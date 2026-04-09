@@ -1,0 +1,13 @@
+[package]
+name = "botrail-kin"
+description = "Kinematics for botrail: forward kinematics over a RobotModel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-model.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true

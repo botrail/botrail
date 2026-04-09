@@ -1,0 +1,27 @@
+[package]
+name = "botrail-py"
+description = "Python bindings and studio server for botrail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+# The pyo3 extension-module feature leaves libpython symbols unresolved, so
+# the auto test harness (an executable) cannot link; tests live in the pure crates.
+test = false
+doctest = false
+
+[dependencies]
+botrail-model.workspace = true
+botrail-kin.workspace = true
+botrail-scene.workspace = true
+nalgebra.workspace = true
+serde_json.workspace = true
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "time"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }

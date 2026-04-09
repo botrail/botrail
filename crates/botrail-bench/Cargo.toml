@@ -1,0 +1,18 @@
+[package]
+name = "botrail-bench"
+description = "Standalone performance benchmarks answering design questions (not shipped)"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Deliberately NOT the workspace nalgebra: parry 0.29 needs a newer one.
+# The bench uses parry's re-exported `na` so the two trees stay independent.
+parry3d-f64 = "0.29"
+
+[[bin]]
+name = "bench-parry"
+path = "src/bench_parry.rs"

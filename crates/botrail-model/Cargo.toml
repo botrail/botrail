@@ -1,0 +1,13 @@
+[package]
+name = "botrail-model"
+description = "Robot model layer for botrail: indexed kinematic tree built from URDF/Xacro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+xurdf.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true

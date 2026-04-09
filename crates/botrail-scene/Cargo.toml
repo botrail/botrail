@@ -1,0 +1,22 @@
+[package]
+name = "botrail-scene"
+description = "Scene state and wire protocol types shared between botrail core and studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-model.workspace = true
+botrail-kin.workspace = true
+nalgebra.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs = { version = "12", optional = true }
+
+[features]
+# Enables TypeScript binding generation for the wire types.
+# Run scripts/gen_protocol.sh to (re)generate studio/src/generated.
+ts = ["dep:ts-rs"]
