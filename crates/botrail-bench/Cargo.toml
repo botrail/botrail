@@ -16,3 +16,7 @@ parry3d-f64 = "0.29"
 [[bin]]
 name = "bench-parry"
 path = "src/bench_parry.rs"
+
+[[bin]]
+name = "probe-distance"
+path = "src/probe_distance.rs"

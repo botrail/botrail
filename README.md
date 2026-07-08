@@ -8,11 +8,13 @@ studio in your browser for building environments, constraints, and motions.
 The core is written in Rust (no system dependencies), with URDF **and Xacro**
 support via [xurdf](https://github.com/neka-nat/xurdf) — no ROS required.
 
-> **Status: M1.** URDF/Xacro loading, FK / Jacobian / damped-least-squares
-> IK, and a live studio viewer: joint sliders plus a draggable TCP gizmo with
-> server-side IK tracking and reachability feedback. See
-> [docs/DESIGN.md](docs/DESIGN.md) for the roadmap (collision checking,
-> planning, motion editing, wasm).
+> **Status: M2.** URDF/Xacro loading, FK / Jacobian / IK with a draggable
+> TCP gizmo, and collision checking: self-collision with an auto-generated
+> ACM, obstacle editing in the studio (add / drag / resize / delete), live
+> collision highlighting and clearance display. Mesh collision shapes land
+> with the upcoming mesh I/O crate (primitives only for now). See
+> [docs/DESIGN.md](docs/DESIGN.md) for the roadmap (planning, motion
+> editing, wasm).
 
 ## Quickstart
 
@@ -33,6 +35,11 @@ scene.set_joint_positions([0.4, -0.9, 1.2, 0.3, 0.8, -0.5])
 position, quaternion = scene.link_pose("tool0")   # FK
 result = robot.ik(position, quaternion)           # IK (check result.converged)
 scene.set_tcp_target((0.3, 0.1, 0.5))             # IK + apply + push to browser
+
+scene.add_box("table", size=(0.6, 0.6, 0.05), position=(0.4, 0.0, 0.0))
+scene.in_collision()                              # False
+scene.min_obstacle_distance()                     # clearance in meters
+scene.check_collisions()                          # [(("link", ...), ("obstacle", ...)), ...]
 ```
 
 ## Development setup

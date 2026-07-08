@@ -1,16 +1,20 @@
 //! JSON wire protocol between the botrail server and the studio UI.
 //!
 //! Messages (tagged with `"type"`):
-//! - server -> client: `scene_init` (full scene description), `state`
-//!   (joint positions + world pose of every link, in `links` order)
-//! - client -> server: `set_joint_positions`
+//! - server -> client: `scene_init` (robot description), `obstacles` (full
+//!   obstacle list, resent on every change), `state` (joint positions, link
+//!   poses, collision pairs, min obstacle distance)
+//! - client -> server: `set_joint_positions`, `set_tcp_target`,
+//!   `add_obstacle`, `update_obstacle_pose`, `update_obstacle_geometry`,
+//!   `remove_obstacle`
 
 use std::path::Path;
 
-use nalgebra::Isometry3;
+use nalgebra::{Isometry3, Vector3};
 use serde::{Deserialize, Serialize};
 
 use crate::Scene;
+use botrail_collide::ColliderId;
 use botrail_model::{Geometry, JointType};
 
 /// Position + quaternion (x, y, z, w), in meters / world frame unless noted.
@@ -136,11 +140,40 @@ pub struct IkStatusMsg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ObstacleMsg {
+    pub name: String,
+    pub geometry: GeometryMsg,
+    /// World pose.
+    pub pose: PoseMsg,
+}
+
+/// One side of a collision pair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ColliderRefMsg {
+    Link { name: String },
+    Obstacle { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct CollisionPairMsg {
+    pub a: ColliderRefMsg,
+    pub b: ColliderRefMsg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ServerMessage {
     SceneInit {
         scene: SceneDescriptionMsg,
+    },
+    /// The full obstacle list; resent whenever it changes.
+    Obstacles {
+        obstacles: Vec<ObstacleMsg>,
     },
     State {
         joint_positions: Vec<f64>,
@@ -148,6 +181,10 @@ pub enum ServerMessage {
         link_poses: Vec<PoseMsg>,
         /// Present when this state is the result of an IK solve.
         ik_status: Option<IkStatusMsg>,
+        /// Colliding pairs at this configuration (empty when collision-free).
+        collisions: Vec<CollisionPairMsg>,
+        /// Minimum robot-obstacle distance; `null` without obstacles.
+        min_distance: Option<f64>,
     },
 }
 
@@ -164,6 +201,64 @@ pub enum ClientMessage {
         link: String,
         pose: PoseMsg,
     },
+    /// The server may uniquify the requested name; the authoritative list
+    /// comes back in the next `obstacles` broadcast.
+    AddObstacle {
+        obstacle: ObstacleMsg,
+    },
+    UpdateObstaclePose {
+        name: String,
+        pose: PoseMsg,
+    },
+    UpdateObstacleGeometry {
+        name: String,
+        geometry: GeometryMsg,
+    },
+    RemoveObstacle {
+        name: String,
+    },
+}
+
+/// Converts a model geometry to its wire form; `mesh_url` maps a mesh path
+/// to a URL + extension (URL assignment is a server concern).
+pub fn geometry_msg(
+    geometry: &Geometry,
+    mesh_url: &mut impl FnMut(&Path) -> (String, String),
+) -> GeometryMsg {
+    match geometry {
+        Geometry::Box { size } => GeometryMsg::Box {
+            size: [size.x, size.y, size.z],
+        },
+        Geometry::Cylinder { radius, length } => GeometryMsg::Cylinder {
+            radius: *radius,
+            length: *length,
+        },
+        Geometry::Sphere { radius } => GeometryMsg::Sphere { radius: *radius },
+        Geometry::Mesh { path, scale } => {
+            let (url, ext) = mesh_url(path);
+            GeometryMsg::Mesh {
+                url,
+                ext,
+                scale: [scale.x, scale.y, scale.z],
+            }
+        }
+    }
+}
+
+/// Converts a wire geometry back into a model geometry. Mesh geometries are
+/// rejected: clients cannot upload meshes over the socket (yet).
+pub fn geometry_from_msg(msg: &GeometryMsg) -> Result<Geometry, String> {
+    match msg {
+        GeometryMsg::Box { size } => Ok(Geometry::Box {
+            size: Vector3::new(size[0], size[1], size[2]),
+        }),
+        GeometryMsg::Cylinder { radius, length } => Ok(Geometry::Cylinder {
+            radius: *radius,
+            length: *length,
+        }),
+        GeometryMsg::Sphere { radius } => Ok(Geometry::Sphere { radius: *radius }),
+        GeometryMsg::Mesh { .. } => Err("mesh obstacles are not supported yet".to_string()),
+    }
 }
 
 impl SceneDescriptionMsg {
@@ -181,24 +276,7 @@ impl SceneDescriptionMsg {
                     .iter()
                     .map(|shape| VisualMsg {
                         origin: PoseMsg::from(&shape.origin),
-                        geometry: match &shape.geometry {
-                            Geometry::Box { size } => GeometryMsg::Box {
-                                size: [size.x, size.y, size.z],
-                            },
-                            Geometry::Cylinder { radius, length } => GeometryMsg::Cylinder {
-                                radius: *radius,
-                                length: *length,
-                            },
-                            Geometry::Sphere { radius } => GeometryMsg::Sphere { radius: *radius },
-                            Geometry::Mesh { path, scale } => {
-                                let (url, ext) = mesh_url(path);
-                                GeometryMsg::Mesh {
-                                    url,
-                                    ext,
-                                    scale: [scale.x, scale.y, scale.z],
-                                }
-                            }
-                        },
+                        geometry: geometry_msg(&shape.geometry, &mut mesh_url),
                     })
                     .collect(),
             })
@@ -227,6 +305,35 @@ impl SceneDescriptionMsg {
     }
 }
 
+/// The full obstacle list as an `obstacles` message.
+pub fn obstacles_message(scene: &Scene) -> ServerMessage {
+    // Obstacles cannot carry meshes (Scene::add_obstacle rejects them), so
+    // the mesh_url mapper is never invoked.
+    let mut no_mesh = |_: &Path| (String::new(), String::new());
+    ServerMessage::Obstacles {
+        obstacles: scene
+            .obstacles()
+            .iter()
+            .map(|o| ObstacleMsg {
+                name: o.name.clone(),
+                geometry: geometry_msg(&o.geometry, &mut no_mesh),
+                pose: PoseMsg::from(&o.pose),
+            })
+            .collect(),
+    }
+}
+
+fn collider_ref(scene: &Scene, id: ColliderId) -> ColliderRefMsg {
+    match id {
+        ColliderId::Link(i) => ColliderRefMsg::Link {
+            name: scene.robot.links[i].name.clone(),
+        },
+        ColliderId::Obstacle(k) => ColliderRefMsg::Obstacle {
+            name: scene.obstacles()[k].name.clone(),
+        },
+    }
+}
+
 /// Current scene state as a `state` message.
 pub fn state_message(scene: &Scene) -> ServerMessage {
     state_message_with_ik(scene, None)
@@ -234,10 +341,20 @@ pub fn state_message(scene: &Scene) -> ServerMessage {
 
 /// Current scene state as a `state` message, tagged with an IK outcome.
 pub fn state_message_with_ik(scene: &Scene, ik_status: Option<IkStatusMsg>) -> ServerMessage {
+    let collisions = scene
+        .check_collisions()
+        .into_iter()
+        .map(|pair| CollisionPairMsg {
+            a: collider_ref(scene, pair.a),
+            b: collider_ref(scene, pair.b),
+        })
+        .collect();
     ServerMessage::State {
         joint_positions: scene.joint_positions().to_vec(),
         link_poses: scene.link_poses().iter().map(PoseMsg::from).collect(),
         ik_status,
+        collisions,
+        min_distance: scene.min_obstacle_distance(),
     }
 }
 
@@ -305,6 +422,56 @@ mod tests {
         // tip link sits 1m above base at q = 0
         assert_eq!(json["link_poses"][1]["position"][2], 1.0);
         assert_eq!(json["ik_status"], serde_json::Value::Null);
+        assert_eq!(json["collisions"].as_array().unwrap().len(), 0);
+        assert_eq!(json["min_distance"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn obstacles_and_collisions_in_messages() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "ball",
+                Geometry::Sphere { radius: 0.2 },
+                nalgebra::Isometry3::translation(0.0, 0.0, 1.0),
+            )
+            .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&obstacles_message(&scene)).unwrap())
+                .unwrap();
+        assert_eq!(json["type"], "obstacles");
+        assert_eq!(json["obstacles"][0]["name"], "ball");
+        assert_eq!(json["obstacles"][0]["geometry"]["kind"], "sphere");
+        assert_eq!(json["obstacles"][0]["pose"]["position"][2], 1.0);
+
+        // The ball (r=0.2 at z=1.0) engulfs the tip link's location; the tip
+        // has no geometry, but the base's visual box does not reach it, so
+        // check a colliding configuration via a bigger obstacle instead.
+        scene
+            .set_obstacle_pose("ball", nalgebra::Isometry3::translation(0.0, 0.0, 0.0))
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state_message(&scene)).unwrap()).unwrap();
+        assert_eq!(json["collisions"][0]["a"]["kind"], "link");
+        assert_eq!(json["collisions"][0]["b"]["kind"], "obstacle");
+        assert_eq!(json["collisions"][0]["b"]["name"], "ball");
+        assert_eq!(json["min_distance"], 0.0);
+    }
+
+    #[test]
+    fn geometry_msg_roundtrip_and_mesh_rejection() {
+        let geom = geometry_from_msg(&GeometryMsg::Box {
+            size: [0.1, 0.2, 0.3],
+        })
+        .unwrap();
+        assert!(matches!(geom, Geometry::Box { size } if (size.y - 0.2).abs() < 1e-12));
+        assert!(geometry_from_msg(&GeometryMsg::Mesh {
+            url: "/meshes/0".into(),
+            ext: "stl".into(),
+            scale: [1.0, 1.0, 1.0],
+        })
+        .is_err());
     }
 
     #[test]

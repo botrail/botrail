@@ -7,3 +7,6 @@ export function linkColor(index: number): string {
   const hue = HUES[index % HUES.length];
   return `hsl(${hue}, 30%, 56%)`;
 }
+
+/** Highlight color for anything in collision; mirrors the CSS --bad token. */
+export const COLLISION_COLOR = "#e2544c";

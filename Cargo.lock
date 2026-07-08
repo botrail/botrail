@@ -134,6 +134,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "botrail-collide"
+version = "0.1.0"
+dependencies = [
+ "botrail-kin",
+ "botrail-model",
+ "nalgebra",
+ "parry3d-f64",
+ "thiserror",
+]
+
+[[package]]
 name = "botrail-kin"
 version = "0.1.0"
 dependencies = [
@@ -156,6 +167,7 @@ name = "botrail-py"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "botrail-collide",
  "botrail-kin",
  "botrail-model",
  "botrail-scene",
@@ -170,6 +182,7 @@ dependencies = [
 name = "botrail-scene"
 version = "0.1.0"
 dependencies = [
+ "botrail-collide",
  "botrail-kin",
  "botrail-model",
  "nalgebra",

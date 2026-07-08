@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use botrail_kin::{solve_ik, IkMode, IkOptions};
 use botrail_model::Geometry;
-use botrail_scene::wire::{IkStatusMsg, PoseMsg, SceneDescriptionMsg, ServerMessage};
+use botrail_scene::wire::{self, IkStatusMsg, PoseMsg, SceneDescriptionMsg, ServerMessage};
 use botrail_scene::{Scene, SceneError};
 use nalgebra::Isometry3;
 use tokio::sync::broadcast;
@@ -133,6 +133,84 @@ impl SceneHub {
         let _ = self.tx.send(self.state_json());
     }
 
+    // ------------------------------------------------------------ obstacles
+
+    pub fn obstacles_json(&self) -> String {
+        let scene = self.lock();
+        serde_json::to_string(&wire::obstacles_message(&scene))
+            .expect("wire types serialize infallibly")
+    }
+
+    fn broadcast_obstacles_and_state(&self) {
+        let _ = self.tx.send(self.obstacles_json());
+        self.broadcast_state();
+    }
+
+    pub fn add_obstacle(
+        &self,
+        name: &str,
+        geometry: Geometry,
+        pose: Isometry3<f64>,
+    ) -> Result<String, SceneError> {
+        let final_name = self.lock().add_obstacle(name, geometry, pose)?;
+        self.broadcast_obstacles_and_state();
+        Ok(final_name)
+    }
+
+    pub fn remove_obstacle(&self, name: &str) -> Result<(), SceneError> {
+        self.lock().remove_obstacle(name)?;
+        self.broadcast_obstacles_and_state();
+        Ok(())
+    }
+
+    pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {
+        self.lock().set_obstacle_pose(name, pose)?;
+        self.broadcast_obstacles_and_state();
+        Ok(())
+    }
+
+    pub fn set_obstacle_geometry(&self, name: &str, geometry: Geometry) -> Result<(), SceneError> {
+        self.lock().set_obstacle_geometry(name, geometry)?;
+        self.broadcast_obstacles_and_state();
+        Ok(())
+    }
+
+    pub fn obstacle_names(&self) -> Vec<String> {
+        self.lock()
+            .obstacles()
+            .iter()
+            .map(|o| o.name.clone())
+            .collect()
+    }
+
+    // ------------------------------------------------------------ collision
+
+    /// Colliding pairs as ((kind, name), (kind, name)) tuples.
+    pub fn collision_pairs(&self) -> Vec<((String, String), (String, String))> {
+        let scene = self.lock();
+        let describe = |id: botrail_collide::ColliderId| match id {
+            botrail_collide::ColliderId::Link(i) => {
+                ("link".to_string(), scene.robot.links[i].name.clone())
+            }
+            botrail_collide::ColliderId::Obstacle(k) => {
+                ("obstacle".to_string(), scene.obstacles()[k].name.clone())
+            }
+        };
+        scene
+            .check_collisions()
+            .into_iter()
+            .map(|p| (describe(p.a), describe(p.b)))
+            .collect()
+    }
+
+    pub fn min_obstacle_distance(&self) -> Option<f64> {
+        self.lock().min_obstacle_distance()
+    }
+
+    pub fn collision_warnings(&self) -> Vec<String> {
+        self.lock().collision_warnings.clone()
+    }
+
     pub fn handle_client_message(&self, text: &str) {
         use botrail_scene::wire::ClientMessage;
         match serde_json::from_str::<ClientMessage>(text) {
@@ -150,6 +228,34 @@ impl SceneHub {
                 };
                 if let Err(e) = self.set_tcp_target(&link, &pose, &options) {
                     eprintln!("botrail: rejected tcp target: {e}");
+                }
+            }
+            Ok(ClientMessage::AddObstacle { obstacle }) => {
+                let result = wire::geometry_from_msg(&obstacle.geometry)
+                    .map_err(SceneError::UnsupportedGeometry)
+                    .and_then(|geometry| {
+                        self.add_obstacle(&obstacle.name, geometry, (&obstacle.pose).into())
+                    });
+                if let Err(e) = result {
+                    eprintln!("botrail: rejected add_obstacle: {e}");
+                }
+            }
+            Ok(ClientMessage::UpdateObstaclePose { name, pose }) => {
+                if let Err(e) = self.set_obstacle_pose(&name, (&pose).into()) {
+                    eprintln!("botrail: rejected update_obstacle_pose: {e}");
+                }
+            }
+            Ok(ClientMessage::UpdateObstacleGeometry { name, geometry }) => {
+                let result = wire::geometry_from_msg(&geometry)
+                    .map_err(SceneError::UnsupportedGeometry)
+                    .and_then(|geometry| self.set_obstacle_geometry(&name, geometry));
+                if let Err(e) = result {
+                    eprintln!("botrail: rejected update_obstacle_geometry: {e}");
+                }
+            }
+            Ok(ClientMessage::RemoveObstacle { name }) => {
+                if let Err(e) = self.remove_obstacle(&name) {
+                    eprintln!("botrail: rejected remove_obstacle: {e}");
                 }
             }
             Err(e) => eprintln!("botrail: unparseable client message: {e}"),

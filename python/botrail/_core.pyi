@@ -60,6 +60,44 @@ class Scene:
         link: Optional[str] = None,
         max_iters: int = 100,
     ) -> IkResult: ...
+    def add_box(
+        self,
+        name: str,
+        size: tuple[float, float, float],
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> str: ...
+    def add_sphere(
+        self,
+        name: str,
+        radius: float,
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> str: ...
+    def add_cylinder(
+        self,
+        name: str,
+        radius: float,
+        length: float,
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> str: ...
+    def remove_obstacle(self, name: str) -> None: ...
+    def set_obstacle_pose(
+        self,
+        name: str,
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> None: ...
+    @property
+    def obstacle_names(self) -> list[str]: ...
+    def check_collisions(
+        self,
+    ) -> list[tuple[tuple[str, str], tuple[str, str]]]: ...
+    def in_collision(self) -> bool: ...
+    def min_obstacle_distance(self) -> Optional[float]: ...
+    @property
+    def collision_warnings(self) -> list[str]: ...
 
 class StudioServer:
     @property

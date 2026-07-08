@@ -3,6 +3,7 @@ import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 
 import { useStudioStore } from "../store";
+import { ObstacleView } from "./ObstacleView";
 import { SceneView } from "./SceneView";
 import { TcpGizmo } from "./TcpGizmo";
 
@@ -19,6 +20,7 @@ export function Viewport() {
           near: 0.01,
           far: 100,
         }}
+        onPointerMissed={() => useStudioStore.getState().selectTcp()}
       >
         <color attach="background" args={["#15171c"]} />
         <ambientLight intensity={0.6} />
@@ -44,6 +46,7 @@ export function Viewport() {
 
         <Suspense fallback={null}>
           <SceneView />
+          <ObstacleView />
           <TcpGizmo />
         </Suspense>
       </Canvas>

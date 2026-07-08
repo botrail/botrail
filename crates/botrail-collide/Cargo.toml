@@ -1,0 +1,15 @@
+[package]
+name = "botrail-collide"
+description = "Collision checking for botrail on top of parry3d (solid shapes only)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-model.workspace = true
+botrail-kin.workspace = true
+nalgebra.workspace = true
+parry3d-f64.workspace = true
+thiserror.workspace = true

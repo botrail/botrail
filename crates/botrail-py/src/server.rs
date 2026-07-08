@@ -28,19 +28,14 @@ async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<SceneHub>>) -> R
 
 async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
     let mut rx = hub.tx.subscribe();
-    if socket
-        .send(Message::Text(hub.scene_init_json().into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    if socket
-        .send(Message::Text(hub.state_json().into()))
-        .await
-        .is_err()
-    {
-        return;
+    for initial in [
+        hub.scene_init_json(),
+        hub.obstacles_json(),
+        hub.state_json(),
+    ] {
+        if socket.send(Message::Text(initial.into())).await.is_err() {
+            return;
+        }
     }
     loop {
         tokio::select! {

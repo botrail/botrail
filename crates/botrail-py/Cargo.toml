@@ -18,6 +18,7 @@ doctest = false
 [dependencies]
 botrail-model.workspace = true
 botrail-kin.workspace = true
+botrail-collide.workspace = true
 botrail-scene.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true

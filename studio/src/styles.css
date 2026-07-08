@@ -292,3 +292,98 @@ select:focus {
   color: var(--bad);
   background: rgba(226, 84, 76, 0.12);
 }
+
+.badge.muted {
+  color: var(--muted);
+  background: var(--panel-2);
+}
+
+/* --- obstacle panel --- */
+.obstacle-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.obstacle-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.obstacle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.obstacle-row:hover {
+  background: var(--panel-2);
+}
+
+.obstacle-row.selected {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.obstacle-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.obstacle-name.bad {
+  color: var(--bad);
+}
+
+.obstacle-remove {
+  flex: none;
+  padding: 0 7px;
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.obstacle-remove:hover:not(:disabled) {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.obstacle-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.num-field input[type="number"] {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.num-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.obstacle-pos {
+  flex: 1;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

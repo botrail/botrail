@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/botrail-model",
     "crates/botrail-kin",
+    "crates/botrail-collide",
     "crates/botrail-scene",
     "crates/botrail-py",
     "crates/botrail-bench",
@@ -18,7 +19,9 @@ authors = ["neka-nat <nekanat.stock@gmail.com>"]
 [workspace.dependencies]
 botrail-model = { path = "crates/botrail-model" }
 botrail-kin = { path = "crates/botrail-kin" }
+botrail-collide = { path = "crates/botrail-collide" }
 botrail-scene = { path = "crates/botrail-scene" }
+parry3d-f64 = "0.29"
 xurdf = "0.3"
 nalgebra = "0.33"
 serde = { version = "1", features = ["derive"] }

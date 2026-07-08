@@ -1,6 +1,8 @@
+import { useMemo } from "react";
+
 import type { GeometryMsg, LinkMsg, PoseMsg, VisualMsg } from "../protocol";
-import { useStudioStore } from "../store";
-import { linkColor } from "../three/palette";
+import { collidingLinkNames, useStudioStore } from "../store";
+import { COLLISION_COLOR, linkColor } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
 
 const IDENTITY_POS: [number, number, number] = [0, 0, 0];
@@ -9,13 +11,24 @@ const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
 export function SceneView() {
   const sceneDesc = useStudioStore((s) => s.sceneDesc);
   const linkPoses = useStudioStore((s) => s.linkPoses);
+  const collisions = useStudioStore((s) => s.collisions);
+  const collidingLinks = useMemo(
+    () => collidingLinkNames(collisions),
+    [collisions],
+  );
 
   if (!sceneDesc) return null;
 
   return (
     <>
       {sceneDesc.links.map((link, i) => (
-        <LinkGroup key={i} link={link} index={i} pose={linkPoses[i]} />
+        <LinkGroup
+          key={i}
+          link={link}
+          index={i}
+          pose={linkPoses[i]}
+          colliding={collidingLinks.has(link.name)}
+        />
       ))}
     </>
   );
@@ -25,12 +38,14 @@ function LinkGroup({
   link,
   index,
   pose,
+  colliding,
 }: {
   link: LinkMsg;
   index: number;
   pose: PoseMsg | undefined;
+  colliding: boolean;
 }) {
-  const color = linkColor(index);
+  const color = colliding ? COLLISION_COLOR : linkColor(index);
   const position = pose ? pose.position : IDENTITY_POS;
   const quaternion = pose ? pose.quaternion : IDENTITY_QUAT;
 

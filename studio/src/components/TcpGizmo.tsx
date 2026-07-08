@@ -17,6 +17,7 @@ export function TcpGizmo() {
   const linkPoses = useStudioStore((s) => s.linkPoses);
   const gizmoMode = useStudioStore((s) => s.gizmoMode);
   const ikStatus = useStudioStore((s) => s.ikStatus);
+  const selection = useStudioStore((s) => s.selection);
 
   const [target, setTarget] = useState<THREE.Group | null>(null);
   const draggingRef = useRef(false);
@@ -34,7 +35,8 @@ export function TcpGizmo() {
     target.quaternion.set(...pose.quaternion);
   }, [pose, target]);
 
-  if (!pose || !tcpLink) return null;
+  // While an obstacle is selected, its gizmo takes over the viewport.
+  if (!pose || !tcpLink || selection.type !== "tcp") return null;
 
   const reachable = ikStatus === null || ikStatus.converged;
   const color = reachable ? "#4da3ff" : "#ff5555";

@@ -131,6 +131,18 @@ fn resolve_link(model: &RobotModel, link: Option<&str>) -> PyResult<usize> {
     }
 }
 
+fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isometry3<f64> {
+    (&botrail_scene::wire::PoseMsg {
+        position,
+        quaternion: quaternion.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+    })
+        .into()
+}
+
+fn scene_err(e: botrail_scene::SceneError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
 fn ik_target(
     position: [f64; 3],
     quaternion: Option<[f64; 4]>,
@@ -230,6 +242,107 @@ impl Scene {
         self.hub
             .link_pose(link_name)
             .ok_or_else(|| PyValueError::new_err(format!("unknown link `{link_name}`")))
+    }
+
+    /// Adds a box obstacle (full extents, meters). Returns the final name,
+    /// which may be uniquified. Changes are pushed to connected studios.
+    #[pyo3(signature = (name, size, position, quaternion = None))]
+    fn add_box(
+        &self,
+        name: &str,
+        size: [f64; 3],
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<String> {
+        self.hub
+            .add_obstacle(
+                name,
+                botrail_model::Geometry::Box {
+                    size: nalgebra::Vector3::new(size[0], size[1], size[2]),
+                },
+                pose_from(position, quaternion),
+            )
+            .map_err(scene_err)
+    }
+
+    #[pyo3(signature = (name, radius, position, quaternion = None))]
+    fn add_sphere(
+        &self,
+        name: &str,
+        radius: f64,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<String> {
+        self.hub
+            .add_obstacle(
+                name,
+                botrail_model::Geometry::Sphere { radius },
+                pose_from(position, quaternion),
+            )
+            .map_err(scene_err)
+    }
+
+    /// Adds a cylinder obstacle (URDF convention: axis along local +z).
+    #[pyo3(signature = (name, radius, length, position, quaternion = None))]
+    fn add_cylinder(
+        &self,
+        name: &str,
+        radius: f64,
+        length: f64,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<String> {
+        self.hub
+            .add_obstacle(
+                name,
+                botrail_model::Geometry::Cylinder { radius, length },
+                pose_from(position, quaternion),
+            )
+            .map_err(scene_err)
+    }
+
+    fn remove_obstacle(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_obstacle(name).map_err(scene_err)
+    }
+
+    #[pyo3(signature = (name, position, quaternion = None))]
+    fn set_obstacle_pose(
+        &self,
+        name: &str,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<()> {
+        self.hub
+            .set_obstacle_pose(name, pose_from(position, quaternion))
+            .map_err(scene_err)
+    }
+
+    #[getter]
+    fn obstacle_names(&self) -> Vec<String> {
+        self.hub.obstacle_names()
+    }
+
+    /// Colliding pairs at the current configuration, as
+    /// `((kind, name), (kind, name))` tuples with kind `"link"`/`"obstacle"`.
+    fn check_collisions(&self) -> Vec<((String, String), (String, String))> {
+        self.hub.collision_pairs()
+    }
+
+    fn in_collision(&self) -> bool {
+        !self.hub.collision_pairs().is_empty()
+    }
+
+    /// Minimum robot-obstacle distance (0 when colliding); `None` without
+    /// obstacles.
+    fn min_obstacle_distance(&self) -> Option<f64> {
+        self.hub.min_obstacle_distance()
+    }
+
+    /// Link shapes skipped for collision checking (e.g. meshes, until the
+    /// mesh I/O crate lands).
+    #[getter]
+    fn collision_warnings(&self) -> Vec<String> {
+        self.hub.collision_warnings()
     }
 
     /// Solves IK toward the given pose (seeded from the current
