@@ -8,15 +8,27 @@ studio in your browser for building environments, constraints, and motions.
 The core is written in Rust (no system dependencies), with URDF **and Xacro**
 support via [xurdf](https://github.com/neka-nat/xurdf) — no ROS required.
 
-> **Status: M4.** URDF/Xacro loading, FK / IK with a draggable TCP gizmo,
+> **Status: M5.** URDF/Xacro loading, FK / IK with a draggable TCP gizmo,
 > collision checking (auto-generated ACM, obstacle editing, live
 > highlighting), motion planning (RRT-Connect + time parameterization with
-> studio playback), and motion authoring: waypoint sequences with
-> joint-plan / Cartesian-line segments, orientation-cone and position-box
-> path constraints, self-contained `.botrail` project save/load, and Python
-> code generation — all editable in the studio. Mesh collision shapes land
-> with the upcoming mesh I/O crate (primitives only for now). See
-> [docs/DESIGN.md](docs/DESIGN.md) for the roadmap (wasm demo next).
+> studio playback), motion authoring (waypoint sequences, Cartesian-line
+> segments, path constraints, `.botrail` projects, Python codegen) — and a
+> **browser-complete wasm build**: the entire core runs client-side, so the
+> studio works as a static page with no server at all. Mesh collision
+> shapes land with the upcoming mesh I/O crate (primitives only for now).
+
+**Try it in your browser** (no install): the demo deploys to GitHub Pages
+from `main` (`.github/workflows/pages.yml`) — or build it locally:
+
+```bash
+./scripts/build_wasm_demo.sh          # needs wasm-pack + wasm32 target
+python -m http.server -d studio/dist-wasm 8899   # any static server works
+```
+
+The studio UI talks to a `SessionBackend`: a WebSocket connection to the
+Python server by default, or the in-browser wasm session in demo builds
+(`VITE_BACKEND=wasm`, or add `?wasm` to the URL when the assets are
+present). Both speak the same wire protocol.
 
 ## Quickstart
 
@@ -117,8 +129,9 @@ crates/botrail-kin     forward kinematics, Jacobian, DLS inverse kinematics
 crates/botrail-collide parry3d-based collision checking (solid shapes, ACM)
 crates/botrail-plan    RRT-Connect + shortcut smoothing
 crates/botrail-traj    time parameterization + trajectory sampling
-crates/botrail-scene   scene state + JSON wire protocol (source of truth)
+crates/botrail-scene   scene state, motions, projects + JSON wire protocol
 crates/botrail-py      pyo3 bindings + axum server (websocket, meshes, SPA)
+crates/botrail-wasm    browser-complete session (same wire protocol, no server)
 crates/botrail-bench   standalone perf probes (not shipped)
 studio/                web UI (vite + React + react-three-fiber)
 python/botrail/        python package (high-level API, bundled studio assets)

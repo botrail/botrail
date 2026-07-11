@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 
+import { backendSupportsHttp } from "../backend";
 import type { ConstraintMsg, SegmentKindMsg } from "../protocol";
 import { useStudioStore } from "../store";
 import {
@@ -167,23 +168,27 @@ export function MotionPanel() {
         </button>
         {motionError && <div className="plan-error">{motionError}</div>}
 
-        <div className="seg motion-io">
-          <button onClick={onSave}>Save</button>
-          <button onClick={() => fileRef.current?.click()}>Load</button>
-          <button onClick={onExport}>Export .py</button>
-        </div>
-        {ioError && <div className="plan-error">{ioError}</div>}
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".botrail,application/json"
-          style={{ display: "none" }}
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) onLoadFile(file);
-            e.target.value = "";
-          }}
-        />
+        {backendSupportsHttp() && (
+          <>
+            <div className="seg motion-io">
+              <button onClick={onSave}>Save</button>
+              <button onClick={() => fileRef.current?.click()}>Load</button>
+              <button onClick={onExport}>Export .py</button>
+            </div>
+            {ioError && <div className="plan-error">{ioError}</div>}
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".botrail,application/json"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) onLoadFile(file);
+                e.target.value = "";
+              }}
+            />
+          </>
+        )}
       </div>
     </section>
   );

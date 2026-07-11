@@ -8,6 +8,7 @@ members = [
     "crates/botrail-traj",
     "crates/botrail-scene",
     "crates/botrail-py",
+    "crates/botrail-wasm",
     "crates/botrail-bench",
 ]
 
