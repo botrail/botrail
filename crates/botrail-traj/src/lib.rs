@@ -1,0 +1,386 @@
+//! Time parameterization of joint-space paths.
+//!
+//! The algorithm is an iterative parabolic scheme (in the spirit of
+//! MoveIt's IPTP): segment durations start at the per-joint velocity bound
+//! and are stretched until interface accelerations — including a rest-to-
+//! rest boundary at both ends — respect the acceleration bound. Sampling
+//! between waypoints is cubic Hermite on the waypoint velocities, so the
+//! preview and exports are smooth. Jerk limits arrive post-M3 (Ruckig-style
+//! is on the roadmap).
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TrajError {
+    #[error("path is empty")]
+    EmptyPath,
+    #[error("expected {expected} joint values, got {got} at waypoint {index}")]
+    WrongDof {
+        expected: usize,
+        got: usize,
+        index: usize,
+    },
+    #[error("velocity/acceleration limits must be positive")]
+    NonPositiveLimits,
+}
+
+/// Per-joint velocity and acceleration bounds (absolute values).
+#[derive(Debug, Clone)]
+pub struct Limits {
+    pub velocity: Vec<f64>,
+    pub acceleration: Vec<f64>,
+}
+
+impl Limits {
+    pub fn uniform(dof: usize, velocity: f64, acceleration: f64) -> Self {
+        Limits {
+            velocity: vec![velocity; dof],
+            acceleration: vec![acceleration; dof],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TimingOptions {
+    /// Input segments longer than this (joint-space L2) are subdivided
+    /// before timing, so accelerations are controlled along the whole path.
+    pub max_segment: f64,
+    /// Acceleration-adjustment sweeps.
+    pub max_passes: usize,
+}
+
+impl Default for TimingOptions {
+    fn default() -> Self {
+        TimingOptions {
+            max_segment: 0.15,
+            max_passes: 64,
+        }
+    }
+}
+
+/// A time-parameterized joint trajectory (waypoints + waypoint velocities).
+#[derive(Debug, Clone)]
+pub struct JointTrajectory {
+    pub times: Vec<f64>,
+    pub positions: Vec<Vec<f64>>,
+    pub velocities: Vec<Vec<f64>>,
+}
+
+impl JointTrajectory {
+    pub fn dof(&self) -> usize {
+        self.positions.first().map_or(0, Vec::len)
+    }
+
+    pub fn duration(&self) -> f64 {
+        *self.times.last().unwrap_or(&0.0)
+    }
+
+    /// Cubic-Hermite sample at time `t` (clamped to the trajectory span).
+    pub fn sample(&self, t: f64) -> Vec<f64> {
+        let n = self.times.len();
+        if n == 1 || t <= self.times[0] {
+            return self.positions[0].clone();
+        }
+        if t >= self.duration() {
+            return self.positions[n - 1].clone();
+        }
+        let seg = match self
+            .times
+            .binary_search_by(|probe| probe.partial_cmp(&t).unwrap())
+        {
+            Ok(i) => return self.positions[i].clone(),
+            Err(i) => i - 1,
+        };
+        let h = self.times[seg + 1] - self.times[seg];
+        let u = (t - self.times[seg]) / h;
+        let (u2, u3) = (u * u, u * u * u);
+        let (h00, h10, h01, h11) = (
+            2.0 * u3 - 3.0 * u2 + 1.0,
+            u3 - 2.0 * u2 + u,
+            -2.0 * u3 + 3.0 * u2,
+            u3 - u2,
+        );
+        (0..self.dof())
+            .map(|j| {
+                h00 * self.positions[seg][j]
+                    + h10 * h * self.velocities[seg][j]
+                    + h01 * self.positions[seg + 1][j]
+                    + h11 * h * self.velocities[seg + 1][j]
+            })
+            .collect()
+    }
+
+    /// Uniformly resampled copy at period `dt` (always includes the final
+    /// configuration).
+    pub fn resample(&self, dt: f64) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let duration = self.duration();
+        let mut times = Vec::new();
+        let mut positions = Vec::new();
+        let mut t = 0.0;
+        while t < duration {
+            times.push(t);
+            positions.push(self.sample(t));
+            t += dt;
+        }
+        times.push(duration);
+        positions.push(self.positions.last().cloned().unwrap_or_default());
+        (times, positions)
+    }
+}
+
+fn distance(a: &[f64], b: &[f64]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn densify(path: &[Vec<f64>], max_segment: f64) -> Vec<Vec<f64>> {
+    let mut out = vec![path[0].clone()];
+    for w in path.windows(2) {
+        let d = distance(&w[0], &w[1]);
+        if d < 1e-12 {
+            continue;
+        }
+        let steps = (d / max_segment).ceil().max(1.0) as usize;
+        for k in 1..steps {
+            let t = k as f64 / steps as f64;
+            out.push(
+                w[0].iter()
+                    .zip(&w[1])
+                    .map(|(a, b)| a + (b - a) * t)
+                    .collect(),
+            );
+        }
+        // Push the exact endpoint (lerp at t=1 would round).
+        out.push(w[1].clone());
+    }
+    out
+}
+
+/// Assigns times to a joint-space path so that per-joint velocity and
+/// acceleration bounds hold at the waypoint representation.
+pub fn time_parameterize(
+    path: &[Vec<f64>],
+    limits: &Limits,
+    options: &TimingOptions,
+) -> Result<JointTrajectory, TrajError> {
+    if path.is_empty() {
+        return Err(TrajError::EmptyPath);
+    }
+    let dof = path[0].len();
+    for (index, q) in path.iter().enumerate() {
+        if q.len() != dof {
+            return Err(TrajError::WrongDof {
+                expected: dof,
+                got: q.len(),
+                index,
+            });
+        }
+    }
+    if limits.velocity.len() != dof
+        || limits.acceleration.len() != dof
+        || limits.velocity.iter().any(|v| *v <= 0.0)
+        || limits.acceleration.iter().any(|a| *a <= 0.0)
+    {
+        return Err(TrajError::NonPositiveLimits);
+    }
+
+    let points = densify(path, options.max_segment);
+    let n = points.len();
+    if n == 1 {
+        return Ok(JointTrajectory {
+            times: vec![0.0],
+            positions: points,
+            velocities: vec![vec![0.0; dof]],
+        });
+    }
+
+    // 1. Velocity-bound initial durations.
+    let nseg = n - 1;
+    let mut dt = vec![0.0f64; nseg];
+    for (i, w) in points.windows(2).enumerate() {
+        let mut min_dt: f64 = 1e-4;
+        // j indexes three parallel arrays; an iterator chain would obscure it.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..dof {
+            min_dt = min_dt.max((w[1][j] - w[0][j]).abs() / limits.velocity[j]);
+        }
+        dt[i] = min_dt;
+    }
+
+    // 2. Stretch durations until interface accelerations (with rest-to-rest
+    //    boundaries) are within bounds.
+    for _ in 0..options.max_passes {
+        let mut changed = false;
+        for i in 0..=nseg {
+            // j indexes points/dt/limits in parallel.
+            #[allow(clippy::needless_range_loop)]
+            for j in 0..dof {
+                let v_prev = if i > 0 {
+                    (points[i][j] - points[i - 1][j]) / dt[i - 1]
+                } else {
+                    0.0
+                };
+                let v_next = if i < nseg {
+                    (points[i + 1][j] - points[i][j]) / dt[i]
+                } else {
+                    0.0
+                };
+                // Conservative span: the shorter adjacent segment. The
+                // average span makes the discrete estimate optimistic vs
+                // the continuous profile; min biases toward stretching.
+                let span = match (i > 0, i < nseg) {
+                    (true, true) => dt[i - 1].min(dt[i]),
+                    (true, false) => dt[i - 1],
+                    (false, true) => dt[i],
+                    (false, false) => unreachable!("n >= 2"),
+                };
+                let acc = (v_next - v_prev) / span;
+                if acc.abs() > limits.acceleration[j] * 1.001 {
+                    // Stretching by sqrt(ratio) halves the acceleration
+                    // roughly quadratically; cap the growth per pass.
+                    let scale = (acc.abs() / limits.acceleration[j]).sqrt().min(1.5);
+                    if i > 0 {
+                        dt[i - 1] *= scale;
+                    }
+                    if i < nseg {
+                        dt[i] *= scale;
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // 3. Timestamps and waypoint velocities (central differences, rest at
+    //    the endpoints), clamped into the velocity bounds.
+    let mut times = Vec::with_capacity(n);
+    let mut acc_t = 0.0;
+    times.push(0.0);
+    for d in &dt {
+        acc_t += d;
+        times.push(acc_t);
+    }
+    let mut velocities = vec![vec![0.0; dof]; n];
+    for i in 1..n - 1 {
+        for j in 0..dof {
+            let v = (points[i + 1][j] - points[i - 1][j]) / (times[i + 1] - times[i - 1]);
+            velocities[i][j] = v.clamp(-limits.velocity[j], limits.velocity[j]);
+        }
+    }
+
+    Ok(JointTrajectory {
+        times,
+        positions: points,
+        velocities,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits1() -> Limits {
+        Limits::uniform(1, 1.0, 1.0)
+    }
+
+    #[test]
+    fn single_joint_move_respects_limits() {
+        let path = vec![vec![0.0], vec![1.0]];
+        let traj = time_parameterize(&path, &limits1(), &TimingOptions::default()).unwrap();
+
+        // Endpoints preserved.
+        assert_eq!(traj.positions.first().unwrap(), &vec![0.0]);
+        assert_eq!(traj.positions.last().unwrap(), &vec![1.0]);
+        // Strictly increasing times.
+        assert!(traj.times.windows(2).all(|w| w[1] > w[0]));
+        // Segment velocities within bound.
+        for (w, d) in traj
+            .positions
+            .windows(2)
+            .zip(traj.times.windows(2).map(|w| w[1] - w[0]))
+        {
+            assert!(((w[1][0] - w[0][0]) / d).abs() <= 1.0 + 1e-9);
+        }
+        // Interface accelerations within bound (incl. rest boundaries).
+        let n = traj.times.len();
+        for i in 0..n {
+            let v_prev = if i > 0 {
+                (traj.positions[i][0] - traj.positions[i - 1][0])
+                    / (traj.times[i] - traj.times[i - 1])
+            } else {
+                0.0
+            };
+            let v_next = if i < n - 1 {
+                (traj.positions[i + 1][0] - traj.positions[i][0])
+                    / (traj.times[i + 1] - traj.times[i])
+            } else {
+                0.0
+            };
+            let span = if i == 0 {
+                traj.times[1] - traj.times[0]
+            } else if i == n - 1 {
+                traj.times[n - 1] - traj.times[n - 2]
+            } else {
+                (traj.times[i] - traj.times[i - 1]).min(traj.times[i + 1] - traj.times[i])
+            };
+            assert!(
+                ((v_next - v_prev) / span).abs() <= 1.0 * 1.01 + 1e-9,
+                "acc violated at waypoint {i}"
+            );
+        }
+        // A 1-rad rest-to-rest move with v=a=1 cannot beat the bang-bang
+        // optimum of 2s; it also should not be pathologically slow.
+        let d = traj.duration();
+        assert!((1.9..6.0).contains(&d), "duration = {d}");
+    }
+
+    #[test]
+    fn sampling_is_monotone_and_hits_endpoints() {
+        let path = vec![vec![0.0, 0.0], vec![0.5, -0.3], vec![1.0, 0.4]];
+        let limits = Limits::uniform(2, 2.0, 4.0);
+        let traj = time_parameterize(&path, &limits, &TimingOptions::default()).unwrap();
+        assert_eq!(traj.sample(-1.0), vec![0.0, 0.0]);
+        assert_eq!(traj.sample(traj.duration() + 1.0), vec![1.0, 0.4]);
+        // Hermite samples stay near the waypoint hull (no wild overshoot).
+        let (_, samples) = traj.resample(0.01);
+        for q in samples {
+            assert!(q[0] >= -0.05 && q[0] <= 1.05);
+            assert!(q[1] >= -0.4 && q[1] <= 0.5);
+        }
+    }
+
+    #[test]
+    fn resample_includes_final_point() {
+        let path = vec![vec![0.0], vec![0.4]];
+        let traj = time_parameterize(&path, &limits1(), &TimingOptions::default()).unwrap();
+        let (times, positions) = traj.resample(0.033);
+        assert_eq!(times.first(), Some(&0.0));
+        assert!((times.last().unwrap() - traj.duration()).abs() < 1e-12);
+        assert_eq!(positions.last().unwrap(), &vec![0.4]);
+    }
+
+    #[test]
+    fn degenerate_paths() {
+        assert!(matches!(
+            time_parameterize(&[], &limits1(), &TimingOptions::default()),
+            Err(TrajError::EmptyPath)
+        ));
+        let stationary = vec![vec![0.3], vec![0.3]];
+        let traj = time_parameterize(&stationary, &limits1(), &TimingOptions::default()).unwrap();
+        assert_eq!(traj.times, vec![0.0]);
+        assert!(matches!(
+            time_parameterize(
+                &[vec![0.0], vec![1.0]],
+                &Limits::uniform(1, 0.0, 1.0),
+                &TimingOptions::default()
+            ),
+            Err(TrajError::NonPositiveLimits)
+        ));
+    }
+}

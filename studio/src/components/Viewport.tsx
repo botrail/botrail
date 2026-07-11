@@ -3,7 +3,9 @@ import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 
 import { useStudioStore } from "../store";
+import { GhostRobot } from "./GhostRobot";
 import { ObstacleView } from "./ObstacleView";
+import { PlaybackDriver } from "./PlaybackDriver";
 import { SceneView } from "./SceneView";
 import { TcpGizmo } from "./TcpGizmo";
 
@@ -46,8 +48,10 @@ export function Viewport() {
 
         <Suspense fallback={null}>
           <SceneView />
+          <GhostRobot />
           <ObstacleView />
           <TcpGizmo />
+          <PlaybackDriver />
         </Suspense>
       </Canvas>
 

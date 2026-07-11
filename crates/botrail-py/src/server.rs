@@ -18,6 +18,8 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
         .route("/api/scene", get(scene_handler))
+        .route("/api/project", get(project_get).post(project_post))
+        .route("/api/export.py", get(python_export))
         .fallback_service(ServeDir::new(studio_dir).append_index_html_on_directories(true))
         .with_state(hub)
 }
@@ -31,6 +33,7 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
     for initial in [
         hub.scene_init_json(),
         hub.obstacles_json(),
+        hub.motions_json(),
         hub.state_json(),
     ] {
         if socket.send(Message::Text(initial.into())).await.is_err() {
@@ -87,6 +90,45 @@ async fn scene_handler(State(hub): State<Arc<SceneHub>>) -> Response {
     (
         [(header::CONTENT_TYPE, "application/json")],
         hub.scene_init_json(),
+    )
+        .into_response()
+}
+
+/// Downloads the current scene as a `.botrail` project file.
+async fn project_get(State(hub): State<Arc<SceneHub>>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"project.botrail\"",
+            ),
+        ],
+        hub.project_json(),
+    )
+        .into_response()
+}
+
+/// Applies an uploaded `.botrail` project to the running scene (robot must
+/// match; obstacles, motions, and joint state are replaced).
+async fn project_post(State(hub): State<Arc<SceneHub>>, body: String) -> Response {
+    match hub.apply_project_json(&body) {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Downloads a generated Python script reproducing the current project.
+async fn python_export(State(hub): State<Arc<SceneHub>>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/x-python; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"scene.py\"",
+            ),
+        ],
+        hub.python_code(),
     )
         .into_response()
 }

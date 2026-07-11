@@ -9,6 +9,7 @@ import type {
   GeometryMsg,
   ObstacleMsg,
   PoseMsg,
+  SegmentMsg,
   ServerMessage,
 } from "./protocol";
 import { useStudioStore } from "./store";
@@ -128,17 +129,37 @@ function throttledByKey<T>(
   };
 }
 
-/** Send the full DOF vector, throttled to ~30 Hz. */
-export const sendJointPositions = throttled<number[]>(
+/** Any direct robot interaction ends a running trajectory preview. */
+function interact(): void {
+  useStudioStore.getState().stopPlayback();
+}
+
+const throttledJointPositions = throttled<number[]>(
   SEND_INTERVAL_MS,
   (positions) => rawSend({ type: "set_joint_positions", positions }),
 );
 
-/** Ask the server to IK-track a TCP target pose, throttled to ~30 Hz. */
-export const sendTcpTarget = throttled<{ link: string; pose: PoseMsg }>(
+/** Send the full DOF vector, throttled to ~30 Hz. */
+export function sendJointPositions(positions: number[]): void {
+  interact();
+  throttledJointPositions(positions);
+}
+
+const throttledTcpTarget = throttled<{ link: string; pose: PoseMsg }>(
   SEND_INTERVAL_MS,
   ({ link, pose }) => rawSend({ type: "set_tcp_target", link, pose }),
 );
+
+/** Ask the server to IK-track a TCP target pose, throttled to ~30 Hz. */
+export function sendTcpTarget(target: { link: string; pose: PoseMsg }): void {
+  interact();
+  throttledTcpTarget(target);
+}
+
+/** Plan from the current configuration to `goal` (DOF order). */
+export function sendPlanRequest(goal: number[]): void {
+  rawSend({ type: "plan_request", goal_positions: goal });
+}
 
 /** Add an obstacle; the server may rename it and re-broadcasts the full list. */
 export function sendAddObstacle(obstacle: ObstacleMsg): void {
@@ -162,4 +183,24 @@ export function sendUpdateObstacleGeometry(
 /** Remove an obstacle (sent immediately). */
 export function sendRemoveObstacle(name: string): void {
   rawSend({ type: "remove_obstacle", name });
+}
+
+/** Append a waypoint segment to a motion; the server creates it if missing. */
+export function sendAddSegment(motion: string, segment: SegmentMsg): void {
+  rawSend({ type: "add_segment", motion, segment });
+}
+
+/** Remove the segment at `index` from a motion (sent immediately). */
+export function sendRemoveSegment(motion: string, index: number): void {
+  rawSend({ type: "remove_segment", motion, index });
+}
+
+/** Drop every segment from a motion (sent immediately). */
+export function sendClearMotion(motion: string): void {
+  rawSend({ type: "clear_motion", motion });
+}
+
+/** Plan the full motion; the result arrives as a `motion_result`. */
+export function sendPlanMotion(motion: string): void {
+  rawSend({ type: "plan_motion", motion });
 }

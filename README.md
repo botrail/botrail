@@ -8,13 +8,15 @@ studio in your browser for building environments, constraints, and motions.
 The core is written in Rust (no system dependencies), with URDF **and Xacro**
 support via [xurdf](https://github.com/neka-nat/xurdf) — no ROS required.
 
-> **Status: M2.** URDF/Xacro loading, FK / Jacobian / IK with a draggable
-> TCP gizmo, and collision checking: self-collision with an auto-generated
-> ACM, obstacle editing in the studio (add / drag / resize / delete), live
-> collision highlighting and clearance display. Mesh collision shapes land
+> **Status: M4.** URDF/Xacro loading, FK / IK with a draggable TCP gizmo,
+> collision checking (auto-generated ACM, obstacle editing, live
+> highlighting), motion planning (RRT-Connect + time parameterization with
+> studio playback), and motion authoring: waypoint sequences with
+> joint-plan / Cartesian-line segments, orientation-cone and position-box
+> path constraints, self-contained `.botrail` project save/load, and Python
+> code generation — all editable in the studio. Mesh collision shapes land
 > with the upcoming mesh I/O crate (primitives only for now). See
-> [docs/DESIGN.md](docs/DESIGN.md) for the roadmap (planning, motion
-> editing, wasm).
+> [docs/DESIGN.md](docs/DESIGN.md) for the roadmap (wasm demo next).
 
 ## Quickstart
 
@@ -40,7 +42,26 @@ scene.add_box("table", size=(0.6, 0.6, 0.05), position=(0.4, 0.0, 0.0))
 scene.in_collision()                              # False
 scene.min_obstacle_distance()                     # clearance in meters
 scene.check_collisions()                          # [(("link", ...), ("obstacle", ...)), ...]
+
+traj = scene.plan([0.0, 1.2, -0.9, 0.4, 0.0, 0.0])  # RRT-Connect + time param
+traj = scene.plan_to_pose((0.4, 0.1, 0.3))           # IK, then plan
+traj.duration, traj.sample(0.5)                      # seconds / joint values
+traj.export_csv("motion.csv", dt=0.008)              # or export_json(...)
+
+scene.add_segment("pick", goal=[0.5, 0.9, -1.2, 0.3, 0.0, 0.0])
+scene.add_segment("pick", kind="cartesian_line",     # straight TCP descent,
+                  orientation_cone=((0, 0, 1), (0, 0, 1), 0.35))  # tool upright
+traj = scene.plan_motion("pick")                     # one trajectory, rest at waypoints
+
+scene.save_project("cell.botrail")                   # self-contained JSON
+scene = bt.Scene.load_project("cell.botrail")
+print(scene.generate_python())                       # script reproducing it all
 ```
+
+Planned trajectories are pushed to the studio automatically and can be
+previewed there (goal ghost, playback slider with segment markers). In the
+UI you can capture waypoints from the posed robot, plan and replay whole
+motions, and save/load `.botrail` projects or export them as Python.
 
 ## Development setup
 
@@ -92,9 +113,13 @@ cd studio && pnpm dev
 
 ```
 crates/botrail-model   URDF/Xacro -> indexed kinematic tree (via xurdf)
-crates/botrail-kin     forward kinematics
+crates/botrail-kin     forward kinematics, Jacobian, DLS inverse kinematics
+crates/botrail-collide parry3d-based collision checking (solid shapes, ACM)
+crates/botrail-plan    RRT-Connect + shortcut smoothing
+crates/botrail-traj    time parameterization + trajectory sampling
 crates/botrail-scene   scene state + JSON wire protocol (source of truth)
 crates/botrail-py      pyo3 bindings + axum server (websocket, meshes, SPA)
+crates/botrail-bench   standalone perf probes (not shipped)
 studio/                web UI (vite + React + react-three-fiber)
 python/botrail/        python package (high-level API, bundled studio assets)
 examples/              primitive-only sample arm + demo script

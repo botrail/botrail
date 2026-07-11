@@ -164,6 +164,69 @@ pub struct CollisionPairMsg {
     pub b: ColliderRefMsg,
 }
 
+/// A time-parameterized trajectory, uniformly sampled for playback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TrajectoryMsg {
+    pub duration: f64,
+    /// Sample timestamps (uniform except the exact final point).
+    pub times: Vec<f64>,
+    /// Joint positions per sample.
+    pub joint_positions: Vec<Vec<f64>>,
+    /// World pose of every link per sample (FK precomputed server-side).
+    pub link_poses: Vec<Vec<PoseMsg>>,
+}
+
+/// A TCP path constraint (see `motion::Constraint`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ConstraintMsg {
+    OrientationCone {
+        axis_local: [f64; 3],
+        axis_world: [f64; 3],
+        /// Half-angle of the cone (rad).
+        angle: f64,
+    },
+    PositionBox {
+        min: [f64; 3],
+        max: [f64; 3],
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SegmentKindMsg {
+    Joint,
+    CartesianLine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SegmentMsg {
+    pub kind: SegmentKindMsg,
+    /// Goal configuration in DOF order.
+    pub goal_positions: Vec<f64>,
+    pub constraints: Vec<ConstraintMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct MotionMsg {
+    pub name: String,
+    pub segments: Vec<SegmentMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PlanStatsMsg {
+    /// Wall-clock planning + timing time.
+    pub planning_time_ms: f64,
+    /// Waypoints in the (shortcut) path before time sampling.
+    pub waypoints: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -185,6 +248,27 @@ pub enum ServerMessage {
         collisions: Vec<CollisionPairMsg>,
         /// Minimum robot-obstacle distance; `null` without obstacles.
         min_distance: Option<f64>,
+    },
+    /// Response to a `plan_request` (broadcast to every client).
+    PlanResult {
+        ok: bool,
+        error: Option<String>,
+        trajectory: Option<TrajectoryMsg>,
+        stats: Option<PlanStatsMsg>,
+    },
+    /// The full motion list; resent whenever it changes.
+    Motions {
+        motions: Vec<MotionMsg>,
+    },
+    /// Response to a `plan_motion` request (broadcast to every client).
+    MotionResult {
+        ok: bool,
+        motion: String,
+        error: Option<String>,
+        trajectory: Option<TrajectoryMsg>,
+        /// Time at which each segment ends (playback markers).
+        segment_ends: Vec<f64>,
+        planning_time_ms: Option<f64>,
     },
 }
 
@@ -216,6 +300,26 @@ pub enum ClientMessage {
     },
     RemoveObstacle {
         name: String,
+    },
+    /// Plan from the current configuration to `goal_positions` (DOF order).
+    PlanRequest {
+        goal_positions: Vec<f64>,
+    },
+    /// Append a segment (creates the motion when missing).
+    AddSegment {
+        motion: String,
+        segment: SegmentMsg,
+    },
+    RemoveSegment {
+        motion: String,
+        index: usize,
+    },
+    ClearMotion {
+        motion: String,
+    },
+    /// Plan every segment of the motion from the current configuration.
+    PlanMotion {
+        motion: String,
     },
 }
 
@@ -302,6 +406,97 @@ impl SceneDescriptionMsg {
             joints,
             tcp_link: Some(robot.links[robot.default_tcp_link()].name.clone()),
         }
+    }
+}
+
+// ------------------------------------------------------ motion conversions
+
+use crate::motion::{Constraint, Motion, Segment, SegmentKind};
+
+fn vec3(a: [f64; 3]) -> Vector3<f64> {
+    Vector3::new(a[0], a[1], a[2])
+}
+
+fn arr3(v: &Vector3<f64>) -> [f64; 3] {
+    [v.x, v.y, v.z]
+}
+
+pub fn constraint_msg(c: &Constraint) -> ConstraintMsg {
+    match c {
+        Constraint::OrientationCone {
+            axis_local,
+            axis_world,
+            angle,
+        } => ConstraintMsg::OrientationCone {
+            axis_local: arr3(axis_local),
+            axis_world: arr3(axis_world),
+            angle: *angle,
+        },
+        Constraint::PositionBox { min, max } => ConstraintMsg::PositionBox {
+            min: arr3(min),
+            max: arr3(max),
+        },
+    }
+}
+
+pub fn constraint_from_msg(msg: &ConstraintMsg) -> Constraint {
+    match msg {
+        ConstraintMsg::OrientationCone {
+            axis_local,
+            axis_world,
+            angle,
+        } => Constraint::OrientationCone {
+            axis_local: vec3(*axis_local),
+            axis_world: vec3(*axis_world),
+            angle: *angle,
+        },
+        ConstraintMsg::PositionBox { min, max } => Constraint::PositionBox {
+            min: vec3(*min),
+            max: vec3(*max),
+        },
+    }
+}
+
+pub fn segment_msg(segment: &Segment) -> SegmentMsg {
+    SegmentMsg {
+        kind: match segment.kind {
+            SegmentKind::Joint => SegmentKindMsg::Joint,
+            SegmentKind::CartesianLine => SegmentKindMsg::CartesianLine,
+        },
+        goal_positions: segment.goal_positions.clone(),
+        constraints: segment.constraints.iter().map(constraint_msg).collect(),
+    }
+}
+
+pub fn segment_from_msg(msg: &SegmentMsg) -> Segment {
+    Segment {
+        kind: match msg.kind {
+            SegmentKindMsg::Joint => SegmentKind::Joint,
+            SegmentKindMsg::CartesianLine => SegmentKind::CartesianLine,
+        },
+        goal_positions: msg.goal_positions.clone(),
+        constraints: msg.constraints.iter().map(constraint_from_msg).collect(),
+    }
+}
+
+pub fn motion_msg(motion: &Motion) -> MotionMsg {
+    MotionMsg {
+        name: motion.name.clone(),
+        segments: motion.segments.iter().map(segment_msg).collect(),
+    }
+}
+
+pub fn motion_from_msg(msg: &MotionMsg) -> Motion {
+    Motion {
+        name: msg.name.clone(),
+        segments: msg.segments.iter().map(segment_from_msg).collect(),
+    }
+}
+
+/// The full motion list as a `motions` message.
+pub fn motions_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Motions {
+        motions: scene.motions().iter().map(motion_msg).collect(),
     }
 }
 

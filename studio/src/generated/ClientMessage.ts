@@ -2,5 +2,6 @@
 import type { GeometryMsg } from "./GeometryMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PoseMsg } from "./PoseMsg";
+import type { SegmentMsg } from "./SegmentMsg";
 
-export type ClientMessage = { "type": "set_joint_positions", positions: Array<number>, } | { "type": "set_tcp_target", link: string, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, };
+export type ClientMessage = { "type": "set_joint_positions", positions: Array<number>, } | { "type": "set_tcp_target", link: string, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "plan_request", goal_positions: Array<number>, } | { "type": "add_segment", motion: string, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, };

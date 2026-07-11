@@ -2,10 +2,13 @@ import { create } from "zustand";
 import type {
   CollisionPairMsg,
   IkStatusMsg,
+  MotionMsg,
   ObstacleMsg,
+  PlanStatsMsg,
   PoseMsg,
   SceneDescriptionMsg,
   ServerMessage,
+  TrajectoryMsg,
 } from "./protocol";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -67,6 +70,27 @@ interface StudioState {
   minDistance: number | null;
   /** Which object the viewport gizmo edits; defaults to the TCP. */
   selection: Selection;
+  /** Snapshot of a goal configuration (joints + link poses for the ghost). */
+  goal: { positions: number[]; linkPoses: PoseMsg[] } | null;
+  /** True while a plan request is in flight. */
+  planning: boolean;
+  planError: string | null;
+  planStats: PlanStatsMsg | null;
+  /** Last planned trajectory (for preview playback). */
+  trajectory: TrajectoryMsg | null;
+  playbackTime: number;
+  playing: boolean;
+  /** When set, the robot renders at these poses instead of the live state. */
+  overridePoses: PoseMsg[] | null;
+  /** All motions in the scene; re-sent in full by the server on every change. */
+  motions: MotionMsg[];
+  /** True while a motion plan request is in flight. */
+  motionPlanning: boolean;
+  motionError: string | null;
+  /** Time at which each planned segment ends (playback boundary markers). */
+  segmentEnds: number[];
+  /** Timing of the last successful motion plan. */
+  motionStats: { planningTimeMs: number } | null;
 
   setConnection: (c: ConnectionStatus) => void;
   applyServerMessage: (msg: ServerMessage) => void;
@@ -78,6 +102,15 @@ interface StudioState {
   setGizmoMode: (mode: GizmoMode) => void;
   selectTcp: () => void;
   selectObstacle: (name: string) => void;
+  setGoalFromCurrent: () => void;
+  clearGoal: () => void;
+  beginPlanning: () => void;
+  beginMotionPlanning: () => void;
+  /** Scrub/advance playback; `poses` become the display override. */
+  setPlayback: (t: number, poses: PoseMsg[]) => void;
+  setPlaying: (playing: boolean) => void;
+  /** Ends playback and returns the display to the live state. */
+  stopPlayback: () => void;
 }
 
 export const useStudioStore = create<StudioState>((set) => ({
@@ -92,6 +125,19 @@ export const useStudioStore = create<StudioState>((set) => ({
   collisions: [],
   minDistance: null,
   selection: { type: "tcp" },
+  goal: null,
+  planning: false,
+  planError: null,
+  planStats: null,
+  trajectory: null,
+  playbackTime: 0,
+  playing: false,
+  overridePoses: null,
+  motions: [],
+  motionPlanning: false,
+  motionError: null,
+  segmentEnds: [],
+  motionStats: null,
 
   setConnection: (c) => set({ connection: c }),
 
@@ -107,6 +153,19 @@ export const useStudioStore = create<StudioState>((set) => ({
         collisions: [],
         minDistance: null,
         selection: { type: "tcp" },
+        goal: null,
+        planning: false,
+        planError: null,
+        planStats: null,
+        trajectory: null,
+        playbackTime: 0,
+        playing: false,
+        overridePoses: null,
+        motions: [],
+        motionPlanning: false,
+        motionError: null,
+        segmentEnds: [],
+        motionStats: null,
       });
     } else if (msg.type === "obstacles") {
       set((s) => {
@@ -120,6 +179,45 @@ export const useStudioStore = create<StudioState>((set) => ({
           selection: gone ? { type: "tcp" } : sel,
         };
       });
+    } else if (msg.type === "plan_result") {
+      if (msg.ok && msg.trajectory) {
+        // Auto-start the preview. The trajectory is shared with motion
+        // playback, so drop any stale motion badge/markers it left behind.
+        set({
+          planning: false,
+          planError: null,
+          planStats: msg.stats,
+          trajectory: msg.trajectory,
+          playbackTime: 0,
+          playing: true,
+          overridePoses: msg.trajectory.link_poses[0] ?? null,
+          segmentEnds: [],
+          motionStats: null,
+        });
+      } else {
+        set({ planning: false, planError: msg.error ?? "planning failed" });
+      }
+    } else if (msg.type === "motions") {
+      set({ motions: msg.motions });
+    } else if (msg.type === "motion_result") {
+      if (msg.ok && msg.trajectory) {
+        // Auto-start the preview through the same shared playback state the
+        // plan panel uses; clear its badge/error since we now own the preview.
+        set({
+          motionPlanning: false,
+          motionError: null,
+          motionStats: { planningTimeMs: msg.planning_time_ms ?? 0 },
+          segmentEnds: msg.segment_ends,
+          trajectory: msg.trajectory,
+          playbackTime: 0,
+          playing: true,
+          overridePoses: msg.trajectory.link_poses[0] ?? null,
+          planStats: null,
+          planError: null,
+        });
+      } else {
+        set({ motionPlanning: false, motionError: msg.error ?? "planning failed" });
+      }
     } else {
       set({
         jointPositions: msg.joint_positions,
@@ -156,4 +254,20 @@ export const useStudioStore = create<StudioState>((set) => ({
   setGizmoMode: (mode) => set({ gizmoMode: mode }),
   selectTcp: () => set({ selection: { type: "tcp" } }),
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
+
+  setGoalFromCurrent: () =>
+    set((s) => ({
+      goal:
+        s.linkPoses.length > 0
+          ? { positions: s.jointPositions.slice(), linkPoses: s.linkPoses }
+          : null,
+      planError: null,
+    })),
+  clearGoal: () => set({ goal: null, planError: null }),
+  beginPlanning: () => set({ planning: true, planError: null }),
+  beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
+
+  setPlayback: (t, poses) => set({ playbackTime: t, overridePoses: poses }),
+  setPlaying: (playing) => set({ playing }),
+  stopPlayback: () => set({ playing: false, overridePoses: null }),
 }));

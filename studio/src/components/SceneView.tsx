@@ -11,6 +11,7 @@ const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
 export function SceneView() {
   const sceneDesc = useStudioStore((s) => s.sceneDesc);
   const linkPoses = useStudioStore((s) => s.linkPoses);
+  const overridePoses = useStudioStore((s) => s.overridePoses);
   const collisions = useStudioStore((s) => s.collisions);
   const collidingLinks = useMemo(
     () => collidingLinkNames(collisions),
@@ -19,6 +20,11 @@ export function SceneView() {
 
   if (!sceneDesc) return null;
 
+  // During trajectory playback the robot renders at the override poses;
+  // collision coloring refers to the live state, so it is suppressed.
+  const poses = overridePoses ?? linkPoses;
+  const playback = overridePoses !== null;
+
   return (
     <>
       {sceneDesc.links.map((link, i) => (
@@ -26,8 +32,8 @@ export function SceneView() {
           key={i}
           link={link}
           index={i}
-          pose={linkPoses[i]}
-          colliding={collidingLinks.has(link.name)}
+          pose={poses[i]}
+          colliding={!playback && collidingLinks.has(link.name)}
         />
       ))}
     </>

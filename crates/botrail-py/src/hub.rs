@@ -211,6 +211,233 @@ impl SceneHub {
         self.lock().collision_warnings.clone()
     }
 
+    // -------------------------------------------------------------- motions
+
+    pub fn motions_json(&self) -> String {
+        let scene = self.lock();
+        serde_json::to_string(&wire::motions_message(&scene))
+            .expect("wire types serialize infallibly")
+    }
+
+    fn broadcast_motions(&self) {
+        let _ = self.tx.send(self.motions_json());
+    }
+
+    pub fn add_segment(
+        &self,
+        motion: &str,
+        segment: botrail_scene::motion::Segment,
+    ) -> Result<(), String> {
+        self.lock()
+            .add_segment(motion, segment)
+            .map_err(|e| e.to_string())?;
+        self.broadcast_motions();
+        Ok(())
+    }
+
+    pub fn remove_segment(&self, motion: &str, index: usize) -> Result<(), String> {
+        self.lock()
+            .remove_segment(motion, index)
+            .map_err(|e| e.to_string())?;
+        self.broadcast_motions();
+        Ok(())
+    }
+
+    pub fn clear_motion(&self, motion: &str) -> Result<(), String> {
+        self.lock()
+            .clear_motion(motion)
+            .map_err(|e| e.to_string())?;
+        self.broadcast_motions();
+        Ok(())
+    }
+
+    pub fn motion_names(&self) -> Vec<String> {
+        self.lock()
+            .motions()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    pub fn motion_segments(&self, name: &str) -> Vec<(String, Vec<f64>)> {
+        self.lock()
+            .motions()
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| {
+                m.segments
+                    .iter()
+                    .map(|s| {
+                        let kind = match s.kind {
+                            botrail_scene::motion::SegmentKind::Joint => "joint",
+                            botrail_scene::motion::SegmentKind::CartesianLine => "cartesian_line",
+                        };
+                        (kind.to_string(), s.goal_positions.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Plans a whole motion against a scene snapshot (no broadcast).
+    pub fn plan_motion_snapshot(
+        &self,
+        name: &str,
+        options: &botrail_plan::PlanOptions,
+    ) -> Result<botrail_scene::motion::PlannedMotion, String> {
+        let snapshot = self.lock().clone();
+        snapshot
+            .plan_motion(name, options, &traj_limits(&snapshot.robot))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Plans a whole motion against a scene snapshot and broadcasts the
+    /// outcome as a `motion_result`.
+    pub fn plan_motion_and_broadcast(
+        &self,
+        name: &str,
+        options: &botrail_plan::PlanOptions,
+    ) -> Result<(botrail_scene::motion::PlannedMotion, f64), String> {
+        let t0 = std::time::Instant::now();
+        let result = self.plan_motion_snapshot(name, options);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let msg = match &result {
+            Ok(planned) => ServerMessage::MotionResult {
+                ok: true,
+                motion: name.to_string(),
+                error: None,
+                trajectory: Some(self.trajectory_msg(&planned.trajectory)),
+                segment_ends: planned.segment_ends.clone(),
+                planning_time_ms: Some(ms),
+            },
+            Err(e) => ServerMessage::MotionResult {
+                ok: false,
+                motion: name.to_string(),
+                error: Some(e.clone()),
+                trajectory: None,
+                segment_ends: Vec::new(),
+                planning_time_ms: None,
+            },
+        };
+        let _ = self
+            .tx
+            .send(serde_json::to_string(&msg).expect("wire types serialize infallibly"));
+        result.map(|planned| (planned, ms))
+    }
+
+    // -------------------------------------------------------------- project
+
+    pub fn project_json(&self) -> String {
+        self.lock().to_project().to_json()
+    }
+
+    pub fn apply_project_json(&self, json: &str) -> Result<(), String> {
+        let project =
+            botrail_scene::project::ProjectFile::from_json(json).map_err(|e| e.to_string())?;
+        self.lock()
+            .apply_project(&project)
+            .map_err(|e| e.to_string())?;
+        let _ = self.tx.send(self.obstacles_json());
+        self.broadcast_motions();
+        self.broadcast_state();
+        Ok(())
+    }
+
+    pub fn python_code(&self) -> String {
+        botrail_scene::project::generate_python(&self.lock().to_project())
+    }
+
+    // ------------------------------------------------------------- planning
+
+    /// Plans from the current configuration to `goal` against a snapshot of
+    /// the scene (the lock is not held while planning), then time-
+    /// parameterizes the path. Returns the trajectory, the shortcut path
+    /// waypoint count, and the wall-clock milliseconds spent.
+    pub fn plan_to(
+        &self,
+        goal: &[f64],
+        options: &botrail_plan::PlanOptions,
+    ) -> Result<(botrail_traj::JointTrajectory, usize, f64), String> {
+        let snapshot = self.lock().clone();
+        let start = snapshot.joint_positions().to_vec();
+        let (lower, upper) = snapshot.robot.sampling_bounds();
+        let space = botrail_plan::JointSpace { lower, upper };
+
+        let t0 = std::time::Instant::now();
+        let path = {
+            let mut is_valid = |q: &[f64]| {
+                snapshot
+                    .collisions_at(q)
+                    .map(|c| c.is_empty())
+                    .unwrap_or(false)
+            };
+            botrail_plan::plan(&space, &start, goal, &mut is_valid, options)
+                .map_err(|e| e.to_string())?
+        };
+        let limits = traj_limits(&snapshot.robot);
+        let traj = botrail_traj::time_parameterize(
+            &path,
+            &limits,
+            &botrail_traj::TimingOptions::default(),
+        )
+        .map_err(|e| e.to_string())?;
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        Ok((traj, path.len(), ms))
+    }
+
+    /// Runs `plan_to` and broadcasts the outcome (success or failure) as a
+    /// `plan_result` message.
+    pub fn plan_and_broadcast(
+        &self,
+        goal: &[f64],
+        options: &botrail_plan::PlanOptions,
+    ) -> Result<(botrail_traj::JointTrajectory, usize, f64), String> {
+        let result = self.plan_to(goal, options);
+        let msg = match &result {
+            Ok((traj, waypoints, ms)) => ServerMessage::PlanResult {
+                ok: true,
+                error: None,
+                trajectory: Some(self.trajectory_msg(traj)),
+                stats: Some(botrail_scene::wire::PlanStatsMsg {
+                    planning_time_ms: *ms,
+                    waypoints: *waypoints,
+                }),
+            },
+            Err(e) => ServerMessage::PlanResult {
+                ok: false,
+                error: Some(e.clone()),
+                trajectory: None,
+                stats: None,
+            },
+        };
+        let _ = self
+            .tx
+            .send(serde_json::to_string(&msg).expect("wire types serialize infallibly"));
+        result
+    }
+
+    /// Samples a trajectory at ~30Hz with per-sample FK for playback.
+    fn trajectory_msg(&self, traj: &botrail_traj::JointTrajectory) -> wire::TrajectoryMsg {
+        let robot = self.lock().robot.clone();
+        let (times, joint_positions) = traj.resample(1.0 / 30.0);
+        let link_poses = joint_positions
+            .iter()
+            .map(|q| {
+                botrail_kin::forward_kinematics(&robot, q)
+                    .expect("trajectory q has scene DOF")
+                    .iter()
+                    .map(PoseMsg::from)
+                    .collect()
+            })
+            .collect();
+        wire::TrajectoryMsg {
+            duration: traj.duration(),
+            times,
+            joint_positions,
+            link_poses,
+        }
+    }
+
     pub fn handle_client_message(&self, text: &str) {
         use botrail_scene::wire::ClientMessage;
         match serde_json::from_str::<ClientMessage>(text) {
@@ -258,7 +485,51 @@ impl SceneHub {
                     eprintln!("botrail: rejected remove_obstacle: {e}");
                 }
             }
+            Ok(ClientMessage::PlanRequest { goal_positions }) => {
+                // Failure is reported to clients inside the plan_result.
+                let _ =
+                    self.plan_and_broadcast(&goal_positions, &botrail_plan::PlanOptions::default());
+            }
+            Ok(ClientMessage::AddSegment { motion, segment }) => {
+                if let Err(e) = self.add_segment(&motion, wire::segment_from_msg(&segment)) {
+                    eprintln!("botrail: rejected add_segment: {e}");
+                }
+            }
+            Ok(ClientMessage::RemoveSegment { motion, index }) => {
+                if let Err(e) = self.remove_segment(&motion, index) {
+                    eprintln!("botrail: rejected remove_segment: {e}");
+                }
+            }
+            Ok(ClientMessage::ClearMotion { motion }) => {
+                if let Err(e) = self.clear_motion(&motion) {
+                    eprintln!("botrail: rejected clear_motion: {e}");
+                }
+            }
+            Ok(ClientMessage::PlanMotion { motion }) => {
+                // Failure is reported to clients inside the motion_result.
+                let _ =
+                    self.plan_motion_and_broadcast(&motion, &botrail_plan::PlanOptions::default());
+            }
             Err(e) => eprintln!("botrail: unparseable client message: {e}"),
         }
+    }
+}
+
+/// Trajectory limits from the URDF: joint velocity limits (defaulting to
+/// 1 rad/s where unspecified) and acceleration at twice the velocity bound
+/// (URDF has no acceleration field; reaches peak speed in 0.5s).
+fn traj_limits(model: &botrail_model::RobotModel) -> botrail_traj::Limits {
+    let velocity: Vec<f64> = model
+        .actuated_joints
+        .iter()
+        .map(|&ji| match model.joints[ji].limits {
+            Some(l) if l.velocity > 0.0 => l.velocity,
+            _ => 1.0,
+        })
+        .collect();
+    let acceleration = velocity.iter().map(|v| 2.0 * v).collect();
+    botrail_traj::Limits {
+        velocity,
+        acceleration,
     }
 }

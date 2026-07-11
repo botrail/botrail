@@ -163,6 +163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "botrail-plan"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "botrail-py"
 version = "0.1.0"
 dependencies = [
@@ -170,7 +177,9 @@ dependencies = [
  "botrail-collide",
  "botrail-kin",
  "botrail-model",
+ "botrail-plan",
  "botrail-scene",
+ "botrail-traj",
  "nalgebra",
  "pyo3",
  "serde_json",
@@ -185,11 +194,20 @@ dependencies = [
  "botrail-collide",
  "botrail-kin",
  "botrail-model",
+ "botrail-plan",
+ "botrail-traj",
  "nalgebra",
  "serde",
  "serde_json",
  "thiserror",
  "ts-rs",
+]
+
+[[package]]
+name = "botrail-traj"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

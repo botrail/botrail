@@ -5,9 +5,13 @@
 //! protocol. The TypeScript side (`studio/src/generated/`) is generated from
 //! them via ts-rs — run `scripts/gen_protocol.sh` after changing them.
 
+pub mod motion;
+pub mod project;
 pub mod wire;
 
 use std::sync::Arc;
+
+use motion::{Motion, MotionError, PlannedMotion, Segment};
 
 use botrail_collide::{Acm, CollisionPair, ObstacleCollider, RobotCollider};
 use botrail_model::{Geometry, RobotModel};
@@ -46,6 +50,7 @@ pub struct Scene {
     obstacle_colliders: Vec<ObstacleCollider>,
     robot_collider: RobotCollider,
     acm: Acm,
+    motions: Vec<Motion>,
     /// Link shapes that could not be used for collision (e.g. meshes until
     /// the mesh I/O crate lands). Surface these to the user once.
     pub collision_warnings: Vec<String>,
@@ -72,6 +77,7 @@ impl Scene {
             obstacle_colliders: Vec::new(),
             robot_collider,
             acm,
+            motions: Vec::new(),
             collision_warnings,
         }
     }
@@ -199,6 +205,38 @@ impl Scene {
         )
     }
 
+    /// Collision pairs at an arbitrary configuration (the scene state is
+    /// not modified).
+    pub fn collisions_at(&self, q: &[f64]) -> Result<Vec<CollisionPair>, SceneError> {
+        let poses =
+            botrail_kin::forward_kinematics(&self.robot, q).map_err(|_| SceneError::WrongDof {
+                expected: self.robot.dof(),
+                got: q.len(),
+            })?;
+        Ok(botrail_collide::check_scene(
+            &self.robot_collider,
+            &poses,
+            &self.acm,
+            &self.obstacle_query(),
+        ))
+    }
+
+    /// True when `q` has the right DOF, respects the position limits, and
+    /// is collision-free. This is the validity predicate handed to planners.
+    pub fn is_state_valid(&self, q: &[f64]) -> bool {
+        if q.len() != self.robot.dof() {
+            return false;
+        }
+        let within =
+            q.iter()
+                .zip(self.robot.actuated_joint_limits())
+                .all(|(v, limits)| match limits {
+                    Some((lo, hi)) => *v >= lo - 1e-9 && *v <= hi + 1e-9,
+                    None => true,
+                });
+        within && self.collisions_at(q).map(|c| c.is_empty()).unwrap_or(false)
+    }
+
     /// Minimum robot-obstacle distance (0 when colliding); `None` without
     /// obstacles or collision geometry.
     pub fn min_obstacle_distance(&self) -> Option<f64> {
@@ -211,6 +249,76 @@ impl Scene {
 
     pub fn acm(&self) -> &Acm {
         &self.acm
+    }
+
+    // -------------------------------------------------------------- motions
+
+    pub fn motions(&self) -> &[Motion] {
+        &self.motions
+    }
+
+    fn motion_index(&self, name: &str) -> Result<usize, MotionError> {
+        self.motions
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(|| MotionError::UnknownMotion(name.to_string()))
+    }
+
+    /// Appends a segment to `motion`, creating the motion if needed.
+    pub fn add_segment(&mut self, motion: &str, segment: Segment) -> Result<(), MotionError> {
+        if segment.goal_positions.len() != self.robot.dof() {
+            return Err(MotionError::WrongDof {
+                index: self
+                    .motion_index(motion)
+                    .map(|i| self.motions[i].segments.len())
+                    .unwrap_or(0),
+                expected: self.robot.dof(),
+                got: segment.goal_positions.len(),
+            });
+        }
+        let index = match self.motion_index(motion) {
+            Ok(i) => i,
+            Err(_) => {
+                self.motions.push(Motion {
+                    name: motion.to_string(),
+                    segments: Vec::new(),
+                });
+                self.motions.len() - 1
+            }
+        };
+        self.motions[index].segments.push(segment);
+        Ok(())
+    }
+
+    pub fn remove_segment(&mut self, motion: &str, segment: usize) -> Result<(), MotionError> {
+        let index = self.motion_index(motion)?;
+        if segment >= self.motions[index].segments.len() {
+            return Err(MotionError::BadSegmentIndex(segment));
+        }
+        self.motions[index].segments.remove(segment);
+        Ok(())
+    }
+
+    /// Removes every segment (the motion itself stays listed).
+    pub fn clear_motion(&mut self, motion: &str) -> Result<(), MotionError> {
+        let index = self.motion_index(motion)?;
+        self.motions[index].segments.clear();
+        Ok(())
+    }
+
+    pub fn set_motions(&mut self, motions: Vec<Motion>) {
+        self.motions = motions;
+    }
+
+    /// Plans all segments of `motion` from the current configuration.
+    pub fn plan_motion(
+        &self,
+        name: &str,
+        plan_options: &botrail_plan::PlanOptions,
+        limits: &botrail_traj::Limits,
+    ) -> Result<PlannedMotion, MotionError> {
+        let index = self.motion_index(name)?;
+        motion::plan_motion(self, &self.motions[index], plan_options, limits)
     }
 }
 

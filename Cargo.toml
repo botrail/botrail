@@ -4,6 +4,8 @@ members = [
     "crates/botrail-model",
     "crates/botrail-kin",
     "crates/botrail-collide",
+    "crates/botrail-plan",
+    "crates/botrail-traj",
     "crates/botrail-scene",
     "crates/botrail-py",
     "crates/botrail-bench",
@@ -20,6 +22,8 @@ authors = ["neka-nat <nekanat.stock@gmail.com>"]
 botrail-model = { path = "crates/botrail-model" }
 botrail-kin = { path = "crates/botrail-kin" }
 botrail-collide = { path = "crates/botrail-collide" }
+botrail-plan = { path = "crates/botrail-plan" }
+botrail-traj = { path = "crates/botrail-traj" }
 botrail-scene = { path = "crates/botrail-scene" }
 parry3d-f64 = "0.29"
 xurdf = "0.3"

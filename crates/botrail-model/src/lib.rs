@@ -115,6 +115,9 @@ pub struct RobotModel {
     pub joint_order: Vec<usize>,
     /// Indices of non-fixed joints, in `q`-vector order (base to tip).
     pub actuated_joints: Vec<usize>,
+    /// The URDF XML this model was built from (xacro already expanded).
+    /// Kept so projects can embed a self-contained robot description.
+    pub urdf_source: String,
 }
 
 impl RobotModel {
@@ -127,17 +130,14 @@ impl RobotModel {
         options: &ModelOptions,
     ) -> Result<Self, ModelError> {
         let path = path.as_ref();
-        let robot =
-            xurdf::parse_urdf_from_file(path).map_err(|e| ModelError::Parse(e.to_string()))?;
-        Self::build(robot, path.parent(), options)
+        let xml = std::fs::read_to_string(path).map_err(|e| ModelError::Parse(e.to_string()))?;
+        Self::from_urdf_str_with(&xml, path.parent(), options)
     }
 
     /// Parses a URDF from a string. Relative mesh paths cannot be resolved in
     /// this mode; pass `base_dir` via [`RobotModel::from_urdf_str_with`] if needed.
     pub fn from_urdf_str(xml: &str) -> Result<Self, ModelError> {
-        let robot =
-            xurdf::parse_urdf_from_string(xml).map_err(|e| ModelError::Parse(e.to_string()))?;
-        Self::build(robot, None, &ModelOptions::default())
+        Self::from_urdf_str_with(xml, None, &ModelOptions::default())
     }
 
     pub fn from_urdf_str_with(
@@ -147,7 +147,7 @@ impl RobotModel {
     ) -> Result<Self, ModelError> {
         let robot =
             xurdf::parse_urdf_from_string(xml).map_err(|e| ModelError::Parse(e.to_string()))?;
-        Self::build(robot, base_dir, options)
+        Self::build(robot, base_dir, options, xml.to_string())
     }
 
     /// Expands a Xacro file and parses the resulting URDF.
@@ -162,9 +162,7 @@ impl RobotModel {
         let path = path.as_ref();
         let xml =
             xurdf::parse_xacro_from_file(path).map_err(|e| ModelError::Parse(e.to_string()))?;
-        let robot =
-            xurdf::parse_urdf_from_string(&xml).map_err(|e| ModelError::Parse(e.to_string()))?;
-        Self::build(robot, path.parent(), options)
+        Self::from_urdf_str_with(&xml, path.parent(), options)
     }
 
     pub fn dof(&self) -> usize {
@@ -210,6 +208,26 @@ impl RobotModel {
         best
     }
 
+    /// Per-DOF sampling bounds for planning: the position limits, with
+    /// continuous joints bounded to one full turn.
+    pub fn sampling_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        let mut lower = Vec::with_capacity(self.dof());
+        let mut upper = Vec::with_capacity(self.dof());
+        for limits in self.actuated_joint_limits() {
+            match limits {
+                Some((lo, hi)) => {
+                    lower.push(lo);
+                    upper.push(hi);
+                }
+                None => {
+                    lower.push(-std::f64::consts::PI);
+                    upper.push(std::f64::consts::PI);
+                }
+            }
+        }
+        (lower, upper)
+    }
+
     /// Neutral configuration: zero, clamped into each joint's position limits.
     pub fn neutral_positions(&self) -> Vec<f64> {
         self.actuated_joints
@@ -225,6 +243,7 @@ impl RobotModel {
         robot: xurdf::Robot,
         base_dir: Option<&Path>,
         options: &ModelOptions,
+        urdf_source: String,
     ) -> Result<Self, ModelError> {
         let link_index: HashMap<&str, usize> = robot
             .links
@@ -350,6 +369,7 @@ impl RobotModel {
             root_link,
             joint_order,
             actuated_joints,
+            urdf_source,
         })
     }
 }

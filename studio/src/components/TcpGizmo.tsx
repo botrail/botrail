@@ -35,8 +35,11 @@ export function TcpGizmo() {
     target.quaternion.set(...pose.quaternion);
   }, [pose, target]);
 
-  // While an obstacle is selected, its gizmo takes over the viewport.
-  if (!pose || !tcpLink || selection.type !== "tcp") return null;
+  // While an obstacle is selected, its gizmo takes over the viewport; and
+  // during trajectory playback the gizmo would point at the live (not the
+  // displayed) TCP, so hide it too.
+  const overriding = useStudioStore((s) => s.overridePoses !== null);
+  if (!pose || !tcpLink || selection.type !== "tcp" || overriding) return null;
 
   const reachable = ikStatus === null || ikStatus.converged;
   const color = reachable ? "#4da3ff" : "#ff5555";

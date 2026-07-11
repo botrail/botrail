@@ -298,6 +298,139 @@ select:focus {
   background: var(--panel-2);
 }
 
+/* --- plan panel --- */
+.plan-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.plan-go {
+  font-weight: 600;
+}
+
+.plan-error {
+  color: var(--bad);
+  font-size: 12px;
+}
+
+.plan-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.playback-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.playback-row button {
+  flex: none;
+  width: 34px;
+}
+
+.seek {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.seek input[type="range"] {
+  display: block;
+  width: 100%;
+}
+
+/* Segment boundary markers overlaid on the seek slider (motion playback). */
+.seek-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.seek-mark {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--muted);
+  opacity: 0.7;
+}
+
+.playback-time {
+  flex: none;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- motion panel --- */
+.motion-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.motion-add {
+  display: flex;
+  gap: 8px;
+}
+
+.motion-add .seg {
+  flex: 1;
+  min-width: 0;
+}
+
+.upright-toggle {
+  flex: none;
+  white-space: nowrap;
+}
+
+.upright-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0f1115;
+}
+
+.motion-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.motion-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+}
+
+.motion-seg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.motion-remove {
+  flex: none;
+  padding: 0 7px;
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.motion-remove:hover:not(:disabled) {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
 /* --- obstacle panel --- */
 .obstacle-controls {
   display: flex;
