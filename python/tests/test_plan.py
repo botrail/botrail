@@ -26,6 +26,12 @@ def test_plan_free_space(scene: bt.Scene) -> None:
     # Times strictly increasing.
     assert all(b > a for a, b in zip(traj.times, traj.times[1:]))
     assert traj.joint_names[0] == "shoulder_pan"
+    # A single plan carries its sparse path as one joint segment.
+    [(kind, waypoints)] = traj.segments
+    assert kind == "joint"
+    assert waypoints[0] == pytest.approx(scene.joint_positions, abs=1e-9)
+    assert waypoints[-1] == pytest.approx(goal_folded(), abs=1e-9)
+    assert len(waypoints) < len(traj.times)
 
 
 def test_plan_avoids_obstacle(scene: bt.Scene) -> None:

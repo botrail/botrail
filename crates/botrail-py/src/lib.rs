@@ -369,10 +369,14 @@ impl Scene {
         } else {
             self.hub.plan_to(&goal, &options)
         };
-        let (traj, _, _) = result.map_err(PyValueError::new_err)?;
+        let (traj, path, _) = result.map_err(PyValueError::new_err)?;
         Ok(Trajectory {
             inner: traj,
             segment_ends: Vec::new(),
+            segments: vec![botrail_scene::motion::PlannedSegment {
+                kind: botrail_scene::motion::SegmentKind::Joint,
+                waypoints: path,
+            }],
             joint_names: self
                 .robot
                 .inner
@@ -380,6 +384,7 @@ impl Scene {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            limits: hub::traj_limits(&self.robot.inner),
         })
     }
 
@@ -475,6 +480,7 @@ impl Scene {
         Ok(Trajectory {
             inner: planned.trajectory,
             segment_ends: planned.segment_ends,
+            segments: planned.segments,
             joint_names: self
                 .robot
                 .inner
@@ -482,6 +488,7 @@ impl Scene {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            limits: hub::traj_limits(&self.robot.inner),
         })
     }
 
@@ -592,6 +599,64 @@ struct Trajectory {
     joint_names: Vec<String>,
     /// Time at which each motion segment ends (empty for single plans).
     segment_ends: Vec<f64>,
+    /// Per-segment sparse planned paths (single plans hold one segment).
+    segments: Vec<botrail_scene::motion::PlannedSegment>,
+    /// Joint limits the trajectory was timed with (drive script speeds).
+    limits: botrail_traj::Limits,
+}
+
+impl Trajectory {
+    /// Renders the sparse planned path as a vendor robot script.
+    #[allow(clippy::too_many_arguments)]
+    fn render_script(
+        &self,
+        dialect: &str,
+        name: &str,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<String> {
+        let backend = botrail_export::backend(dialect).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown dialect {dialect:?} (available: {})",
+                botrail_export::DIALECTS.join(", ")
+            ))
+        })?;
+        let segments: Vec<botrail_export::PathSegment> = self
+            .segments
+            .iter()
+            .map(|s| botrail_export::PathSegment {
+                kind: match s.kind {
+                    botrail_scene::motion::SegmentKind::Joint => botrail_export::PathKind::Joint,
+                    botrail_scene::motion::SegmentKind::CartesianLine => {
+                        botrail_export::PathKind::Linear
+                    }
+                },
+                waypoints: s.waypoints.clone(),
+            })
+            .collect();
+        let options = botrail_export::ProgramOptions {
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        };
+        let program = botrail_export::build_program(
+            name,
+            &self.joint_names,
+            &segments,
+            &self.limits.velocity,
+            &self.limits.acceleration,
+            &options,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        backend
+            .emit(&program)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
 }
 
 #[pymethods]
@@ -605,6 +670,26 @@ impl Trajectory {
     #[getter]
     fn segment_ends(&self) -> Vec<f64> {
         self.segment_ends.clone()
+    }
+
+    /// Sparse planned path per segment, as `(kind, waypoints)` tuples with
+    /// `kind` in `{"joint", "cartesian_line"}`. For joint segments these
+    /// are the shortcut waypoints, for cartesian segments the IK follow
+    /// points; both endpoints are included. This is the input for script
+    /// exporters (one move command per waypoint), unlike `positions`,
+    /// which is densified for time parameterization.
+    #[getter]
+    fn segments(&self) -> Vec<(String, Vec<Vec<f64>>)> {
+        self.segments
+            .iter()
+            .map(|s| {
+                let kind = match s.kind {
+                    botrail_scene::motion::SegmentKind::Joint => "joint",
+                    botrail_scene::motion::SegmentKind::CartesianLine => "cartesian_line",
+                };
+                (kind.to_string(), s.waypoints.clone())
+            })
+            .collect()
     }
 
     #[getter]
@@ -668,6 +753,74 @@ impl Trajectory {
             out.push('\n');
         }
         std::fs::write(&path, out)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    /// Renders the planned motion as a vendor robot script and returns it
+    /// as a string. The script replays the sparse planned waypoints as
+    /// vendor move commands (`segments`); time parameterization is left to
+    /// the robot controller. Speeds derive from the joint limits scaled by
+    /// `speed_scale`; `blend_radius` (m) rounds intermediate waypoints
+    /// (keep 0 unless verified on the controller — overlapping blends
+    /// abort some controllers); linear-move speed is `tcp_speed` (m/s).
+    /// With `move_to_start` the program begins with a joint move to the
+    /// first waypoint. Currently supported dialects: "urscript".
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (dialect = "urscript", name = "botrail_program", speed_scale = 1.0,
+                        blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2,
+                        move_to_start = true))]
+    fn to_script(
+        &self,
+        dialect: &str,
+        name: &str,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<String> {
+        self.render_script(
+            dialect,
+            name,
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        )
+    }
+
+    /// Writes `to_script` output to `path`. The program name defaults to
+    /// the file stem (e.g. `pick.script` → `def pick():`).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, dialect = "urscript", name = None, speed_scale = 1.0,
+                        blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2,
+                        move_to_start = true))]
+    fn export_script(
+        &self,
+        path: PathBuf,
+        dialect: &str,
+        name: Option<&str>,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<()> {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let script = self.render_script(
+            dialect,
+            name.unwrap_or(&stem),
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        )?;
+        std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
     }
 

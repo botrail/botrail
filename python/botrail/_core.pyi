@@ -152,9 +152,32 @@ class Trajectory:
     def duration(self) -> float: ...
     @property
     def segment_ends(self) -> list[float]: ...
+    @property
+    def segments(self) -> list[tuple[str, list[list[float]]]]: ...
     def sample(self, t: float) -> list[float]: ...
     def export_json(self, path: Union[str, Path]) -> None: ...
     def export_csv(self, path: Union[str, Path], dt: Optional[float] = None) -> None: ...
+    def to_script(
+        self,
+        dialect: str = "urscript",
+        name: str = "botrail_program",
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> str: ...
+    def export_script(
+        self,
+        path: Union[str, Path],
+        dialect: str = "urscript",
+        name: Optional[str] = None,
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> None: ...
 
 class StudioServer:
     @property

@@ -50,6 +50,26 @@ def test_plan_motion_passes_through_waypoints(scene: bt.Scene) -> None:
     assert traj.sample(traj.duration) == pytest.approx(g2, abs=1e-6)
 
 
+def test_plan_motion_exposes_sparse_segments(scene: bt.Scene) -> None:
+    g1 = [0.6, 0.4, -0.5, 0.2, 0.0, 0.0]
+    g2 = [-0.4, 0.8, -1.0, 0.0, 0.3, 0.0]
+    scene.add_segment("main", goal=g1)
+    scene.add_segment("main", goal=g2)
+    traj = scene.plan_motion("main", broadcast=False)
+
+    assert len(traj.segments) == 2
+    kind, waypoints = traj.segments[0]
+    assert kind == "joint"
+    # Chained endpoints: start config -> g1 -> g2, exactly.
+    assert waypoints[0] == pytest.approx(scene.joint_positions)
+    assert waypoints[-1] == pytest.approx(g1)
+    assert traj.segments[1][1][0] == pytest.approx(g1)
+    assert traj.segments[1][1][-1] == pytest.approx(g2)
+    # Sparse: fewer waypoints than the densified trajectory samples.
+    total = sum(len(wps) for _, wps in traj.segments)
+    assert total < len(traj.times)
+
+
 def test_cartesian_segment_moves_tcp_on_a_line(scene: bt.Scene) -> None:
     # Fold horizontally, then a straight 8cm descent as a cartesian segment.
     start = [0.0, 1.1, -0.6, -0.5, 0.0, 0.0]
@@ -60,6 +80,10 @@ def test_cartesian_segment_moves_tcp_on_a_line(scene: bt.Scene) -> None:
 
     scene.add_segment("descend", goal=goal_ik.q, kind="cartesian_line")
     traj = scene.plan_motion("descend", broadcast=False)
+
+    kind, waypoints = traj.segments[0]
+    assert kind == "cartesian_line"
+    assert waypoints[0] == pytest.approx(start)
 
     t = 0.0
     while t <= traj.duration:

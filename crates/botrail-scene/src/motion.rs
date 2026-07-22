@@ -84,12 +84,29 @@ pub struct Motion {
     pub segments: Vec<Segment>,
 }
 
+/// The joint path a single segment was planned through, before
+/// densification and time parameterization. For `Joint` segments this is
+/// the shortcut-smoothed RRT output (sparse; consecutive waypoints are
+/// connected by valid straight joint-space segments), for `CartesianLine`
+/// the seed-continuous IK follow points along the TCP line. Script
+/// exporters consume this to emit per-vendor move commands instead of
+/// reconstructing waypoints from the dense trajectory.
+#[derive(Debug, Clone)]
+pub struct PlannedSegment {
+    pub kind: SegmentKind,
+    /// Waypoints in DOF order, both endpoints included. The first equals
+    /// the previous segment's last; the last is the reached goal.
+    pub waypoints: Vec<Vec<f64>>,
+}
+
 /// A planned motion: one concatenated trajectory plus the time at which
-/// each segment ends (for UI markers and per-segment inspection).
+/// each segment ends (for UI markers and per-segment inspection) and the
+/// per-segment sparse paths (for script export).
 #[derive(Debug, Clone)]
 pub struct PlannedMotion {
     pub trajectory: JointTrajectory,
     pub segment_ends: Vec<f64>,
+    pub segments: Vec<PlannedSegment>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +293,7 @@ pub fn plan_motion(
     let mut current = scene.joint_positions().to_vec();
     let mut combined: Option<JointTrajectory> = None;
     let mut segment_ends = Vec::with_capacity(motion.segments.len());
+    let mut segments = Vec::with_capacity(motion.segments.len());
 
     for (index, segment) in motion.segments.iter().enumerate() {
         let path = plan_segment(scene, &current, segment, tcp, index, plan_options)?;
@@ -286,11 +304,16 @@ pub fn plan_motion(
             Some(head) => concatenate(head, traj),
         });
         segment_ends.push(combined.as_ref().expect("just set").duration());
+        segments.push(PlannedSegment {
+            kind: segment.kind,
+            waypoints: path,
+        });
     }
 
     Ok(PlannedMotion {
         trajectory: combined.expect("at least one segment"),
         segment_ends,
+        segments,
     })
 }
 
@@ -371,6 +394,49 @@ mod tests {
     }
 
     #[test]
+    fn planned_motion_retains_sparse_segment_paths() {
+        let scene = scene();
+        let g1 = vec![0.6, 0.4, -0.5, 0.2, 0.0, 0.0];
+        let g2 = vec![-0.4, 0.8, -1.0, 0.0, 0.3, 0.0];
+        let motion = Motion {
+            name: "m".into(),
+            segments: vec![
+                seg(SegmentKind::Joint, g1.clone()),
+                seg(SegmentKind::Joint, g2.clone()),
+            ],
+        };
+        let planned = plan_motion(
+            &scene,
+            &motion,
+            &botrail_plan::PlanOptions::default(),
+            &limits(),
+        )
+        .unwrap();
+
+        assert_eq!(planned.segments.len(), 2);
+        assert!(planned
+            .segments
+            .iter()
+            .all(|s| s.kind == SegmentKind::Joint));
+        // Chained endpoints: start at the scene configuration, pass exactly
+        // through each goal.
+        assert_eq!(
+            planned.segments[0].waypoints.first().unwrap().as_slice(),
+            scene.joint_positions()
+        );
+        assert_eq!(planned.segments[0].waypoints.last().unwrap(), &g1);
+        assert_eq!(planned.segments[1].waypoints.first().unwrap(), &g1);
+        assert_eq!(planned.segments[1].waypoints.last().unwrap(), &g2);
+        // Sparse: fewer waypoints than the densified trajectory.
+        let sparse: usize = planned.segments.iter().map(|s| s.waypoints.len()).sum();
+        assert!(
+            sparse < planned.trajectory.positions.len(),
+            "{sparse} sparse vs {} dense",
+            planned.trajectory.positions.len()
+        );
+    }
+
+    #[test]
     fn cartesian_line_keeps_tcp_on_the_line() {
         let scene = scene();
         // Start folded horizontally, goal: same orientation, shifted down in z
@@ -424,6 +490,23 @@ mod tests {
         let final_pose =
             botrail_kin::forward_kinematics(&scene.robot, path.last().unwrap()).unwrap()[tcp];
         assert!((final_pose.translation.vector - target.translation.vector).norm() < 1e-3);
+
+        // Planned as a motion, the segment retains the IK follow path
+        // (deterministic, so it matches the direct call above).
+        let motion = Motion {
+            name: "descend".into(),
+            segments: vec![seg(SegmentKind::CartesianLine, ik.q.clone())],
+        };
+        let planned = plan_motion(
+            &scene,
+            &motion,
+            &botrail_plan::PlanOptions::default(),
+            &limits(),
+        )
+        .unwrap();
+        assert_eq!(planned.segments.len(), 1);
+        assert_eq!(planned.segments[0].kind, SegmentKind::CartesianLine);
+        assert_eq!(planned.segments[0].waypoints, path);
     }
 
     #[test]

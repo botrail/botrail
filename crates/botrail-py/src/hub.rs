@@ -351,13 +351,13 @@ impl SceneHub {
 
     /// Plans from the current configuration to `goal` against a snapshot of
     /// the scene (the lock is not held while planning), then time-
-    /// parameterizes the path. Returns the trajectory, the shortcut path
-    /// waypoint count, and the wall-clock milliseconds spent.
+    /// parameterizes the path. Returns the trajectory, the sparse shortcut
+    /// path (kept for script export), and the wall-clock milliseconds spent.
     pub fn plan_to(
         &self,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
-    ) -> Result<(botrail_traj::JointTrajectory, usize, f64), String> {
+    ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
         let snapshot = self.lock().clone();
         let start = snapshot.joint_positions().to_vec();
         let (lower, upper) = snapshot.robot.sampling_bounds();
@@ -382,7 +382,7 @@ impl SceneHub {
         )
         .map_err(|e| e.to_string())?;
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        Ok((traj, path.len(), ms))
+        Ok((traj, path, ms))
     }
 
     /// Runs `plan_to` and broadcasts the outcome (success or failure) as a
@@ -391,16 +391,16 @@ impl SceneHub {
         &self,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
-    ) -> Result<(botrail_traj::JointTrajectory, usize, f64), String> {
+    ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
         let result = self.plan_to(goal, options);
         let msg = match &result {
-            Ok((traj, waypoints, ms)) => ServerMessage::PlanResult {
+            Ok((traj, path, ms)) => ServerMessage::PlanResult {
                 ok: true,
                 error: None,
                 trajectory: Some(self.trajectory_msg(traj)),
                 stats: Some(botrail_scene::wire::PlanStatsMsg {
                     planning_time_ms: *ms,
-                    waypoints: *waypoints,
+                    waypoints: path.len(),
                 }),
             },
             Err(e) => ServerMessage::PlanResult {
@@ -518,7 +518,7 @@ impl SceneHub {
 /// Trajectory limits from the URDF: joint velocity limits (defaulting to
 /// 1 rad/s where unspecified) and acceleration at twice the velocity bound
 /// (URDF has no acceleration field; reaches peak speed in 0.5s).
-fn traj_limits(model: &botrail_model::RobotModel) -> botrail_traj::Limits {
+pub(crate) fn traj_limits(model: &botrail_model::RobotModel) -> botrail_traj::Limits {
     let velocity: Vec<f64> = model
         .actuated_joints
         .iter()

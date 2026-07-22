@@ -145,6 +145,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "botrail-export"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "botrail-kin"
 version = "0.1.0"
 dependencies = [
@@ -175,6 +182,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "botrail-collide",
+ "botrail-export",
  "botrail-kin",
  "botrail-model",
  "botrail-plan",
