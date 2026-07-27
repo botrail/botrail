@@ -23,6 +23,7 @@ botrail-plan.workspace = true
 botrail-traj.workspace = true
 botrail-export.workspace = true
 botrail-scene.workspace = true
+botrail-session.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }

@@ -8,6 +8,7 @@ members = [
     "crates/botrail-traj",
     "crates/botrail-export",
     "crates/botrail-scene",
+    "crates/botrail-session",
     "crates/botrail-py",
     "crates/botrail-wasm",
     "crates/botrail-bench",
@@ -28,6 +29,7 @@ botrail-plan = { path = "crates/botrail-plan" }
 botrail-traj = { path = "crates/botrail-traj" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
+botrail-session = { path = "crates/botrail-session" }
 parry3d-f64 = "0.29"
 xurdf = "0.3"
 nalgebra = "0.33"

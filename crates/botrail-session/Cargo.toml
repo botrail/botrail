@@ -1,0 +1,17 @@
+[package]
+name = "botrail-session"
+description = "Shared session logic (wire dispatch + planning helpers) for the server hub and the wasm session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-model.workspace = true
+botrail-kin.workspace = true
+botrail-plan.workspace = true
+botrail-traj.workspace = true
+botrail-scene.workspace = true
+nalgebra.workspace = true
+serde_json.workspace = true

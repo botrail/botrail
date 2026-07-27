@@ -130,6 +130,7 @@ crates/botrail-collide parry3d-based collision checking (solid shapes, ACM)
 crates/botrail-plan    RRT-Connect + shortcut smoothing
 crates/botrail-traj    time parameterization + trajectory sampling
 crates/botrail-scene   scene state, motions, projects + JSON wire protocol
+crates/botrail-session shared wire dispatch + planning helpers (hub & wasm)
 crates/botrail-py      pyo3 bindings + axum server (websocket, meshes, SPA)
 crates/botrail-wasm    browser-complete session (same wire protocol, no server)
 crates/botrail-bench   standalone perf probes (not shipped)

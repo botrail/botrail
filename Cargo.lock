@@ -187,6 +187,7 @@ dependencies = [
  "botrail-model",
  "botrail-plan",
  "botrail-scene",
+ "botrail-session",
  "botrail-traj",
  "nalgebra",
  "pyo3",
@@ -212,6 +213,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "botrail-session"
+version = "0.1.0"
+dependencies = [
+ "botrail-kin",
+ "botrail-model",
+ "botrail-plan",
+ "botrail-scene",
+ "botrail-traj",
+ "nalgebra",
+ "serde_json",
+]
+
+[[package]]
 name = "botrail-traj"
 version = "0.1.0"
 dependencies = [
@@ -222,13 +236,10 @@ dependencies = [
 name = "botrail-wasm"
 version = "0.1.0"
 dependencies = [
- "botrail-kin",
  "botrail-model",
- "botrail-plan",
  "botrail-scene",
- "botrail-traj",
+ "botrail-session",
  "js-sys",
- "nalgebra",
  "serde_json",
  "wasm-bindgen",
 ]
