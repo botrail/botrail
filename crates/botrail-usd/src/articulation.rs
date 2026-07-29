@@ -166,12 +166,18 @@ fn collect(prim: Prim, parent_world: gf::Matrix4d, out: &mut Vec<PrimInfo>) -> a
         .type_name()?
         .map(|t| t.to_string())
         .unwrap_or_default();
-    let is_body = view.prim().has_api_schema("PhysicsRigidBodyAPI").unwrap_or(false);
+    let is_body = view
+        .prim()
+        .has_api_schema("PhysicsRigidBodyAPI")
+        .unwrap_or(false);
     let is_articulation_root = view
         .prim()
         .has_api_schema("PhysicsArticulationRootAPI")
         .unwrap_or(false);
-    let has_collision_api = view.prim().has_api_schema("PhysicsCollisionAPI").unwrap_or(false);
+    let has_collision_api = view
+        .prim()
+        .has_api_schema("PhysicsCollisionAPI")
+        .unwrap_or(false);
     let visible =
         view.compute_visibility().unwrap_or(Visibility::Inherited) != Visibility::Invisible;
     let default_purpose = view.compute_purpose().unwrap_or_default() == Purpose::Default;
@@ -210,23 +216,24 @@ impl RobotBuilder<'_> {
     ) -> Result<ImportedRobot, UsdImportError> {
         let art = |msg: String| UsdImportError::Articulation(msg);
 
-        let root_path = match articulation_root {
-            Some(path) => prims
-                .iter()
-                .find(|p| p.path == path)
-                .ok_or_else(|| art(format!("articulation root `{path}` not found")))?
-                .path
-                .clone(),
-            None => prims
-                .iter()
-                .find(|p| p.is_articulation_root)
-                .ok_or_else(|| {
-                    art("no prim with PhysicsArticulationRootAPI found (pass articulation_root)"
+        let root_path =
+            match articulation_root {
+                Some(path) => prims
+                    .iter()
+                    .find(|p| p.path == path)
+                    .ok_or_else(|| art(format!("articulation root `{path}` not found")))?
+                    .path
+                    .clone(),
+                None => prims
+                    .iter()
+                    .find(|p| p.is_articulation_root)
+                    .ok_or_else(|| {
+                        art("no prim with PhysicsArticulationRootAPI found (pass articulation_root)"
                         .to_string())
-                })?
-                .path
-                .clone(),
-        };
+                    })?
+                    .path
+                    .clone(),
+            };
         let in_subtree =
             |p: &str| p == root_path || p.starts_with(&format!("{root_path}/")) || root_path == "/";
 
@@ -317,7 +324,8 @@ impl RobotBuilder<'_> {
                 name: joint.name.clone(),
                 joint_type: joint.joint_type,
                 origin,
-                axis: Unit::try_new(axis, 1e-9).unwrap_or_else(|| Unit::new_unchecked(Vector3::z())),
+                axis: Unit::try_new(axis, 1e-9)
+                    .unwrap_or_else(|| Unit::new_unchecked(Vector3::z())),
                 limits,
                 parent_link: parent,
                 child_link: child,
@@ -440,11 +448,14 @@ impl RobotBuilder<'_> {
             .flatten()
             .map(f64::from);
         // Drive effort (angular or linear namespace).
-        let effort = ["drive:angular:physics:maxForce", "drive:linear:physics:maxForce"]
-            .iter()
-            .find_map(|name| info.prim.attribute(*name).get::<f32>().ok().flatten())
-            .map(f64::from)
-            .unwrap_or(0.0);
+        let effort = [
+            "drive:angular:physics:maxForce",
+            "drive:linear:physics:maxForce",
+        ]
+        .iter()
+        .find_map(|name| info.prim.attribute(*name).get::<f32>().ok().flatten())
+        .map(f64::from)
+        .unwrap_or(0.0);
 
         Ok(Some(JointRecord {
             name: info.path.clone(),
@@ -506,9 +517,9 @@ impl RobotBuilder<'_> {
             }
             // Stop at nested rigid bodies (their geometry belongs to them).
             if !is_self
-                && body_paths
-                    .iter()
-                    .any(|b| b != &body.path && (info.path == *b || info.path.starts_with(&format!("{b}/"))))
+                && body_paths.iter().any(|b| {
+                    b != &body.path && (info.path == *b || info.path.starts_with(&format!("{b}/")))
+                })
             {
                 continue;
             }
@@ -565,8 +576,8 @@ impl RobotBuilder<'_> {
                         .vertices
                         .iter()
                         .map(|v| {
-                            let p =
-                                self.up_fix * (residual * Vector3::new(v[0], v[1], v[2]) * self.mpu);
+                            let p = self.up_fix
+                                * (residual * Vector3::new(v[0], v[1], v[2]) * self.mpu);
                             [p.x, p.y, p.z]
                         })
                         .collect(),
@@ -751,10 +762,7 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         // each other's scratch dirs.
         static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "botrail-usd-art-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("botrail-usd-art-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("robot.usda");
         std::fs::write(&path, usda).unwrap();

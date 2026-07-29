@@ -75,7 +75,10 @@ async fn asset_handler(Path(rest): Path<String>, State(hub): State<Arc<SceneHub>
     };
     // Reject path traversal; USD-internal references are always relative
     // and slash-separated.
-    if rest.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+    if rest
+        .split('/')
+        .any(|c| c.is_empty() || c == "." || c == "..")
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::read(dir.join(&rest)).await {

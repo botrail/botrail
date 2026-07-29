@@ -173,10 +173,7 @@ pub fn emit_state(host: &impl SessionHost) {
     host.emit(&msg);
 }
 
-pub fn set_joint_positions(
-    host: &impl SessionHost,
-    positions: Vec<f64>,
-) -> Result<(), SceneError> {
+pub fn set_joint_positions(host: &impl SessionHost, positions: Vec<f64>) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_joint_positions(positions))?;
     emit_state(host);
     Ok(())
@@ -298,10 +295,7 @@ fn emit_frames(host: &impl SessionHost) {
 }
 
 /// Adds/updates named world frames and rebroadcasts the frame list.
-pub fn add_frames(
-    host: &impl SessionHost,
-    frames: Vec<(String, Isometry3<f64>)>,
-) {
+pub fn add_frames(host: &impl SessionHost, frames: Vec<(String, Isometry3<f64>)>) {
     host.with_scene(|scene| {
         for (name, pose) in frames {
             scene.add_frame(&name, pose);
@@ -630,9 +624,7 @@ mod tests {
         let out = host.out.borrow();
         assert_eq!(out.len(), 1);
         match &out[0] {
-            ServerMessage::PlanResult {
-                ok, trajectory, ..
-            } => {
+            ServerMessage::PlanResult { ok, trajectory, .. } => {
                 assert!(ok);
                 assert!(trajectory.is_some());
             }
@@ -768,9 +760,7 @@ mod tests {
         handle_client_message(&host, r#"{"type":"plan_request","goal_positions":[0.8]}"#);
         let out = host.0.out.borrow();
         match &out[0] {
-            ServerMessage::PlanResult {
-                ok, trajectory, ..
-            } => {
+            ServerMessage::PlanResult { ok, trajectory, .. } => {
                 assert!(ok);
                 let traj = trajectory.as_ref().unwrap();
                 assert!(traj.link_poses.is_none(), "USD robots skip pose baking");

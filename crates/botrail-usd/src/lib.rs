@@ -271,10 +271,7 @@ impl Importer<'_> {
         let visible =
             view.compute_visibility().unwrap_or(Visibility::Inherited) != Visibility::Invisible;
         let renderable = view.compute_purpose().unwrap_or_default() == Purpose::Default;
-        let type_name = prim
-            .type_name()?
-            .map(|t| t.to_string())
-            .unwrap_or_default();
+        let type_name = prim.type_name()?.map(|t| t.to_string()).unwrap_or_default();
         let children = view.prim().children()?;
 
         if visible && renderable {
@@ -458,10 +455,7 @@ impl Importer<'_> {
     /// world" stays identity and a Z-up robot placed on it stands upright.
     fn frame_pose(&self, world: &gf::Matrix4d) -> Isometry3<f64> {
         let (pose, _) = self.normalized_pose(world);
-        Isometry3::from_parts(
-            pose.translation,
-            pose.rotation * self.up_axis_fix.inverse(),
-        )
+        Isometry3::from_parts(pose.translation, pose.rotation * self.up_axis_fix.inverse())
     }
 
     fn write_mesh(&self, mesh: &MeshData) -> Result<PathBuf, io::Error> {

@@ -329,7 +329,12 @@ impl Scene {
     fn obstacle_query(&self) -> (Vec<(Isometry3<f64>, &ObstacleCollider)>, Vec<usize>) {
         let mut query = Vec::new();
         let mut map = Vec::new();
-        for (i, (o, c)) in self.obstacles.iter().zip(&self.obstacle_colliders).enumerate() {
+        for (i, (o, c)) in self
+            .obstacles
+            .iter()
+            .zip(&self.obstacle_colliders)
+            .enumerate()
+        {
             if o.enabled {
                 query.push((o.pose, c));
                 map.push(i);
@@ -591,12 +596,7 @@ mod tests {
         // base-local target.
         let world_target = scene.robot_base_pose() * iso(0.0, 0.0, 0.5);
         let ik = scene
-            .solve_ik_world(
-                1,
-                &world_target,
-                &[0.3],
-                &botrail_kin::IkOptions::default(),
-            )
+            .solve_ik_world(1, &world_target, &[0.3], &botrail_kin::IkOptions::default())
             .unwrap();
         assert!(ik.converged);
     }

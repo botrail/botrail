@@ -318,8 +318,7 @@ mod tests {
             move_to_start: false,
             ..ProgramOptions::default()
         };
-        let program =
-            build_program("p", &names(1), &segments, &[2.0], &[4.0], &options).unwrap();
+        let program = build_program("p", &names(1), &segments, &[2.0], &[4.0], &options).unwrap();
         let blends: Vec<f64> = program
             .commands
             .iter()

@@ -110,10 +110,9 @@ fn parse_stl_ascii(text: &str) -> Result<MeshData, MeshError> {
         match words.next() {
             Some("vertex") => {
                 let mut read = || -> Result<f64, MeshError> {
-                    words
-                        .next()
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| MeshError::Parse(format!("stl line {}: bad vertex", line_no + 1)))
+                    words.next().and_then(|w| w.parse().ok()).ok_or_else(|| {
+                        MeshError::Parse(format!("stl line {}: bad vertex", line_no + 1))
+                    })
                 };
                 facet.push([read()?, read()?, read()?]);
             }
@@ -152,10 +151,9 @@ pub fn parse_obj(text: &str) -> Result<MeshData, MeshError> {
         match words.next() {
             Some("v") => {
                 let mut read = || -> Result<f64, MeshError> {
-                    words
-                        .next()
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| MeshError::Parse(format!("obj line {}: bad vertex", line_no + 1)))
+                    words.next().and_then(|w| w.parse().ok()).ok_or_else(|| {
+                        MeshError::Parse(format!("obj line {}: bad vertex", line_no + 1))
+                    })
                 };
                 vertices.push([read()?, read()?, read()?]);
             }
@@ -164,7 +162,10 @@ pub fn parse_obj(text: &str) -> Result<MeshData, MeshError> {
                 for word in words {
                     let index_str = word.split('/').next().unwrap_or("");
                     let raw: i64 = index_str.parse().map_err(|_| {
-                        MeshError::Parse(format!("obj line {}: bad face index `{word}`", line_no + 1))
+                        MeshError::Parse(format!(
+                            "obj line {}: bad face index `{word}`",
+                            line_no + 1
+                        ))
                     })?;
                     let index = if raw < 0 {
                         vertices.len() as i64 + raw
@@ -277,7 +278,11 @@ mod tests {
         let parsed = parse_stl(&bytes).unwrap();
         assert_eq!(parsed.indices.len(), 12);
         assert_eq!(parsed.vertices.len(), 36); // deduplication is not required
-        let max_z = parsed.vertices.iter().map(|v| v[2]).fold(f64::MIN, f64::max);
+        let max_z = parsed
+            .vertices
+            .iter()
+            .map(|v| v[2])
+            .fold(f64::MIN, f64::max);
         assert!((max_z - 0.3).abs() < 1e-6);
     }
 

@@ -275,7 +275,8 @@ impl Scene {
     /// state to connected studio clients.
     #[pyo3(signature = (position, quaternion = None))]
     fn set_robot_base_pose(&self, position: [f64; 3], quaternion: Option<[f64; 4]>) {
-        self.hub.set_robot_base_pose(pose_from(position, quaternion));
+        self.hub
+            .set_robot_base_pose(pose_from(position, quaternion));
     }
 
     #[getter]
@@ -444,7 +445,9 @@ impl Scene {
     /// Includes/excludes an obstacle from collision checking (it keeps
     /// rendering in the studio either way).
     fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> PyResult<()> {
-        self.hub.set_obstacle_enabled(name, enabled).map_err(scene_err)
+        self.hub
+            .set_obstacle_enabled(name, enabled)
+            .map_err(scene_err)
     }
 
     #[pyo3(signature = (name, position, quaternion = None))]
@@ -662,8 +665,9 @@ impl Scene {
         // A USD-sourced robot bundles its stage layers (root + sublayers +
         // reference targets under the stage directory) as `robot/<relpath>`.
         for robot in &mut project.robots {
-            let botrail_scene::project::RobotSourceMsg::Usd { path: stage_path, .. } =
-                &mut robot.source
+            let botrail_scene::project::RobotSourceMsg::Usd {
+                path: stage_path, ..
+            } = &mut robot.source
             else {
                 continue;
             };
@@ -702,8 +706,11 @@ impl Scene {
         let file = std::fs::File::create(&path).map_err(io_err)?;
         let mut archive = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
-        let zip_err = |e: zip::result::ZipError| PyIOError::new_err(format!("{}: {e}", path.display()));
-        archive.start_file("project.json", options).map_err(zip_err)?;
+        let zip_err =
+            |e: zip::result::ZipError| PyIOError::new_err(format!("{}: {e}", path.display()));
+        archive
+            .start_file("project.json", options)
+            .map_err(zip_err)?;
         archive
             .write_all(project.to_json().as_bytes())
             .map_err(io_err)?;
@@ -725,9 +732,8 @@ impl Scene {
         use botrail_scene::project::RobotSourceMsg;
         let bytes = std::fs::read(&path)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
-        let project = read_project(&bytes).map_err(|e| {
-            PyValueError::new_err(format!("{}: {e}", path.display()))
-        })?;
+        let project = read_project(&bytes)
+            .map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
         let robot_msg = project
             .single_robot()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -102,9 +102,7 @@ impl SceneHub {
     /// relative references inside the stage resolve).
     pub fn robot_asset_dir(&self) -> Option<PathBuf> {
         self.with_scene(|scene| match &scene.robot.source {
-            botrail_model::RobotSource::Usd { path, .. } => {
-                path.parent().map(|p| p.to_path_buf())
-            }
+            botrail_model::RobotSource::Usd { path, .. } => path.parent().map(|p| p.to_path_buf()),
             _ => None,
         })
     }
@@ -195,8 +193,7 @@ impl SceneHub {
     // ------------------------------------------------------------ obstacles
 
     pub fn obstacles_json(&self) -> String {
-        let msg =
-            self.with_scene(|scene| wire::obstacles_message(scene, |p| self.mesh_url(p)));
+        let msg = self.with_scene(|scene| wire::obstacles_message(scene, |p| self.mesh_url(p)));
         serde_json::to_string(&msg).expect("wire types serialize infallibly")
     }
 

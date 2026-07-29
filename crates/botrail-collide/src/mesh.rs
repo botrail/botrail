@@ -178,10 +178,12 @@ mod tests {
             translation: Vector::new(1.0, 0.0, 0.0),
             ..Pose::identity()
         };
-        let hit = query::intersection_test(&Pose::identity(), shape.as_ref(), &outside, ball.as_ref())
-            .unwrap();
+        let hit =
+            query::intersection_test(&Pose::identity(), shape.as_ref(), &outside, ball.as_ref())
+                .unwrap();
         assert!(!hit);
-        let d = query::distance(&Pose::identity(), shape.as_ref(), &outside, ball.as_ref()).unwrap();
+        let d =
+            query::distance(&Pose::identity(), shape.as_ref(), &outside, ball.as_ref()).unwrap();
         assert!((d - 0.75).abs() < 0.02, "distance {d}");
     }
 
@@ -207,8 +209,11 @@ mod tests {
         std::env::set_var("BOTRAIL_CACHE_DIR", &dir);
 
         let stl = dir.join("box.stl");
-        std::fs::write(&stl, botrail_mesh::to_stl_binary(&botrail_mesh::box_mesh([0.2, 0.2, 0.2])))
-            .unwrap();
+        std::fs::write(
+            &stl,
+            botrail_mesh::to_stl_binary(&botrail_mesh::box_mesh([0.2, 0.2, 0.2])),
+        )
+        .unwrap();
 
         let scale = Vector3::new(1.0, 1.0, 2.0);
         let first = load_mesh_compound(&stl, &scale).unwrap();
