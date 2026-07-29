@@ -6,4 +6,8 @@ export type ObstacleMsg = { name: string, geometry: GeometryMsg,
 /**
  * World pose.
  */
-pose: PoseMsg, };
+pose: PoseMsg, 
+/**
+ * Disabled obstacles render but are excluded from collision checking.
+ */
+enabled: boolean, };

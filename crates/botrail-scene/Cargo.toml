@@ -20,6 +20,7 @@ thiserror.workspace = true
 ts-rs = { version = "12", optional = true }
 
 [features]
+parallel = ["botrail-collide/parallel"]
 # Enables TypeScript binding generation for the wire types.
 # Run scripts/gen_protocol.sh to (re)generate studio/src/generated.
 ts = ["dep:ts-rs"]

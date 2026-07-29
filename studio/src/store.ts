@@ -101,6 +101,10 @@ interface StudioState {
   segmentEnds: number[];
   /** Timing of the last successful motion plan. */
   motionStats: { planningTimeMs: number } | null;
+  /** A USD file dropped in wasm mode, rendered client-side as the stage. */
+  droppedStage: { data: ArrayBuffer; name: string; upAxis: "Y" | "Z" } | null;
+  /** Obstacles hidden in the viewport (display only; collision unaffected). */
+  hiddenObstacles: Set<string>;
 
   setConnection: (c: ConnectionStatus) => void;
   applyServerMessage: (msg: ServerMessage) => void;
@@ -122,6 +126,10 @@ interface StudioState {
   setPlaying: (playing: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
+  setDroppedStage: (
+    stage: { data: ArrayBuffer; name: string; upAxis: "Y" | "Z" } | null,
+  ) => void;
+  toggleObstacleHidden: (name: string) => void;
 }
 
 export const useStudioStore = create<StudioState>((set) => ({
@@ -152,6 +160,8 @@ export const useStudioStore = create<StudioState>((set) => ({
   motionError: null,
   segmentEnds: [],
   motionStats: null,
+  droppedStage: null,
+  hiddenObstacles: new Set(),
 
   setConnection: (c) => set({ connection: c }),
 
@@ -299,4 +309,15 @@ export const useStudioStore = create<StudioState>((set) => ({
   setPlaying: (playing) => set({ playing }),
   stopPlayback: () =>
     set({ playing: false, overridePoses: null, overrideJoints: null }),
+  setDroppedStage: (stage) => set({ droppedStage: stage }),
+  toggleObstacleHidden: (name) =>
+    set((s) => {
+      const next = new Set(s.hiddenObstacles);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return { hiddenObstacles: next };
+    }),
 }));

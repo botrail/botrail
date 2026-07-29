@@ -148,10 +148,7 @@ pub fn import_robot(
         source_path: path.to_path_buf(),
         mpu,
         up_fix,
-        mesh_cache_dir: options
-            .mesh_cache_dir
-            .clone()
-            .unwrap_or_else(default_mesh_cache_dir),
+        mesh_cache_dir: options.mesh_cache_dir.clone(),
         warnings: Vec::new(),
     };
     builder.build(prims, options.articulation_root.as_deref())
@@ -201,7 +198,7 @@ struct RobotBuilder<'a> {
     source_path: PathBuf,
     mpu: f64,
     up_fix: UnitQuaternion<f64>,
-    mesh_cache_dir: PathBuf,
+    mesh_cache_dir: Option<PathBuf>,
     warnings: Vec<String>,
 }
 
@@ -576,7 +573,13 @@ impl RobotBuilder<'_> {
                     indices: data.indices,
                 };
                 Geometry::Mesh {
-                    path: write_stl_cached(&self.mesh_cache_dir, &baked)?,
+                    path: {
+                        let dir = self
+                            .mesh_cache_dir
+                            .clone()
+                            .unwrap_or_else(default_mesh_cache_dir);
+                        write_stl_cached(&dir, &baked)?
+                    },
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 }
             }

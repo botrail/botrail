@@ -171,6 +171,13 @@ pub struct ObstacleMsg {
     pub geometry: GeometryMsg,
     /// World pose.
     pub pose: PoseMsg,
+    /// Disabled obstacles render but are excluded from collision checking.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One side of a collision pair.
@@ -337,6 +344,11 @@ pub enum ClientMessage {
     },
     RemoveObstacle {
         name: String,
+    },
+    /// Include/exclude an obstacle from collision checking.
+    SetObstacleEnabled {
+        name: String,
+        enabled: bool,
     },
     /// Plan from the current configuration to `goal_positions` (DOF order).
     PlanRequest {
@@ -572,6 +584,7 @@ pub fn obstacles_message(
                 name: o.name.clone(),
                 geometry: geometry_msg(&o.geometry, &mut mesh_url),
                 pose: PoseMsg::from(&o.pose),
+                enabled: o.enabled,
             })
             .collect(),
     }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use motion::{Motion, MotionError, PlannedMotion, Segment};
 
-use botrail_collide::{Acm, CollisionPair, ObstacleCollider, RobotCollider};
+use botrail_collide::{Acm, ColliderId, CollisionPair, ObstacleCollider, RobotCollider};
 use botrail_model::{Geometry, RobotModel};
 use nalgebra::Isometry3;
 use thiserror::Error;
@@ -38,6 +38,9 @@ pub struct Obstacle {
     pub name: String,
     pub geometry: Geometry,
     pub pose: Isometry3<f64>,
+    /// Disabled obstacles keep their geometry but are excluded from
+    /// collision checking (and therefore from planning validity).
+    pub enabled: bool,
 }
 
 /// A named world-frame pose — a mount point / teach reference, typically
@@ -225,9 +228,59 @@ impl Scene {
             name: name.clone(),
             geometry,
             pose,
+            enabled: true,
         });
         self.obstacle_colliders.push(collider);
         Ok(name)
+    }
+
+    /// Adds a batch of obstacles atomically: all colliders are built first
+    /// (in parallel under the `parallel` feature — mesh VHACD dominates),
+    /// and nothing is inserted if any geometry fails. Returns the final
+    /// (possibly uniquified) names.
+    pub fn add_obstacles(
+        &mut self,
+        batch: Vec<(String, Geometry, Isometry3<f64>)>,
+    ) -> Result<Vec<String>, SceneError> {
+        let geometries: Vec<Geometry> = batch.iter().map(|(_, g, _)| g.clone()).collect();
+        let colliders = botrail_collide::build_obstacle_colliders(&geometries)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| SceneError::UnsupportedGeometry(e.to_string()))?;
+        let mut names = Vec::with_capacity(batch.len());
+        for ((name, geometry, pose), collider) in batch.into_iter().zip(colliders) {
+            let name = self.unique_name(&name);
+            self.obstacles.push(Obstacle {
+                name: name.clone(),
+                geometry,
+                pose,
+                enabled: true,
+            });
+            self.obstacle_colliders.push(collider);
+            names.push(name);
+        }
+        Ok(names)
+    }
+
+    /// Adds an obstacle with a caller-built collider — the path for
+    /// in-memory mesh geometry (wasm imports), where the mesh `path` in
+    /// `geometry` is a virtual identifier that is never read.
+    pub fn add_obstacle_with_collider(
+        &mut self,
+        name: &str,
+        geometry: Geometry,
+        pose: Isometry3<f64>,
+        collider: ObstacleCollider,
+    ) -> String {
+        let name = self.unique_name(name);
+        self.obstacles.push(Obstacle {
+            name: name.clone(),
+            geometry,
+            pose,
+            enabled: true,
+        });
+        self.obstacle_colliders.push(collider);
+        name
     }
 
     pub fn remove_obstacle(&mut self, name: &str) -> Result<(), SceneError> {
@@ -247,6 +300,14 @@ impl Scene {
         Ok(())
     }
 
+    /// Enables/disables an obstacle for collision checking (geometry and
+    /// pose are kept; disabled obstacles still render in the UI).
+    pub fn set_obstacle_enabled(&mut self, name: &str, enabled: bool) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].enabled = enabled;
+        Ok(())
+    }
+
     pub fn set_obstacle_geometry(
         &mut self,
         name: &str,
@@ -262,35 +323,53 @@ impl Scene {
 
     // ------------------------------------------------------------ collision
 
-    fn obstacle_query(&self) -> Vec<(Isometry3<f64>, &ObstacleCollider)> {
-        self.obstacles
-            .iter()
-            .zip(&self.obstacle_colliders)
-            .map(|(o, c)| (o.pose, c))
-            .collect()
+    /// Enabled obstacles as a collision query, plus the mapping from query
+    /// index back to the obstacle's index in `self.obstacles` (disabled
+    /// entries make the two diverge).
+    fn obstacle_query(&self) -> (Vec<(Isometry3<f64>, &ObstacleCollider)>, Vec<usize>) {
+        let mut query = Vec::new();
+        let mut map = Vec::new();
+        for (i, (o, c)) in self.obstacles.iter().zip(&self.obstacle_colliders).enumerate() {
+            if o.enabled {
+                query.push((o.pose, c));
+                map.push(i);
+            }
+        }
+        (query, map)
+    }
+
+    /// Rewrites query-local obstacle indices back to `self.obstacles` order.
+    fn remap_obstacle_ids(mut pairs: Vec<CollisionPair>, map: &[usize]) -> Vec<CollisionPair> {
+        for pair in &mut pairs {
+            for id in [&mut pair.a, &mut pair.b] {
+                if let ColliderId::Obstacle(k) = id {
+                    *id = ColliderId::Obstacle(map[*k]);
+                }
+            }
+        }
+        pairs
     }
 
     /// Self-collision (ACM-filtered) and robot-vs-obstacle pairs at the
     /// current configuration.
     pub fn check_collisions(&self) -> Vec<CollisionPair> {
-        botrail_collide::check_scene(
+        let (query, map) = self.obstacle_query();
+        let pairs = botrail_collide::check_scene(
             &self.robot_collider,
             &self.link_poses(),
             &self.acm,
-            &self.obstacle_query(),
-        )
+            &query,
+        );
+        Self::remap_obstacle_ids(pairs, &map)
     }
 
     /// Collision pairs at an arbitrary configuration (the scene state is
     /// not modified).
     pub fn collisions_at(&self, q: &[f64]) -> Result<Vec<CollisionPair>, SceneError> {
         let poses = self.fk(q)?;
-        Ok(botrail_collide::check_scene(
-            &self.robot_collider,
-            &poses,
-            &self.acm,
-            &self.obstacle_query(),
-        ))
+        let (query, map) = self.obstacle_query();
+        let pairs = botrail_collide::check_scene(&self.robot_collider, &poses, &self.acm, &query);
+        Ok(Self::remap_obstacle_ids(pairs, &map))
     }
 
     /// True when `q` has the right DOF, respects the position limits, and
@@ -315,7 +394,7 @@ impl Scene {
         botrail_collide::min_robot_obstacle_distance(
             &self.robot_collider,
             &self.link_poses(),
-            &self.obstacle_query(),
+            &self.obstacle_query().0,
         )
     }
 
@@ -520,6 +599,45 @@ mod tests {
             )
             .unwrap();
         assert!(ik.converged);
+    }
+
+    #[test]
+    fn disabled_obstacles_are_skipped_and_ids_stay_stable() {
+        let mut scene = sample_scene();
+        // Two boxes on link b (z = 0.5): both collide when enabled.
+        scene
+            .add_obstacle(
+                "first",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "second",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        assert_eq!(scene.check_collisions().len(), 2);
+
+        // Disabling the FIRST must not shift the second's reported id.
+        scene.set_obstacle_enabled("first", false).unwrap();
+        let pairs = scene.check_collisions();
+        assert_eq!(pairs.len(), 1);
+        let ColliderId::Obstacle(k) = pairs[0].b else {
+            panic!("expected obstacle id");
+        };
+        assert_eq!(scene.obstacles()[k].name, "second");
+
+        // Disabled obstacles also drop out of planning validity.
+        scene.set_obstacle_enabled("second", false).unwrap();
+        assert!(scene.check_collisions().is_empty());
+        assert_eq!(scene.min_obstacle_distance(), None);
     }
 
     #[test]

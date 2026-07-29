@@ -13,6 +13,12 @@ botrail-kin.workspace = true
 botrail-mesh.workspace = true
 nalgebra.workspace = true
 parry3d-f64.workspace = true
+rayon = { version = "1", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# Parallel VHACD decomposition (mesh-heavy robots / imported scenes).
+# Off for wasm builds (single-threaded there anyway).
+parallel = ["dep:rayon"]

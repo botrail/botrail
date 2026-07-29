@@ -238,7 +238,24 @@ pub fn to_stl_binary(mesh: &MeshData) -> Vec<u8> {
     let mut out = vec![0u8; 80];
     out.extend_from_slice(&(mesh.indices.len() as u32).to_le_bytes());
     for tri in &mesh.indices {
-        out.extend_from_slice(&[0u8; 12]); // normal (unused)
+        // Face normal — viewers shade flat black on all-zero normals.
+        let [a, b, c] = [
+            mesh.vertices[tri[0] as usize],
+            mesh.vertices[tri[1] as usize],
+            mesh.vertices[tri[2] as usize],
+        ];
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        for k in n {
+            let value = if len > 1e-12 { k / len } else { 0.0 };
+            out.extend_from_slice(&(value as f32).to_le_bytes());
+        }
         for &i in tri {
             for c in mesh.vertices[i as usize] {
                 out.extend_from_slice(&(c as f32).to_le_bytes());

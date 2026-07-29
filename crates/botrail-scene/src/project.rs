@@ -190,6 +190,7 @@ impl Scene {
                     name: o.name.clone(),
                     geometry: geometry_msg(&o.geometry, &mut mesh_url),
                     pose: PoseMsg::from(&o.pose),
+                    enabled: o.enabled,
                 })
                 .collect(),
             motions: self.motions().iter().map(motion_msg).collect(),
@@ -238,16 +239,21 @@ impl Scene {
         let mut obstacles = Vec::with_capacity(project.obstacles.len());
         for o in &project.obstacles {
             let geometry = geometry_from_project(&o.geometry).map_err(ProjectError::Scene)?;
-            obstacles.push((o.name.clone(), geometry, (&o.pose).into()));
+            obstacles.push((o.name.clone(), geometry, (&o.pose).into(), o.enabled));
         }
 
         while let Some(existing) = self.obstacles().first().map(|o| o.name.clone()) {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (name, geometry, pose) in obstacles {
-            self.add_obstacle(&name, geometry, pose)
+        for (name, geometry, pose, enabled) in obstacles {
+            let final_name = self
+                .add_obstacle(&name, geometry, pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
+            if !enabled {
+                self.set_obstacle_enabled(&final_name, false)
+                    .expect("obstacle was just added");
+            }
         }
         self.set_robot_base_pose((&robot_msg.base_pose).into());
         self.set_joint_positions(robot_msg.joint_positions.clone())

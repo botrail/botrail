@@ -55,6 +55,11 @@ pub struct ImportOptions {
     /// Where extracted meshes are written; defaults to
     /// `$BOTRAIL_CACHE_DIR|~/.cache/botrail|$TMP/botrail-cache` + `/usd-meshes`.
     pub mesh_cache_dir: Option<PathBuf>,
+    /// Keep extracted meshes in memory ([`ImportedNode::mesh_data`])
+    /// instead of writing STL files — required on wasm, where there is no
+    /// filesystem. The node's `Geometry::Mesh` path is then a virtual
+    /// `usd://<prim>` identifier.
+    pub meshes_in_memory: bool,
 }
 
 /// One geometry prim, ready to become a scene obstacle.
@@ -65,6 +70,9 @@ pub struct ImportedNode {
     pub geometry: Geometry,
     /// World pose, meters / Z-up.
     pub pose: Isometry3<f64>,
+    /// Present when [`ImportOptions::meshes_in_memory`] is set: the baked
+    /// (normalized) triangle mesh, for direct collider construction.
+    pub mesh_data: Option<MeshData>,
 }
 
 /// A named mount point (leaf Xform/Scope with no geometry).
@@ -74,13 +82,28 @@ pub struct ImportedFrame {
     pub pose: Isometry3<f64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ImportedScene {
     pub nodes: Vec<ImportedNode>,
     pub frames: Vec<ImportedFrame>,
     /// Prims that could not be imported (unsupported types, degenerate
     /// data). Import continues past them.
     pub warnings: Vec<String>,
+    /// The stage's authored up axis (`"Y"` or `"Z"`). Everything in
+    /// `nodes`/`frames` is already normalized to Z-up; clients rendering
+    /// the *original* stage themselves need this to match.
+    pub up_axis: &'static str,
+}
+
+impl Default for ImportedScene {
+    fn default() -> Self {
+        ImportedScene {
+            nodes: Vec::new(),
+            frames: Vec::new(),
+            warnings: Vec::new(),
+            up_axis: "Y",
+        }
+    }
 }
 
 /// Untyped view over any prim so `Xformable`'s provided methods (the full
@@ -108,25 +131,91 @@ pub fn import_usd(path: &Path, options: &ImportOptions) -> Result<ImportedScene,
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+    import_stage(&stage, options)
+}
 
+/// Imports a stage held entirely in memory (single layer or usdz package —
+/// the wasm / drag-and-drop path; external references cannot resolve).
+pub fn import_usd_bytes(
+    bytes: Vec<u8>,
+    file_name: &str,
+    options: &ImportOptions,
+) -> Result<ImportedScene, UsdImportError> {
+    let stage = Stage::builder()
+        .resolver(bytes_resolver(bytes, file_name))
+        .open(file_name)
+        .map_err(|e| UsdImportError::Open {
+            path: file_name.to_string(),
+            message: e.to_string(),
+        })?;
+    import_stage(&stage, options)
+}
+
+fn import_stage(stage: &Stage, options: &ImportOptions) -> Result<ImportedScene, UsdImportError> {
     let mut importer = Importer {
-        stage: &stage,
+        stage,
         // USD defaults: centimeters, Y-up.
         meters_per_unit: 0.01,
         up_axis_fix: y_up_to_z_up(),
-        mesh_cache_dir: options
-            .mesh_cache_dir
-            .clone()
-            .unwrap_or_else(default_mesh_cache_dir),
+        mesh_cache_dir: options.mesh_cache_dir.clone(),
+        meshes_in_memory: options.meshes_in_memory,
         out: ImportedScene::default(),
     };
     importer.read_stage_metadata();
+    importer.out.up_axis = if importer.up_axis_fix == UnitQuaternion::identity() {
+        "Z"
+    } else {
+        "Y"
+    };
 
     let root = stage.prim(sdf::Path::abs_root());
     importer
         .walk(root, gf::Matrix4d::default())
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
     Ok(importer.out)
+}
+
+/// Single-asset in-memory resolver for [`import_usd_bytes`].
+pub(crate) fn bytes_resolver(bytes: Vec<u8>, file_name: &str) -> MemoryResolver {
+    MemoryResolver {
+        name: file_name.to_string(),
+        bytes,
+    }
+}
+
+/// Serves exactly one in-memory layer; everything else is unresolved.
+pub(crate) struct MemoryResolver {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+impl Resolver for MemoryResolver {
+    fn create_identifier(&self, asset_path: &str, _anchor: Option<&ResolvedPath>) -> String {
+        asset_path.to_string()
+    }
+
+    fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+        (asset_path == self.name).then(|| ResolvedPath::new(&self.name))
+    }
+
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+        Some(ResolvedPath::new(asset_path))
+    }
+
+    fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+        if resolved_path.to_string_lossy() == self.name {
+            Ok(Box::new(io::Cursor::new(self.bytes.clone())))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                resolved_path.to_string(),
+            ))
+        }
+    }
+
+    fn identity(&self) -> String {
+        format!("botrail-memory:{}", self.name)
+    }
 }
 
 /// Rotation mapping Y-up worlds onto botrail's Z-up (+90 deg about X).
@@ -138,7 +227,11 @@ struct Importer<'a> {
     stage: &'a Stage,
     meters_per_unit: f64,
     up_axis_fix: UnitQuaternion<f64>,
-    mesh_cache_dir: PathBuf,
+    /// Resolved lazily in `write_mesh`: the default computation touches
+    /// `std::env::temp_dir()`, which panics on wasm (where
+    /// `meshes_in_memory` avoids the filesystem entirely).
+    mesh_cache_dir: Option<PathBuf>,
+    meshes_in_memory: bool,
     out: ImportedScene,
 }
 
@@ -215,6 +308,7 @@ impl Importer<'_> {
             name: path.to_string(),
             geometry,
             pose,
+            mesh_data: None,
         };
         // Per-local-axis scale for primitive dimensions.
         let scale = [
@@ -247,14 +341,26 @@ impl Importer<'_> {
                         .collect(),
                     indices: data.indices,
                 };
-                let stl_path = self.write_mesh(&baked)?;
-                self.out.nodes.push(node(
-                    Geometry::Mesh {
-                        path: stl_path,
-                        scale: Vector3::new(1.0, 1.0, 1.0),
-                    },
-                    pose,
-                ));
+                if self.meshes_in_memory {
+                    self.out.nodes.push(ImportedNode {
+                        name: path.to_string(),
+                        geometry: Geometry::Mesh {
+                            path: PathBuf::from(format!("usd:/{path}")),
+                            scale: Vector3::new(1.0, 1.0, 1.0),
+                        },
+                        pose,
+                        mesh_data: Some(baked),
+                    });
+                } else {
+                    let stl_path = self.write_mesh(&baked)?;
+                    self.out.nodes.push(node(
+                        Geometry::Mesh {
+                            path: stl_path,
+                            scale: Vector3::new(1.0, 1.0, 1.0),
+                        },
+                        pose,
+                    ));
+                }
             }
             "Cube" => {
                 let size: f64 = geom::Cube::get(self.stage, prim.path().clone())?
@@ -359,7 +465,11 @@ impl Importer<'_> {
     }
 
     fn write_mesh(&self, mesh: &MeshData) -> Result<PathBuf, io::Error> {
-        write_stl_cached(&self.mesh_cache_dir, mesh)
+        let dir = self
+            .mesh_cache_dir
+            .clone()
+            .unwrap_or_else(default_mesh_cache_dir);
+        write_stl_cached(&dir, mesh)
     }
 
     fn warn(&mut self, path: &sdf::Path, message: String) {
@@ -379,8 +489,13 @@ pub(crate) fn decompose_matrix(world: &gf::Matrix4d) -> (Isometry3<f64>, Matrix3
         m[2], m[6], m[10],
     );
     let translation = Vector3::new(m[12], m[13], m[14]);
+    // Bounded iteration count: nalgebra's plain `from_matrix` iterates
+    // without limit and can spin forever on ill-conditioned matrices
+    // (mirrored or near-singular scales — Franka finger links in the
+    // wild). Non-convergence just leaves more in the residual, which gets
+    // baked into vertices anyway.
     let rotation = if linear.determinant() > 1e-12 {
-        Rotation3::from_matrix(&linear)
+        Rotation3::from_matrix_eps(&linear, 1e-9, 100, Rotation3::identity())
     } else {
         Rotation3::identity()
     };
@@ -516,6 +631,43 @@ impl ImportedScene {
     pub fn frame(&self, name: &str) -> Option<&ImportedFrame> {
         self.frames.iter().find(|f| f.name == name)
     }
+}
+
+/// Filesystem layers a stage transitively loads (root, sublayers,
+/// reference/payload targets) — the set to bundle when archiving a
+/// USD-sourced robot. Opens the stage and traverses it fully so on-demand
+/// arcs are forced to load.
+pub fn stage_dependencies(
+    path: &Path,
+    search_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, UsdImportError> {
+    let mut search_paths = search_paths.to_vec();
+    if let Some(dir) = path.parent() {
+        search_paths.push(dir.to_path_buf());
+    }
+    let stage = Stage::builder()
+        .resolver(SearchPathResolver::new(search_paths))
+        .open(&path.display().to_string())
+        .map_err(|e| UsdImportError::Open {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+
+    fn force_load(prim: Prim) -> anyhow::Result<()> {
+        for child in prim.children()? {
+            force_load(child)?;
+        }
+        Ok(())
+    }
+    force_load(stage.prim(sdf::Path::abs_root()))
+        .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
+
+    Ok(stage
+        .layer_identifiers()
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect())
 }
 
 #[cfg(test)]
@@ -739,5 +891,49 @@ def Xform "W" {
             "pack/a.usd"
         );
         assert_eq!(SearchPathResolver::strip("./local.usda"), "./local.usda");
+    }
+}
+
+#[cfg(test)]
+mod bytes_tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_import_keeps_meshes_off_disk() {
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "W"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "W" {
+    def Mesh "Tri" {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+    }
+    def Cube "C" { double size = 0.5 }
+}
+"#;
+        let dir = std::env::temp_dir().join(format!("botrail-usd-mem-{}", std::process::id()));
+        let options = ImportOptions {
+            meshes_in_memory: true,
+            mesh_cache_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let scene = import_usd_bytes(usda.as_bytes().to_vec(), "drop.usda", &options).unwrap();
+
+        let mesh = scene.nodes.iter().find(|n| n.name == "/W/Tri").unwrap();
+        let data = mesh.mesh_data.as_ref().expect("mesh kept in memory");
+        assert_eq!(data.indices.len(), 1);
+        assert!(matches!(&mesh.geometry, Geometry::Mesh { path, .. }
+            if path.to_string_lossy().starts_with("usd:/")));
+        // Nothing was written to the cache dir.
+        assert!(!dir.exists());
+
+        // Primitives import as usual.
+        let cube = scene.nodes.iter().find(|n| n.name == "/W/C").unwrap();
+        assert!(matches!(cube.geometry, Geometry::Box { size } if (size.x - 0.5).abs() < 1e-9));
+        assert!(cube.mesh_data.is_none());
     }
 }

@@ -21,16 +21,19 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     name: "box",
     geometry: { kind: "box", size: [0.1, 0.1, 0.1] },
     pose: spawnPose(),
+    enabled: true,
   }),
   sphere: () => ({
     name: "sphere",
     geometry: { kind: "sphere", radius: 0.05 },
     pose: spawnPose(),
+    enabled: true,
   }),
   cylinder: () => ({
     name: "cylinder",
     geometry: { kind: "cylinder", radius: 0.05, length: 0.1 },
     pose: spawnPose(),
+    enabled: true,
   }),
 };
 

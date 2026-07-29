@@ -4,6 +4,7 @@ import { MotionPanel } from "./components/MotionPanel";
 import { ObstaclePanel } from "./components/ObstaclePanel";
 import { PlanPanel } from "./components/PlanPanel";
 import { RobotPanel } from "./components/RobotPanel";
+import { SceneTreePanel } from "./components/SceneTreePanel";
 import { TcpPanel } from "./components/TcpPanel";
 import { Viewport } from "./components/Viewport";
 
@@ -15,6 +16,7 @@ export function App() {
         <Viewport />
         <aside className="panel">
           <RobotPanel />
+          <SceneTreePanel />
           <TcpPanel />
           <PlanPanel />
           <MotionPanel />

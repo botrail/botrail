@@ -64,6 +64,17 @@ pub fn load_mesh_compound(
     Ok(shape)
 }
 
+/// VHACD hulls as plain point sets — the cacheable/serializable
+/// representation (also crosses the wasm Web Worker boundary).
+pub fn decompose_hulls(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {
+    decompose(mesh)
+}
+
+/// Rebuilds a solid compound from decomposed hull point sets.
+pub fn compound_from_hulls(hulls: &[Vec<[f64; 3]>]) -> Result<SharedShape, CollideError> {
+    compound_from_point_sets(hulls)
+}
+
 /// VHACD hulls as plain point sets — the cacheable representation.
 fn decompose(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {
     let points: Vec<Vector> = mesh

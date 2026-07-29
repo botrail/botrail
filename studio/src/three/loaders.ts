@@ -32,6 +32,8 @@ async function doLoad(url: string, ext: string): Promise<LoadedMesh | null> {
   if (e === "stl") {
     const buffer = await fetchArrayBuffer(url);
     const geometry = new STLLoader().parse(buffer);
+    // Some exporters write zero normals, which shade flat black.
+    geometry.computeVertexNormals();
     return { kind: "geometry", geometry };
   }
   if (e === "obj") {

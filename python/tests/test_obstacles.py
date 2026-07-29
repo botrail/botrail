@@ -84,3 +84,22 @@ def test_collision_state_is_reflected_in_wire_state(scene: bt.Scene) -> None:
         assert payload is not None
     finally:
         server.stop()
+
+
+def test_obstacle_enable_toggle() -> None:
+    from pathlib import Path
+
+    import botrail as bt
+
+    examples = Path(__file__).resolve().parents[2] / "examples"
+    scene = bt.Scene(bt.Robot.from_urdf(examples / "simple_arm.urdf"))
+    scene.add_box("blocker", size=(0.3, 0.3, 0.3), position=(0.0, 0.0, 0.5))
+    assert scene.in_collision()
+
+    scene.set_obstacle_enabled("blocker", False)
+    assert not scene.in_collision()
+    # Planning ignores disabled obstacles too (validity uses the same query).
+    assert scene.min_obstacle_distance() is None
+
+    scene.set_obstacle_enabled("blocker", True)
+    assert scene.in_collision()

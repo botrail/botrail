@@ -41,7 +41,7 @@ impl SessionHost for SceneHub {
 
     fn robot_asset_url(&self, path: &std::path::Path) -> Option<String> {
         path.file_name()
-            .map(|f| format!("/assets/{}", f.to_string_lossy()))
+            .map(|f| format!("/usd-assets/{}", f.to_string_lossy()))
     }
 
     fn mesh_url(&self, path: &std::path::Path) -> (String, String) {
@@ -219,6 +219,10 @@ impl SceneHub {
 
     pub fn remove_obstacle(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_obstacle(self, name)
+    }
+
+    pub fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_enabled(self, name, enabled)
     }
 
     pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {

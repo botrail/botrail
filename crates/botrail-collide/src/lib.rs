@@ -48,6 +48,28 @@ pub struct CollisionPair {
     pub b: ColliderId,
 }
 
+/// Builds obstacle colliders for a batch of geometries — in parallel under
+/// the `parallel` feature, where mesh VHACD decomposition dominates.
+pub fn build_obstacle_colliders(
+    geometries: &[botrail_model::Geometry],
+) -> Vec<Result<ObstacleCollider, CollideError>> {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        geometries
+            .par_iter()
+            .map(ObstacleCollider::from_geometry)
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        geometries
+            .iter()
+            .map(ObstacleCollider::from_geometry)
+            .collect()
+    }
+}
+
 /// Per-link collision shapes derived from a robot model.
 #[derive(Clone)]
 pub struct RobotCollider {
@@ -60,31 +82,44 @@ impl RobotCollider {
     /// URDFs). Shapes that fail to convert (e.g. unreadable mesh files) are
     /// skipped with a warning rather than failing the whole robot.
     pub fn from_model(model: &RobotModel) -> (Self, Vec<String>) {
+        let build = |link: &botrail_model::Link| -> (Parts, Vec<String>) {
+            let source = if link.collisions.is_empty() {
+                &link.visuals
+            } else {
+                &link.collisions
+            };
+            let mut warnings = Vec::new();
+            let parts = source
+                .iter()
+                .filter_map(|shape| match convert::shape_to_parry(shape) {
+                    Ok(part) => Some(part),
+                    Err(e) => {
+                        warnings.push(format!(
+                            "link `{}`: {e}; shape ignored for collision",
+                            link.name
+                        ));
+                        None
+                    }
+                })
+                .collect();
+            (parts, warnings)
+        };
+        // Mesh shapes VHACD-decompose on first load (~1s each), so links
+        // build in parallel when the feature is on.
+        #[cfg(feature = "parallel")]
+        let results: Vec<(Parts, Vec<String>)> = {
+            use rayon::prelude::*;
+            model.links.par_iter().map(build).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let results: Vec<(Parts, Vec<String>)> = model.links.iter().map(build).collect();
+
+        let mut links = Vec::with_capacity(results.len());
         let mut warnings = Vec::new();
-        let links = model
-            .links
-            .iter()
-            .map(|link| {
-                let source = if link.collisions.is_empty() {
-                    &link.visuals
-                } else {
-                    &link.collisions
-                };
-                source
-                    .iter()
-                    .filter_map(|shape| match convert::shape_to_parry(shape) {
-                        Ok(part) => Some(part),
-                        Err(e) => {
-                            warnings.push(format!(
-                                "link `{}`: {e}; shape ignored for collision",
-                                link.name
-                            ));
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
+        for (parts, mut link_warnings) in results {
+            links.push(parts);
+            warnings.append(&mut link_warnings);
+        }
         (RobotCollider { links }, warnings)
     }
 
@@ -105,6 +140,14 @@ impl ObstacleCollider {
         Ok(ObstacleCollider {
             parts: vec![(offset, shape)],
         })
+    }
+
+    /// Wraps an already-built shape (e.g. [`mesh::mesh_to_compound`] on
+    /// in-memory mesh data, where no file path exists to load from).
+    pub fn from_shape(shape: SharedShape) -> Self {
+        ObstacleCollider {
+            parts: vec![(Pose::identity(), shape)],
+        }
     }
 }
 

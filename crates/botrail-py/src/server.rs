@@ -17,7 +17,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
-        .route("/assets/{*rest}", get(asset_handler))
+        .route("/usd-assets/{*rest}", get(asset_handler))
         .route("/api/scene", get(scene_handler))
         .route("/api/project", get(project_get).post(project_post))
         .route("/api/export.py", get(python_export))

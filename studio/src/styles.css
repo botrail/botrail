@@ -520,3 +520,42 @@ select:focus {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- scene tree --- */
+.scene-tree {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 2px;
+  border-radius: 4px;
+}
+.tree-row.selected {
+  background: rgba(77, 163, 255, 0.18);
+}
+.tree-row .tree-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tree-twist {
+  width: 16px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.tree-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 11px;
+}

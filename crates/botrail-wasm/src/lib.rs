@@ -13,15 +13,84 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use botrail_scene::wire::ServerMessage;
+use botrail_scene::wire::{self, ServerMessage};
 use botrail_scene::Scene;
 use botrail_session::SessionHost;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 const DEMO_URDF: &str = include_str!("../../../examples/simple_arm.urdf");
 
 fn to_json(msg: &ServerMessage) -> String {
     serde_json::to_string(msg).expect("wire types serialize infallibly")
+}
+
+/// A USD scene decomposed off the main thread: geometry in wire form,
+/// mesh collision shapes as VHACD hull point sets. Produced by
+/// [`decompose_usd_scene`] (in a Web Worker) and consumed by
+/// [`WasmSession::load_prepared_scene`] (on the main thread, cheaply).
+#[derive(Serialize, Deserialize)]
+struct PreparedScene {
+    nodes: Vec<PreparedNode>,
+    frames: Vec<wire::FrameMsg>,
+    warnings: Vec<String>,
+    /// Authored up axis of the source stage ("Y"/"Z"), so the client can
+    /// orient its own rendering of the original stage.
+    up_axis: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreparedNode {
+    name: String,
+    geometry: wire::GeometryMsg,
+    pose: wire::PoseMsg,
+    hulls: Option<Vec<Vec<[f64; 3]>>>,
+}
+
+/// Imports a USD stage from bytes and runs the expensive part (composition
+/// + VHACD decomposition of mesh collision shapes). Runs in a Web Worker's
+/// own wasm instance; the result JSON crosses back to the main thread.
+#[wasm_bindgen]
+pub fn decompose_usd_scene(
+    bytes: Vec<u8>,
+    file_name: &str,
+    prefix: Option<String>,
+) -> Result<String, JsError> {
+    let options = botrail_usd::ImportOptions {
+        meshes_in_memory: true,
+        ..Default::default()
+    };
+    let imported = botrail_usd::import_usd_bytes(bytes, file_name, &options)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let prefix = prefix.unwrap_or_default();
+    let mut no_mesh = |_: &std::path::Path| (String::new(), String::new());
+    let up_axis = imported.up_axis.to_string();
+    let prepared = PreparedScene {
+        up_axis,
+        nodes: imported
+            .nodes
+            .into_iter()
+            .map(|node| PreparedNode {
+                name: format!("{prefix}{}", node.name),
+                geometry: wire::geometry_msg(&node.geometry, &mut no_mesh),
+                pose: wire::PoseMsg::from(&node.pose),
+                hulls: node
+                    .mesh_data
+                    .as_ref()
+                    .map(botrail_collide::mesh::decompose_hulls),
+            })
+            .collect(),
+        frames: imported
+            .frames
+            .into_iter()
+            .map(|f| wire::FrameMsg {
+                name: format!("{prefix}{}", f.name),
+                pose: wire::PoseMsg::from(&f.pose),
+            })
+            .collect(),
+        warnings: imported.warnings,
+    };
+    serde_json::to_string(&prepared).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// Single-threaded host: messages are collected and handed back to the
@@ -90,6 +159,122 @@ impl WasmSession {
     pub fn handle(&mut self, text: &str) -> Vec<String> {
         botrail_session::handle_client_message(&self.host, text);
         self.host.out.take()
+    }
+
+    /// Applies a scene prepared by [`decompose_usd_scene`] (usually in a
+    /// Web Worker): rebuilds compounds from the precomputed hulls — cheap —
+    /// and registers obstacles and frames. Returns the update messages.
+    pub fn load_prepared_scene(&mut self, json: &str) -> Result<Vec<String>, JsError> {
+        let prepared: PreparedScene =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        for warning in &prepared.warnings {
+            web_log(&format!("botrail-wasm: usd import: {warning}"));
+        }
+        self.host
+            .with_scene(|scene| -> Result<(), String> {
+                for node in prepared.nodes {
+                    let pose = (&node.pose).into();
+                    match node.hulls {
+                        Some(hulls) => {
+                            let shape = botrail_collide::mesh::compound_from_hulls(&hulls)
+                                .map_err(|e| e.to_string())?;
+                            scene.add_obstacle_with_collider(
+                                &node.name,
+                                botrail_model::Geometry::Mesh {
+                                    path: format!("usd:/{}", node.name).into(),
+                                    scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                                },
+                                pose,
+                                botrail_collide::ObstacleCollider::from_shape(shape),
+                            );
+                        }
+                        None => {
+                            let geometry = wire::geometry_from_msg(&node.geometry)
+                                .map_err(|e| e.to_string())?;
+                            scene
+                                .add_obstacle(&node.name, geometry, pose)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                for frame in prepared.frames {
+                    scene.add_frame(&frame.name, (&frame.pose).into());
+                }
+                Ok(())
+            })
+            .map_err(|e| JsError::new(&e))?;
+        self.emit_scene_updates();
+        Ok(self.host.out.take())
+    }
+
+    /// Imports a USD stage held in memory (a dropped .usda/.usd/.usdz file;
+    /// external references cannot resolve) as static obstacles and named
+    /// frames. Mesh collision shapes are VHACD-decomposed in memory — this
+    /// can take on the order of a second per mesh on the main thread.
+    /// Returns the update messages (obstacles, frames, state).
+    pub fn load_usd_scene(
+        &mut self,
+        bytes: Vec<u8>,
+        file_name: &str,
+        prefix: Option<String>,
+    ) -> Result<Vec<String>, JsError> {
+        let options = botrail_usd::ImportOptions {
+            meshes_in_memory: true,
+            ..Default::default()
+        };
+        let imported = botrail_usd::import_usd_bytes(bytes, file_name, &options)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        for warning in &imported.warnings {
+            web_log(&format!("botrail-wasm: usd import: {warning}"));
+        }
+
+        let prefix = prefix.unwrap_or_default();
+        self.host
+            .with_scene(|scene| -> Result<(), String> {
+                for node in imported.nodes {
+                    let name = format!("{prefix}{}", node.name);
+                    match node.mesh_data {
+                        Some(mesh) => {
+                            let shape = botrail_collide::mesh::mesh_to_compound(&mesh)
+                                .map_err(|e| e.to_string())?;
+                            scene.add_obstacle_with_collider(
+                                &name,
+                                node.geometry,
+                                node.pose,
+                                botrail_collide::ObstacleCollider::from_shape(shape),
+                            );
+                        }
+                        None => {
+                            scene
+                                .add_obstacle(&name, node.geometry, node.pose)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                for frame in imported.frames {
+                    scene.add_frame(&format!("{prefix}{}", frame.name), frame.pose);
+                }
+                Ok(())
+            })
+            .map_err(|e| JsError::new(&e))?;
+
+        self.emit_scene_updates();
+        Ok(self.host.out.take())
+    }
+}
+
+impl WasmSession {
+    fn emit_scene_updates(&self) {
+        let msgs = self.host.with_scene(|scene| {
+            vec![
+                wire::obstacles_message(scene, |_| (String::new(), String::new())),
+                wire::frames_message(scene),
+                wire::state_message(scene),
+            ]
+        });
+        for msg in &msgs {
+            self.host.emit(msg);
+        }
     }
 }
 

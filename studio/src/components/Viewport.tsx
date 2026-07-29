@@ -2,7 +2,9 @@ import { Suspense } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 
+import { isWasmMode } from "../backend";
 import { useStudioStore } from "../store";
+import { dropUsdScene } from "../ws";
 import { GhostRobot } from "./GhostRobot";
 import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
@@ -10,12 +12,35 @@ import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { TcpGizmo } from "./TcpGizmo";
 import { UsdRobotView } from "./UsdRobotView";
+import { WasmStageView } from "./WasmStageView";
 
 export function Viewport() {
   const connected = useStudioStore((s) => s.connection === "connected");
 
+  // Wasm mode: drop a USD file to import it into the in-browser session
+  // (collision + frames) and render the stage client-side.
+  const onDrop = async (e: React.DragEvent) => {
+    if (!isWasmMode()) return;
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file || !/[.]usd[acz]?$/i.test(file.name)) return;
+    const data = await file.arrayBuffer();
+    const result = await dropUsdScene(new Uint8Array(data), file.name);
+    if (result.ok) {
+      useStudioStore
+        .getState()
+        .setDroppedStage({ data, name: file.name, upAxis: result.upAxis });
+    }
+  };
+
   return (
-    <div className="viewport">
+    <div
+      className="viewport"
+      onDragOver={(e) => {
+        if (isWasmMode()) e.preventDefault();
+      }}
+      onDrop={onDrop}
+    >
       <Canvas
         camera={{
           position: [1.6, -1.6, 1.2],
@@ -51,6 +76,7 @@ export function Viewport() {
         <Suspense fallback={null}>
           <SceneView />
           <UsdRobotView />
+          <WasmStageView />
           <GhostRobot />
           <ObstacleView />
           <TcpGizmo />

@@ -140,7 +140,7 @@ def test_studio_serves_usd_asset(robot_usd: Path) -> None:
                 time.sleep(0.05)
         assert data is not None
         asset = data["scene"]["usd_asset"]
-        assert asset == {"url": "/assets/arm.usda", "articulation_root": "/Robot"}
+        assert asset == {"url": "/usd-assets/arm.usda", "articulation_root": "/Robot"}
 
         # The referenced stage is served from the robot's directory.
         with urllib.request.urlopen(f"{server.url}{asset['url']}", timeout=1) as resp:
@@ -149,10 +149,82 @@ def test_studio_serves_usd_asset(robot_usd: Path) -> None:
 
         # Path traversal is rejected.
         try:
-            urllib.request.urlopen(f"{server.url}/assets/foo/../arm.usda", timeout=1)
+            urllib.request.urlopen(f"{server.url}/usd-assets/foo/../arm.usda", timeout=1)
             raised = False
         except urllib.error.HTTPError as e:
             raised = e.code == 404
         assert raised
     finally:
         server.stop()
+
+
+def test_usd_robot_project_bundles_the_stage(robot_usd: Path, tmp_path: Path) -> None:
+    """The stage layers travel inside the archive: the original can vanish."""
+    scene = bt.Scene(bt.Robot.from_usd(robot_usd))
+    scene.set_joint_positions([0.5, -0.3])
+    project = tmp_path / "cell.botrail"
+    scene.save_project(project)
+    assert project.read_bytes()[:2] == b"PK"  # USD robot forces the archive
+
+    robot_usd.unlink()  # original stage deleted...
+    reloaded = bt.Scene.load_project(project)  # ...reload uses the bundle
+    assert reloaded.robot.name == "Robot"
+    assert reloaded.robot.dof == 2
+    assert reloaded.joint_positions == pytest.approx([0.5, -0.3])
+
+
+# Golden checks against official Isaac Sim assets (Franka, UR10). Opt-in:
+# point BOTRAIL_ISAAC_DIR at a directory containing franka.usd / ur10.usd
+# (e.g. from the public mirror:
+# https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/...).
+import math
+import os
+
+ISAAC_DIR = os.environ.get("BOTRAIL_ISAAC_DIR")
+isaac = pytest.mark.skipif(
+    not ISAAC_DIR, reason="BOTRAIL_ISAAC_DIR not set (Isaac assets not available)"
+)
+
+
+@isaac
+def test_franka_golden() -> None:
+    robot = bt.Robot.from_usd(Path(ISAAC_DIR) / "franka.usd")
+    assert robot.dof == 9  # 7 arm + 2 fingers
+    names = [j.rsplit("/", 1)[-1] for j in robot.joint_names]
+    assert names == [f"panda_joint{i}" for i in range(1, 8)] + [
+        "panda_finger_joint1",
+        "panda_finger_joint2",
+    ]
+    # Published Panda position limits (rad), degrees->radians conversion.
+    expected = [
+        (-2.8973, 2.8973), (-1.7628, 1.7628), (-2.8973, 2.8973),
+        (-3.0718, -0.0698), (-2.8973, 2.8973), (-0.0175, 3.7525),
+        (-2.8973, 2.8973),
+    ]
+    for (lo, hi), (elo, ehi) in zip(robot.joint_limits[:7], expected):
+        assert lo == pytest.approx(elo, abs=1e-3)
+        assert hi == pytest.approx(ehi, abs=1e-3)
+    # Prismatic fingers: 0..0.04 m (metersPerUnit applied).
+    for lo, hi in robot.joint_limits[7:]:
+        assert lo == pytest.approx(0.0, abs=1e-6)
+        assert hi == pytest.approx(0.04, abs=1e-6)
+    # The imported model plans out of the box.
+    scene = bt.Scene(robot)
+    goal = [0.3, -0.5, 0.2, -1.8, 0.1, 1.5, 0.4, 0.02, 0.02]
+    traj = scene.plan(goal, broadcast=False)
+    assert traj.duration > 0.0
+
+
+@isaac
+def test_ur10_golden() -> None:
+    robot = bt.Robot.from_usd(Path(ISAAC_DIR) / "ur10.usd")
+    assert robot.dof == 6
+    names = [j.rsplit("/", 1)[-1] for j in robot.joint_names]
+    assert names == [
+        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+    ]
+    # UR10: every joint +-360 deg -> +-2*pi rad.
+    for lo, hi in robot.joint_limits:
+        assert lo == pytest.approx(-2 * math.pi, abs=1e-4)
+        assert hi == pytest.approx(2 * math.pi, abs=1e-4)

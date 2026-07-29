@@ -128,6 +128,20 @@ export function sendRobotBasePose(pose: PoseMsg): void {
   throttledRobotBasePose(pose);
 }
 
+/**
+ * Wasm mode only: imports a dropped USD file into the in-browser session.
+ * Returns false when unsupported (server mode) or on import failure.
+ */
+export async function dropUsdScene(
+  bytes: Uint8Array,
+  fileName: string,
+): Promise<{ ok: boolean; upAxis: "Y" | "Z" }> {
+  if (backend instanceof WasmBackend) {
+    return backend.loadUsdScene(bytes, fileName);
+  }
+  return { ok: false, upAxis: "Y" };
+}
+
 /** Plan from the current configuration to `goal` (DOF order). */
 export function sendPlanRequest(goal: number[]): void {
   rawSend({ type: "plan_request", goal_positions: goal });
@@ -150,6 +164,11 @@ export function sendUpdateObstacleGeometry(
   geometry: GeometryMsg,
 ): void {
   rawSend({ type: "update_obstacle_geometry", name, geometry });
+}
+
+/** Include/exclude an obstacle from collision checking. */
+export function sendSetObstacleEnabled(name: string, enabled: boolean): void {
+  rawSend({ type: "set_obstacle_enabled", name, enabled });
 }
 
 /** Remove an obstacle (sent immediately). */

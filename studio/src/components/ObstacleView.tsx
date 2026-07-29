@@ -17,6 +17,7 @@ export function ObstacleView() {
   const obstacles = useStudioStore((s) => s.obstacles);
   const collisions = useStudioStore((s) => s.collisions);
   const selection = useStudioStore((s) => s.selection);
+  const hiddenObstacles = useStudioStore((s) => s.hiddenObstacles);
   const collidingObstacles = useMemo(
     () => collidingObstacleNames(collisions),
     [collisions],
@@ -24,7 +25,7 @@ export function ObstacleView() {
 
   return (
     <>
-      {obstacles.map((o) => (
+      {obstacles.filter((o) => !hiddenObstacles.has(o.name)).map((o) => (
         <ObstacleNode
           key={o.name}
           obstacle={o}

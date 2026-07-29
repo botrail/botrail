@@ -140,6 +140,10 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::RemoveObstacle { name } => {
             remove_obstacle(host, &name).map_err(|e| format!("rejected remove_obstacle: {e}"))
         }
+        ClientMessage::SetObstacleEnabled { name, enabled } => {
+            set_obstacle_enabled(host, &name, enabled)
+                .map_err(|e| format!("rejected set_obstacle_enabled: {e}"))
+        }
         ClientMessage::PlanRequest { goal_positions } => {
             // Failure is reported to clients inside the plan_result.
             let _ = plan_and_emit(host, &goal_positions, &botrail_plan::PlanOptions::default());
@@ -244,12 +248,7 @@ pub fn add_obstacles(
     host: &impl SessionHost,
     batch: Vec<(String, Geometry, Isometry3<f64>)>,
 ) -> Result<Vec<String>, SceneError> {
-    let names = host.with_scene(|scene| {
-        batch
-            .into_iter()
-            .map(|(name, geometry, pose)| scene.add_obstacle(&name, geometry, pose))
-            .collect::<Result<Vec<_>, _>>()
-    })?;
+    let names = host.with_scene(|scene| scene.add_obstacles(batch))?;
     emit_obstacles_and_state(host);
     Ok(names)
 }
@@ -266,6 +265,17 @@ pub fn set_obstacle_pose(
     pose: Isometry3<f64>,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_pose(name, pose))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Includes/excludes an obstacle from collision checking.
+pub fn set_obstacle_enabled(
+    host: &impl SessionHost,
+    name: &str,
+    enabled: bool,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_enabled(name, enabled))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -719,7 +729,7 @@ mod tests {
         }
         fn robot_asset_url(&self, path: &Path) -> Option<String> {
             path.file_name()
-                .map(|f| format!("/assets/{}", f.to_string_lossy()))
+                .map(|f| format!("/usd-assets/{}", f.to_string_lossy()))
         }
         fn emit(&self, msg: &ServerMessage) {
             self.0.emit(msg);
@@ -740,7 +750,7 @@ mod tests {
             panic!("expected scene_init");
         };
         let asset = scene.usd_asset.as_ref().expect("usd_asset present");
-        assert_eq!(asset.url, "/assets/arm.usda");
+        assert_eq!(asset.url, "/usd-assets/arm.usda");
         assert_eq!(asset.articulation_root, "/R");
 
         // A host without asset serving (wasm) keeps the legacy path.

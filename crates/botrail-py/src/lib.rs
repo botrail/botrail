@@ -393,7 +393,7 @@ impl Scene {
     ) -> PyResult<Vec<String>> {
         let options = botrail_usd::ImportOptions {
             search_paths: search_paths.unwrap_or_default(),
-            mesh_cache_dir: None,
+            ..Default::default()
         };
         let imported = botrail_usd::import_usd(&path, &options)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -439,6 +439,12 @@ impl Scene {
 
     fn remove_obstacle(&self, name: &str) -> PyResult<()> {
         self.hub.remove_obstacle(name).map_err(scene_err)
+    }
+
+    /// Includes/excludes an obstacle from collision checking (it keeps
+    /// rendering in the studio either way).
+    fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> PyResult<()> {
+        self.hub.set_obstacle_enabled(name, enabled).map_err(scene_err)
     }
 
     #[pyo3(signature = (name, position, quaternion = None))]
@@ -653,6 +659,41 @@ impl Scene {
             }
         }
 
+        // A USD-sourced robot bundles its stage layers (root + sublayers +
+        // reference targets under the stage directory) as `robot/<relpath>`.
+        for robot in &mut project.robots {
+            let botrail_scene::project::RobotSourceMsg::Usd { path: stage_path, .. } =
+                &mut robot.source
+            else {
+                continue;
+            };
+            let root = PathBuf::from(&*stage_path);
+            let Some(root_dir) = root.parent().map(|d| d.to_path_buf()) else {
+                continue;
+            };
+            let deps = botrail_usd::stage_dependencies(&root, &[])
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            for dep in deps {
+                match dep.strip_prefix(&root_dir) {
+                    Ok(rel) => assets.push((
+                        format!("robot/{}", rel.to_string_lossy().replace('\\', "/")),
+                        dep.clone(),
+                    )),
+                    Err(_) => eprintln!(
+                        "botrail: project: stage layer {} is outside the robot directory; \
+                         referenced by absolute path (not bundled)",
+                        dep.display()
+                    ),
+                }
+            }
+            let rel_root = root
+                .strip_prefix(&root_dir)
+                .expect("root is inside its parent")
+                .to_string_lossy()
+                .replace('\\', "/");
+            *stage_path = format!("robot/{rel_root}");
+        }
+
         if assets.is_empty() {
             return std::fs::write(&path, project.to_json()).map_err(io_err);
         }
@@ -827,7 +868,7 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
         .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)));
     let names: Vec<String> = archive
         .file_names()
-        .filter(|n| n.starts_with("assets/"))
+        .filter(|n| n.starts_with("assets/") || n.starts_with("robot/"))
         .map(str::to_string)
         .collect();
     for name in &names {
@@ -847,11 +888,18 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
         std::fs::write(&target, data).map_err(|e| e.to_string())?;
     }
 
-    // Point mesh urls at the extracted copies.
+    // Point mesh urls and bundled robot stages at the extracted copies.
     for o in &mut project.obstacles {
         if let botrail_scene::wire::GeometryMsg::Mesh { url, .. } = &mut o.geometry {
             if url.starts_with("assets/") {
                 *url = dir.join(&*url).display().to_string();
+            }
+        }
+    }
+    for robot in &mut project.robots {
+        if let botrail_scene::project::RobotSourceMsg::Usd { path, .. } = &mut robot.source {
+            if path.starts_with("robot/") {
+                *path = dir.join(&*path).display().to_string();
             }
         }
     }
