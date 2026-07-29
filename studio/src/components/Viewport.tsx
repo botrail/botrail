@@ -16,6 +16,15 @@ import { WasmStageView } from "./WasmStageView";
 
 export function Viewport() {
   const connected = useStudioStore((s) => s.connection === "connected");
+  const selection = useStudioStore((s) => s.selection);
+  const tcpLink = useStudioStore((s) => s.tcpLink);
+
+  const focusLabel =
+    selection.type === "obstacle"
+      ? `obstacle · ${selection.name}`
+      : selection.type === "robot"
+        ? "robot base"
+        : `TCP · ${tcpLink ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.
@@ -82,6 +91,7 @@ export function Viewport() {
         </Suspense>
       </Canvas>
 
+      {connected && <div className="focus-chip">{focusLabel}</div>}
       {!connected && <div className="overlay">connecting…</div>}
     </div>
   );

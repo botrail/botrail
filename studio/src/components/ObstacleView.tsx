@@ -5,6 +5,7 @@ import * as THREE from "three";
 
 import type { GeometryMsg, ObstacleMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
 import { COLLISION_COLOR } from "../three/palette";
 import { sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
@@ -123,11 +124,19 @@ function ObstacleGeometry({
   onSelect: (e: ThreeEvent<MouseEvent>) => void;
 }) {
   const highlight = selected && <Edges color={SELECT_EDGE_COLOR} lineWidth={2} />;
+  const pick = {
+    onClick: onSelect,
+    onPointerOver: (e: ThreeEvent<PointerEvent>) => {
+      e.stopPropagation();
+      cursorEnter();
+    },
+    onPointerOut: () => cursorLeave(),
+  };
 
   switch (geometry.kind) {
     case "box":
       return (
-        <mesh onClick={onSelect}>
+        <mesh {...pick}>
           <boxGeometry args={geometry.size} />
           <ObstacleMaterial color={color} />
           {highlight}
@@ -137,7 +146,7 @@ function ObstacleGeometry({
       // URDF cylinders point along +Z; three's CylinderGeometry points along
       // +Y, so rotate +90deg about X to align them (same as SceneView).
       return (
-        <mesh rotation={[Math.PI / 2, 0, 0]} onClick={onSelect}>
+        <mesh rotation={[Math.PI / 2, 0, 0]} {...pick}>
           <cylinderGeometry
             args={[geometry.radius, geometry.radius, geometry.length, 32]}
           />
@@ -147,7 +156,7 @@ function ObstacleGeometry({
       );
     case "sphere":
       return (
-        <mesh onClick={onSelect}>
+        <mesh {...pick}>
           <sphereGeometry args={[geometry.radius, 32, 24]} />
           <ObstacleMaterial color={color} />
           {highlight}
@@ -157,7 +166,7 @@ function ObstacleGeometry({
       // URL is empty in wasm mode (no mesh serving there yet).
       if (!geometry.url) return null;
       return (
-        <group onClick={onSelect}>
+        <group {...pick}>
           <MeshVisual geometry={geometry} color={color} />
         </group>
       );

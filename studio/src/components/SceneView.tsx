@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import type { GeometryMsg, LinkMsg, PoseMsg, VisualMsg } from "../protocol";
 import { collidingLinkNames, useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
 import { COLLISION_COLOR, linkColor } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
 
@@ -26,8 +27,21 @@ export function SceneView() {
   const poses = overridePoses ?? linkPoses;
   const playback = overridePoses !== null;
 
+  // The click handler makes the robot opaque to picking: without it, R3F
+  // ignores handler-less meshes and a click on the arm would select
+  // whatever obstacle lies behind it. Clicking the robot focuses the TCP.
   return (
-    <>
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        useStudioStore.getState().selectTcp();
+      }}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        cursorEnter();
+      }}
+      onPointerOut={cursorLeave}
+    >
       {sceneDesc.links.map((link, i) => (
         <LinkGroup
           key={i}
@@ -37,7 +51,7 @@ export function SceneView() {
           colliding={!playback && collidingLinks.has(link.name)}
         />
       ))}
-    </>
+    </group>
   );
 }
 

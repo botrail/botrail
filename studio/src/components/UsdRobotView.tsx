@@ -8,6 +8,7 @@ import {
 
 import type { PoseMsg, SceneDescriptionMsg } from "../protocol";
 import { collidingLinkNames, useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
 
 /**
  * Client-side USD robot rendering: the same stage the server planned
@@ -90,9 +91,23 @@ export function UsdRobotView() {
   }, [robot, sceneDesc, goal, basePose]);
 
   if (!robot) return null;
+  // The click handler makes the robot opaque to picking: without it, R3F
+  // ignores handler-less meshes and a click on the arm would select
+  // whatever obstacle lies behind it. Clicking the robot focuses the TCP.
   return (
     <>
-      <primitive object={robot} />
+      <primitive
+        object={robot}
+        onClick={(e: { stopPropagation: () => void }) => {
+          e.stopPropagation();
+          useStudioStore.getState().selectTcp();
+        }}
+        onPointerOver={(e: { stopPropagation: () => void }) => {
+          e.stopPropagation();
+          cursorEnter();
+        }}
+        onPointerOut={cursorLeave}
+      />
       {ghost && <primitive object={ghost} />}
     </>
   );
