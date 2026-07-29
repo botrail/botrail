@@ -1,4 +1,4 @@
-import { samplePoses } from "../playback";
+import { sampleOverride } from "../playback";
 import { useStudioStore } from "../store";
 import { sendPlanRequest } from "../ws";
 
@@ -33,7 +33,7 @@ export function PlanPanel() {
     // "At the end" with a slider-step tolerance: scrubbing snaps the time
     // to a 0.01s grid, so an exact comparison would replay ~one frame.
     if (!playing && playbackTime >= trajectory.duration - 0.02) {
-      setPlayback(0, samplePoses(trajectory, 0));
+      setPlayback(0, ...sampleOverride(trajectory, 0));
     }
     setPlaying(!playing);
   };
@@ -41,7 +41,7 @@ export function PlanPanel() {
   const onScrub = (t: number) => {
     if (!trajectory) return;
     setPlaying(false);
-    setPlayback(t, samplePoses(trajectory, t));
+    setPlayback(t, ...sampleOverride(trajectory, t));
   };
 
   return (

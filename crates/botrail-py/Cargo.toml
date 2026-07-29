@@ -24,9 +24,11 @@ botrail-traj.workspace = true
 botrail-export.workspace = true
 botrail-scene.workspace = true
 botrail-session.workspace = true
+botrail-usd.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "time"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["fs"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }

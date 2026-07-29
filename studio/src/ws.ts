@@ -118,6 +118,16 @@ export function sendTcpTarget(target: { link: string; pose: PoseMsg }): void {
   throttledTcpTarget(target);
 }
 
+const throttledRobotBasePose = throttled<PoseMsg>(SEND_INTERVAL_MS, (pose) =>
+  rawSend({ type: "set_robot_base_pose", pose }),
+);
+
+/** Place the robot's root link (world frame), throttled to ~30 Hz. */
+export function sendRobotBasePose(pose: PoseMsg): void {
+  interact();
+  throttledRobotBasePose(pose);
+}
+
 /** Plan from the current configuration to `goal` (DOF order). */
 export function sendPlanRequest(goal: number[]): void {
   rawSend({ type: "plan_request", goal_positions: goal });

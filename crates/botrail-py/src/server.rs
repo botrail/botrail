@@ -17,6 +17,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
+        .route("/assets/{*rest}", get(asset_handler))
         .route("/api/scene", get(scene_handler))
         .route("/api/project", get(project_get).post(project_post))
         .route("/api/export.py", get(python_export))
@@ -34,6 +35,7 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
         hub.scene_init_json(),
         hub.obstacles_json(),
         hub.motions_json(),
+        hub.frames_json(),
         hub.state_json(),
     ] {
         if socket.send(Message::Text(initial.into())).await.is_err() {
@@ -65,11 +67,35 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
     }
 }
 
-async fn mesh_handler(Path(id): Path<usize>, State(hub): State<Arc<SceneHub>>) -> Response {
-    let Some(path) = hub.meshes.get(id) else {
+/// Serves a USD robot's stage directory so the client-side loader can
+/// fetch the root layer and its relative references.
+async fn asset_handler(Path(rest): Path<String>, State(hub): State<Arc<SceneHub>>) -> Response {
+    let Some(dir) = hub.robot_asset_dir() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match tokio::fs::read(path).await {
+    // Reject path traversal; USD-internal references are always relative
+    // and slash-separated.
+    if rest.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::read(dir.join(&rest)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn mesh_handler(Path(id): Path<usize>, State(hub): State<Arc<SceneHub>>) -> Response {
+    let Some(path) = hub.mesh_path(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(&path).await {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),

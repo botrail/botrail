@@ -15,5 +15,7 @@ times: Array<number>,
 joint_positions: Array<Array<number>>, 
 /**
  * World pose of every link per sample (FK precomputed server-side).
+ * `None` for USD-rendered robots — the client applies
+ * `joint_positions` itself.
  */
-link_poses: Array<Array<PoseMsg>>, };
+link_poses: Array<Array<PoseMsg>> | null, };

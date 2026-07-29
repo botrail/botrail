@@ -76,10 +76,10 @@ impl WasmSession {
     }
 
     /// The connection handshake, in order:
-    /// scene_init, obstacles, motions, state.
+    /// scene_init, obstacles, motions, state. Mesh URLs stay empty (the
+    /// default host mapping) — wasm serves no meshes yet.
     pub fn initial_messages(&self) -> Vec<String> {
-        let no_mesh = |_: &std::path::Path| (String::new(), String::new());
-        botrail_session::initial_messages(&self.host, no_mesh)
+        botrail_session::initial_messages(&self.host)
             .iter()
             .map(to_json)
             .collect()

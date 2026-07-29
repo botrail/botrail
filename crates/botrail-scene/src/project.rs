@@ -1,10 +1,16 @@
 //! The `.botrail` project format: a self-contained JSON snapshot of the
-//! robot (embedded URDF), joint state, obstacles, and motions — plus a
-//! Python code generator that reproduces the project programmatically.
+//! robots (embedded source + world base pose + joint state), obstacles, and
+//! motions — plus a Python code generator that reproduces the project
+//! programmatically.
 //!
-//! Known limitation: mesh assets referenced by the URDF are NOT embedded
-//! yet (that arrives with the mesh I/O crate); primitive-only robots and
-//! scenes are fully self-contained.
+//! Version 2 stores robots as a list to keep the format multi-robot-ready;
+//! the code currently enforces exactly one. Version 1 files (single
+//! `robot_urdf`, base implicitly at the world origin) are still read.
+//!
+//! Known limitation: mesh assets are referenced by filesystem path, not
+//! embedded (asset bundling arrives with the zip-based v3 format). In a
+//! project file a mesh obstacle's `url` field holds that local path.
+//! Primitive-only robots and scenes are fully self-contained.
 
 use std::sync::Arc;
 
@@ -12,20 +18,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::wire::{
-    geometry_from_msg, geometry_msg, motion_from_msg, motion_msg, ConstraintMsg, GeometryMsg,
-    MotionMsg, ObstacleMsg, PoseMsg, SegmentKindMsg,
+    geometry_from_msg, geometry_msg, motion_from_msg, motion_msg, ConstraintMsg, FrameMsg,
+    GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg, SegmentKindMsg,
 };
 use crate::Scene;
 
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
-    #[error("unsupported project version {0} (expected {PROJECT_VERSION})")]
+    #[error("unsupported project version {0} (expected <= {PROJECT_VERSION})")]
     Version(u32),
     #[error("invalid project JSON: {0}")]
     Json(String),
-    #[error("embedded URDF failed to parse: {0}")]
+    #[error("embedded robot failed to parse: {0}")]
     Robot(String),
     #[error("project does not fit this scene: {0}")]
     Incompatible(String),
@@ -33,74 +39,205 @@ pub enum ProjectError {
     Scene(String),
 }
 
+/// Where a project robot comes from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RobotSourceMsg {
+    /// URDF XML (xacro already expanded), embedded verbatim.
+    Urdf { xml: String },
+    /// USD stage reference (local path until asset bundling lands). The
+    /// application layer re-imports it via botrail-usd on load.
+    Usd {
+        path: String,
+        articulation_root: String,
+    },
+}
+
+/// One robot in a project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRobotMsg {
+    pub source: RobotSourceMsg,
+    /// World pose of the robot's root link.
+    pub base_pose: PoseMsg,
+    pub joint_positions: Vec<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectFile {
     pub version: u32,
-    /// URDF XML (xacro already expanded).
-    pub robot_urdf: String,
-    pub joint_positions: Vec<f64>,
+    pub robots: Vec<ProjectRobotMsg>,
     pub obstacles: Vec<ObstacleMsg>,
     pub motions: Vec<MotionMsg>,
+    /// Named world frames (absent in older v2 files).
+    #[serde(default)]
+    pub frames: Vec<FrameMsg>,
+}
+
+fn identity_pose() -> PoseMsg {
+    PoseMsg {
+        position: [0.0; 3],
+        quaternion: [0.0, 0.0, 0.0, 1.0],
+    }
 }
 
 impl ProjectFile {
     pub fn from_json(json: &str) -> Result<Self, ProjectError> {
-        let project: ProjectFile =
-            serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
-        if project.version != PROJECT_VERSION {
-            return Err(ProjectError::Version(project.version));
+        #[derive(Deserialize)]
+        struct VersionProbe {
+            version: u32,
         }
-        Ok(project)
+        let probe: VersionProbe =
+            serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
+        match probe.version {
+            1 => {
+                /// The v1 layout: one implicit robot at the world origin.
+                #[derive(Deserialize)]
+                struct ProjectV1 {
+                    robot_urdf: String,
+                    joint_positions: Vec<f64>,
+                    obstacles: Vec<ObstacleMsg>,
+                    motions: Vec<MotionMsg>,
+                }
+                let v1: ProjectV1 =
+                    serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
+                Ok(ProjectFile {
+                    version: PROJECT_VERSION,
+                    robots: vec![ProjectRobotMsg {
+                        source: RobotSourceMsg::Urdf { xml: v1.robot_urdf },
+                        base_pose: identity_pose(),
+                        joint_positions: v1.joint_positions,
+                    }],
+                    obstacles: v1.obstacles,
+                    motions: v1.motions,
+                    frames: Vec::new(),
+                })
+            }
+            2 => {
+                let project: ProjectFile =
+                    serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
+                project.single_robot()?;
+                Ok(project)
+            }
+            v => Err(ProjectError::Version(v)),
+        }
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("project serializes infallibly")
     }
+
+    /// The project's robot. The format allows a list; until multi-robot
+    /// lands, exactly one is required.
+    pub fn single_robot(&self) -> Result<&ProjectRobotMsg, ProjectError> {
+        match self.robots.as_slice() {
+            [robot] => Ok(robot),
+            robots => Err(ProjectError::Incompatible(format!(
+                "expected exactly 1 robot, project has {}",
+                robots.len()
+            ))),
+        }
+    }
+}
+
+/// Project files reference mesh files by local path, carried in the wire
+/// geometry's `url` field.
+fn mesh_path_url(path: &std::path::Path) -> (String, String) {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    (path.display().to_string(), ext)
+}
+
+/// The inverse of [`mesh_path_url`]: rebuilds model geometry, mapping a
+/// mesh's `url` back to a filesystem path (unlike the wire-facing
+/// `geometry_from_msg`, which rejects meshes from clients).
+fn geometry_from_project(msg: &GeometryMsg) -> Result<botrail_model::Geometry, String> {
+    match msg {
+        GeometryMsg::Mesh { url, scale, .. } => Ok(botrail_model::Geometry::Mesh {
+            path: url.into(),
+            scale: nalgebra::Vector3::new(scale[0], scale[1], scale[2]),
+        }),
+        other => geometry_from_msg(other),
+    }
 }
 
 impl Scene {
     pub fn to_project(&self) -> ProjectFile {
-        let mut no_mesh = |_: &std::path::Path| (String::new(), String::new());
+        let mut mesh_url = mesh_path_url;
         ProjectFile {
             version: PROJECT_VERSION,
-            robot_urdf: self.robot.urdf_source.clone(),
-            joint_positions: self.joint_positions().to_vec(),
+            robots: vec![ProjectRobotMsg {
+                source: match &self.robot.source {
+                    botrail_model::RobotSource::UrdfXml(xml) => {
+                        RobotSourceMsg::Urdf { xml: xml.clone() }
+                    }
+                    botrail_model::RobotSource::Usd {
+                        path,
+                        articulation_root,
+                    } => RobotSourceMsg::Usd {
+                        path: path.display().to_string(),
+                        articulation_root: articulation_root.clone(),
+                    },
+                },
+                base_pose: PoseMsg::from(self.robot_base_pose()),
+                joint_positions: self.joint_positions().to_vec(),
+            }],
             obstacles: self
                 .obstacles()
                 .iter()
                 .map(|o| ObstacleMsg {
                     name: o.name.clone(),
-                    geometry: geometry_msg(&o.geometry, &mut no_mesh),
+                    geometry: geometry_msg(&o.geometry, &mut mesh_url),
                     pose: PoseMsg::from(&o.pose),
                 })
                 .collect(),
             motions: self.motions().iter().map(motion_msg).collect(),
+            frames: self
+                .frames()
+                .iter()
+                .map(|f| FrameMsg {
+                    name: f.name.clone(),
+                    pose: PoseMsg::from(&f.pose),
+                })
+                .collect(),
         }
     }
 
-    /// Builds a fresh scene (robot included) from a project.
+    /// Builds a fresh scene (robot included) from a project. USD-sourced
+    /// robots need the importer and are handled one layer up (botrail-py's
+    /// `load_project`), which re-imports and then calls `apply_project`.
     pub fn from_project(project: &ProjectFile) -> Result<Scene, ProjectError> {
-        let robot = botrail_model::RobotModel::from_urdf_str(&project.robot_urdf)
+        let robot_msg = project.single_robot()?;
+        let RobotSourceMsg::Urdf { xml } = &robot_msg.source else {
+            return Err(ProjectError::Robot(
+                "USD-sourced robot: re-import it via the USD importer, then apply_project"
+                    .to_string(),
+            ));
+        };
+        let robot = botrail_model::RobotModel::from_urdf_str(xml)
             .map_err(|e| ProjectError::Robot(e.to_string()))?;
         let mut scene = Scene::new(Arc::new(robot));
         scene.apply_project(project)?;
         Ok(scene)
     }
 
-    /// Applies a project's state (joints, obstacles, motions) onto this
-    /// scene. The robot itself is kept; the project must have the same DOF.
+    /// Applies a project's state (base pose, joints, obstacles, motions)
+    /// onto this scene. The robot itself is kept; the project must have the
+    /// same DOF.
     pub fn apply_project(&mut self, project: &ProjectFile) -> Result<(), ProjectError> {
-        if project.joint_positions.len() != self.robot.dof() {
+        let robot_msg = project.single_robot()?;
+        if robot_msg.joint_positions.len() != self.robot.dof() {
             return Err(ProjectError::Incompatible(format!(
                 "project has {} DOF, scene robot has {}",
-                project.joint_positions.len(),
+                robot_msg.joint_positions.len(),
                 self.robot.dof()
             )));
         }
         // Build the new obstacle set before mutating anything.
         let mut obstacles = Vec::with_capacity(project.obstacles.len());
         for o in &project.obstacles {
-            let geometry = geometry_from_msg(&o.geometry).map_err(ProjectError::Scene)?;
+            let geometry = geometry_from_project(&o.geometry).map_err(ProjectError::Scene)?;
             obstacles.push((o.name.clone(), geometry, (&o.pose).into()));
         }
 
@@ -112,9 +249,20 @@ impl Scene {
             self.add_obstacle(&name, geometry, pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
         }
-        self.set_joint_positions(project.joint_positions.clone())
+        self.set_robot_base_pose((&robot_msg.base_pose).into());
+        self.set_joint_positions(robot_msg.joint_positions.clone())
             .map_err(|e| ProjectError::Scene(e.to_string()))?;
         self.set_motions(project.motions.iter().map(motion_from_msg).collect());
+        self.set_frames(
+            project
+                .frames
+                .iter()
+                .map(|f| crate::Frame {
+                    name: f.name.clone(),
+                    pose: (&f.pose).into(),
+                })
+                .collect(),
+        );
         Ok(())
     }
 }
@@ -131,17 +279,48 @@ fn py_tuple(values: &[f64]) -> String {
     format!("({})", items.join(", "))
 }
 
+fn is_identity_pose(pose: &PoseMsg) -> bool {
+    pose.position.iter().all(|v| v.abs() < 1e-12)
+        && (pose.quaternion[3] - 1.0).abs() < 1e-12
+        && pose.quaternion[..3].iter().all(|v| v.abs() < 1e-12)
+}
+
 /// Generates a standalone Python script that rebuilds the project with the
-/// botrail API. The URDF is embedded so the script is self-contained.
+/// botrail API. The robot source is embedded so the script is
+/// self-contained.
 pub fn generate_python(project: &ProjectFile) -> String {
+    let robot_msg = match project.single_robot() {
+        Ok(robot) => robot,
+        Err(e) => return format!("# cannot generate script: {e}\n"),
+    };
     let mut out = String::new();
     out.push_str("\"\"\"Generated by botrail studio — rebuilds the saved project.\"\"\"\n\n");
     out.push_str("import botrail as bt\n\n");
-    // Triple-quote guard: a URDF containing ''' would break the literal.
-    let urdf = project.robot_urdf.replace("'''", "'\\''\\''\\'");
-    out.push_str(&format!("URDF = r'''{urdf}'''\n\n"));
-    out.push_str("robot = bt.Robot.from_urdf_string(URDF)\n");
-    out.push_str("scene = bt.Scene(robot)\n");
+    match &robot_msg.source {
+        RobotSourceMsg::Urdf { xml } => {
+            // Triple-quote guard: a URDF containing ''' would break the literal.
+            let urdf = xml.replace("'''", "'\\''\\''\\'");
+            out.push_str(&format!("URDF = r'''{urdf}'''\n\n"));
+            out.push_str("robot = bt.Robot.from_urdf_string(URDF)\n");
+        }
+        RobotSourceMsg::Usd {
+            path,
+            articulation_root,
+        } => {
+            out.push_str(&format!(
+                "robot = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
+            ));
+        }
+    }
+    if is_identity_pose(&robot_msg.base_pose) {
+        out.push_str("scene = bt.Scene(robot)\n");
+    } else {
+        out.push_str(&format!(
+            "scene = bt.Scene(robot, base_position={}, base_quaternion={})\n",
+            py_tuple(&robot_msg.base_pose.position),
+            py_tuple(&robot_msg.base_pose.quaternion)
+        ));
+    }
 
     for o in &project.obstacles {
         let pos = py_tuple(&o.pose.position);
@@ -162,14 +341,24 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 "scene.add_cylinder({:?}, radius={radius}, length={length}, position={pos}, quaternion={quat})\n",
                 o.name
             )),
-            GeometryMsg::Mesh { .. } => {
-                out.push_str(&format!("# obstacle {:?}: mesh not supported yet\n", o.name))
-            }
+            GeometryMsg::Mesh { url, scale, .. } => out.push_str(&format!(
+                "scene.add_mesh({:?}, path={url:?}, position={pos}, scale={}, quaternion={quat})\n",
+                o.name,
+                py_tuple(scale)
+            )),
         }
+    }
+    for frame in &project.frames {
+        out.push_str(&format!(
+            "scene.add_frame({:?}, position={}, quaternion={})\n",
+            frame.name,
+            py_tuple(&frame.pose.position),
+            py_tuple(&frame.pose.quaternion)
+        ));
     }
     out.push_str(&format!(
         "scene.set_joint_positions({})\n",
-        py_list(&project.joint_positions)
+        py_list(&robot_msg.joint_positions)
     ));
 
     for motion in &project.motions {
@@ -268,12 +457,15 @@ mod tests {
 
     #[test]
     fn project_roundtrip_preserves_everything() {
-        let scene = sample_scene();
+        let mut scene = sample_scene();
+        scene.set_robot_base_pose(Isometry3::translation(0.5, -0.2, 0.8));
         let json = scene.to_project().to_json();
         let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
 
         assert_eq!(reloaded.robot.name, scene.robot.name);
         assert_eq!(reloaded.joint_positions(), scene.joint_positions());
+        let base = reloaded.robot_base_pose();
+        assert!((base.translation.vector - Vector3::new(0.5, -0.2, 0.8)).norm() < 1e-12);
         assert_eq!(reloaded.obstacles().len(), 1);
         assert_eq!(reloaded.obstacles()[0].name, "wall");
         assert_eq!(reloaded.motions().len(), 1);
@@ -290,6 +482,24 @@ mod tests {
     }
 
     #[test]
+    fn v1_project_reads_with_identity_base() {
+        // A minimal v1 file (flat robot_urdf, no robots list).
+        let v1 = serde_json::json!({
+            "version": 1,
+            "robot_urdf": ARM,
+            "joint_positions": [0.1, 0.2, -0.3, 0.0, 0.4, 0.0],
+            "obstacles": [],
+            "motions": [],
+        })
+        .to_string();
+        let project = ProjectFile::from_json(&v1).unwrap();
+        assert_eq!(project.version, PROJECT_VERSION);
+        let scene = Scene::from_project(&project).unwrap();
+        assert_eq!(scene.robot_base_pose(), &Isometry3::identity());
+        assert_eq!(scene.joint_positions()[1], 0.2);
+    }
+
+    #[test]
     fn version_mismatch_is_rejected() {
         let mut project = sample_scene().to_project();
         project.version = 99;
@@ -297,6 +507,17 @@ mod tests {
         assert!(matches!(
             ProjectFile::from_json(&json),
             Err(ProjectError::Version(99))
+        ));
+    }
+
+    #[test]
+    fn multi_robot_projects_are_rejected_for_now() {
+        let mut project = sample_scene().to_project();
+        project.robots.push(project.robots[0].clone());
+        let json = project.to_json();
+        assert!(matches!(
+            ProjectFile::from_json(&json),
+            Err(ProjectError::Incompatible(_))
         ));
     }
 
@@ -319,7 +540,7 @@ mod tests {
         assert_eq!(other.motions().len(), 1);
 
         let mut bad = project.clone();
-        bad.joint_positions = vec![0.0; 3];
+        bad.robots[0].joint_positions = vec![0.0; 3];
         assert!(matches!(
             other.apply_project(&bad),
             Err(ProjectError::Incompatible(_))
@@ -328,11 +549,13 @@ mod tests {
 
     #[test]
     fn generated_python_contains_the_full_recipe() {
-        let scene = sample_scene();
+        let mut scene = sample_scene();
+        scene.set_robot_base_pose(Isometry3::translation(1.0, 0.0, 0.0));
         let code = generate_python(&scene.to_project());
         for needle in [
             "import botrail as bt",
             "bt.Robot.from_urdf_string(URDF)",
+            "base_position=(1.000000, 0.000000, 0.000000)",
             "scene.add_box(\"wall\"",
             "scene.set_joint_positions(",
             "scene.add_segment(\"main\"",
@@ -343,5 +566,9 @@ mod tests {
         ] {
             assert!(code.contains(needle), "missing `{needle}`:\n{code}");
         }
+        // Identity base stays out of the generated constructor.
+        let mut plain = sample_scene();
+        plain.set_robot_base_pose(Isometry3::identity());
+        assert!(generate_python(&plain.to_project()).contains("bt.Scene(robot)\n"));
     }
 }

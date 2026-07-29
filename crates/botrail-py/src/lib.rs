@@ -49,6 +49,37 @@ impl Robot {
         })
     }
 
+    /// Imports a robot from a USD articulation (UsdPhysics joints and rigid
+    /// bodies, e.g. Isaac Sim assets). Link/joint names are the prim paths;
+    /// revolute limits are converted from degrees, distances from the
+    /// stage's `metersPerUnit`, and Y-up stages are re-modeled as Z-up.
+    /// `articulation_root` defaults to the first prim carrying
+    /// `PhysicsArticulationRootAPI`; `search_paths` resolve external
+    /// (`omniverse://`) references against local directories.
+    #[staticmethod]
+    #[pyo3(signature = (path, articulation_root = None, search_paths = None))]
+    fn from_usd(
+        path: PathBuf,
+        articulation_root: Option<String>,
+        search_paths: Option<Vec<PathBuf>>,
+    ) -> PyResult<Self> {
+        let imported = botrail_usd::import_robot(
+            &path,
+            &botrail_usd::RobotImportOptions {
+                search_paths: search_paths.unwrap_or_default(),
+                mesh_cache_dir: None,
+                articulation_root,
+            },
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for warning in &imported.warnings {
+            eprintln!("botrail: usd robot import: {warning}");
+        }
+        Ok(Robot {
+            inner: Arc::new(imported.model),
+        })
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -212,9 +243,17 @@ struct Scene {
 
 #[pymethods]
 impl Scene {
+    /// A scene with the robot root placed at the world-frame base pose
+    /// (identity when omitted).
     #[new]
-    fn new(robot: &Robot) -> Self {
-        let scene = botrail_scene::Scene::new(robot.inner.clone());
+    #[pyo3(signature = (robot, base_position = None, base_quaternion = None))]
+    fn new(
+        robot: &Robot,
+        base_position: Option<[f64; 3]>,
+        base_quaternion: Option<[f64; 4]>,
+    ) -> Self {
+        let base = pose_from(base_position.unwrap_or([0.0; 3]), base_quaternion);
+        let scene = botrail_scene::Scene::with_base(robot.inner.clone(), base);
         Scene {
             hub: Arc::new(SceneHub::new(scene)),
             robot: robot.clone(),
@@ -224,6 +263,19 @@ impl Scene {
     #[getter]
     fn robot(&self) -> Robot {
         self.robot.clone()
+    }
+
+    /// World pose of the robot root as `(position, quaternion_xyzw)`.
+    #[getter]
+    fn robot_base_pose(&self) -> ([f64; 3], [f64; 4]) {
+        self.hub.robot_base_pose()
+    }
+
+    /// Places the robot root at the world-frame pose and pushes the new
+    /// state to connected studio clients.
+    #[pyo3(signature = (position, quaternion = None))]
+    fn set_robot_base_pose(&self, position: [f64; 3], quaternion: Option<[f64; 4]>) {
+        self.hub.set_robot_base_pose(pose_from(position, quaternion));
     }
 
     #[getter]
@@ -299,6 +351,90 @@ impl Scene {
                 pose_from(position, quaternion),
             )
             .map_err(scene_err)
+    }
+
+    /// Adds a mesh obstacle from an STL/OBJ file. The collision shape is a
+    /// VHACD convex decomposition (computed on first load, then cached on
+    /// disk); the studio renders the original mesh.
+    #[pyo3(signature = (name, path, position, scale = None, quaternion = None))]
+    fn add_mesh(
+        &self,
+        name: &str,
+        path: PathBuf,
+        position: [f64; 3],
+        scale: Option<[f64; 3]>,
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<String> {
+        let s = scale.unwrap_or([1.0; 3]);
+        self.hub
+            .add_obstacle(
+                name,
+                botrail_model::Geometry::Mesh {
+                    path,
+                    scale: nalgebra::Vector3::new(s[0], s[1], s[2]),
+                },
+                pose_from(position, quaternion),
+            )
+            .map_err(scene_err)
+    }
+
+    /// Imports the static geometry of a USD stage (usda/usdc/usdz —
+    /// references, variants, and instancing are composed) as obstacles,
+    /// normalized to meters / Z-up. Leaf Xform/Scope prims become named
+    /// frames (see `frame()`), usable as robot mount points. Obstacle and
+    /// frame names are the prim paths, optionally prefixed. Returns the
+    /// added obstacle names.
+    #[pyo3(signature = (path, prefix = None, search_paths = None))]
+    fn load_usd(
+        &self,
+        path: PathBuf,
+        prefix: Option<String>,
+        search_paths: Option<Vec<PathBuf>>,
+    ) -> PyResult<Vec<String>> {
+        let options = botrail_usd::ImportOptions {
+            search_paths: search_paths.unwrap_or_default(),
+            mesh_cache_dir: None,
+        };
+        let imported = botrail_usd::import_usd(&path, &options)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        for warning in &imported.warnings {
+            eprintln!("botrail: usd import: {warning}");
+        }
+        let prefix = prefix.unwrap_or_default();
+        let batch = imported
+            .nodes
+            .into_iter()
+            .map(|n| (format!("{prefix}{}", n.name), n.geometry, n.pose))
+            .collect();
+        let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
+        self.hub.add_frames(
+            imported
+                .frames
+                .into_iter()
+                .map(|f| (format!("{prefix}{}", f.name), f.pose))
+                .collect(),
+        );
+        Ok(names)
+    }
+
+    /// Registers (or updates) a named world frame.
+    #[pyo3(signature = (name, position, quaternion = None))]
+    fn add_frame(&self, name: &str, position: [f64; 3], quaternion: Option<[f64; 4]>) {
+        self.hub.add_frame(name, pose_from(position, quaternion));
+    }
+
+    /// All named frames as `{name: (position, quaternion_xyzw)}`.
+    #[getter]
+    fn frames(&self) -> std::collections::HashMap<String, ([f64; 3], [f64; 4])> {
+        self.hub.frames().into_iter().collect()
+    }
+
+    /// Pose of a named frame as `(position, quaternion_xyzw)` — e.g.
+    /// `scene.set_robot_base_pose(*scene.frame("/World/mount"))`.
+    fn frame(&self, name: &str) -> PyResult<([f64; 3], [f64; 4])> {
+        self.hub
+            .frame_pose(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown frame `{name}`")))
     }
 
     fn remove_obstacle(&self, name: &str) -> PyResult<()> {
@@ -494,20 +630,88 @@ impl Scene {
 
     /// Saves the scene (robot URDF, joint state, obstacles, motions) as a
     /// self-contained `.botrail` project file.
+    /// Saves the project. Plain JSON when everything is self-contained; a
+    /// zip archive (`project.json` + `assets/`) when mesh files are
+    /// referenced, so the file stays portable across machines.
     fn save_project(&self, path: PathBuf) -> PyResult<()> {
-        std::fs::write(&path, self.hub.project_json())
-            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+        let io_err = |e: std::io::Error| PyIOError::new_err(format!("{}: {e}", path.display()));
+        let mut project = self.hub.project();
+
+        // Collect referenced mesh files and rewrite their urls to bundled
+        // asset names.
+        let mut assets: Vec<(String, PathBuf)> = Vec::new();
+        for o in &mut project.obstacles {
+            if let botrail_scene::wire::GeometryMsg::Mesh { url, .. } = &mut o.geometry {
+                let source = PathBuf::from(&*url);
+                let file_name = source
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "mesh".to_string());
+                let asset = format!("assets/{}_{}", assets.len(), file_name);
+                *url = asset.clone();
+                assets.push((asset, source));
+            }
+        }
+
+        if assets.is_empty() {
+            return std::fs::write(&path, project.to_json()).map_err(io_err);
+        }
+
+        use std::io::Write as _;
+        let file = std::fs::File::create(&path).map_err(io_err)?;
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        let zip_err = |e: zip::result::ZipError| PyIOError::new_err(format!("{}: {e}", path.display()));
+        archive.start_file("project.json", options).map_err(zip_err)?;
+        archive
+            .write_all(project.to_json().as_bytes())
+            .map_err(io_err)?;
+        for (name, source) in assets {
+            let bytes = std::fs::read(&source)
+                .map_err(|e| PyIOError::new_err(format!("{}: {e}", source.display())))?;
+            archive.start_file(name, options).map_err(zip_err)?;
+            archive.write_all(&bytes).map_err(io_err)?;
+        }
+        archive.finish().map_err(zip_err)?;
+        Ok(())
     }
 
     /// Loads a `.botrail` project file into a fresh scene (robot included).
+    /// URDF robots rebuild from the embedded XML; USD robots re-import from
+    /// the referenced stage path.
     #[staticmethod]
     fn load_project(path: PathBuf) -> PyResult<Self> {
-        let json = std::fs::read_to_string(&path)
+        use botrail_scene::project::RobotSourceMsg;
+        let bytes = std::fs::read(&path)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
-        let project = botrail_scene::project::ProjectFile::from_json(&json)
+        let project = read_project(&bytes).map_err(|e| {
+            PyValueError::new_err(format!("{}: {e}", path.display()))
+        })?;
+        let robot_msg = project
+            .single_robot()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let scene = botrail_scene::Scene::from_project(&project)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let scene = match &robot_msg.source {
+            RobotSourceMsg::Urdf { .. } => botrail_scene::Scene::from_project(&project)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            RobotSourceMsg::Usd {
+                path,
+                articulation_root,
+            } => {
+                let imported = botrail_usd::import_robot(
+                    std::path::Path::new(path),
+                    &botrail_usd::RobotImportOptions {
+                        articulation_root: Some(articulation_root.clone()),
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let mut scene = botrail_scene::Scene::new(Arc::new(imported.model));
+                scene
+                    .apply_project(&project)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                scene
+            }
+        };
         let robot = Robot {
             inner: scene.robot.clone(),
         };
@@ -537,6 +741,9 @@ impl Scene {
     ) -> PyResult<Trajectory> {
         let link_index = resolve_link(&self.robot.inner, link)?;
         let (target, mode) = ik_target(position, quaternion);
+        // The target is world-frame; re-express it in the robot base frame
+        // for the base-frame solver.
+        let target = self.hub.robot_base_isometry().inverse() * target;
         let seed_q = self.hub.joint_positions();
         let options = botrail_kin::IkOptions {
             mode,
@@ -590,6 +797,75 @@ impl Scene {
     fn __repr__(&self) -> String {
         format!("Scene(robot='{}')", self.robot.inner.name)
     }
+}
+
+/// Parses project bytes: a zip archive (`project.json` + `assets/`, with
+/// assets extracted to the cache and urls rewritten) or plain JSON.
+fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, String> {
+    use std::io::Read as _;
+    if !bytes.starts_with(b"PK\x03\x04") {
+        let json = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+        return botrail_scene::project::ProjectFile::from_json(json).map_err(|e| e.to_string());
+    }
+
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut json = String::new();
+    archive
+        .by_name("project.json")
+        .map_err(|e| format!("project.json: {e}"))?
+        .read_to_string(&mut json)
+        .map_err(|e| e.to_string())?;
+    let mut project =
+        botrail_scene::project::ProjectFile::from_json(&json).map_err(|e| e.to_string())?;
+
+    // Extract bundled assets to a content-addressed cache directory.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(bytes, &mut hasher);
+    let dir = cache_base()
+        .join("projects")
+        .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)));
+    let names: Vec<String> = archive
+        .file_names()
+        .filter(|n| n.starts_with("assets/"))
+        .map(str::to_string)
+        .collect();
+    for name in &names {
+        let target = dir.join(name);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut data = Vec::new();
+        archive
+            .by_name(name)
+            .map_err(|e| e.to_string())?
+            .read_to_end(&mut data)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&target, data).map_err(|e| e.to_string())?;
+    }
+
+    // Point mesh urls at the extracted copies.
+    for o in &mut project.obstacles {
+        if let botrail_scene::wire::GeometryMsg::Mesh { url, .. } = &mut o.geometry {
+            if url.starts_with("assets/") {
+                *url = dir.join(&*url).display().to_string();
+            }
+        }
+    }
+    Ok(project)
+}
+
+/// `$BOTRAIL_CACHE_DIR`, else `~/.cache/botrail`, else the system temp dir.
+fn cache_base() -> PathBuf {
+    std::env::var_os("BOTRAIL_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").join("botrail"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("botrail-cache"))
 }
 
 /// A planned, time-parameterized joint trajectory.

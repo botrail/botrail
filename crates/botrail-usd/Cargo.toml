@@ -1,0 +1,21 @@
+[package]
+name = "botrail-usd"
+description = "USD scene importer for botrail (static environment geometry via openusd)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-model.workspace = true
+botrail-mesh.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true
+# Pre-1.0 pure-Rust USD implementation: pin an exact rev (crates.io releases
+# lag main significantly; see the spike notes in docs/DESIGN.md).
+openusd = { git = "https://github.com/mxpv/openusd", rev = "659917514b462834293094b93d62b5decb7133db", features = ["geom", "physics"] }
+anyhow = "1"
+
+[dev-dependencies]
+botrail-kin.workspace = true

@@ -114,8 +114,10 @@ def test_project_save_load_roundtrip(scene: bt.Scene, tmp_path: Path) -> None:
     path = tmp_path / "cell.botrail"
     scene.save_project(path)
     payload = json.loads(path.read_text())
-    assert payload["version"] == 1
-    assert "<robot" in payload["robot_urdf"]
+    assert payload["version"] == 2
+    assert len(payload["robots"]) == 1
+    assert payload["robots"][0]["source"]["kind"] == "urdf"
+    assert "<robot" in payload["robots"][0]["source"]["xml"]
 
     loaded = bt.Scene.load_project(path)
     assert loaded.robot.name == "simple_arm"
@@ -154,7 +156,7 @@ def test_http_project_endpoints(scene: bt.Scene) -> None:
                 break
             except OSError:
                 time.sleep(0.05)
-        assert project is not None and project["version"] == 1
+        assert project is not None and project["version"] == 2
         assert [o["name"] for o in project["obstacles"]] == ["wall"]
         assert [m["name"] for m in project["motions"]] == ["main"]
 

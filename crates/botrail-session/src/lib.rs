@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use botrail_kin::{solve_ik, IkMode, IkOptions, IkResult};
+use botrail_kin::{IkMode, IkOptions, IkResult};
 use botrail_model::{Geometry, RobotModel};
 use botrail_scene::motion::{PlannedMotion, Segment};
 use botrail_scene::wire::{
@@ -25,6 +25,20 @@ pub trait SessionHost {
     /// the duration of `f`, so keep the work brief — long-running planning
     /// goes through [`snapshot`](Self::snapshot) instead.
     fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R;
+
+    /// Maps a mesh file path to the `(url, extension)` pair clients fetch
+    /// the visual from. Hosts without mesh serving keep the default empty
+    /// mapping (clients skip such visuals).
+    fn mesh_url(&self, _path: &Path) -> (String, String) {
+        (String::new(), String::new())
+    }
+
+    /// URL the client can fetch a USD-sourced robot's stage from (relative
+    /// references must resolve against it). `None` (default) keeps the
+    /// client on the legacy link-visual rendering path.
+    fn robot_asset_url(&self, _path: &Path) -> Option<String> {
+        None
+    }
 
     /// Sends one server message to the connected client(s).
     fn emit(&self, msg: &ServerMessage);
@@ -43,23 +57,35 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// state. `mesh_url` maps a robot visual-mesh path to the `(url, extension)`
-/// pair the client's loader fetches; hosts without mesh serving map to empty
-/// strings.
-pub fn initial_messages(
-    host: &impl SessionHost,
-    mesh_url: impl FnMut(&Path) -> (String, String),
-) -> Vec<ServerMessage> {
+/// state. Mesh visuals are mapped to URLs through the host's
+/// [`mesh_url`](SessionHost::mesh_url).
+pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
         vec![
-            ServerMessage::SceneInit {
-                scene: SceneDescriptionMsg::from_scene(scene, mesh_url),
-            },
-            wire::obstacles_message(scene),
+            scene_init_message(host, scene),
+            wire::obstacles_message(scene, |p| host.mesh_url(p)),
             wire::motions_message(scene),
+            wire::frames_message(scene),
             wire::state_message(scene),
         ]
     })
+}
+
+/// The `scene_init` message, with mesh/asset URLs mapped through the host.
+pub fn scene_init_message(host: &impl SessionHost, scene: &Scene) -> ServerMessage {
+    let usd_asset = match &scene.robot.source {
+        botrail_model::RobotSource::Usd {
+            path,
+            articulation_root,
+        } => host.robot_asset_url(path).map(|url| wire::UsdAssetMsg {
+            url,
+            articulation_root: articulation_root.clone(),
+        }),
+        _ => None,
+    };
+    ServerMessage::SceneInit {
+        scene: SceneDescriptionMsg::from_scene(scene, |p| host.mesh_url(p), usd_asset),
+    }
 }
 
 /// Handles one raw client message, emitting whatever a server should
@@ -88,6 +114,10 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             set_tcp_target(host, &link, &pose, &options)
                 .map(|_| ())
                 .map_err(|e| format!("rejected tcp target: {e}"))
+        }
+        ClientMessage::SetRobotBasePose { pose } => {
+            set_robot_base_pose(host, (&pose).into());
+            Ok(())
         }
         ClientMessage::AddObstacle { obstacle } => wire::geometry_from_msg(&obstacle.geometry)
             .and_then(|geometry| {
@@ -148,9 +178,16 @@ pub fn set_joint_positions(
     Ok(())
 }
 
-/// Solves IK for `link` toward `pose`, seeded from the current
-/// configuration, applies the (best-effort) result, and emits the new state
-/// tagged with the IK outcome.
+/// Places the robot's root link at `pose` (world frame) and emits the new
+/// state.
+pub fn set_robot_base_pose(host: &impl SessionHost, pose: Isometry3<f64>) {
+    host.with_scene(|scene| scene.set_robot_base_pose(pose));
+    emit_state(host);
+}
+
+/// Solves IK for `link` toward `pose` (world frame), seeded from the
+/// current configuration, applies the (best-effort) result, and emits the
+/// new state tagged with the IK outcome.
 pub fn set_tcp_target(
     host: &impl SessionHost,
     link: &str,
@@ -164,8 +201,9 @@ pub fn set_tcp_target(
             .ok_or_else(|| format!("unknown link `{link}`"))?;
         let target: Isometry3<f64> = pose.into();
         let seed = scene.joint_positions().to_vec();
-        let result =
-            solve_ik(&scene.robot, index, &target, &seed, options).map_err(|e| e.to_string())?;
+        let result = scene
+            .solve_ik_world(index, &target, &seed, options)
+            .map_err(|e| e.to_string())?;
         scene
             .set_joint_positions(result.q.clone())
             .map_err(|e| e.to_string())?;
@@ -183,7 +221,7 @@ pub fn set_tcp_target(
 // ------------------------------------------------------------ obstacles
 
 fn emit_obstacles_and_state(host: &impl SessionHost) {
-    let msg = host.with_scene(|scene| wire::obstacles_message(scene));
+    let msg = host.with_scene(|scene| wire::obstacles_message(scene, |p| host.mesh_url(p)));
     host.emit(&msg);
     emit_state(host);
 }
@@ -198,6 +236,22 @@ pub fn add_obstacle(
     let final_name = host.with_scene(|scene| scene.add_obstacle(name, geometry, pose))?;
     emit_obstacles_and_state(host);
     Ok(final_name)
+}
+
+/// Adds a batch of obstacles with a single obstacles/state emission
+/// (importers add tens to hundreds at once). Returns the final names.
+pub fn add_obstacles(
+    host: &impl SessionHost,
+    batch: Vec<(String, Geometry, Isometry3<f64>)>,
+) -> Result<Vec<String>, SceneError> {
+    let names = host.with_scene(|scene| {
+        batch
+            .into_iter()
+            .map(|(name, geometry, pose)| scene.add_obstacle(&name, geometry, pose))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    emit_obstacles_and_state(host);
+    Ok(names)
 }
 
 pub fn remove_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
@@ -224,6 +278,26 @@ pub fn set_obstacle_geometry(
     host.with_scene(|scene| scene.set_obstacle_geometry(name, geometry))?;
     emit_obstacles_and_state(host);
     Ok(())
+}
+
+// --------------------------------------------------------------- frames
+
+fn emit_frames(host: &impl SessionHost) {
+    let msg = host.with_scene(|scene| wire::frames_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds/updates named world frames and rebroadcasts the frame list.
+pub fn add_frames(
+    host: &impl SessionHost,
+    frames: Vec<(String, Isometry3<f64>)>,
+) {
+    host.with_scene(|scene| {
+        for (name, pose) in frames {
+            scene.add_frame(&name, pose);
+        }
+    });
+    emit_frames(host);
 }
 
 // -------------------------------------------------------------- motions
@@ -362,18 +436,24 @@ pub fn trajectory_msg(
     host: &impl SessionHost,
     traj: &botrail_traj::JointTrajectory,
 ) -> wire::TrajectoryMsg {
-    let robot = host.with_scene(|scene| scene.robot.clone());
+    let (robot, base) = host.with_scene(|scene| (scene.robot.clone(), *scene.robot_base_pose()));
     let (times, joint_positions) = traj.resample(1.0 / 30.0);
-    let link_poses = joint_positions
-        .iter()
-        .map(|q| {
-            botrail_kin::forward_kinematics(&robot, q)
-                .expect("trajectory q has scene DOF")
+    // USD-rendered robots do FK client-side; skip the precomputed poses.
+    let link_poses = match &robot.source {
+        botrail_model::RobotSource::Usd { .. } => None,
+        botrail_model::RobotSource::UrdfXml(_) => Some(
+            joint_positions
                 .iter()
-                .map(PoseMsg::from)
-                .collect()
-        })
-        .collect();
+                .map(|q| {
+                    botrail_kin::forward_kinematics_with_base(&robot, q, &base)
+                        .expect("trajectory q has scene DOF")
+                        .iter()
+                        .map(PoseMsg::from)
+                        .collect()
+                })
+                .collect(),
+        ),
+    };
     wire::TrajectoryMsg {
         duration: traj.duration(),
         times,
@@ -415,6 +495,14 @@ mod tests {
     }
 
     impl TestHost {
+        fn from_scene(scene: Scene) -> Self {
+            TestHost {
+                scene: RefCell::new(scene),
+                out: RefCell::new(Vec::new()),
+                logs: RefCell::new(Vec::new()),
+            }
+        }
+
         fn new() -> Self {
             let urdf = r#"
             <robot name="r">
@@ -432,11 +520,7 @@ mod tests {
               </joint>
             </robot>"#;
             let model = botrail_model::RobotModel::from_urdf_str(urdf).unwrap();
-            TestHost {
-                scene: RefCell::new(Scene::new(Arc::new(model))),
-                out: RefCell::new(Vec::new()),
-                logs: RefCell::new(Vec::new()),
-            }
+            Self::from_scene(Scene::new(Arc::new(model)))
         }
 
         fn message_types(&self) -> Vec<&'static str> {
@@ -449,6 +533,7 @@ mod tests {
                     ServerMessage::State { .. } => "state",
                     ServerMessage::PlanResult { .. } => "plan_result",
                     ServerMessage::Motions { .. } => "motions",
+                    ServerMessage::Frames { .. } => "frames",
                     ServerMessage::MotionResult { .. } => "motion_result",
                 })
                 .collect()
@@ -473,11 +558,28 @@ mod tests {
     #[test]
     fn handshake_order() {
         let host = TestHost::new();
-        let msgs = initial_messages(&host, |_| (String::new(), String::new()));
+        let msgs = initial_messages(&host);
         assert!(matches!(msgs[0], ServerMessage::SceneInit { .. }));
         assert!(matches!(msgs[1], ServerMessage::Obstacles { .. }));
         assert!(matches!(msgs[2], ServerMessage::Motions { .. }));
-        assert!(matches!(msgs[3], ServerMessage::State { .. }));
+        assert!(matches!(msgs[3], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[4], ServerMessage::State { .. }));
+    }
+
+    #[test]
+    fn add_frames_broadcasts_the_list() {
+        let host = TestHost::new();
+        add_frames(
+            &host,
+            vec![("mount".to_string(), Isometry3::translation(1.0, 0.0, 0.5))],
+        );
+        assert_eq!(host.message_types(), ["frames"]);
+        let out = host.out.borrow();
+        let ServerMessage::Frames { frames } = &out[0] else {
+            panic!("expected frames");
+        };
+        assert_eq!(frames[0].name, "mount");
+        assert!((frames[0].pose.position[2] - 0.5).abs() < 1e-12);
     }
 
     #[test]
@@ -523,6 +625,157 @@ mod tests {
             } => {
                 assert!(ok);
                 assert!(trajectory.is_some());
+            }
+            other => panic!("expected plan_result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_robot_base_pose_moves_base_and_emits_state() {
+        let host = TestHost::new();
+        handle_client_message(
+            &host,
+            r#"{"type":"set_robot_base_pose","pose":{"position":[1.0,2.0,0.5],"quaternion":[0.0,0.0,0.0,1.0]}}"#,
+        );
+        assert_eq!(host.message_types(), ["state"]);
+        let scene = host.scene.borrow();
+        assert!((scene.robot_base_pose().translation.x - 1.0).abs() < 1e-12);
+        // The state message's link poses follow the base.
+        let out = host.out.borrow();
+        match &out[0] {
+            ServerMessage::State {
+                base_pose,
+                link_poses,
+                ..
+            } => {
+                assert!((base_pose.position[0] - 1.0).abs() < 1e-12);
+                assert!((link_poses[0].position[1] - 2.0).abs() < 1e-12);
+            }
+            other => panic!("expected state, got {other:?}"),
+        }
+    }
+
+    /// TestHost with a robot whose source is a USD stage reference and a
+    /// host that serves assets.
+    fn usd_host() -> TestHost {
+        use botrail_model::{Geometry as G, Joint, JointLimits, JointType, Link, Shape};
+        use nalgebra::{Translation3, Unit, UnitQuaternion, Vector3};
+        let shape = || Shape {
+            origin: Isometry3::identity(),
+            geometry: G::Box {
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+        };
+        let links = vec![
+            Link {
+                name: "/R/base".into(),
+                visuals: vec![shape()],
+                collisions: vec![],
+                parent_joint: None,
+            },
+            Link {
+                name: "/R/arm".into(),
+                visuals: vec![shape()],
+                collisions: vec![],
+                parent_joint: None,
+            },
+        ];
+        let joints = vec![Joint {
+            name: "/R/j1".into(),
+            joint_type: JointType::Revolute,
+            origin: Isometry3::from_parts(
+                Translation3::new(0.0, 0.0, 0.5),
+                UnitQuaternion::identity(),
+            ),
+            axis: Unit::new_normalize(Vector3::z()),
+            limits: Some(JointLimits {
+                lower: -1.0,
+                upper: 1.0,
+                velocity: 1.0,
+                effort: 1.0,
+            }),
+            parent_link: 0,
+            child_link: 1,
+            q_index: None,
+        }];
+        let model = botrail_model::RobotModel::from_parts(
+            "usdbot".into(),
+            links,
+            joints,
+            botrail_model::RobotSource::Usd {
+                path: "/tmp/robots/arm.usda".into(),
+                articulation_root: "/R".into(),
+            },
+        )
+        .unwrap();
+        TestHost::from_scene(Scene::new(Arc::new(model)))
+    }
+
+    struct AssetHost(TestHost);
+
+    impl SessionHost for AssetHost {
+        fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
+            self.0.with_scene(f)
+        }
+        fn robot_asset_url(&self, path: &Path) -> Option<String> {
+            path.file_name()
+                .map(|f| format!("/assets/{}", f.to_string_lossy()))
+        }
+        fn emit(&self, msg: &ServerMessage) {
+            self.0.emit(msg);
+        }
+        fn now_ms(&self) -> f64 {
+            0.0
+        }
+        fn log(&self, message: &str) {
+            self.0.log(message);
+        }
+    }
+
+    #[test]
+    fn usd_robot_scene_init_references_the_asset() {
+        let host = AssetHost(usd_host());
+        let msgs = initial_messages(&host);
+        let ServerMessage::SceneInit { scene } = &msgs[0] else {
+            panic!("expected scene_init");
+        };
+        let asset = scene.usd_asset.as_ref().expect("usd_asset present");
+        assert_eq!(asset.url, "/assets/arm.usda");
+        assert_eq!(asset.articulation_root, "/R");
+
+        // A host without asset serving (wasm) keeps the legacy path.
+        let plain = usd_host();
+        let msgs = initial_messages(&plain);
+        let ServerMessage::SceneInit { scene } = &msgs[0] else {
+            panic!("expected scene_init");
+        };
+        assert!(scene.usd_asset.is_none());
+    }
+
+    #[test]
+    fn usd_robot_trajectories_are_joint_only() {
+        let host = AssetHost(usd_host());
+        handle_client_message(&host, r#"{"type":"plan_request","goal_positions":[0.8]}"#);
+        let out = host.0.out.borrow();
+        match &out[0] {
+            ServerMessage::PlanResult {
+                ok, trajectory, ..
+            } => {
+                assert!(ok);
+                let traj = trajectory.as_ref().unwrap();
+                assert!(traj.link_poses.is_none(), "USD robots skip pose baking");
+                assert!(!traj.joint_positions.is_empty());
+            }
+            other => panic!("expected plan_result, got {other:?}"),
+        }
+
+        // Legacy URDF robots keep precomputed poses.
+        let legacy = TestHost::new();
+        handle_client_message(&legacy, r#"{"type":"plan_request","goal_positions":[0.8]}"#);
+        let out = legacy.out.borrow();
+        match &out[0] {
+            ServerMessage::PlanResult { trajectory, .. } => {
+                assert!(trajectory.as_ref().unwrap().link_poses.is_some());
             }
             other => panic!("expected plan_result, got {other:?}"),
         }

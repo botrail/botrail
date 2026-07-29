@@ -33,10 +33,10 @@ pub fn geometry_to_parry(geometry: &Geometry) -> Result<(Pose, SharedShape), Col
             };
             Ok((offset, SharedShape::cylinder(length / 2.0, *radius)))
         }
-        Geometry::Mesh { path, .. } => Err(CollideError::UnsupportedGeometry(format!(
-            "mesh `{}` (mesh collision arrives with the mesh I/O crate; use primitives or omit)",
-            path.display()
-        ))),
+        Geometry::Mesh { path, scale } => Ok((
+            Pose::identity(),
+            crate::mesh::load_mesh_compound(path, scale)?,
+        )),
     }
 }
 

@@ -3,6 +3,7 @@ import { JointPanel } from "./components/JointPanel";
 import { MotionPanel } from "./components/MotionPanel";
 import { ObstaclePanel } from "./components/ObstaclePanel";
 import { PlanPanel } from "./components/PlanPanel";
+import { RobotPanel } from "./components/RobotPanel";
 import { TcpPanel } from "./components/TcpPanel";
 import { Viewport } from "./components/Viewport";
 
@@ -13,6 +14,7 @@ export function App() {
       <div className="body">
         <Viewport />
         <aside className="panel">
+          <RobotPanel />
           <TcpPanel />
           <PlanPanel />
           <MotionPanel />

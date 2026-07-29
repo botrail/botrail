@@ -11,6 +11,8 @@ export type { LinkMsg } from "./generated/LinkMsg";
 export type { JointTypeMsg } from "./generated/JointTypeMsg";
 export type { IkStatusMsg } from "./generated/IkStatusMsg";
 export type { ObstacleMsg } from "./generated/ObstacleMsg";
+export type { FrameMsg } from "./generated/FrameMsg";
+export type { UsdAssetMsg } from "./generated/UsdAssetMsg";
 export type { ColliderRefMsg } from "./generated/ColliderRefMsg";
 export type { CollisionPairMsg } from "./generated/CollisionPairMsg";
 export type { TrajectoryMsg } from "./generated/TrajectoryMsg";

@@ -38,7 +38,9 @@ export function TcpGizmo() {
   // While an obstacle is selected, its gizmo takes over the viewport; and
   // during trajectory playback the gizmo would point at the live (not the
   // displayed) TCP, so hide it too.
-  const overriding = useStudioStore((s) => s.overridePoses !== null);
+  const overriding = useStudioStore(
+    (s) => s.overridePoses !== null || s.overrideJoints !== null,
+  );
   if (!pose || !tcpLink || selection.type !== "tcp" || overriding) return null;
 
   const reachable = ikStatus === null || ikStatus.converged;

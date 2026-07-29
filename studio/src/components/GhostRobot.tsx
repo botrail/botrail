@@ -12,7 +12,8 @@ export function GhostRobot() {
   const sceneDesc = useStudioStore((s) => s.sceneDesc);
   const goal = useStudioStore((s) => s.goal);
 
-  if (!sceneDesc || !goal) return null;
+  // USD-rendered robots get their ghost from UsdRobotView.
+  if (!sceneDesc || sceneDesc.usd_asset || !goal) return null;
 
   return (
     <>

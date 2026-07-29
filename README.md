@@ -15,7 +15,15 @@ support via [xurdf](https://github.com/neka-nat/xurdf) — no ROS required.
 > segments, path constraints, `.botrail` projects, Python codegen) — and a
 > **browser-complete wasm build**: the entire core runs client-side, so the
 > studio works as a static page with no server at all. Mesh collision
-> shapes land with the upcoming mesh I/O crate (primitives only for now).
+> shapes are in: STL/OBJ links and obstacles collide via cached VHACD
+> convex decompositions. USD scenes (usda/usdc/usdz, incl. references,
+> variants, instancing, Isaac-style `omniverse://` paths via search dirs)
+> import as world-posed obstacles and named mount frames, normalized to
+> meters / Z-up. Robots themselves can come from USD articulations
+> (UsdPhysics joints/bodies, Isaac Sim style) via `bt.Robot.from_usd` —
+> the studio then renders the original stage client-side with
+> [three-usd-robot](https://github.com/neka-nat/three-usd-robot) (full
+> visual fidelity, client-side FK, joint-only wire traffic).
 
 **Try it in your browser** (no install): the demo deploys to GitHub Pages
 from `main` (`.github/workflows/pages.yml`) — or build it locally:
@@ -36,6 +44,7 @@ present). Both speak the same wire protocol.
 import botrail as bt
 
 robot = bt.Robot.from_urdf("examples/simple_arm.urdf")  # or from_xacro(...)
+robot = bt.Robot.from_usd("franka.usd")                 # or a USD articulation
 scene = bt.Scene(robot)
 bt.studio(scene)  # opens the 3D studio in your browser
 ```
@@ -46,12 +55,17 @@ Everything is mirrored in Python:
 
 ```python
 scene.set_joint_positions([0.4, -0.9, 1.2, 0.3, 0.8, -0.5])
-position, quaternion = scene.link_pose("tool0")   # FK
+scene.set_robot_base_pose((1.0, 0.5, 0.0))        # place the robot in the world
+position, quaternion = scene.link_pose("tool0")   # FK (world frame)
 result = robot.ik(position, quaternion)           # IK (check result.converged)
 scene.set_tcp_target((0.3, 0.1, 0.5))             # IK + apply + push to browser
 
 scene.add_box("table", size=(0.6, 0.6, 0.05), position=(0.4, 0.0, 0.0))
+scene.add_mesh("crate", "crate.stl", position=(0.3, 0.2, 0.1))  # VHACD, cached
 scene.in_collision()                              # False
+
+scene.load_usd("cell.usda", prefix="env")         # USD stage -> obstacles+frames
+scene.set_robot_base_pose(*scene.frame("env/World/mount"))  # place on a frame
 scene.min_obstacle_distance()                     # clearance in meters
 scene.check_collisions()                          # [(("link", ...), ("obstacle", ...)), ...]
 
@@ -65,7 +79,7 @@ scene.add_segment("pick", kind="cartesian_line",     # straight TCP descent,
                   orientation_cone=((0, 0, 1), (0, 0, 1), 0.35))  # tool upright
 traj = scene.plan_motion("pick")                     # one trajectory, rest at waypoints
 
-scene.save_project("cell.botrail")                   # self-contained JSON
+scene.save_project("cell.botrail")                   # JSON, or zip when meshes are referenced
 scene = bt.Scene.load_project("cell.botrail")
 print(scene.generate_python())                       # script reproducing it all
 ```
@@ -125,12 +139,14 @@ cd studio && pnpm dev
 
 ```
 crates/botrail-model   URDF/Xacro -> indexed kinematic tree (via xurdf)
+crates/botrail-mesh    minimal STL/OBJ triangle-mesh loading
 crates/botrail-kin     forward kinematics, Jacobian, DLS inverse kinematics
-crates/botrail-collide parry3d-based collision checking (solid shapes, ACM)
+crates/botrail-collide parry3d collision checking (solid shapes, VHACD, ACM)
 crates/botrail-plan    RRT-Connect + shortcut smoothing
 crates/botrail-traj    time parameterization + trajectory sampling
 crates/botrail-scene   scene state, motions, projects + JSON wire protocol
 crates/botrail-session shared wire dispatch + planning helpers (hub & wasm)
+crates/botrail-usd     USD importer (openusd): scenes, frames, articulations
 crates/botrail-py      pyo3 bindings + axum server (websocket, meshes, SPA)
 crates/botrail-wasm    browser-complete session (same wire protocol, no server)
 crates/botrail-bench   standalone perf probes (not shipped)

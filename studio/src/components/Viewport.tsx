@@ -6,8 +6,10 @@ import { useStudioStore } from "../store";
 import { GhostRobot } from "./GhostRobot";
 import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
+import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { TcpGizmo } from "./TcpGizmo";
+import { UsdRobotView } from "./UsdRobotView";
 
 export function Viewport() {
   const connected = useStudioStore((s) => s.connection === "connected");
@@ -48,9 +50,11 @@ export function Viewport() {
 
         <Suspense fallback={null}>
           <SceneView />
+          <UsdRobotView />
           <GhostRobot />
           <ObstacleView />
           <TcpGizmo />
+          <RobotBaseGizmo />
           <PlaybackDriver />
         </Suspense>
       </Canvas>

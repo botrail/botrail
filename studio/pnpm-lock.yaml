@@ -26,6 +26,9 @@ importers:
       three-stdlib:
         specifier: ^2.29.0
         version: 2.36.1(three@0.169.0)
+      three-usd-robot:
+        specifier: ^0.8.0
+        version: 0.8.0(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0)
       zustand:
         specifier: ^4.5.0
         version: 4.5.7(@types/react@18.3.31)(react@18.3.1)
@@ -832,6 +835,19 @@ packages:
     resolution: {integrity: sha512-XyGQrFmNQ5O/IoKm556ftwKsBg11TIb301MB5dWNicziQBEs2g3gtOYIf7pFiLa0zI2gUwhtCjv9fmjnxKZ1Cg==}
     peerDependencies:
       three: '>=0.128.0'
+
+  three-usd-robot@0.8.0:
+    resolution: {integrity: sha512-PIQgMtQ/GrBw11FXqINHhn2g14OkQNtUeDDyF6jJhm8yqy3C6/z9zpqoKmvVcC20k3pMw+44+pkiYAraA9sFug==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@react-three/fiber': '>=8'
+      react: '>=18'
+      three: '>=0.160.0'
+    peerDependenciesMeta:
+      '@react-three/fiber':
+        optional: true
+      react:
+        optional: true
 
   three@0.169.0:
     resolution: {integrity: sha512-Ed906MA3dR4TS5riErd4QBsRGPcx+HBDX2O5yYE5GqJeFQTPU+M56Va/f/Oph9X7uZo3W3o4l2ZhBZ6f6qUv0w==}
@@ -1692,6 +1708,14 @@ snapshots:
       fflate: 0.6.10
       potpack: 1.0.2
       three: 0.169.0
+
+  three-usd-robot@0.8.0(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0):
+    dependencies:
+      fflate: 0.8.3
+      three: 0.169.0
+    optionalDependencies:
+      '@react-three/fiber': 8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0)
+      react: 18.3.1
 
   three@0.169.0: {}
 

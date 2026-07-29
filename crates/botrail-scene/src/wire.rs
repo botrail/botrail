@@ -118,14 +118,39 @@ pub struct JointMsg {
     pub limits: Option<[f64; 2]>,
 }
 
+/// Reference to the robot's source USD stage, for client-side rendering
+/// (three-usd-robot). Present only for USD-sourced robots on hosts that
+/// serve assets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct UsdAssetMsg {
+    /// URL of the stage; relative references resolve against it.
+    pub url: String,
+    /// Articulation root prim path (joint/link names are prim paths).
+    pub articulation_root: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SceneDescriptionMsg {
     pub robot_name: String,
+    /// When present, the client renders the robot from this USD asset
+    /// (client-side FK); the `links` visuals then serve only as fallback.
+    pub usd_asset: Option<UsdAssetMsg>,
+    /// World pose of the robot's root link.
+    pub base_pose: PoseMsg,
     pub links: Vec<LinkMsg>,
     pub joints: Vec<JointMsg>,
     /// Suggested end-effector link for the TCP gizmo (deepest leaf link).
     pub tcp_link: Option<String>,
+}
+
+/// A named world-frame pose (mount point / teach reference).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct FrameMsg {
+    pub name: String,
+    pub pose: PoseMsg,
 }
 
 /// Outcome of the most recent IK solve, echoed with the resulting state.
@@ -174,7 +199,9 @@ pub struct TrajectoryMsg {
     /// Joint positions per sample.
     pub joint_positions: Vec<Vec<f64>>,
     /// World pose of every link per sample (FK precomputed server-side).
-    pub link_poses: Vec<Vec<PoseMsg>>,
+    /// `None` for USD-rendered robots — the client applies
+    /// `joint_positions` itself.
+    pub link_poses: Option<Vec<Vec<PoseMsg>>>,
 }
 
 /// A TCP path constraint (see `motion::Constraint`).
@@ -238,8 +265,14 @@ pub enum ServerMessage {
     Obstacles {
         obstacles: Vec<ObstacleMsg>,
     },
+    /// The full named-frame list; resent whenever it changes.
+    Frames {
+        frames: Vec<FrameMsg>,
+    },
     State {
         joint_positions: Vec<f64>,
+        /// World pose of the robot's root link.
+        base_pose: PoseMsg,
         /// World pose per link, aligned with `SceneDescriptionMsg::links`.
         link_poses: Vec<PoseMsg>,
         /// Present when this state is the result of an IK solve.
@@ -283,6 +316,10 @@ pub enum ClientMessage {
     /// seeded from the current configuration, and apply the result.
     SetTcpTarget {
         link: String,
+        pose: PoseMsg,
+    },
+    /// Places the robot's root link at `pose` (world frame).
+    SetRobotBasePose {
         pose: PoseMsg,
     },
     /// The server may uniquify the requested name; the authoritative list
@@ -367,8 +404,13 @@ pub fn geometry_from_msg(msg: &GeometryMsg) -> Result<Geometry, String> {
 
 impl SceneDescriptionMsg {
     /// Builds the description, mapping each mesh path to a URL + extension
-    /// via `mesh_url` (URL assignment is a server concern).
-    pub fn from_scene(scene: &Scene, mut mesh_url: impl FnMut(&Path) -> (String, String)) -> Self {
+    /// via `mesh_url` (URL assignment is a server concern). `usd_asset` is
+    /// the host-mapped stage reference for client-side robot rendering.
+    pub fn from_scene(
+        scene: &Scene,
+        mut mesh_url: impl FnMut(&Path) -> (String, String),
+        usd_asset: Option<UsdAssetMsg>,
+    ) -> Self {
         let robot = &scene.robot;
         let links = robot
             .links
@@ -402,6 +444,8 @@ impl SceneDescriptionMsg {
             .collect();
         SceneDescriptionMsg {
             robot_name: robot.name.clone(),
+            usd_asset,
+            base_pose: PoseMsg::from(scene.robot_base_pose()),
             links,
             joints,
             tcp_link: Some(robot.links[robot.default_tcp_link()].name.clone()),
@@ -500,18 +544,33 @@ pub fn motions_message(scene: &Scene) -> ServerMessage {
     }
 }
 
-/// The full obstacle list as an `obstacles` message.
-pub fn obstacles_message(scene: &Scene) -> ServerMessage {
-    // Obstacles cannot carry meshes (Scene::add_obstacle rejects them), so
-    // the mesh_url mapper is never invoked.
-    let mut no_mesh = |_: &Path| (String::new(), String::new());
+/// The full frame list as a `frames` message.
+pub fn frames_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Frames {
+        frames: scene
+            .frames()
+            .iter()
+            .map(|f| FrameMsg {
+                name: f.name.clone(),
+                pose: PoseMsg::from(&f.pose),
+            })
+            .collect(),
+    }
+}
+
+/// The full obstacle list as an `obstacles` message; `mesh_url` maps a mesh
+/// obstacle's file path to the URL + extension clients fetch it from.
+pub fn obstacles_message(
+    scene: &Scene,
+    mut mesh_url: impl FnMut(&Path) -> (String, String),
+) -> ServerMessage {
     ServerMessage::Obstacles {
         obstacles: scene
             .obstacles()
             .iter()
             .map(|o| ObstacleMsg {
                 name: o.name.clone(),
-                geometry: geometry_msg(&o.geometry, &mut no_mesh),
+                geometry: geometry_msg(&o.geometry, &mut mesh_url),
                 pose: PoseMsg::from(&o.pose),
             })
             .collect(),
@@ -546,6 +605,7 @@ pub fn state_message_with_ik(scene: &Scene, ik_status: Option<IkStatusMsg>) -> S
         .collect();
     ServerMessage::State {
         joint_positions: scene.joint_positions().to_vec(),
+        base_pose: PoseMsg::from(scene.robot_base_pose()),
         link_poses: scene.link_poses().iter().map(PoseMsg::from).collect(),
         ik_status,
         collisions,
@@ -584,10 +644,14 @@ mod tests {
     #[test]
     fn scene_description_json_shape() {
         let scene = sample_scene();
-        let desc = SceneDescriptionMsg::from_scene(&scene, |path| {
-            assert!(path.ends_with("meshes/arm.stl"));
-            ("/meshes/0".to_string(), "stl".to_string())
-        });
+        let desc = SceneDescriptionMsg::from_scene(
+            &scene,
+            |path| {
+                assert!(path.ends_with("meshes/arm.stl"));
+                ("/meshes/0".to_string(), "stl".to_string())
+            },
+            None,
+        );
         let msg = ServerMessage::SceneInit { scene: desc };
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
@@ -632,9 +696,11 @@ mod tests {
             )
             .unwrap();
 
-        let json: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&obstacles_message(&scene)).unwrap())
-                .unwrap();
+        let no_mesh = |_: &Path| (String::new(), String::new());
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&obstacles_message(&scene, no_mesh)).unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["type"], "obstacles");
         assert_eq!(json["obstacles"][0]["name"], "ball");
         assert_eq!(json["obstacles"][0]["geometry"]["kind"], "sphere");

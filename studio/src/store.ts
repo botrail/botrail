@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   CollisionPairMsg,
+  FrameMsg,
   IkStatusMsg,
   MotionMsg,
   ObstacleMsg,
@@ -15,7 +16,10 @@ export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
 
 /** What the viewport gizmo is currently editing. */
-export type Selection = { type: "tcp" } | { type: "obstacle"; name: string };
+export type Selection =
+  | { type: "tcp" }
+  | { type: "obstacle"; name: string }
+  | { type: "robot" };
 
 /** Actuated joints (those with a q_index), in q_index order. */
 function actuatedDof(scene: SceneDescriptionMsg): number {
@@ -54,6 +58,8 @@ interface StudioState {
   sceneDesc: SceneDescriptionMsg | null;
   /** Joint position vector, indexed by q_index (length = DOF). */
   jointPositions: number[];
+  /** World pose of the robot's root link. */
+  basePose: PoseMsg | null;
   /** World pose per link, aligned with sceneDesc.links. */
   linkPoses: PoseMsg[];
   connection: ConnectionStatus;
@@ -64,6 +70,8 @@ interface StudioState {
   gizmoMode: GizmoMode;
   /** Obstacles in the scene; re-sent in full by the server on every change. */
   obstacles: ObstacleMsg[];
+  /** Named world frames (mount points); re-sent in full on every change. */
+  frames: FrameMsg[];
   /** Colliding pairs at the current configuration (empty when clear). */
   collisions: CollisionPairMsg[];
   /** Minimum robot-obstacle distance; null without obstacles. */
@@ -82,6 +90,8 @@ interface StudioState {
   playing: boolean;
   /** When set, the robot renders at these poses instead of the live state. */
   overridePoses: PoseMsg[] | null;
+  /** Joint-space playback override (USD-rendered robots do FK client-side). */
+  overrideJoints: number[] | null;
   /** All motions in the scene; re-sent in full by the server on every change. */
   motions: MotionMsg[];
   /** True while a motion plan request is in flight. */
@@ -102,12 +112,13 @@ interface StudioState {
   setGizmoMode: (mode: GizmoMode) => void;
   selectTcp: () => void;
   selectObstacle: (name: string) => void;
+  selectRobot: () => void;
   setGoalFromCurrent: () => void;
   clearGoal: () => void;
   beginPlanning: () => void;
   beginMotionPlanning: () => void;
-  /** Scrub/advance playback; `poses` become the display override. */
-  setPlayback: (t: number, poses: PoseMsg[]) => void;
+  /** Scrub/advance playback; poses or joints become the display override. */
+  setPlayback: (t: number, poses: PoseMsg[] | null, joints: number[] | null) => void;
   setPlaying: (playing: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
@@ -116,12 +127,14 @@ interface StudioState {
 export const useStudioStore = create<StudioState>((set) => ({
   sceneDesc: null,
   jointPositions: [],
+  basePose: null,
   linkPoses: [],
   connection: "connecting",
   ikStatus: null,
   tcpLink: null,
   gizmoMode: "translate",
   obstacles: [],
+  frames: [],
   collisions: [],
   minDistance: null,
   selection: { type: "tcp" },
@@ -133,6 +146,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   playbackTime: 0,
   playing: false,
   overridePoses: null,
+  overrideJoints: null,
   motions: [],
   motionPlanning: false,
   motionError: null,
@@ -146,10 +160,12 @@ export const useStudioStore = create<StudioState>((set) => ({
       set({
         sceneDesc: msg.scene,
         jointPositions: new Array(actuatedDof(msg.scene)).fill(0),
+        basePose: msg.scene.base_pose,
         linkPoses: [],
         ikStatus: null,
         tcpLink: msg.scene.tcp_link,
         obstacles: [],
+        frames: [],
         collisions: [],
         minDistance: null,
         selection: { type: "tcp" },
@@ -161,6 +177,7 @@ export const useStudioStore = create<StudioState>((set) => ({
         playbackTime: 0,
         playing: false,
         overridePoses: null,
+        overrideJoints: null,
         motions: [],
         motionPlanning: false,
         motionError: null,
@@ -190,13 +207,18 @@ export const useStudioStore = create<StudioState>((set) => ({
           trajectory: msg.trajectory,
           playbackTime: 0,
           playing: true,
-          overridePoses: msg.trajectory.link_poses[0] ?? null,
+          overridePoses: msg.trajectory.link_poses?.[0] ?? null,
+          overrideJoints: msg.trajectory.link_poses
+            ? null
+            : (msg.trajectory.joint_positions[0] ?? null),
           segmentEnds: [],
           motionStats: null,
         });
       } else {
         set({ planning: false, planError: msg.error ?? "planning failed" });
       }
+    } else if (msg.type === "frames") {
+      set({ frames: msg.frames });
     } else if (msg.type === "motions") {
       set({ motions: msg.motions });
     } else if (msg.type === "motion_result") {
@@ -211,7 +233,10 @@ export const useStudioStore = create<StudioState>((set) => ({
           trajectory: msg.trajectory,
           playbackTime: 0,
           playing: true,
-          overridePoses: msg.trajectory.link_poses[0] ?? null,
+          overridePoses: msg.trajectory.link_poses?.[0] ?? null,
+          overrideJoints: msg.trajectory.link_poses
+            ? null
+            : (msg.trajectory.joint_positions[0] ?? null),
           planStats: null,
           planError: null,
         });
@@ -221,6 +246,7 @@ export const useStudioStore = create<StudioState>((set) => ({
     } else {
       set({
         jointPositions: msg.joint_positions,
+        basePose: msg.base_pose,
         linkPoses: msg.link_poses,
         ikStatus: msg.ik_status,
         collisions: msg.collisions,
@@ -254,6 +280,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   setGizmoMode: (mode) => set({ gizmoMode: mode }),
   selectTcp: () => set({ selection: { type: "tcp" } }),
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
+  selectRobot: () => set({ selection: { type: "robot" } }),
 
   setGoalFromCurrent: () =>
     set((s) => ({
@@ -267,7 +294,9 @@ export const useStudioStore = create<StudioState>((set) => ({
   beginPlanning: () => set({ planning: true, planError: null }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
-  setPlayback: (t, poses) => set({ playbackTime: t, overridePoses: poses }),
+  setPlayback: (t, poses, joints) =>
+    set({ playbackTime: t, overridePoses: poses, overrideJoints: joints }),
   setPlaying: (playing) => set({ playing }),
-  stopPlayback: () => set({ playing: false, overridePoses: null }),
+  stopPlayback: () =>
+    set({ playing: false, overridePoses: null, overrideJoints: null }),
 }));

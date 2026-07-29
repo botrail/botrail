@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/botrail-model",
+    "crates/botrail-mesh",
     "crates/botrail-kin",
     "crates/botrail-collide",
     "crates/botrail-plan",
@@ -9,6 +10,7 @@ members = [
     "crates/botrail-export",
     "crates/botrail-scene",
     "crates/botrail-session",
+    "crates/botrail-usd",
     "crates/botrail-py",
     "crates/botrail-wasm",
     "crates/botrail-bench",
@@ -23,6 +25,7 @@ authors = ["neka-nat <nekanat.stock@gmail.com>"]
 
 [workspace.dependencies]
 botrail-model = { path = "crates/botrail-model" }
+botrail-mesh = { path = "crates/botrail-mesh" }
 botrail-kin = { path = "crates/botrail-kin" }
 botrail-collide = { path = "crates/botrail-collide" }
 botrail-plan = { path = "crates/botrail-plan" }
@@ -30,6 +33,7 @@ botrail-traj = { path = "crates/botrail-traj" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
 botrail-session = { path = "crates/botrail-session" }
+botrail-usd = { path = "crates/botrail-usd" }
 parry3d-f64 = "0.29"
 xurdf = "0.3"
 nalgebra = "0.33"

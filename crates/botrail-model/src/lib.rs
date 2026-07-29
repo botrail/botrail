@@ -105,6 +105,20 @@ pub struct Link {
     pub parent_joint: Option<usize>,
 }
 
+/// Where a robot model came from — kept so projects can persist and
+/// re-create the robot.
+#[derive(Debug, Clone)]
+pub enum RobotSource {
+    /// URDF XML (xacro already expanded); embedded verbatim in projects.
+    UrdfXml(String),
+    /// A USD stage: file path plus the articulation root prim path.
+    /// Referenced (not embedded) until asset bundling lands.
+    Usd {
+        path: PathBuf,
+        articulation_root: String,
+    },
+}
+
 #[derive(Debug)]
 pub struct RobotModel {
     pub name: String,
@@ -115,9 +129,7 @@ pub struct RobotModel {
     pub joint_order: Vec<usize>,
     /// Indices of non-fixed joints, in `q`-vector order (base to tip).
     pub actuated_joints: Vec<usize>,
-    /// The URDF XML this model was built from (xacro already expanded).
-    /// Kept so projects can embed a self-contained robot description.
-    pub urdf_source: String,
+    pub source: RobotSource,
 }
 
 impl RobotModel {
@@ -252,7 +264,7 @@ impl RobotModel {
             .map(|(i, l)| (l.name.as_str(), i))
             .collect();
 
-        let mut links: Vec<Link> = robot
+        let links: Vec<Link> = robot
             .links
             .iter()
             .map(|l| Link {
@@ -305,10 +317,7 @@ impl RobotModel {
                 }),
                 _ => None,
             };
-            if links[child_link].parent_joint.is_some() {
-                return Err(ModelError::MultipleParents(j.child.clone()));
-            }
-            links[child_link].parent_joint = Some(ji);
+            let _ = ji;
             joints.push(Joint {
                 name: j.name.clone(),
                 joint_type,
@@ -319,6 +328,32 @@ impl RobotModel {
                 child_link,
                 q_index: None,
             });
+        }
+
+        Self::from_parts(robot.name, links, joints, RobotSource::UrdfXml(urdf_source))
+    }
+
+    /// Builds a model from converted parts, computing the tree invariants:
+    /// per-link parent joints, root detection, breadth-first joint order,
+    /// q-index assignment, and loop rejection. Callers may leave
+    /// `Joint::q_index` and `Link::parent_joint` unset — both are assigned
+    /// here. This is the entry point for non-URDF importers.
+    pub fn from_parts(
+        name: String,
+        mut links: Vec<Link>,
+        mut joints: Vec<Joint>,
+        source: RobotSource,
+    ) -> Result<Self, ModelError> {
+        for link in &mut links {
+            link.parent_joint = None;
+        }
+        for (ji, j) in joints.iter().enumerate() {
+            if links[j.child_link].parent_joint.is_some() {
+                return Err(ModelError::MultipleParents(
+                    links[j.child_link].name.clone(),
+                ));
+            }
+            links[j.child_link].parent_joint = Some(ji);
         }
 
         let roots: Vec<usize> = links
@@ -363,13 +398,13 @@ impl RobotModel {
         }
 
         Ok(RobotModel {
-            name: robot.name,
+            name,
             links,
             joints,
             root_link,
             joint_order,
             actuated_joints,
-            urdf_source,
+            source,
         })
     }
 }

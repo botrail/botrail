@@ -40,27 +40,47 @@ pub struct Obstacle {
     pub pose: Isometry3<f64>,
 }
 
-/// A robot in a workspace with obstacles. Collision checking runs against
-/// solid colliders (see botrail-collide's shape policy).
+/// A named world-frame pose — a mount point / teach reference, typically
+/// imported from a scene file. Not a collision object.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub name: String,
+    pub pose: Isometry3<f64>,
+}
+
+/// A robot placed in a world with obstacles. All poses entering or leaving
+/// the scene (link poses, IK targets, obstacle poses, constraints) are in
+/// the world frame; the robot root sits at `robot_base`. Collision checking
+/// runs against solid colliders (see botrail-collide's shape policy).
 #[derive(Clone)]
 pub struct Scene {
     pub robot: Arc<RobotModel>,
+    /// World pose of the robot's root link.
+    robot_base: Isometry3<f64>,
     joint_positions: Vec<f64>,
     obstacles: Vec<Obstacle>,
     obstacle_colliders: Vec<ObstacleCollider>,
     robot_collider: RobotCollider,
     acm: Acm,
     motions: Vec<Motion>,
-    /// Link shapes that could not be used for collision (e.g. meshes until
-    /// the mesh I/O crate lands). Surface these to the user once.
+    frames: Vec<Frame>,
+    /// Link shapes that could not be used for collision (e.g. unreadable
+    /// mesh files). Surface these to the user once.
     pub collision_warnings: Vec<String>,
 }
 
 impl Scene {
     pub fn new(robot: Arc<RobotModel>) -> Self {
+        Self::with_base(robot, Isometry3::identity())
+    }
+
+    /// A scene with the robot root placed at `base` (world frame).
+    pub fn with_base(robot: Arc<RobotModel>, base: Isometry3<f64>) -> Self {
         let joint_positions = robot.neutral_positions();
         let (robot_collider, collision_warnings) = RobotCollider::from_model(&robot);
         let mut acm = Acm::adjacent(&robot);
+        // Self-collision analysis is base-invariant: links move rigidly with
+        // the base, so the identity-base sampling stays valid.
         for (i, j) in botrail_collide::detect_always_colliding(
             &robot,
             &robot_collider,
@@ -72,14 +92,70 @@ impl Scene {
         }
         Self {
             robot,
+            robot_base: base,
             joint_positions,
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),
             robot_collider,
             acm,
             motions: Vec::new(),
+            frames: Vec::new(),
             collision_warnings,
         }
+    }
+
+    // --------------------------------------------------------------- frames
+
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    pub fn frame(&self, name: &str) -> Option<&Frame> {
+        self.frames.iter().find(|f| f.name == name)
+    }
+
+    /// Adds or replaces a named world-frame pose.
+    pub fn add_frame(&mut self, name: &str, pose: Isometry3<f64>) {
+        match self.frames.iter_mut().find(|f| f.name == name) {
+            Some(frame) => frame.pose = pose,
+            None => self.frames.push(Frame {
+                name: name.to_string(),
+                pose,
+            }),
+        }
+    }
+
+    /// World pose of the robot's root link.
+    pub fn robot_base_pose(&self) -> &Isometry3<f64> {
+        &self.robot_base
+    }
+
+    pub fn set_robot_base_pose(&mut self, pose: Isometry3<f64>) {
+        self.robot_base = pose;
+    }
+
+    /// World pose of every link at configuration `q`.
+    pub fn fk(&self, q: &[f64]) -> Result<Vec<Isometry3<f64>>, SceneError> {
+        botrail_kin::forward_kinematics_with_base(&self.robot, q, &self.robot_base).map_err(|_| {
+            SceneError::WrongDof {
+                expected: self.robot.dof(),
+                got: q.len(),
+            }
+        })
+    }
+
+    /// Solves IK for `link` toward a world-frame target: the target is
+    /// re-expressed in the robot base frame before handing it to the
+    /// base-frame solver.
+    pub fn solve_ik_world(
+        &self,
+        link: usize,
+        target_world: &Isometry3<f64>,
+        seed: &[f64],
+        options: &botrail_kin::IkOptions,
+    ) -> Result<botrail_kin::IkResult, botrail_kin::KinError> {
+        let target_base = self.robot_base.inverse() * target_world;
+        botrail_kin::solve_ik(&self.robot, link, &target_base, seed, options)
     }
 
     pub fn joint_positions(&self) -> &[f64] {
@@ -99,7 +175,7 @@ impl Scene {
 
     /// World pose of every link at the current configuration.
     pub fn link_poses(&self) -> Vec<Isometry3<f64>> {
-        botrail_kin::forward_kinematics(&self.robot, &self.joint_positions)
+        self.fk(&self.joint_positions)
             .expect("joint_positions length is enforced by set_joint_positions")
     }
 
@@ -208,11 +284,7 @@ impl Scene {
     /// Collision pairs at an arbitrary configuration (the scene state is
     /// not modified).
     pub fn collisions_at(&self, q: &[f64]) -> Result<Vec<CollisionPair>, SceneError> {
-        let poses =
-            botrail_kin::forward_kinematics(&self.robot, q).map_err(|_| SceneError::WrongDof {
-                expected: self.robot.dof(),
-                got: q.len(),
-            })?;
+        let poses = self.fk(q)?;
         Ok(botrail_collide::check_scene(
             &self.robot_collider,
             &poses,
@@ -308,6 +380,10 @@ impl Scene {
 
     pub fn set_motions(&mut self, motions: Vec<Motion>) {
         self.motions = motions;
+    }
+
+    pub fn set_frames(&mut self, frames: Vec<Frame>) {
+        self.frames = frames;
     }
 
     /// Plans all segments of `motion` from the current configuration.
@@ -408,6 +484,45 @@ mod tests {
     }
 
     #[test]
+    fn base_pose_shifts_links_collisions_and_ik() {
+        let mut scene = sample_scene();
+        // Obstacle sitting on link b's identity-base location (z = 0.5).
+        scene
+            .add_obstacle(
+                "blocker",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        assert_eq!(scene.check_collisions().len(), 1);
+
+        // Moving the base a meter away clears the collision and shifts
+        // every link pose by the base transform.
+        scene.set_robot_base_pose(iso(1.0, 0.0, 0.0));
+        assert!(scene.check_collisions().is_empty());
+        let poses = scene.link_poses();
+        assert!((poses[0].translation.x - 1.0).abs() < 1e-12);
+        assert!((poses[1].translation.x - 1.0).abs() < 1e-12);
+        assert!((poses[1].translation.z - 0.5).abs() < 1e-12);
+
+        // World-frame IK: a target expressed in the world frame lands on
+        // the same configuration the identity-base solve finds for the
+        // base-local target.
+        let world_target = scene.robot_base_pose() * iso(0.0, 0.0, 0.5);
+        let ik = scene
+            .solve_ik_world(
+                1,
+                &world_target,
+                &[0.3],
+                &botrail_kin::IkOptions::default(),
+            )
+            .unwrap();
+        assert!(ik.converged);
+    }
+
+    #[test]
     fn obstacle_names_are_uniquified() {
         let mut scene = sample_scene();
         let g = || Geometry::Sphere { radius: 0.05 };
@@ -426,18 +541,46 @@ mod tests {
     }
 
     #[test]
-    fn mesh_obstacles_are_rejected() {
+    fn mesh_obstacles_collide_via_vhacd() {
         let mut scene = sample_scene();
-        let err = scene
+        let dir = std::env::temp_dir().join(format!("botrail-scene-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = dir.join("box.stl");
+        std::fs::write(
+            &stl,
+            botrail_mesh::to_stl_binary(&botrail_mesh::box_mesh([0.3, 0.3, 0.3])),
+        )
+        .unwrap();
+
+        // Mesh box engulfing link b (at z = 0.5): collision.
+        let name = scene
             .add_obstacle(
                 "m",
                 Geometry::Mesh {
-                    path: "x.stl".into(),
+                    path: stl.clone(),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                iso(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        assert!(!scene.check_collisions().is_empty());
+
+        // Moved away: clear, with a sane positive clearance.
+        scene.set_obstacle_pose(&name, iso(2.0, 0.0, 0.0)).unwrap();
+        assert!(scene.check_collisions().is_empty());
+        assert!(scene.min_obstacle_distance().unwrap() > 1.0);
+
+        // A missing file still fails cleanly.
+        assert!(scene
+            .add_obstacle(
+                "missing",
+                Geometry::Mesh {
+                    path: dir.join("nope.stl"),
                     scale: Vector3::new(1.0, 1.0, 1.0),
                 },
                 iso(1.0, 0.0, 0.0),
             )
-            .unwrap_err();
-        assert!(matches!(err, SceneError::UnsupportedGeometry(_)));
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

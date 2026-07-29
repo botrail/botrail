@@ -1,10 +1,11 @@
 //! Collision checking for botrail on top of parry3d.
 //!
-//! Shape policy (from `docs/bench-parry3d.md`): only *solid* parry shapes are
-//! used — primitives map directly, meshes will map to VHACD convex compounds
-//! once the mesh I/O crate lands. Raw `TriMesh` is never used as collision
-//! geometry because parry's surface semantics silently miss full containment
-//! and report bogus distances for contained shapes.
+//! Shape policy (from `docs/bench-parry3d.md`): only *solid* parry shapes
+//! are used — primitives map directly, meshes map to VHACD convex compounds
+//! (see [`mesh`], with a content-addressed disk cache). Raw `TriMesh` is
+//! never used as collision geometry because parry's surface semantics
+//! silently miss full containment and report bogus distances for contained
+//! shapes.
 //!
 //! Math boundary: the public API speaks nalgebra (`Isometry3<f64>`, matching
 //! the rest of botrail); parry >= 0.23 is glam-based, so poses are converted
@@ -12,6 +13,7 @@
 
 mod acm;
 mod convert;
+pub mod mesh;
 
 use botrail_model::RobotModel;
 use nalgebra::Isometry3;
@@ -27,6 +29,8 @@ pub use convert::to_parry_pose;
 pub enum CollideError {
     #[error("unsupported collision geometry: {0}")]
     UnsupportedGeometry(String),
+    #[error("mesh collision shape failed: {0}")]
+    MeshLoad(String),
 }
 
 /// A shape set in a local frame: `(local_pose, shape)` pairs.
@@ -53,8 +57,8 @@ pub struct RobotCollider {
 impl RobotCollider {
     /// Builds colliders from each link's `<collision>` geometry, falling
     /// back to `<visual>` when a link declares none (common in simple
-    /// URDFs). Unsupported geometries (meshes, for now) are skipped with a
-    /// warning rather than failing the whole robot.
+    /// URDFs). Shapes that fail to convert (e.g. unreadable mesh files) are
+    /// skipped with a warning rather than failing the whole robot.
     pub fn from_model(model: &RobotModel) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let links = model
@@ -213,7 +217,7 @@ pub fn min_robot_obstacle_distance(
 mod tests {
     use super::*;
     use botrail_model::Geometry;
-    use nalgebra::{Translation3, UnitQuaternion, Vector3};
+    use nalgebra::{Translation3, UnitQuaternion};
 
     /// Three stacked 0.2m cubes connected by prismatic joints along z; at
     /// q = 0 all three overlap at the origin.

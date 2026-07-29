@@ -18,7 +18,8 @@ export function SceneView() {
     [collisions],
   );
 
-  if (!sceneDesc) return null;
+  // USD-rendered robots draw through UsdRobotView instead.
+  if (!sceneDesc || sceneDesc.usd_asset) return null;
 
   // During trajectory playback the robot renders at the override poses;
   // collision coloring refers to the live state, so it is suppressed.

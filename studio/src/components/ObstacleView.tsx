@@ -7,6 +7,7 @@ import type { GeometryMsg, ObstacleMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import { COLLISION_COLOR } from "../three/palette";
 import { sendUpdateObstaclePose } from "../ws";
+import { MeshVisual } from "./MeshVisual";
 
 const NEUTRAL_COLOR = "#9aa3b2";
 const SELECT_EDGE_COLOR = "#cdd4df";
@@ -152,11 +153,13 @@ function ObstacleGeometry({
         </mesh>
       );
     case "mesh":
-      console.warn(
-        "botrail studio: obstacle mesh geometry is not supported",
-        geometry,
+      // URL is empty in wasm mode (no mesh serving there yet).
+      if (!geometry.url) return null;
+      return (
+        <group onClick={onSelect}>
+          <MeshVisual geometry={geometry} color={color} />
+        </group>
       );
-      return null;
     default:
       return null;
   }

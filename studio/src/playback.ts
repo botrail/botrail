@@ -24,11 +24,55 @@ function nlerpQuat(
   return [q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm];
 }
 
+/** Index pair + blend factor around time `t` (clamped). */
+function bracket(times: number[], t: number): [number, number, number] {
+  const last = times.length - 1;
+  if (t <= times[0]) return [0, 0, 0];
+  if (t >= times[last]) return [last, last, 0];
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return [lo, hi, (t - times[lo]) / (times[hi] - times[lo])];
+}
+
+/**
+ * Playback override at time `t`: `[poses, joints]` — precomputed poses for
+ * legacy robots, joint values for USD-rendered robots (client-side FK).
+ */
+export function sampleOverride(
+  traj: TrajectoryMsg,
+  t: number,
+): [PoseMsg[] | null, number[] | null] {
+  if (traj.link_poses) {
+    return [samplePoses({ ...traj, link_poses: traj.link_poses }, t), null];
+  }
+  return [null, sampleJoints(traj, t)];
+}
+
+/** Joint positions at time `t`, linearly interpolated. */
+export function sampleJoints(traj: TrajectoryMsg, t: number): number[] {
+  const [lo, hi, u] = bracket(traj.times, t);
+  return traj.joint_positions[lo].map((a, i) =>
+    lerp(a, traj.joint_positions[hi][i], u),
+  );
+}
+
 /**
  * Link poses at time `t`, interpolated between the trajectory's ~30Hz
- * samples (linear positions, nlerp orientations). `t` is clamped.
+ * samples (linear positions, nlerp orientations). `t` is clamped. Only
+ * valid for trajectories that carry precomputed poses (legacy robots).
  */
-export function samplePoses(traj: TrajectoryMsg, t: number): PoseMsg[] {
+export function samplePoses(
+  traj: TrajectoryMsg & { link_poses: PoseMsg[][] },
+  t: number,
+): PoseMsg[] {
   const times = traj.times;
   const last = times.length - 1;
   if (t <= times[0]) return traj.link_poses[0];

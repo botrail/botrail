@@ -134,7 +134,7 @@ fn constraints_ok(scene: &Scene, q: &[f64], constraints: &[Constraint], tcp: usi
     if constraints.is_empty() {
         return true;
     }
-    let Ok(poses) = botrail_kin::forward_kinematics(&scene.robot, q) else {
+    let Ok(poses) = scene.fk(q) else {
         return false;
     };
     let pose = &poses[tcp];
@@ -180,10 +180,10 @@ fn cartesian_line(
         fraction: fraction * 100.0,
         reason: reason.to_string(),
     };
-    let start_pose = botrail_kin::forward_kinematics(&scene.robot, start_q)
-        .map_err(|e| fail(0.0, &e.to_string()))?[tcp];
-    let goal_pose = botrail_kin::forward_kinematics(&scene.robot, goal_q)
-        .map_err(|e| fail(0.0, &e.to_string()))?[tcp];
+    // World-frame TCP poses; the base pose cancels out of the interpolated
+    // targets only through solve_ik_world's re-expression.
+    let start_pose = scene.fk(start_q).map_err(|e| fail(0.0, &e.to_string()))?[tcp];
+    let goal_pose = scene.fk(goal_q).map_err(|e| fail(0.0, &e.to_string()))?[tcp];
 
     let dist = (goal_pose.translation.vector - start_pose.translation.vector).norm();
     let angle = start_pose.rotation.angle_to(&goal_pose.rotation);
@@ -208,7 +208,8 @@ fn cartesian_line(
                 .into(),
             start_pose.rotation.slerp(&goal_pose.rotation, u),
         );
-        let ik = botrail_kin::solve_ik(&scene.robot, tcp, &target, &q, &ik_options)
+        let ik = scene
+            .solve_ik_world(tcp, &target, &q, &ik_options)
             .map_err(|e| fail(u, &e.to_string()))?;
         if !ik.converged {
             return Err(fail(u, "IK did not converge (unreachable along the line)"));
@@ -507,6 +508,58 @@ mod tests {
         assert_eq!(planned.segments.len(), 1);
         assert_eq!(planned.segments[0].kind, SegmentKind::CartesianLine);
         assert_eq!(planned.segments[0].waypoints, path);
+    }
+
+    #[test]
+    fn cartesian_line_follows_world_line_with_moved_base() {
+        let mut scene = scene();
+        let base = Isometry3::from_parts(
+            nalgebra::Translation3::new(0.7, -0.4, 0.2),
+            nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.9),
+        );
+        scene.set_robot_base_pose(base);
+        let start = vec![0.0, 1.1, -0.6, -0.5, 0.0, 0.0];
+        scene.set_joint_positions(start.clone()).unwrap();
+        let tcp = scene.robot.default_tcp_link();
+        let start_pose = scene.link_poses()[tcp];
+
+        // World-frame goal: 8cm straight down from the current TCP.
+        let target = Isometry3::from_parts(
+            (start_pose.translation.vector + Vector3::new(0.0, 0.0, -0.08)).into(),
+            start_pose.rotation,
+        );
+        let ik = scene
+            .solve_ik_world(tcp, &target, &start, &botrail_kin::IkOptions::default())
+            .unwrap();
+        assert!(ik.converged);
+
+        let path = cartesian_line(
+            &scene,
+            &start,
+            &ik.q,
+            &[],
+            tcp,
+            &CartesianOptions::default(),
+            0,
+        )
+        .unwrap();
+        // Every follow point's WORLD TCP lies on the straight world segment.
+        for q in &path {
+            let pose = scene.fk(q).unwrap()[tcp];
+            let p = pose.translation.vector;
+            let a = start_pose.translation.vector;
+            let b = target.translation.vector;
+            let ab = b - a;
+            let t = (p - a).dot(&ab) / ab.norm_squared();
+            let closest = a + ab * t.clamp(0.0, 1.0);
+            assert!(
+                (p - closest).norm() < 2e-3,
+                "off line by {}",
+                (p - closest).norm()
+            );
+        }
+        let final_pose = scene.fk(path.last().unwrap()).unwrap()[tcp];
+        assert!((final_pose.translation.vector - target.translation.vector).norm() < 1e-3);
     }
 
     #[test]
