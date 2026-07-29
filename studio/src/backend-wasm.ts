@@ -27,18 +27,14 @@ export class WasmBackend implements SessionBackend {
    * scene on this thread is cheap. Falls back to a synchronous in-place
    * import when the worker path fails.
    */
-  async loadUsdScene(
-    bytes: Uint8Array,
-    fileName: string,
-  ): Promise<{ ok: boolean; upAxis: "Y" | "Z" }> {
-    if (!this.session || !this.handlers) return { ok: false, upAxis: "Y" };
+  async loadUsdScene(bytes: Uint8Array, fileName: string): Promise<boolean> {
+    if (!this.session || !this.handlers) return false;
     try {
       const json = await this.decomposeInWorker(bytes, fileName);
-      const upAxis = JSON.parse(json).up_axis === "Z" ? "Z" : "Y";
       for (const text of this.session.load_prepared_scene(json)) {
         this.handlers.onMessage(text);
       }
-      return { ok: true, upAxis };
+      return true;
     } catch (err) {
       console.warn(
         "botrail studio: worker import failed; falling back to main thread",
@@ -49,10 +45,10 @@ export class WasmBackend implements SessionBackend {
       for (const text of this.session.load_usd_scene(bytes, fileName, null)) {
         this.handlers.onMessage(text);
       }
-      return { ok: true, upAxis: "Y" };
+      return true;
     } catch (err) {
       console.error("botrail studio: USD import failed", err);
-      return { ok: false, upAxis: "Y" };
+      return false;
     }
   }
 

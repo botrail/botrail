@@ -27,8 +27,8 @@ importers:
         specifier: ^2.29.0
         version: 2.36.1(three@0.169.0)
       three-usd-robot:
-        specifier: ^0.8.0
-        version: 0.8.0(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0)
+        specifier: ^0.8.1
+        version: 0.8.1(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0)
       zustand:
         specifier: ^4.5.0
         version: 4.5.7(@types/react@18.3.31)(react@18.3.1)
@@ -836,8 +836,8 @@ packages:
     peerDependencies:
       three: '>=0.128.0'
 
-  three-usd-robot@0.8.0:
-    resolution: {integrity: sha512-PIQgMtQ/GrBw11FXqINHhn2g14OkQNtUeDDyF6jJhm8yqy3C6/z9zpqoKmvVcC20k3pMw+44+pkiYAraA9sFug==}
+  three-usd-robot@0.8.1:
+    resolution: {integrity: sha512-y0aWE0SAWHYEUA8/vYE87I3d35rtvXJdCCVxLpNWgBE0OP6fVQVdEhJ5rcU3UorUX6HtqRbx3VfG5Ce1qv3dIQ==}
     engines: {node: '>=18'}
     peerDependencies:
       '@react-three/fiber': '>=8'
@@ -1709,7 +1709,7 @@ snapshots:
       potpack: 1.0.2
       three: 0.169.0
 
-  three-usd-robot@0.8.0(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0):
+  three-usd-robot@0.8.1(@react-three/fiber@8.18.0(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(three@0.169.0))(react@18.3.1)(three@0.169.0):
     dependencies:
       fflate: 0.8.3
       three: 0.169.0

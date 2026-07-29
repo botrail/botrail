@@ -19,7 +19,7 @@ export function WasmStageView() {
       return;
     }
     let cancelled = false;
-    new ThreeUsdRobotLoader({ loadSceneGeometry: true })
+    new ThreeUsdRobotLoader({ loadSceneGeometry: true, worldUp: "Z" })
       .parse(droppedStage.data)
       .then((loaded) => {
         if (!cancelled) setStage(loaded);
@@ -32,15 +32,8 @@ export function WasmStageView() {
     };
   }, [droppedStage]);
 
-  if (!stage || !droppedStage) return null;
-  // three-usd-robot keeps the stage's authored axes; botrail's viewport is
-  // Z-up, so Y-up stages rotate +90 deg about X to line up with the
-  // collision proxies.
-  const rotation: [number, number, number] =
-    droppedStage.upAxis === "Y" ? [Math.PI / 2, 0, 0] : [0, 0, 0];
-  return (
-    <group rotation={rotation}>
-      <primitive object={stage} />
-    </group>
-  );
+  if (!stage) return null;
+  // `worldUp: "Z"` aligns the stage with botrail's world (and the
+  // collision proxies) regardless of the authored up axis.
+  return <primitive object={stage} />;
 }

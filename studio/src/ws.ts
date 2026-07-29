@@ -135,11 +135,11 @@ export function sendRobotBasePose(pose: PoseMsg): void {
 export async function dropUsdScene(
   bytes: Uint8Array,
   fileName: string,
-): Promise<{ ok: boolean; upAxis: "Y" | "Z" }> {
+): Promise<boolean> {
   if (backend instanceof WasmBackend) {
     return backend.loadUsdScene(bytes, fileName);
   }
-  return { ok: false, upAxis: "Y" };
+  return false;
 }
 
 /** Plan from the current configuration to `goal` (DOF order). */

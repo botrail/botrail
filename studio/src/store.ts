@@ -102,7 +102,7 @@ interface StudioState {
   /** Timing of the last successful motion plan. */
   motionStats: { planningTimeMs: number } | null;
   /** A USD file dropped in wasm mode, rendered client-side as the stage. */
-  droppedStage: { data: ArrayBuffer; name: string; upAxis: "Y" | "Z" } | null;
+  droppedStage: { data: ArrayBuffer; name: string } | null;
   /** Obstacles hidden in the viewport (display only; collision unaffected). */
   hiddenObstacles: Set<string>;
 
@@ -126,9 +126,7 @@ interface StudioState {
   setPlaying: (playing: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
-  setDroppedStage: (
-    stage: { data: ArrayBuffer; name: string; upAxis: "Y" | "Z" } | null,
-  ) => void;
+  setDroppedStage: (stage: { data: ArrayBuffer; name: string } | null) => void;
   toggleObstacleHidden: (name: string) => void;
 }
 

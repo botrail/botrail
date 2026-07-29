@@ -34,7 +34,8 @@ export function UsdRobotView() {
       return;
     }
     let cancelled = false;
-    new ThreeUsdRobotLoader()
+    // botrail's world is Z-up; the library defaults to three.js Y-up.
+    new ThreeUsdRobotLoader({ worldUp: "Z" })
       .loadAsync(url)
       .then((r) => {
         if (!cancelled) setRobot(r);

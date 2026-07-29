@@ -25,11 +25,8 @@ export function Viewport() {
     const file = e.dataTransfer.files[0];
     if (!file || !/[.]usd[acz]?$/i.test(file.name)) return;
     const data = await file.arrayBuffer();
-    const result = await dropUsdScene(new Uint8Array(data), file.name);
-    if (result.ok) {
-      useStudioStore
-        .getState()
-        .setDroppedStage({ data, name: file.name, upAxis: result.upAxis });
+    if (await dropUsdScene(new Uint8Array(data), file.name)) {
+      useStudioStore.getState().setDroppedStage({ data, name: file.name });
     }
   };
 
