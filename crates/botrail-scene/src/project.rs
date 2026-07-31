@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::wire::{
-    geometry_from_msg, geometry_msg, motion_from_msg, motion_msg, sequence_from_msg, sequence_msg,
-    signal_def_msg, ActionMsg, ConditionMsg, ConstraintMsg, FrameMsg, GeometryMsg, MotionMsg,
-    ObstacleMsg, PoseMsg, SegmentKindMsg, SequenceMsg, SignalDefMsg,
+    device_from_msg, device_msg, geometry_from_msg, geometry_msg, motion_from_msg, motion_msg,
+    sensor_from_msg, sensor_msg, sequence_from_msg, sequence_msg, signal_def_msg, ActionMsg,
+    ConditionMsg, ConstraintMsg, DeviceMsg, FrameMsg, GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg,
+    SegmentKindMsg, SensorMsg, SequenceMsg, SignalDefMsg,
 };
 use crate::Scene;
 
@@ -78,6 +79,12 @@ pub struct ProjectFile {
     /// Internal signal declarations (absent in older v2 files).
     #[serde(default)]
     pub signals: Vec<SignalDefMsg>,
+    /// Pseudo-sensors (absent in older v2 files).
+    #[serde(default)]
+    pub sensors: Vec<SensorMsg>,
+    /// Auxiliary devices (absent in older v2 files).
+    #[serde(default)]
+    pub devices: Vec<DeviceMsg>,
 }
 
 fn identity_pose() -> PoseMsg {
@@ -119,6 +126,8 @@ impl ProjectFile {
                     frames: Vec::new(),
                     sequences: Vec::new(),
                     signals: Vec::new(),
+                    sensors: Vec::new(),
+                    devices: Vec::new(),
                 })
             }
             2 => {
@@ -208,6 +217,8 @@ impl Scene {
             motions: self.motions().iter().map(motion_msg).collect(),
             sequences: self.sequences().iter().map(sequence_msg).collect(),
             signals: self.signals().iter().map(signal_def_msg).collect(),
+            sensors: self.sensors().iter().map(sensor_msg).collect(),
+            devices: self.devices().iter().map(device_msg).collect(),
             frames: self
                 .frames()
                 .iter()
@@ -290,6 +301,8 @@ impl Scene {
         self.set_attachments(attachments);
         self.set_motions(project.motions.iter().map(motion_from_msg).collect());
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
+        self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
+        self.set_devices(project.devices.iter().map(device_from_msg).collect());
         self.set_signals(
             project
                 .signals
@@ -461,6 +474,66 @@ pub fn generate_python(project: &ProjectFile) -> String {
         ));
     }
 
+    for sensor in &project.sensors {
+        let watch = match &sensor.watch {
+            crate::wire::SensorWatchMsg::AllObjects => String::new(),
+            crate::wire::SensorWatchMsg::Objects { names } => {
+                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+                format!(", watch=[{}]", items.join(", "))
+            }
+            crate::wire::SensorWatchMsg::Robot => ", watch=[], watch_robot=True".to_string(),
+            crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
+        };
+        match &sensor.kind {
+            crate::wire::SensorKindMsg::Zone { pose, size } => out.push_str(&format!(
+                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch})\n",
+                sensor.name,
+                py_tuple(&pose.position),
+                py_tuple(size),
+                py_tuple(&pose.quaternion),
+            )),
+            crate::wire::SensorKindMsg::Beam { from, to, radius } => out.push_str(&format!(
+                "scene.add_beam_sensor({:?}, frm={}, to={}, radius={radius}{watch})\n",
+                sensor.name,
+                py_tuple(from),
+                py_tuple(to),
+            )),
+        }
+    }
+    for device in &project.devices {
+        match &device.kind {
+            crate::wire::DeviceKindMsg::Conveyor {
+                zone_pose,
+                zone_size,
+                velocity,
+                running,
+            } => out.push_str(&format!(
+                "scene.add_conveyor({:?}, zone_position={}, zone_size={}, velocity={}, zone_quaternion={}, running={})\n",
+                device.name,
+                py_tuple(&zone_pose.position),
+                py_tuple(zone_size),
+                py_tuple(velocity),
+                py_tuple(&zone_pose.quaternion),
+                if *running { "True" } else { "False" },
+            )),
+            crate::wire::DeviceKindMsg::LinearAxis {
+                objects,
+                axis,
+                speed,
+                position,
+                range,
+            } => {
+                let items: Vec<String> = objects.iter().map(|n| format!("{n:?}")).collect();
+                out.push_str(&format!(
+                    "scene.add_linear_axis({:?}, objects=[{}], axis={}, speed={speed}, range={}, position={position})\n",
+                    device.name,
+                    items.join(", "),
+                    py_tuple(axis),
+                    py_tuple(range),
+                ));
+            }
+        }
+    }
     for signal in &project.signals {
         out.push_str(&format!(
             "scene.define_signal({:?}, initial={})\n",
@@ -519,6 +592,16 @@ fn py_action(action: &ActionMsg) -> String {
             "bt.seq.set_signal({signal:?}, {})",
             if *value { "True" } else { "False" }
         ),
+        ActionMsg::Device { device, command } => match command {
+            crate::wire::DeviceCommandMsg::Start => format!("bt.seq.start({device:?})"),
+            crate::wire::DeviceCommandMsg::Stop => format!("bt.seq.stop({device:?})"),
+            crate::wire::DeviceCommandMsg::SetSpeed { speed } => {
+                format!("bt.seq.set_speed({device:?}, {speed})")
+            }
+            crate::wire::DeviceCommandMsg::MoveTo { position } => {
+                format!("bt.seq.move_to({device:?}, {position})")
+            }
+        },
     }
 }
 
@@ -531,6 +614,7 @@ fn py_condition(condition: &ConditionMsg) -> String {
             "bt.seq.signal({name:?}, {})",
             if *value { "True" } else { "False" }
         ),
+        ConditionMsg::DeviceDone { device } => format!("bt.seq.device_done({device:?})"),
         ConditionMsg::All { conditions } => {
             let inner: Vec<String> = conditions.iter().map(py_condition).collect();
             format!("bt.seq.all_of({})", inner.join(", "))

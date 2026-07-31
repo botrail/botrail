@@ -162,6 +162,56 @@ impl ObstacleCollider {
             parts: vec![(Pose::identity(), shape)],
         }
     }
+
+    /// A solid box (pseudo-sensor zones).
+    pub fn cuboid(half_extents: nalgebra::Vector3<f64>) -> Self {
+        Self::from_shape(SharedShape::cuboid(
+            half_extents.x,
+            half_extents.y,
+            half_extents.z,
+        ))
+    }
+
+    /// A capsule spanning two local points (pseudo photoelectric beams).
+    pub fn capsule(a: nalgebra::Point3<f64>, b: nalgebra::Point3<f64>, radius: f64) -> Self {
+        let p = |p: nalgebra::Point3<f64>| parry3d_f64::math::Vector::new(p.x, p.y, p.z);
+        Self::from_shape(SharedShape::capsule(p(a), p(b), radius))
+    }
+
+    /// Overlap test between two colliders at world poses (boolean contact,
+    /// the semantics a presence sensor or light beam wants).
+    pub fn intersects(
+        &self,
+        pose: &Isometry3<f64>,
+        other: &ObstacleCollider,
+        other_pose: &Isometry3<f64>,
+    ) -> bool {
+        parts_intersect(
+            &to_parry_pose(pose),
+            &self.parts,
+            &to_parry_pose(other_pose),
+            &other.parts,
+        )
+    }
+}
+
+/// True when any robot link overlaps `collider` (light-curtain style robot
+/// sensing). `link_poses` must align with the model's links.
+pub fn robot_intersects(
+    robot: &RobotCollider,
+    link_poses: &[Isometry3<f64>],
+    collider: &ObstacleCollider,
+    pose: &Isometry3<f64>,
+) -> bool {
+    let p = to_parry_pose(pose);
+    robot
+        .links
+        .iter()
+        .zip(link_poses)
+        .any(|(parts, link_pose)| {
+            !parts.is_empty()
+                && parts_intersect(&to_parry_pose(link_pose), parts, &p, &collider.parts)
+        })
 }
 
 fn parts_intersect(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> bool {

@@ -308,6 +308,40 @@ impl SceneHub {
         })
     }
 
+    pub fn sensors_json(&self) -> String {
+        let msg = self.with_scene(|scene| wire::sensors_message(scene));
+        serde_json::to_string(&msg).expect("wire types serialize infallibly")
+    }
+
+    pub fn devices_json(&self) -> String {
+        let msg = self.with_scene(|scene| wire::devices_message(scene));
+        serde_json::to_string(&msg).expect("wire types serialize infallibly")
+    }
+
+    pub fn upsert_sensor(&self, sensor: botrail_scene::seq::Sensor) {
+        botrail_session::upsert_sensor(self, sensor);
+    }
+
+    pub fn remove_sensor(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_sensor(self, name)
+    }
+
+    pub fn sensor_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.sensors().iter().map(|s| s.name.clone()).collect())
+    }
+
+    pub fn upsert_device(&self, device: botrail_scene::seq::Device) {
+        botrail_session::upsert_device(self, device);
+    }
+
+    pub fn remove_device(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_device(self, name)
+    }
+
+    pub fn device_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.devices().iter().map(|d| d.name.clone()).collect())
+    }
+
     /// Rolls out a sequence (broadcasting the result to the studio) and
     /// returns the timeline plus the snapshot it ran against.
     pub fn simulate_sequence(
@@ -504,6 +538,8 @@ impl SceneHub {
         let _ = self.tx.send(self.obstacles_json());
         let _ = self.tx.send(self.motions_json());
         let _ = self.tx.send(self.sequences_json());
+        let _ = self.tx.send(self.sensors_json());
+        let _ = self.tx.send(self.devices_json());
         let _ = self.tx.send(self.frames_json());
         self.broadcast_state();
         Ok(())

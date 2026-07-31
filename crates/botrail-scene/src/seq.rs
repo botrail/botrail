@@ -8,6 +8,8 @@
 //! (TON), `Done` = the robot's completion signal, the scan loop lives in
 //! [`crate::rollout`].
 
+use nalgebra::{Isometry3, Point3, Unit, Vector3};
+
 use crate::{Scene, SceneError};
 
 /// A user-defined internal signal (PLC internal relay), written by
@@ -16,6 +18,78 @@ use crate::{Scene, SceneError};
 pub struct SignalDef {
     pub name: String,
     pub initial: bool,
+}
+
+/// A pseudo-sensor, evaluated geometrically each scan tick and published
+/// as a read-only *input* signal under its own name (PLC input contact).
+#[derive(Debug, Clone)]
+pub struct Sensor {
+    pub name: String,
+    pub kind: SensorKind,
+    pub watch: SensorWatch,
+}
+
+#[derive(Debug, Clone)]
+pub enum SensorKind {
+    /// Presence/area sensor: ON while a watched body overlaps the box.
+    Zone {
+        pose: Isometry3<f64>,
+        size: Vector3<f64>,
+    },
+    /// Photoelectric beam: ON while the beam segment is interrupted.
+    Beam {
+        from: Point3<f64>,
+        to: Point3<f64>,
+        radius: f64,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum SensorWatch {
+    /// Only the named obstacles trip the sensor.
+    Objects(Vec<String>),
+    AllObjects,
+    /// Robot links trip it (light-curtain style).
+    Robot,
+    All,
+}
+
+/// A scripted auxiliary device (PLC output): commanded by
+/// [`Action::Device`], it moves obstacles kinematically each scan tick.
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub name: String,
+    pub kind: DeviceKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeviceKind {
+    /// Advects any *unattached* obstacle whose origin lies inside the zone
+    /// box by `velocity` while running. Its running state is recorded as an
+    /// output-signal lane under the device name.
+    Conveyor {
+        zone_pose: Isometry3<f64>,
+        zone_size: Vector3<f64>,
+        velocity: Vector3<f64>,
+        running: bool,
+    },
+    /// Moves the listed obstacles along `axis` at `speed`, positioned by
+    /// `MoveTo` commands within `range`; `DeviceDone` means in-position.
+    LinearAxis {
+        objects: Vec<String>,
+        axis: Unit<Vector3<f64>>,
+        speed: f64,
+        position: f64,
+        range: (f64, f64),
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum DeviceCommand {
+    Start,
+    Stop,
+    SetSpeed(f64),
+    MoveTo(f64),
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +130,12 @@ pub enum Action {
     Detach { object: String },
     /// Write an internal signal (self-holding relay style).
     Set { signal: String, value: bool },
+    /// Command an auxiliary device (output coil: conveyor start/stop,
+    /// axis positioning). Instantaneous state change.
+    Device {
+        device: String,
+        command: DeviceCommand,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +149,8 @@ pub enum Condition {
     /// Level test of a signal (sensors join in S4 under the same name
     /// space).
     Signal { name: String, value: bool },
+    /// A linear axis has reached its commanded position (in-position).
+    DeviceDone { device: String },
     /// Series contacts (AND).
     All(Vec<Condition>),
     /// Parallel contacts (OR).
@@ -153,6 +235,61 @@ impl Scene {
         self.signals = signals;
     }
 
+    pub fn sensors(&self) -> &[Sensor] {
+        &self.sensors
+    }
+
+    /// Adds or replaces a pseudo-sensor.
+    pub fn upsert_sensor(&mut self, sensor: Sensor) {
+        match self.sensors.iter_mut().find(|s| s.name == sensor.name) {
+            Some(slot) => *slot = sensor,
+            None => self.sensors.push(sensor),
+        }
+    }
+
+    pub fn remove_sensor(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.sensors.len();
+        self.sensors.retain(|s| s.name != name);
+        if self.sensors.len() == before {
+            return Err(SceneError::UnknownSensor(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_sensors(&mut self, sensors: Vec<Sensor>) {
+        self.sensors = sensors;
+    }
+
+    pub fn devices(&self) -> &[Device] {
+        &self.devices
+    }
+
+    /// Adds or replaces an auxiliary device.
+    pub fn upsert_device(&mut self, device: Device) {
+        match self.devices.iter_mut().find(|d| d.name == device.name) {
+            Some(slot) => *slot = device,
+            None => self.devices.push(device),
+        }
+    }
+
+    pub fn remove_device(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.devices.len();
+        self.devices.retain(|d| d.name != name);
+        if self.devices.len() == before {
+            return Err(SceneError::UnknownDevice(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_devices(&mut self, devices: Vec<Device>) {
+        self.devices = devices;
+    }
+
+    /// Is `name` readable as a signal (internal relay or sensor input)?
+    fn signal_readable(&self, name: &str) -> bool {
+        self.signals.iter().any(|s| s.name == name) || self.sensors.iter().any(|s| s.name == name)
+    }
+
     /// Full authoring-time validation, run before a rollout. `Err` carries
     /// the offending step index (when applicable) and a message.
     pub(crate) fn validate_sequence(
@@ -161,6 +298,17 @@ impl Scene {
     ) -> Result<(), (Option<usize>, String)> {
         if sequence.steps.is_empty() {
             return Err((None, "sequence has no steps".to_string()));
+        }
+        for sensor in &self.sensors {
+            if self.signals.iter().any(|s| s.name == sensor.name) {
+                return Err((
+                    None,
+                    format!(
+                        "sensor `{}` collides with an internal signal of the same name",
+                        sensor.name
+                    ),
+                ));
+            }
         }
         for (i, step) in sequence.steps.iter().enumerate() {
             let drivers = step.actions.iter().filter(|a| a.drives_joints()).count();
@@ -245,11 +393,49 @@ impl Scene {
             }
             Action::Set { signal, .. } => {
                 if !self.signals.iter().any(|s| &s.name == signal) {
+                    if self.sensors.iter().any(|s| &s.name == signal) {
+                        return Err(format!("sensor `{signal}` is a read-only input"));
+                    }
                     return Err(format!(
                         "unknown signal `{signal}` (declare it with define_signal)"
                     ));
                 }
                 Ok(())
+            }
+            Action::Device { device, command } => {
+                let found = self
+                    .devices
+                    .iter()
+                    .find(|d| &d.name == device)
+                    .ok_or_else(|| format!("unknown device `{device}`"))?;
+                match (&found.kind, command) {
+                    (DeviceKind::Conveyor { .. }, DeviceCommand::Start | DeviceCommand::Stop) => {
+                        Ok(())
+                    }
+                    (DeviceKind::Conveyor { .. }, DeviceCommand::SetSpeed(v)) => {
+                        if v.is_finite() {
+                            Ok(())
+                        } else {
+                            Err(format!("set_speed({v}) is not finite"))
+                        }
+                    }
+                    (DeviceKind::Conveyor { .. }, DeviceCommand::MoveTo(_)) => Err(format!(
+                        "conveyor `{device}` has no position; use start/stop"
+                    )),
+                    (DeviceKind::LinearAxis { range, .. }, DeviceCommand::MoveTo(p)) => {
+                        if !p.is_finite() || *p < range.0 - 1e-9 || *p > range.1 + 1e-9 {
+                            Err(format!(
+                                "move_to({p}) is outside the axis range [{}, {}]",
+                                range.0, range.1
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    (DeviceKind::LinearAxis { .. }, _) => {
+                        Err(format!("axis `{device}` only takes move_to commands"))
+                    }
+                }
             }
         }
     }
@@ -264,9 +450,22 @@ impl Scene {
                 Ok(())
             }
             Condition::Signal { name, .. } => {
-                if !self.signals.iter().any(|s| &s.name == name) {
+                if !self.signal_readable(name) {
                     return Err(format!(
-                        "unknown signal `{name}` (declare it with define_signal)"
+                        "unknown signal `{name}` (declare it with define_signal or add a sensor)"
+                    ));
+                }
+                Ok(())
+            }
+            Condition::DeviceDone { device } => {
+                let found = self
+                    .devices
+                    .iter()
+                    .find(|d| &d.name == device)
+                    .ok_or_else(|| format!("unknown device `{device}`"))?;
+                if !matches!(found.kind, DeviceKind::LinearAxis { .. }) {
+                    return Err(format!(
+                        "`device_done` waits for a linear axis; `{device}` is a conveyor"
                     ));
                 }
                 Ok(())

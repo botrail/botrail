@@ -20,6 +20,16 @@ function actionLabel(action: ActionMsg): string {
       return `⊖ ${short(action.object)}`;
     case "set":
       return `${action.signal}=${action.value ? "1" : "0"}`;
+    case "device": {
+      const cmd = action.command;
+      const verb =
+        cmd.type === "set_speed"
+          ? `speed ${cmd.speed}`
+          : cmd.type === "move_to"
+            ? `→${cmd.position}`
+            : cmd.type;
+      return `⚙ ${action.device} ${verb}`;
+    }
   }
 }
 
@@ -37,6 +47,8 @@ function conditionLabel(condition: ConditionMsg): string {
       return condition.conditions.map(conditionLabel).join(" & ");
     case "any":
       return condition.conditions.map(conditionLabel).join(" | ");
+    case "device_done":
+      return `${condition.device} done`;
   }
 }
 

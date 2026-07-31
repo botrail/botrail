@@ -8,6 +8,8 @@ import type {
   PlanStatsMsg,
   PoseMsg,
   SceneDescriptionMsg,
+  DeviceMsg,
+  SensorMsg,
   SequenceMsg,
   ServerMessage,
   SignalDefMsg,
@@ -112,6 +114,10 @@ interface StudioState {
   sequences: SequenceMsg[];
   /** Declared internal signals. */
   signalDefs: SignalDefMsg[];
+  /** Pseudo-sensors; re-sent in full by the server on every change. */
+  sensors: SensorMsg[];
+  /** Auxiliary devices; re-sent in full by the server on every change. */
+  devices: DeviceMsg[];
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   sequenceError: string | null;
@@ -190,6 +196,8 @@ export const useStudioStore = create<StudioState>((set) => ({
   motions: [],
   sequences: [],
   signalDefs: [],
+  sensors: [],
+  devices: [],
   sequenceSimulating: false,
   sequenceError: null,
   timeline: null,
@@ -229,6 +237,8 @@ export const useStudioStore = create<StudioState>((set) => ({
         motions: [],
         sequences: [],
         signalDefs: [],
+        sensors: [],
+        devices: [],
         sequenceSimulating: false,
         sequenceError: null,
         timeline: null,
@@ -278,6 +288,10 @@ export const useStudioStore = create<StudioState>((set) => ({
       set({ motions: msg.motions });
     } else if (msg.type === "sequences") {
       set({ sequences: msg.sequences, signalDefs: msg.signals });
+    } else if (msg.type === "sensors") {
+      set({ sensors: msg.sensors });
+    } else if (msg.type === "devices") {
+      set({ devices: msg.devices });
     } else if (msg.type === "sequence_result") {
       if (msg.ok && msg.timeline) {
         const traj = msg.timeline.trajectory;

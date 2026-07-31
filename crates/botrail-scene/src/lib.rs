@@ -41,6 +41,10 @@ pub enum SceneError {
     UnknownSequence(String),
     #[error("unknown signal `{0}`")]
     UnknownSignal(String),
+    #[error("unknown sensor `{0}`")]
+    UnknownSensor(String),
+    #[error("unknown device `{0}`")]
+    UnknownDevice(String),
     #[error("{0}")]
     UnsupportedGeometry(String),
 }
@@ -99,6 +103,8 @@ pub struct Scene {
     motions: Vec<Motion>,
     sequences: Vec<seq::Sequence>,
     signals: Vec<seq::SignalDef>,
+    sensors: Vec<seq::Sensor>,
+    devices: Vec<seq::Device>,
     frames: Vec<Frame>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
@@ -138,6 +144,8 @@ impl Scene {
             motions: Vec::new(),
             sequences: Vec::new(),
             signals: Vec::new(),
+            sensors: Vec::new(),
+            devices: Vec::new(),
             frames: Vec::new(),
             collision_warnings,
         }

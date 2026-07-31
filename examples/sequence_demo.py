@@ -1,10 +1,11 @@
-"""PLC-style sequence demo: a full pick cycle on the factory cell.
+"""PLC-style sequence demo: the full §1 scenario on the factory cell.
 
-The cycle mirrors how real cells are structured — *planned* transfer moves
-between stations, *guarded* ramp moves (no collision check) for the
-approach/retreat through contact, an internal `carrying` signal, and timer
-steps. Everything bakes into one deterministic timeline whose cycle time is
-printed, then exports to USD.
+The conveyor feeds Box_A down the belt until it interrupts a photoelectric
+beam at the pick point; the sequence stops the belt and runs a pick cycle
+structured like a real cell — *planned* transfer moves between stations,
+*guarded* ramp moves (no collision check) for the approach/retreat through
+contact, an internal `carrying` signal, and timer steps. Everything bakes
+into one deterministic timeline (cycle time printed), then exports to USD.
 
 Run with:  python examples/sequence_demo.py [out.usda]
 """
@@ -18,6 +19,16 @@ import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
 
 BOX = "/World/Conveyor/Box_A"
+# The 12 cm box is bulky for the Franka hand: allow by-design contact with
+# the whole wrist assembly, not just the gripper subtree.
+TOUCH = [
+    "/panda/panda_hand",
+    "/panda/panda_leftfinger",
+    "/panda/panda_rightfinger",
+    "/panda/panda_link7",
+    "/panda/panda_link6",
+    "/panda/panda_link5",
+]
 
 
 def build_cycle(scene: bt.Scene) -> str:
@@ -25,6 +36,22 @@ def build_cycle(scene: bt.Scene) -> str:
     names = scene.robot.joint_names
     fingers = [n for n in names if "panda_finger_joint" in n]
     home_q = list(scene.joint_positions)
+
+    # ---- conveyor feed: Box_A starts upstream, a beam guards the pick ---
+    scene.set_obstacle_pose(BOX, (-0.9, 0.62, 0.61))
+    scene.add_conveyor(
+        "conv",
+        zone_position=(-0.45, 0.62, 0.61),
+        zone_size=(1.3, 0.4, 0.24),
+        velocity=(0.15, 0.0, 0.0),
+        running=False,
+    )
+    scene.add_beam_sensor(
+        "beam_pick",
+        frm=(0.06, 0.42, 0.61),
+        to=(0.06, 0.82, 0.61),
+        watch=[BOX],
+    )
 
     # ---- teach the poses by IK posing (studio-equivalent workflow) ------
     pick_pos, pick_quat = scene.frame("/World/Conveyor/PickFrame")
@@ -36,6 +63,8 @@ def build_cycle(scene: bt.Scene) -> str:
     hover_q = list(scene.joint_positions)  # above the conveyor
     scene.set_tcp_target((place_pos[0], place_pos[1], place_pos[2] + 0.20), pick_quat)
     drop_q = list(scene.joint_positions)  # above the pallet
+    scene.set_tcp_target((place_pos[0], place_pos[1], place_pos[2] + 0.38), pick_quat)
+    retreat_q = list(scene.joint_positions)  # clear of the released box
     scene.set_joint_positions(home_q)
 
     closed = 0.025  # slight squeeze on the 12 cm box
@@ -58,13 +87,15 @@ def build_cycle(scene: bt.Scene) -> str:
     ramp_to = lambda q: dict(zip(names, q))  # noqa: E731
 
     sq = scene.sequence("pick_place")
+    sq.step("feed", actions=[bt.seq.start("conv")], transition=bt.seq.signal("beam_pick"))
+    sq.step("halt", actions=[bt.seq.stop("conv")])
     sq.step("approach", actions=[bt.seq.motion("to_hover")])
     sq.step("descend", actions=[bt.seq.ramp(ramp_to(grasp_q), 0.8)])
     sq.step("close", actions=[bt.seq.ramp({f: closed for f in fingers}, 0.4)])
     sq.step(
         "grasp",
         actions=[
-            bt.seq.attach(BOX, link="/panda/panda_hand"),
+            bt.seq.attach(BOX, link="/panda/panda_hand", touch_links=TOUCH),
             bt.seq.set_signal("carrying"),
         ],
     )
@@ -75,6 +106,7 @@ def build_cycle(scene: bt.Scene) -> str:
         actions=[bt.seq.detach(BOX), bt.seq.set_signal("carrying", False)],
     )
     sq.step("open", actions=[bt.seq.ramp({f: 0.035 for f in fingers}, 0.4)])
+    sq.step("retreat", actions=[bt.seq.ramp(ramp_to(with_fingers(retreat_q, 0.035)), 0.8)])
     sq.step("settle", transition=bt.seq.elapsed(0.5))
     sq.step("home", actions=[bt.seq.motion("home")])
     return sq.name

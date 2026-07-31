@@ -57,7 +57,7 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, frames, state. Mesh visuals are mapped to URLs through the
+/// sequences, sensors, devices, frames, state. Mesh visuals are mapped to URLs through the
 /// host's [`mesh_url`](SessionHost::mesh_url).
 pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
@@ -66,6 +66,8 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::obstacles_message(scene, |p| host.mesh_url(p)),
             wire::motions_message(scene),
             wire::sequences_message(scene),
+            wire::sensors_message(scene),
+            wire::devices_message(scene),
             wire::frames_message(scene),
             wire::state_message(scene),
         ]
@@ -195,6 +197,20 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
                 &botrail_scene::rollout::RolloutOptions::default(),
             );
             Ok(())
+        }
+        ClientMessage::UpsertSensor { sensor } => {
+            upsert_sensor(host, wire::sensor_from_msg(&sensor));
+            Ok(())
+        }
+        ClientMessage::RemoveSensor { name } => {
+            remove_sensor(host, &name).map_err(|e| format!("rejected remove_sensor: {e}"))
+        }
+        ClientMessage::UpsertDevice { device } => {
+            upsert_device(host, wire::device_from_msg(&device));
+            Ok(())
+        }
+        ClientMessage::RemoveDevice { name } => {
+            remove_device(host, &name).map_err(|e| format!("rejected remove_device: {e}"))
         }
     }
 }
@@ -429,6 +445,40 @@ pub fn define_signal(host: &impl SessionHost, name: &str, initial: bool) {
 pub fn remove_signal(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_signal(name))?;
     emit_sequences(host);
+    Ok(())
+}
+
+fn emit_sensors(host: &impl SessionHost) {
+    let msg = host.with_scene(|scene| wire::sensors_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces a pseudo-sensor and rebroadcasts the list.
+pub fn upsert_sensor(host: &impl SessionHost, sensor: botrail_scene::seq::Sensor) {
+    host.with_scene(|scene| scene.upsert_sensor(sensor));
+    emit_sensors(host);
+}
+
+pub fn remove_sensor(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_sensor(name))?;
+    emit_sensors(host);
+    Ok(())
+}
+
+fn emit_devices(host: &impl SessionHost) {
+    let msg = host.with_scene(|scene| wire::devices_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces an auxiliary device and rebroadcasts the list.
+pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
+    host.with_scene(|scene| scene.upsert_device(device));
+    emit_devices(host);
+}
+
+pub fn remove_device(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_device(name))?;
+    emit_devices(host);
     Ok(())
 }
 
@@ -764,6 +814,8 @@ mod tests {
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
                     ServerMessage::SequenceResult { .. } => "sequence_result",
+                    ServerMessage::Sensors { .. } => "sensors",
+                    ServerMessage::Devices { .. } => "devices",
                 })
                 .collect()
         }
@@ -792,8 +844,10 @@ mod tests {
         assert!(matches!(msgs[1], ServerMessage::Obstacles { .. }));
         assert!(matches!(msgs[2], ServerMessage::Motions { .. }));
         assert!(matches!(msgs[3], ServerMessage::Sequences { .. }));
-        assert!(matches!(msgs[4], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[5], ServerMessage::State { .. }));
+        assert!(matches!(msgs[4], ServerMessage::Sensors { .. }));
+        assert!(matches!(msgs[5], ServerMessage::Devices { .. }));
+        assert!(matches!(msgs[6], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[7], ServerMessage::State { .. }));
     }
 
     #[test]

@@ -64,6 +64,34 @@ def set_signal(name: str, value: bool = True) -> Action:
     return {"type": "set", "signal": name, "value": bool(value)}
 
 
+def start(device: str) -> Action:
+    """Start a conveyor."""
+    return {"type": "device", "device": device, "command": {"type": "start"}}
+
+
+def stop(device: str) -> Action:
+    """Stop a conveyor."""
+    return {"type": "device", "device": device, "command": {"type": "stop"}}
+
+
+def set_speed(device: str, speed: float) -> Action:
+    """Rescale a conveyor's velocity to ``speed`` (m/s, direction kept)."""
+    return {
+        "type": "device",
+        "device": device,
+        "command": {"type": "set_speed", "speed": float(speed)},
+    }
+
+
+def move_to(device: str, position: float) -> Action:
+    """Command a linear axis to ``position``; await with ``device_done``."""
+    return {
+        "type": "device",
+        "device": device,
+        "command": {"type": "move_to", "position": float(position)},
+    }
+
+
 # --------------------------------------------------------------- conditions
 
 
@@ -83,8 +111,13 @@ def elapsed(seconds: float) -> Condition:
 
 
 def signal(name: str, value: bool = True) -> Condition:
-    """Level test of a signal."""
+    """Level test of a signal (internal relay or sensor input)."""
     return {"type": "signal", "name": name, "value": bool(value)}
+
+
+def device_done(device: str) -> Condition:
+    """A linear axis has reached its commanded position."""
+    return {"type": "device_done", "device": device}
 
 
 def all_of(*conditions: Condition) -> Condition:

@@ -170,6 +170,19 @@ fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isom
         .into()
 }
 
+fn sensor_watch(watch: Option<Vec<String>>, watch_robot: bool) -> botrail_scene::seq::SensorWatch {
+    use botrail_scene::seq::SensorWatch;
+    match (watch, watch_robot) {
+        (None, false) => SensorWatch::AllObjects,
+        (None, true) => SensorWatch::All,
+        (Some(names), false) => SensorWatch::Objects(names),
+        (Some(names), true) if names.is_empty() => SensorWatch::Robot,
+        // Named objects plus the robot has no dedicated variant; watch
+        // everything (the superset) rather than silently dropping one.
+        (Some(_), true) => SensorWatch::All,
+    }
+}
+
 fn scene_err(e: botrail_scene::SceneError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
@@ -538,6 +551,132 @@ impl Scene {
     #[getter]
     fn signals(&self) -> Vec<(String, bool)> {
         self.hub.signals()
+    }
+
+    /// Adds a box-shaped presence sensor: its name becomes a read-only
+    /// input signal, ON while a watched body overlaps the zone. `watch` is
+    /// a list of obstacle names (default: every obstacle); pass
+    /// `watch_robot=True` to sense robot links too (with `watch=[]` for a
+    /// robot-only light curtain).
+    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false))]
+    fn add_zone_sensor(
+        &self,
+        name: &str,
+        position: [f64; 3],
+        size: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+        watch: Option<Vec<String>>,
+        watch_robot: bool,
+    ) -> PyResult<()> {
+        self.hub.upsert_sensor(botrail_scene::seq::Sensor {
+            name: name.to_string(),
+            kind: botrail_scene::seq::SensorKind::Zone {
+                pose: pose_from(position, quaternion),
+                size: nalgebra::Vector3::new(size[0], size[1], size[2]),
+            },
+            watch: sensor_watch(watch, watch_robot),
+        });
+        Ok(())
+    }
+
+    /// Adds a photoelectric beam sensor between two world points, ON while
+    /// the beam is interrupted. Watch semantics as in `add_zone_sensor`.
+    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false))]
+    fn add_beam_sensor(
+        &self,
+        name: &str,
+        frm: [f64; 3],
+        to: [f64; 3],
+        radius: f64,
+        watch: Option<Vec<String>>,
+        watch_robot: bool,
+    ) -> PyResult<()> {
+        self.hub.upsert_sensor(botrail_scene::seq::Sensor {
+            name: name.to_string(),
+            kind: botrail_scene::seq::SensorKind::Beam {
+                from: nalgebra::Point3::new(frm[0], frm[1], frm[2]),
+                to: nalgebra::Point3::new(to[0], to[1], to[2]),
+                radius,
+            },
+            watch: sensor_watch(watch, watch_robot),
+        });
+        Ok(())
+    }
+
+    fn remove_sensor(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_sensor(name).map_err(scene_err)
+    }
+
+    #[getter]
+    fn sensor_names(&self) -> Vec<String> {
+        self.hub.sensor_names()
+    }
+
+    /// Adds a conveyor: while running, any unattached obstacle whose origin
+    /// lies inside the zone box is carried at `velocity` (m/s). Start/stop
+    /// it from sequences with `bt.seq.start`/`bt.seq.stop`.
+    #[pyo3(signature = (name, zone_position, zone_size, velocity, zone_quaternion = None, running = true))]
+    fn add_conveyor(
+        &self,
+        name: &str,
+        zone_position: [f64; 3],
+        zone_size: [f64; 3],
+        velocity: [f64; 3],
+        zone_quaternion: Option<[f64; 4]>,
+        running: bool,
+    ) -> PyResult<()> {
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::Conveyor {
+                zone_pose: pose_from(zone_position, zone_quaternion),
+                zone_size: nalgebra::Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                velocity: nalgebra::Vector3::new(velocity[0], velocity[1], velocity[2]),
+                running,
+            },
+        });
+        Ok(())
+    }
+
+    /// Adds a linear axis (door / lifter / indexer) moving the listed
+    /// obstacles along `axis` at `speed`, positioned within `range` by
+    /// `bt.seq.move_to`; await it with `bt.seq.device_done`.
+    #[pyo3(signature = (name, objects, axis, speed, range, position = 0.0))]
+    fn add_linear_axis(
+        &self,
+        name: &str,
+        objects: Vec<String>,
+        axis: [f64; 3],
+        speed: f64,
+        range: [f64; 2],
+        position: f64,
+    ) -> PyResult<()> {
+        let axis = nalgebra::Unit::try_new(nalgebra::Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
+            .ok_or_else(|| PyValueError::new_err("axis must be a nonzero vector"))?;
+        if !(speed.is_finite() && speed > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "speed must be positive, got {speed}"
+            )));
+        }
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::LinearAxis {
+                objects,
+                axis,
+                speed,
+                position,
+                range: (range[0], range[1]),
+            },
+        });
+        Ok(())
+    }
+
+    fn remove_device(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_device(name).map_err(scene_err)
+    }
+
+    #[getter]
+    fn device_names(&self) -> Vec<String> {
+        self.hub.device_names()
     }
 
     /// Starts (or replaces) a PLC-style sequence and returns a builder:

@@ -225,3 +225,13 @@ export function sendRemoveSequence(name: string): void {
 export function sendSimulateSequence(name: string): void {
   rawSend({ type: "simulate_sequence", name });
 }
+
+/** Remove a pseudo-sensor (sent immediately). */
+export function sendRemoveSensor(name: string): void {
+  rawSend({ type: "remove_sensor", name });
+}
+
+/** Remove an auxiliary device (sent immediately). */
+export function sendRemoveDevice(name: string): void {
+  rawSend({ type: "remove_device", name });
+}

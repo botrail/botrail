@@ -292,6 +292,78 @@ pub struct SignalDefMsg {
     pub initial: bool,
 }
 
+/// A pseudo-sensor: geometric test published as a read-only input signal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SensorMsg {
+    pub name: String,
+    pub kind: SensorKindMsg,
+    pub watch: SensorWatchMsg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SensorKindMsg {
+    /// Presence/area sensor: ON while a watched body overlaps the box.
+    Zone { pose: PoseMsg, size: [f64; 3] },
+    /// Photoelectric beam: ON while the segment is interrupted.
+    Beam {
+        from: [f64; 3],
+        to: [f64; 3],
+        radius: f64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SensorWatchMsg {
+    Objects { names: Vec<String> },
+    AllObjects,
+    Robot,
+    All,
+}
+
+/// A scripted auxiliary device commanded from sequences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct DeviceMsg {
+    pub name: String,
+    pub kind: DeviceKindMsg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum DeviceKindMsg {
+    /// Advects unattached obstacles whose origin lies inside the zone.
+    Conveyor {
+        zone_pose: PoseMsg,
+        zone_size: [f64; 3],
+        velocity: [f64; 3],
+        running: bool,
+    },
+    /// Moves the listed obstacles along `axis` within `range`.
+    LinearAxis {
+        objects: Vec<String>,
+        axis: [f64; 3],
+        speed: f64,
+        position: f64,
+        range: [f64; 2],
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum DeviceCommandMsg {
+    Start,
+    Stop,
+    SetSpeed { speed: f64 },
+    MoveTo { position: f64 },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SequenceMsg {
@@ -339,6 +411,11 @@ pub enum ActionMsg {
     Detach { object: String },
     /// Write an internal signal.
     Set { signal: String, value: bool },
+    /// Command an auxiliary device (output coil).
+    Device {
+        device: String,
+        command: DeviceCommandMsg,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -353,6 +430,8 @@ pub enum ConditionMsg {
     Elapsed { seconds: f64 },
     /// Level test of a signal.
     Signal { name: String, value: bool },
+    /// A linear axis reached its commanded position.
+    DeviceDone { device: String },
     /// Series contacts (AND).
     All { conditions: Vec<ConditionMsg> },
     /// Parallel contacts (OR).
@@ -443,6 +522,14 @@ pub enum ServerMessage {
     Sequences {
         sequences: Vec<SequenceMsg>,
         signals: Vec<SignalDefMsg>,
+    },
+    /// The full pseudo-sensor list; resent on every change.
+    Sensors {
+        sensors: Vec<SensorMsg>,
+    },
+    /// The full device list; resent on every change.
+    Devices {
+        devices: Vec<DeviceMsg>,
     },
     /// Response to a `simulate_sequence` request (broadcast to every client).
     SequenceResult {
@@ -554,6 +641,20 @@ pub enum ClientMessage {
     /// Roll out the sequence against a scene snapshot; the result arrives
     /// as a `sequence_result`.
     SimulateSequence {
+        name: String,
+    },
+    /// Add or replace a pseudo-sensor.
+    UpsertSensor {
+        sensor: SensorMsg,
+    },
+    RemoveSensor {
+        name: String,
+    },
+    /// Add or replace an auxiliary device.
+    UpsertDevice {
+        device: DeviceMsg,
+    },
+    RemoveDevice {
         name: String,
     },
 }
@@ -744,7 +845,10 @@ pub fn motions_message(scene: &Scene) -> ServerMessage {
 
 // ---------------------------------------------------- sequence conversions
 
-use crate::seq::{Action, Condition, Sequence, SignalDef, Step};
+use crate::seq::{
+    Action, Condition, Device, DeviceCommand, DeviceKind, Sensor, SensorKind, SensorWatch,
+    Sequence, SignalDef, Step,
+};
 
 pub fn action_msg(action: &Action) -> ActionMsg {
     match action {
@@ -777,6 +881,17 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             signal: signal.clone(),
             value: *value,
         },
+        Action::Device { device, command } => ActionMsg::Device {
+            device: device.clone(),
+            command: match command {
+                DeviceCommand::Start => DeviceCommandMsg::Start,
+                DeviceCommand::Stop => DeviceCommandMsg::Stop,
+                DeviceCommand::SetSpeed(speed) => DeviceCommandMsg::SetSpeed { speed: *speed },
+                DeviceCommand::MoveTo(position) => DeviceCommandMsg::MoveTo {
+                    position: *position,
+                },
+            },
+        },
     }
 }
 
@@ -805,6 +920,15 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             signal: signal.clone(),
             value: *value,
         },
+        ActionMsg::Device { device, command } => Action::Device {
+            device: device.clone(),
+            command: match command {
+                DeviceCommandMsg::Start => DeviceCommand::Start,
+                DeviceCommandMsg::Stop => DeviceCommand::Stop,
+                DeviceCommandMsg::SetSpeed { speed } => DeviceCommand::SetSpeed(*speed),
+                DeviceCommandMsg::MoveTo { position } => DeviceCommand::MoveTo(*position),
+            },
+        },
     }
 }
 
@@ -816,6 +940,9 @@ pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
         Condition::Signal { name, value } => ConditionMsg::Signal {
             name: name.clone(),
             value: *value,
+        },
+        Condition::DeviceDone { device } => ConditionMsg::DeviceDone {
+            device: device.clone(),
         },
         Condition::All(cs) => ConditionMsg::All {
             conditions: cs.iter().map(seq_condition_msg).collect(),
@@ -834,6 +961,9 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
         ConditionMsg::Signal { name, value } => Condition::Signal {
             name: name.clone(),
             value: *value,
+        },
+        ConditionMsg::DeviceDone { device } => Condition::DeviceDone {
+            device: device.clone(),
         },
         ConditionMsg::All { conditions } => {
             Condition::All(conditions.iter().map(seq_condition_from_msg).collect())
@@ -886,6 +1016,133 @@ pub fn sequences_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Sequences {
         sequences: scene.sequences().iter().map(sequence_msg).collect(),
         signals: scene.signals().iter().map(signal_def_msg).collect(),
+    }
+}
+
+pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
+    SensorMsg {
+        name: sensor.name.clone(),
+        kind: match &sensor.kind {
+            SensorKind::Zone { pose, size } => SensorKindMsg::Zone {
+                pose: PoseMsg::from(pose),
+                size: [size.x, size.y, size.z],
+            },
+            SensorKind::Beam { from, to, radius } => SensorKindMsg::Beam {
+                from: [from.x, from.y, from.z],
+                to: [to.x, to.y, to.z],
+                radius: *radius,
+            },
+        },
+        watch: match &sensor.watch {
+            SensorWatch::Objects(names) => SensorWatchMsg::Objects {
+                names: names.clone(),
+            },
+            SensorWatch::AllObjects => SensorWatchMsg::AllObjects,
+            SensorWatch::Robot => SensorWatchMsg::Robot,
+            SensorWatch::All => SensorWatchMsg::All,
+        },
+    }
+}
+
+pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
+    Sensor {
+        name: msg.name.clone(),
+        kind: match &msg.kind {
+            SensorKindMsg::Zone { pose, size } => SensorKind::Zone {
+                pose: pose.into(),
+                size: Vector3::new(size[0], size[1], size[2]),
+            },
+            SensorKindMsg::Beam { from, to, radius } => SensorKind::Beam {
+                from: nalgebra::Point3::new(from[0], from[1], from[2]),
+                to: nalgebra::Point3::new(to[0], to[1], to[2]),
+                radius: *radius,
+            },
+        },
+        watch: match &msg.watch {
+            SensorWatchMsg::Objects { names } => SensorWatch::Objects(names.clone()),
+            SensorWatchMsg::AllObjects => SensorWatch::AllObjects,
+            SensorWatchMsg::Robot => SensorWatch::Robot,
+            SensorWatchMsg::All => SensorWatch::All,
+        },
+    }
+}
+
+pub fn device_msg(device: &Device) -> DeviceMsg {
+    DeviceMsg {
+        name: device.name.clone(),
+        kind: match &device.kind {
+            DeviceKind::Conveyor {
+                zone_pose,
+                zone_size,
+                velocity,
+                running,
+            } => DeviceKindMsg::Conveyor {
+                zone_pose: PoseMsg::from(zone_pose),
+                zone_size: [zone_size.x, zone_size.y, zone_size.z],
+                velocity: [velocity.x, velocity.y, velocity.z],
+                running: *running,
+            },
+            DeviceKind::LinearAxis {
+                objects,
+                axis,
+                speed,
+                position,
+                range,
+            } => DeviceKindMsg::LinearAxis {
+                objects: objects.clone(),
+                axis: [axis.x, axis.y, axis.z],
+                speed: *speed,
+                position: *position,
+                range: [range.0, range.1],
+            },
+        },
+    }
+}
+
+pub fn device_from_msg(msg: &DeviceMsg) -> Device {
+    Device {
+        name: msg.name.clone(),
+        kind: match &msg.kind {
+            DeviceKindMsg::Conveyor {
+                zone_pose,
+                zone_size,
+                velocity,
+                running,
+            } => DeviceKind::Conveyor {
+                zone_pose: zone_pose.into(),
+                zone_size: Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                velocity: Vector3::new(velocity[0], velocity[1], velocity[2]),
+                running: *running,
+            },
+            DeviceKindMsg::LinearAxis {
+                objects,
+                axis,
+                speed,
+                position,
+                range,
+            } => DeviceKind::LinearAxis {
+                objects: objects.clone(),
+                axis: nalgebra::Unit::try_new(Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
+                    .unwrap_or_else(|| nalgebra::Unit::new_unchecked(Vector3::x())),
+                speed: *speed,
+                position: *position,
+                range: (range[0], range[1]),
+            },
+        },
+    }
+}
+
+/// The full pseudo-sensor list as a `sensors` message.
+pub fn sensors_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Sensors {
+        sensors: scene.sensors().iter().map(sensor_msg).collect(),
+    }
+}
+
+/// The full device list as a `devices` message.
+pub fn devices_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Devices {
+        devices: scene.devices().iter().map(device_msg).collect(),
     }
 }
 

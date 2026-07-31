@@ -124,6 +124,48 @@ class Scene:
         dt: float = 0.01,
         max_duration: float = 120.0,
     ) -> "SequenceTimeline": ...
+    def add_zone_sensor(
+        self,
+        name: str,
+        position: tuple[float, float, float],
+        size: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+        watch: Optional[list[str]] = None,
+        watch_robot: bool = False,
+    ) -> None: ...
+    def add_beam_sensor(
+        self,
+        name: str,
+        frm: tuple[float, float, float],
+        to: tuple[float, float, float],
+        radius: float = 0.005,
+        watch: Optional[list[str]] = None,
+        watch_robot: bool = False,
+    ) -> None: ...
+    def remove_sensor(self, name: str) -> None: ...
+    @property
+    def sensor_names(self) -> list[str]: ...
+    def add_conveyor(
+        self,
+        name: str,
+        zone_position: tuple[float, float, float],
+        zone_size: tuple[float, float, float],
+        velocity: tuple[float, float, float],
+        zone_quaternion: Optional[tuple[float, float, float, float]] = None,
+        running: bool = True,
+    ) -> None: ...
+    def add_linear_axis(
+        self,
+        name: str,
+        objects: list[str],
+        axis: tuple[float, float, float],
+        speed: float,
+        range: tuple[float, float],
+        position: float = 0.0,
+    ) -> None: ...
+    def remove_device(self, name: str) -> None: ...
+    @property
+    def device_names(self) -> list[str]: ...
     def check_collisions(
         self,
     ) -> list[tuple[tuple[str, str], tuple[str, str]]]: ...

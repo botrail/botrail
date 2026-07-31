@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 
 import type { FrameMsg, ObstacleMsg } from "../protocol";
 import { useStudioStore } from "../store";
-import { sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
+import { sendRemoveDevice, sendRemoveSensor, sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
 
 /**
  * Hierarchy over obstacle/frame names (prim paths from USD imports group
@@ -12,7 +12,16 @@ import { sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
 export function SceneTreePanel() {
   const obstacles = useStudioStore((s) => s.obstacles);
   const frames = useStudioStore((s) => s.frames);
-  if (obstacles.length === 0 && frames.length === 0) return null;
+  const sensors = useStudioStore((s) => s.sensors);
+  const devices = useStudioStore((s) => s.devices);
+  if (
+    obstacles.length === 0 &&
+    frames.length === 0 &&
+    sensors.length === 0 &&
+    devices.length === 0
+  ) {
+    return null;
+  }
   return (
     <section className="panel-section">
       <div className="panel-head">
@@ -22,6 +31,42 @@ export function SceneTreePanel() {
         </span>
       </div>
       <Tree obstacles={obstacles} frames={frames} />
+      {(sensors.length > 0 || devices.length > 0) && (
+        <div className="scene-tree">
+          {sensors.map((s) => (
+            <div key={s.name} className="tree-row">
+              <span className="tree-twist" />
+              <span className="tree-label" title={`${s.kind.kind} sensor`}>
+                {"\u{1F4E1} "}
+                {s.name}
+              </span>
+              <button
+                className="tree-toggle"
+                title="remove sensor"
+                onClick={() => sendRemoveSensor(s.name)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          {devices.map((d) => (
+            <div key={d.name} className="tree-row">
+              <span className="tree-twist" />
+              <span className="tree-label" title={d.kind.kind}>
+                {"\u{2699} "}
+                {d.name}
+              </span>
+              <button
+                className="tree-toggle"
+                title="remove device"
+                onClick={() => sendRemoveDevice(d.name)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

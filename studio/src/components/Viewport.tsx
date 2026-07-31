@@ -10,6 +10,7 @@ import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
+import { SensorView } from "./SensorView";
 import { TcpGizmo } from "./TcpGizmo";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
@@ -86,6 +87,7 @@ export function Viewport() {
           <WasmStageView />
           <GhostRobot />
           <ObstacleView />
+          <SensorView />
           <TcpGizmo />
           <RobotBaseGizmo />
           <PlaybackDriver />

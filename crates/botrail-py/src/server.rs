@@ -36,6 +36,8 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
         hub.obstacles_json(),
         hub.motions_json(),
         hub.sequences_json(),
+        hub.sensors_json(),
+        hub.devices_json(),
         hub.frames_json(),
         hub.state_json(),
     ] {
