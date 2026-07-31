@@ -104,12 +104,14 @@ def Xform "World"
             uniform token[] xformOpOrder = ["xformOp:translate"]
         }
 
+        # 60 mm cartons: the Franka hand opens to 80 mm, so this is what it
+        # can actually grasp. They sit on the belt top (0.55).
         def Cube "Box_A"
         {
             double size = 1
             color3f[] primvars:displayColor = [(0.85, 0.5, 0.2)]
-            double3 xformOp:translate = (-0.5, 0, 0.61)
-            float3 xformOp:scale = (0.12, 0.12, 0.12)
+            double3 xformOp:translate = (0, 0, 0.58)
+            float3 xformOp:scale = (0.06, 0.06, 0.06)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
@@ -117,8 +119,8 @@ def Xform "World"
         {
             double size = 1
             color3f[] primvars:displayColor = [(0.85, 0.5, 0.2)]
-            double3 xformOp:translate = (0, 0, 0.61)
-            float3 xformOp:scale = (0.12, 0.12, 0.12)
+            double3 xformOp:translate = (-1.35, 0, 0.58)
+            float3 xformOp:scale = (0.06, 0.06, 0.06)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
@@ -131,10 +133,14 @@ def Xform "World"
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
+        # Taught grasp pose for a box at the pick station: the point between
+        # the fingertips (the centre of Box_A) with the tool pointing down
+        # (180 deg about X), fingers straddling the belt direction.
         def Xform "PickFrame"
         {
-            double3 xformOp:translate = (0, 0, 0.75)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
+            double3 xformOp:translate = (0, 0, 0.58)
+            quatd xformOp:orient = (0, 1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
         }
     }
 
@@ -170,10 +176,14 @@ def Xform "World"
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
+        # Taught place pose: a 60 mm box resting on Crate_2's lid (top 0.42),
+        # gripped the same way as at the pick but rotated a quarter turn, so
+        # the box lands square with the pallet.
         def Xform "PlaceFrame"
         {
-            double3 xformOp:translate = (0, 0, 0.55)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
+            double3 xformOp:translate = (0.16, -0.04, 0.45)
+            quatd xformOp:orient = (0, 0.7071067811865476, -0.7071067811865476, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
         }
     }
 

@@ -16,19 +16,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import botrail as bt  # noqa: E402
-from demo import build_scene  # noqa: E402
+from demo import build_scene, teach_grasp  # noqa: E402
 
 BOX = "/World/Conveyor/Box_A"
-# The 12 cm box is bulky for the Franka hand: allow by-design contact with
-# the whole wrist assembly, not just the gripper subtree.
-TOUCH = [
-    "/panda/panda_hand",
-    "/panda/panda_leftfinger",
-    "/panda/panda_rightfinger",
-    "/panda/panda_link7",
-    "/panda/panda_link6",
-    "/panda/panda_link5",
-]
+BOX_SIZE = 0.06  # the carton in factory.usda, sized for the Franka hand
+BEAM_RADIUS = 0.005
+# Finger stroke: open wide enough to drop over the box, closed a millimetre
+# a side into it. That squeeze is the cycle's only by-design contact, so the
+# pads are the only links allowed to touch the carried box. The open width
+# also has to swallow the few millimetres a joint-space ramp bows sideways
+# on its way down (0.04 is the joint limit, which the planner excludes).
+OPEN, CLOSED = 0.039, 0.029
+TOUCH = ["/panda/panda_leftfinger", "/panda/panda_rightfinger"]
+# Vertical standoff for the hover poses either side of a grasp.
+HOVER = 0.15
 
 
 def build_cycle(scene: bt.Scene) -> str:
@@ -37,39 +38,47 @@ def build_cycle(scene: bt.Scene) -> str:
     fingers = [n for n in names if "panda_finger_joint" in n]
     home_q = list(scene.joint_positions)
 
+    # ---- the two taught stations, straight out of the USD cell ----------
+    pick = scene.frame("/World/Conveyor/PickFrame")
+    place = scene.frame("/World/Pallet/PlaceFrame")
+
     # ---- conveyor feed: Box_A starts upstream, a beam guards the pick ---
-    scene.set_obstacle_pose(BOX, (-0.9, 0.62, 0.61))
+    # The taught grasp sits at the box's centre, so the pick frame's height
+    # is also where the box rides down the belt.
+    scene.set_obstacle_pose(BOX, (-0.9, pick[0][1], pick[0][2]))
     # The transport zone floor sits above the belt slab (top 0.55) so the
     # advection carries the goods, not the conveyor's own structure.
     scene.add_conveyor(
         "conv",
-        zone_position=(-0.45, 0.62, 0.66),
+        zone_position=(-0.45, 0.62, 0.60),
         zone_size=(1.3, 0.4, 0.14),
         velocity=(0.15, 0.0, 0.0),
         running=False,
     )
+    # The beam trips once the box's leading face comes within the beam
+    # radius, so parking it half a box downstream of the pick frame coasts
+    # the box to a stop centred under the taught grasp.
+    trip_x = pick[0][0] + BOX_SIZE / 2 + BEAM_RADIUS
     scene.add_beam_sensor(
         "beam_pick",
-        frm=(0.06, 0.42, 0.61),
-        to=(0.06, 0.82, 0.61),
+        frm=(trip_x, 0.42, pick[0][2]),
+        to=(trip_x, 0.82, pick[0][2]),
+        radius=BEAM_RADIUS,
         watch=[BOX],
     )
 
     # ---- teach the poses by IK posing (studio-equivalent workflow) ------
-    pick_pos, pick_quat = scene.frame("/World/Conveyor/PickFrame")
-    place_pos, _ = scene.frame("/World/Pallet/PlaceFrame")
-
-    scene.set_tcp_target(pick_pos, pick_quat)
-    grasp_q = list(scene.joint_positions)  # touching the box (open)
-    scene.set_tcp_target((pick_pos[0], pick_pos[1], pick_pos[2] + 0.15), pick_quat)
-    hover_q = list(scene.joint_positions)  # above the conveyor
-    scene.set_tcp_target((place_pos[0], place_pos[1], place_pos[2] + 0.20), pick_quat)
-    drop_q = list(scene.joint_positions)  # above the pallet
-    scene.set_tcp_target((place_pos[0], place_pos[1], place_pos[2] + 0.38), pick_quat)
-    retreat_q = list(scene.joint_positions)  # clear of the released box
+    # Each station is solved hover-first, so the grasp warm-starts from the
+    # pose right above it and stays in the same posture family. Between the
+    # stations the robot goes back to the ready pose first: the pallet is a
+    # 150 deg base swing from the conveyor, and warm-starting across that
+    # walks the solver into a local minimum.
+    hover_q = teach_grasp(scene, pick, standoff=HOVER)  # above the belt
+    grasp_q = teach_grasp(scene, pick)  # pads around the box, still open
     scene.set_joint_positions(home_q)
-
-    closed = 0.025  # slight squeeze on the 12 cm box
+    drop_q = teach_grasp(scene, place, standoff=HOVER)  # above the pallet
+    place_q = teach_grasp(scene, place)  # box resting on the crate
+    scene.set_joint_positions(home_q)
 
     def with_fingers(q: list, width: float) -> list:
         """The configuration with both finger joints set to `width`
@@ -80,8 +89,8 @@ def build_cycle(scene: bt.Scene) -> str:
         return q
 
     # ---- planned transfer motions (fingers stay closed while carrying) --
-    scene.add_segment("to_hover", goal=hover_q)
-    scene.add_segment("to_pallet", goal=with_fingers(drop_q, closed))
+    scene.add_segment("to_hover", goal=with_fingers(hover_q, OPEN))
+    scene.add_segment("to_pallet", goal=with_fingers(drop_q, CLOSED))
     scene.add_segment("home", goal=home_q)
 
     # ---- the sequence ---------------------------------------------------
@@ -92,8 +101,8 @@ def build_cycle(scene: bt.Scene) -> str:
     sq.step("feed", actions=[bt.seq.start("conv")], transition=bt.seq.signal("beam_pick"))
     sq.step("halt", actions=[bt.seq.stop("conv")])
     sq.step("approach", actions=[bt.seq.motion("to_hover")])
-    sq.step("descend", actions=[bt.seq.ramp(ramp_to(grasp_q), 0.8)])
-    sq.step("close", actions=[bt.seq.ramp({f: closed for f in fingers}, 0.4)])
+    sq.step("descend", actions=[bt.seq.ramp(ramp_to(with_fingers(grasp_q, OPEN)), 0.8)])
+    sq.step("close", actions=[bt.seq.ramp({f: CLOSED for f in fingers}, 0.4)])
     sq.step(
         "grasp",
         actions=[
@@ -101,14 +110,15 @@ def build_cycle(scene: bt.Scene) -> str:
             bt.seq.set_signal("carrying"),
         ],
     )
-    sq.step("lift", actions=[bt.seq.ramp(ramp_to(with_fingers(hover_q, closed)), 0.8)])
+    sq.step("lift", actions=[bt.seq.ramp(ramp_to(with_fingers(hover_q, CLOSED)), 0.8)])
     sq.step("carry", actions=[bt.seq.motion("to_pallet")])
+    sq.step("lower", actions=[bt.seq.ramp(ramp_to(with_fingers(place_q, CLOSED)), 0.8)])
     sq.step(
         "release",
         actions=[bt.seq.detach(BOX), bt.seq.set_signal("carrying", False)],
     )
-    sq.step("open", actions=[bt.seq.ramp({f: 0.035 for f in fingers}, 0.4)])
-    sq.step("retreat", actions=[bt.seq.ramp(ramp_to(with_fingers(retreat_q, 0.035)), 0.8)])
+    sq.step("open", actions=[bt.seq.ramp({f: OPEN for f in fingers}, 0.4)])
+    sq.step("retreat", actions=[bt.seq.ramp(ramp_to(with_fingers(drop_q, OPEN)), 0.8)])
     sq.step("settle", transition=bt.seq.elapsed(0.5))
     sq.step("home", actions=[bt.seq.motion("home")])
     return sq.name

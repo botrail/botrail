@@ -55,6 +55,43 @@ def build_scene() -> bt.Scene:
     return scene
 
 
+# --------------------------------------------------------------- grasping
+
+# The cell's teach frames (PickFrame / PlaceFrame) are *grasp* poses: the
+# point between the fingertips, tool +Z along the approach direction. IK,
+# though, solves for a link — so a taught pose has to be backed off along
+# the tool axis to the hand frame. On this Franka the palm hull ends 67 mm
+# out and the fingertips reach 112 mm, so holding a box 100 mm out puts the
+# pads across it with the palm clear of its top face.
+HAND = "/panda/panda_hand"
+GRIP_DEPTH = 0.10
+
+
+def hand_pose(pose, standoff: float = 0.0):
+    """The ``panda_hand`` pose that lands the finger pads on ``pose``
+    (a ``(position, quaternion)`` grasp frame), backed off by ``standoff``
+    along the approach axis for a hover pose."""
+    (x, y, z), quat = pose
+    qx, qy, qz, qw = quat
+    tool_z = (2 * (qx * qz + qw * qy), 2 * (qy * qz - qw * qx), 1 - 2 * (qx * qx + qy * qy))
+    depth = GRIP_DEPTH + standoff
+    return tuple(p - depth * a for p, a in zip((x, y, z), tool_z)), quat
+
+
+def teach_grasp(scene: bt.Scene, pose, standoff: float = 0.0) -> list:
+    """Poses the robot so the gripper grasps at ``pose`` and returns the
+    joint vector — the scripted form of dragging the studio's TCP gizmo.
+    Raises when IK misses, rather than teaching a bad pose."""
+    position, quaternion = hand_pose(pose, standoff)
+    ik = scene.set_tcp_target(position, quaternion, link=HAND)
+    if not ik.converged:
+        raise RuntimeError(
+            f"IK did not reach {tuple(round(v, 3) for v in position)}: "
+            f"{ik.pos_error * 1e3:.1f} mm / {ik.rot_error:.3f} rad short"
+        )
+    return list(scene.joint_positions)
+
+
 if __name__ == "__main__":
     scene = build_scene()
     print(scene.robot)
