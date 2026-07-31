@@ -816,6 +816,7 @@ mod tests {
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
+                    ServerMessage::RecordingResult { .. } => "recording_result",
                 })
                 .collect()
         }

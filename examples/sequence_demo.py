@@ -39,10 +39,12 @@ def build_cycle(scene: bt.Scene) -> str:
 
     # ---- conveyor feed: Box_A starts upstream, a beam guards the pick ---
     scene.set_obstacle_pose(BOX, (-0.9, 0.62, 0.61))
+    # The transport zone floor sits above the belt slab (top 0.55) so the
+    # advection carries the goods, not the conveyor's own structure.
     scene.add_conveyor(
         "conv",
-        zone_position=(-0.45, 0.62, 0.61),
-        zone_size=(1.3, 0.4, 0.24),
+        zone_position=(-0.45, 0.62, 0.66),
+        zone_size=(1.3, 0.4, 0.14),
         velocity=(0.15, 0.0, 0.0),
         running=False,
     )

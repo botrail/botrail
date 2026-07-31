@@ -34,7 +34,20 @@ collisions: Array<CollisionPairMsg>,
 /**
  * Minimum robot-obstacle distance; `null` without obstacles.
  */
-min_distance: number | null, } | { "type": "plan_result", ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "motion_result", ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
+min_distance: number | null, } | { "type": "plan_result", ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
+/**
+ * Source layer path (display form).
+ */
+source: string, error: string | null, 
+/**
+ * `"joint_state"` (q(t) recovered, client plays joints) or
+ * `"transforms"` (link-pose playback) when ok.
+ */
+mode: string | null, warnings: Array<string>, 
+/**
+ * Playable timeline (no step/signal lanes) when ok.
+ */
+timeline: TimelineMsg | null, } | { "type": "motion_result", ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
 /**
  * Time at which each segment ends (playback markers).
  */

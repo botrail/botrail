@@ -407,14 +407,103 @@ impl SceneHub {
                 }
             })
             .collect();
+        let joint_samples: Vec<Vec<f64>> = times.iter().map(|&t| traj.sample(t)).collect();
         let input = botrail_usd::export::AnimationInput {
             model: &scene.robot,
             times: &times,
             link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
             objects: &objects,
         };
         let options = botrail_usd::export::ExportOptions { fps };
         botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())
+    }
+
+    /// Loads a baked USD recording (an Isaac Sim capture or a botrail
+    /// export), lifts it onto the scene's robot, broadcasts the playable
+    /// timeline to the studio, and returns
+    /// `(mode, duration, warnings, moving-object names)`.
+    #[allow(clippy::type_complexity)]
+    pub fn play_usd_animation(
+        &self,
+        path: &std::path::Path,
+        force_transforms: bool,
+    ) -> Result<(String, f64, Vec<String>, Vec<String>), String> {
+        let scene = self.snapshot();
+        let obstacle_names: Vec<String> =
+            scene.obstacles().iter().map(|o| o.name.clone()).collect();
+        let options = botrail_usd::recording::RecordingImportOptions {
+            search_paths: Vec::new(),
+            force_transforms,
+        };
+        let source = path.display().to_string();
+        match botrail_usd::recording::import_recording(
+            path,
+            &scene.robot,
+            &obstacle_names,
+            &options,
+        ) {
+            Ok(rec) => {
+                use botrail_usd::recording::RecordingMode;
+                let mode = match rec.mode {
+                    RecordingMode::JointState => "joint_state",
+                    RecordingMode::Transforms => "transforms",
+                };
+                let duration = rec.times.last().copied().unwrap_or(0.0);
+                let track_names: Vec<String> =
+                    rec.object_tracks.iter().map(|(n, _)| n.clone()).collect();
+                let trajectory = wire::TrajectoryMsg {
+                    duration,
+                    times: rec.times,
+                    joint_positions: rec.joint_samples.unwrap_or_default(),
+                    link_poses: match rec.mode {
+                        // Joint mode rides the existing joint-playback path.
+                        RecordingMode::JointState => None,
+                        RecordingMode::Transforms => Some(
+                            rec.link_poses
+                                .iter()
+                                .map(|frame| frame.iter().map(wire::PoseMsg::from).collect())
+                                .collect(),
+                        ),
+                    },
+                    object_tracks: (!rec.object_tracks.is_empty()).then(|| {
+                        rec.object_tracks
+                            .iter()
+                            .map(|(name, poses)| wire::ObjectTrackMsg {
+                                name: name.clone(),
+                                poses: poses.iter().map(wire::PoseMsg::from).collect(),
+                            })
+                            .collect()
+                    }),
+                };
+                let timeline = wire::TimelineMsg {
+                    duration,
+                    trajectory,
+                    step_spans: Vec::new(),
+                    signals: Vec::new(),
+                };
+                self.emit(&ServerMessage::RecordingResult {
+                    ok: true,
+                    source,
+                    error: None,
+                    mode: Some(mode.to_string()),
+                    warnings: rec.warnings.clone(),
+                    timeline: Some(timeline),
+                });
+                Ok((mode.to_string(), duration, rec.warnings, track_names))
+            }
+            Err(e) => {
+                self.emit(&ServerMessage::RecordingResult {
+                    ok: false,
+                    source,
+                    error: Some(e.to_string()),
+                    mode: None,
+                    warnings: Vec::new(),
+                    timeline: None,
+                });
+                Err(e.to_string())
+            }
+        }
     }
 
     // ------------------------------------------------------------ collision

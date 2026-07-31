@@ -24,6 +24,7 @@ export function UsdRobotView() {
 
   const jointPositions = useStudioStore((s) => s.jointPositions);
   const overrideJoints = useStudioStore((s) => s.overrideJoints);
+  const overridePoses = useStudioStore((s) => s.overridePoses);
   const basePose = useStudioStore((s) => s.basePose);
   const collisions = useStudioStore((s) => s.collisions);
   const goal = useStudioStore((s) => s.goal);
@@ -49,12 +50,26 @@ export function UsdRobotView() {
     };
   }, [url]);
 
-  // Displayed joints: playback override wins over the live state.
+  // Displayed joints: playback override wins over the live state. While a
+  // link-pose (baked) override runs, setJointValues must stay silent — it
+  // would snap the library back to fk display mode; when the override ends
+  // (`baked` flips), this effect re-fires and that same call restores fk.
+  const baked = overridePoses !== null;
   const displayed = overrideJoints ?? jointPositions;
   useEffect(() => {
-    if (!robot || !sceneDesc) return;
+    if (!robot || !sceneDesc || baked) return;
     robot.setJointValues(jointMap(sceneDesc, displayed));
-  }, [robot, sceneDesc, displayed]);
+  }, [robot, sceneDesc, displayed, baked]);
+
+  // Link-pose playback (transform-mode USD recordings): world-space link
+  // targets drive the prims directly; the library undoes the robot
+  // object's own placement, so recorded base motion replays correctly.
+  useEffect(() => {
+    if (!robot || !sceneDesc || !overridePoses) return;
+    robot.setLinkTransforms(linkPoseMap(sceneDesc, overridePoses), {
+      space: "world",
+    });
+  }, [robot, sceneDesc, overridePoses]);
 
   // Base placement.
   useEffect(() => {
@@ -63,7 +78,7 @@ export function UsdRobotView() {
   }, [robot, basePose]);
 
   // Collision highlight refers to the live state; suppress during playback.
-  const playback = overrideJoints !== null;
+  const playback = overrideJoints !== null || baked;
   useEffect(() => {
     if (!robot || !sceneDesc) return;
     const names = playback ? new Set<string>() : collidingLinkNames(collisions);
@@ -111,6 +126,22 @@ export function UsdRobotView() {
       {ghost && <primitive object={ghost} />}
     </>
   );
+}
+
+/** Link-pose array -> {body prim path: world pose} for three-usd-robot. */
+function linkPoseMap(
+  desc: SceneDescriptionMsg,
+  poses: PoseMsg[],
+): Record<string, { position: [number, number, number]; quaternion: [number, number, number, number] }> {
+  const map: Record<
+    string,
+    { position: [number, number, number]; quaternion: [number, number, number, number] }
+  > = {};
+  desc.links.forEach((link, i) => {
+    const p = poses[i];
+    if (p) map[link.name] = { position: p.position, quaternion: p.quaternion };
+  });
+  return map;
 }
 
 /** DOF vector -> {joint prim path: value} for three-usd-robot. */

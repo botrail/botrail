@@ -94,6 +94,11 @@ pub struct AnimationInput<'a> {
     /// World pose of every link per frame (botrail Z-up meters), aligned
     /// with `times`; inner vectors align with `model.links`.
     pub link_poses: &'a [Vec<Isometry3<f64>>],
+    /// Joint positions per frame (rad / m, DOF order). When present and the
+    /// robot is USD-sourced, `JointStateAPI` timeSamples are authored on the
+    /// joint prims alongside the link transforms, so readers (botrail
+    /// included) can recover q(t) without projecting link poses.
+    pub joint_samples: Option<&'a [Vec<f64>]>,
     pub objects: &'a [ObjectSpec],
 }
 
@@ -161,6 +166,21 @@ pub fn export_animation(
             )));
         }
     }
+    if let Some(joint_samples) = input.joint_samples {
+        if joint_samples.len() != n {
+            return Err(UsdExportError::Input(format!(
+                "{} frames but {} joint sample sets",
+                n,
+                joint_samples.len()
+            )));
+        }
+        if joint_samples.iter().any(|q| q.len() != input.model.dof()) {
+            return Err(UsdExportError::Input(format!(
+                "joint samples must have {} values (model DOF)",
+                input.model.dof()
+            )));
+        }
+    }
     for obj in input.objects {
         if let PoseTrack::Sampled(samples) = &obj.track {
             if samples.len() != n {
@@ -206,8 +226,9 @@ pub fn export_animation(
             path,
             articulation_root,
         } => {
-            let info = robot_stage_info(path, articulation_root, input.model, &mut warnings)?;
-            author_referenced_robot(&mut layer, input, &codes, &info, asset_stem)?;
+            let (info, _stage) =
+                robot_stage_info(path, &[], articulation_root, input.model, &mut warnings)?;
+            author_referenced_robot(&mut layer, input, &codes, &info, asset_stem, &mut warnings)?;
             assets = robot_asset_copies(path, asset_stem, &mut warnings)?;
         }
         RobotSource::UrdfXml(_) => {
@@ -228,15 +249,16 @@ pub fn export_animation(
 
 /// Source-stage normalization: botrail world = `S(stage)` with
 /// `t' = F·(t·mpu)`, `R' = F·R·F⁻¹`.
-struct StageFrame {
-    mpu: f64,
-    up_fix: UnitQuaternion<f64>,
+#[derive(Clone, Copy)]
+pub(crate) struct StageFrame {
+    pub(crate) mpu: f64,
+    pub(crate) up_fix: UnitQuaternion<f64>,
 }
 
 impl StageFrame {
     /// Maps a botrail-world pose into raw source-stage coordinates
     /// (the importer conjugation's inverse).
-    fn to_stage(&self, x: &Isometry3<f64>) -> Isometry3<f64> {
+    fn to_stage(self, x: &Isometry3<f64>) -> Isometry3<f64> {
         let fi = self.up_fix.inverse();
         Isometry3::from_parts(
             Translation3::from((fi * x.translation.vector) / self.mpu),
@@ -255,8 +277,39 @@ fn orient_value(x: &Isometry3<f64>) -> Value {
     Value::Quatd(gf::quatd(q.w, q.i, q.j, q.k))
 }
 
+/// openusd's text writer prints single-item list-ops without brackets.
+/// That shorthand is fine for `references`, but pxr's parser insists on a
+/// bracketed list for `apiSchemas` — wrap those lines so exported layers
+/// open in stock USD tooling.
+fn bracket_singleton_api_schemas(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim_start();
+        let is_scalar = ["prepend ", "append ", "add ", "delete ", ""]
+            .iter()
+            .any(|kw| {
+                trimmed
+                    .strip_prefix(kw)
+                    .and_then(|r| r.strip_prefix("apiSchemas = \""))
+                    .is_some_and(|r| r.ends_with('"'))
+            });
+        if is_scalar {
+            let eq = body.find("= ").expect("matched above");
+            out.push_str(&body[..eq + 2]);
+            out.push('[');
+            out.push_str(&body[eq + 2..]);
+            out.push(']');
+            out.push_str(&line[body.len()..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// USD prim names allow `[A-Za-z_][A-Za-z0-9_]*`.
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (i, c) in name.chars().enumerate() {
         let valid = c.is_ascii_alphanumeric() || c == '_';
@@ -476,7 +529,9 @@ impl LayerBuilder {
                 .expect("prim spec exists");
             spec.add(ChildrenKey::PropertyChildren, Value::token_vec(names));
         }
-        TextWriter::write_to_string(&self.data).map_err(|e| UsdExportError::Author(e.to_string()))
+        let text = TextWriter::write_to_string(&self.data)
+            .map_err(|e| UsdExportError::Author(e.to_string()))?;
+        Ok(bracket_singleton_api_schemas(&text))
     }
 }
 
@@ -502,18 +557,20 @@ enum ParentAnchor {
     Body { link: usize, offset: Isometry3<f64> },
 }
 
-struct LinkStageInfo {
+pub(crate) struct LinkStageInfo {
     /// Path relative to the articulation root; empty when the root prim is
     /// itself the body.
     rel_path: String,
-    k_inv: Isometry3<f64>,
+    /// Absolute body prim path in the (possibly re-rooted) stage.
+    pub(crate) stage_path: String,
+    pub(crate) k_inv: Isometry3<f64>,
     parent: ParentAnchor,
 }
 
-struct RobotStageInfo {
-    frame: StageFrame,
+pub(crate) struct RobotStageInfo {
+    pub(crate) frame: StageFrame,
     root_path: String,
-    links: Vec<LinkStageInfo>,
+    pub(crate) links: Vec<LinkStageInfo>,
 }
 
 /// Prim facts gathered from the source robot stage.
@@ -524,13 +581,69 @@ struct StagePrim {
     prim: openusd::usd::Prim,
 }
 
-fn robot_stage_info(
+/// A stage opened for structural inspection: frame conventions plus every
+/// prim's (earliest-time) world transform and type.
+pub(crate) struct OpenedStage {
+    pub(crate) stage: Stage,
+    pub(crate) frame: StageFrame,
+    pub(crate) path: String,
+    prims: HashMap<String, StagePrim>,
+}
+
+impl OpenedStage {
+    pub(crate) fn has_prim(&self, path: &str) -> bool {
+        self.prims.contains_key(path)
+    }
+}
+
+/// Stage normalization (USD defaults: centimeters, Y-up) — must mirror the
+/// importer exactly.
+fn frame_from_stage(stage: &Stage) -> StageFrame {
+    let mut frame = StageFrame {
+        mpu: 0.01,
+        up_fix: y_up_to_z_up(),
+    };
+    let layer = stage.root_layer();
+    if let Some(root) = layer.pseudo_root() {
+        match root.field("metersPerUnit") {
+            Ok(Some(Value::Double(d))) => frame.mpu = d,
+            Ok(Some(Value::Float(f))) => frame.mpu = f as f64,
+            _ => {}
+        }
+        if let Ok(Some(Value::Token(t))) = root.field("upAxis") {
+            if t.as_str() == "Z" {
+                frame.up_fix = UnitQuaternion::identity();
+            }
+        }
+    }
+    frame
+}
+
+/// Frame metadata of a stage without traversing its prims (cheap enough to
+/// peek at a robot stage's conventions during recording import).
+pub(crate) fn stage_frame_metadata(
     path: &Path,
-    articulation_root: &str,
-    model: &RobotModel,
-    warnings: &mut Vec<String>,
-) -> Result<RobotStageInfo, UsdExportError> {
-    let mut search_paths = Vec::new();
+    extra_search_paths: &[PathBuf],
+) -> Result<StageFrame, UsdExportError> {
+    let mut search_paths = extra_search_paths.to_vec();
+    if let Some(dir) = path.parent() {
+        search_paths.push(dir.to_path_buf());
+    }
+    let stage = Stage::builder()
+        .resolver(SearchPathResolver::new(search_paths))
+        .open(&path.display().to_string())
+        .map_err(|e| UsdExportError::Open {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+    Ok(frame_from_stage(&stage))
+}
+
+pub(crate) fn open_stage_prims(
+    path: &Path,
+    extra_search_paths: &[PathBuf],
+) -> Result<OpenedStage, UsdExportError> {
+    let mut search_paths = extra_search_paths.to_vec();
     if let Some(dir) = path.parent() {
         search_paths.push(dir.to_path_buf());
     }
@@ -542,27 +655,7 @@ fn robot_stage_info(
             message: e.to_string(),
         })?;
 
-    // Stage normalization (USD defaults: centimeters, Y-up) — must mirror
-    // the importer exactly.
-    let mut frame = StageFrame {
-        mpu: 0.01,
-        up_fix: y_up_to_z_up(),
-    };
-    {
-        let layer = stage.root_layer();
-        if let Some(root) = layer.pseudo_root() {
-            match root.field("metersPerUnit") {
-                Ok(Some(Value::Double(d))) => frame.mpu = d,
-                Ok(Some(Value::Float(f))) => frame.mpu = f as f64,
-                _ => {}
-            }
-            if let Ok(Some(Value::Token(t))) = root.field("upAxis") {
-                if t.as_str() == "Z" {
-                    frame.up_fix = UnitQuaternion::identity();
-                }
-            }
-        }
-    }
+    let frame = frame_from_stage(&stage);
 
     let mut prims: HashMap<String, StagePrim> = HashMap::new();
     collect_stage_prims(
@@ -572,6 +665,103 @@ fn robot_stage_info(
     )
     .map_err(|e| UsdExportError::RobotStage(e.to_string()))?;
 
+    Ok(OpenedStage {
+        frame,
+        path: path.display().to_string(),
+        prims,
+        stage,
+    })
+}
+
+/// Stage prim path of a model-named prim when the robot subtree rooted at
+/// `model_root` (the model's articulation root) lives at `stage_root` in
+/// this stage. Identity when the two roots coincide.
+pub(crate) fn remap_model_path(stage_root: &str, model_root: &str, name: &str) -> String {
+    if stage_root == model_root || name == "/" {
+        return name.to_string();
+    }
+    if name == model_root {
+        return stage_root.to_string();
+    }
+    match name.strip_prefix(&format!("{model_root}/")) {
+        Some(rel) => format!("{stage_root}/{rel}"),
+        None => name.to_string(),
+    }
+}
+
+/// Finds where the robot's link tree lives in an opened stage: the model's
+/// own articulation root when present (an animation layered over the robot
+/// stage), otherwise the unique prim whose subtree contains every link
+/// (e.g. `/World/Robot` in a botrail export, or wherever a recording
+/// placed the robot).
+pub(crate) fn find_robot_root(
+    opened: &OpenedStage,
+    model_root: &str,
+    model: &RobotModel,
+) -> Result<String, UsdExportError> {
+    let all_present = |root: &str| {
+        model.links.iter().all(|l| {
+            opened
+                .prims
+                .contains_key(remap_model_path(root, model_root, &l.name).as_str())
+        })
+    };
+    if all_present(model_root) {
+        return Ok(model_root.to_string());
+    }
+    let mut candidates: Vec<String> = opened
+        .prims
+        .keys()
+        .filter(|p| p.as_str() != "/" && all_present(p))
+        .cloned()
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => Err(UsdExportError::RobotStage(format!(
+            "no prim in `{}` carries this robot's link tree (looked for `{}` and its siblings)",
+            opened.path, model.links[model.root_link].name
+        ))),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(UsdExportError::RobotStage(format!(
+            "multiple prims in `{}` match this robot's link tree: {}",
+            opened.path,
+            candidates.join(", ")
+        ))),
+    }
+}
+
+pub(crate) fn robot_stage_info(
+    path: &Path,
+    extra_search_paths: &[PathBuf],
+    articulation_root: &str,
+    model: &RobotModel,
+    warnings: &mut Vec<String>,
+) -> Result<(RobotStageInfo, Stage), UsdExportError> {
+    let opened = open_stage_prims(path, extra_search_paths)?;
+    let info = robot_stage_info_on(
+        &opened,
+        articulation_root,
+        articulation_root,
+        model,
+        warnings,
+    )?;
+    Ok((info, opened.stage))
+}
+
+/// Structural facts about the robot inside an opened stage. `stage_root` is
+/// the robot's root prim in *this* stage; `model_root` the model's own
+/// articulation root (they differ when a recording re-rooted the robot).
+pub(crate) fn robot_stage_info_on(
+    opened: &OpenedStage,
+    stage_root: &str,
+    model_root: &str,
+    model: &RobotModel,
+    warnings: &mut Vec<String>,
+) -> Result<RobotStageInfo, UsdExportError> {
+    let frame = opened.frame;
+    let prims = &opened.prims;
+    let articulation_root = stage_root;
+
     if articulation_root == "/" {
         return Err(UsdExportError::RobotStage(
             "cannot reference a pseudo-root articulation; the robot stage needs a root prim".into(),
@@ -580,7 +770,7 @@ fn robot_stage_info(
     if !prims.contains_key(articulation_root) {
         return Err(UsdExportError::RobotStage(format!(
             "articulation root `{articulation_root}` not found in `{}`",
-            path.display()
+            opened.path
         )));
     }
 
@@ -592,7 +782,7 @@ fn robot_stage_info(
             || articulation_root == "/"
     };
     let mut corrections: HashMap<String, Isometry3<f64>> = HashMap::new();
-    for (prim_path, info) in &prims {
+    for (prim_path, info) in prims {
         if !in_subtree(prim_path) {
             continue;
         }
@@ -634,20 +824,22 @@ fn robot_stage_info(
         corrections.insert(body1, local_pose1);
     }
 
-    // Model link names are body prim paths (the importer's naming contract).
-    let body_set: HashMap<&str, usize> = model
+    // Model link names are body prim paths (the importer's naming contract),
+    // re-rooted at `stage_root` when the stage placed the robot elsewhere.
+    let body_set: HashMap<String, usize> = model
         .links
         .iter()
         .enumerate()
-        .map(|(i, l)| (l.name.as_str(), i))
+        .map(|(i, l)| (remap_model_path(stage_root, model_root, &l.name), i))
         .collect();
     let mut links = Vec::with_capacity(model.links.len());
     for link in &model.links {
-        let body_path = link.name.as_str();
+        let body_path = remap_model_path(stage_root, model_root, &link.name);
+        let body_path = body_path.as_str();
         let Some(body) = prims.get(body_path) else {
             return Err(UsdExportError::RobotStage(format!(
                 "model link `{body_path}` has no prim in `{}` — was the robot imported from this stage?",
-                path.display()
+                opened.path
             )));
         };
         if !body.residual_ok {
@@ -690,6 +882,7 @@ fn robot_stage_info(
 
         links.push(LinkStageInfo {
             rel_path,
+            stage_path: body_path.to_string(),
             k_inv: corrections
                 .get(body_path)
                 .map(|k| k.inverse())
@@ -745,6 +938,7 @@ fn author_referenced_robot(
     codes: &[f64],
     info: &RobotStageInfo,
     asset_stem: &str,
+    warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
     let robot_prim = "/World/Robot";
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
@@ -821,7 +1015,63 @@ fn author_referenced_robot(
         layer.ensure_prim(&prim, Specifier::Over, None);
         layer.xform(&prim, &XformValue::Sampled(codes, poses), None);
     }
+
+    if let Some(joint_samples) = input.joint_samples {
+        author_joint_states(layer, input, codes, joint_samples, info, warnings);
+    }
     Ok(())
+}
+
+/// Authors `PhysicsJointStateAPI` position timeSamples on the joint prims —
+/// the articulation-native encoding of the same animation, letting readers
+/// recover q(t) without projecting link poses. Angular positions follow the
+/// UsdPhysics convention (degrees); linear ones are in stage units.
+fn author_joint_states(
+    layer: &mut LayerBuilder,
+    input: &AnimationInput,
+    codes: &[f64],
+    joint_samples: &[Vec<f64>],
+    info: &RobotStageInfo,
+    warnings: &mut Vec<String>,
+) {
+    use botrail_model::JointType;
+    let root_prefix = format!("{}/", info.root_path);
+    for joint in &input.model.joints {
+        let Some(qi) = joint.q_index else { continue };
+        let Some(rel) = joint.name.strip_prefix(&root_prefix) else {
+            warnings.push(format!(
+                "joint `{}` lies outside the articulation root; joint state not authored",
+                joint.name
+            ));
+            continue;
+        };
+        let (instance, to_stage): (&str, fn(f64, f64) -> f64) = match joint.joint_type {
+            JointType::Revolute | JointType::Continuous => ("angular", |v, _| v.to_degrees()),
+            JointType::Prismatic => ("linear", |v, mpu| v / mpu),
+            JointType::Fixed => continue,
+        };
+        let prim = format!("/World/Robot/{rel}");
+        layer.ensure_prim(&prim, Specifier::Over, None);
+        layer.prim_field(
+            &prim,
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(ListOp {
+                prepended_items: vec![format!("PhysicsJointStateAPI:{instance}").into()],
+                ..Default::default()
+            }),
+        );
+        let samples: sdf::TimeSampleMap = codes
+            .iter()
+            .zip(joint_samples)
+            .map(|(code, q)| (*code, Value::Float(to_stage(q[qi], info.frame.mpu) as f32)))
+            .collect();
+        layer.attr(
+            &prim,
+            &format!("state:{instance}:physics:position"),
+            "float",
+            AttrValue::Samples(samples),
+        );
+    }
 }
 
 /// File name of the robot's root stage inside the copied asset directory.
@@ -1102,17 +1352,13 @@ fn author_objects(
     Ok(())
 }
 
+/// Shared 2-DOF test articulation (export + recording tests).
+/// A 2-DOF articulation exercising every export-relevant feature: a
+/// nontrivial K on link1 (localPos1 = (0,0,-0.2)), and link2 nested
+/// under a *static intermediate* Xform below link1 (anchor = body
+/// ancestor + folded static offset).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::articulation::{import_robot, RobotImportOptions};
-    use nalgebra::Matrix3;
-
-    /// A 2-DOF articulation exercising every export-relevant feature: a
-    /// nontrivial K on link1 (localPos1 = (0,0,-0.2)), and link2 nested
-    /// under a *static intermediate* Xform below link1 (anchor = body
-    /// ancestor + folded static offset).
-    const ARM: &str = r#"#usda 1.0
+pub(crate) const TEST_ARM: &str = r#"#usda 1.0
 (
     defaultPrim = "Robot"
     metersPerUnit = 1
@@ -1181,6 +1427,14 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
     }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::articulation::{import_robot, RobotImportOptions};
+    use nalgebra::Matrix3;
+
+    const ARM: &str = TEST_ARM;
 
     /// The same layer reinterpreted as a centimeters / Y-up stage — a
     /// *different* robot, but import→FK vs export→compose must still agree.
@@ -1271,10 +1525,12 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
             .map(|q| botrail_kin::forward_kinematics_with_base(&model, q, &base).unwrap())
             .collect();
 
+        let joint_samples: Vec<Vec<f64>> = configs.to_vec();
         let input = AnimationInput {
             model: &model,
             times: &times,
             link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
             objects: &[],
         };
         let warnings =
@@ -1324,6 +1580,43 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
                         &format!("{tag} frame {f} link {} point {p_raw:?}", link.name),
                     );
                 }
+            }
+        }
+
+        // pxr requires apiSchemas as a bracketed list even for one entry
+        // (openusd's scalar shorthand is rejected by stock USD tooling).
+        let text = std::fs::read_to_string(dir.join("anim.usda")).unwrap();
+        assert!(
+            text.contains("prepend apiSchemas = [\"PhysicsJointStateAPI:angular\"]"),
+            "apiSchemas not bracketed"
+        );
+
+        // JointState timeSamples carry q(t) natively (angular in degrees).
+        for (f, t) in times.iter().enumerate() {
+            for (ji, joint) in model.joints.iter().enumerate() {
+                let Some(qi) = joint.q_index else { continue };
+                let rel = joint.name.strip_prefix("/Robot").unwrap();
+                let raw = stage
+                    .attribute(
+                        sdf::path(&format!("/World/Robot{rel}"))
+                            .unwrap()
+                            .append_property("state:angular:physics:position")
+                            .unwrap(),
+                    )
+                    .get_at::<sdf::Value>(TimeCode::new(t * 60.0))
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("missing joint state on {}", joint.name));
+                // The text parser may widen `float` samples to Double.
+                let attr = match raw {
+                    sdf::Value::Float(v) => v as f64,
+                    sdf::Value::Double(v) => v,
+                    other => panic!("unexpected joint state value {other:?}"),
+                };
+                let expected = configs[f][qi].to_degrees();
+                assert!(
+                    (attr - expected).abs() < 1e-3,
+                    "{tag} frame {f} joint {ji}: {attr} vs {expected}"
+                );
             }
         }
     }
@@ -1396,6 +1689,7 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
             model: &model,
             times: &times,
             link_poses: &link_poses,
+            joint_samples: None,
             objects: &objects,
         };
         let warnings =
@@ -1467,6 +1761,7 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
             model: &model,
             times: &[],
             link_poses: &[],
+            joint_samples: None,
             objects: &[],
         };
         assert!(matches!(
@@ -1479,6 +1774,7 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
             model: &model,
             times: &times,
             link_poses: &[],
+            joint_samples: None,
             objects: &[],
         };
         assert!(matches!(

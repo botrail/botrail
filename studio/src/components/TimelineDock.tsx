@@ -13,6 +13,7 @@ const BAND_COLORS = ["#4a6fa5", "#5a8f6a", "#a5824a", "#7a5aa5", "#a55a6f"];
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const trajectory = useStudioStore((s) => s.trajectory);
+  const recording = useStudioStore((s) => s.recording);
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const setPlayback = useStudioStore((s) => s.setPlayback);
   const setPlaying = useStudioStore((s) => s.setPlaying);
@@ -20,6 +21,9 @@ export function TimelineDock() {
 
   if (!timeline || !trajectory || timeline.duration <= 0) return null;
   const duration = timeline.duration;
+  const recordingLabel = recording
+    ? `${recording.source.split("/").pop()} (${recording.mode})`
+    : null;
 
   const seek = (e: React.MouseEvent) => {
     const bar = barRef.current;
@@ -36,7 +40,10 @@ export function TimelineDock() {
   return (
     <div className="timeline-dock">
       <div className="timeline-head">
-        <span>cycle {duration.toFixed(2)}s</span>
+        <span>
+          {recordingLabel ? `● ${recordingLabel} — ` : ""}
+          cycle {duration.toFixed(2)}s
+        </span>
         <span>{playbackTime.toFixed(2)}s</span>
       </div>
       <div className="timeline-bands" ref={barRef} onClick={seek}>

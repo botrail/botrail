@@ -539,6 +539,21 @@ pub enum ServerMessage {
         timeline: Option<TimelineMsg>,
         planning_time_ms: Option<f64>,
     },
+    /// Response to a USD-recording playback request (broadcast to every
+    /// client): a baked animation (an Isaac Sim capture or a botrail
+    /// export) lifted onto the scene's robot.
+    RecordingResult {
+        ok: bool,
+        /// Source layer path (display form).
+        source: String,
+        error: Option<String>,
+        /// `"joint_state"` (q(t) recovered, client plays joints) or
+        /// `"transforms"` (link-pose playback) when ok.
+        mode: Option<String>,
+        warnings: Vec<String>,
+        /// Playable timeline (no step/signal lanes) when ok.
+        timeline: Option<TimelineMsg>,
+    },
     /// Response to a `plan_motion` request (broadcast to every client).
     MotionResult {
         ok: bool,

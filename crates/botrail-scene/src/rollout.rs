@@ -1062,7 +1062,7 @@ impl Rollout {
 pub(crate) mod tests {
     use super::*;
     use crate::motion::{Segment, SegmentKind};
-    use crate::seq::{SignalDef, Step};
+    use crate::seq::Step;
     use botrail_model::Geometry;
     use nalgebra::{Translation3, UnitQuaternion, Vector3};
     use std::sync::Arc;

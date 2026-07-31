@@ -127,6 +127,9 @@ interface StudioState {
     stepSpans: StepSpanMsg[];
     signals: SignalTrackMsg[];
   } | null;
+  /** The USD recording behind the current playback, when there is one. */
+  recording: { source: string; mode: string; warnings: string[] } | null;
+  recordingError: string | null;
   /** True while a motion plan request is in flight. */
   motionPlanning: boolean;
   motionError: string | null;
@@ -201,6 +204,8 @@ export const useStudioStore = create<StudioState>((set) => ({
   sequenceSimulating: false,
   sequenceError: null,
   timeline: null,
+  recording: null,
+  recordingError: null,
   motionPlanning: false,
   motionError: null,
   segmentEnds: [],
@@ -278,6 +283,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           segmentEnds: [],
           motionStats: null,
           timeline: null,
+          recording: null,
         });
       } else {
         set({ planning: false, planError: msg.error ?? "planning failed" });
@@ -316,11 +322,49 @@ export const useStudioStore = create<StudioState>((set) => ({
           planError: null,
           motionStats: null,
           motionError: null,
+          recording: null,
         });
       } else {
         set({
           sequenceSimulating: false,
           sequenceError: msg.error ?? "simulation failed",
+        });
+      }
+    } else if (msg.type === "recording_result") {
+      if (msg.ok && msg.timeline) {
+        const traj = msg.timeline.trajectory;
+        // A baked USD recording (Isaac capture or botrail export) plays
+        // through the shared trajectory machinery. Joint-state recordings
+        // carry joint_positions; transform recordings carry link_poses,
+        // which USD robots apply via setLinkTransforms (baked mode).
+        set({
+          recording: {
+            source: msg.source,
+            mode: msg.mode ?? "",
+            warnings: msg.warnings,
+          },
+          recordingError: null,
+          timeline: {
+            duration: msg.timeline.duration,
+            stepSpans: msg.timeline.step_spans,
+            signals: msg.timeline.signals,
+          },
+          segmentEnds: [],
+          trajectory: traj,
+          playbackTime: 0,
+          playing: true,
+          overridePoses: traj.link_poses?.[0] ?? null,
+          overrideJoints: traj.link_poses ? null : (traj.joint_positions[0] ?? null),
+          overrideObstaclePoses: firstObjectPoses(traj),
+          planStats: null,
+          planError: null,
+          motionStats: null,
+          motionError: null,
+        });
+      } else {
+        set({
+          recording: null,
+          recordingError: msg.error ?? "recording import failed",
         });
       }
     } else if (msg.type === "motion_result") {
@@ -343,6 +387,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           planStats: null,
           planError: null,
           timeline: null,
+          recording: null,
         });
       } else {
         set({ motionPlanning: false, motionError: msg.error ?? "planning failed" });

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use botrail_model::RobotModel;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use hub::SceneHub;
 
@@ -531,6 +532,31 @@ impl Scene {
         self.hub
             .export_trajectory_usd(&trajectory.inner, &path, fps)
             .map_err(PyValueError::new_err)
+    }
+
+    /// Plays a baked USD recording (an Isaac Sim capture or a botrail
+    /// export) on the scene's robot and broadcasts it to the studio.
+    /// Joint playback is used when the layer carries `JointStateAPI`
+    /// samples for every actuated joint; otherwise the recorded body
+    /// transforms are replayed directly (`force_transforms` forces the
+    /// latter). Returns `{"mode", "duration", "warnings"}`.
+    #[pyo3(signature = (path, force_transforms = false))]
+    fn play_usd_animation<'py>(
+        &self,
+        py: Python<'py>,
+        path: PathBuf,
+        force_transforms: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let (mode, duration, warnings, object_tracks) = self
+            .hub
+            .play_usd_animation(&path, force_transforms)
+            .map_err(PyValueError::new_err)?;
+        let out = PyDict::new(py);
+        out.set_item("mode", mode)?;
+        out.set_item("duration", duration)?;
+        out.set_item("warnings", warnings)?;
+        out.set_item("object_tracks", object_tracks)?;
+        Ok(out)
     }
 
     // ------------------------------------------------------------ sequences
@@ -1666,10 +1692,13 @@ impl SequenceTimeline {
                 }
             })
             .collect();
+        let joint_samples: Vec<Vec<f64>> =
+            times.iter().map(|&t| self.inner.robot.sample(t)).collect();
         let input = botrail_usd::export::AnimationInput {
             model: &self.scene.robot,
             times: &times,
             link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
             objects: &objects,
         };
         let options = botrail_usd::export::ExportOptions { fps };

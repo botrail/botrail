@@ -19,6 +19,7 @@
 
 mod articulation;
 pub mod export;
+pub mod recording;
 
 pub use articulation::{import_robot, ImportedRobot, RobotImportOptions};
 
@@ -45,6 +46,8 @@ pub enum UsdImportError {
     Articulation(String),
     #[error("failed to write extracted mesh: {0}")]
     MeshCache(#[from] io::Error),
+    #[error("recording import failed: {0}")]
+    Recording(String),
 }
 
 #[derive(Debug, Clone, Default)]

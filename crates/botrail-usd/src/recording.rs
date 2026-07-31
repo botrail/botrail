@@ -1,0 +1,702 @@
+//! Baked-recording import: read a stage whose prims carry transform (and
+//! optionally `JointStateAPI`) timeSamples — an Isaac Sim recording or a
+//! botrail export — and lift it back into botrail-world tracks.
+//!
+//! Two tiers, mirroring the writer:
+//! 1. **Joint state** — when every actuated joint carries a readable
+//!    `state:{angular,linear}:physics:position`, q(t) is read directly
+//!    (degrees / stage units converted) and cross-checked against the
+//!    recorded body transforms by FK residual.
+//! 2. **Transforms** — otherwise the body prims' composed world transforms
+//!    become per-link pose tracks, the constraint-agnostic view of the
+//!    recording (clients replay them with `setLinkTransforms`).
+//!
+//! Sampling walks the recording's own integer time codes (recorders author
+//! per frame), so no interpolation semantics leak in. The robot may live at
+//! any prim path — `/World/Robot` in a botrail export, the robot stage's
+//! own root when animation is layered directly, or wherever a simulator
+//! parked it; the link tree is located by structure.
+
+use std::path::{Path, PathBuf};
+
+use botrail_kin::forward_kinematics_with_base;
+use botrail_model::{JointType, RobotModel};
+use nalgebra::{Isometry3, Translation3};
+use openusd::schemas::geom::Xformable;
+use openusd::usd::{Prim, SchemaBase, Stage, TimeCode};
+use openusd::{gf, sdf};
+
+use crate::export::{
+    find_robot_root, open_stage_prims, remap_model_path, robot_stage_info_on, sanitize_name,
+    stage_frame_metadata, RobotStageInfo,
+};
+use crate::{decompose_matrix, AnyPrim, UsdImportError};
+
+#[derive(Debug, Clone, Default)]
+pub struct RecordingImportOptions {
+    /// Extra resolver roots (worth pointing at the robot's own stage
+    /// directory when the recording references it relatively).
+    pub search_paths: Vec<PathBuf>,
+    /// Ignore `JointStateAPI` even when present and use the transform tier.
+    pub force_transforms: bool,
+}
+
+/// How the robot part of the recording is best played back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingMode {
+    /// q(t) recovered from `JointStateAPI` — joint-space playback.
+    JointState,
+    /// Body transforms only — link-pose (baked) playback.
+    Transforms,
+}
+
+pub struct ImportedRecording {
+    /// Frame times in seconds from 0 (the recording's own frame grid).
+    pub times: Vec<f64>,
+    pub mode: RecordingMode,
+    /// q per frame (DOF order); present in [`RecordingMode::JointState`].
+    pub joint_samples: Option<Vec<Vec<f64>>>,
+    /// World link poses per frame (botrail Z-up meters), aligned with
+    /// `model.links` — always present (playback and validation).
+    pub link_poses: Vec<Vec<Isometry3<f64>>>,
+    /// Obstacles that move during the recording: `(name, world pose per
+    /// frame)` in the scene importer's obstacle-pose convention.
+    pub object_tracks: Vec<(String, Vec<Isometry3<f64>>)>,
+    pub warnings: Vec<String>,
+}
+
+/// Reads a recording composed at `path` against the given robot model.
+/// `obstacle_names` are the scene's obstacles; each is looked up by prim
+/// path (or under the export convention `/World/Env/<name>`) and gets a
+/// motion track when it actually moves.
+pub fn import_recording(
+    path: &Path,
+    model: &RobotModel,
+    obstacle_names: &[String],
+    options: &RecordingImportOptions,
+) -> Result<ImportedRecording, UsdImportError> {
+    let (robot_stage_path, model_root) = match &model.source {
+        botrail_model::RobotSource::Usd {
+            path,
+            articulation_root,
+        } => (path.clone(), articulation_root.clone()),
+        _ => {
+            return Err(UsdImportError::Recording(
+                "recordings replay USD-sourced robots; this scene's robot came from URDF".into(),
+            ))
+        }
+    };
+    let recording = |e: crate::export::UsdExportError| match e {
+        // The shared opener speaks of "robot stages"; here it opened the
+        // recording itself.
+        crate::export::UsdExportError::Open { path, message } => {
+            UsdImportError::Recording(format!("failed to open `{path}`: {message}"))
+        }
+        other => UsdImportError::Recording(other.to_string()),
+    };
+
+    let mut warnings = Vec::new();
+    let opened = open_stage_prims(path, &options.search_paths).map_err(recording)?;
+    let stage_root = find_robot_root(&opened, &model_root, model).map_err(recording)?;
+    // The recording composes the robot subtree through whatever corrective
+    // transform it likes, so a scaled robot legitimately shows "non-rigid"
+    // here — the chain scale is handled below; drop that noise.
+    let mut info_warnings = Vec::new();
+    let info = robot_stage_info_on(&opened, &stage_root, &model_root, model, &mut info_warnings)
+        .map_err(recording)?;
+    warnings.extend(
+        info_warnings
+            .into_iter()
+            .filter(|w| !w.contains("non-rigid")),
+    );
+
+    // Botrail link axes were fixed at robot-import time by the *robot
+    // stage's* up axis: raw body axes relabel to botrail by its `F`, no
+    // matter how the recording embeds the subtree. Peel it off on the right.
+    let robot_up_fix = match stage_frame_metadata(&robot_stage_path, &options.search_paths) {
+        Ok(f) => f.up_fix,
+        Err(e) => {
+            warnings.push(format!(
+                "robot stage unreadable ({e}); assuming its axes match the recording's"
+            ));
+            opened.frame.up_fix
+        }
+    };
+
+    // ---- obstacle prim resolution ---------------------------------------
+    // Two homes per obstacle: its own prim path (an Isaac recording over
+    // the original stage) or the export convention `/World/Env/...` with
+    // `/`-segmented names nested and each segment sanitized.
+    let mut object_paths: Vec<(String, String)> = Vec::new();
+    for name in obstacle_names {
+        let candidates = [name.clone(), env_path_of(name)];
+        match candidates.iter().find(|p| opened.has_prim(p)) {
+            Some(p) => object_paths.push((name.clone(), p.clone())),
+            None if name.starts_with('/') => warnings.push(format!(
+                "obstacle `{name}` has no prim in the recording; left static"
+            )),
+            None => {}
+        }
+    }
+
+    // ---- time range: layer metadata, else scanned sample codes ----------
+    let stage = &opened.stage;
+    let link_paths: Vec<String> = info.links.iter().map(|l| l.stage_path.clone()).collect();
+    let tracked_paths: Vec<String> = link_paths
+        .iter()
+        .cloned()
+        .chain(object_paths.iter().map(|(_, p)| p.clone()))
+        .collect();
+
+    let (mut start, mut end, mut tcps) = (None, None, 24.0f64);
+    {
+        let layer = stage.root_layer();
+        if let Some(root) = layer.pseudo_root() {
+            if let Ok(Some(v)) = root.field("startTimeCode") {
+                start = value_to_f64(&v);
+            }
+            if let Ok(Some(v)) = root.field("endTimeCode") {
+                end = value_to_f64(&v);
+            }
+            if let Ok(Some(v)) = root.field("timeCodesPerSecond") {
+                if let Some(t) = value_to_f64(&v).filter(|t| *t > 0.0) {
+                    tcps = t;
+                }
+            }
+        }
+    }
+    if start.is_none() || end.is_none() {
+        let (lo, hi) = scan_sample_range(stage, &tracked_paths);
+        start = start.or(lo);
+        end = end.or(hi);
+    }
+    let (Some(start), Some(end)) = (start, end) else {
+        return Err(UsdImportError::Recording(
+            "no time range: the stage has neither start/endTimeCode metadata nor timeSamples on \
+             the robot or obstacle prims"
+                .into(),
+        ));
+    };
+    if end < start {
+        return Err(UsdImportError::Recording(format!(
+            "bad time range [{start}, {end}]"
+        )));
+    }
+    // The recording's own frame grid: integer codes hit authored samples,
+    // so interpolation semantics never matter.
+    let codes: Vec<f64> = (start.floor() as i64..=end.ceil() as i64)
+        .map(|c| c as f64)
+        .collect();
+    let times: Vec<f64> = codes.iter().map(|c| (c - codes[0]) / tcps).collect();
+
+    // ---- per-frame world transforms of tracked prims --------------------
+    let chains = build_chains(stage, &tracked_paths)?;
+    let worlds: Vec<Vec<(Isometry3<f64>, f64)>> = codes
+        .iter()
+        .map(|&code| evaluate_chains(&chains, code))
+        .collect();
+    let link_count = info.links.len();
+
+    // Robot links: body → link frame (`∘ K`), then stage coords → botrail:
+    // translation and the rotation's left side follow the *recording's*
+    // frame; the rotation's right side unlabels the *robot stage's* axes
+    // (the two coincide only when animation is layered straight onto the
+    // robot stage). `K` is authored in the robot stage's units; the chain's
+    // accumulated scale re-expresses it in recording units (a cm robot
+    // composed into a meter recording).
+    let ru_inv = robot_up_fix.inverse();
+    let link_poses: Vec<Vec<Isometry3<f64>>> = worlds
+        .iter()
+        .map(|frame| {
+            (0..link_count)
+                .map(|i| {
+                    let (body, scale) = frame[i];
+                    let k = info.links[i].k_inv.inverse();
+                    let k_scaled = Isometry3::from_parts(
+                        Translation3::from(k.translation.vector * scale),
+                        k.rotation,
+                    );
+                    let raw = body * k_scaled;
+                    Isometry3::from_parts(
+                        Translation3::from(
+                            info.frame.up_fix * (raw.translation.vector * info.frame.mpu),
+                        ),
+                        info.frame.up_fix * raw.rotation * ru_inv,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    // Obstacles: geometry convention (vertices were baked at import), and
+    // only the ones that actually move.
+    let mut object_tracks = Vec::new();
+    for (offset, (name, _)) in object_paths.iter().enumerate() {
+        let idx = link_count + offset;
+        let track: Vec<Isometry3<f64>> = worlds
+            .iter()
+            .map(|frame| {
+                let raw = &frame[idx].0;
+                Isometry3::from_parts(
+                    Translation3::from(
+                        info.frame.up_fix * (raw.translation.vector * info.frame.mpu),
+                    ),
+                    info.frame.up_fix * raw.rotation,
+                )
+            })
+            .collect();
+        let rest = track[0];
+        let moved = track.iter().any(|p| {
+            (p.translation.vector - rest.translation.vector).norm() > 1e-9
+                || p.rotation.angle_to(&rest.rotation) > 1e-9
+        });
+        if moved {
+            object_tracks.push((name.clone(), track));
+        }
+    }
+
+    // ---- tier 1: JointStateAPI ------------------------------------------
+    let joint_samples = if options.force_transforms {
+        None
+    } else {
+        read_joint_states(
+            stage,
+            model,
+            &info,
+            &stage_root,
+            &model_root,
+            &codes,
+            &mut warnings,
+        )
+    };
+    let mode = if joint_samples.is_some() {
+        RecordingMode::JointState
+    } else {
+        RecordingMode::Transforms
+    };
+
+    if let Some(samples) = &joint_samples {
+        check_fk_residual(model, &link_poses, samples, &mut warnings);
+    }
+
+    Ok(ImportedRecording {
+        times,
+        mode,
+        joint_samples,
+        link_poses,
+        object_tracks,
+        warnings,
+    })
+}
+
+/// The exporter's `/World/Env` prim path for an obstacle name.
+fn env_path_of(name: &str) -> String {
+    let mut path = "/World/Env".to_string();
+    for seg in name.split('/').filter(|s| !s.is_empty()) {
+        path.push('/');
+        path.push_str(&sanitize_name(seg));
+    }
+    path
+}
+
+fn value_to_f64(v: &sdf::Value) -> Option<f64> {
+    match v {
+        sdf::Value::Double(d) => Some(*d),
+        sdf::Value::Float(f) => Some(*f as f64),
+        sdf::Value::Int(i) => Some(*i as f64),
+        sdf::Value::Int64(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// Min/max authored sample codes over the tracked prims' xformOps.
+fn scan_sample_range(stage: &Stage, paths: &[String]) -> (Option<f64>, Option<f64>) {
+    let (mut lo, mut hi) = (None::<f64>, None::<f64>);
+    for path in paths {
+        let Ok(prim_path) = sdf::path(path) else {
+            continue;
+        };
+        let view = AnyPrim(stage.prim(prim_path));
+        let Ok(Some(order)) = view.xform_op_order() else {
+            continue;
+        };
+        for op in order {
+            let Ok(attr_path) = view.prim().path().append_property(op.as_str()) else {
+                continue;
+            };
+            let Ok(Some(sample_times)) = stage.time_sample_times(attr_path) else {
+                continue;
+            };
+            for t in sample_times {
+                lo = Some(lo.map_or(t, |v: f64| v.min(t)));
+                hi = Some(hi.map_or(t, |v: f64| v.max(t)));
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// Root→prim chains for cheap per-frame world evaluation (only tracked
+/// prims and their ancestors get touched, not the whole stage).
+fn build_chains(stage: &Stage, paths: &[String]) -> Result<Vec<Vec<Prim>>, UsdImportError> {
+    paths
+        .iter()
+        .map(|path| {
+            let mut chain = Vec::new();
+            let mut acc = String::new();
+            for part in path.split('/').filter(|p| !p.is_empty()) {
+                acc.push('/');
+                acc.push_str(part);
+                let prim_path = sdf::path(&acc)
+                    .map_err(|e| UsdImportError::Recording(format!("bad prim path: {e}")))?;
+                chain.push(stage.prim(prim_path));
+            }
+            if chain.is_empty() {
+                return Err(UsdImportError::Recording(format!(
+                    "prim `{path}` not found in the recording"
+                )));
+            }
+            Ok(chain)
+        })
+        .collect()
+}
+
+/// Raw stage-space world transform per tracked prim at one time code
+/// (row-vector convention: world = local · parent), plus the chain's
+/// accumulated uniform scale (cube root of the residual determinant).
+fn evaluate_chains(chains: &[Vec<Prim>], code: f64) -> Vec<(Isometry3<f64>, f64)> {
+    chains
+        .iter()
+        .map(|chain| {
+            let mut world = gf::Matrix4d::default();
+            for prim in chain {
+                let view = AnyPrim(prim.clone());
+                if let Ok(local) = view.local_to_parent_transform(TimeCode::new(code)) {
+                    world = local * world;
+                }
+            }
+            let (pose, residual) = decompose_matrix(&world);
+            let det = residual.determinant();
+            let scale = if det.is_finite() && det > 1e-12 {
+                det.cbrt()
+            } else {
+                1.0
+            };
+            (pose, scale)
+        })
+        .collect()
+}
+
+/// Reads q(t) from `JointStateAPI`. Joint mode needs *every* actuated
+/// joint readable over the whole range; a partial set gets a warning and
+/// falls back to transforms.
+fn read_joint_states(
+    stage: &Stage,
+    model: &RobotModel,
+    info: &RobotStageInfo,
+    stage_root: &str,
+    model_root: &str,
+    codes: &[f64],
+    warnings: &mut Vec<String>,
+) -> Option<Vec<Vec<f64>>> {
+    let dof = model.dof();
+    if dof == 0 {
+        return None;
+    }
+    let mut tracks: Vec<(usize, Vec<f64>)> = Vec::new();
+    for joint in &model.joints {
+        let Some(qi) = joint.q_index else { continue };
+        let (instance, from_stage): (&str, fn(f64, f64) -> f64) = match joint.joint_type {
+            JointType::Revolute | JointType::Continuous => ("angular", |v, _| v.to_radians()),
+            JointType::Prismatic => ("linear", |v, mpu| v * mpu),
+            JointType::Fixed => continue,
+        };
+        let prim_path = remap_model_path(stage_root, model_root, &joint.name);
+        let attr_path = sdf::path(&prim_path).ok().and_then(|p| {
+            p.append_property(format!("state:{instance}:physics:position").as_str())
+                .ok()
+        });
+        let Some(attr_path) = attr_path else { continue };
+        let mut track = Vec::with_capacity(codes.len());
+        for &code in codes {
+            match stage
+                .attribute(attr_path.clone())
+                .get_at::<sdf::Value>(TimeCode::new(code))
+            {
+                // The usda parser widens float samples to Double on read;
+                // accept both (and integer-authored states).
+                Ok(Some(v)) => match value_to_f64(&v) {
+                    Some(raw) => track.push(from_stage(raw, info.frame.mpu)),
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+        if track.len() == codes.len() {
+            tracks.push((qi, track));
+        }
+    }
+    if tracks.is_empty() {
+        return None;
+    }
+    if tracks.len() != dof {
+        warnings.push(format!(
+            "JointState covers only {}/{dof} actuated joints; playing transforms instead",
+            tracks.len()
+        ));
+        return None;
+    }
+    let mut samples = vec![vec![0.0; dof]; codes.len()];
+    for (qi, track) in tracks {
+        for (f, v) in track.into_iter().enumerate() {
+            samples[f][qi] = v;
+        }
+    }
+    Some(samples)
+}
+
+/// Joint-state sanity: FK from q(t) — with the recorded root pose as the
+/// base, so mobile bases replay too — must land on the recorded body
+/// transforms. Sampled at the first/middle/last frames.
+fn check_fk_residual(
+    model: &RobotModel,
+    link_poses: &[Vec<Isometry3<f64>>],
+    joint_samples: &[Vec<f64>],
+    warnings: &mut Vec<String>,
+) {
+    let n = link_poses.len();
+    let mut worst = 0.0f64;
+    for f in [0, n / 2, n.saturating_sub(1)] {
+        let base = link_poses[f][model.root_link];
+        let Ok(fk) = forward_kinematics_with_base(model, &joint_samples[f], &base) else {
+            continue;
+        };
+        for (a, b) in fk.iter().zip(&link_poses[f]) {
+            worst = worst.max((a.translation.vector - b.translation.vector).norm());
+        }
+    }
+    if worst > 1e-3 {
+        warnings.push(format!(
+            "joint-state FK deviates from the recorded transforms by up to {:.1} mm — the \
+             recording may not match this robot model",
+            worst * 1e3
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::articulation::{import_robot, RobotImportOptions};
+    use crate::export::{
+        write_animation, AnimationInput, ExportOptions, ObjectSpec, PoseTrack, TEST_ARM,
+    };
+    use botrail_model::Geometry;
+    use nalgebra::{UnitQuaternion, Vector3};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "botrail-usd-recording-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    struct Fixture {
+        model: RobotModel,
+        anim: PathBuf,
+        times: Vec<f64>,
+        configs: Vec<Vec<f64>>,
+        link_poses: Vec<Vec<Isometry3<f64>>>,
+        box_track: Vec<Isometry3<f64>>,
+    }
+
+    /// Import the ARM stage, bake a densely-sampled FK animation (with
+    /// JointState and one moving + one static obstacle), and write it out —
+    /// the recording under test.
+    fn export_fixture(usda: &str, tag: &str) -> Fixture {
+        let dir = temp_dir(tag);
+        std::fs::write(dir.join("robot.usda"), usda).unwrap();
+        let imported = import_robot(
+            &dir.join("robot.usda"),
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = imported.model;
+
+        let base = Isometry3::from_parts(
+            Translation3::new(0.3, -0.2, 0.1),
+            UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.4),
+        );
+        // One authored sample per integer frame at 60 fps — the shape real
+        // recorders produce, and exactly the grid the importer walks.
+        let times: Vec<f64> = (0..=24).map(|k| k as f64 / 60.0).collect();
+        let configs: Vec<Vec<f64>> = times
+            .iter()
+            .map(|t| vec![1.2 * (3.0 * t).sin(), -0.4 + 0.9 * t])
+            .collect();
+        let link_poses: Vec<Vec<Isometry3<f64>>> = configs
+            .iter()
+            .map(|q| forward_kinematics_with_base(&model, q, &base).unwrap())
+            .collect();
+
+        let box_track: Vec<Isometry3<f64>> = times
+            .iter()
+            .map(|t| {
+                Isometry3::from_parts(
+                    Translation3::new(0.5 + 0.15 * t, 0.1, 0.05),
+                    UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.5 * t),
+                )
+            })
+            .collect();
+        let objects = [
+            ObjectSpec {
+                name: "box".into(),
+                geometry: Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                track: PoseTrack::Sampled(box_track.clone()),
+            },
+            ObjectSpec {
+                name: "table".into(),
+                geometry: Geometry::Box {
+                    size: Vector3::new(1.0, 1.0, 0.02),
+                },
+                track: PoseTrack::Static(Isometry3::translation(0.5, 0.0, -0.01)),
+            },
+        ];
+
+        let input = AnimationInput {
+            model: &model,
+            times: &times,
+            link_poses: &link_poses,
+            joint_samples: Some(&configs),
+            objects: &objects,
+        };
+        let anim = dir.join("anim.usda");
+        let warnings = write_animation(&anim, &input, &ExportOptions::default()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Fixture {
+            model,
+            anim,
+            times,
+            configs,
+            link_poses,
+            box_track,
+        }
+    }
+
+    fn assert_pose_close(a: &Isometry3<f64>, b: &Isometry3<f64>, tol: f64, ctx: &str) {
+        let dt = (a.translation.vector - b.translation.vector).norm();
+        let dr = a.rotation.angle_to(&b.rotation);
+        assert!(
+            dt < tol && dr < tol,
+            "{ctx}: dt = {dt:.2e}, dr = {dr:.2e}\n  a = {a:?}\n  b = {b:?}"
+        );
+    }
+
+    fn check_link_poses(fx: &Fixture, rec: &ImportedRecording, tol: f64, tag: &str) {
+        assert_eq!(rec.times.len(), fx.times.len());
+        for (t, expect) in rec.times.iter().zip(&fx.times) {
+            assert!((t - expect).abs() < 1e-12);
+        }
+        for (f, poses) in rec.link_poses.iter().enumerate() {
+            for (i, pose) in poses.iter().enumerate() {
+                assert_pose_close(
+                    pose,
+                    &fx.link_poses[f][i],
+                    tol,
+                    &format!("{tag} frame {f} link {}", fx.model.links[i].name),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn joint_state_roundtrip() {
+        let fx = export_fixture(TEST_ARM, "joint");
+        let rec = import_recording(
+            &fx.anim,
+            &fx.model,
+            &["box".into(), "table".into()],
+            &RecordingImportOptions::default(),
+        )
+        .unwrap();
+        assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
+        assert_eq!(rec.mode, RecordingMode::JointState);
+
+        // q(t) roundtrips through float32 degrees.
+        let samples = rec.joint_samples.as_ref().unwrap();
+        for (f, q) in samples.iter().enumerate() {
+            for (a, b) in q.iter().zip(&fx.configs[f]) {
+                assert!((a - b).abs() < 1e-5, "frame {f}: {a} vs {b}");
+            }
+        }
+        check_link_poses(&fx, &rec, 1e-6, "joint");
+
+        // Only the moving obstacle gets a track, in world coords.
+        assert_eq!(rec.object_tracks.len(), 1);
+        let (name, track) = &rec.object_tracks[0];
+        assert_eq!(name, "box");
+        for (f, pose) in track.iter().enumerate() {
+            assert_pose_close(pose, &fx.box_track[f], 1e-6, &format!("box frame {f}"));
+        }
+    }
+
+    #[test]
+    fn transform_fallback() {
+        let fx = export_fixture(TEST_ARM, "transforms");
+        let rec = import_recording(
+            &fx.anim,
+            &fx.model,
+            &[],
+            &RecordingImportOptions {
+                force_transforms: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rec.mode, RecordingMode::Transforms);
+        assert!(rec.joint_samples.is_none());
+        check_link_poses(&fx, &rec, 1e-6, "transforms");
+    }
+
+    /// A centimeters / Y-up robot stage: the recording composes it through
+    /// the corrective orient+scale pair, and `K` must be re-expressed in
+    /// recording units before use.
+    #[test]
+    fn yup_cm_robot_recording() {
+        let usda = TEST_ARM
+            .replace("metersPerUnit = 1", "metersPerUnit = 0.01")
+            .replace("upAxis = \"Z\"", "upAxis = \"Y\"");
+        let fx = export_fixture(&usda, "yupcm");
+        for force in [false, true] {
+            let rec = import_recording(
+                &fx.anim,
+                &fx.model,
+                &[],
+                &RecordingImportOptions {
+                    force_transforms: force,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
+            assert_eq!(
+                rec.mode,
+                if force {
+                    RecordingMode::Transforms
+                } else {
+                    RecordingMode::JointState
+                }
+            );
+            check_link_poses(&fx, &rec, 1e-6, "yupcm");
+        }
+    }
+}

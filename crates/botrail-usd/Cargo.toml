@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 botrail-model.workspace = true
+botrail-kin.workspace = true
 botrail-mesh.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
@@ -18,4 +19,3 @@ openusd = { git = "https://github.com/mxpv/openusd", rev = "659917514b4628342930
 anyhow = "1"
 
 [dev-dependencies]
-botrail-kin.workspace = true
