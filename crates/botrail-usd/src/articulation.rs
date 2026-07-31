@@ -44,7 +44,7 @@ use crate::{
 
 /// Untyped joint view granting the shared [`JointBase`] accessors
 /// (bodies, localPose0/1) for any concrete joint type.
-struct AnyJoint(Prim);
+pub(crate) struct AnyJoint(pub(crate) Prim);
 
 impl SchemaBase for AnyJoint {
     const KIND: openusd::usd::SchemaKind = openusd::usd::SchemaKind::ConcreteTyped;
@@ -515,13 +515,18 @@ impl RobotBuilder<'_> {
             if !is_self && !info.path.starts_with(&body_prefix) {
                 continue;
             }
-            // Stop at nested rigid bodies (their geometry belongs to them).
-            if !is_self
-                && body_paths.iter().any(|b| {
-                    b != &body.path && (info.path == *b || info.path.starts_with(&format!("{b}/")))
-                })
-            {
-                continue;
+            // Geometry belongs to its *nearest* ancestor body: stop at
+            // nested rigid bodies, but keep prims whose closest body is
+            // this one (a body nested under another body still owns its
+            // own subtree).
+            if !is_self {
+                let nearest = body_paths
+                    .iter()
+                    .filter(|b| info.path == **b || info.path.starts_with(&format!("{b}/")))
+                    .max_by_key(|b| b.len());
+                if nearest.map(|b| b != &body.path).unwrap_or(false) {
+                    continue;
+                }
             }
             let geometry = match self.read_geometry(info) {
                 Ok(Some(g)) => g,

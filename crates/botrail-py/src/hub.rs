@@ -267,6 +267,69 @@ impl SceneHub {
         })
     }
 
+    // ------------------------------------------------------------ usd export
+
+    /// Bakes a trajectory into a USD animation layer at `path`: robot link
+    /// transforms as timeSamples (USD-sourced robots reference their stage,
+    /// URDF robots are authored from the model), every obstacle as a prim,
+    /// and grasped objects riding the arm on sampled tracks. Returns
+    /// exporter warnings.
+    pub fn export_trajectory_usd(
+        &self,
+        traj: &botrail_traj::JointTrajectory,
+        path: &std::path::Path,
+        fps: f64,
+    ) -> Result<Vec<String>, String> {
+        if !(fps.is_finite() && fps > 0.0) {
+            return Err(format!("fps must be positive, got {fps}"));
+        }
+        let scene = self.snapshot();
+        let duration = traj.duration();
+        // Frame times on the fps grid, plus the exact final time.
+        let mut times = Vec::new();
+        let mut k = 0u64;
+        loop {
+            let t = k as f64 / fps;
+            if t >= duration - 1e-9 {
+                break;
+            }
+            times.push(t);
+            k += 1;
+        }
+        times.push(duration);
+
+        let mut link_poses = Vec::with_capacity(times.len());
+        for &t in &times {
+            let poses = scene.fk(&traj.sample(t)).map_err(|e| e.to_string())?;
+            link_poses.push(poses);
+        }
+        let objects: Vec<botrail_usd::export::ObjectSpec> = scene
+            .obstacles()
+            .iter()
+            .map(|o| {
+                let track = match scene.attachment(&o.name) {
+                    Some(att) => botrail_usd::export::PoseTrack::Sampled(
+                        link_poses.iter().map(|p| p[att.link] * att.grasp).collect(),
+                    ),
+                    None => botrail_usd::export::PoseTrack::Static(o.pose),
+                };
+                botrail_usd::export::ObjectSpec {
+                    name: o.name.clone(),
+                    geometry: o.geometry.clone(),
+                    track,
+                }
+            })
+            .collect();
+        let input = botrail_usd::export::AnimationInput {
+            model: &scene.robot,
+            times: &times,
+            link_poses: &link_poses,
+            objects: &objects,
+        };
+        let options = botrail_usd::export::ExportOptions { fps };
+        botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())
+    }
+
     // ------------------------------------------------------------ collision
 
     /// Colliding pairs as ((kind, name), (kind, name)) tuples.

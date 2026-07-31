@@ -502,6 +502,24 @@ impl Scene {
         self.hub.attachments()
     }
 
+    /// Bakes a trajectory to a USD animation layer (`.usda`) that plays in
+    /// usdview / Omniverse / Blender: robot link motion as timeSamples,
+    /// obstacles as prims, grasped objects riding along. USD-sourced robots
+    /// reference their original stage (assets copied to a sibling
+    /// `<stem>_assets/` directory); URDF robots are authored from the
+    /// model's visuals. Returns exporter warnings.
+    #[pyo3(signature = (trajectory, path, fps = 60.0))]
+    fn export_usd(
+        &self,
+        trajectory: &Trajectory,
+        path: PathBuf,
+        fps: f64,
+    ) -> PyResult<Vec<String>> {
+        self.hub
+            .export_trajectory_usd(&trajectory.inner, &path, fps)
+            .map_err(PyValueError::new_err)
+    }
+
     /// Colliding pairs at the current configuration, as
     /// `((kind, name), (kind, name))` tuples with kind `"link"`/`"obstacle"`.
     fn check_collisions(&self) -> Vec<((String, String), (String, String))> {

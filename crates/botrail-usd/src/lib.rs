@@ -18,6 +18,7 @@
 //! placement.
 
 mod articulation;
+pub mod export;
 
 pub use articulation::{import_robot, ImportedRobot, RobotImportOptions};
 
