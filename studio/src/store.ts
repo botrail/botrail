@@ -54,6 +54,14 @@ export function collidingObstacleNames(
   return set;
 }
 
+/** First-sample poses of every attached-object track (playback seeding). */
+function firstObjectPoses(traj: TrajectoryMsg): Record<string, PoseMsg> | null {
+  if (!traj.object_tracks || traj.object_tracks.length === 0) return null;
+  const out: Record<string, PoseMsg> = {};
+  for (const track of traj.object_tracks) out[track.name] = track.poses[0];
+  return out;
+}
+
 interface StudioState {
   sceneDesc: SceneDescriptionMsg | null;
   /** Joint position vector, indexed by q_index (length = DOF). */
@@ -92,6 +100,8 @@ interface StudioState {
   overridePoses: PoseMsg[] | null;
   /** Joint-space playback override (USD-rendered robots do FK client-side). */
   overrideJoints: number[] | null;
+  /** Playback poses of attached objects, keyed by obstacle name. */
+  overrideObstaclePoses: Record<string, PoseMsg> | null;
   /** All motions in the scene; re-sent in full by the server on every change. */
   motions: MotionMsg[];
   /** True while a motion plan request is in flight. */
@@ -122,7 +132,12 @@ interface StudioState {
   beginPlanning: () => void;
   beginMotionPlanning: () => void;
   /** Scrub/advance playback; poses or joints become the display override. */
-  setPlayback: (t: number, poses: PoseMsg[] | null, joints: number[] | null) => void;
+  setPlayback: (
+    t: number,
+    poses: PoseMsg[] | null,
+    joints: number[] | null,
+    obstaclePoses: Record<string, PoseMsg> | null,
+  ) => void;
   setPlaying: (playing: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
@@ -153,6 +168,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   playing: false,
   overridePoses: null,
   overrideJoints: null,
+  overrideObstaclePoses: null,
   motions: [],
   motionPlanning: false,
   motionError: null,
@@ -186,6 +202,7 @@ export const useStudioStore = create<StudioState>((set) => ({
         playing: false,
         overridePoses: null,
         overrideJoints: null,
+        overrideObstaclePoses: null,
         motions: [],
         motionPlanning: false,
         motionError: null,
@@ -219,6 +236,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           overrideJoints: msg.trajectory.link_poses
             ? null
             : (msg.trajectory.joint_positions[0] ?? null),
+          overrideObstaclePoses: firstObjectPoses(msg.trajectory),
           segmentEnds: [],
           motionStats: null,
         });
@@ -245,6 +263,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           overrideJoints: msg.trajectory.link_poses
             ? null
             : (msg.trajectory.joint_positions[0] ?? null),
+          overrideObstaclePoses: firstObjectPoses(msg.trajectory),
           planStats: null,
           planError: null,
         });
@@ -302,11 +321,21 @@ export const useStudioStore = create<StudioState>((set) => ({
   beginPlanning: () => set({ planning: true, planError: null }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
-  setPlayback: (t, poses, joints) =>
-    set({ playbackTime: t, overridePoses: poses, overrideJoints: joints }),
+  setPlayback: (t, poses, joints, obstaclePoses) =>
+    set({
+      playbackTime: t,
+      overridePoses: poses,
+      overrideJoints: joints,
+      overrideObstaclePoses: obstaclePoses,
+    }),
   setPlaying: (playing) => set({ playing }),
   stopPlayback: () =>
-    set({ playing: false, overridePoses: null, overrideJoints: null }),
+    set({
+      playing: false,
+      overridePoses: null,
+      overrideJoints: null,
+      overrideObstaclePoses: null,
+    }),
   setDroppedStage: (stage) => set({ droppedStage: stage }),
   toggleObstacleHidden: (name) =>
     set((s) => {

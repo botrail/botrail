@@ -144,6 +144,15 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             set_obstacle_enabled(host, &name, enabled)
                 .map_err(|e| format!("rejected set_obstacle_enabled: {e}"))
         }
+        ClientMessage::AttachObstacle {
+            name,
+            link,
+            touch_links,
+        } => attach_obstacle(host, &name, link.as_deref(), touch_links.as_deref())
+            .map_err(|e| format!("rejected attach_obstacle: {e}")),
+        ClientMessage::DetachObstacle { name } => {
+            detach_obstacle(host, &name).map_err(|e| format!("rejected detach_obstacle: {e}"))
+        }
         ClientMessage::PlanRequest { goal_positions } => {
             // Failure is reported to clients inside the plan_result.
             let _ = plan_and_emit(host, &goal_positions, &botrail_plan::PlanOptions::default());
@@ -173,8 +182,20 @@ pub fn emit_state(host: &impl SessionHost) {
     host.emit(&msg);
 }
 
+/// Robot motion drags attached (grasped) obstacles along; clients learn
+/// obstacle poses only from `obstacles` broadcasts, so any joint/base
+/// change must rebroadcast the list while something is attached.
+fn emit_obstacles_if_attached(host: &impl SessionHost) {
+    let attached = host.with_scene(|scene| !scene.attachments().is_empty());
+    if attached {
+        let msg = host.with_scene(|scene| wire::obstacles_message(scene, |p| host.mesh_url(p)));
+        host.emit(&msg);
+    }
+}
+
 pub fn set_joint_positions(host: &impl SessionHost, positions: Vec<f64>) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_joint_positions(positions))?;
+    emit_obstacles_if_attached(host);
     emit_state(host);
     Ok(())
 }
@@ -183,6 +204,7 @@ pub fn set_joint_positions(host: &impl SessionHost, positions: Vec<f64>) -> Resu
 /// state.
 pub fn set_robot_base_pose(host: &impl SessionHost, pose: Isometry3<f64>) {
     host.with_scene(|scene| scene.set_robot_base_pose(pose));
+    emit_obstacles_if_attached(host);
     emit_state(host);
 }
 
@@ -215,6 +237,7 @@ pub fn set_tcp_target(
         };
         Ok((result, wire::state_message_with_ik(scene, Some(status))))
     })?;
+    emit_obstacles_if_attached(host);
     host.emit(&state);
     Ok(result)
 }
@@ -283,6 +306,28 @@ pub fn set_obstacle_geometry(
     geometry: Geometry,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_geometry(name, geometry))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Attaches an obstacle to a robot link (grasp captured at the current
+/// relative pose; see `Scene::attach_obstacle` for the defaults) and
+/// rebroadcasts obstacles + state.
+pub fn attach_obstacle(
+    host: &impl SessionHost,
+    name: &str,
+    link: Option<&str>,
+    touch_links: Option<&[String]>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.attach_obstacle(name, link, touch_links))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Detaches an obstacle (its pose freezes where the robot holds it) and
+/// rebroadcasts obstacles + state.
+pub fn detach_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.detach_obstacle(name))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -435,34 +480,55 @@ pub fn plan_motion_and_emit(
     result.map(|planned| (planned, ms))
 }
 
-/// Samples a trajectory at ~30Hz with per-sample FK for playback.
+/// Samples a trajectory at ~30Hz with per-sample FK for playback. Attached
+/// (grasped) obstacles get world-pose tracks baked alongside, whatever the
+/// robot's rendering path — the client never does FK for obstacles.
 pub fn trajectory_msg(
     host: &impl SessionHost,
     traj: &botrail_traj::JointTrajectory,
 ) -> wire::TrajectoryMsg {
-    let (robot, base) = host.with_scene(|scene| (scene.robot.clone(), *scene.robot_base_pose()));
+    let (robot, base, attachments) = host.with_scene(|scene| {
+        (
+            scene.robot.clone(),
+            *scene.robot_base_pose(),
+            scene.attachments().to_vec(),
+        )
+    });
     let (times, joint_positions) = traj.resample(1.0 / 30.0);
     // USD-rendered robots do FK client-side; skip the precomputed poses.
-    let link_poses = match &robot.source {
-        botrail_model::RobotSource::Usd { .. } => None,
-        botrail_model::RobotSource::UrdfXml(_) => Some(
-            joint_positions
-                .iter()
-                .map(|q| {
-                    botrail_kin::forward_kinematics_with_base(&robot, q, &base)
-                        .expect("trajectory q has scene DOF")
-                        .iter()
-                        .map(PoseMsg::from)
-                        .collect()
-                })
-                .collect(),
-        ),
-    };
+    let want_link_poses = matches!(&robot.source, botrail_model::RobotSource::UrdfXml(_));
+    let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
+    let mut object_tracks = (!attachments.is_empty()).then(|| {
+        attachments
+            .iter()
+            .map(|a| wire::ObjectTrackMsg {
+                name: a.object.clone(),
+                poses: Vec::with_capacity(joint_positions.len()),
+            })
+            .collect::<Vec<_>>()
+    });
+    if link_poses.is_some() || object_tracks.is_some() {
+        for q in &joint_positions {
+            let poses = botrail_kin::forward_kinematics_with_base(&robot, q, &base)
+                .expect("trajectory q has scene DOF");
+            if let Some(link_poses) = &mut link_poses {
+                link_poses.push(poses.iter().map(PoseMsg::from).collect());
+            }
+            if let Some(tracks) = &mut object_tracks {
+                for (track, att) in tracks.iter_mut().zip(&attachments) {
+                    track
+                        .poses
+                        .push(PoseMsg::from(&(poses[att.link] * att.grasp)));
+                }
+            }
+        }
+    }
     wire::TrajectoryMsg {
         duration: traj.duration(),
         times,
         joint_positions,
         link_poses,
+        object_tracks,
     }
 }
 
@@ -787,5 +853,133 @@ mod tests {
         handle_client_message(&host, "not json");
         assert!(host.message_types().is_empty());
         assert_eq!(host.logs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn attach_detach_dispatch_rebroadcasts_obstacles() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "box",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::translation(0.1, 0.0, 0.5),
+                )
+                .unwrap()
+        });
+        handle_client_message(&host, r#"{"type":"attach_obstacle","name":"box"}"#);
+        assert_eq!(host.message_types(), ["obstacles", "state"]);
+        assert!(host.logs.borrow().is_empty());
+        {
+            let out = host.out.borrow();
+            let ServerMessage::Obstacles { obstacles } = &out[0] else {
+                panic!("expected obstacles");
+            };
+            let att = obstacles[0].attached_to.as_ref().expect("attached");
+            assert_eq!(att.link, "b");
+        }
+
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"detach_obstacle","name":"box"}"#);
+        assert_eq!(host.message_types(), ["obstacles", "state"]);
+        {
+            let out = host.out.borrow();
+            let ServerMessage::Obstacles { obstacles } = &out[0] else {
+                panic!("expected obstacles");
+            };
+            assert!(obstacles[0].attached_to.is_none());
+        }
+
+        // Unknown obstacle: logged, nothing emitted.
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"attach_obstacle","name":"ghost"}"#);
+        assert!(host.message_types().is_empty());
+        assert_eq!(host.logs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn joint_updates_rebroadcast_obstacles_while_attached() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "held",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::translation(0.1, 0.0, 0.5),
+                )
+                .unwrap();
+        });
+        // Nothing attached: joint updates emit state only.
+        handle_client_message(&host, r#"{"type":"set_joint_positions","positions":[0.2]}"#);
+        assert_eq!(host.message_types(), ["state"]);
+        host.out.borrow_mut().clear();
+
+        host.with_scene(|scene| scene.attach_obstacle("held", None, None).unwrap());
+        handle_client_message(&host, r#"{"type":"set_joint_positions","positions":[0.9]}"#);
+        assert_eq!(host.message_types(), ["obstacles", "state"]);
+        let out = host.out.borrow();
+        let ServerMessage::Obstacles { obstacles } = &out[0] else {
+            panic!("expected obstacles");
+        };
+        // The rebroadcast carries the followed pose. Grasped at q=0.2 and
+        // moved to q=0.9, the box swings by the 0.7 rad delta.
+        let p = &obstacles[0].pose.position;
+        assert!((p[0] - 0.1 * 0.7f64.cos()).abs() < 1e-9);
+        assert!((p[1] - 0.1 * 0.7f64.sin()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trajectories_bake_attached_object_tracks() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "held",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::translation(0.1, 0.0, 0.5),
+                )
+                .unwrap();
+            scene.attach_obstacle("held", None, None).unwrap();
+        });
+        handle_client_message(&host, r#"{"type":"plan_request","goal_positions":[0.8]}"#);
+        let out = host.out.borrow();
+        let ServerMessage::PlanResult { ok, trajectory, .. } = &out[0] else {
+            panic!("expected plan_result");
+        };
+        assert!(ok);
+        let traj = trajectory.as_ref().unwrap();
+        let tracks = traj.object_tracks.as_ref().expect("object tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].name, "held");
+        assert_eq!(tracks[0].poses.len(), traj.times.len());
+        // The final sample lands exactly on the goal: the held object sits
+        // at Rz(0.8)·(0.1, 0, 0) + (0, 0, 0.5).
+        let last = tracks[0].poses.last().unwrap();
+        assert!((last.position[0] - 0.1 * 0.8f64.cos()).abs() < 1e-9);
+        assert!((last.position[1] - 0.1 * 0.8f64.sin()).abs() < 1e-9);
+        assert!((last.position[2] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usd_robots_get_object_tracks_without_link_poses() {
+        let host = AssetHost(usd_host());
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "held",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::translation(0.1, 0.0, 0.5),
+                )
+                .unwrap();
+            scene.attach_obstacle("held", None, None).unwrap();
+        });
+        handle_client_message(&host, r#"{"type":"plan_request","goal_positions":[0.8]}"#);
+        let out = host.0.out.borrow();
+        let ServerMessage::PlanResult { trajectory, .. } = &out[0] else {
+            panic!("expected plan_result");
+        };
+        let traj = trajectory.as_ref().unwrap();
+        assert!(traj.link_poses.is_none(), "USD robots skip pose baking");
+        assert!(traj.object_tracks.is_some(), "objects are baked regardless");
     }
 }

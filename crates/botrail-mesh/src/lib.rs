@@ -125,7 +125,7 @@ fn parse_stl_ascii(text: &str) -> Result<MeshData, MeshError> {
                     )));
                 }
                 let base = vertices.len() as u32;
-                vertices.extend(facet.drain(..));
+                vertices.append(&mut facet);
                 indices.push([base, base + 1, base + 2]);
             }
             _ => {}

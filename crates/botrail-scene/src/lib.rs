@@ -29,6 +29,12 @@ pub enum SceneError {
     WrongDof { expected: usize, got: usize },
     #[error("unknown obstacle `{0}`")]
     UnknownObstacle(String),
+    #[error("unknown link `{0}`")]
+    UnknownLink(String),
+    #[error("obstacle `{0}` is already attached")]
+    AlreadyAttached(String),
+    #[error("obstacle `{0}` is not attached")]
+    NotAttached(String),
     #[error("{0}")]
     UnsupportedGeometry(String),
 }
@@ -51,6 +57,24 @@ pub struct Frame {
     pub pose: Isometry3<f64>,
 }
 
+/// An obstacle rigidly attached to a robot link — a grasped object. While
+/// attached, the obstacle's world pose is kept in sync with the link
+/// (`link_pose ∘ grasp`), and for collision checking it moves with the robot
+/// (checked against the environment and non-touch links) instead of being a
+/// static obstacle.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// Obstacle name.
+    pub object: String,
+    /// Carrying link index.
+    pub link: usize,
+    /// Fixed relative pose: `link ← object`.
+    pub grasp: Isometry3<f64>,
+    /// Links allowed to touch the object (the carrying link and e.g. the
+    /// gripper fingers).
+    pub touch_links: Vec<usize>,
+}
+
 /// A robot placed in a world with obstacles. All poses entering or leaving
 /// the scene (link poses, IK targets, obstacle poses, constraints) are in
 /// the world frame; the robot root sits at `robot_base`. Collision checking
@@ -63,6 +87,7 @@ pub struct Scene {
     joint_positions: Vec<f64>,
     obstacles: Vec<Obstacle>,
     obstacle_colliders: Vec<ObstacleCollider>,
+    attachments: Vec<Attachment>,
     robot_collider: RobotCollider,
     acm: Acm,
     motions: Vec<Motion>,
@@ -99,6 +124,7 @@ impl Scene {
             joint_positions,
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),
+            attachments: Vec::new(),
             robot_collider,
             acm,
             motions: Vec::new(),
@@ -135,6 +161,7 @@ impl Scene {
 
     pub fn set_robot_base_pose(&mut self, pose: Isometry3<f64>) {
         self.robot_base = pose;
+        self.sync_attached_poses();
     }
 
     /// World pose of every link at configuration `q`.
@@ -173,6 +200,7 @@ impl Scene {
             });
         }
         self.joint_positions = positions;
+        self.sync_attached_poses();
         Ok(())
     }
 
@@ -287,6 +315,7 @@ impl Scene {
         let index = self.obstacle_index(name)?;
         self.obstacles.remove(index);
         self.obstacle_colliders.remove(index);
+        self.attachments.retain(|a| a.object != name);
         Ok(())
     }
 
@@ -297,6 +326,13 @@ impl Scene {
     ) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].pose = pose;
+        // Moving an attached object re-grasps it: the new world pose becomes
+        // the new fixed relative pose (so e.g. gizmo-dragging a held object
+        // adjusts the grip instead of being overwritten on the next sync).
+        if let Some(k) = self.attachments.iter().position(|a| a.object == name) {
+            let link_pose = self.link_poses()[self.attachments[k].link];
+            self.attachments[k].grasp = link_pose.inverse() * pose;
+        }
         Ok(())
     }
 
@@ -321,11 +357,126 @@ impl Scene {
         Ok(())
     }
 
+    // ---------------------------------------------------------- attachments
+
+    pub fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
+
+    pub fn attachment(&self, object: &str) -> Option<&Attachment> {
+        self.attachments.iter().find(|a| a.object == object)
+    }
+
+    fn is_attached(&self, object: &str) -> bool {
+        self.attachments.iter().any(|a| a.object == object)
+    }
+
+    /// The link and every link below it in the kinematic tree — the gripper
+    /// subtree when `link` is the tool link. Used as the default touch set.
+    fn link_subtree(&self, link: usize) -> Vec<usize> {
+        let mut result = vec![link];
+        let mut stack = vec![link];
+        while let Some(l) = stack.pop() {
+            for joint in &self.robot.joints {
+                if joint.parent_link == l {
+                    result.push(joint.child_link);
+                    stack.push(joint.child_link);
+                }
+            }
+        }
+        result
+    }
+
+    /// Attaches an obstacle to a link, capturing the grasp transform from
+    /// the current poses (`grasp = link_pose⁻¹ ∘ obstacle_pose`). `link =
+    /// None` uses the default TCP link; `touch_links = None` defaults to the
+    /// link's subtree (the gripper).
+    pub fn attach_obstacle(
+        &mut self,
+        name: &str,
+        link: Option<&str>,
+        touch_links: Option<&[String]>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        if self.is_attached(name) {
+            return Err(SceneError::AlreadyAttached(name.to_string()));
+        }
+        let link = match link {
+            Some(l) => self
+                .robot
+                .link_index(l)
+                .ok_or_else(|| SceneError::UnknownLink(l.to_string()))?,
+            None => self.robot.default_tcp_link(),
+        };
+        let touch_links = match touch_links {
+            Some(names) => {
+                let mut indices = Vec::with_capacity(names.len());
+                for l in names {
+                    indices.push(
+                        self.robot
+                            .link_index(l)
+                            .ok_or_else(|| SceneError::UnknownLink(l.to_string()))?,
+                    );
+                }
+                if !indices.contains(&link) {
+                    indices.push(link);
+                }
+                indices
+            }
+            None => self.link_subtree(link),
+        };
+        let grasp = self.link_poses()[link].inverse() * self.obstacles[index].pose;
+        self.attachments.push(Attachment {
+            object: name.to_string(),
+            link,
+            grasp,
+            touch_links,
+        });
+        Ok(())
+    }
+
+    /// Detaches an obstacle: its pose freezes at the current FK-derived
+    /// world pose and it returns to the static environment set.
+    pub fn detach_obstacle(&mut self, name: &str) -> Result<(), SceneError> {
+        if !self.is_attached(name) {
+            return Err(SceneError::NotAttached(name.to_string()));
+        }
+        self.sync_attached_poses();
+        self.attachments.retain(|a| a.object != name);
+        Ok(())
+    }
+
+    /// Replaces all attachments verbatim (project load) — stored grasp
+    /// transforms are used as-is instead of being captured from the current
+    /// poses. Entries referencing unknown obstacles are dropped.
+    pub fn set_attachments(&mut self, attachments: Vec<Attachment>) {
+        let known = |a: &Attachment| {
+            self.obstacles.iter().any(|o| o.name == a.object) && a.link < self.robot.links.len()
+        };
+        self.attachments = attachments.into_iter().filter(|a| known(a)).collect();
+        self.sync_attached_poses();
+    }
+
+    /// Re-derives the world pose of every attached obstacle from the
+    /// current configuration, so `obstacles()` (and the UI) always see
+    /// grasped objects where the robot holds them.
+    fn sync_attached_poses(&mut self) {
+        if self.attachments.is_empty() {
+            return;
+        }
+        let poses = self.link_poses();
+        for att in &self.attachments {
+            if let Some(i) = self.obstacles.iter().position(|o| o.name == att.object) {
+                self.obstacles[i].pose = poses[att.link] * att.grasp;
+            }
+        }
+    }
+
     // ------------------------------------------------------------ collision
 
-    /// Enabled obstacles as a collision query, plus the mapping from query
-    /// index back to the obstacle's index in `self.obstacles` (disabled
-    /// entries make the two diverge).
+    /// Enabled *static* obstacles as a collision query (attached obstacles
+    /// move with the robot and are queried separately), plus the mapping
+    /// from query index back to the obstacle's index in `self.obstacles`.
     fn obstacle_query(&self) -> (Vec<(Isometry3<f64>, &ObstacleCollider)>, Vec<usize>) {
         let mut query = Vec::new();
         let mut map = Vec::new();
@@ -335,7 +486,7 @@ impl Scene {
             .zip(&self.obstacle_colliders)
             .enumerate()
         {
-            if o.enabled {
+            if o.enabled && !self.is_attached(&o.name) {
                 query.push((o.pose, c));
                 map.push(i);
             }
@@ -343,38 +494,78 @@ impl Scene {
         (query, map)
     }
 
-    /// Rewrites query-local obstacle indices back to `self.obstacles` order.
-    fn remap_obstacle_ids(mut pairs: Vec<CollisionPair>, map: &[usize]) -> Vec<CollisionPair> {
+    /// Enabled attached obstacles as riding colliders, plus the mapping from
+    /// query index back to `self.obstacles`.
+    fn attached_query(&self) -> (Vec<botrail_collide::AttachedCollider<'_>>, Vec<usize>) {
+        let mut query = Vec::new();
+        let mut map = Vec::new();
+        for att in &self.attachments {
+            let Some(i) = self.obstacles.iter().position(|o| o.name == att.object) else {
+                continue;
+            };
+            if !self.obstacles[i].enabled {
+                continue;
+            }
+            query.push(botrail_collide::AttachedCollider {
+                link: att.link,
+                offset: att.grasp,
+                collider: &self.obstacle_colliders[i],
+                skip_links: &att.touch_links,
+            });
+            map.push(i);
+        }
+        (query, map)
+    }
+
+    /// Rewrites query-local ids back to `self.obstacles` order. Attached
+    /// ids also become plain obstacle ids, so downstream consumers (wire,
+    /// highlighting) only ever see links and obstacles.
+    fn remap_obstacle_ids(
+        mut pairs: Vec<CollisionPair>,
+        obstacle_map: &[usize],
+        attached_map: &[usize],
+    ) -> Vec<CollisionPair> {
         for pair in &mut pairs {
             for id in [&mut pair.a, &mut pair.b] {
-                if let ColliderId::Obstacle(k) = id {
-                    *id = ColliderId::Obstacle(map[*k]);
+                match id {
+                    ColliderId::Obstacle(k) => *id = ColliderId::Obstacle(obstacle_map[*k]),
+                    ColliderId::Attached(k) => *id = ColliderId::Obstacle(attached_map[*k]),
+                    ColliderId::Link(_) => {}
                 }
             }
         }
         pairs
     }
 
-    /// Self-collision (ACM-filtered) and robot-vs-obstacle pairs at the
-    /// current configuration.
+    /// Self-collision (ACM-filtered), robot-vs-obstacle, and attached-object
+    /// pairs at the current configuration.
     pub fn check_collisions(&self) -> Vec<CollisionPair> {
         let (query, map) = self.obstacle_query();
+        let (attached, attached_map) = self.attached_query();
         let pairs = botrail_collide::check_scene(
             &self.robot_collider,
             &self.link_poses(),
             &self.acm,
             &query,
+            &attached,
         );
-        Self::remap_obstacle_ids(pairs, &map)
+        Self::remap_obstacle_ids(pairs, &map, &attached_map)
     }
 
     /// Collision pairs at an arbitrary configuration (the scene state is
-    /// not modified).
+    /// not modified). Attached obstacles ride the FK poses of `q`.
     pub fn collisions_at(&self, q: &[f64]) -> Result<Vec<CollisionPair>, SceneError> {
         let poses = self.fk(q)?;
         let (query, map) = self.obstacle_query();
-        let pairs = botrail_collide::check_scene(&self.robot_collider, &poses, &self.acm, &query);
-        Ok(Self::remap_obstacle_ids(pairs, &map))
+        let (attached, attached_map) = self.attached_query();
+        let pairs = botrail_collide::check_scene(
+            &self.robot_collider,
+            &poses,
+            &self.acm,
+            &query,
+            &attached,
+        );
+        Ok(Self::remap_obstacle_ids(pairs, &map, &attached_map))
     }
 
     /// True when `q` has the right DOF, respects the position limits, and
@@ -394,12 +585,14 @@ impl Scene {
     }
 
     /// Minimum robot-obstacle distance (0 when colliding); `None` without
-    /// obstacles or collision geometry.
+    /// obstacles or collision geometry. Attached objects count as part of
+    /// the robot side.
     pub fn min_obstacle_distance(&self) -> Option<f64> {
         botrail_collide::min_robot_obstacle_distance(
             &self.robot_collider,
             &self.link_poses(),
             &self.obstacle_query().0,
+            &self.attached_query().0,
         )
     }
 
@@ -638,6 +831,137 @@ mod tests {
         scene.set_obstacle_enabled("second", false).unwrap();
         assert!(scene.check_collisions().is_empty());
         assert_eq!(scene.min_obstacle_distance(), None);
+    }
+
+    #[test]
+    fn attach_captures_grasp_and_follows_joints() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.1, 0.0, 0.5),
+            )
+            .unwrap();
+        // link=None defaults to the TCP link (deepest leaf = "b").
+        scene.attach_obstacle("box", None, None).unwrap();
+        let att = scene.attachment("box").unwrap();
+        assert_eq!(att.link, 1);
+        assert_eq!(att.touch_links, vec![1]);
+        assert!((att.grasp.translation.vector - Vector3::new(0.1, 0.0, 0.0)).norm() < 1e-12);
+
+        // Rotating the joint (about z at b's origin) carries the box along.
+        scene.set_joint_positions(vec![0.7]).unwrap();
+        let pose = scene.obstacles()[0].pose;
+        let expected = Vector3::new(0.1 * 0.7f64.cos(), 0.1 * 0.7f64.sin(), 0.5);
+        assert!((pose.translation.vector - expected).norm() < 1e-12);
+
+        // Detaching freezes the pose; further joint motion leaves it.
+        scene.detach_obstacle("box").unwrap();
+        assert!(scene.attachments().is_empty());
+        scene.set_joint_positions(vec![0.0]).unwrap();
+        assert!((scene.obstacles()[0].pose.translation.vector - expected).norm() < 1e-12);
+    }
+
+    #[test]
+    fn attached_object_collides_as_part_of_the_robot() {
+        let mut scene = sample_scene();
+        // Held box overlapping its carrying link b: suppressed by the
+        // default touch set, so the scene stays collision-free.
+        scene
+            .add_obstacle(
+                "held",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.1, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.attach_obstacle("held", None, None).unwrap();
+        assert!(scene.check_collisions().is_empty());
+
+        // A wall overlapping the held box (but clear of every link) is a
+        // collision — reported as an obstacle/obstacle pair — and makes the
+        // current configuration invalid for planning.
+        scene
+            .add_obstacle(
+                "wall",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.2, 0.0, 0.5),
+            )
+            .unwrap();
+        let pairs = scene.check_collisions();
+        assert_eq!(pairs.len(), 1);
+        let (ColliderId::Obstacle(a), ColliderId::Obstacle(b)) = (pairs[0].a, pairs[0].b) else {
+            panic!("expected obstacle/obstacle pair, got {pairs:?}");
+        };
+        assert_eq!(scene.obstacles()[a].name, "held");
+        assert_eq!(scene.obstacles()[b].name, "wall");
+        assert!(!scene.is_state_valid(&[0.0]));
+
+        // Rotating the held box away from the wall clears it again.
+        assert!(scene.is_state_valid(&[1.0]));
+
+        // Clearance measures the held box, not just the links: held right
+        // face at x=0.15, wall left face at x=0.55 when moved out.
+        scene.set_obstacle_pose("wall", iso(0.6, 0.0, 0.5)).unwrap();
+        let d = scene.min_obstacle_distance().unwrap();
+        assert!((d - 0.4).abs() < 1e-9, "d = {d}");
+    }
+
+    #[test]
+    fn moving_an_attached_obstacle_regrasps() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.1, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.attach_obstacle("box", Some("b"), None).unwrap();
+        // Drag the held box to a new world pose: the grasp updates so the
+        // new relative pose sticks across joint motion.
+        scene.set_obstacle_pose("box", iso(0.0, 0.2, 0.5)).unwrap();
+        scene
+            .set_joint_positions(vec![std::f64::consts::FRAC_PI_2])
+            .unwrap();
+        let pose = scene.obstacles()[0].pose;
+        assert!((pose.translation.vector - Vector3::new(-0.2, 0.0, 0.5)).norm() < 1e-9);
+    }
+
+    #[test]
+    fn attach_errors_and_cleanup() {
+        let mut scene = sample_scene();
+        assert!(matches!(
+            scene.attach_obstacle("ghost", None, None),
+            Err(SceneError::UnknownObstacle(_))
+        ));
+        scene
+            .add_obstacle("box", Geometry::Sphere { radius: 0.02 }, iso(0.1, 0.0, 0.5))
+            .unwrap();
+        assert!(matches!(
+            scene.attach_obstacle("box", Some("nope"), None),
+            Err(SceneError::UnknownLink(_))
+        ));
+        scene.attach_obstacle("box", Some("b"), None).unwrap();
+        assert!(matches!(
+            scene.attach_obstacle("box", Some("b"), None),
+            Err(SceneError::AlreadyAttached(_))
+        ));
+        // Removing the obstacle drops its attachment.
+        scene.remove_obstacle("box").unwrap();
+        assert!(scene.attachments().is_empty());
+        assert!(matches!(
+            scene.detach_obstacle("box"),
+            Err(SceneError::NotAttached(_))
+        ));
     }
 
     #[test]

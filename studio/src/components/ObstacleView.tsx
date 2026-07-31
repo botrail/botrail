@@ -53,14 +53,20 @@ function ObstacleNode({
   const [group, setGroup] = useState<THREE.Group | null>(null);
   const draggingRef = useRef(false);
   const { pose, name } = obstacle;
+  // During trajectory playback, attached objects follow their baked track
+  // instead of the live scene pose.
+  const overridePose = useStudioStore(
+    (s) => s.overrideObstaclePoses?.[name] ?? null,
+  );
 
   // Follow the store pose except while the user is dragging this obstacle, so
   // the server's echo (and a rejected move) don't fight the gizmo.
   useEffect(() => {
     if (!group || draggingRef.current) return;
-    group.position.set(...pose.position);
-    group.quaternion.set(...pose.quaternion);
-  }, [group, pose]);
+    const shown = overridePose ?? pose;
+    group.position.set(...shown.position);
+    group.quaternion.set(...shown.quaternion);
+  }, [group, pose, overridePose]);
 
   const onDrag = () => {
     // objectChange also fires on attach/programmatic updates; only real drags

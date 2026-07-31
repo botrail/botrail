@@ -191,6 +191,9 @@ impl Scene {
                     geometry: geometry_msg(&o.geometry, &mut mesh_url),
                     pose: PoseMsg::from(&o.pose),
                     enabled: o.enabled,
+                    attached_to: self
+                        .attachment(&o.name)
+                        .map(|a| crate::wire::attachment_msg(self, a)),
                 })
                 .collect(),
             motions: self.motions().iter().map(motion_msg).collect(),
@@ -258,6 +261,22 @@ impl Scene {
         self.set_robot_base_pose((&robot_msg.base_pose).into());
         self.set_joint_positions(robot_msg.joint_positions.clone())
             .map_err(|e| ProjectError::Scene(e.to_string()))?;
+        // Restore attachments verbatim (stored grasp transforms, not
+        // re-captured) once obstacles and joints are in place.
+        let mut attachments = Vec::new();
+        for o in &project.obstacles {
+            if let Some(msg) = &o.attached_to {
+                let attachment = crate::wire::attachment_from_msg(&self.robot, &o.name, msg)
+                    .map_err(|link| {
+                        ProjectError::Incompatible(format!(
+                            "attachment of `{}` references unknown link `{link}`",
+                            o.name
+                        ))
+                    })?;
+                attachments.push(attachment);
+            }
+        }
+        self.set_attachments(attachments);
         self.set_motions(project.motions.iter().map(motion_from_msg).collect());
         self.set_frames(
             project
@@ -366,6 +385,19 @@ pub fn generate_python(project: &ProjectFile) -> String {
         "scene.set_joint_positions({})\n",
         py_list(&robot_msg.joint_positions)
     ));
+    // Attach after obstacles and joints so the captured grasp matches the
+    // saved relative pose.
+    for o in &project.obstacles {
+        if let Some(att) = &o.attached_to {
+            let touch: Vec<String> = att.touch_links.iter().map(|l| format!("{l:?}")).collect();
+            out.push_str(&format!(
+                "scene.attach({:?}, link={:?}, touch_links=[{}])\n",
+                o.name,
+                att.link,
+                touch.join(", ")
+            ));
+        }
+    }
 
     for motion in &project.motions {
         out.push('\n');
@@ -485,6 +517,52 @@ mod tests {
         ));
         // The reloaded scene still collision-checks (collider rebuilt).
         assert!(!reloaded.check_collisions().is_empty() || true);
+    }
+
+    #[test]
+    fn attachments_roundtrip_and_generate_python() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "held",
+                Geometry::Sphere { radius: 0.02 },
+                Isometry3::translation(0.2, 0.0, 0.4),
+            )
+            .unwrap();
+        let tcp = scene.robot.links[scene.robot.default_tcp_link()]
+            .name
+            .clone();
+        scene.attach_obstacle("held", None, None).unwrap();
+        let saved_grasp = scene.attachment("held").unwrap().grasp;
+
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        let att = reloaded.attachment("held").expect("attachment survives");
+        assert_eq!(reloaded.robot.links[att.link].name, tcp);
+        assert!(
+            (att.grasp.translation.vector - saved_grasp.translation.vector).norm() < 1e-12
+                && att.grasp.rotation.angle_to(&saved_grasp.rotation) < 1e-12
+        );
+        // The reloaded held obstacle still rides the arm.
+        assert_eq!(
+            reloaded.check_collisions().len(),
+            scene.check_collisions().len()
+        );
+
+        let code = generate_python(&scene.to_project());
+        assert!(
+            code.contains(&format!("scene.attach(\"held\", link=\"{tcp}\"")),
+            "missing attach line:\n{code}"
+        );
+
+        // A project referencing a link the robot doesn't have is rejected.
+        let mut bad = scene.to_project();
+        bad.obstacles[1].attached_to.as_mut().unwrap().link = "phantom".into();
+        let mut other = Scene::new(scene.robot.clone());
+        assert!(matches!(
+            other.apply_project(&bad),
+            Err(ProjectError::Incompatible(_))
+        ));
     }
 
     #[test]

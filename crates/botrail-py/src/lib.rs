@@ -467,6 +467,41 @@ impl Scene {
         self.hub.obstacle_names()
     }
 
+    /// World pose of an obstacle as `(position, quaternion_xyzw)`.
+    fn obstacle_pose(&self, name: &str) -> PyResult<([f64; 3], [f64; 4])> {
+        self.hub
+            .obstacle_pose(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
+    }
+
+    /// Attaches an obstacle to a robot link at its current relative pose —
+    /// a grasp. While attached the object follows the link (live, in
+    /// planning, and in playback) and collides as part of the robot.
+    /// `link=None` uses the TCP link; `touch_links=None` allows contact
+    /// with the link's subtree (the gripper).
+    #[pyo3(signature = (name, link = None, touch_links = None))]
+    fn attach(
+        &self,
+        name: &str,
+        link: Option<&str>,
+        touch_links: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        self.hub
+            .attach_obstacle(name, link, touch_links.as_deref())
+            .map_err(scene_err)
+    }
+
+    /// Detaches an obstacle; its pose freezes where the robot holds it.
+    fn detach(&self, name: &str) -> PyResult<()> {
+        self.hub.detach_obstacle(name).map_err(scene_err)
+    }
+
+    /// Attached obstacles as `(object, link)` name pairs.
+    #[getter]
+    fn attachments(&self) -> Vec<(String, String)> {
+        self.hub.attachments()
+    }
+
     /// Colliding pairs at the current configuration, as
     /// `((kind, name), (kind, name))` tuples with kind `"link"`/`"obstacle"`.
     fn check_collisions(&self) -> Vec<((String, String), (String, String))> {

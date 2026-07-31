@@ -171,6 +171,20 @@ export function sendSetObstacleEnabled(name: string, enabled: boolean): void {
   rawSend({ type: "set_obstacle_enabled", name, enabled });
 }
 
+/**
+ * Attach an obstacle to a robot link at its current relative pose (a
+ * grasp). `link = null` lets the server pick the default TCP link; touch
+ * links default to the link's subtree (the gripper).
+ */
+export function sendAttachObstacle(name: string, link: string | null): void {
+  rawSend({ type: "attach_obstacle", name, link, touch_links: null });
+}
+
+/** Detach an obstacle; its pose freezes where the robot holds it. */
+export function sendDetachObstacle(name: string): void {
+  rawSend({ type: "detach_obstacle", name });
+}
+
 /** Remove an obstacle (sent immediately). */
 export function sendRemoveObstacle(name: string): void {
   rawSend({ type: "remove_obstacle", name });

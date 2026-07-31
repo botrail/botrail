@@ -108,6 +108,14 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
         </span>
         {o && (
           <>
+            {o.attached_to && (
+              <span
+                className="tree-toggle"
+                title={`attached to ${o.attached_to.link}`}
+              >
+                🧲
+              </span>
+            )}
             <button
               className="tree-toggle"
               title={hidden ? "show" : "hide (display only)"}

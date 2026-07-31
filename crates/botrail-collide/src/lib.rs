@@ -40,12 +40,25 @@ type Parts = Vec<(Pose, SharedShape)>;
 pub enum ColliderId {
     Link(usize),
     Obstacle(usize),
+    /// Index into the `attached` slice passed to [`check_scene`].
+    Attached(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollisionPair {
     pub a: ColliderId,
     pub b: ColliderId,
+}
+
+/// An obstacle rigidly attached to a robot link (a grasped object): its
+/// world pose is `link_poses[link] * offset` at query time, so it moves with
+/// the robot. `skip_links` are links allowed to touch it — the carrying link
+/// and e.g. gripper fingers.
+pub struct AttachedCollider<'a> {
+    pub link: usize,
+    pub offset: Isometry3<f64>,
+    pub collider: &'a ObstacleCollider,
+    pub skip_links: &'a [usize],
 }
 
 /// Builds obstacle colliders for a batch of geometries — in parallel under
@@ -189,14 +202,18 @@ fn parts_distance(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> Option<
     min
 }
 
-/// Checks self-collision (non-ACM link pairs) and robot-vs-obstacle
-/// collision. `link_poses` must align with the model's links; obstacles are
-/// `(world_pose, collider)` pairs whose index becomes `ColliderId::Obstacle`.
+/// Checks self-collision (non-ACM link pairs), robot-vs-obstacle collision,
+/// and attached-object collision. `link_poses` must align with the model's
+/// links; obstacles are `(world_pose, collider)` pairs whose index becomes
+/// `ColliderId::Obstacle`; attached objects (index → `ColliderId::Attached`)
+/// ride their carrying link and are checked against links (minus
+/// `skip_links`), obstacles, and each other.
 pub fn check_scene(
     robot: &RobotCollider,
     link_poses: &[Isometry3<f64>],
     acm: &Acm,
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
+    attached: &[AttachedCollider],
 ) -> Vec<CollisionPair> {
     let world: Vec<Pose> = link_poses.iter().map(to_parry_pose).collect();
     let mut pairs = Vec::new();
@@ -230,17 +247,62 @@ pub fn check_scene(
             }
         }
     }
+    let att_world: Vec<Pose> = attached
+        .iter()
+        .map(|a| to_parry_pose(&(link_poses[a.link] * a.offset)))
+        .collect();
+    for (k, att) in attached.iter().enumerate() {
+        for (i, parts) in robot.links.iter().enumerate() {
+            if parts.is_empty() || att.skip_links.contains(&i) {
+                continue;
+            }
+            if parts_intersect(&world[i], parts, &att_world[k], &att.collider.parts) {
+                pairs.push(CollisionPair {
+                    a: ColliderId::Link(i),
+                    b: ColliderId::Attached(k),
+                });
+            }
+        }
+        for (j, (obs_pose, obs)) in obstacles.iter().enumerate() {
+            let op = to_parry_pose(obs_pose);
+            if parts_intersect(&att_world[k], &att.collider.parts, &op, &obs.parts) {
+                pairs.push(CollisionPair {
+                    a: ColliderId::Attached(k),
+                    b: ColliderId::Obstacle(j),
+                });
+            }
+        }
+        for k2 in (k + 1)..attached.len() {
+            if parts_intersect(
+                &att_world[k],
+                &att.collider.parts,
+                &att_world[k2],
+                &attached[k2].collider.parts,
+            ) {
+                pairs.push(CollisionPair {
+                    a: ColliderId::Attached(k),
+                    b: ColliderId::Attached(k2),
+                });
+            }
+        }
+    }
     pairs
 }
 
-/// Minimum distance between any robot link and any obstacle (0 when
-/// colliding). `None` when there is nothing to measure.
+/// Minimum distance between the robot side (links plus attached objects)
+/// and any obstacle (0 when colliding). `None` when there is nothing to
+/// measure.
 pub fn min_robot_obstacle_distance(
     robot: &RobotCollider,
     link_poses: &[Isometry3<f64>],
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
+    attached: &[AttachedCollider],
 ) -> Option<f64> {
     let world: Vec<Pose> = link_poses.iter().map(to_parry_pose).collect();
+    let att_world: Vec<Pose> = attached
+        .iter()
+        .map(|a| to_parry_pose(&(link_poses[a.link] * a.offset)))
+        .collect();
     let mut min: Option<f64> = None;
     for (obs_pose, obs) in obstacles {
         let op = to_parry_pose(obs_pose);
@@ -249,6 +311,11 @@ pub fn min_robot_obstacle_distance(
                 continue;
             }
             if let Some(d) = parts_distance(&world[i], parts, &op, &obs.parts) {
+                min = Some(min.map_or(d, |m| m.min(d)));
+            }
+        }
+        for (k, att) in attached.iter().enumerate() {
+            if let Some(d) = parts_distance(&att_world[k], &att.collider.parts, &op, &obs.parts) {
                 min = Some(min.map_or(d, |m| m.min(d)));
             }
         }
@@ -305,7 +372,7 @@ mod tests {
         // q = 0: a, b, c all coincide. a-b and b-c are adjacent (allowed);
         // only the non-adjacent a-c pair must be reported.
         let poses = botrail_kin::forward_kinematics(&model, &[0.0, 0.0]).unwrap();
-        let pairs = check_scene(&collider, &poses, &acm, &[]);
+        let pairs = check_scene(&collider, &poses, &acm, &[], &[]);
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -315,7 +382,7 @@ mod tests {
         );
         // Separate all three: no collisions.
         let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
-        assert!(check_scene(&collider, &poses, &acm, &[]).is_empty());
+        assert!(check_scene(&collider, &poses, &acm, &[], &[]).is_empty());
     }
 
     #[test]
@@ -326,13 +393,13 @@ mod tests {
 
         // Ball 0.3m to the side of link a (cube half-extent 0.1): gap 0.15.
         let far = [(iso(0.3, 0.0, 0.0), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &far).is_empty());
-        let d = min_robot_obstacle_distance(&collider, &poses, &far).unwrap();
+        assert!(check_scene(&collider, &poses, &acm, &far, &[]).is_empty());
+        let d = min_robot_obstacle_distance(&collider, &poses, &far, &[]).unwrap();
         assert!((d - 0.15).abs() < 1e-9, "d = {d}");
 
         // Ball overlapping link b (which sits at z = 0.5).
         let hit = [(iso(0.0, 0.0, 0.55), &ball)];
-        let pairs = check_scene(&collider, &poses, &acm, &hit);
+        let pairs = check_scene(&collider, &poses, &acm, &hit, &[]);
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -341,8 +408,88 @@ mod tests {
             }]
         );
         assert_eq!(
-            min_robot_obstacle_distance(&collider, &poses, &hit).unwrap(),
+            min_robot_obstacle_distance(&collider, &poses, &hit, &[]).unwrap(),
             0.0
+        );
+    }
+
+    #[test]
+    fn attached_object_collides_and_follows_link() {
+        let (model, collider, acm) = stack();
+        // Separated stack: a at 0, b at 0.5, c at 1.0 — no self collision.
+        let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let held = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+
+        // Sphere held 0.3m beside link c (link 2): clear of everything.
+        let att = AttachedCollider {
+            link: 2,
+            offset: iso(0.3, 0.0, 0.0),
+            collider: &held,
+            skip_links: &[2],
+        };
+        assert!(check_scene(&collider, &poses, &acm, &[], &[att]).is_empty());
+
+        // An obstacle overlapping the held sphere's *world* position
+        // (0.3, 0, 1.0) — proves the offset composes with the link pose.
+        let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        let env = [(iso(0.3, 0.0, 1.0), &ball)];
+        let att = AttachedCollider {
+            link: 2,
+            offset: iso(0.3, 0.0, 0.0),
+            collider: &held,
+            skip_links: &[2],
+        };
+        let pairs = check_scene(&collider, &poses, &acm, &env, &[att]);
+        assert_eq!(
+            pairs,
+            vec![CollisionPair {
+                a: ColliderId::Attached(0),
+                b: ColliderId::Obstacle(0),
+            }]
+        );
+
+        // Distance includes the attached object: env ball moved 0.2m along x
+        // from the held sphere (surface gap 0.1), links all >= 0.2 away.
+        let env = [(iso(0.5, 0.0, 1.0), &ball)];
+        let att = AttachedCollider {
+            link: 2,
+            offset: iso(0.3, 0.0, 0.0),
+            collider: &held,
+            skip_links: &[2],
+        };
+        let d = min_robot_obstacle_distance(&collider, &poses, &env, &[att]).unwrap();
+        assert!((d - 0.1).abs() < 1e-9, "d = {d}");
+    }
+
+    #[test]
+    fn attached_skip_links_suppress_carrier_contact() {
+        let (model, collider, acm) = stack();
+        let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let held = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+
+        // Sphere at the center of its carrying link c: touching the carrier.
+        let overlapping = AttachedCollider {
+            link: 2,
+            offset: Isometry3::identity(),
+            collider: &held,
+            skip_links: &[2],
+        };
+        assert!(check_scene(&collider, &poses, &acm, &[], &[overlapping]).is_empty());
+
+        // Same but skip_links empty: the carrier contact must be reported.
+        let reported = AttachedCollider {
+            link: 2,
+            offset: Isometry3::identity(),
+            collider: &held,
+            skip_links: &[],
+        };
+        let pairs = check_scene(&collider, &poses, &acm, &[], &[reported]);
+        assert_eq!(
+            pairs,
+            vec![CollisionPair {
+                a: ColliderId::Link(2),
+                b: ColliderId::Attached(0),
+            }]
         );
     }
 
@@ -364,14 +511,17 @@ mod tests {
         let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
 
         let along_axis = [(iso(0.0, 0.0, 0.45), &ball)];
-        assert_eq!(check_scene(&collider, &poses, &acm, &along_axis).len(), 1);
+        assert_eq!(
+            check_scene(&collider, &poses, &acm, &along_axis, &[]).len(),
+            1
+        );
 
         let off_side = [(iso(0.3, 0.0, 0.0), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &off_side).is_empty());
+        assert!(check_scene(&collider, &poses, &acm, &off_side, &[]).is_empty());
 
         // Beyond the cap (cylinder ends at z=0.5, ball spans 0.65..0.75).
         let beyond_cap = [(iso(0.0, 0.0, 0.7), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &beyond_cap).is_empty());
+        assert!(check_scene(&collider, &poses, &acm, &beyond_cap, &[]).is_empty());
     }
 
     #[test]

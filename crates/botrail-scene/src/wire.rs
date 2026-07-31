@@ -174,10 +174,25 @@ pub struct ObstacleMsg {
     /// Disabled obstacles render but are excluded from collision checking.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Present while the obstacle is attached to (grasped by) a robot link.
+    #[serde(default)]
+    pub attached_to: Option<AttachmentMsg>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Attachment state of a grasped obstacle (see `ObstacleMsg::attached_to`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AttachmentMsg {
+    /// Carrying link name.
+    pub link: String,
+    /// Fixed relative pose: `link ← object`.
+    pub grasp: PoseMsg,
+    /// Links allowed to touch the object (carrying link, gripper fingers).
+    pub touch_links: Vec<String>,
 }
 
 /// One side of a collision pair.
@@ -209,6 +224,21 @@ pub struct TrajectoryMsg {
     /// `None` for USD-rendered robots — the client applies
     /// `joint_positions` itself.
     pub link_poses: Option<Vec<Vec<PoseMsg>>>,
+    /// World-pose track per attached (grasped) object, aligned with
+    /// `times`. `None` when nothing is attached.
+    #[serde(default)]
+    pub object_tracks: Option<Vec<ObjectTrackMsg>>,
+}
+
+/// Per-sample world poses for one scene object riding the robot during
+/// playback (a grasped obstacle).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ObjectTrackMsg {
+    /// Obstacle name.
+    pub name: String,
+    /// One world pose per trajectory sample.
+    pub poses: Vec<PoseMsg>,
 }
 
 /// A TCP path constraint (see `motion::Constraint`).
@@ -349,6 +379,20 @@ pub enum ClientMessage {
     SetObstacleEnabled {
         name: String,
         enabled: bool,
+    },
+    /// Attach an obstacle to a robot link at its current relative pose.
+    /// `link = None` uses the default TCP link; `touch_links = None`
+    /// defaults to the link's subtree (the gripper).
+    AttachObstacle {
+        name: String,
+        #[serde(default)]
+        link: Option<String>,
+        #[serde(default)]
+        touch_links: Option<Vec<String>>,
+    },
+    /// Detach an obstacle; its pose freezes where the robot holds it.
+    DetachObstacle {
+        name: String,
     },
     /// Plan from the current configuration to `goal_positions` (DOF order).
     PlanRequest {
@@ -570,6 +614,40 @@ pub fn frames_message(scene: &Scene) -> ServerMessage {
     }
 }
 
+/// A scene attachment in wire form (link indices become link names).
+pub fn attachment_msg(scene: &Scene, attachment: &crate::Attachment) -> AttachmentMsg {
+    AttachmentMsg {
+        link: scene.robot.links[attachment.link].name.clone(),
+        grasp: PoseMsg::from(&attachment.grasp),
+        touch_links: attachment
+            .touch_links
+            .iter()
+            .map(|&l| scene.robot.links[l].name.clone())
+            .collect(),
+    }
+}
+
+/// Converts a wire attachment back into a scene attachment. Unknown link
+/// names are rejected (`Err` carries the offending name).
+pub fn attachment_from_msg(
+    robot: &botrail_model::RobotModel,
+    object: &str,
+    msg: &AttachmentMsg,
+) -> Result<crate::Attachment, String> {
+    let link_index =
+        |name: &str| -> Result<usize, String> { robot.link_index(name).ok_or(name.to_string()) };
+    Ok(crate::Attachment {
+        object: object.to_string(),
+        link: link_index(&msg.link)?,
+        grasp: (&msg.grasp).into(),
+        touch_links: msg
+            .touch_links
+            .iter()
+            .map(|l| link_index(l))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
 /// The full obstacle list as an `obstacles` message; `mesh_url` maps a mesh
 /// obstacle's file path to the URL + extension clients fetch it from.
 pub fn obstacles_message(
@@ -585,6 +663,7 @@ pub fn obstacles_message(
                 geometry: geometry_msg(&o.geometry, &mut mesh_url),
                 pose: PoseMsg::from(&o.pose),
                 enabled: o.enabled,
+                attached_to: scene.attachment(&o.name).map(|a| attachment_msg(scene, a)),
             })
             .collect(),
     }
@@ -598,6 +677,9 @@ fn collider_ref(scene: &Scene, id: ColliderId) -> ColliderRefMsg {
         ColliderId::Obstacle(k) => ColliderRefMsg::Obstacle {
             name: scene.obstacles()[k].name.clone(),
         },
+        // Scene::remap_obstacle_ids rewrites attached ids to obstacle ids
+        // before pairs leave the scene layer.
+        ColliderId::Attached(_) => unreachable!("attached ids are remapped by Scene"),
     }
 }
 
@@ -731,6 +813,80 @@ mod tests {
         assert_eq!(json["collisions"][0]["b"]["kind"], "obstacle");
         assert_eq!(json["collisions"][0]["b"]["name"], "ball");
         assert_eq!(json["min_distance"], 0.0);
+    }
+
+    #[test]
+    fn attached_obstacles_carry_attachment_state() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Sphere { radius: 0.02 },
+                nalgebra::Isometry3::translation(0.1, 0.0, 1.0),
+            )
+            .unwrap();
+        scene.attach_obstacle("box", Some("tip"), None).unwrap();
+
+        let no_mesh = |_: &Path| (String::new(), String::new());
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&obstacles_message(&scene, no_mesh)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["obstacles"][0]["attached_to"]["link"], "tip");
+        assert_eq!(
+            json["obstacles"][0]["attached_to"]["grasp"]["position"][0],
+            0.1
+        );
+        assert_eq!(json["obstacles"][0]["attached_to"]["touch_links"][0], "tip");
+
+        // Un-attached obstacle messages (e.g. from older clients) read back
+        // with `attached_to = None`.
+        let msg: ObstacleMsg = serde_json::from_str(
+            r#"{"name":"o","geometry":{"kind":"sphere","radius":0.1},
+                "pose":{"position":[0,0,0],"quaternion":[0,0,0,1]}}"#,
+        )
+        .unwrap();
+        assert_eq!(msg.attached_to, None);
+    }
+
+    #[test]
+    fn attach_client_messages_parse_with_defaults() {
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"type":"attach_obstacle","name":"box"}"#).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::AttachObstacle {
+                name: "box".into(),
+                link: None,
+                touch_links: None,
+            }
+        );
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"attach_obstacle","name":"box","link":"tip","touch_links":["tip"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::AttachObstacle {
+                name: "box".into(),
+                link: Some("tip".into()),
+                touch_links: Some(vec!["tip".into()]),
+            }
+        );
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"type":"detach_obstacle","name":"box"}"#).unwrap();
+        assert_eq!(msg, ClientMessage::DetachObstacle { name: "box".into() });
+    }
+
+    #[test]
+    fn trajectory_msg_object_tracks_default_none() {
+        // Trajectories serialized before object_tracks existed still read.
+        let msg: TrajectoryMsg = serde_json::from_str(
+            r#"{"duration":1.0,"times":[0.0,1.0],
+                "joint_positions":[[0.0],[1.0]],"link_poses":null}"#,
+        )
+        .unwrap();
+        assert_eq!(msg.object_tracks, None);
     }
 
     #[test]

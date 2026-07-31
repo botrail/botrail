@@ -71,7 +71,7 @@ pub fn detect_always_colliding(
             Ok(p) => p,
             Err(_) => continue,
         };
-        for pair in crate::check_scene(robot, &poses, acm, &[]) {
+        for pair in crate::check_scene(robot, &poses, acm, &[], &[]) {
             if let (crate::ColliderId::Link(i), crate::ColliderId::Link(j)) = (pair.a, pair.b) {
                 *counts.entry(key(i, j)).or_default() += 1;
             }

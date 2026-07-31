@@ -1,6 +1,6 @@
 import { useFrame } from "@react-three/fiber";
 
-import { sampleJoints, samplePoses } from "../playback";
+import { sampleOverride } from "../playback";
 import { useStudioStore } from "../store";
 
 /** Advances trajectory playback each rendered frame while playing. */
@@ -10,13 +10,9 @@ export function PlaybackDriver() {
     if (!s.playing || !s.trajectory) return;
     const traj = s.trajectory;
     const t = Math.min(s.playbackTime + delta, traj.duration);
-    if (traj.link_poses) {
-      // Legacy robots: precomputed link poses drive the display.
-      s.setPlayback(t, samplePoses({ ...traj, link_poses: traj.link_poses }, t), null);
-    } else {
-      // USD-rendered robots: joint values, FK happens client-side.
-      s.setPlayback(t, null, sampleJoints(traj, t));
-    }
+    // Poses for legacy robots, joints for USD robots (client-side FK), and
+    // attached-object poses for either.
+    s.setPlayback(t, ...sampleOverride(traj, t));
     if (t >= traj.duration) {
       s.setPlaying(false);
     }

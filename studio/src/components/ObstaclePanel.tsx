@@ -4,6 +4,8 @@ import type { GeometryMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import {
   sendAddObstacle,
+  sendAttachObstacle,
+  sendDetachObstacle,
   sendRemoveObstacle,
   sendUpdateObstacleGeometry,
 } from "../ws";
@@ -22,18 +24,21 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     geometry: { kind: "box", size: [0.1, 0.1, 0.1] },
     pose: spawnPose(),
     enabled: true,
+    attached_to: null,
   }),
   sphere: () => ({
     name: "sphere",
     geometry: { kind: "sphere", radius: 0.05 },
     pose: spawnPose(),
     enabled: true,
+    attached_to: null,
   }),
   cylinder: () => ({
     name: "cylinder",
     geometry: { kind: "cylinder", radius: 0.05, length: 0.1 },
     pose: spawnPose(),
     enabled: true,
+    attached_to: null,
   }),
 };
 
@@ -100,6 +105,9 @@ export function ObstaclePanel() {
               <span
                 className={`obstacle-name${collidingObstacles.has(o.name) ? " bad" : ""}`}
               >
+                {o.attached_to && (
+                  <span title={`attached to ${o.attached_to.link}`}>{"\u{1F9F2} "}</span>
+                )}
                 {o.name}
               </span>
               <button
@@ -141,8 +149,14 @@ function ClearanceBadge({
   );
 }
 
+/** Display label for a link: prim paths shorten to their last segment. */
+function linkLabel(link: string): string {
+  return link.split("/").filter(Boolean).pop() ?? link;
+}
+
 function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
   const { geometry, pose, name } = obstacle;
+  const tcpLink = useStudioStore((s) => s.tcpLink);
   const commit = (g: GeometryMsg) => sendUpdateObstacleGeometry(name, g);
 
   return (
@@ -193,6 +207,23 @@ function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
         <span className="obstacle-pos">
           {pose.position.map((v) => v.toFixed(3)).join("  ")}
         </span>
+      </div>
+      <div className="seg">
+        {obstacle.attached_to ? (
+          <button
+            title={`attached to ${obstacle.attached_to.link}`}
+            onClick={() => sendDetachObstacle(name)}
+          >
+            Detach from {linkLabel(obstacle.attached_to.link)}
+          </button>
+        ) : (
+          <button
+            title="grasp: follow the TCP link and collide as part of the robot"
+            onClick={() => sendAttachObstacle(name, tcpLink)}
+          >
+            Attach to {tcpLink ? linkLabel(tcpLink) : "TCP"}
+          </button>
+        )}
       </div>
     </div>
   );

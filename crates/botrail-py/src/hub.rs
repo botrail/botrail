@@ -19,7 +19,10 @@ use tokio::sync::broadcast;
 
 pub(crate) use botrail_session::traj_limits;
 
-fn pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
+/// `(position, quaternion_xyzw)` — the pose shape crossing into Python.
+pub type PoseArrays = ([f64; 3], [f64; 4]);
+
+fn pose_arrays(pose: &Isometry3<f64>) -> PoseArrays {
     let t = pose.translation;
     let q = pose.rotation.coords;
     ([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
@@ -120,7 +123,7 @@ impl SceneHub {
         self.with_scene(|scene| scene.joint_positions().to_vec())
     }
 
-    pub fn link_pose(&self, link_name: &str) -> Option<([f64; 3], [f64; 4])> {
+    pub fn link_pose(&self, link_name: &str) -> Option<PoseArrays> {
         self.with_scene(|scene| {
             let index = scene.robot.link_index(link_name)?;
             let pose = scene.link_poses()[index];
@@ -131,7 +134,7 @@ impl SceneHub {
     }
 
     /// World pose of the robot root as `(position, quaternion_xyzw)`.
-    pub fn robot_base_pose(&self) -> ([f64; 3], [f64; 4]) {
+    pub fn robot_base_pose(&self) -> PoseArrays {
         pose_arrays(&self.robot_base_isometry())
     }
 
@@ -151,7 +154,7 @@ impl SceneHub {
         serde_json::to_string(&msg).expect("wire types serialize infallibly")
     }
 
-    pub fn frames(&self) -> Vec<(String, ([f64; 3], [f64; 4]))> {
+    pub fn frames(&self) -> Vec<(String, PoseArrays)> {
         self.with_scene(|scene| {
             scene
                 .frames()
@@ -161,7 +164,7 @@ impl SceneHub {
         })
     }
 
-    pub fn frame_pose(&self, name: &str) -> Option<([f64; 3], [f64; 4])> {
+    pub fn frame_pose(&self, name: &str) -> Option<PoseArrays> {
         self.with_scene(|scene| scene.frame(name).map(|f| pose_arrays(&f.pose)))
     }
 
@@ -230,6 +233,40 @@ impl SceneHub {
         self.with_scene(|scene| scene.obstacles().iter().map(|o| o.name.clone()).collect())
     }
 
+    /// World pose of an obstacle as `(position, quaternion_xyzw)`.
+    pub fn obstacle_pose(&self, name: &str) -> Option<PoseArrays> {
+        self.with_scene(|scene| {
+            let o = scene.obstacles().iter().find(|o| o.name == name)?;
+            let t = o.pose.translation;
+            let q = o.pose.rotation.coords;
+            Some(([t.x, t.y, t.z], [q.x, q.y, q.z, q.w]))
+        })
+    }
+
+    pub fn attach_obstacle(
+        &self,
+        name: &str,
+        link: Option<&str>,
+        touch_links: Option<&[String]>,
+    ) -> Result<(), SceneError> {
+        botrail_session::attach_obstacle(self, name, link, touch_links)
+    }
+
+    pub fn detach_obstacle(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::detach_obstacle(self, name)
+    }
+
+    /// Attached obstacles as (object, carrying link name) pairs.
+    pub fn attachments(&self) -> Vec<(String, String)> {
+        self.with_scene(|scene| {
+            scene
+                .attachments()
+                .iter()
+                .map(|a| (a.object.clone(), scene.robot.links[a.link].name.clone()))
+                .collect()
+        })
+    }
+
     // ------------------------------------------------------------ collision
 
     /// Colliding pairs as ((kind, name), (kind, name)) tuples.
@@ -241,6 +278,10 @@ impl SceneHub {
                 }
                 botrail_collide::ColliderId::Obstacle(k) => {
                     ("obstacle".to_string(), scene.obstacles()[k].name.clone())
+                }
+                // Remapped to obstacle ids by Scene before pairs get here.
+                botrail_collide::ColliderId::Attached(_) => {
+                    unreachable!("attached ids are remapped by Scene")
                 }
             };
             scene

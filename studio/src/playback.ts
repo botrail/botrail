@@ -43,17 +43,46 @@ function bracket(times: number[], t: number): [number, number, number] {
 }
 
 /**
- * Playback override at time `t`: `[poses, joints]` — precomputed poses for
- * legacy robots, joint values for USD-rendered robots (client-side FK).
+ * Playback override at time `t`: `[poses, joints, objectPoses]` —
+ * precomputed poses for legacy robots, joint values for USD-rendered robots
+ * (client-side FK), and world poses of attached objects riding along.
  */
 export function sampleOverride(
   traj: TrajectoryMsg,
   t: number,
-): [PoseMsg[] | null, number[] | null] {
+): [PoseMsg[] | null, number[] | null, Record<string, PoseMsg> | null] {
+  const objects = sampleObjectPoses(traj, t);
   if (traj.link_poses) {
-    return [samplePoses({ ...traj, link_poses: traj.link_poses }, t), null];
+    return [samplePoses({ ...traj, link_poses: traj.link_poses }, t), null, objects];
   }
-  return [null, sampleJoints(traj, t)];
+  return [null, sampleJoints(traj, t), objects];
+}
+
+/**
+ * World poses of attached (grasped) objects at time `t`, keyed by obstacle
+ * name. `null` when the trajectory carries no object tracks.
+ */
+export function sampleObjectPoses(
+  traj: TrajectoryMsg,
+  t: number,
+): Record<string, PoseMsg> | null {
+  const tracks = traj.object_tracks;
+  if (!tracks || tracks.length === 0) return null;
+  const [lo, hi, u] = bracket(traj.times, t);
+  const out: Record<string, PoseMsg> = {};
+  for (const track of tracks) {
+    const pa = track.poses[lo];
+    const pb = track.poses[hi];
+    out[track.name] = {
+      position: [
+        lerp(pa.position[0], pb.position[0], u),
+        lerp(pa.position[1], pb.position[1], u),
+        lerp(pa.position[2], pb.position[2], u),
+      ],
+      quaternion: nlerpQuat(pa.quaternion, pb.quaternion, u),
+    };
+  }
+  return out;
 }
 
 /** Joint positions at time `t`, linearly interpolated. */
