@@ -45,6 +45,13 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
             return;
         }
     }
+    // A recording played before this client connected still reaches it —
+    // after `state` so the live snapshot never clobbers the playback.
+    if let Some(recording) = hub.last_recording_json() {
+        if socket.send(Message::Text(recording.into())).await.is_err() {
+            return;
+        }
+    }
     loop {
         tokio::select! {
             broadcast = rx.recv() => match broadcast {

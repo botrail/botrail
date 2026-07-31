@@ -35,6 +35,10 @@ pub struct SceneHub {
     /// Mesh id (URL path segment) -> filesystem path. Grows lazily as
     /// robot/obstacle mesh visuals are mapped to URLs.
     meshes: Mutex<Vec<PathBuf>>,
+    /// Last successful recording playback, replayed to late-joining
+    /// clients — the normal flow is "script plays, then the browser opens",
+    /// so the original broadcast usually lands before anyone connects.
+    last_recording: Mutex<Option<String>>,
 }
 
 impl SessionHost for SceneHub {
@@ -84,7 +88,16 @@ impl SceneHub {
             scene: Mutex::new(scene),
             tx,
             meshes: Mutex::new(Vec::new()),
+            last_recording: Mutex::new(None),
         }
+    }
+
+    /// The last successful `recording_result` (serialized), for handshakes.
+    pub fn last_recording_json(&self) -> Option<String> {
+        self.last_recording
+            .lock()
+            .expect("recording mutex poisoned")
+            .clone()
     }
 
     /// Filesystem path behind `/meshes/{id}`.
@@ -482,14 +495,20 @@ impl SceneHub {
                     step_spans: Vec::new(),
                     signals: Vec::new(),
                 };
-                self.emit(&ServerMessage::RecordingResult {
+                let msg = ServerMessage::RecordingResult {
                     ok: true,
                     source,
                     error: None,
                     mode: Some(mode.to_string()),
                     warnings: rec.warnings.clone(),
                     timeline: Some(timeline),
-                });
+                };
+                *self
+                    .last_recording
+                    .lock()
+                    .expect("recording mutex poisoned") =
+                    Some(serde_json::to_string(&msg).expect("wire types serialize infallibly"));
+                self.emit(&msg);
                 Ok((mode.to_string(), duration, rec.warnings, track_names))
             }
             Err(e) => {
@@ -624,6 +643,10 @@ impl SceneHub {
             botrail_scene::project::ProjectFile::from_json(json).map_err(|e| e.to_string())?;
         self.with_scene(|scene| scene.apply_project(&project))
             .map_err(|e| e.to_string())?;
+        *self
+            .last_recording
+            .lock()
+            .expect("recording mutex poisoned") = None;
         let _ = self.tx.send(self.obstacles_json());
         let _ = self.tx.send(self.motions_json());
         let _ = self.tx.send(self.sequences_json());

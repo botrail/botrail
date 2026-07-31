@@ -392,7 +392,7 @@ export const useStudioStore = create<StudioState>((set) => ({
       } else {
         set({ motionPlanning: false, motionError: msg.error ?? "planning failed" });
       }
-    } else {
+    } else if (msg.type === "state") {
       set({
         jointPositions: msg.joint_positions,
         basePose: msg.base_pose,
@@ -402,6 +402,8 @@ export const useStudioStore = create<StudioState>((set) => ({
         minDistance: msg.min_distance,
       });
     }
+    // Message types this build doesn't know (a newer server) fall through
+    // untouched — a stale bundle must degrade, not crash to a black screen.
   },
 
   setJointPosition: (qIndex, value) =>
