@@ -1,7 +1,10 @@
-"""PLC-style sequence demo: the full §1 scenario on the factory cell.
+"""PLC-style sequence demo: a tracking pick on the factory cell.
 
 The conveyor feeds Box_A down the belt until it interrupts a photoelectric
-beam at the pick point; the sequence stops the belt and runs a pick cycle
+beam at the pick point — and then keeps running. The sequence latches onto
+the box (`bt.seq.track`), so every pose taught at the station rides along
+with the part: the robot dives onto the moving box, closes on it in motion,
+and only lets go of the belt sync once the box is its own. The rest is
 structured like a real cell — *planned* transfer moves between stations,
 *guarded* ramp moves (no collision check) for the approach/retreat through
 contact, an internal `carrying` signal, and timer steps. Everything bakes
@@ -56,8 +59,9 @@ def build_cycle(scene: bt.Scene) -> str:
         running=False,
     )
     # The beam trips once the box's leading face comes within the beam
-    # radius, so parking it half a box downstream of the pick frame coasts
-    # the box to a stop centred under the taught grasp.
+    # radius, so parking it half a box downstream of the pick frame fires
+    # the latch just as the box reaches the taught grasp — which is what
+    # makes tracking pick the box up rather than a fixed point in space.
     trip_x = pick[0][0] + BOX_SIZE / 2 + BEAM_RADIUS
     scene.add_beam_sensor(
         "beam_pick",
@@ -98,20 +102,29 @@ def build_cycle(scene: bt.Scene) -> str:
     ramp_to = lambda q: dict(zip(names, q))  # noqa: E731
 
     sq = scene.sequence("pick_place")
-    sq.step("feed", actions=[bt.seq.start("conv")], transition=bt.seq.signal("beam_pick"))
-    sq.step("halt", actions=[bt.seq.stop("conv")])
-    sq.step("approach", actions=[bt.seq.motion("to_hover")])
-    sq.step("descend", actions=[bt.seq.ramp(ramp_to(with_fingers(grasp_q, OPEN)), 0.8)])
+    # The belt starts and the robot pre-positions over the pick point at the
+    # same time; the step ends when the part has arrived *and* the arm is
+    # there to meet it (series contacts).
+    sq.step(
+        "feed",
+        actions=[bt.seq.start("conv"), bt.seq.motion("to_hover")],
+        transition=bt.seq.all_of(bt.seq.signal("beam_pick"), bt.seq.done()),
+    )
+    # No halt: from here the taught poses ride the box down the belt.
+    sq.step("latch", actions=[bt.seq.track(BOX)])
+    sq.step("descend", actions=[bt.seq.ramp(ramp_to(with_fingers(grasp_q, OPEN)), 0.6)])
     sq.step("close", actions=[bt.seq.ramp({f: CLOSED for f in fingers}, 0.4)])
     sq.step(
         "grasp",
         actions=[
+            # Grasping the tracked part freezes the sync offset, so the lift
+            # goes straight up from wherever the box was caught.
             bt.seq.attach(BOX, link="/panda/panda_hand", touch_links=TOUCH),
             bt.seq.set_signal("carrying"),
         ],
     )
-    sq.step("lift", actions=[bt.seq.ramp(ramp_to(with_fingers(hover_q, CLOSED)), 0.8)])
-    sq.step("carry", actions=[bt.seq.motion("to_pallet")])
+    sq.step("lift", actions=[bt.seq.ramp(ramp_to(with_fingers(hover_q, CLOSED)), 0.6)])
+    sq.step("carry", actions=[bt.seq.untrack(), bt.seq.motion("to_pallet")])
     sq.step("lower", actions=[bt.seq.ramp(ramp_to(with_fingers(place_q, CLOSED)), 0.8)])
     sq.step(
         "release",
@@ -131,8 +144,15 @@ def main() -> None:
 
     timeline = scene.simulate_sequence(name)
     print(f"cycle time: {timeline.duration:.2f}s")
-    for name, start, end in timeline.step_spans:
-        print(f"  {start:6.2f} – {end:6.2f}  {name}")
+    spans = {step: (start, end) for step, start, end in timeline.step_spans}
+    for step, start, end in timeline.step_spans:
+        print(f"  {start:6.2f} – {end:6.2f}  {step}")
+
+    # How far the belt carried the box between the latch and the grasp: the
+    # distance the pick would have missed by without tracking.
+    latch, grasp = spans["latch"][0], spans["grasp"][0]
+    travel = timeline.object_pose(BOX, grasp)[0][0] - timeline.object_pose(BOX, latch)[0][0]
+    print(f"tracked pick: caught the box {travel * 1e3:.0f} mm downstream, belt still running")
 
     warnings = timeline.export_usd(out, fps=60.0)
     for w in warnings:

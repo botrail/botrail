@@ -232,7 +232,16 @@ struct Rollout {
     motion_end: Option<f64>,
     /// The in-flight motion/ramp, for per-tick joint sampling.
     active: Option<ActiveMove>,
+    /// Commanded joints (what the robot actually does).
     q: Vec<f64>,
+    /// Joints as the motion/ramp asks for them, before any tracking offset.
+    /// Equal to `q` unless a track is active.
+    q_nom: Vec<f64>,
+    /// Previous tick's nominal, so a tracked solve can warm-start from the
+    /// previous *command* plus the nominal increment.
+    q_nom_prev: Vec<f64>,
+    /// Conveyor tracking: the latched part and the offset it has built up.
+    tracking: Option<TrackLatch>,
     sensors: Vec<SensorRuntime>,
     devices: Vec<DeviceRuntime>,
 
@@ -276,6 +285,29 @@ impl ActiveMove {
             }
         }
     }
+}
+
+/// Per-tick tracking solve: warm-started from the nominal configuration,
+/// so it only has to absorb one scan period of part motion.
+const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
+    mode: botrail_kin::IkMode::Pose,
+    max_iters: 100,
+    tol_pos: 1e-7,
+    tol_rot: 1e-6,
+    damping: 0.05,
+    orientation_weight: 0.5,
+    max_step: 0.5,
+};
+
+/// An active conveyor track: taught poses are carried by `offset`, which is
+/// the part's rigid motion since the latch — recomputed every tick until the
+/// part is grasped, then frozen (from then on it is the robot moving it).
+struct TrackLatch {
+    object: String,
+    link: usize,
+    origin: Isometry3<f64>,
+    offset: Isometry3<f64>,
+    frozen: bool,
 }
 
 struct SensorRuntime {
@@ -423,11 +455,14 @@ impl Rollout {
             step_entered_at: 0.0,
             motion_end: None,
             active: None,
+            tracking: None,
             sensors,
             devices,
             times: vec![0.0],
             positions: vec![q.clone()],
             velocities: Vec::new(),
+            q_nom: q.clone(),
+            q_nom_prev: q.clone(),
             q,
             objects,
             signals,
@@ -477,10 +512,15 @@ impl Rollout {
         // Joints follow the in-flight motion/ramp (attached obstacles are
         // re-synced by set_joint_positions).
         if let Some(active) = &self.active {
-            self.q = active.sample(t);
-            self.world
-                .set_joint_positions(self.q.clone())
-                .expect("sampled q has scene DOF");
+            self.q_nom = active.sample(t);
+            // Under a track the commanded joints are solved in
+            // `follow_tracked_part`, once this tick's part motion is known.
+            if self.tracking.is_none() {
+                self.q = self.q_nom.clone();
+                self.world
+                    .set_joint_positions(self.q.clone())
+                    .expect("sampled q has scene DOF");
+            }
             if self.motion_end.map(|end| t >= end - 1e-9).unwrap_or(false) {
                 self.active = None;
             }
@@ -618,7 +658,135 @@ impl Rollout {
                 pose,
             });
         }
+        self.follow_tracked_part()?;
         Ok(())
+    }
+
+    /// Conveyor tracking: re-solve the arm so this tick's commanded pose is
+    /// the nominal one carried by the part's motion since the latch. Runs
+    /// after the devices have moved the world, so the robot sees the part
+    /// where it is *now*.
+    fn follow_tracked_part(&mut self) -> Result<(), SeqError> {
+        let Some(latch) = &self.tracking else {
+            return Ok(());
+        };
+        let (object, link, origin, frozen) =
+            (latch.object.clone(), latch.link, latch.origin, latch.frozen);
+        // A grasped part is carried by the robot itself, so following it
+        // would chase its own tail: the offset it had at the grasp stands.
+        let offset = if frozen {
+            latch.offset
+        } else {
+            let pose = self
+                .world
+                .obstacles()
+                .iter()
+                .find(|o| o.name == object)
+                .map(|o| o.pose)
+                .ok_or_else(|| SeqError::Action {
+                    step: self.step,
+                    name: self.step_name(self.step),
+                    message: format!("tracked obstacle `{object}` disappeared"),
+                })?;
+            let offset = pose * origin.inverse();
+            if let Some(latch) = &mut self.tracking {
+                latch.offset = offset;
+            }
+            offset
+        };
+
+        let nominal = self.world.fk(&self.q_nom).expect("q_nom has scene DOF")[link];
+        let target = offset * nominal;
+        // Warm start from what the robot did last tick plus this tick's
+        // nominal increment: the solve then only absorbs one scan period of
+        // part motion (and joints the offset cannot touch — the gripper —
+        // follow the nominal exactly).
+        let seed: Vec<f64> = self
+            .q
+            .iter()
+            .zip(&self.q_nom)
+            .zip(&self.q_nom_prev)
+            .map(|((commanded, nominal), previous)| commanded + (nominal - previous))
+            .collect();
+        let result = self
+            .world
+            .solve_ik_world(link, &target, &seed, &TRACK_IK)
+            .expect("seed has scene DOF");
+        if !result.converged {
+            return Err(SeqError::Action {
+                step: self.step,
+                name: self.step_name(self.step),
+                message: format!(
+                    "tracking `{object}`: the part ran out of reach at t = {:.2}s \
+                     ({:.3} mm / {:.4} rad short after {} iterations)",
+                    self.t,
+                    result.pos_error * 1e3,
+                    result.rot_error,
+                    result.iters
+                ),
+            });
+        }
+        let previous = self.q.clone();
+        self.q = result.q;
+        self.q_nom_prev = self.q_nom.clone();
+        self.world
+            .set_joint_positions(self.q.clone())
+            .expect("solved q has scene DOF");
+        // The move's own waypoints know nothing about the offset, so a
+        // tracked tick bakes itself (velocities by difference).
+        let dt = self.options.dt;
+        let velocity = self
+            .q
+            .iter()
+            .zip(&previous)
+            .map(|(now, before)| (now - before) / dt)
+            .collect();
+        let (t, q) = (self.t, self.q.clone());
+        self.append_waypoint(t, q, velocity);
+        Ok(())
+    }
+
+    /// Latches onto `object`: from here the nominal poses ride its motion.
+    fn latch_track(&mut self, object: &str, link: Option<&str>) -> Result<(), SeqError> {
+        let err = |message: String| SeqError::Action {
+            step: self.step,
+            name: self.step_name(self.step),
+            message,
+        };
+        let link = match link {
+            Some(name) => self
+                .world
+                .robot
+                .link_index(name)
+                .ok_or_else(|| err(format!("unknown link `{name}`")))?,
+            // The wrist, not the fingertip: a pose says nothing about the
+            // grip, so the solver must not be able to spend it.
+            None => self.world.robot.tool_mount_link(),
+        };
+        let origin = self
+            .world
+            .obstacles()
+            .iter()
+            .find(|o| o.name == object)
+            .map(|o| o.pose)
+            .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
+        self.q_nom = self.q.clone();
+        self.q_nom_prev = self.q.clone();
+        self.tracking = Some(TrackLatch {
+            object: object.to_string(),
+            link,
+            origin,
+            offset: Isometry3::identity(),
+            frozen: false,
+        });
+        Ok(())
+    }
+
+    /// Drops the track; the robot keeps the configuration it is in, so the
+    /// nominal frame is re-based onto it (releasing never moves the robot).
+    fn release_track(&mut self) {
+        self.tracking = None;
+        self.q_nom = self.q.clone();
     }
 
     /// Extends (or opens) a constant-velocity span covering this tick.
@@ -847,7 +1015,7 @@ impl Rollout {
                 });
             }
             Action::StartRamp { targets, duration } => {
-                let mut goal = self.q.clone();
+                let mut goal = self.q_nom.clone();
                 for (joint, value) in targets {
                     let ji = self
                         .world
@@ -860,12 +1028,16 @@ impl Rollout {
                     goal[qi] = *value;
                 }
                 // Two rest-to-rest waypoints: cubic Hermite eases in/out.
-                self.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
+                // A tracked ramp cannot bake ahead — its poses are carried
+                // by a part that has not moved yet — so it bakes per tick.
+                if self.tracking.is_none() {
+                    self.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
+                }
                 self.motion_end = Some(self.t + duration);
                 self.active = Some(ActiveMove::Ramp {
                     start: self.t,
                     duration: *duration,
-                    from: self.q.clone(),
+                    from: self.q_nom.clone(),
                     to: goal,
                 });
             }
@@ -909,6 +1081,14 @@ impl Rollout {
                     link: attachment.link,
                     offset: attachment.grasp,
                 });
+                // Grasping the tracked part ends the chase: it moves with
+                // the robot now, so the offset it had at the grasp stands
+                // (which is what keeps the lift straight).
+                if let Some(latch) = &mut self.tracking {
+                    if &latch.object == object {
+                        latch.frozen = true;
+                    }
+                }
             }
             Action::Detach { object } => {
                 self.world
@@ -934,6 +1114,13 @@ impl Rollout {
                 }
                 track.spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
             }
+            Action::Track { object, link } => {
+                self.world
+                    .set_joint_positions(self.q.clone())
+                    .map_err(|e| err(e.to_string()))?;
+                self.latch_track(object, link.as_deref())?;
+            }
+            Action::Untrack => self.release_track(),
             Action::Set { signal, value } => {
                 let t = self.t;
                 let track = self
@@ -1833,6 +2020,384 @@ mod device_tests {
             &shadowed,
             vec![step("x", vec![], Condition::Immediately)],
             "collides",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tracking_tests {
+    use super::*;
+    use crate::seq::{Action, Condition, Device, DeviceKind, Sequence, Step};
+    use botrail_model::Geometry;
+    use nalgebra::{Translation3, UnitQuaternion, Vector3};
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    /// A 3-axis gantry: enough DOF to hold a pose while a part slides by.
+    fn gantry() -> Scene {
+        let urdf = r#"
+        <robot name="gantry">
+          <link name="base"/>
+          <link name="bridge"/>
+          <link name="carriage"/>
+          <link name="tool">
+            <visual><geometry><box size="0.05 0.05 0.05"/></geometry></visual>
+          </link>
+          <joint name="jx" type="prismatic">
+            <parent link="base"/><child link="bridge"/>
+            <axis xyz="1 0 0"/>
+            <limit lower="-2" upper="2" effort="1" velocity="1"/>
+          </joint>
+          <joint name="jy" type="prismatic">
+            <parent link="bridge"/><child link="carriage"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-2" upper="2" effort="1" velocity="1"/>
+          </joint>
+          <joint name="jz" type="prismatic">
+            <parent link="carriage"/><child link="tool"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-2" upper="2" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+        Scene::new(std::sync::Arc::new(
+            botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
+        ))
+    }
+
+    fn limits() -> botrail_traj::Limits {
+        botrail_traj::Limits::uniform(3, 1.0, 2.0)
+    }
+
+    /// Belt at 0.2 m/s with the part starting under the taught pose.
+    fn cell() -> Scene {
+        let mut scene = gantry();
+        scene.set_joint_positions(vec![0.0, 0.0, 0.4]).unwrap();
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.05, 0.05, 0.05),
+                },
+                iso(0.0, 0.0, 0.0),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(0.5, 0.0, 0.0),
+                zone_size: Vector3::new(3.0, 0.4, 0.4),
+                velocity: Vector3::new(0.2, 0.0, 0.0),
+                running: true,
+            },
+        });
+        scene
+    }
+
+    fn tool_pose(scene: &Scene, q: &[f64]) -> Isometry3<f64> {
+        let link = scene.robot.link_index("tool").unwrap();
+        scene.fk(q).unwrap()[link]
+    }
+
+    /// The taught descent is carried by the belt: the tool meets the part
+    /// where the part *is*, not where it was taught.
+    #[test]
+    fn tracked_ramp_follows_the_moving_part() {
+        let mut scene = cell();
+        scene.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step(
+                    "latch",
+                    vec![Action::Track {
+                        object: "part".into(),
+                        link: Some("tool".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "descend",
+                    vec![Action::StartRamp {
+                        // taught: straight down onto the part at x = 0
+                        targets: vec![("jz".into(), 0.05)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .unwrap();
+        assert!((tl.duration - 0.5).abs() < 1e-9, "{}", tl.duration);
+
+        // The part has travelled 0.2 * 0.5 = 0.1 m; so has the tool, which
+        // also completed the taught 0.35 m descent.
+        let end = tool_pose(&scene, &tl.robot.sample(tl.duration));
+        assert!((end.translation.x - 0.1).abs() < 1e-4, "{}", end.translation.x);
+        assert!((end.translation.z - 0.05).abs() < 1e-4, "{}", end.translation.z);
+        // Mid-ramp the tool sits over the part throughout, not behind it.
+        for i in 0..=10 {
+            let t = tl.duration * f64::from(i) / 10.0;
+            let pose = tool_pose(&scene, &tl.robot.sample(t));
+            assert!(
+                (pose.translation.x - 0.2 * t).abs() < 1e-3,
+                "t={t}: tool x {} vs part {}",
+                pose.translation.x,
+                0.2 * t
+            );
+        }
+    }
+
+    /// Grasping the tracked part freezes the offset, so the lift after it is
+    /// straight up — the part is not dragged back to the taught station.
+    #[test]
+    fn grasp_freezes_the_offset_and_the_lift_stays_put() {
+        let mut scene = cell();
+        scene.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step(
+                    "latch",
+                    vec![Action::Track {
+                        object: "part".into(),
+                        link: Some("tool".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "descend",
+                    vec![Action::StartRamp {
+                        targets: vec![("jz".into(), 0.05)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "grasp",
+                    vec![Action::Attach {
+                        object: "part".into(),
+                        link: Some("tool".into()),
+                        touch_links: Some(vec!["tool".into()]),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "lift",
+                    vec![Action::StartRamp {
+                        targets: vec![("jz".into(), 0.4)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+                step("release", vec![Action::Untrack], Condition::Immediately),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .unwrap();
+        let track = tl
+            .objects
+            .iter()
+            .find(|o| o.name == "part")
+            .expect("the grasped part is tracked");
+        let poses = |t: f64| {
+            let q = tl.robot.sample(t);
+            let link_poses = scene.fk(&q).unwrap();
+            (
+                tool_pose(&scene, &q),
+                SequenceTimeline::object_pose(track, &link_poses, t).unwrap(),
+            )
+        };
+        let (_, at_grasp) = poses(0.5);
+        let (tool_end, at_end) = poses(tl.duration);
+        // Lifted straight up from where it was caught.
+        assert!((at_end.translation.x - at_grasp.translation.x).abs() < 1e-6);
+        assert!((at_end.translation.z - at_grasp.translation.z - 0.35).abs() < 1e-4);
+        // ... and it is still in the gripper.
+        assert!((tool_end.translation.x - at_end.translation.x).abs() < 1e-5);
+    }
+
+    /// Releasing a track never moves the robot: the world-frame moves after
+    /// it start from wherever the tracked part left the arm.
+    #[test]
+    fn untrack_holds_the_pose_it_reached() {
+        let mut scene = cell();
+        scene.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step(
+                    "latch",
+                    vec![Action::Track {
+                        object: "part".into(),
+                        link: Some("tool".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+                step("follow", vec![], Condition::Elapsed { seconds: 0.5 }),
+                step("release", vec![Action::Untrack], Condition::Immediately),
+                step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .unwrap();
+        let at_release = tool_pose(&scene, &tl.robot.sample(0.5));
+        let at_end = tool_pose(&scene, &tl.robot.sample(tl.duration));
+        assert!((at_release.translation.x - 0.1).abs() < 1e-4);
+        assert!(
+            (at_end.translation.vector - at_release.translation.vector).norm() < 1e-9,
+            "the robot moved after the release"
+        );
+    }
+
+    /// Servoing a fingertip while the gripper ramps is rejected: the solve
+    /// could spend the grip chasing the part (the default link — the tool
+    /// mount — is what keeps this from happening in the first place).
+    #[test]
+    fn ramping_the_tracked_gripper_is_rejected() {
+        let urdf = r#"
+        <robot name="arm">
+          <link name="base"/>
+          <link name="wrist"/>
+          <link name="left"/>
+          <link name="right"/>
+          <joint name="elbow" type="prismatic">
+            <parent link="base"/><child link="wrist"/>
+            <axis xyz="1 0 0"/>
+            <limit lower="-1" upper="1" effort="1" velocity="1"/>
+          </joint>
+          <joint name="finger_left" type="prismatic">
+            <parent link="wrist"/><child link="left"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+          </joint>
+          <joint name="finger_right" type="prismatic">
+            <parent link="wrist"/><child link="right"/>
+            <axis xyz="0 -1 0"/>
+            <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+        let mut scene = Scene::new(std::sync::Arc::new(
+            botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
+        ));
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.05, 0.05, 0.05),
+                },
+                iso(0.0, 0.0, 0.0),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "latch",
+                    vec![Action::Track {
+                        object: "part".into(),
+                        link: Some("left".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "close",
+                    vec![Action::StartRamp {
+                        targets: vec![("finger_left".into(), 0.02)],
+                        duration: 0.4,
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let err = scene
+            .simulate_sequence(
+                "s",
+                &RolloutOptions::default(),
+                &botrail_traj::Limits::uniform(3, 1.0, 2.0),
+            )
+            .expect_err("the gripper joint moves the servoed link")
+            .to_string();
+        assert!(err.contains("fights the track"), "{err}");
+        assert!(err.contains("wrist"), "{err}");
+    }
+
+    /// Authoring-time rules: one track at a time, no stray release, and no
+    /// planned motions while the frame is moving.
+    #[test]
+    fn tracking_rules_are_validated() {
+        let base = cell();
+        let check = |steps: Vec<Step>, needle: &str| {
+            let mut scene = base.clone();
+            scene
+                .add_segment(
+                    "go",
+                    crate::motion::Segment {
+                        kind: crate::motion::SegmentKind::Joint,
+                        goal_positions: vec![0.1, 0.0, 0.4],
+                        constraints: vec![],
+                    },
+                )
+                .unwrap();
+            scene.upsert_sequence(Sequence {
+                name: "s".into(),
+                steps,
+            });
+            let err = scene
+                .simulate_sequence("s", &RolloutOptions::default(), &limits())
+                .expect_err("expected `{needle}`")
+                .to_string();
+            assert!(err.contains(needle), "expected `{needle}` in `{err}`");
+        };
+        let track = || Action::Track {
+            object: "part".into(),
+            link: None,
+        };
+        check(
+            vec![step(
+                "twice",
+                vec![track(), track()],
+                Condition::Immediately,
+            )],
+            "already tracking",
+        );
+        check(
+            vec![step("loose", vec![Action::Untrack], Condition::Immediately)],
+            "without an active track",
+        );
+        check(
+            vec![
+                step("latch", vec![track()], Condition::Immediately),
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+            ],
+            "release the track first",
+        );
+        check(
+            vec![step(
+                "ghost",
+                vec![Action::Track {
+                    object: "nope".into(),
+                    link: None,
+                }],
+                Condition::Immediately,
+            )],
+            "unknown obstacle",
         );
     }
 }

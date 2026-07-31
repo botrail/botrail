@@ -59,6 +59,24 @@ def detach(obj: str) -> Action:
     return {"type": "detach", "object": obj}
 
 
+def track(obj: str, link: Optional[str] = None) -> Action:
+    """Conveyor tracking: latch onto a moving part. Until :func:`untrack`,
+    every commanded pose is carried by the part's motion since this step, so
+    poses taught at the station keep meeting the part while it travels — the
+    line never has to stop. Grasping the tracked part freezes the offset, so
+    the lift after it goes straight up. Planned motions cannot run while
+    tracking; ramps can."""
+    action: Action = {"type": "track", "object": obj}
+    if link is not None:
+        action["link"] = link
+    return action
+
+
+def untrack() -> Action:
+    """Stop following the tracked part; the robot holds where it stands."""
+    return {"type": "untrack"}
+
+
 def set_signal(name: str, value: bool = True) -> Action:
     """Write an internal signal (declare it with ``scene.define_signal``)."""
     return {"type": "set", "signal": name, "value": bool(value)}

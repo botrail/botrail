@@ -2,4 +2,4 @@
 import type { DeviceCommandMsg } from "./DeviceCommandMsg";
 import type { RampTargetMsg } from "./RampTargetMsg";
 
-export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_ramp", targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", object: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach", object: string, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };
+export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_ramp", targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", object: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach", object: string, } | { "type": "track", object: string, link: string | null, } | { "type": "untrack" } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };

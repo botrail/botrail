@@ -220,6 +220,58 @@ impl RobotModel {
         best
     }
 
+    /// The deepest link every tool leaf hangs off: the wrist a gripper is
+    /// bolted to, or simply the last link of a single chain. It is the
+    /// deepest frame a *pose* fully describes — joints below it (a gripper's)
+    /// move parts of the tool relative to each other, so servoing a link
+    /// below the mount lets a solver spend the grip as if it were a DOF.
+    pub fn tool_mount_link(&self) -> usize {
+        let leaves: Vec<usize> = (0..self.links.len())
+            .filter(|link| !self.joints.iter().any(|j| j.parent_link == *link))
+            .collect();
+        let Some((first, rest)) = leaves.split_first() else {
+            return self.root_link;
+        };
+        // Deepest link on one leaf's chain that every other leaf hangs off.
+        let mut link = Some(*first);
+        while let Some(current) = link {
+            if rest.iter().all(|&leaf| self.is_ancestor_or_self(current, leaf)) {
+                return current;
+            }
+            link = self.links[current]
+                .parent_joint
+                .map(|ji| self.joints[ji].parent_link);
+        }
+        self.root_link
+    }
+
+    /// Actuated joints that move `link` — its ancestors in the chain, i.e.
+    /// exactly the DOFs a solver can use to place it.
+    pub fn driving_joints(&self, link: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut current = link;
+        while let Some(ji) = self.links[current].parent_joint {
+            if self.joints[ji].q_index.is_some() {
+                out.push(ji);
+            }
+            current = self.joints[ji].parent_link;
+        }
+        out
+    }
+
+    fn is_ancestor_or_self(&self, ancestor: usize, link: usize) -> bool {
+        let mut current = Some(link);
+        while let Some(index) = current {
+            if index == ancestor {
+                return true;
+            }
+            current = self.links[index]
+                .parent_joint
+                .map(|ji| self.joints[ji].parent_link);
+        }
+        false
+    }
+
     /// Per-DOF sampling bounds for planning: the position limits, with
     /// continuous joints bounded to one full turn.
     pub fn sampling_bounds(&self) -> (Vec<f64>, Vec<f64>) {
@@ -470,6 +522,64 @@ mod tests {
       </joint>
     </robot>
     "#;
+
+    /// A wrist carrying a two-finger gripper: the tool mount is the wrist
+    /// the fingers hang off, not the deepest leaf.
+    const GRIPPER: &str = r#"
+    <robot name="arm">
+      <link name="base"/>
+      <link name="wrist"/>
+      <link name="left"/>
+      <link name="right"/>
+      <joint name="elbow" type="revolute">
+        <parent link="base"/><child link="wrist"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/>
+      </joint>
+      <joint name="finger_left" type="prismatic">
+        <parent link="wrist"/><child link="left"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+      </joint>
+      <joint name="finger_right" type="prismatic">
+        <parent link="wrist"/><child link="right"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+      </joint>
+    </robot>
+    "#;
+
+    #[test]
+    fn tool_mount_is_the_link_the_tool_hangs_off() {
+        let model = RobotModel::from_urdf_str(GRIPPER).unwrap();
+        let mount = model.tool_mount_link();
+        assert_eq!(model.links[mount].name, "wrist");
+        // The deepest-leaf heuristic picks a fingertip, which is exactly the
+        // difference that matters for pose servoing.
+        assert!(model.links[model.default_tcp_link()].name.starts_with("finger")
+            || model.links[model.default_tcp_link()].name == "left"
+            || model.links[model.default_tcp_link()].name == "right");
+        // A single chain has no branch: mount == deepest link.
+        let chain = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        assert_eq!(chain.tool_mount_link(), chain.default_tcp_link());
+    }
+
+    #[test]
+    fn driving_joints_are_the_ancestors() {
+        let model = RobotModel::from_urdf_str(GRIPPER).unwrap();
+        let names = |link: &str| {
+            let mut out: Vec<String> = model
+                .driving_joints(model.link_index(link).unwrap())
+                .into_iter()
+                .map(|ji| model.joints[ji].name.clone())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(names("wrist"), vec!["elbow"]);
+        assert_eq!(names("left"), vec!["elbow", "finger_left"]);
+        assert!(names("base").is_empty());
+    }
 
     #[test]
     fn builds_tree_and_q_mapping() {

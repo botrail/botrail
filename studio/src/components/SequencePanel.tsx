@@ -18,6 +18,10 @@ function actionLabel(action: ActionMsg): string {
       return `⊕ ${short(action.object)}`;
     case "detach":
       return `⊖ ${short(action.object)}`;
+    case "track":
+      return `⇉ ${short(action.object)}`;
+    case "untrack":
+      return "⇥ untrack";
     case "set":
       return `${action.signal}=${action.value ? "1" : "0"}`;
     case "device": {

@@ -588,6 +588,11 @@ fn py_action(action: &ActionMsg) -> String {
             format!("bt.seq.attach({object:?}{extras})")
         }
         ActionMsg::Detach { object } => format!("bt.seq.detach({object:?})"),
+        ActionMsg::Track { object, link } => match link {
+            Some(link) => format!("bt.seq.track({object:?}, link={link:?})"),
+            None => format!("bt.seq.track({object:?})"),
+        },
+        ActionMsg::Untrack => "bt.seq.untrack()".to_string(),
         ActionMsg::Set { signal, value } => format!(
             "bt.seq.set_signal({signal:?}, {})",
             if *value { "True" } else { "False" }

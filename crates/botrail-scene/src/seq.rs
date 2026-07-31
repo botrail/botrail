@@ -126,6 +126,20 @@ pub enum Action {
         link: Option<String>,
         touch_links: Option<Vec<String>>,
     },
+    /// Conveyor tracking: latch onto a moving part. Until the track is
+    /// released, every commanded pose is carried by the part's motion since
+    /// this instant — poses taught at the station keep meeting the part
+    /// while it travels, so the line never has to stop. Grasping the tracked
+    /// part freezes the offset (it is the robot's now); the offset survives
+    /// [`Action::Untrack`], which only stops following. Instantaneous.
+    Track {
+        object: String,
+        /// Link servoed onto the part; defaults to the TCP link.
+        link: Option<String>,
+    },
+    /// Release the track: commands go back to plain world coordinates from
+    /// wherever the robot stands (never a jump). Instantaneous.
+    Untrack,
     /// Release: the obstacle's pose freezes where it is. Instantaneous.
     Detach { object: String },
     /// Write an internal signal (self-holding relay style).
@@ -310,6 +324,9 @@ impl Scene {
                 ));
             }
         }
+        // Tracking is a mode the steps switch on and off, so its rules are
+        // checked by walking the (linear) step list once.
+        let mut tracked: Option<(String, Vec<String>)> = None;
         for (i, step) in sequence.steps.iter().enumerate() {
             let drivers = step.actions.iter().filter(|a| a.drives_joints()).count();
             if drivers > 1 {
@@ -327,11 +344,83 @@ impl Scene {
             }
             for action in &step.actions {
                 self.validate_action(action).map_err(|m| (Some(i), m))?;
+                self.validate_tracking(action, &mut tracked)
+                    .map_err(|m| (Some(i), m))?;
             }
             self.validate_condition(&step.transition)
                 .map_err(|m| (Some(i), m))?;
         }
         Ok(())
+    }
+
+    /// Threads the tracking mode through one action, rejecting the orders
+    /// the scan engine cannot honour. Carries the tracked object plus the
+    /// joints that would fight the track if a ramp drove them.
+    fn validate_tracking(
+        &self,
+        action: &Action,
+        tracked: &mut Option<(String, Vec<String>)>,
+    ) -> Result<(), String> {
+        match action {
+            Action::Track { object, link } => match tracked {
+                Some((current, _)) => Err(format!(
+                    "already tracking `{current}`; release it with untrack before tracking `{object}`"
+                )),
+                None => {
+                    let servoed = match link {
+                        Some(name) => self
+                            .robot
+                            .link_index(name)
+                            .ok_or_else(|| format!("unknown link `{name}`"))?,
+                        None => self.robot.tool_mount_link(),
+                    };
+                    // Joints below the tool mount (a gripper's) move the
+                    // servoed link without being described by its pose, so
+                    // the solver would trade the grip away for reach.
+                    let trunk = self.robot.driving_joints(self.robot.tool_mount_link());
+                    let contested = self
+                        .robot
+                        .driving_joints(servoed)
+                        .into_iter()
+                        .filter(|ji| !trunk.contains(ji))
+                        .map(|ji| self.robot.joints[ji].name.clone())
+                        .collect();
+                    *tracked = Some((object.clone(), contested));
+                    Ok(())
+                }
+            },
+            Action::Untrack => match tracked.take() {
+                Some(_) => Ok(()),
+                None => Err("untrack without an active track".to_string()),
+            },
+            Action::StartRamp { targets, .. } => {
+                let Some((object, contested)) = tracked else {
+                    return Ok(());
+                };
+                match targets
+                    .iter()
+                    .find(|(joint, _)| contested.iter().any(|c| c == joint))
+                {
+                    Some((joint, _)) => Err(format!(
+                        "ramping `{joint}` while tracking `{object}` fights the track: it moves the \
+                         servoed link itself, so the solve would spend it chasing the part. Track a \
+                         link at or above the tool mount (`{}`) instead",
+                        self.robot.links[self.robot.tool_mount_link()].name
+                    )),
+                    None => Ok(()),
+                }
+            }
+            // Planned motions bake their whole trajectory when they start,
+            // which cannot absorb a part that keeps moving underneath.
+            Action::StartMotion { motion } => match tracked {
+                Some((object, _)) => Err(format!(
+                    "motion `{motion}` cannot run while tracking `{object}`: \
+                     plans are baked in world coordinates, so release the track first"
+                )),
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
     }
 
     fn validate_action(&self, action: &Action) -> Result<(), String> {
@@ -391,6 +480,23 @@ impl Scene {
                 }
                 Ok(())
             }
+            Action::Track { object, link } => {
+                if !self.obstacles.iter().any(|o| &o.name == object) {
+                    return Err(format!("unknown obstacle `{object}`"));
+                }
+                if self.attachment(object).is_some() {
+                    return Err(format!(
+                        "`{object}` is already grasped; there is nothing to track"
+                    ));
+                }
+                if let Some(link) = link {
+                    if self.robot.link_index(link).is_none() {
+                        return Err(format!("unknown link `{link}`"));
+                    }
+                }
+                Ok(())
+            }
+            Action::Untrack => Ok(()),
             Action::Set { signal, .. } => {
                 if !self.signals.iter().any(|s| &s.name == signal) {
                     if self.sensors.iter().any(|s| &s.name == signal) {

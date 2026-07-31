@@ -409,6 +409,15 @@ pub enum ActionMsg {
     },
     /// Release an obstacle where it is (instantaneous).
     Detach { object: String },
+    /// Latch onto a moving part: taught poses ride its motion until the
+    /// track is released (conveyor tracking).
+    Track {
+        object: String,
+        #[serde(default)]
+        link: Option<String>,
+    },
+    /// Stop following the tracked part (instantaneous).
+    Untrack,
     /// Write an internal signal.
     Set { signal: String, value: bool },
     /// Command an auxiliary device (output coil).
@@ -892,6 +901,11 @@ pub fn action_msg(action: &Action) -> ActionMsg {
         Action::Detach { object } => ActionMsg::Detach {
             object: object.clone(),
         },
+        Action::Track { object, link } => ActionMsg::Track {
+            object: object.clone(),
+            link: link.clone(),
+        },
+        Action::Untrack => ActionMsg::Untrack,
         Action::Set { signal, value } => ActionMsg::Set {
             signal: signal.clone(),
             value: *value,
@@ -931,6 +945,11 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
         ActionMsg::Detach { object } => Action::Detach {
             object: object.clone(),
         },
+        ActionMsg::Track { object, link } => Action::Track {
+            object: object.clone(),
+            link: link.clone(),
+        },
+        ActionMsg::Untrack => Action::Untrack,
         ActionMsg::Set { signal, value } => Action::Set {
             signal: signal.clone(),
             value: *value,
