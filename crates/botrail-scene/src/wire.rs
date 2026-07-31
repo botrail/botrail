@@ -282,6 +282,115 @@ pub struct MotionMsg {
     pub segments: Vec<SegmentMsg>,
 }
 
+// --------------------------------------------------- sequences (PLC-style)
+
+/// A user-defined internal signal (PLC internal relay).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SignalDefMsg {
+    pub name: String,
+    pub initial: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SequenceMsg {
+    pub name: String,
+    pub steps: Vec<StepMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StepMsg {
+    pub name: String,
+    /// Entry actions, fired when the step becomes active.
+    pub actions: Vec<ActionMsg>,
+    /// The step completes when this condition holds.
+    pub transition: ConditionMsg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RampTargetMsg {
+    pub joint: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ActionMsg {
+    /// Start a named motion; await it with the `done` condition.
+    StartMotion { motion: String },
+    /// Linearly ramp joints (gripper open/close); await with `done`.
+    StartRamp {
+        targets: Vec<RampTargetMsg>,
+        duration: f64,
+    },
+    /// Grasp an obstacle at its current relative pose (instantaneous).
+    Attach {
+        object: String,
+        #[serde(default)]
+        link: Option<String>,
+        #[serde(default)]
+        touch_links: Option<Vec<String>>,
+    },
+    /// Release an obstacle where it is (instantaneous).
+    Detach { object: String },
+    /// Write an internal signal.
+    Set { signal: String, value: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ConditionMsg {
+    /// Always true — fire the actions and move on.
+    Immediately,
+    /// The motion/ramp started by this step has finished.
+    Done,
+    /// On-delay timer from step entry (TON).
+    Elapsed { seconds: f64 },
+    /// Level test of a signal.
+    Signal { name: String, value: bool },
+    /// Series contacts (AND).
+    All { conditions: Vec<ConditionMsg> },
+    /// Parallel contacts (OR).
+    Any { conditions: Vec<ConditionMsg> },
+}
+
+/// One step's interval on a baked timeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StepSpanMsg {
+    pub name: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// A boolean signal as a step function (timing-chart lane).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SignalTrackMsg {
+    pub name: String,
+    /// Edge times; `values[i]` holds from `times[i]` on. `times[0] = 0`.
+    pub times: Vec<f64>,
+    pub values: Vec<bool>,
+}
+
+/// A baked sequence rollout: the robot + grasped objects ride the embedded
+/// trajectory (the studio plays it with the existing machinery), plus the
+/// step bands and signal lanes for the timeline display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TimelineMsg {
+    /// Cycle time in seconds.
+    pub duration: f64,
+    pub trajectory: TrajectoryMsg,
+    pub step_spans: Vec<StepSpanMsg>,
+    pub signals: Vec<SignalTrackMsg>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PlanStatsMsg {
@@ -329,6 +438,19 @@ pub enum ServerMessage {
     /// The full motion list; resent whenever it changes.
     Motions {
         motions: Vec<MotionMsg>,
+    },
+    /// The full sequence + internal-signal lists; resent on every change.
+    Sequences {
+        sequences: Vec<SequenceMsg>,
+        signals: Vec<SignalDefMsg>,
+    },
+    /// Response to a `simulate_sequence` request (broadcast to every client).
+    SequenceResult {
+        ok: bool,
+        sequence: String,
+        error: Option<String>,
+        timeline: Option<TimelineMsg>,
+        planning_time_ms: Option<f64>,
     },
     /// Response to a `plan_motion` request (broadcast to every client).
     MotionResult {
@@ -413,6 +535,26 @@ pub enum ClientMessage {
     /// Plan every segment of the motion from the current configuration.
     PlanMotion {
         motion: String,
+    },
+    /// Add or replace a sequence wholesale (steps are small).
+    UpsertSequence {
+        sequence: SequenceMsg,
+    },
+    RemoveSequence {
+        name: String,
+    },
+    /// Declare (or re-initialize) an internal signal.
+    DefineSignal {
+        name: String,
+        initial: bool,
+    },
+    RemoveSignal {
+        name: String,
+    },
+    /// Roll out the sequence against a scene snapshot; the result arrives
+    /// as a `sequence_result`.
+    SimulateSequence {
+        name: String,
     },
 }
 
@@ -597,6 +739,153 @@ pub fn motion_from_msg(msg: &MotionMsg) -> Motion {
 pub fn motions_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Motions {
         motions: scene.motions().iter().map(motion_msg).collect(),
+    }
+}
+
+// ---------------------------------------------------- sequence conversions
+
+use crate::seq::{Action, Condition, Sequence, SignalDef, Step};
+
+pub fn action_msg(action: &Action) -> ActionMsg {
+    match action {
+        Action::StartMotion { motion } => ActionMsg::StartMotion {
+            motion: motion.clone(),
+        },
+        Action::StartRamp { targets, duration } => ActionMsg::StartRamp {
+            targets: targets
+                .iter()
+                .map(|(joint, value)| RampTargetMsg {
+                    joint: joint.clone(),
+                    value: *value,
+                })
+                .collect(),
+            duration: *duration,
+        },
+        Action::Attach {
+            object,
+            link,
+            touch_links,
+        } => ActionMsg::Attach {
+            object: object.clone(),
+            link: link.clone(),
+            touch_links: touch_links.clone(),
+        },
+        Action::Detach { object } => ActionMsg::Detach {
+            object: object.clone(),
+        },
+        Action::Set { signal, value } => ActionMsg::Set {
+            signal: signal.clone(),
+            value: *value,
+        },
+    }
+}
+
+pub fn action_from_msg(msg: &ActionMsg) -> Action {
+    match msg {
+        ActionMsg::StartMotion { motion } => Action::StartMotion {
+            motion: motion.clone(),
+        },
+        ActionMsg::StartRamp { targets, duration } => Action::StartRamp {
+            targets: targets.iter().map(|t| (t.joint.clone(), t.value)).collect(),
+            duration: *duration,
+        },
+        ActionMsg::Attach {
+            object,
+            link,
+            touch_links,
+        } => Action::Attach {
+            object: object.clone(),
+            link: link.clone(),
+            touch_links: touch_links.clone(),
+        },
+        ActionMsg::Detach { object } => Action::Detach {
+            object: object.clone(),
+        },
+        ActionMsg::Set { signal, value } => Action::Set {
+            signal: signal.clone(),
+            value: *value,
+        },
+    }
+}
+
+pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
+    match condition {
+        Condition::Immediately => ConditionMsg::Immediately,
+        Condition::Done => ConditionMsg::Done,
+        Condition::Elapsed { seconds } => ConditionMsg::Elapsed { seconds: *seconds },
+        Condition::Signal { name, value } => ConditionMsg::Signal {
+            name: name.clone(),
+            value: *value,
+        },
+        Condition::All(cs) => ConditionMsg::All {
+            conditions: cs.iter().map(seq_condition_msg).collect(),
+        },
+        Condition::Any(cs) => ConditionMsg::Any {
+            conditions: cs.iter().map(seq_condition_msg).collect(),
+        },
+    }
+}
+
+pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
+    match msg {
+        ConditionMsg::Immediately => Condition::Immediately,
+        ConditionMsg::Done => Condition::Done,
+        ConditionMsg::Elapsed { seconds } => Condition::Elapsed { seconds: *seconds },
+        ConditionMsg::Signal { name, value } => Condition::Signal {
+            name: name.clone(),
+            value: *value,
+        },
+        ConditionMsg::All { conditions } => {
+            Condition::All(conditions.iter().map(seq_condition_from_msg).collect())
+        }
+        ConditionMsg::Any { conditions } => {
+            Condition::Any(conditions.iter().map(seq_condition_from_msg).collect())
+        }
+    }
+}
+
+pub fn sequence_msg(sequence: &Sequence) -> SequenceMsg {
+    SequenceMsg {
+        name: sequence.name.clone(),
+        steps: sequence
+            .steps
+            .iter()
+            .map(|s| StepMsg {
+                name: s.name.clone(),
+                actions: s.actions.iter().map(action_msg).collect(),
+                transition: seq_condition_msg(&s.transition),
+            })
+            .collect(),
+    }
+}
+
+pub fn sequence_from_msg(msg: &SequenceMsg) -> Sequence {
+    Sequence {
+        name: msg.name.clone(),
+        steps: msg
+            .steps
+            .iter()
+            .map(|s| Step {
+                name: s.name.clone(),
+                actions: s.actions.iter().map(action_from_msg).collect(),
+                transition: seq_condition_from_msg(&s.transition),
+            })
+            .collect(),
+    }
+}
+
+pub fn signal_def_msg(signal: &SignalDef) -> SignalDefMsg {
+    SignalDefMsg {
+        name: signal.name.clone(),
+        initial: signal.initial,
+    }
+}
+
+/// The full sequence + signal lists as a `sequences` message.
+pub fn sequences_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Sequences {
+        sequences: scene.sequences().iter().map(sequence_msg).collect(),
+        signals: scene.signals().iter().map(signal_def_msg).collect(),
     }
 }
 

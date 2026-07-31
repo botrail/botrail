@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::wire::{
-    geometry_from_msg, geometry_msg, motion_from_msg, motion_msg, ConstraintMsg, FrameMsg,
-    GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg, SegmentKindMsg,
+    geometry_from_msg, geometry_msg, motion_from_msg, motion_msg, sequence_from_msg, sequence_msg,
+    signal_def_msg, ActionMsg, ConditionMsg, ConstraintMsg, FrameMsg, GeometryMsg, MotionMsg,
+    ObstacleMsg, PoseMsg, SegmentKindMsg, SequenceMsg, SignalDefMsg,
 };
 use crate::Scene;
 
@@ -71,6 +72,12 @@ pub struct ProjectFile {
     /// Named world frames (absent in older v2 files).
     #[serde(default)]
     pub frames: Vec<FrameMsg>,
+    /// PLC-style sequences (absent in older v2 files).
+    #[serde(default)]
+    pub sequences: Vec<SequenceMsg>,
+    /// Internal signal declarations (absent in older v2 files).
+    #[serde(default)]
+    pub signals: Vec<SignalDefMsg>,
 }
 
 fn identity_pose() -> PoseMsg {
@@ -110,6 +117,8 @@ impl ProjectFile {
                     obstacles: v1.obstacles,
                     motions: v1.motions,
                     frames: Vec::new(),
+                    sequences: Vec::new(),
+                    signals: Vec::new(),
                 })
             }
             2 => {
@@ -197,6 +206,8 @@ impl Scene {
                 })
                 .collect(),
             motions: self.motions().iter().map(motion_msg).collect(),
+            sequences: self.sequences().iter().map(sequence_msg).collect(),
+            signals: self.signals().iter().map(signal_def_msg).collect(),
             frames: self
                 .frames()
                 .iter()
@@ -278,6 +289,17 @@ impl Scene {
         }
         self.set_attachments(attachments);
         self.set_motions(project.motions.iter().map(motion_from_msg).collect());
+        self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
+        self.set_signals(
+            project
+                .signals
+                .iter()
+                .map(|s| crate::seq::SignalDef {
+                    name: s.name.clone(),
+                    initial: s.initial,
+                })
+                .collect(),
+        );
         self.set_frames(
             project
                 .frames
@@ -439,8 +461,85 @@ pub fn generate_python(project: &ProjectFile) -> String {
         ));
     }
 
+    for signal in &project.signals {
+        out.push_str(&format!(
+            "scene.define_signal({:?}, initial={})\n",
+            signal.name,
+            if signal.initial { "True" } else { "False" }
+        ));
+    }
+    for sequence in &project.sequences {
+        out.push('\n');
+        out.push_str(&format!("sequence = scene.sequence({:?})\n", sequence.name));
+        for step in &sequence.steps {
+            let actions: Vec<String> = step.actions.iter().map(py_action).collect();
+            out.push_str(&format!(
+                "sequence.step({:?}, actions=[{}], transition={})\n",
+                step.name,
+                actions.join(", "),
+                py_condition(&step.transition)
+            ));
+        }
+    }
+
     out.push_str("\nbt.studio(scene)\n");
     out
+}
+
+fn py_action(action: &ActionMsg) -> String {
+    match action {
+        ActionMsg::StartMotion { motion } => format!("bt.seq.motion({motion:?})"),
+        ActionMsg::StartRamp { targets, duration } => {
+            let entries: Vec<String> = targets
+                .iter()
+                .map(|t| format!("{:?}: {:.6}", t.joint, t.value))
+                .collect();
+            format!(
+                "bt.seq.ramp({{{}}}, duration={duration})",
+                entries.join(", ")
+            )
+        }
+        ActionMsg::Attach {
+            object,
+            link,
+            touch_links,
+        } => {
+            let mut extras = String::new();
+            if let Some(link) = link {
+                extras.push_str(&format!(", link={link:?}"));
+            }
+            if let Some(touch) = touch_links {
+                let names: Vec<String> = touch.iter().map(|t| format!("{t:?}")).collect();
+                extras.push_str(&format!(", touch_links=[{}]", names.join(", ")));
+            }
+            format!("bt.seq.attach({object:?}{extras})")
+        }
+        ActionMsg::Detach { object } => format!("bt.seq.detach({object:?})"),
+        ActionMsg::Set { signal, value } => format!(
+            "bt.seq.set_signal({signal:?}, {})",
+            if *value { "True" } else { "False" }
+        ),
+    }
+}
+
+fn py_condition(condition: &ConditionMsg) -> String {
+    match condition {
+        ConditionMsg::Immediately => "bt.seq.immediately()".to_string(),
+        ConditionMsg::Done => "bt.seq.done()".to_string(),
+        ConditionMsg::Elapsed { seconds } => format!("bt.seq.elapsed({seconds})"),
+        ConditionMsg::Signal { name, value } => format!(
+            "bt.seq.signal({name:?}, {})",
+            if *value { "True" } else { "False" }
+        ),
+        ConditionMsg::All { conditions } => {
+            let inner: Vec<String> = conditions.iter().map(py_condition).collect();
+            format!("bt.seq.all_of({})", inner.join(", "))
+        }
+        ConditionMsg::Any { conditions } => {
+            let inner: Vec<String> = conditions.iter().map(py_condition).collect();
+            format!("bt.seq.any_of({})", inner.join(", "))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +662,68 @@ mod tests {
             other.apply_project(&bad),
             Err(ProjectError::Incompatible(_))
         ));
+    }
+
+    #[test]
+    fn sequences_and_signals_roundtrip_and_generate_python() {
+        let mut scene = sample_scene();
+        scene.define_signal("armed", true);
+        scene.upsert_sequence(crate::seq::Sequence {
+            name: "cycle".into(),
+            steps: vec![
+                crate::seq::Step {
+                    name: "run".into(),
+                    actions: vec![crate::seq::Action::StartMotion {
+                        motion: "main".into(),
+                    }],
+                    transition: crate::seq::Condition::All(vec![
+                        crate::seq::Condition::Done,
+                        crate::seq::Condition::Signal {
+                            name: "armed".into(),
+                            value: true,
+                        },
+                    ]),
+                },
+                crate::seq::Step {
+                    name: "wait".into(),
+                    actions: vec![crate::seq::Action::Set {
+                        signal: "armed".into(),
+                        value: false,
+                    }],
+                    transition: crate::seq::Condition::Elapsed { seconds: 0.5 },
+                },
+            ],
+        });
+
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.signals().len(), 1);
+        assert!(reloaded.signals()[0].initial);
+        let seq = reloaded.sequence("cycle").expect("sequence survives");
+        assert_eq!(seq.steps.len(), 2);
+        assert!(matches!(
+            &seq.steps[0].transition,
+            crate::seq::Condition::All(cs) if cs.len() == 2
+        ));
+
+        let code = generate_python(&scene.to_project());
+        for needle in [
+            "scene.define_signal(\"armed\", initial=True)",
+            "sequence = scene.sequence(\"cycle\")",
+            "bt.seq.motion(\"main\")",
+            "bt.seq.all_of(bt.seq.done(), bt.seq.signal(\"armed\", True))",
+            "bt.seq.set_signal(\"armed\", False)",
+            "bt.seq.elapsed(0.5)",
+        ] {
+            assert!(code.contains(needle), "missing `{needle}`:\n{code}");
+        }
+
+        // Older projects without the fields still read.
+        let mut bare: serde_json::Value = serde_json::from_str(&json).unwrap();
+        bare.as_object_mut().unwrap().remove("sequences");
+        bare.as_object_mut().unwrap().remove("signals");
+        let project = ProjectFile::from_json(&bare.to_string()).unwrap();
+        assert!(project.sequences.is_empty() && project.signals.is_empty());
     }
 
     #[test]

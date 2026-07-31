@@ -57,14 +57,15 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// state. Mesh visuals are mapped to URLs through the host's
-/// [`mesh_url`](SessionHost::mesh_url).
+/// sequences, frames, state. Mesh visuals are mapped to URLs through the
+/// host's [`mesh_url`](SessionHost::mesh_url).
 pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
         vec![
             scene_init_message(host, scene),
             wire::obstacles_message(scene, |p| host.mesh_url(p)),
             wire::motions_message(scene),
+            wire::sequences_message(scene),
             wire::frames_message(scene),
             wire::state_message(scene),
         ]
@@ -170,6 +171,29 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::PlanMotion { motion } => {
             // Failure is reported to clients inside the motion_result.
             let _ = plan_motion_and_emit(host, &motion, &botrail_plan::PlanOptions::default());
+            Ok(())
+        }
+        ClientMessage::UpsertSequence { sequence } => {
+            upsert_sequence(host, wire::sequence_from_msg(&sequence));
+            Ok(())
+        }
+        ClientMessage::RemoveSequence { name } => {
+            remove_sequence(host, &name).map_err(|e| format!("rejected remove_sequence: {e}"))
+        }
+        ClientMessage::DefineSignal { name, initial } => {
+            define_signal(host, &name, initial);
+            Ok(())
+        }
+        ClientMessage::RemoveSignal { name } => {
+            remove_signal(host, &name).map_err(|e| format!("rejected remove_signal: {e}"))
+        }
+        ClientMessage::SimulateSequence { name } => {
+            // Failure is reported to clients inside the sequence_result.
+            let _ = simulate_sequence_and_emit(
+                host,
+                &name,
+                &botrail_scene::rollout::RolloutOptions::default(),
+            );
             Ok(())
         }
     }
@@ -375,6 +399,139 @@ pub fn clear_motion(host: &impl SessionHost, motion: &str) -> Result<(), String>
         .map_err(|e| e.to_string())?;
     emit_motions(host);
     Ok(())
+}
+
+// ------------------------------------------------------------ sequences
+
+fn emit_sequences(host: &impl SessionHost) {
+    let msg = host.with_scene(|scene| wire::sequences_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces a sequence wholesale and rebroadcasts the list.
+pub fn upsert_sequence(host: &impl SessionHost, sequence: botrail_scene::seq::Sequence) {
+    host.with_scene(|scene| scene.upsert_sequence(sequence));
+    emit_sequences(host);
+}
+
+pub fn remove_sequence(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_sequence(name))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+/// Declares (or re-initializes) an internal signal and rebroadcasts.
+pub fn define_signal(host: &impl SessionHost, name: &str, initial: bool) {
+    host.with_scene(|scene| scene.define_signal(name, initial));
+    emit_sequences(host);
+}
+
+pub fn remove_signal(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_signal(name))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+/// Rolls out a sequence against a scene snapshot and emits the outcome as
+/// a `sequence_result` message.
+pub fn simulate_sequence_and_emit(
+    host: &impl SessionHost,
+    name: &str,
+    options: &botrail_scene::rollout::RolloutOptions,
+) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
+    let snapshot = host.snapshot();
+    let t0 = host.now_ms();
+    let result = snapshot
+        .simulate_sequence(name, options, &traj_limits(&snapshot.robot))
+        .map_err(|e| e.to_string());
+    let ms = host.now_ms() - t0;
+    let msg = match &result {
+        Ok(timeline) => ServerMessage::SequenceResult {
+            ok: true,
+            sequence: name.to_string(),
+            error: None,
+            timeline: Some(timeline_msg(&snapshot, timeline)),
+            planning_time_ms: Some(ms),
+        },
+        Err(e) => ServerMessage::SequenceResult {
+            ok: false,
+            sequence: name.to_string(),
+            error: Some(e.clone()),
+            timeline: None,
+            planning_time_ms: None,
+        },
+    };
+    host.emit(&msg);
+    result
+}
+
+/// Samples a baked timeline at ~30Hz for playback: the robot rides the
+/// embedded trajectory (link poses precomputed for URDF robots), tracked
+/// objects get world-pose tracks derived from their spans.
+pub fn timeline_msg(
+    scene: &Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+) -> wire::TimelineMsg {
+    let (times, joint_positions) = timeline.robot.resample(1.0 / 30.0);
+    let want_link_poses = matches!(&scene.robot.source, botrail_model::RobotSource::UrdfXml(_));
+    let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
+    let mut object_tracks = (!timeline.objects.is_empty()).then(|| {
+        timeline
+            .objects
+            .iter()
+            .map(|track| wire::ObjectTrackMsg {
+                name: track.name.clone(),
+                poses: Vec::with_capacity(joint_positions.len()),
+            })
+            .collect::<Vec<_>>()
+    });
+    if link_poses.is_some() || object_tracks.is_some() {
+        for (k, q) in joint_positions.iter().enumerate() {
+            let poses =
+                botrail_kin::forward_kinematics_with_base(&scene.robot, q, scene.robot_base_pose())
+                    .expect("timeline q has scene DOF");
+            if let Some(tracks) = &mut object_tracks {
+                for (msg, track) in tracks.iter_mut().zip(&timeline.objects) {
+                    let pose = botrail_scene::rollout::SequenceTimeline::object_pose(
+                        track, &poses, times[k],
+                    )
+                    .unwrap_or_default();
+                    msg.poses.push(PoseMsg::from(&pose));
+                }
+            }
+            if let Some(link_poses) = &mut link_poses {
+                link_poses.push(poses.iter().map(PoseMsg::from).collect());
+            }
+        }
+    }
+    wire::TimelineMsg {
+        duration: timeline.duration,
+        trajectory: wire::TrajectoryMsg {
+            duration: timeline.duration,
+            times,
+            joint_positions,
+            link_poses,
+            object_tracks,
+        },
+        step_spans: timeline
+            .step_spans
+            .iter()
+            .map(|s| wire::StepSpanMsg {
+                name: s.name.clone(),
+                start: s.start,
+                end: s.end,
+            })
+            .collect(),
+        signals: timeline
+            .signals
+            .iter()
+            .map(|s| wire::SignalTrackMsg {
+                name: s.name.clone(),
+                times: s.edges.iter().map(|(t, _)| *t).collect(),
+                values: s.edges.iter().map(|(_, v)| *v).collect(),
+            })
+            .collect(),
+    }
 }
 
 // ------------------------------------------------------------- planning
@@ -605,6 +762,8 @@ mod tests {
                     ServerMessage::Motions { .. } => "motions",
                     ServerMessage::Frames { .. } => "frames",
                     ServerMessage::MotionResult { .. } => "motion_result",
+                    ServerMessage::Sequences { .. } => "sequences",
+                    ServerMessage::SequenceResult { .. } => "sequence_result",
                 })
                 .collect()
         }
@@ -632,8 +791,9 @@ mod tests {
         assert!(matches!(msgs[0], ServerMessage::SceneInit { .. }));
         assert!(matches!(msgs[1], ServerMessage::Obstacles { .. }));
         assert!(matches!(msgs[2], ServerMessage::Motions { .. }));
-        assert!(matches!(msgs[3], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[4], ServerMessage::State { .. }));
+        assert!(matches!(msgs[3], ServerMessage::Sequences { .. }));
+        assert!(matches!(msgs[4], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[5], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -845,6 +1005,94 @@ mod tests {
             }
             other => panic!("expected plan_result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sequence_upsert_simulate_and_result_roundtrip() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "box",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::translation(0.1, 0.0, 0.5),
+                )
+                .unwrap();
+            scene
+                .add_segment(
+                    "go",
+                    Segment {
+                        kind: botrail_scene::motion::SegmentKind::Joint,
+                        goal_positions: vec![0.8],
+                        constraints: vec![],
+                    },
+                )
+                .unwrap();
+        });
+        handle_client_message(
+            &host,
+            r#"{"type":"define_signal","name":"flag","initial":false}"#,
+        );
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"pick","steps":[
+                {"name":"grasp","actions":[{"type":"attach","object":"box"}],
+                 "transition":{"type":"immediately"}},
+                {"name":"move","actions":[{"type":"start_motion","motion":"go"}],
+                 "transition":{"type":"done"}},
+                {"name":"mark","actions":[{"type":"set","signal":"flag","value":true}],
+                 "transition":{"type":"elapsed","seconds":0.2}}
+            ]}}"#,
+        );
+        assert_eq!(host.message_types(), ["sequences", "sequences"]);
+        host.out.borrow_mut().clear();
+
+        handle_client_message(&host, r#"{"type":"simulate_sequence","name":"pick"}"#);
+        let out = host.out.borrow();
+        let ServerMessage::SequenceResult {
+            ok,
+            timeline,
+            error,
+            ..
+        } = &out[0]
+        else {
+            panic!("expected sequence_result, got {out:?}");
+        };
+        assert!(ok, "{error:?}");
+        let tl = timeline.as_ref().unwrap();
+        assert_eq!(tl.step_spans.len(), 3);
+        assert_eq!(tl.step_spans[1].name, "move");
+        // The grasped box rides the trajectory's object track...
+        let tracks = tl.trajectory.object_tracks.as_ref().unwrap();
+        assert_eq!(tracks[0].name, "box");
+        assert_eq!(tracks[0].poses.len(), tl.trajectory.times.len());
+        let last = tracks[0].poses.last().unwrap();
+        assert!((last.position[0] - 0.1 * 0.8f64.cos()).abs() < 1e-6);
+        // ...and the signal lane records the mark edge.
+        assert_eq!(tl.signals.len(), 1);
+        assert_eq!(tl.signals[0].values, vec![false, true]);
+        // The live scene stays untouched by the rollout.
+        host.with_scene(|scene| {
+            assert!(scene.attachments().is_empty());
+            assert_eq!(scene.joint_positions(), &[0.0]);
+        });
+
+        drop(out);
+        host.out.borrow_mut().clear();
+        // A broken sequence reports through the result, not a log.
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"bad","steps":[
+                {"name":"x","actions":[{"type":"start_motion","motion":"nope"}],
+                 "transition":{"type":"done"}}]}}"#,
+        );
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"simulate_sequence","name":"bad"}"#);
+        let out = host.out.borrow();
+        let ServerMessage::SequenceResult { ok, error, .. } = &out[0] else {
+            panic!("expected sequence_result");
+        };
+        assert!(!ok && error.as_ref().unwrap().contains("unknown motion"));
     }
 
     #[test]

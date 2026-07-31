@@ -520,6 +520,84 @@ impl Scene {
             .map_err(PyValueError::new_err)
     }
 
+    // ------------------------------------------------------------ sequences
+
+    /// Declares (or re-initializes) an internal signal — a PLC internal
+    /// relay written by `bt.seq.set_signal` actions and read by
+    /// `bt.seq.signal` transitions.
+    #[pyo3(signature = (name, initial = false))]
+    fn define_signal(&self, name: &str, initial: bool) {
+        self.hub.define_signal(name, initial);
+    }
+
+    fn remove_signal(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_signal(name).map_err(scene_err)
+    }
+
+    /// Declared internal signals as `(name, initial)` pairs.
+    #[getter]
+    fn signals(&self) -> Vec<(String, bool)> {
+        self.hub.signals()
+    }
+
+    /// Starts (or replaces) a PLC-style sequence and returns a builder:
+    /// `scene.sequence("pick").step("run", actions=[bt.seq.motion("go")])`.
+    fn sequence(slf: Py<Self>, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let module = py.import("botrail.seq")?;
+        Ok(module
+            .getattr("SequenceBuilder")?
+            .call1((slf, name))?
+            .unbind())
+    }
+
+    /// Adds or replaces a sequence from wire-format JSON (the
+    /// `SequenceBuilder` sugar calls this).
+    fn _upsert_sequence_json(&self, json: &str) -> PyResult<()> {
+        self.hub
+            .upsert_sequence_json(json)
+            .map_err(PyValueError::new_err)
+    }
+
+    fn remove_sequence(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_sequence(name).map_err(scene_err)
+    }
+
+    #[getter]
+    fn sequence_names(&self) -> Vec<String> {
+        self.hub.sequence_names()
+    }
+
+    /// Rolls out a sequence with the PLC scan loop against a snapshot of
+    /// this scene (motions plan at their step, grasped objects ride along)
+    /// and returns the baked timeline. Also broadcasts the result to
+    /// connected studio clients for playback.
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0))]
+    fn simulate_sequence(
+        &self,
+        name: &str,
+        dt: f64,
+        max_duration: f64,
+    ) -> PyResult<SequenceTimeline> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration,
+            ..Default::default()
+        };
+        let (timeline, scene) = self
+            .hub
+            .simulate_sequence(name, &options)
+            .map_err(PyValueError::new_err)?;
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene,
+        })
+    }
+
     /// Colliding pairs at the current configuration, as
     /// `((kind, name), (kind, name))` tuples with kind `"link"`/`"obstacle"`.
     fn check_collisions(&self) -> Vec<((String, String), (String, String))> {
@@ -1304,12 +1382,170 @@ fn serve_studio(
     })
 }
 
+/// A baked sequence rollout: the cycle's joint track, grasped-object
+/// motion, signal waveforms, and step spans (the timing chart).
+#[pyclass(frozen, module = "botrail._core")]
+struct SequenceTimeline {
+    inner: botrail_scene::rollout::SequenceTimeline,
+    /// The pre-rollout snapshot the timeline was baked against (FK model,
+    /// base pose, obstacle geometry for USD export).
+    scene: botrail_scene::Scene,
+}
+
+#[pymethods]
+impl SequenceTimeline {
+    /// Cycle time in seconds.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.inner.duration
+    }
+
+    /// `(step name, start, end)` per step, in execution order.
+    #[getter]
+    fn step_spans(&self) -> Vec<(String, f64, f64)> {
+        self.inner
+            .step_spans
+            .iter()
+            .map(|s| (s.name.clone(), s.start, s.end))
+            .collect()
+    }
+
+    /// Signal waveforms as `(name, [(time, value), ...])` edge lists.
+    #[getter]
+    fn signals(&self) -> Vec<(String, Vec<(f64, bool)>)> {
+        self.inner
+            .signals
+            .iter()
+            .map(|s| (s.name.clone(), s.edges.clone()))
+            .collect()
+    }
+
+    /// Joint positions at time `t` (clamped to the cycle).
+    fn sample(&self, t: f64) -> Vec<f64> {
+        self.inner.robot.sample(t)
+    }
+
+    /// World pose of a grasped/tracked object at time `t`.
+    fn object_pose(&self, name: &str, t: f64) -> PyResult<([f64; 3], [f64; 4])> {
+        let track = self
+            .inner
+            .objects
+            .iter()
+            .find(|o| o.name == name)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("`{name}` is not tracked by this timeline"))
+            })?;
+        let poses = self
+            .scene
+            .fk(&self.inner.robot.sample(t))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let pose = botrail_scene::rollout::SequenceTimeline::object_pose(track, &poses, t)
+            .ok_or_else(|| PyValueError::new_err("empty object track"))?;
+        let q = pose.rotation.coords;
+        Ok((
+            [pose.translation.x, pose.translation.y, pose.translation.z],
+            [q.x, q.y, q.z, q.w],
+        ))
+    }
+
+    /// The cycle's joint track as a [`Trajectory`] (CSV/JSON export, joint
+    /// access). Step boundaries land in `segment_ends`.
+    #[getter]
+    fn trajectory(&self) -> Trajectory {
+        Trajectory {
+            inner: self.inner.robot.clone(),
+            joint_names: self
+                .scene
+                .robot
+                .actuated_joint_names()
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+            segment_ends: self.inner.step_spans.iter().map(|s| s.end).collect(),
+            segments: Vec::new(),
+            limits: crate::hub::traj_limits(&self.scene.robot),
+        }
+    }
+
+    /// Bakes the whole cycle to a USD animation layer (see
+    /// `Scene.export_usd`): robot + every obstacle, with grasped objects
+    /// riding, releasing, and resting exactly as simulated.
+    #[pyo3(signature = (path, fps = 60.0))]
+    fn export_usd(&self, path: PathBuf, fps: f64) -> PyResult<Vec<String>> {
+        if !(fps.is_finite() && fps > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "fps must be positive, got {fps}"
+            )));
+        }
+        let duration = self.inner.duration;
+        let mut times = Vec::new();
+        let mut k = 0u64;
+        loop {
+            let t = k as f64 / fps;
+            if t >= duration - 1e-9 {
+                break;
+            }
+            times.push(t);
+            k += 1;
+        }
+        times.push(duration);
+
+        let mut link_poses = Vec::with_capacity(times.len());
+        for &t in &times {
+            let poses = self
+                .scene
+                .fk(&self.inner.robot.sample(t))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            link_poses.push(poses);
+        }
+        let objects: Vec<botrail_usd::export::ObjectSpec> = self
+            .scene
+            .obstacles()
+            .iter()
+            .map(|o| {
+                let track = match self.inner.objects.iter().find(|t| t.name == o.name) {
+                    Some(track) => botrail_usd::export::PoseTrack::Sampled(
+                        times
+                            .iter()
+                            .enumerate()
+                            .map(|(k, &t)| {
+                                botrail_scene::rollout::SequenceTimeline::object_pose(
+                                    track,
+                                    &link_poses[k],
+                                    t,
+                                )
+                                .unwrap_or(o.pose)
+                            })
+                            .collect(),
+                    ),
+                    None => botrail_usd::export::PoseTrack::Static(o.pose),
+                };
+                botrail_usd::export::ObjectSpec {
+                    name: o.name.clone(),
+                    geometry: o.geometry.clone(),
+                    track,
+                }
+            })
+            .collect();
+        let input = botrail_usd::export::AnimationInput {
+            model: &self.scene.robot,
+            times: &times,
+            link_poses: &link_poses,
+            objects: &objects,
+        };
+        let options = botrail_usd::export::ExportOptions { fps };
+        botrail_usd::export::write_animation(&path, &input, &options)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Robot>()?;
     m.add_class::<Scene>()?;
     m.add_class::<IkResult>()?;
     m.add_class::<Trajectory>()?;
+    m.add_class::<SequenceTimeline>()?;
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

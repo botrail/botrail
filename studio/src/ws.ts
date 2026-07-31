@@ -13,6 +13,7 @@ import type {
   ObstacleMsg,
   PoseMsg,
   SegmentMsg,
+  SequenceMsg,
   ServerMessage,
 } from "./protocol";
 import { useStudioStore } from "./store";
@@ -208,4 +209,19 @@ export function sendClearMotion(motion: string): void {
 /** Plan the full motion; the result arrives as a `motion_result`. */
 export function sendPlanMotion(motion: string): void {
   rawSend({ type: "plan_motion", motion });
+}
+
+/** Add or replace a sequence wholesale (steps are small). */
+export function sendUpsertSequence(sequence: SequenceMsg): void {
+  rawSend({ type: "upsert_sequence", sequence });
+}
+
+/** Remove a sequence (sent immediately). */
+export function sendRemoveSequence(name: string): void {
+  rawSend({ type: "remove_sequence", name });
+}
+
+/** Roll out the sequence; the result arrives as a `sequence_result`. */
+export function sendSimulateSequence(name: string): void {
+  rawSend({ type: "simulate_sequence", name });
 }

@@ -11,6 +11,7 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { TcpGizmo } from "./TcpGizmo";
+import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
 
@@ -92,6 +93,7 @@ export function Viewport() {
       </Canvas>
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
+      <TimelineDock />
       {!connected && <div className="overlay">connecting…</div>}
     </div>
   );

@@ -8,7 +8,11 @@ import type {
   PlanStatsMsg,
   PoseMsg,
   SceneDescriptionMsg,
+  SequenceMsg,
   ServerMessage,
+  SignalDefMsg,
+  SignalTrackMsg,
+  StepSpanMsg,
   TrajectoryMsg,
 } from "./protocol";
 
@@ -104,6 +108,19 @@ interface StudioState {
   overrideObstaclePoses: Record<string, PoseMsg> | null;
   /** All motions in the scene; re-sent in full by the server on every change. */
   motions: MotionMsg[];
+  /** PLC-style sequences; re-sent in full by the server on every change. */
+  sequences: SequenceMsg[];
+  /** Declared internal signals. */
+  signalDefs: SignalDefMsg[];
+  /** True while a sequence rollout is in flight. */
+  sequenceSimulating: boolean;
+  sequenceError: string | null;
+  /** Step bands + signal lanes of the last baked timeline (the dock). */
+  timeline: {
+    duration: number;
+    stepSpans: StepSpanMsg[];
+    signals: SignalTrackMsg[];
+  } | null;
   /** True while a motion plan request is in flight. */
   motionPlanning: boolean;
   motionError: string | null;
@@ -127,6 +144,7 @@ interface StudioState {
   selectTcp: () => void;
   selectObstacle: (name: string) => void;
   selectRobot: () => void;
+  beginSequenceSim: () => void;
   setGoalFromCurrent: () => void;
   clearGoal: () => void;
   beginPlanning: () => void;
@@ -170,6 +188,11 @@ export const useStudioStore = create<StudioState>((set) => ({
   overrideJoints: null,
   overrideObstaclePoses: null,
   motions: [],
+  sequences: [],
+  signalDefs: [],
+  sequenceSimulating: false,
+  sequenceError: null,
+  timeline: null,
   motionPlanning: false,
   motionError: null,
   segmentEnds: [],
@@ -204,6 +227,11 @@ export const useStudioStore = create<StudioState>((set) => ({
         overrideJoints: null,
         overrideObstaclePoses: null,
         motions: [],
+        sequences: [],
+        signalDefs: [],
+        sequenceSimulating: false,
+        sequenceError: null,
+        timeline: null,
         motionPlanning: false,
         motionError: null,
         segmentEnds: [],
@@ -239,6 +267,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           overrideObstaclePoses: firstObjectPoses(msg.trajectory),
           segmentEnds: [],
           motionStats: null,
+          timeline: null,
         });
       } else {
         set({ planning: false, planError: msg.error ?? "planning failed" });
@@ -247,6 +276,39 @@ export const useStudioStore = create<StudioState>((set) => ({
       set({ frames: msg.frames });
     } else if (msg.type === "motions") {
       set({ motions: msg.motions });
+    } else if (msg.type === "sequences") {
+      set({ sequences: msg.sequences, signalDefs: msg.signals });
+    } else if (msg.type === "sequence_result") {
+      if (msg.ok && msg.timeline) {
+        const traj = msg.timeline.trajectory;
+        // The baked cycle plays through the shared trajectory machinery;
+        // step ends double as the seek-bar tick marks.
+        set({
+          sequenceSimulating: false,
+          sequenceError: null,
+          timeline: {
+            duration: msg.timeline.duration,
+            stepSpans: msg.timeline.step_spans,
+            signals: msg.timeline.signals,
+          },
+          segmentEnds: msg.timeline.step_spans.map((s) => s.end),
+          trajectory: traj,
+          playbackTime: 0,
+          playing: true,
+          overridePoses: traj.link_poses?.[0] ?? null,
+          overrideJoints: traj.link_poses ? null : (traj.joint_positions[0] ?? null),
+          overrideObstaclePoses: firstObjectPoses(traj),
+          planStats: null,
+          planError: null,
+          motionStats: null,
+          motionError: null,
+        });
+      } else {
+        set({
+          sequenceSimulating: false,
+          sequenceError: msg.error ?? "simulation failed",
+        });
+      }
     } else if (msg.type === "motion_result") {
       if (msg.ok && msg.trajectory) {
         // Auto-start the preview through the same shared playback state the
@@ -266,6 +328,7 @@ export const useStudioStore = create<StudioState>((set) => ({
           overrideObstaclePoses: firstObjectPoses(msg.trajectory),
           planStats: null,
           planError: null,
+          timeline: null,
         });
       } else {
         set({ motionPlanning: false, motionError: msg.error ?? "planning failed" });
@@ -309,6 +372,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
   selectRobot: () => set({ selection: { type: "robot" } }),
 
+  beginSequenceSim: () => set({ sequenceSimulating: true, sequenceError: null }),
   setGoalFromCurrent: () =>
     set((s) => ({
       goal:

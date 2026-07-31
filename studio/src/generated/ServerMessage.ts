@@ -7,6 +7,9 @@ import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
 import type { PoseMsg } from "./PoseMsg";
 import type { SceneDescriptionMsg } from "./SceneDescriptionMsg";
+import type { SequenceMsg } from "./SequenceMsg";
+import type { SignalDefMsg } from "./SignalDefMsg";
+import type { TimelineMsg } from "./TimelineMsg";
 import type { TrajectoryMsg } from "./TrajectoryMsg";
 
 export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "state", joint_positions: Array<number>, 
@@ -29,7 +32,7 @@ collisions: Array<CollisionPairMsg>,
 /**
  * Minimum robot-obstacle distance; `null` without obstacles.
  */
-min_distance: number | null, } | { "type": "plan_result", ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "motion_result", ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
+min_distance: number | null, } | { "type": "plan_result", ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "motion_result", ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
 /**
  * Time at which each segment ends (playback markers).
  */

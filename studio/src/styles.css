@@ -574,3 +574,120 @@ select:focus {
   padding: 0 2px;
   font-size: 11px;
 }
+
+/* ---------------------------------------------------------- sequence panel */
+
+.seq-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #2c3444;
+  color: #aeb8c8;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.seq-cond {
+  color: #7d8798;
+  font-size: 10px;
+  white-space: nowrap;
+  margin-right: 4px;
+}
+
+.seq-wait {
+  width: 52px;
+  margin-right: 4px;
+}
+
+/* ----------------------------------------------------------- timeline dock */
+
+.timeline-dock {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(16, 20, 28, 0.88);
+  border: 1px solid #2c3444;
+  font-size: 11px;
+  color: #aeb8c8;
+  z-index: 5;
+}
+
+.timeline-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #7d8798;
+}
+
+.timeline-bands {
+  position: relative;
+  height: 22px;
+  border-radius: 4px;
+  background: #1a202c;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.timeline-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  overflow: hidden;
+  border-right: 1px solid rgba(0, 0, 0, 0.35);
+  opacity: 0.85;
+}
+
+.timeline-band-label {
+  display: block;
+  padding: 3px 4px;
+  font-size: 10px;
+  color: #e8ecf2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.timeline-playhead {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #e8ecf2;
+  pointer-events: none;
+}
+
+.timeline-lane {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.timeline-lane-name {
+  width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #7d8798;
+  font-size: 10px;
+}
+
+.timeline-lane-track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: 2px;
+  background: #1a202c;
+}
+
+.timeline-lane-on {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #5a8f6a;
+  border-radius: 2px;
+}

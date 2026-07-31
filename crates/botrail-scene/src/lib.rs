@@ -7,6 +7,8 @@
 
 pub mod motion;
 pub mod project;
+pub mod rollout;
+pub mod seq;
 pub mod wire;
 
 use std::sync::Arc;
@@ -35,6 +37,10 @@ pub enum SceneError {
     AlreadyAttached(String),
     #[error("obstacle `{0}` is not attached")]
     NotAttached(String),
+    #[error("unknown sequence `{0}`")]
+    UnknownSequence(String),
+    #[error("unknown signal `{0}`")]
+    UnknownSignal(String),
     #[error("{0}")]
     UnsupportedGeometry(String),
 }
@@ -91,6 +97,8 @@ pub struct Scene {
     robot_collider: RobotCollider,
     acm: Acm,
     motions: Vec<Motion>,
+    sequences: Vec<seq::Sequence>,
+    signals: Vec<seq::SignalDef>,
     frames: Vec<Frame>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
@@ -128,6 +136,8 @@ impl Scene {
             robot_collider,
             acm,
             motions: Vec::new(),
+            sequences: Vec::new(),
+            signals: Vec::new(),
             frames: Vec::new(),
             collision_warnings,
         }

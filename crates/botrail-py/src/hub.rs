@@ -267,6 +267,59 @@ impl SceneHub {
         })
     }
 
+    // ------------------------------------------------------------ sequences
+
+    pub fn sequences_json(&self) -> String {
+        let msg = self.with_scene(|scene| wire::sequences_message(scene));
+        serde_json::to_string(&msg).expect("wire types serialize infallibly")
+    }
+
+    /// Adds or replaces a sequence from its wire-format JSON.
+    pub fn upsert_sequence_json(&self, json: &str) -> Result<(), String> {
+        let msg: wire::SequenceMsg =
+            serde_json::from_str(json).map_err(|e| format!("invalid sequence JSON: {e}"))?;
+        botrail_session::upsert_sequence(self, wire::sequence_from_msg(&msg));
+        Ok(())
+    }
+
+    pub fn remove_sequence(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_sequence(self, name)
+    }
+
+    pub fn sequence_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.sequences().iter().map(|s| s.name.clone()).collect())
+    }
+
+    pub fn define_signal(&self, name: &str, initial: bool) {
+        botrail_session::define_signal(self, name, initial);
+    }
+
+    pub fn remove_signal(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_signal(self, name)
+    }
+
+    pub fn signals(&self) -> Vec<(String, bool)> {
+        self.with_scene(|scene| {
+            scene
+                .signals()
+                .iter()
+                .map(|s| (s.name.clone(), s.initial))
+                .collect()
+        })
+    }
+
+    /// Rolls out a sequence (broadcasting the result to the studio) and
+    /// returns the timeline plus the snapshot it ran against.
+    pub fn simulate_sequence(
+        &self,
+        name: &str,
+        options: &botrail_scene::rollout::RolloutOptions,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        let snapshot = self.snapshot();
+        let timeline = botrail_session::simulate_sequence_and_emit(self, name, options)?;
+        Ok((timeline, snapshot))
+    }
+
     // ------------------------------------------------------------ usd export
 
     /// Bakes a trajectory into a USD animation layer at `path`: robot link
@@ -450,6 +503,8 @@ impl SceneHub {
             .map_err(|e| e.to_string())?;
         let _ = self.tx.send(self.obstacles_json());
         let _ = self.tx.send(self.motions_json());
+        let _ = self.tx.send(self.sequences_json());
+        let _ = self.tx.send(self.frames_json());
         self.broadcast_state();
         Ok(())
     }
