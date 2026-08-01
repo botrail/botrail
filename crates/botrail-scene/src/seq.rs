@@ -49,8 +49,11 @@ pub enum SensorWatch {
     /// Only the named obstacles trip the sensor.
     Objects(Vec<String>),
     AllObjects,
-    /// Robot links trip it (light-curtain style).
+    /// Any robot's links trip it (light-curtain style).
     Robot,
+    /// Only the named robot instances' links trip it (interlock zones that
+    /// must see one arm but not the other).
+    Robots(Vec<String>),
     All,
 }
 
@@ -108,20 +111,26 @@ pub struct Step {
     pub transition: Condition,
 }
 
+/// Robot-addressed actions carry `robot: Option<String>` — the instance
+/// name, or `None` for the scene's sole robot. With several robots `None`
+/// is ambiguous and rejected at validation (same rule as the Python API).
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Start a named motion (planned against the world state at this
-    /// moment). Await it with [`Condition::Done`].
+    /// moment; the motion's owning robot drives). Await it with
+    /// [`Condition::Done`].
     StartMotion { motion: String },
     /// Linearly ramp a subset of joints (a gripper open/close) over
     /// `duration` seconds. Await it with [`Condition::Done`].
     StartRamp {
+        robot: Option<String>,
         targets: Vec<(String, f64)>,
         duration: f64,
     },
     /// Grasp: rigidly attach an obstacle at its current relative pose
     /// (defaults as in [`Scene::attach_obstacle`]). Instantaneous.
     Attach {
+        robot: Option<String>,
         object: String,
         link: Option<String>,
         touch_links: Option<Vec<String>>,
@@ -133,14 +142,16 @@ pub enum Action {
     /// part freezes the offset (it is the robot's now); the offset survives
     /// [`Action::Untrack`], which only stops following. Instantaneous.
     Track {
+        robot: Option<String>,
         object: String,
         /// Link servoed onto the part; defaults to the TCP link.
         link: Option<String>,
     },
     /// Release the track: commands go back to plain world coordinates from
     /// wherever the robot stands (never a jump). Instantaneous.
-    Untrack,
+    Untrack { robot: Option<String> },
     /// Release: the obstacle's pose freezes where it is. Instantaneous.
+    /// The carrying robot is looked up from the attachment.
     Detach { object: String },
     /// Write an internal signal (self-holding relay style).
     Set { signal: String, value: bool },
@@ -156,8 +167,12 @@ pub enum Action {
 pub enum Condition {
     /// Always true: the step just fires its actions and moves on.
     Immediately,
-    /// The motion/ramp started by *this step* has finished.
+    /// Every motion/ramp started by *this step* has finished (a step may
+    /// start one per robot).
     Done,
+    /// The named robot has no motion/ramp in flight — whichever step
+    /// started it. The robot-level idle test interlocks are built from.
+    RobotDone { robot: String },
     /// On-delay timer: true `seconds` after the step became active.
     Elapsed { seconds: f64 },
     /// Level test of a signal (sensors join in S4 under the same name
@@ -178,13 +193,6 @@ impl Condition {
             Condition::All(cs) | Condition::Any(cs) => cs.iter().any(|c| c.mentions_done()),
             _ => false,
         }
-    }
-}
-
-impl Action {
-    /// Does this action drive the robot's joint vector?
-    pub(crate) fn drives_joints(&self) -> bool {
-        matches!(self, Action::StartMotion { .. } | Action::StartRamp { .. })
     }
 }
 
@@ -304,6 +312,44 @@ impl Scene {
         self.signals.iter().any(|s| s.name == name) || self.sensors.iter().any(|s| s.name == name)
     }
 
+    /// Resolves an action's robot reference to a scene index. `None` means
+    /// the sole robot; with several robots it is ambiguous and rejected
+    /// (mirroring the Python API rule).
+    pub(crate) fn resolve_seq_robot(&self, robot: &Option<String>) -> Result<usize, String> {
+        let names = || {
+            self.robots()
+                .iter()
+                .map(|r| format!("`{}`", r.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match robot {
+            Some(name) => self
+                .robot_index(name)
+                .ok_or_else(|| format!("unknown robot `{name}` (robots: {})", names())),
+            None if self.robots().len() == 1 => Ok(0),
+            None => Err(format!(
+                "the scene has {} robots; give the action a robot (one of: {})",
+                self.robots().len(),
+                names()
+            )),
+        }
+    }
+
+    /// The robot a driver action moves: a motion's owner, or the ramp's
+    /// addressed robot. `None` for non-driver actions.
+    fn driver_robot(&self, action: &Action) -> Result<Option<usize>, String> {
+        match action {
+            Action::StartMotion { motion } => Ok(self
+                .motions
+                .iter()
+                .find(|m| &m.name == motion)
+                .map(|m| m.robot)),
+            Action::StartRamp { robot, .. } => self.resolve_seq_robot(robot).map(Some),
+            _ => Ok(None),
+        }
+    }
+
     /// Full authoring-time validation, run before a rollout. `Err` carries
     /// the offending step index (when applicable) and a message.
     pub(crate) fn validate_sequence(
@@ -324,28 +370,45 @@ impl Scene {
                 ));
             }
         }
-        // Tracking is a mode the steps switch on and off, so its rules are
-        // checked by walking the (linear) step list once.
-        let mut tracked: Option<(String, Vec<String>)> = None;
+        // Tracking and grasping are modes the steps switch on and off, so
+        // their rules are checked by walking the (linear) step list once —
+        // per robot for tracking, per object for grasps.
+        let mut tracked: Vec<Option<(String, Vec<String>)>> = vec![None; self.robots().len()];
+        let mut held: std::collections::HashMap<String, usize> = self
+            .attachments()
+            .iter()
+            .map(|a| (a.object.clone(), a.robot))
+            .collect();
         for (i, step) in sequence.steps.iter().enumerate() {
-            let drivers = step.actions.iter().filter(|a| a.drives_joints()).count();
-            if drivers > 1 {
-                return Err((
-                    Some(i),
-                    "a step can start at most one motion or ramp (they both drive the same joints)"
-                        .to_string(),
-                ));
+            for action in &step.actions {
+                self.validate_action(action, &mut held)
+                    .map_err(|m| (Some(i), m))?;
+                self.validate_tracking(action, &mut tracked)
+                    .map_err(|m| (Some(i), m))?;
             }
-            if step.transition.mentions_done() && drivers == 0 {
+            // One driver per robot per step: two moves on one arm fight for
+            // the same joints; one move per arm is the multi-actor case.
+            let mut driving: Vec<usize> = Vec::new();
+            for action in &step.actions {
+                if let Some(robot) = self.driver_robot(action).map_err(|m| (Some(i), m))? {
+                    if driving.contains(&robot) {
+                        return Err((
+                            Some(i),
+                            format!(
+                                "a step can start at most one motion or ramp per robot \
+                                 (they drive the same joints); `{}` already has one",
+                                self.robots()[robot].name
+                            ),
+                        ));
+                    }
+                    driving.push(robot);
+                }
+            }
+            if step.transition.mentions_done() && driving.is_empty() {
                 return Err((
                     Some(i),
                     "`done` waits for a motion/ramp, but this step starts none".to_string(),
                 ));
-            }
-            for action in &step.actions {
-                self.validate_action(action).map_err(|m| (Some(i), m))?;
-                self.validate_tracking(action, &mut tracked)
-                    .map_err(|m| (Some(i), m))?;
             }
             self.validate_condition(&step.transition)
                 .map_err(|m| (Some(i), m))?;
@@ -353,48 +416,60 @@ impl Scene {
         Ok(())
     }
 
-    /// Threads the tracking mode through one action, rejecting the orders
-    /// the scan engine cannot honour. Carries the tracked object plus the
-    /// joints that would fight the track if a ramp drove them.
+    /// Threads the per-robot tracking mode through one action, rejecting
+    /// the orders the scan engine cannot honour. `tracked[r]` carries the
+    /// robot's tracked object plus the joints that would fight the track if
+    /// a ramp drove them.
     fn validate_tracking(
         &self,
         action: &Action,
-        tracked: &mut Option<(String, Vec<String>)>,
+        tracked: &mut [Option<(String, Vec<String>)>],
     ) -> Result<(), String> {
         match action {
-            Action::Track { object, link } => match tracked {
-                Some((current, _)) => Err(format!(
-                    "already tracking `{current}`; release it with untrack before tracking `{object}`"
-                )),
-                None => {
-                    let servoed = match link {
-                        Some(name) => self
-                            .robot
-                            .link_index(name)
-                            .ok_or_else(|| format!("unknown link `{name}`"))?,
-                        None => self.robot.tool_mount_link(),
-                    };
-                    // Joints below the tool mount (a gripper's) move the
-                    // servoed link without being described by its pose, so
-                    // the solver would trade the grip away for reach.
-                    let trunk = self.robot.driving_joints(self.robot.tool_mount_link());
-                    let contested = self
-                        .robot
-                        .driving_joints(servoed)
-                        .into_iter()
-                        .filter(|ji| !trunk.contains(ji))
-                        .map(|ji| self.robot.joints[ji].name.clone())
-                        .collect();
-                    *tracked = Some((object.clone(), contested));
-                    Ok(())
+            Action::Track {
+                robot,
+                object,
+                link,
+            } => {
+                let r = self.resolve_seq_robot(robot)?;
+                let model = &self.robots()[r].model;
+                match &tracked[r] {
+                    Some((current, _)) => Err(format!(
+                        "already tracking `{current}`; release it with untrack before tracking `{object}`"
+                    )),
+                    None => {
+                        let servoed = match link {
+                            Some(name) => model
+                                .link_index(name)
+                                .ok_or_else(|| format!("unknown link `{name}`"))?,
+                            None => model.tool_mount_link(),
+                        };
+                        // Joints below the tool mount (a gripper's) move the
+                        // servoed link without being described by its pose, so
+                        // the solver would trade the grip away for reach.
+                        let trunk = model.driving_joints(model.tool_mount_link());
+                        let contested = model
+                            .driving_joints(servoed)
+                            .into_iter()
+                            .filter(|ji| !trunk.contains(ji))
+                            .map(|ji| model.joints[ji].name.clone())
+                            .collect();
+                        tracked[r] = Some((object.clone(), contested));
+                        Ok(())
+                    }
                 }
-            },
-            Action::Untrack => match tracked.take() {
-                Some(_) => Ok(()),
-                None => Err("untrack without an active track".to_string()),
-            },
-            Action::StartRamp { targets, .. } => {
-                let Some((object, contested)) = tracked else {
+            }
+            Action::Untrack { robot } => {
+                let r = self.resolve_seq_robot(robot)?;
+                match tracked[r].take() {
+                    Some(_) => Ok(()),
+                    None => Err("untrack without an active track".to_string()),
+                }
+            }
+            Action::StartRamp { robot, targets, .. } => {
+                let r = self.resolve_seq_robot(robot)?;
+                let model = &self.robots()[r].model;
+                let Some((object, contested)) = &tracked[r] else {
                     return Ok(());
                 };
                 match targets
@@ -405,25 +480,40 @@ impl Scene {
                         "ramping `{joint}` while tracking `{object}` fights the track: it moves the \
                          servoed link itself, so the solve would spend it chasing the part. Track a \
                          link at or above the tool mount (`{}`) instead",
-                        self.robot.links[self.robot.tool_mount_link()].name
+                        model.links[model.tool_mount_link()].name
                     )),
                     None => Ok(()),
                 }
             }
             // Planned motions bake their whole trajectory when they start,
-            // which cannot absorb a part that keeps moving underneath.
-            Action::StartMotion { motion } => match tracked {
-                Some((object, _)) => Err(format!(
-                    "motion `{motion}` cannot run while tracking `{object}`: \
-                     plans are baked in world coordinates, so release the track first"
-                )),
-                None => Ok(()),
-            },
+            // which cannot absorb a part that keeps moving underneath. Only
+            // the owning robot's track conflicts — another arm may plan.
+            Action::StartMotion { motion } => {
+                let Some(owner) = self
+                    .motions
+                    .iter()
+                    .find(|m| &m.name == motion)
+                    .map(|m| m.robot)
+                else {
+                    return Ok(());
+                };
+                match &tracked[owner] {
+                    Some((object, _)) => Err(format!(
+                        "motion `{motion}` cannot run while tracking `{object}`: \
+                         plans are baked in world coordinates, so release the track first"
+                    )),
+                    None => Ok(()),
+                }
+            }
             _ => Ok(()),
         }
     }
 
-    fn validate_action(&self, action: &Action) -> Result<(), String> {
+    fn validate_action(
+        &self,
+        action: &Action,
+        held: &mut std::collections::HashMap<String, usize>,
+    ) -> Result<(), String> {
         match action {
             Action::StartMotion { motion } => {
                 let found = self
@@ -436,7 +526,12 @@ impl Scene {
                 }
                 Ok(())
             }
-            Action::StartRamp { targets, duration } => {
+            Action::StartRamp {
+                robot,
+                targets,
+                duration,
+            } => {
+                let model = &self.robots()[self.resolve_seq_robot(robot)?].model;
                 if targets.is_empty() {
                     return Err("ramp has no target joints".to_string());
                 }
@@ -444,11 +539,10 @@ impl Scene {
                     return Err(format!("ramp duration must be positive, got {duration}"));
                 }
                 for (joint, value) in targets {
-                    let ji = self
-                        .robot
+                    let ji = model
                         .joint_index(joint)
                         .ok_or_else(|| format!("unknown joint `{joint}`"))?;
-                    let j = &self.robot.joints[ji];
+                    let j = &model.joints[ji];
                     if j.q_index.is_none() {
                         return Err(format!("joint `{joint}` is not actuated"));
                     }
@@ -463,40 +557,66 @@ impl Scene {
                 }
                 Ok(())
             }
-            Action::Attach { object, link, .. } => {
+            Action::Attach {
+                robot,
+                object,
+                link,
+                ..
+            } => {
+                let r = self.resolve_seq_robot(robot)?;
                 if !self.obstacles.iter().any(|o| &o.name == object) {
                     return Err(format!("unknown obstacle `{object}`"));
                 }
                 if let Some(link) = link {
-                    if self.robot.link_index(link).is_none() {
+                    if self.robots()[r].model.link_index(link).is_none() {
                         return Err(format!("unknown link `{link}`"));
                     }
                 }
+                // One carrier at a time; a handover is written as
+                // "detach → (place) → attach" (§design-multi-robot 6).
+                if let Some(carrier) = held.get(object) {
+                    return Err(format!(
+                        "`{object}` is already attached to `{}`; detach it first \
+                         (a handover is detach → attach)",
+                        self.robots()[*carrier].name
+                    ));
+                }
+                held.insert(object.clone(), r);
                 Ok(())
             }
             Action::Detach { object } => {
                 if !self.obstacles.iter().any(|o| &o.name == object) {
                     return Err(format!("unknown obstacle `{object}`"));
                 }
+                if held.remove(object).is_none() {
+                    return Err(format!(
+                        "`{object}` is not attached at this point in the sequence"
+                    ));
+                }
                 Ok(())
             }
-            Action::Track { object, link } => {
+            Action::Track {
+                robot,
+                object,
+                link,
+            } => {
+                let r = self.resolve_seq_robot(robot)?;
                 if !self.obstacles.iter().any(|o| &o.name == object) {
                     return Err(format!("unknown obstacle `{object}`"));
                 }
-                if self.attachment(object).is_some() {
+                if held.contains_key(object) {
                     return Err(format!(
                         "`{object}` is already grasped; there is nothing to track"
                     ));
                 }
                 if let Some(link) = link {
-                    if self.robot.link_index(link).is_none() {
+                    if self.robots()[r].model.link_index(link).is_none() {
                         return Err(format!("unknown link `{link}`"));
                     }
                 }
                 Ok(())
             }
-            Action::Untrack => Ok(()),
+            Action::Untrack { robot } => self.resolve_seq_robot(robot).map(|_| ()),
             Action::Set { signal, .. } => {
                 if !self.signals.iter().any(|s| &s.name == signal) {
                     if self.sensors.iter().any(|s| &s.name == signal) {
@@ -549,6 +669,9 @@ impl Scene {
     fn validate_condition(&self, condition: &Condition) -> Result<(), String> {
         match condition {
             Condition::Immediately | Condition::Done => Ok(()),
+            Condition::RobotDone { robot } => {
+                self.resolve_seq_robot(&Some(robot.clone())).map(|_| ())
+            }
             Condition::Elapsed { seconds } => {
                 if !(seconds.is_finite() && *seconds >= 0.0) {
                     return Err(format!("elapsed seconds must be >= 0, got {seconds}"));

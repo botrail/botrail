@@ -1,12 +1,17 @@
 //! JSON wire protocol between the botrail server and the studio UI.
 //!
 //! Messages (tagged with `"type"`):
-//! - server -> client: `scene_init` (robot description), `obstacles` (full
-//!   obstacle list, resent on every change), `state` (joint positions, link
-//!   poses, collision pairs, min obstacle distance)
+//! - server -> client: `scene_init` (per-robot descriptions), `obstacles`
+//!   (full obstacle list, resent on every change), `state` (per-robot joint
+//!   positions and link poses, collision pairs, min obstacle distance)
 //! - client -> server: `set_joint_positions`, `set_tcp_target`,
 //!   `add_obstacle`, `update_obstacle_pose`, `update_obstacle_geometry`,
 //!   `remove_obstacle`
+//!
+//! Robot addressing: server -> client messages carry the robot **instance
+//! name** (`RobotDescMsg::name`) as the scope key; client -> server messages
+//! take `robot: Option<String>` where `None` means the first robot (kept for
+//! pre-multi-robot clients).
 
 use std::path::Path;
 
@@ -130,19 +135,29 @@ pub struct UsdAssetMsg {
     pub articulation_root: String,
 }
 
+/// One robot instance. The instance `name` is the scope key every
+/// robot-addressed message uses from here on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct SceneDescriptionMsg {
-    pub robot_name: String,
+pub struct RobotDescMsg {
+    /// Scene-unique instance name.
+    pub name: String,
     /// When present, the client renders the robot from this USD asset
     /// (client-side FK); the `links` visuals then serve only as fallback.
     pub usd_asset: Option<UsdAssetMsg>,
     /// World pose of the robot's root link.
     pub base_pose: PoseMsg,
     pub links: Vec<LinkMsg>,
+    /// `q_index` is the robot-local DOF index.
     pub joints: Vec<JointMsg>,
     /// Suggested end-effector link for the TCP gizmo (deepest leaf link).
     pub tcp_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SceneDescriptionMsg {
+    pub robots: Vec<RobotDescMsg>,
 }
 
 /// A named world-frame pose (mount point / teach reference).
@@ -162,6 +177,21 @@ pub struct IkStatusMsg {
     pub pos_error: f64,
     /// Remaining orientation error (rad).
     pub rot_error: f64,
+}
+
+/// Per-robot slice of a `state` message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RobotStateMsg {
+    /// Instance name (matches `RobotDescMsg::name`).
+    pub name: String,
+    pub joint_positions: Vec<f64>,
+    /// World pose of the robot's root link.
+    pub base_pose: PoseMsg,
+    /// World pose per link, aligned with `RobotDescMsg::links`.
+    pub link_poses: Vec<PoseMsg>,
+    /// Present on the robot an IK solve just ran for.
+    pub ik_status: Option<IkStatusMsg>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -187,6 +217,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AttachmentMsg {
+    /// Carrying robot instance name; `None` means the first robot.
+    #[serde(default)]
+    pub robot: Option<String>,
     /// Carrying link name.
     pub link: String,
     /// Fixed relative pose: `link ← object`.
@@ -200,8 +233,14 @@ pub struct AttachmentMsg {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ColliderRefMsg {
-    Link { name: String },
-    Obstacle { name: String },
+    Link {
+        /// Owning robot instance name.
+        robot: String,
+        name: String,
+    },
+    Obstacle {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -279,6 +318,9 @@ pub struct SegmentMsg {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct MotionMsg {
     pub name: String,
+    /// Owning robot instance name; `None` means the first robot.
+    #[serde(default)]
+    pub robot: Option<String>,
     pub segments: Vec<SegmentMsg>,
 }
 
@@ -319,9 +361,16 @@ pub enum SensorKindMsg {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum SensorWatchMsg {
-    Objects { names: Vec<String> },
+    Objects {
+        names: Vec<String>,
+    },
     AllObjects,
+    /// Any robot's links trip it.
     Robot,
+    /// Only the named robot instances' links trip it.
+    Robots {
+        names: Vec<String>,
+    },
     All,
 }
 
@@ -388,36 +437,49 @@ pub struct RampTargetMsg {
     pub value: f64,
 }
 
+/// Robot-addressed actions carry `robot` — the instance name, or `None`
+/// for the scene's sole robot (ambiguous, and rejected, with several).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ActionMsg {
-    /// Start a named motion; await it with the `done` condition.
+    /// Start a named motion (its owning robot drives); await it with the
+    /// `done` condition.
     StartMotion { motion: String },
     /// Linearly ramp joints (gripper open/close); await with `done`.
     StartRamp {
+        #[serde(default)]
+        robot: Option<String>,
         targets: Vec<RampTargetMsg>,
         duration: f64,
     },
     /// Grasp an obstacle at its current relative pose (instantaneous).
     Attach {
+        #[serde(default)]
+        robot: Option<String>,
         object: String,
         #[serde(default)]
         link: Option<String>,
         #[serde(default)]
         touch_links: Option<Vec<String>>,
     },
-    /// Release an obstacle where it is (instantaneous).
+    /// Release an obstacle where it is (instantaneous; the carrier is
+    /// looked up from the attachment).
     Detach { object: String },
     /// Latch onto a moving part: taught poses ride its motion until the
     /// track is released (conveyor tracking).
     Track {
+        #[serde(default)]
+        robot: Option<String>,
         object: String,
         #[serde(default)]
         link: Option<String>,
     },
     /// Stop following the tracked part (instantaneous).
-    Untrack,
+    Untrack {
+        #[serde(default)]
+        robot: Option<String>,
+    },
     /// Write an internal signal.
     Set { signal: String, value: bool },
     /// Command an auxiliary device (output coil).
@@ -433,8 +495,11 @@ pub enum ActionMsg {
 pub enum ConditionMsg {
     /// Always true — fire the actions and move on.
     Immediately,
-    /// The motion/ramp started by this step has finished.
+    /// Every motion/ramp started by this step has finished.
     Done,
+    /// The named robot has no motion/ramp in flight (interlock building
+    /// block).
+    RobotDone { robot: String },
     /// On-delay timer from step entry (TON).
     Elapsed { seconds: f64 },
     /// Level test of a signal.
@@ -466,15 +531,33 @@ pub struct SignalTrackMsg {
     pub values: Vec<bool>,
 }
 
-/// A baked sequence rollout: the robot + grasped objects ride the embedded
-/// trajectory (the studio plays it with the existing machinery), plus the
-/// step bands and signal lanes for the timeline display.
+/// One robot's playable track on a baked timeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RobotTimelineMsg {
+    /// Instance name (matches `RobotDescMsg::name`).
+    pub name: String,
+    pub trajectory: TrajectoryMsg,
+    /// Intervals a motion/ramp drove this robot, labelled with the motion
+    /// name — the timeline's robot lanes.
+    #[serde(default)]
+    pub moves: Vec<StepSpanMsg>,
+}
+
+/// A baked sequence rollout: each robot rides its own embedded trajectory
+/// on a single clock (the studio plays them with the existing machinery),
+/// grasped/tracked objects follow world-pose tracks, plus the step bands
+/// and signal lanes for the timeline display.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TimelineMsg {
     /// Cycle time in seconds.
     pub duration: f64,
-    pub trajectory: TrajectoryMsg,
+    /// Per-robot tracks; every trajectory shares the same sample grid.
+    pub robots: Vec<RobotTimelineMsg>,
+    /// World-pose track per moving scene object, aligned with the (shared)
+    /// trajectory sample grid. Empty when nothing rides along.
+    pub objects: Vec<ObjectTrackMsg>,
     pub step_spans: Vec<StepSpanMsg>,
     pub signals: Vec<SignalTrackMsg>,
 }
@@ -504,13 +587,8 @@ pub enum ServerMessage {
         frames: Vec<FrameMsg>,
     },
     State {
-        joint_positions: Vec<f64>,
-        /// World pose of the robot's root link.
-        base_pose: PoseMsg,
-        /// World pose per link, aligned with `SceneDescriptionMsg::links`.
-        link_poses: Vec<PoseMsg>,
-        /// Present when this state is the result of an IK solve.
-        ik_status: Option<IkStatusMsg>,
+        /// One entry per robot, in `SceneDescriptionMsg::robots` order.
+        robots: Vec<RobotStateMsg>,
         /// Colliding pairs at this configuration (empty when collision-free).
         collisions: Vec<CollisionPairMsg>,
         /// Minimum robot-obstacle distance; `null` without obstacles.
@@ -518,6 +596,8 @@ pub enum ServerMessage {
     },
     /// Response to a `plan_request` (broadcast to every client).
     PlanResult {
+        /// Robot instance the plan is for (plays back on that robot).
+        robot: String,
         ok: bool,
         error: Option<String>,
         trajectory: Option<TrajectoryMsg>,
@@ -565,6 +645,8 @@ pub enum ServerMessage {
     },
     /// Response to a `plan_motion` request (broadcast to every client).
     MotionResult {
+        /// Owning robot instance (plays back on that robot).
+        robot: String,
         ok: bool,
         motion: String,
         error: Option<String>,
@@ -580,16 +662,25 @@ pub enum ServerMessage {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ClientMessage {
     SetJointPositions {
+        /// Target robot instance name; `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         positions: Vec<f64>,
     },
     /// Ask the server to solve IK for `link` toward `pose` (world frame),
     /// seeded from the current configuration, and apply the result.
     SetTcpTarget {
+        /// Target robot instance name; `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         link: String,
         pose: PoseMsg,
     },
     /// Places the robot's root link at `pose` (world frame).
     SetRobotBasePose {
+        /// Target robot instance name; `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         pose: PoseMsg,
     },
     /// The server may uniquify the requested name; the authoritative list
@@ -618,6 +709,9 @@ pub enum ClientMessage {
     /// defaults to the link's subtree (the gripper).
     AttachObstacle {
         name: String,
+        /// Carrying robot instance name; `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         #[serde(default)]
         link: Option<String>,
         #[serde(default)]
@@ -627,13 +721,21 @@ pub enum ClientMessage {
     DetachObstacle {
         name: String,
     },
-    /// Plan from the current configuration to `goal_positions` (DOF order).
+    /// Plan from the current configuration to `goal_positions` (the target
+    /// robot's DOF order); other robots are frozen collision bodies.
     PlanRequest {
+        /// Target robot instance name; `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         goal_positions: Vec<f64>,
     },
     /// Append a segment (creates the motion when missing).
     AddSegment {
         motion: String,
+        /// Owner when the motion is created (an existing motion keeps its
+        /// owner); `None` means the first robot.
+        #[serde(default)]
+        robot: Option<String>,
         segment: SegmentMsg,
     },
     RemoveSegment {
@@ -727,52 +829,61 @@ pub fn geometry_from_msg(msg: &GeometryMsg) -> Result<Geometry, String> {
 
 impl SceneDescriptionMsg {
     /// Builds the description, mapping each mesh path to a URL + extension
-    /// via `mesh_url` (URL assignment is a server concern). `usd_asset` is
-    /// the host-mapped stage reference for client-side robot rendering.
+    /// via `mesh_url` (URL assignment is a server concern). `usd_asset`
+    /// yields the host-mapped stage reference for the robot at the given
+    /// index, for client-side robot rendering.
     pub fn from_scene(
         scene: &Scene,
         mut mesh_url: impl FnMut(&Path) -> (String, String),
-        usd_asset: Option<UsdAssetMsg>,
+        mut usd_asset: impl FnMut(usize) -> Option<UsdAssetMsg>,
     ) -> Self {
-        let robot = &scene.robot;
-        let links = robot
-            .links
+        let robots = scene
+            .robots()
             .iter()
-            .map(|link| LinkMsg {
-                name: link.name.clone(),
-                visuals: link
-                    .visuals
+            .enumerate()
+            .map(|(index, sr)| {
+                let model = &sr.model;
+                let links = model
+                    .links
                     .iter()
-                    .map(|shape| VisualMsg {
-                        origin: PoseMsg::from(&shape.origin),
-                        geometry: geometry_msg(&shape.geometry, &mut mesh_url),
+                    .map(|link| LinkMsg {
+                        name: link.name.clone(),
+                        visuals: link
+                            .visuals
+                            .iter()
+                            .map(|shape| VisualMsg {
+                                origin: PoseMsg::from(&shape.origin),
+                                geometry: geometry_msg(&shape.geometry, &mut mesh_url),
+                            })
+                            .collect(),
                     })
-                    .collect(),
+                    .collect();
+                let joints = model
+                    .joints
+                    .iter()
+                    .map(|joint| JointMsg {
+                        name: joint.name.clone(),
+                        joint_type: joint.joint_type.into(),
+                        q_index: joint.q_index,
+                        limits: match joint.joint_type {
+                            JointType::Revolute | JointType::Prismatic => {
+                                joint.limits.map(|l| [l.lower, l.upper])
+                            }
+                            _ => None,
+                        },
+                    })
+                    .collect();
+                RobotDescMsg {
+                    name: sr.name.clone(),
+                    usd_asset: usd_asset(index),
+                    base_pose: PoseMsg::from(sr.base_pose()),
+                    links,
+                    joints,
+                    tcp_link: Some(model.links[model.default_tcp_link()].name.clone()),
+                }
             })
             .collect();
-        let joints = robot
-            .joints
-            .iter()
-            .map(|joint| JointMsg {
-                name: joint.name.clone(),
-                joint_type: joint.joint_type.into(),
-                q_index: joint.q_index,
-                limits: match joint.joint_type {
-                    JointType::Revolute | JointType::Prismatic => {
-                        joint.limits.map(|l| [l.lower, l.upper])
-                    }
-                    _ => None,
-                },
-            })
-            .collect();
-        SceneDescriptionMsg {
-            robot_name: robot.name.clone(),
-            usd_asset,
-            base_pose: PoseMsg::from(scene.robot_base_pose()),
-            links,
-            joints,
-            tcp_link: Some(robot.links[robot.default_tcp_link()].name.clone()),
-        }
+        SceneDescriptionMsg { robots }
     }
 }
 
@@ -846,24 +957,38 @@ pub fn segment_from_msg(msg: &SegmentMsg) -> Segment {
     }
 }
 
-pub fn motion_msg(motion: &Motion) -> MotionMsg {
+pub fn motion_msg(scene: &Scene, motion: &Motion) -> MotionMsg {
     MotionMsg {
         name: motion.name.clone(),
+        // `None` for the first robot keeps single-robot wire/projects
+        // byte-identical to the pre-multi-robot format.
+        robot: (motion.robot != 0).then(|| scene.robots()[motion.robot].name.clone()),
         segments: motion.segments.iter().map(segment_msg).collect(),
     }
 }
 
-pub fn motion_from_msg(msg: &MotionMsg) -> Motion {
-    Motion {
+/// Converts a wire motion back into a scene motion. An unknown owning robot
+/// name is rejected (`Err` carries the name).
+pub fn motion_from_msg(scene: &Scene, msg: &MotionMsg) -> Result<Motion, String> {
+    let robot = match &msg.robot {
+        Some(name) => scene.robot_index(name).ok_or_else(|| name.clone())?,
+        None => 0,
+    };
+    Ok(Motion {
         name: msg.name.clone(),
+        robot,
         segments: msg.segments.iter().map(segment_from_msg).collect(),
-    }
+    })
 }
 
 /// The full motion list as a `motions` message.
 pub fn motions_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Motions {
-        motions: scene.motions().iter().map(motion_msg).collect(),
+        motions: scene
+            .motions()
+            .iter()
+            .map(|m| motion_msg(scene, m))
+            .collect(),
     }
 }
 
@@ -879,7 +1004,12 @@ pub fn action_msg(action: &Action) -> ActionMsg {
         Action::StartMotion { motion } => ActionMsg::StartMotion {
             motion: motion.clone(),
         },
-        Action::StartRamp { targets, duration } => ActionMsg::StartRamp {
+        Action::StartRamp {
+            robot,
+            targets,
+            duration,
+        } => ActionMsg::StartRamp {
+            robot: robot.clone(),
             targets: targets
                 .iter()
                 .map(|(joint, value)| RampTargetMsg {
@@ -890,10 +1020,12 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             duration: *duration,
         },
         Action::Attach {
+            robot,
             object,
             link,
             touch_links,
         } => ActionMsg::Attach {
+            robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
             touch_links: touch_links.clone(),
@@ -901,11 +1033,18 @@ pub fn action_msg(action: &Action) -> ActionMsg {
         Action::Detach { object } => ActionMsg::Detach {
             object: object.clone(),
         },
-        Action::Track { object, link } => ActionMsg::Track {
+        Action::Track {
+            robot,
+            object,
+            link,
+        } => ActionMsg::Track {
+            robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
         },
-        Action::Untrack => ActionMsg::Untrack,
+        Action::Untrack { robot } => ActionMsg::Untrack {
+            robot: robot.clone(),
+        },
         Action::Set { signal, value } => ActionMsg::Set {
             signal: signal.clone(),
             value: *value,
@@ -929,15 +1068,22 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
         ActionMsg::StartMotion { motion } => Action::StartMotion {
             motion: motion.clone(),
         },
-        ActionMsg::StartRamp { targets, duration } => Action::StartRamp {
+        ActionMsg::StartRamp {
+            robot,
+            targets,
+            duration,
+        } => Action::StartRamp {
+            robot: robot.clone(),
             targets: targets.iter().map(|t| (t.joint.clone(), t.value)).collect(),
             duration: *duration,
         },
         ActionMsg::Attach {
+            robot,
             object,
             link,
             touch_links,
         } => Action::Attach {
+            robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
             touch_links: touch_links.clone(),
@@ -945,11 +1091,18 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
         ActionMsg::Detach { object } => Action::Detach {
             object: object.clone(),
         },
-        ActionMsg::Track { object, link } => Action::Track {
+        ActionMsg::Track {
+            robot,
+            object,
+            link,
+        } => Action::Track {
+            robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
         },
-        ActionMsg::Untrack => Action::Untrack,
+        ActionMsg::Untrack { robot } => Action::Untrack {
+            robot: robot.clone(),
+        },
         ActionMsg::Set { signal, value } => Action::Set {
             signal: signal.clone(),
             value: *value,
@@ -970,6 +1123,9 @@ pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
     match condition {
         Condition::Immediately => ConditionMsg::Immediately,
         Condition::Done => ConditionMsg::Done,
+        Condition::RobotDone { robot } => ConditionMsg::RobotDone {
+            robot: robot.clone(),
+        },
         Condition::Elapsed { seconds } => ConditionMsg::Elapsed { seconds: *seconds },
         Condition::Signal { name, value } => ConditionMsg::Signal {
             name: name.clone(),
@@ -991,6 +1147,9 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
     match msg {
         ConditionMsg::Immediately => Condition::Immediately,
         ConditionMsg::Done => Condition::Done,
+        ConditionMsg::RobotDone { robot } => Condition::RobotDone {
+            robot: robot.clone(),
+        },
         ConditionMsg::Elapsed { seconds } => Condition::Elapsed { seconds: *seconds },
         ConditionMsg::Signal { name, value } => Condition::Signal {
             name: name.clone(),
@@ -1073,6 +1232,9 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
             },
             SensorWatch::AllObjects => SensorWatchMsg::AllObjects,
             SensorWatch::Robot => SensorWatchMsg::Robot,
+            SensorWatch::Robots(names) => SensorWatchMsg::Robots {
+                names: names.clone(),
+            },
             SensorWatch::All => SensorWatchMsg::All,
         },
     }
@@ -1095,6 +1257,7 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
         watch: match &msg.watch {
             SensorWatchMsg::Objects { names } => SensorWatch::Objects(names.clone()),
             SensorWatchMsg::AllObjects => SensorWatch::AllObjects,
+            SensorWatchMsg::Robots { names } => SensorWatch::Robots(names.clone()),
             SensorWatchMsg::Robot => SensorWatch::Robot,
             SensorWatchMsg::All => SensorWatch::All,
         },
@@ -1196,28 +1359,36 @@ pub fn frames_message(scene: &Scene) -> ServerMessage {
 
 /// A scene attachment in wire form (link indices become link names).
 pub fn attachment_msg(scene: &Scene, attachment: &crate::Attachment) -> AttachmentMsg {
+    let model = &scene.robots()[attachment.robot].model;
     AttachmentMsg {
-        link: scene.robot.links[attachment.link].name.clone(),
+        robot: (attachment.robot != 0).then(|| scene.robots()[attachment.robot].name.clone()),
+        link: model.links[attachment.link].name.clone(),
         grasp: PoseMsg::from(&attachment.grasp),
         touch_links: attachment
             .touch_links
             .iter()
-            .map(|&l| scene.robot.links[l].name.clone())
+            .map(|&l| model.links[l].name.clone())
             .collect(),
     }
 }
 
-/// Converts a wire attachment back into a scene attachment. Unknown link
-/// names are rejected (`Err` carries the offending name).
+/// Converts a wire attachment back into a scene attachment. Unknown robot
+/// or link names are rejected (`Err` carries the offending name).
 pub fn attachment_from_msg(
-    robot: &botrail_model::RobotModel,
+    scene: &Scene,
     object: &str,
     msg: &AttachmentMsg,
 ) -> Result<crate::Attachment, String> {
+    let robot = match &msg.robot {
+        Some(name) => scene.robot_index(name).ok_or_else(|| name.clone())?,
+        None => 0,
+    };
+    let model = &scene.robots()[robot].model;
     let link_index =
-        |name: &str| -> Result<usize, String> { robot.link_index(name).ok_or(name.to_string()) };
+        |name: &str| -> Result<usize, String> { model.link_index(name).ok_or(name.to_string()) };
     Ok(crate::Attachment {
         object: object.to_string(),
+        robot,
         link: link_index(&msg.link)?,
         grasp: (&msg.grasp).into(),
         touch_links: msg
@@ -1251,8 +1422,9 @@ pub fn obstacles_message(
 
 fn collider_ref(scene: &Scene, id: ColliderId) -> ColliderRefMsg {
     match id {
-        ColliderId::Link(i) => ColliderRefMsg::Link {
-            name: scene.robot.links[i].name.clone(),
+        ColliderId::Link { robot, link } => ColliderRefMsg::Link {
+            robot: scene.robots()[robot].name.clone(),
+            name: scene.robots()[robot].model.links[link].name.clone(),
         },
         ColliderId::Obstacle(k) => ColliderRefMsg::Obstacle {
             name: scene.obstacles()[k].name.clone(),
@@ -1268,8 +1440,12 @@ pub fn state_message(scene: &Scene) -> ServerMessage {
     state_message_with_ik(scene, None)
 }
 
-/// Current scene state as a `state` message, tagged with an IK outcome.
-pub fn state_message_with_ik(scene: &Scene, ik_status: Option<IkStatusMsg>) -> ServerMessage {
+/// Current scene state as a `state` message; `ik_status` tags the robot at
+/// the given index with an IK outcome.
+pub fn state_message_with_ik(
+    scene: &Scene,
+    ik_status: Option<(usize, IkStatusMsg)>,
+) -> ServerMessage {
     let collisions = scene
         .check_collisions()
         .into_iter()
@@ -1278,11 +1454,27 @@ pub fn state_message_with_ik(scene: &Scene, ik_status: Option<IkStatusMsg>) -> S
             b: collider_ref(scene, pair.b),
         })
         .collect();
+    let robots = scene
+        .robots()
+        .iter()
+        .enumerate()
+        .map(|(index, sr)| RobotStateMsg {
+            name: sr.name.clone(),
+            joint_positions: sr.joint_positions().to_vec(),
+            base_pose: PoseMsg::from(sr.base_pose()),
+            link_poses: scene
+                .link_poses_for(index)
+                .iter()
+                .map(PoseMsg::from)
+                .collect(),
+            ik_status: ik_status
+                .as_ref()
+                .filter(|(robot, _)| *robot == index)
+                .map(|(_, status)| status.clone()),
+        })
+        .collect();
     ServerMessage::State {
-        joint_positions: scene.joint_positions().to_vec(),
-        base_pose: PoseMsg::from(scene.robot_base_pose()),
-        link_poses: scene.link_poses().iter().map(PoseMsg::from).collect(),
-        ik_status,
+        robots,
         collisions,
         min_distance: scene.min_obstacle_distance(),
     }
@@ -1325,24 +1517,22 @@ mod tests {
                 assert!(path.ends_with("meshes/arm.stl"));
                 ("/meshes/0".to_string(), "stl".to_string())
             },
-            None,
+            |_| None,
         );
         let msg = ServerMessage::SceneInit { scene: desc };
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(json["type"], "scene_init");
-        assert_eq!(json["scene"]["robot_name"], "wire_bot");
+        let robot = &json["scene"]["robots"][0];
+        assert_eq!(robot["name"], "wire_bot");
+        assert_eq!(robot["links"][0]["visuals"][0]["geometry"]["kind"], "box");
         assert_eq!(
-            json["scene"]["links"][0]["visuals"][0]["geometry"]["kind"],
-            "box"
-        );
-        assert_eq!(
-            json["scene"]["links"][0]["visuals"][1]["geometry"]["url"],
+            robot["links"][0]["visuals"][1]["geometry"]["url"],
             "/meshes/0"
         );
-        assert_eq!(json["scene"]["joints"][0]["joint_type"], "revolute");
-        assert_eq!(json["scene"]["joints"][0]["q_index"], 0);
-        assert_eq!(json["scene"]["tcp_link"], "tip");
+        assert_eq!(robot["joints"][0]["joint_type"], "revolute");
+        assert_eq!(robot["joints"][0]["q_index"], 0);
+        assert_eq!(robot["tcp_link"], "tip");
     }
 
     #[test]
@@ -1351,13 +1541,80 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&state_message(&scene)).unwrap()).unwrap();
         assert_eq!(json["type"], "state");
-        assert_eq!(json["joint_positions"].as_array().unwrap().len(), 1);
-        assert_eq!(json["link_poses"].as_array().unwrap().len(), 2);
+        let robot = &json["robots"][0];
+        assert_eq!(robot["name"], "wire_bot");
+        assert_eq!(robot["joint_positions"].as_array().unwrap().len(), 1);
+        assert_eq!(robot["link_poses"].as_array().unwrap().len(), 2);
         // tip link sits 1m above base at q = 0
-        assert_eq!(json["link_poses"][1]["position"][2], 1.0);
-        assert_eq!(json["ik_status"], serde_json::Value::Null);
+        assert_eq!(robot["link_poses"][1]["position"][2], 1.0);
+        assert_eq!(robot["ik_status"], serde_json::Value::Null);
         assert_eq!(json["collisions"].as_array().unwrap().len(), 0);
         assert_eq!(json["min_distance"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn multi_robot_scene_and_state_shapes() {
+        let mut scene = sample_scene();
+        let model = scene.robots()[0].model.clone();
+        let second = scene.add_robot(model, None, nalgebra::Isometry3::translation(1.0, 0.0, 0.0));
+        assert_eq!(second, "wire_bot_2");
+
+        let desc =
+            SceneDescriptionMsg::from_scene(&scene, |_| (String::new(), String::new()), |_| None);
+        assert_eq!(desc.robots.len(), 2);
+        assert_eq!(desc.robots[1].name, "wire_bot_2");
+        assert_eq!(desc.robots[1].base_pose.position[0], 1.0);
+        // q_index stays robot-local for the twin.
+        assert_eq!(desc.robots[1].joints[0].q_index, Some(0));
+
+        // Per-robot state, with the IK tag landing on the addressed robot.
+        let status = IkStatusMsg {
+            converged: true,
+            pos_error: 0.0,
+            rot_error: 0.0,
+        };
+        let msg = state_message_with_ik(&scene, Some((1, status)));
+        let ServerMessage::State { robots, .. } = &msg else {
+            panic!("expected state");
+        };
+        assert_eq!(robots.len(), 2);
+        assert_eq!(robots[1].name, "wire_bot_2");
+        assert!((robots[1].base_pose.position[0] - 1.0).abs() < 1e-12);
+        assert!(robots[0].ik_status.is_none());
+        assert!(robots[1].ik_status.is_some());
+
+        // Overlapping twins produce link collisions scoped by robot name.
+        scene.set_robot_base_pose_for(1, nalgebra::Isometry3::identity());
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state_message(&scene)).unwrap()).unwrap();
+        let pair = &json["collisions"][0];
+        assert_eq!(pair["a"]["kind"], "link");
+        assert_eq!(pair["a"]["robot"], "wire_bot");
+        assert_eq!(pair["b"]["robot"], "wire_bot_2");
+    }
+
+    #[test]
+    fn robot_addressed_client_messages_parse() {
+        // Old JSON without `robot` still parses (first-robot default)...
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"type":"plan_request","goal_positions":[0.5]}"#).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::PlanRequest {
+                robot: None,
+                goal_positions: vec![0.5]
+            }
+        );
+        // ...and the addressed form carries the instance name.
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"set_robot_base_pose","robot":"arm_b",
+                "pose":{"position":[0,0,0],"quaternion":[0,0,0,1]}}"#,
+        )
+        .unwrap();
+        let ClientMessage::SetRobotBasePose { robot, .. } = msg else {
+            panic!("wrong variant");
+        };
+        assert_eq!(robot.as_deref(), Some("arm_b"));
     }
 
     #[test]
@@ -1390,6 +1647,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&state_message(&scene)).unwrap()).unwrap();
         assert_eq!(json["collisions"][0]["a"]["kind"], "link");
+        assert_eq!(json["collisions"][0]["a"]["robot"], "wire_bot");
         assert_eq!(json["collisions"][0]["b"]["kind"], "obstacle");
         assert_eq!(json["collisions"][0]["b"]["name"], "ball");
         assert_eq!(json["min_distance"], 0.0);
@@ -1437,6 +1695,7 @@ mod tests {
             msg,
             ClientMessage::AttachObstacle {
                 name: "box".into(),
+                robot: None,
                 link: None,
                 touch_links: None,
             }
@@ -1449,6 +1708,7 @@ mod tests {
             msg,
             ClientMessage::AttachObstacle {
                 name: "box".into(),
+                robot: None,
                 link: Some("tip".into()),
                 touch_links: Some(vec!["tip".into()]),
             }
@@ -1491,6 +1751,7 @@ mod tests {
         assert_eq!(
             msg,
             ClientMessage::SetJointPositions {
+                robot: None,
                 positions: vec![0.25]
             }
         );
@@ -1499,7 +1760,7 @@ mod tests {
             r#"{"type":"set_tcp_target","link":"tip","pose":{"position":[0.1,0.2,0.3],"quaternion":[0,0,0,1]}}"#,
         )
         .unwrap();
-        let ClientMessage::SetTcpTarget { link, pose } = msg else {
+        let ClientMessage::SetTcpTarget { link, pose, .. } = msg else {
             panic!("wrong variant");
         };
         assert_eq!(link, "tip");

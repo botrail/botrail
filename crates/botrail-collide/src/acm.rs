@@ -37,6 +37,39 @@ impl Acm {
     }
 }
 
+/// Allowed collision pairs between links of *different* robots, keyed by
+/// `(robot, link)`. Unlike the intra-robot [`Acm`], nothing is generated
+/// automatically: inter-robot contact depends on the relative base poses
+/// (and both configurations), so the identity-base sampling behind
+/// [`detect_always_colliding`] does not apply. Pairs are stored with the
+/// lower robot index first.
+#[derive(Debug, Clone, Default)]
+pub struct InterRobotAcm {
+    allowed: HashSet<((usize, usize), (usize, usize))>,
+}
+
+fn inter_key(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+impl InterRobotAcm {
+    pub fn allow(&mut self, a: (usize, usize), b: (usize, usize)) {
+        self.allowed.insert(inter_key(a, b));
+    }
+
+    pub fn allows(&self, a: (usize, usize), b: (usize, usize)) -> bool {
+        self.allowed.contains(&inter_key(a, b))
+    }
+
+    pub fn allowed_pairs(&self) -> impl Iterator<Item = ((usize, usize), (usize, usize))> + '_ {
+        self.allowed.iter().copied()
+    }
+}
+
 /// Samples random configurations (deterministic xorshift) and returns link
 /// pairs colliding in at least `threshold` of them — these are almost
 /// certainly in contact by design and should be added to the ACM.
@@ -71,8 +104,17 @@ pub fn detect_always_colliding(
             Ok(p) => p,
             Err(_) => continue,
         };
-        for pair in crate::check_scene(robot, &poses, acm, &[], &[]) {
-            if let (crate::ColliderId::Link(i), crate::ColliderId::Link(j)) = (pair.a, pair.b) {
+        let query = crate::RobotQuery {
+            collider: robot,
+            link_poses: &poses,
+            acm,
+        };
+        for pair in crate::check_scene(&[query], &InterRobotAcm::default(), &[], &[]) {
+            if let (
+                crate::ColliderId::Link { link: i, .. },
+                crate::ColliderId::Link { link: j, .. },
+            ) = (pair.a, pair.b)
+            {
                 *counts.entry(key(i, j)).or_default() += 1;
             }
         }

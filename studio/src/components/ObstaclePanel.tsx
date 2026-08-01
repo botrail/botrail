@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { GeometryMsg, ObstacleMsg, PoseMsg } from "../protocol";
-import { collidingObstacleNames, useStudioStore } from "../store";
+import { collidingObstacleNames, robotByName, useStudioStore } from "../store";
 import {
   sendAddObstacle,
   sendAttachObstacle,
@@ -156,7 +156,11 @@ function linkLabel(link: string): string {
 
 function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
   const { geometry, pose, name } = obstacle;
-  const tcpLink = useStudioStore((s) => s.tcpLink);
+  // Attach grasps with the panel-selected robot at its TCP link.
+  const selectedRobot = useStudioStore((s) => s.selectedRobot);
+  const tcpLink = useStudioStore(
+    (s) => robotByName(s.robots, s.selectedRobot)?.tcpLink ?? null,
+  );
   const commit = (g: GeometryMsg) => sendUpdateObstacleGeometry(name, g);
 
   return (
@@ -219,7 +223,11 @@ function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
         ) : (
           <button
             title="grasp: follow the TCP link and collide as part of the robot"
-            onClick={() => sendAttachObstacle(name, tcpLink)}
+            disabled={selectedRobot === null}
+            onClick={() =>
+              selectedRobot !== null &&
+              sendAttachObstacle(name, selectedRobot, tcpLink)
+            }
           >
             Attach to {tcpLink ? linkLabel(tcpLink) : "TCP"}
           </button>

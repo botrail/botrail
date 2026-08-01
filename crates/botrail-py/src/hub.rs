@@ -46,9 +46,11 @@ impl SessionHost for SceneHub {
         f(&mut self.scene.lock().expect("scene mutex poisoned"))
     }
 
-    fn robot_asset_url(&self, path: &std::path::Path) -> Option<String> {
+    fn robot_asset_url(&self, robot: usize, path: &std::path::Path) -> Option<String> {
+        // Namespaced by robot index (not name: names are user-chosen and
+        // would need URL escaping); the client treats the URL as opaque.
         path.file_name()
-            .map(|f| format!("/usd-assets/{}", f.to_string_lossy()))
+            .map(|f| format!("/usd-assets/{robot}/{}", f.to_string_lossy()))
     }
 
     fn mesh_url(&self, path: &std::path::Path) -> (String, String) {
@@ -114,10 +116,20 @@ impl SceneHub {
         serde_json::to_string(&msg).expect("wire types serialize infallibly")
     }
 
-    /// Directory `/assets/*` serves (a USD robot's stage directory, so
-    /// relative references inside the stage resolve).
-    pub fn robot_asset_dir(&self) -> Option<PathBuf> {
-        self.with_scene(|scene| match &scene.robot.source {
+    /// The connection handshake (scene_init … state), serialized — the
+    /// order comes from `botrail_session::initial_messages`, the single
+    /// definition shared with the wasm host.
+    pub fn handshake_jsons(&self) -> Vec<String> {
+        botrail_session::initial_messages(self)
+            .iter()
+            .map(|msg| serde_json::to_string(msg).expect("wire types serialize infallibly"))
+            .collect()
+    }
+
+    /// Directory `/usd-assets/{robot}/*` serves (that robot's stage
+    /// directory, so relative references inside the stage resolve).
+    pub fn robot_asset_dir(&self, robot: usize) -> Option<PathBuf> {
+        self.with_scene(|scene| match &scene.robots().get(robot)?.model.source {
             botrail_model::RobotSource::Usd { path, .. } => path.parent().map(|p| p.to_path_buf()),
             _ => None,
         })
@@ -128,18 +140,82 @@ impl SceneHub {
         serde_json::to_string(&msg).expect("wire types serialize infallibly")
     }
 
-    pub fn set_joint_positions(&self, positions: Vec<f64>) -> Result<(), SceneError> {
-        botrail_session::set_joint_positions(self, positions)
+    // --------------------------------------------------------------- robots
+
+    /// Resolves an optional robot instance name to its index. `None` means
+    /// the sole robot and is ambiguous (an error) when several exist.
+    pub fn robot_index(&self, robot: Option<&str>) -> Result<usize, String> {
+        self.with_scene(|scene| {
+            let names = || {
+                scene
+                    .robots()
+                    .iter()
+                    .map(|r| format!("{:?}", r.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match robot {
+                Some(name) => scene
+                    .robot_index(name)
+                    .ok_or_else(|| format!("unknown robot `{name}` (robots: {})", names())),
+                None if scene.robots().len() == 1 => Ok(0),
+                None => Err(format!(
+                    "scene has {} robots; pass robot=<name> (one of: {})",
+                    scene.robots().len(),
+                    names()
+                )),
+            }
+        })
+    }
+
+    pub fn robot_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.robots().iter().map(|r| r.name.clone()).collect())
+    }
+
+    pub fn robot_model(&self, robot: usize) -> std::sync::Arc<botrail_model::RobotModel> {
+        self.with_scene(|scene| scene.robots()[robot].model.clone())
+    }
+
+    /// Adds a robot instance and re-runs the handshake broadcast — the
+    /// robot roster lives in `scene_init`, and that message resets the
+    /// studio store, so the full content refresh must follow it.
+    pub fn add_robot(
+        &self,
+        model: std::sync::Arc<botrail_model::RobotModel>,
+        name: Option<&str>,
+        base: Isometry3<f64>,
+    ) -> String {
+        let final_name = self.with_scene(|scene| scene.add_robot(model, name, base));
+        self.broadcast_handshake();
+        final_name
+    }
+
+    fn broadcast_handshake(&self) {
+        for msg in botrail_session::initial_messages(self) {
+            self.emit(&msg);
+        }
+    }
+
+    pub fn set_joint_positions_for(
+        &self,
+        robot: usize,
+        positions: Vec<f64>,
+    ) -> Result<(), SceneError> {
+        botrail_session::set_joint_positions_for(self, robot, positions)
     }
 
     pub fn joint_positions(&self) -> Vec<f64> {
         self.with_scene(|scene| scene.joint_positions().to_vec())
     }
 
-    pub fn link_pose(&self, link_name: &str) -> Option<PoseArrays> {
+    pub fn joint_positions_for(&self, robot: usize) -> Vec<f64> {
+        self.with_scene(|scene| scene.robots()[robot].joint_positions().to_vec())
+    }
+
+    pub fn link_pose_for(&self, robot: usize, link_name: &str) -> Option<PoseArrays> {
         self.with_scene(|scene| {
-            let index = scene.robot.link_index(link_name)?;
-            let pose = scene.link_poses()[index];
+            let index = scene.robots()[robot].model.link_index(link_name)?;
+            let pose = scene.link_poses_for(robot)[index];
             let t = pose.translation;
             let q = pose.rotation.coords;
             Some(([t.x, t.y, t.z], [q.x, q.y, q.z, q.w]))
@@ -162,11 +238,6 @@ impl SceneHub {
         botrail_session::add_frames(self, frames);
     }
 
-    pub fn frames_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::frames_message(scene));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
-    }
-
     pub fn frames(&self) -> Vec<(String, PoseArrays)> {
         self.with_scene(|scene| {
             scene
@@ -182,36 +253,28 @@ impl SceneHub {
     }
 
     pub fn robot_base_isometry(&self) -> Isometry3<f64> {
-        self.with_scene(|scene| *scene.robot_base_pose())
+        self.robot_base_isometry_for(0)
     }
 
-    /// Places the robot's root link (world frame) and broadcasts the state.
-    pub fn set_robot_base_pose(&self, pose: Isometry3<f64>) {
-        botrail_session::set_robot_base_pose(self, pose);
+    pub fn robot_base_isometry_for(&self, robot: usize) -> Isometry3<f64> {
+        self.with_scene(|scene| *scene.robots()[robot].base_pose())
     }
 
-    /// Solves IK for `link` toward `pose`, seeded from the current
-    /// configuration, applies the (best-effort) result, and broadcasts the
-    /// new state tagged with the IK outcome.
-    pub fn set_tcp_target(
+    pub fn set_robot_base_pose_for(&self, robot: usize, pose: Isometry3<f64>) {
+        botrail_session::set_robot_base_pose_for(self, robot, pose);
+    }
+
+    pub fn set_tcp_target_for(
         &self,
+        robot: usize,
         link: &str,
         pose: &PoseMsg,
         options: &IkOptions,
     ) -> Result<botrail_kin::IkResult, String> {
-        botrail_session::set_tcp_target(self, link, pose, options)
-    }
-
-    pub fn broadcast_state(&self) {
-        botrail_session::emit_state(self);
+        botrail_session::set_tcp_target_for(self, robot, link, pose, options)
     }
 
     // ------------------------------------------------------------ obstacles
-
-    pub fn obstacles_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::obstacles_message(scene, |p| self.mesh_url(p)));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
-    }
 
     pub fn add_obstacle(
         &self,
@@ -256,13 +319,14 @@ impl SceneHub {
         })
     }
 
-    pub fn attach_obstacle(
+    pub fn attach_obstacle_to(
         &self,
+        robot: usize,
         name: &str,
         link: Option<&str>,
         touch_links: Option<&[String]>,
     ) -> Result<(), SceneError> {
-        botrail_session::attach_obstacle(self, name, link, touch_links)
+        botrail_session::attach_obstacle_to(self, robot, name, link, touch_links)
     }
 
     pub fn detach_obstacle(&self, name: &str) -> Result<(), SceneError> {
@@ -275,17 +339,17 @@ impl SceneHub {
             scene
                 .attachments()
                 .iter()
-                .map(|a| (a.object.clone(), scene.robot.links[a.link].name.clone()))
+                .map(|a| {
+                    (
+                        a.object.clone(),
+                        scene.robots()[a.robot].model.links[a.link].name.clone(),
+                    )
+                })
                 .collect()
         })
     }
 
     // ------------------------------------------------------------ sequences
-
-    pub fn sequences_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::sequences_message(scene));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
-    }
 
     /// Adds or replaces a sequence from its wire-format JSON.
     pub fn upsert_sequence_json(&self, json: &str) -> Result<(), String> {
@@ -319,16 +383,6 @@ impl SceneHub {
                 .map(|s| (s.name.clone(), s.initial))
                 .collect()
         })
-    }
-
-    pub fn sensors_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::sensors_message(scene));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
-    }
-
-    pub fn devices_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::devices_message(scene));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
     }
 
     pub fn upsert_sensor(&self, sensor: botrail_scene::seq::Sensor) {
@@ -376,6 +430,7 @@ impl SceneHub {
     /// exporter warnings.
     pub fn export_trajectory_usd(
         &self,
+        robot: usize,
         traj: &botrail_traj::JointTrajectory,
         path: &std::path::Path,
         fps: f64,
@@ -400,14 +455,18 @@ impl SceneHub {
 
         let mut link_poses = Vec::with_capacity(times.len());
         for &t in &times {
-            let poses = scene.fk(&traj.sample(t)).map_err(|e| e.to_string())?;
+            let poses = scene
+                .fk_for(robot, &traj.sample(t))
+                .map_err(|e| e.to_string())?;
             link_poses.push(poses);
         }
+        // Objects held by *this* robot ride its trajectory; everything else
+        // (including other robots' cargo) stays at its current pose.
         let objects: Vec<botrail_usd::export::ObjectSpec> = scene
             .obstacles()
             .iter()
             .map(|o| {
-                let track = match scene.attachment(&o.name) {
+                let track = match scene.attachment(&o.name).filter(|a| a.robot == robot) {
                     Some(att) => botrail_usd::export::PoseTrack::Sampled(
                         link_poses.iter().map(|p| p[att.link] * att.grasp).collect(),
                     ),
@@ -421,11 +480,22 @@ impl SceneHub {
             })
             .collect();
         let joint_samples: Vec<Vec<f64>> = times.iter().map(|&t| traj.sample(t)).collect();
-        let input = botrail_usd::export::AnimationInput {
-            model: &scene.robot,
-            times: &times,
+        // A sole robot exports under the historical `Robot` prim (byte
+        // compatibility); named instances appear once several exist.
+        let name = if scene.robots().len() == 1 {
+            "Robot".to_string()
+        } else {
+            scene.robots()[robot].name.clone()
+        };
+        let robots = [botrail_usd::export::RobotAnimation {
+            name: &name,
+            model: &scene.robots()[robot].model,
             link_poses: &link_poses,
             joint_samples: Some(&joint_samples),
+        }];
+        let input = botrail_usd::export::AnimationInput {
+            robots: &robots,
+            times: &times,
             objects: &objects,
         };
         let options = botrail_usd::export::ExportOptions { fps };
@@ -441,57 +511,77 @@ impl SceneHub {
         &self,
         path: &std::path::Path,
         force_transforms: bool,
+        robot_roots: Vec<(String, String)>,
     ) -> Result<(String, f64, Vec<String>, Vec<String>), String> {
         let scene = self.snapshot();
         let obstacle_names: Vec<String> =
             scene.obstacles().iter().map(|o| o.name.clone()).collect();
+        let robots: Vec<(String, &botrail_model::RobotModel)> = scene
+            .robots()
+            .iter()
+            .map(|r| (r.name.clone(), r.model.as_ref()))
+            .collect();
         let options = botrail_usd::recording::RecordingImportOptions {
             search_paths: Vec::new(),
             force_transforms,
+            robot_roots,
         };
         let source = path.display().to_string();
-        match botrail_usd::recording::import_recording(
-            path,
-            &scene.robot,
-            &obstacle_names,
-            &options,
-        ) {
+        match botrail_usd::recording::import_recording(path, &robots, &obstacle_names, &options) {
             Ok(rec) => {
                 use botrail_usd::recording::RecordingMode;
-                let mode = match rec.mode {
-                    RecordingMode::JointState => "joint_state",
-                    RecordingMode::Transforms => "transforms",
+                // The reported mode summarizes all robots.
+                let mode = match (
+                    rec.robots
+                        .iter()
+                        .all(|r| r.mode == RecordingMode::JointState),
+                    rec.robots
+                        .iter()
+                        .all(|r| r.mode == RecordingMode::Transforms),
+                ) {
+                    (true, _) => "joint_state".to_string(),
+                    (_, true) => "transforms".to_string(),
+                    _ => "mixed".to_string(),
                 };
                 let duration = rec.times.last().copied().unwrap_or(0.0);
                 let track_names: Vec<String> =
                     rec.object_tracks.iter().map(|(n, _)| n.clone()).collect();
-                let trajectory = wire::TrajectoryMsg {
-                    duration,
-                    times: rec.times,
-                    joint_positions: rec.joint_samples.unwrap_or_default(),
-                    link_poses: match rec.mode {
-                        // Joint mode rides the existing joint-playback path.
-                        RecordingMode::JointState => None,
-                        RecordingMode::Transforms => Some(
-                            rec.link_poses
-                                .iter()
-                                .map(|frame| frame.iter().map(wire::PoseMsg::from).collect())
-                                .collect(),
-                        ),
-                    },
-                    object_tracks: (!rec.object_tracks.is_empty()).then(|| {
-                        rec.object_tracks
-                            .iter()
-                            .map(|(name, poses)| wire::ObjectTrackMsg {
-                                name: name.clone(),
-                                poses: poses.iter().map(wire::PoseMsg::from).collect(),
-                            })
-                            .collect()
-                    }),
-                };
                 let timeline = wire::TimelineMsg {
                     duration,
-                    trajectory,
+                    robots: rec
+                        .robots
+                        .iter()
+                        .map(|r| wire::RobotTimelineMsg {
+                            name: r.name.clone(),
+                            trajectory: wire::TrajectoryMsg {
+                                duration,
+                                times: rec.times.clone(),
+                                joint_positions: r.joint_samples.clone().unwrap_or_default(),
+                                link_poses: match r.mode {
+                                    // Joint mode rides the joint-playback path.
+                                    RecordingMode::JointState => None,
+                                    RecordingMode::Transforms => Some(
+                                        r.link_poses
+                                            .iter()
+                                            .map(|frame| {
+                                                frame.iter().map(wire::PoseMsg::from).collect()
+                                            })
+                                            .collect(),
+                                    ),
+                                },
+                                object_tracks: None,
+                            },
+                            moves: Vec::new(),
+                        })
+                        .collect(),
+                    objects: rec
+                        .object_tracks
+                        .iter()
+                        .map(|(name, poses)| wire::ObjectTrackMsg {
+                            name: name.clone(),
+                            poses: poses.iter().map(wire::PoseMsg::from).collect(),
+                        })
+                        .collect(),
                     step_spans: Vec::new(),
                     signals: Vec::new(),
                 };
@@ -531,9 +621,10 @@ impl SceneHub {
     pub fn collision_pairs(&self) -> Vec<((String, String), (String, String))> {
         self.with_scene(|scene| {
             let describe = |id: botrail_collide::ColliderId| match id {
-                botrail_collide::ColliderId::Link(i) => {
-                    ("link".to_string(), scene.robot.links[i].name.clone())
-                }
+                botrail_collide::ColliderId::Link { robot, link } => (
+                    "link".to_string(),
+                    scene.robots()[robot].model.links[link].name.clone(),
+                ),
                 botrail_collide::ColliderId::Obstacle(k) => {
                     ("obstacle".to_string(), scene.obstacles()[k].name.clone())
                 }
@@ -560,17 +651,13 @@ impl SceneHub {
 
     // -------------------------------------------------------------- motions
 
-    pub fn motions_json(&self) -> String {
-        let msg = self.with_scene(|scene| wire::motions_message(scene));
-        serde_json::to_string(&msg).expect("wire types serialize infallibly")
-    }
-
-    pub fn add_segment(
+    pub fn add_segment_for(
         &self,
+        robot: usize,
         motion: &str,
         segment: botrail_scene::motion::Segment,
     ) -> Result<(), String> {
-        botrail_session::add_segment(self, motion, segment)
+        botrail_session::add_segment_for(self, robot, motion, segment)
     }
 
     pub fn remove_segment(&self, motion: &str, index: usize) -> Result<(), String> {
@@ -579,6 +666,17 @@ impl SceneHub {
 
     pub fn clear_motion(&self, motion: &str) -> Result<(), String> {
         botrail_session::clear_motion(self, motion)
+    }
+
+    /// The owning robot index of a named motion.
+    pub fn motion_owner(&self, name: &str) -> Option<usize> {
+        self.with_scene(|scene| {
+            scene
+                .motions()
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.robot)
+        })
     }
 
     pub fn motion_names(&self) -> Vec<String> {
@@ -647,13 +745,12 @@ impl SceneHub {
             .last_recording
             .lock()
             .expect("recording mutex poisoned") = None;
-        let _ = self.tx.send(self.obstacles_json());
-        let _ = self.tx.send(self.motions_json());
-        let _ = self.tx.send(self.sequences_json());
-        let _ = self.tx.send(self.sensors_json());
-        let _ = self.tx.send(self.devices_json());
-        let _ = self.tx.send(self.frames_json());
-        self.broadcast_state();
+        // Full-content refresh; the shared definition keeps this in lockstep
+        // with the handshake (scene_init is skipped — a project load cannot
+        // change the robot).
+        for msg in botrail_session::refresh_messages(self) {
+            self.emit(&msg);
+        }
         Ok(())
     }
 
@@ -663,26 +760,22 @@ impl SceneHub {
 
     // ------------------------------------------------------------- planning
 
-    /// Plans from the current configuration to `goal` against a snapshot of
-    /// the scene (the lock is not held while planning), then time-
-    /// parameterizes the path. Returns the trajectory, the sparse shortcut
-    /// path (kept for script export), and the wall-clock milliseconds spent.
-    pub fn plan_to(
+    pub fn plan_to_for(
         &self,
+        robot: usize,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
     ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-        botrail_session::plan_to(self, goal, options)
+        botrail_session::plan_to_for(self, robot, goal, options)
     }
 
-    /// Runs `plan_to` and broadcasts the outcome (success or failure) as a
-    /// `plan_result` message.
-    pub fn plan_and_broadcast(
+    pub fn plan_and_broadcast_for(
         &self,
+        robot: usize,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
     ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-        botrail_session::plan_and_emit(self, goal, options)
+        botrail_session::plan_and_emit_for(self, robot, goal, options)
     }
 
     pub fn handle_client_message(&self, text: &str) {

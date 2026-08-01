@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 
 import { backendSupportsHttp } from "../backend";
 import type { ConstraintMsg, SegmentKindMsg } from "../protocol";
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import {
   sendAddSegment,
   sendPlanMotion,
@@ -30,15 +30,15 @@ function downloadBlob(blob: Blob, filename: string): void {
 
 /** Waypoint editing, motion planning, and project save/load/export. */
 export function MotionPanel() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
+  const robots = useStudioStore((s) => s.robots);
+  const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const connected = useStudioStore((s) => s.connection === "connected");
-  const jointPositions = useStudioStore((s) => s.jointPositions);
   const motions = useStudioStore((s) => s.motions);
   const motionPlanning = useStudioStore((s) => s.motionPlanning);
   const motionError = useStudioStore((s) => s.motionError);
   const motionStats = useStudioStore((s) => s.motionStats);
   const segmentEnds = useStudioStore((s) => s.segmentEnds);
-  const trajectory = useStudioStore((s) => s.trajectory);
+  const playback = useStudioStore((s) => s.playback);
   const beginMotionPlanning = useStudioStore((s) => s.beginMotionPlanning);
 
   const [upright, setUpright] = useState(false);
@@ -46,17 +46,23 @@ export function MotionPanel() {
   const [ioError, setIoError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  if (!sceneDesc) return null;
+  if (!robot) return null;
+  const robotName = robot.desc.name;
+  const firstRobot = robots[0]?.desc.name;
 
-  // A single motion "main" is edited; adopt the server's name if it exists.
-  const motion = motions[0] ?? null;
-  const motionName = motion?.name ?? "main";
+  // One motion per robot is edited here; adopt the server's first motion
+  // owned by the selected robot if it exists (a motion's `robot: null`
+  // means the first robot).
+  const owned = motions.filter((m) => (m.robot ?? firstRobot) === robotName);
+  const motion = owned[0] ?? null;
+  const motionName =
+    motion?.name ?? (robotName === firstRobot ? "main" : `main_${robotName}`);
   const segments = motion?.segments ?? [];
 
   const addSegment = (kind: SegmentKindMsg) => {
-    sendAddSegment(motionName, {
+    sendAddSegment(motionName, robotName, {
       kind,
-      goal_positions: jointPositions.slice(),
+      goal_positions: robot.jointPositions.slice(),
       constraints: upright ? [UPRIGHT_CONE] : [],
     });
   };
@@ -109,9 +115,9 @@ export function MotionPanel() {
       <div className="panel-head">
         <h2>Motion</h2>
         {motionPlanning && <span className="badge muted">planning…</span>}
-        {!motionPlanning && motionStats && trajectory && (
+        {!motionPlanning && motionStats && playback && (
           <span className="badge ok">
-            {trajectory.duration.toFixed(2)}s · {segmentEnds.length} seg ·{" "}
+            {playback.duration.toFixed(2)}s · {segmentEnds.length} seg ·{" "}
             {motionStats.planningTimeMs.toFixed(0)}ms
           </span>
         )}

@@ -1,16 +1,16 @@
-import { sampleOverride } from "../playback";
-import { useStudioStore } from "../store";
+import { samplePlayback } from "../playback";
+import { robotByName, useStudioStore } from "../store";
 import { sendPlanRequest } from "../ws";
 
 /** Goal capture, plan request, and trajectory preview playback. */
 export function PlanPanel() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
+  const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const connected = useStudioStore((s) => s.connection === "connected");
   const goal = useStudioStore((s) => s.goal);
   const planning = useStudioStore((s) => s.planning);
   const planError = useStudioStore((s) => s.planError);
   const planStats = useStudioStore((s) => s.planStats);
-  const trajectory = useStudioStore((s) => s.trajectory);
+  const playback = useStudioStore((s) => s.playback);
   const segmentEnds = useStudioStore((s) => s.segmentEnds);
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const playing = useStudioStore((s) => s.playing);
@@ -20,28 +20,28 @@ export function PlanPanel() {
   const setPlayback = useStudioStore((s) => s.setPlayback);
   const setPlaying = useStudioStore((s) => s.setPlaying);
 
-  if (!sceneDesc) return null;
+  if (!robot) return null;
 
   const onPlan = () => {
     if (!goal) return;
     beginPlanning();
-    sendPlanRequest(goal.positions);
+    sendPlanRequest(goal.robot, goal.positions);
   };
 
   const onTogglePlay = () => {
-    if (!trajectory) return;
+    if (!playback) return;
     // "At the end" with a slider-step tolerance: scrubbing snaps the time
     // to a 0.01s grid, so an exact comparison would replay ~one frame.
-    if (!playing && playbackTime >= trajectory.duration - 0.02) {
-      setPlayback(0, ...sampleOverride(trajectory, 0));
+    if (!playing && playbackTime >= playback.duration - 0.02) {
+      setPlayback(0, samplePlayback(playback, 0));
     }
     setPlaying(!playing);
   };
 
   const onScrub = (t: number) => {
-    if (!trajectory) return;
+    if (!playback) return;
     setPlaying(false);
-    setPlayback(t, ...sampleOverride(trajectory, t));
+    setPlayback(t, samplePlayback(playback, t));
   };
 
   return (
@@ -49,9 +49,9 @@ export function PlanPanel() {
       <div className="panel-head">
         <h2>Plan</h2>
         {planning && <span className="badge muted">planning…</span>}
-        {!planning && planStats && trajectory && (
+        {!planning && planStats && playback && (
           <span className="badge ok">
-            {trajectory.duration.toFixed(2)}s · {planStats.waypoints} wp ·{" "}
+            {playback.duration.toFixed(2)}s · {planStats.waypoints} wp ·{" "}
             {planStats.planning_time_ms.toFixed(0)}ms
           </span>
         )}
@@ -73,37 +73,37 @@ export function PlanPanel() {
           </button>
         </div>
         {planError && <div className="plan-error">{planError}</div>}
-        {goal && !trajectory && !planning && !planError && (
+        {goal && !playback && !planning && !planError && (
           <div className="plan-hint">
-            goal set — pose the robot at the start, then Plan
+            goal set on {goal.robot} — pose the robot at the start, then Plan
           </div>
         )}
-        {trajectory && (
+        {playback && (
           <div className="playback-row">
             <button onClick={onTogglePlay}>{playing ? "❚❚" : "▶"}</button>
             <div className="seek">
               <input
                 type="range"
                 min={0}
-                max={trajectory.duration}
+                max={playback.duration}
                 step={0.01}
                 value={playbackTime}
                 onChange={(e) => onScrub(parseFloat(e.target.value))}
               />
-              {segmentEnds.length > 0 && trajectory.duration > 0 && (
+              {segmentEnds.length > 0 && playback.duration > 0 && (
                 <div className="seek-marks">
                   {segmentEnds.map((t, i) => (
                     <div
                       key={i}
                       className="seek-mark"
-                      style={{ left: `${(t / trajectory.duration) * 100}%` }}
+                      style={{ left: `${(t / playback.duration) * 100}%` }}
                     />
                   ))}
                 </div>
               )}
             </div>
             <span className="playback-time">
-              {playbackTime.toFixed(2)}/{trajectory.duration.toFixed(2)}s
+              {playbackTime.toFixed(2)}/{playback.duration.toFixed(2)}s
             </span>
           </div>
         )}

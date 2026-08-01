@@ -3,8 +3,8 @@
 //! motions — plus a Python code generator that reproduces the project
 //! programmatically.
 //!
-//! Version 2 stores robots as a list to keep the format multi-robot-ready;
-//! the code currently enforces exactly one. Version 1 files (single
+//! Version 2 stores robots as a list; each entry carries its instance
+//! name, source, base pose, and joint state. Version 1 files (single
 //! `robot_urdf`, base implicitly at the world origin) are still read.
 //!
 //! Known limitation: mesh assets are referenced by filesystem path, not
@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use nalgebra::Isometry3;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -58,6 +59,10 @@ pub enum RobotSourceMsg {
 /// One robot in a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRobotMsg {
+    /// Scene-unique instance name; `None` (older files) falls back to the
+    /// model name.
+    #[serde(default)]
+    pub name: Option<String>,
     pub source: RobotSourceMsg,
     /// World pose of the robot's root link.
     pub base_pose: PoseMsg,
@@ -117,6 +122,7 @@ impl ProjectFile {
                 Ok(ProjectFile {
                     version: PROJECT_VERSION,
                     robots: vec![ProjectRobotMsg {
+                        name: None,
                         source: RobotSourceMsg::Urdf { xml: v1.robot_urdf },
                         base_pose: identity_pose(),
                         joint_positions: v1.joint_positions,
@@ -133,7 +139,11 @@ impl ProjectFile {
             2 => {
                 let project: ProjectFile =
                     serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
-                project.single_robot()?;
+                if project.robots.is_empty() {
+                    return Err(ProjectError::Incompatible(
+                        "project has no robots".to_string(),
+                    ));
+                }
                 Ok(project)
             }
             v => Err(ProjectError::Version(v)),
@@ -142,18 +152,6 @@ impl ProjectFile {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("project serializes infallibly")
-    }
-
-    /// The project's robot. The format allows a list; until multi-robot
-    /// lands, exactly one is required.
-    pub fn single_robot(&self) -> Result<&ProjectRobotMsg, ProjectError> {
-        match self.robots.as_slice() {
-            [robot] => Ok(robot),
-            robots => Err(ProjectError::Incompatible(format!(
-                "expected exactly 1 robot, project has {}",
-                robots.len()
-            ))),
-        }
     }
 }
 
@@ -185,22 +183,27 @@ impl Scene {
         let mut mesh_url = mesh_path_url;
         ProjectFile {
             version: PROJECT_VERSION,
-            robots: vec![ProjectRobotMsg {
-                source: match &self.robot.source {
-                    botrail_model::RobotSource::UrdfXml(xml) => {
-                        RobotSourceMsg::Urdf { xml: xml.clone() }
-                    }
-                    botrail_model::RobotSource::Usd {
-                        path,
-                        articulation_root,
-                    } => RobotSourceMsg::Usd {
-                        path: path.display().to_string(),
-                        articulation_root: articulation_root.clone(),
+            robots: self
+                .robots()
+                .iter()
+                .map(|r| ProjectRobotMsg {
+                    name: Some(r.name.clone()),
+                    source: match &r.model.source {
+                        botrail_model::RobotSource::UrdfXml(xml) => {
+                            RobotSourceMsg::Urdf { xml: xml.clone() }
+                        }
+                        botrail_model::RobotSource::Usd {
+                            path,
+                            articulation_root,
+                        } => RobotSourceMsg::Usd {
+                            path: path.display().to_string(),
+                            articulation_root: articulation_root.clone(),
+                        },
                     },
-                },
-                base_pose: PoseMsg::from(self.robot_base_pose()),
-                joint_positions: self.joint_positions().to_vec(),
-            }],
+                    base_pose: PoseMsg::from(r.base_pose()),
+                    joint_positions: r.joint_positions().to_vec(),
+                })
+                .collect(),
             obstacles: self
                 .obstacles()
                 .iter()
@@ -214,7 +217,7 @@ impl Scene {
                         .map(|a| crate::wire::attachment_msg(self, a)),
                 })
                 .collect(),
-            motions: self.motions().iter().map(motion_msg).collect(),
+            motions: self.motions().iter().map(|m| motion_msg(self, m)).collect(),
             sequences: self.sequences().iter().map(sequence_msg).collect(),
             signals: self.signals().iter().map(signal_def_msg).collect(),
             sensors: self.sensors().iter().map(sensor_msg).collect(),
@@ -230,35 +233,72 @@ impl Scene {
         }
     }
 
-    /// Builds a fresh scene (robot included) from a project. USD-sourced
+    /// Builds a fresh scene (robots included) from a project. USD-sourced
     /// robots need the importer and are handled one layer up (botrail-py's
-    /// `load_project`), which re-imports and then calls `apply_project`.
+    /// `load_project`), which re-imports each and then calls
+    /// `apply_project`.
     pub fn from_project(project: &ProjectFile) -> Result<Scene, ProjectError> {
-        let robot_msg = project.single_robot()?;
-        let RobotSourceMsg::Urdf { xml } = &robot_msg.source else {
-            return Err(ProjectError::Robot(
-                "USD-sourced robot: re-import it via the USD importer, then apply_project"
-                    .to_string(),
-            ));
-        };
-        let robot = botrail_model::RobotModel::from_urdf_str(xml)
-            .map_err(|e| ProjectError::Robot(e.to_string()))?;
-        let mut scene = Scene::new(Arc::new(robot));
+        let mut models = Vec::with_capacity(project.robots.len());
+        for robot_msg in &project.robots {
+            let RobotSourceMsg::Urdf { xml } = &robot_msg.source else {
+                return Err(ProjectError::Robot(
+                    "USD-sourced robot: re-import it via the USD importer, then apply_project"
+                        .to_string(),
+                ));
+            };
+            let robot = botrail_model::RobotModel::from_urdf_str(xml)
+                .map_err(|e| ProjectError::Robot(e.to_string()))?;
+            models.push(Arc::new(robot));
+        }
+        let mut iter = models.into_iter();
+        let mut scene = Scene::new(iter.next().expect("from_json rejects empty robot lists"));
+        for model in iter {
+            scene.add_robot(model, None, Isometry3::identity());
+        }
         scene.apply_project(project)?;
         Ok(scene)
     }
 
-    /// Applies a project's state (base pose, joints, obstacles, motions)
-    /// onto this scene. The robot itself is kept; the project must have the
-    /// same DOF.
+    /// Applies a project's state (names, base poses, joints, obstacles,
+    /// motions) onto this scene. The robot models themselves are kept; the
+    /// project must have the same robot count and per-robot DOF.
     pub fn apply_project(&mut self, project: &ProjectFile) -> Result<(), ProjectError> {
-        let robot_msg = project.single_robot()?;
-        if robot_msg.joint_positions.len() != self.robot.dof() {
+        if project.robots.len() != self.robots().len() {
             return Err(ProjectError::Incompatible(format!(
-                "project has {} DOF, scene robot has {}",
-                robot_msg.joint_positions.len(),
-                self.robot.dof()
+                "project has {} robots, scene has {}",
+                project.robots.len(),
+                self.robots().len()
             )));
+        }
+        for (i, robot_msg) in project.robots.iter().enumerate() {
+            if robot_msg.joint_positions.len() != self.robots()[i].model.dof() {
+                return Err(ProjectError::Incompatible(format!(
+                    "project robot {i} has {} DOF, scene robot has {}",
+                    robot_msg.joint_positions.len(),
+                    self.robots()[i].model.dof()
+                )));
+            }
+        }
+        // Restore instance names (older files carry none and keep the
+        // model-derived defaults); reject duplicates before mutating.
+        {
+            let mut names: Vec<String> = self.robots().iter().map(|r| r.name.clone()).collect();
+            for (i, robot_msg) in project.robots.iter().enumerate() {
+                if let Some(name) = &robot_msg.name {
+                    names[i] = name.clone();
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            for name in &names {
+                if !seen.insert(name) {
+                    return Err(ProjectError::Incompatible(format!(
+                        "duplicate robot instance name `{name}`"
+                    )));
+                }
+            }
+            for (i, name) in names.into_iter().enumerate() {
+                self.robots[i].name = name;
+            }
         }
         // Build the new obstacle set before mutating anything.
         let mut obstacles = Vec::with_capacity(project.obstacles.len());
@@ -280,18 +320,20 @@ impl Scene {
                     .expect("obstacle was just added");
             }
         }
-        self.set_robot_base_pose((&robot_msg.base_pose).into());
-        self.set_joint_positions(robot_msg.joint_positions.clone())
-            .map_err(|e| ProjectError::Scene(e.to_string()))?;
+        for (i, robot_msg) in project.robots.iter().enumerate() {
+            self.set_robot_base_pose_for(i, (&robot_msg.base_pose).into());
+            self.set_joint_positions_for(i, robot_msg.joint_positions.clone())
+                .map_err(|e| ProjectError::Scene(e.to_string()))?;
+        }
         // Restore attachments verbatim (stored grasp transforms, not
         // re-captured) once obstacles and joints are in place.
         let mut attachments = Vec::new();
         for o in &project.obstacles {
             if let Some(msg) = &o.attached_to {
-                let attachment = crate::wire::attachment_from_msg(&self.robot, &o.name, msg)
-                    .map_err(|link| {
+                let attachment =
+                    crate::wire::attachment_from_msg(self, &o.name, msg).map_err(|name| {
                         ProjectError::Incompatible(format!(
-                            "attachment of `{}` references unknown link `{link}`",
+                            "attachment of `{}` references unknown robot or link `{name}`",
                             o.name
                         ))
                     })?;
@@ -299,7 +341,16 @@ impl Scene {
             }
         }
         self.set_attachments(attachments);
-        self.set_motions(project.motions.iter().map(motion_from_msg).collect());
+        let mut motions = Vec::with_capacity(project.motions.len());
+        for msg in &project.motions {
+            motions.push(motion_from_msg(self, msg).map_err(|name| {
+                ProjectError::Incompatible(format!(
+                    "motion `{}` references unknown robot `{name}`",
+                    msg.name
+                ))
+            })?);
+        }
+        self.set_motions(motions);
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
@@ -345,41 +396,92 @@ fn is_identity_pose(pose: &PoseMsg) -> bool {
         && pose.quaternion[..3].iter().all(|v| v.abs() < 1e-12)
 }
 
+/// The `, robot="…"` kwarg selecting robot `i` — empty for single-robot
+/// projects, where the implicit default keeps the script identical to the
+/// pre-multi-robot output.
+fn robot_kwarg(project: &ProjectFile, i: usize) -> String {
+    if project.robots.len() == 1 {
+        return String::new();
+    }
+    match &project.robots[i].name {
+        Some(name) => format!(", robot={name:?}"),
+        // Multi-robot projects written by botrail always carry names; a
+        // hand-edited file without them cannot be addressed reliably.
+        None => String::new(),
+    }
+}
+
+/// `robot_kwarg` looked up by stored instance name (attachment/motion
+/// references), falling back to the first robot.
+fn robot_kwarg_for_name(project: &ProjectFile, name: &Option<String>) -> String {
+    let index = name
+        .as_ref()
+        .and_then(|n| {
+            project
+                .robots
+                .iter()
+                .position(|r| r.name.as_ref() == Some(n))
+        })
+        .unwrap_or(0);
+    robot_kwarg(project, index)
+}
+
 /// Generates a standalone Python script that rebuilds the project with the
-/// botrail API. The robot source is embedded so the script is
+/// botrail API. The robot sources are embedded so the script is
 /// self-contained.
 pub fn generate_python(project: &ProjectFile) -> String {
-    let robot_msg = match project.single_robot() {
-        Ok(robot) => robot,
-        Err(e) => return format!("# cannot generate script: {e}\n"),
-    };
+    if project.robots.is_empty() {
+        return "# cannot generate script: project has no robots\n".to_string();
+    }
+    let multi = project.robots.len() > 1;
     let mut out = String::new();
     out.push_str("\"\"\"Generated by botrail studio — rebuilds the saved project.\"\"\"\n\n");
     out.push_str("import botrail as bt\n\n");
-    match &robot_msg.source {
-        RobotSourceMsg::Urdf { xml } => {
-            // Triple-quote guard: a URDF containing ''' would break the literal.
-            let urdf = xml.replace("'''", "'\\''\\''\\'");
-            out.push_str(&format!("URDF = r'''{urdf}'''\n\n"));
-            out.push_str("robot = bt.Robot.from_urdf_string(URDF)\n");
+    for (i, robot_msg) in project.robots.iter().enumerate() {
+        let var = if i == 0 {
+            "robot".to_string()
+        } else {
+            format!("robot_{}", i + 1)
+        };
+        match &robot_msg.source {
+            RobotSourceMsg::Urdf { xml } => {
+                // Triple-quote guard: a URDF containing ''' would break the literal.
+                let urdf = xml.replace("'''", "'\\''\\''\\'");
+                let konst = if i == 0 {
+                    "URDF".to_string()
+                } else {
+                    format!("URDF_{}", i + 1)
+                };
+                out.push_str(&format!("{konst} = r'''{urdf}'''\n\n"));
+                out.push_str(&format!("{var} = bt.Robot.from_urdf_string({konst})\n"));
+            }
+            RobotSourceMsg::Usd {
+                path,
+                articulation_root,
+            } => {
+                out.push_str(&format!(
+                    "{var} = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
+                ));
+            }
         }
-        RobotSourceMsg::Usd {
-            path,
-            articulation_root,
-        } => {
-            out.push_str(&format!(
-                "robot = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
+        let mut kwargs = String::new();
+        if multi {
+            if let Some(name) = &robot_msg.name {
+                kwargs.push_str(&format!(", name={name:?}"));
+            }
+        }
+        if !is_identity_pose(&robot_msg.base_pose) {
+            kwargs.push_str(&format!(
+                ", base_position={}, base_quaternion={}",
+                py_tuple(&robot_msg.base_pose.position),
+                py_tuple(&robot_msg.base_pose.quaternion)
             ));
         }
-    }
-    if is_identity_pose(&robot_msg.base_pose) {
-        out.push_str("scene = bt.Scene(robot)\n");
-    } else {
-        out.push_str(&format!(
-            "scene = bt.Scene(robot, base_position={}, base_quaternion={})\n",
-            py_tuple(&robot_msg.base_pose.position),
-            py_tuple(&robot_msg.base_pose.quaternion)
-        ));
+        if i == 0 {
+            out.push_str(&format!("scene = bt.Scene({var}{kwargs})\n"));
+        } else {
+            out.push_str(&format!("scene.add_robot({var}{kwargs})\n"));
+        }
     }
 
     for o in &project.obstacles {
@@ -416,20 +518,24 @@ pub fn generate_python(project: &ProjectFile) -> String {
             py_tuple(&frame.pose.quaternion)
         ));
     }
-    out.push_str(&format!(
-        "scene.set_joint_positions({})\n",
-        py_list(&robot_msg.joint_positions)
-    ));
+    for (i, robot_msg) in project.robots.iter().enumerate() {
+        out.push_str(&format!(
+            "scene.set_joint_positions({}{})\n",
+            py_list(&robot_msg.joint_positions),
+            robot_kwarg(project, i)
+        ));
+    }
     // Attach after obstacles and joints so the captured grasp matches the
     // saved relative pose.
     for o in &project.obstacles {
         if let Some(att) = &o.attached_to {
             let touch: Vec<String> = att.touch_links.iter().map(|l| format!("{l:?}")).collect();
             out.push_str(&format!(
-                "scene.attach({:?}, link={:?}, touch_links=[{}])\n",
+                "scene.attach({:?}, link={:?}, touch_links=[{}]{})\n",
                 o.name,
                 att.link,
-                touch.join(", ")
+                touch.join(", "),
+                robot_kwarg_for_name(project, &att.robot)
             ));
         }
     }
@@ -461,11 +567,12 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 }
             }
             out.push_str(&format!(
-                "scene.add_segment({:?}, goal={}, kind={:?}{})\n",
+                "scene.add_segment({:?}, goal={}, kind={:?}{}{})\n",
                 motion.name,
                 py_list(&segment.goal_positions),
                 kind,
-                extras
+                extras,
+                robot_kwarg_for_name(project, &motion.robot)
             ));
         }
         out.push_str(&format!(
@@ -482,6 +589,10 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 format!(", watch=[{}]", items.join(", "))
             }
             crate::wire::SensorWatchMsg::Robot => ", watch=[], watch_robot=True".to_string(),
+            crate::wire::SensorWatchMsg::Robots { names } => {
+                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+                format!(", watch=[], watch_robots=[{}]", items.join(", "))
+            }
             crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
         };
         match &sensor.kind {
@@ -560,19 +671,31 @@ pub fn generate_python(project: &ProjectFile) -> String {
 }
 
 fn py_action(action: &ActionMsg) -> String {
+    // A `robot=` kwarg appears only when the action names one, so
+    // single-robot scripts keep their pre-multi-robot output byte for byte.
+    let robot_kwarg = |robot: &Option<String>| match robot {
+        Some(name) => format!(", robot={name:?}"),
+        None => String::new(),
+    };
     match action {
         ActionMsg::StartMotion { motion } => format!("bt.seq.motion({motion:?})"),
-        ActionMsg::StartRamp { targets, duration } => {
+        ActionMsg::StartRamp {
+            robot,
+            targets,
+            duration,
+        } => {
             let entries: Vec<String> = targets
                 .iter()
                 .map(|t| format!("{:?}: {:.6}", t.joint, t.value))
                 .collect();
             format!(
-                "bt.seq.ramp({{{}}}, duration={duration})",
-                entries.join(", ")
+                "bt.seq.ramp({{{}}}, duration={duration}{})",
+                entries.join(", "),
+                robot_kwarg(robot)
             )
         }
         ActionMsg::Attach {
+            robot,
             object,
             link,
             touch_links,
@@ -585,14 +708,25 @@ fn py_action(action: &ActionMsg) -> String {
                 let names: Vec<String> = touch.iter().map(|t| format!("{t:?}")).collect();
                 extras.push_str(&format!(", touch_links=[{}]", names.join(", ")));
             }
+            extras.push_str(&robot_kwarg(robot));
             format!("bt.seq.attach({object:?}{extras})")
         }
         ActionMsg::Detach { object } => format!("bt.seq.detach({object:?})"),
-        ActionMsg::Track { object, link } => match link {
-            Some(link) => format!("bt.seq.track({object:?}, link={link:?})"),
-            None => format!("bt.seq.track({object:?})"),
+        ActionMsg::Track {
+            robot,
+            object,
+            link,
+        } => match link {
+            Some(link) => format!(
+                "bt.seq.track({object:?}, link={link:?}{})",
+                robot_kwarg(robot)
+            ),
+            None => format!("bt.seq.track({object:?}{})", robot_kwarg(robot)),
         },
-        ActionMsg::Untrack => "bt.seq.untrack()".to_string(),
+        ActionMsg::Untrack { robot } => match robot {
+            Some(name) => format!("bt.seq.untrack(robot={name:?})"),
+            None => "bt.seq.untrack()".to_string(),
+        },
         ActionMsg::Set { signal, value } => format!(
             "bt.seq.set_signal({signal:?}, {})",
             if *value { "True" } else { "False" }
@@ -614,6 +748,7 @@ fn py_condition(condition: &ConditionMsg) -> String {
     match condition {
         ConditionMsg::Immediately => "bt.seq.immediately()".to_string(),
         ConditionMsg::Done => "bt.seq.done()".to_string(),
+        ConditionMsg::RobotDone { robot } => format!("bt.seq.robot_done({robot:?})"),
         ConditionMsg::Elapsed { seconds } => format!("bt.seq.elapsed({seconds})"),
         ConditionMsg::Signal { name, value } => format!(
             "bt.seq.signal({name:?}, {})",
@@ -688,7 +823,7 @@ mod tests {
         let json = scene.to_project().to_json();
         let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
 
-        assert_eq!(reloaded.robot.name, scene.robot.name);
+        assert_eq!(reloaded.robot().name, scene.robot().name);
         assert_eq!(reloaded.joint_positions(), scene.joint_positions());
         let base = reloaded.robot_base_pose();
         assert!((base.translation.vector - Vector3::new(0.5, -0.2, 0.8)).norm() < 1e-12);
@@ -724,7 +859,7 @@ mod tests {
                 Isometry3::translation(0.2, 0.0, 0.4),
             )
             .unwrap();
-        let tcp = scene.robot.links[scene.robot.default_tcp_link()]
+        let tcp = scene.robot().links[scene.robot().default_tcp_link()]
             .name
             .clone();
         scene.attach_obstacle("held", None, None).unwrap();
@@ -733,7 +868,7 @@ mod tests {
         let json = scene.to_project().to_json();
         let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
         let att = reloaded.attachment("held").expect("attachment survives");
-        assert_eq!(reloaded.robot.links[att.link].name, tcp);
+        assert_eq!(reloaded.robot().links[att.link].name, tcp);
         assert!(
             (att.grasp.translation.vector - saved_grasp.translation.vector).norm() < 1e-12
                 && att.grasp.rotation.angle_to(&saved_grasp.rotation) < 1e-12
@@ -753,7 +888,7 @@ mod tests {
         // A project referencing a link the robot doesn't have is rejected.
         let mut bad = scene.to_project();
         bad.obstacles[1].attached_to.as_mut().unwrap().link = "phantom".into();
-        let mut other = Scene::new(scene.robot.clone());
+        let mut other = Scene::new(scene.robot().clone());
         assert!(matches!(
             other.apply_project(&bad),
             Err(ProjectError::Incompatible(_))
@@ -852,14 +987,100 @@ mod tests {
     }
 
     #[test]
-    fn multi_robot_projects_are_rejected_for_now() {
+    fn empty_robot_lists_are_rejected() {
         let mut project = sample_scene().to_project();
-        project.robots.push(project.robots[0].clone());
-        let json = project.to_json();
+        project.robots.clear();
         assert!(matches!(
-            ProjectFile::from_json(&json),
+            ProjectFile::from_json(&project.to_json()),
             Err(ProjectError::Incompatible(_))
         ));
+    }
+
+    #[test]
+    fn robot_count_and_duplicate_names_are_checked() {
+        let mut project = sample_scene().to_project();
+        project.robots.push(project.robots[0].clone());
+        // Two robots into a one-robot scene: count mismatch.
+        let mut scene = sample_scene();
+        assert!(matches!(
+            scene.apply_project(&project),
+            Err(ProjectError::Incompatible(_))
+        ));
+        // Duplicate instance names are rejected.
+        let mut scene = sample_scene();
+        scene.add_robot(
+            scene.robot().clone(),
+            None,
+            Isometry3::translation(2.0, 0.0, 0.0),
+        );
+        assert!(matches!(
+            scene.apply_project(&project),
+            Err(ProjectError::Incompatible(_))
+        ));
+    }
+
+    #[test]
+    fn multi_robot_projects_round_trip() {
+        let mut scene = sample_scene();
+        scene.add_robot(
+            scene.robot().clone(),
+            Some("second"),
+            Isometry3::translation(2.0, 0.0, 0.0),
+        );
+        scene
+            .set_joint_positions_for(1, vec![0.3, -0.2, 0.1, 0.0, 0.0, 0.6])
+            .unwrap();
+        // A motion owned by the second robot, and a grasp by it.
+        scene
+            .add_segment_for(
+                1,
+                "second_move",
+                Segment {
+                    kind: SegmentKind::Joint,
+                    goal_positions: vec![0.0; 6],
+                    constraints: vec![],
+                },
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "held",
+                Geometry::Sphere { radius: 0.02 },
+                Isometry3::translation(2.0, 0.0, 0.8),
+            )
+            .unwrap();
+        scene.attach_obstacle_to(1, "held", None, None).unwrap();
+
+        let project = scene.to_project();
+        assert_eq!(project.robots.len(), 2);
+        assert_eq!(project.robots[1].name.as_deref(), Some("second"));
+        assert_eq!(project.robots[1].base_pose.position, [2.0, 0.0, 0.0]);
+        assert_eq!(project.robots[1].joint_positions[5], 0.6);
+        let motion = project
+            .motions
+            .iter()
+            .find(|m| m.name == "second_move")
+            .unwrap();
+        assert_eq!(motion.robot.as_deref(), Some("second"));
+
+        let reloaded =
+            Scene::from_project(&ProjectFile::from_json(&project.to_json()).unwrap()).unwrap();
+        assert_eq!(reloaded.robots().len(), 2);
+        assert_eq!(reloaded.robots()[1].name, "second");
+        assert_eq!(reloaded.robots()[1].base_pose().translation.vector.x, 2.0);
+        assert_eq!(reloaded.robots()[1].joint_positions()[5], 0.6);
+        let motion = reloaded
+            .motions()
+            .iter()
+            .find(|m| m.name == "second_move")
+            .unwrap();
+        assert_eq!(motion.robot, 1);
+        let att = reloaded.attachment("held").unwrap();
+        assert_eq!(att.robot, 1);
+        // The generated script re-addresses each robot by name.
+        let script = generate_python(&project);
+        assert!(script.contains("scene.add_robot(robot_2, name=\"second\""));
+        assert!(script.contains("robot=\"second\""));
     }
 
     #[test]
@@ -867,7 +1088,7 @@ mod tests {
         let scene = sample_scene();
         let project = scene.to_project();
 
-        let mut other = Scene::new(scene.robot.clone());
+        let mut other = Scene::new(scene.robot().clone());
         other
             .add_obstacle(
                 "old",

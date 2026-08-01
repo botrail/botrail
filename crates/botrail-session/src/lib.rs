@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use botrail_kin::{IkMode, IkOptions, IkResult};
-use botrail_model::{Geometry, RobotModel};
+use botrail_model::Geometry;
 use botrail_scene::motion::{PlannedMotion, Segment};
 use botrail_scene::wire::{
     self, ClientMessage, IkStatusMsg, PoseMsg, SceneDescriptionMsg, ServerMessage,
@@ -34,9 +34,10 @@ pub trait SessionHost {
     }
 
     /// URL the client can fetch a USD-sourced robot's stage from (relative
-    /// references must resolve against it). `None` (default) keeps the
-    /// client on the legacy link-visual rendering path.
-    fn robot_asset_url(&self, _path: &Path) -> Option<String> {
+    /// references must resolve against it); `robot` is the scene index of
+    /// the robot the stage belongs to. `None` (default) keeps the client on
+    /// the legacy link-visual rendering path.
+    fn robot_asset_url(&self, _robot: usize, _path: &Path) -> Option<String> {
         None
     }
 
@@ -57,12 +58,22 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, frames, state. Mesh visuals are mapped to URLs through the
-/// host's [`mesh_url`](SessionHost::mesh_url).
+/// sequences, sensors, devices, frames, state. Mesh visuals are mapped to
+/// URLs through the host's [`mesh_url`](SessionHost::mesh_url). This is the
+/// single definition of the handshake — hosts must not hand-roll it.
 pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
+    let mut messages = vec![host.with_scene(|scene| scene_init_message(host, scene))];
+    messages.extend(refresh_messages(host));
+    messages
+}
+
+/// Every scene-content message except `scene_init`, in handshake order:
+/// obstacles, motions, sequences, sensors, devices, frames, state. Re-sent
+/// wholesale after bulk changes (project load), where the robot — and
+/// therefore `scene_init` — cannot change.
+pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
         vec![
-            scene_init_message(host, scene),
             wire::obstacles_message(scene, |p| host.mesh_url(p)),
             wire::motions_message(scene),
             wire::sequences_message(scene),
@@ -76,14 +87,16 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// The `scene_init` message, with mesh/asset URLs mapped through the host.
 pub fn scene_init_message(host: &impl SessionHost, scene: &Scene) -> ServerMessage {
-    let usd_asset = match &scene.robot.source {
+    let usd_asset = |robot: usize| match &scene.robots()[robot].model.source {
         botrail_model::RobotSource::Usd {
             path,
             articulation_root,
-        } => host.robot_asset_url(path).map(|url| wire::UsdAssetMsg {
-            url,
-            articulation_root: articulation_root.clone(),
-        }),
+        } => host
+            .robot_asset_url(robot, path)
+            .map(|url| wire::UsdAssetMsg {
+                url,
+                articulation_root: articulation_root.clone(),
+            }),
         _ => None,
     };
     ServerMessage::SceneInit {
@@ -103,23 +116,43 @@ pub fn handle_client_message(host: &impl SessionHost, text: &str) {
     }
 }
 
+/// Resolves a wire robot reference: an instance name, or `None` for the
+/// first robot (pre-multi-robot clients).
+fn resolve_robot(host: &impl SessionHost, robot: &Option<String>) -> Result<usize, String> {
+    match robot {
+        Some(name) => host.with_scene(|scene| {
+            scene
+                .robot_index(name)
+                .ok_or_else(|| format!("unknown robot `{name}`"))
+        }),
+        None => Ok(0),
+    }
+}
+
 fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
     match msg {
-        ClientMessage::SetJointPositions { positions } => set_joint_positions(host, positions)
+        ClientMessage::SetJointPositions { robot, positions } => resolve_robot(host, &robot)
+            .and_then(|robot| {
+                set_joint_positions_for(host, robot, positions).map_err(|e| e.to_string())
+            })
             .map_err(|e| format!("rejected set_joint_positions: {e}")),
-        ClientMessage::SetTcpTarget { link, pose } => {
+        ClientMessage::SetTcpTarget { robot, link, pose } => {
             // Warm-seeded streaming solve: the gizmo sends targets at
             // ~60Hz, so a few iterations per message are enough.
             let options = IkOptions {
                 mode: IkMode::Pose,
                 ..IkOptions::streaming()
             };
-            set_tcp_target(host, &link, &pose, &options)
-                .map(|_| ())
+            resolve_robot(host, &robot)
+                .and_then(|robot| {
+                    set_tcp_target_for(host, robot, &link, &pose, &options).map(|_| ())
+                })
                 .map_err(|e| format!("rejected tcp target: {e}"))
         }
-        ClientMessage::SetRobotBasePose { pose } => {
-            set_robot_base_pose(host, (&pose).into());
+        ClientMessage::SetRobotBasePose { robot, pose } => {
+            let robot = resolve_robot(host, &robot)
+                .map_err(|e| format!("rejected set_robot_base_pose: {e}"))?;
+            set_robot_base_pose_for(host, robot, (&pose).into());
             Ok(())
         }
         ClientMessage::AddObstacle { obstacle } => wire::geometry_from_msg(&obstacle.geometry)
@@ -149,22 +182,42 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         }
         ClientMessage::AttachObstacle {
             name,
+            robot,
             link,
             touch_links,
-        } => attach_obstacle(host, &name, link.as_deref(), touch_links.as_deref())
+        } => resolve_robot(host, &robot)
+            .and_then(|robot| {
+                attach_obstacle_to(host, robot, &name, link.as_deref(), touch_links.as_deref())
+                    .map_err(|e| e.to_string())
+            })
             .map_err(|e| format!("rejected attach_obstacle: {e}")),
         ClientMessage::DetachObstacle { name } => {
             detach_obstacle(host, &name).map_err(|e| format!("rejected detach_obstacle: {e}"))
         }
-        ClientMessage::PlanRequest { goal_positions } => {
+        ClientMessage::PlanRequest {
+            robot,
+            goal_positions,
+        } => {
+            let robot =
+                resolve_robot(host, &robot).map_err(|e| format!("rejected plan_request: {e}"))?;
             // Failure is reported to clients inside the plan_result.
-            let _ = plan_and_emit(host, &goal_positions, &botrail_plan::PlanOptions::default());
+            let _ = plan_and_emit_for(
+                host,
+                robot,
+                &goal_positions,
+                &botrail_plan::PlanOptions::default(),
+            );
             Ok(())
         }
-        ClientMessage::AddSegment { motion, segment } => {
-            add_segment(host, &motion, wire::segment_from_msg(&segment))
-                .map_err(|e| format!("rejected add_segment: {e}"))
-        }
+        ClientMessage::AddSegment {
+            motion,
+            robot,
+            segment,
+        } => resolve_robot(host, &robot)
+            .and_then(|robot| {
+                add_segment_for(host, robot, &motion, wire::segment_from_msg(&segment))
+            })
+            .map_err(|e| format!("rejected add_segment: {e}")),
         ClientMessage::RemoveSegment { motion, index } => remove_segment(host, &motion, index)
             .map_err(|e| format!("rejected remove_segment: {e}")),
         ClientMessage::ClearMotion { motion } => {
@@ -233,49 +286,52 @@ fn emit_obstacles_if_attached(host: &impl SessionHost) {
     }
 }
 
-pub fn set_joint_positions(host: &impl SessionHost, positions: Vec<f64>) -> Result<(), SceneError> {
-    host.with_scene(|scene| scene.set_joint_positions(positions))?;
+pub fn set_joint_positions_for(
+    host: &impl SessionHost,
+    robot: usize,
+    positions: Vec<f64>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_joint_positions_for(robot, positions))?;
     emit_obstacles_if_attached(host);
     emit_state(host);
     Ok(())
 }
 
-/// Places the robot's root link at `pose` (world frame) and emits the new
-/// state.
-pub fn set_robot_base_pose(host: &impl SessionHost, pose: Isometry3<f64>) {
-    host.with_scene(|scene| scene.set_robot_base_pose(pose));
+pub fn set_robot_base_pose_for(host: &impl SessionHost, robot: usize, pose: Isometry3<f64>) {
+    host.with_scene(|scene| scene.set_robot_base_pose_for(robot, pose));
     emit_obstacles_if_attached(host);
     emit_state(host);
 }
 
-/// Solves IK for `link` toward `pose` (world frame), seeded from the
-/// current configuration, applies the (best-effort) result, and emits the
-/// new state tagged with the IK outcome.
-pub fn set_tcp_target(
+pub fn set_tcp_target_for(
     host: &impl SessionHost,
+    robot: usize,
     link: &str,
     pose: &PoseMsg,
     options: &IkOptions,
 ) -> Result<IkResult, String> {
     let (result, state) = host.with_scene(|scene| -> Result<_, String> {
-        let index = scene
-            .robot
+        let index = scene.robots()[robot]
+            .model
             .link_index(link)
             .ok_or_else(|| format!("unknown link `{link}`"))?;
         let target: Isometry3<f64> = pose.into();
-        let seed = scene.joint_positions().to_vec();
+        let seed = scene.robots()[robot].joint_positions().to_vec();
         let result = scene
-            .solve_ik_world(index, &target, &seed, options)
+            .solve_ik_world_for(robot, index, &target, &seed, options)
             .map_err(|e| e.to_string())?;
         scene
-            .set_joint_positions(result.q.clone())
+            .set_joint_positions_for(robot, result.q.clone())
             .map_err(|e| e.to_string())?;
         let status = IkStatusMsg {
             converged: result.converged,
             pos_error: result.pos_error,
             rot_error: result.rot_error,
         };
-        Ok((result, wire::state_message_with_ik(scene, Some(status))))
+        Ok((
+            result,
+            wire::state_message_with_ik(scene, Some((robot, status))),
+        ))
     })?;
     emit_obstacles_if_attached(host);
     host.emit(&state);
@@ -350,16 +406,14 @@ pub fn set_obstacle_geometry(
     Ok(())
 }
 
-/// Attaches an obstacle to a robot link (grasp captured at the current
-/// relative pose; see `Scene::attach_obstacle` for the defaults) and
-/// rebroadcasts obstacles + state.
-pub fn attach_obstacle(
+pub fn attach_obstacle_to(
     host: &impl SessionHost,
+    robot: usize,
     name: &str,
     link: Option<&str>,
     touch_links: Option<&[String]>,
 ) -> Result<(), SceneError> {
-    host.with_scene(|scene| scene.attach_obstacle(name, link, touch_links))?;
+    host.with_scene(|scene| scene.attach_obstacle_to(robot, name, link, touch_links))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -396,8 +450,13 @@ fn emit_motions(host: &impl SessionHost) {
     host.emit(&msg);
 }
 
-pub fn add_segment(host: &impl SessionHost, motion: &str, segment: Segment) -> Result<(), String> {
-    host.with_scene(|scene| scene.add_segment(motion, segment))
+pub fn add_segment_for(
+    host: &impl SessionHost,
+    robot: usize,
+    motion: &str,
+    segment: Segment,
+) -> Result<(), String> {
+    host.with_scene(|scene| scene.add_segment_for(robot, motion, segment))
         .map_err(|e| e.to_string())?;
     emit_motions(host);
     Ok(())
@@ -492,7 +551,7 @@ pub fn simulate_sequence_and_emit(
     let snapshot = host.snapshot();
     let t0 = host.now_ms();
     let result = snapshot
-        .simulate_sequence(name, options, &traj_limits(&snapshot.robot))
+        .simulate_sequence(name, options)
         .map_err(|e| e.to_string());
     let ms = host.now_ms() - t0;
     let msg = match &result {
@@ -515,54 +574,105 @@ pub fn simulate_sequence_and_emit(
     result
 }
 
-/// Samples a baked timeline at ~30Hz for playback: the robot rides the
-/// embedded trajectory (link poses precomputed for URDF robots), tracked
-/// objects get world-pose tracks derived from their spans.
+/// Samples a baked timeline at ~30Hz for playback: every robot rides its
+/// embedded trajectory (link poses precomputed for URDF robots) on one
+/// shared sample grid, tracked objects get world-pose tracks derived from
+/// their spans (via each carrier's FK).
 pub fn timeline_msg(
     scene: &Scene,
     timeline: &botrail_scene::rollout::SequenceTimeline,
 ) -> wire::TimelineMsg {
-    let (times, joint_positions) = timeline.robot.resample(1.0 / 30.0);
-    let want_link_poses = matches!(&scene.robot.source, botrail_model::RobotSource::UrdfXml(_));
-    let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
-    let mut object_tracks = (!timeline.objects.is_empty()).then(|| {
-        timeline
-            .objects
-            .iter()
-            .map(|track| wire::ObjectTrackMsg {
-                name: track.name.clone(),
-                poses: Vec::with_capacity(joint_positions.len()),
-            })
-            .collect::<Vec<_>>()
-    });
-    if link_poses.is_some() || object_tracks.is_some() {
-        for (k, q) in joint_positions.iter().enumerate() {
-            let poses =
-                botrail_kin::forward_kinematics_with_base(&scene.robot, q, scene.robot_base_pose())
-                    .expect("timeline q has scene DOF");
-            if let Some(tracks) = &mut object_tracks {
-                for (msg, track) in tracks.iter_mut().zip(&timeline.objects) {
-                    let pose = botrail_scene::rollout::SequenceTimeline::object_pose(
-                        track, &poses, times[k],
+    // All robot tracks span [0, duration], so their resample grids agree —
+    // the objects' shared time base.
+    let sampled: Vec<(Vec<f64>, Vec<Vec<f64>>)> = timeline
+        .robots
+        .iter()
+        .map(|track| track.trajectory.resample(1.0 / 30.0))
+        .collect();
+    let grid: &[f64] = sampled
+        .first()
+        .map(|(times, _)| times.as_slice())
+        .unwrap_or(&[]);
+
+    let mut object_tracks: Vec<wire::ObjectTrackMsg> = timeline
+        .objects
+        .iter()
+        .map(|track| wire::ObjectTrackMsg {
+            name: track.name.clone(),
+            poses: Vec::with_capacity(grid.len()),
+        })
+        .collect();
+    if !object_tracks.is_empty() {
+        for (k, &t) in grid.iter().enumerate() {
+            let all_poses: Vec<Vec<nalgebra::Isometry3<f64>>> = scene
+                .robots()
+                .iter()
+                .enumerate()
+                .map(|(r, sr)| {
+                    botrail_kin::forward_kinematics_with_base(
+                        &sr.model,
+                        &sampled[r].1[k],
+                        sr.base_pose(),
                     )
-                    .unwrap_or_default();
-                    msg.poses.push(PoseMsg::from(&pose));
-                }
-            }
-            if let Some(link_poses) = &mut link_poses {
-                link_poses.push(poses.iter().map(PoseMsg::from).collect());
+                    .expect("timeline q has robot DOF")
+                })
+                .collect();
+            for (msg, track) in object_tracks.iter_mut().zip(&timeline.objects) {
+                let pose =
+                    botrail_scene::rollout::SequenceTimeline::object_pose(track, &all_poses, t)
+                        .unwrap_or_default();
+                msg.poses.push(PoseMsg::from(&pose));
             }
         }
     }
+
+    let robots = timeline
+        .robots
+        .iter()
+        .zip(sampled)
+        .enumerate()
+        .map(|(r, (track, (times, joint_positions)))| {
+            let sr = &scene.robots()[r];
+            // USD-rendered robots do FK client-side; skip precomputed poses.
+            let link_poses = matches!(&sr.model.source, botrail_model::RobotSource::UrdfXml(_))
+                .then(|| {
+                    joint_positions
+                        .iter()
+                        .map(|q| {
+                            botrail_kin::forward_kinematics_with_base(&sr.model, q, sr.base_pose())
+                                .expect("timeline q has robot DOF")
+                                .iter()
+                                .map(PoseMsg::from)
+                                .collect()
+                        })
+                        .collect()
+                });
+            wire::RobotTimelineMsg {
+                name: track.name.clone(),
+                trajectory: wire::TrajectoryMsg {
+                    duration: timeline.duration,
+                    times,
+                    joint_positions,
+                    link_poses,
+                    object_tracks: None,
+                },
+                moves: track
+                    .moves
+                    .iter()
+                    .map(|s| wire::StepSpanMsg {
+                        name: s.name.clone(),
+                        start: s.start,
+                        end: s.end,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
     wire::TimelineMsg {
         duration: timeline.duration,
-        trajectory: wire::TrajectoryMsg {
-            duration: timeline.duration,
-            times,
-            joint_positions,
-            link_poses,
-            object_tracks,
-        },
+        robots,
+        objects: object_tracks,
         step_spans: timeline
             .step_spans
             .iter()
@@ -586,27 +696,29 @@ pub fn timeline_msg(
 
 // ------------------------------------------------------------- planning
 
-/// Plans from the current configuration to `goal` against a snapshot of the
-/// scene, then time-parameterizes the path. Returns the trajectory, the
-/// sparse shortcut path (kept for script export), and the wall-clock
-/// milliseconds spent.
-pub fn plan_to(
+/// Plans robot `robot` from its current configuration to `goal` against a
+/// snapshot of the scene, then time-parameterizes the path; every other
+/// robot is a frozen collision body at its current configuration. Returns
+/// the trajectory, the sparse shortcut path (kept for script export), and
+/// the wall-clock milliseconds spent.
+pub fn plan_to_for(
     host: &impl SessionHost,
+    robot: usize,
     goal: &[f64],
     options: &botrail_plan::PlanOptions,
 ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
     let snapshot = host.snapshot();
-    let start = snapshot.joint_positions().to_vec();
-    let (lower, upper) = snapshot.robot.sampling_bounds();
+    let start = snapshot.robots()[robot].joint_positions().to_vec();
+    let (lower, upper) = snapshot.robots()[robot].model.sampling_bounds();
     let space = botrail_plan::JointSpace { lower, upper };
 
     let t0 = host.now_ms();
     let path = {
-        let mut is_valid = |q: &[f64]| snapshot.is_state_valid(q);
+        let mut is_valid = |q: &[f64]| snapshot.is_state_valid_for(robot, q);
         botrail_plan::plan(&space, &start, goal, &mut is_valid, options)
             .map_err(|e| e.to_string())?
     };
-    let limits = traj_limits(&snapshot.robot);
+    let limits = traj_limits(&snapshot.robots()[robot].model);
     let traj =
         botrail_traj::time_parameterize(&path, &limits, &botrail_traj::TimingOptions::default())
             .map_err(|e| e.to_string())?;
@@ -614,25 +726,29 @@ pub fn plan_to(
     Ok((traj, path, ms))
 }
 
-/// Runs [`plan_to`] and emits the outcome (success or failure) as a
-/// `plan_result` message.
-pub fn plan_and_emit(
+/// Runs [`plan_to_for`] and emits a `plan_result` tagged with the robot's
+/// instance name, so clients play it back on the right arm.
+pub fn plan_and_emit_for(
     host: &impl SessionHost,
+    robot: usize,
     goal: &[f64],
     options: &botrail_plan::PlanOptions,
 ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-    let result = plan_to(host, goal, options);
+    let result = plan_to_for(host, robot, goal, options);
+    let robot_name = host.with_scene(|scene| scene.robots()[robot].name.clone());
     let msg = match &result {
         Ok((traj, path, ms)) => ServerMessage::PlanResult {
+            robot: robot_name,
             ok: true,
             error: None,
-            trajectory: Some(trajectory_msg(host, traj)),
+            trajectory: Some(trajectory_msg(host, robot, traj)),
             stats: Some(wire::PlanStatsMsg {
                 planning_time_ms: *ms,
                 waypoints: path.len(),
             }),
         },
         Err(e) => ServerMessage::PlanResult {
+            robot: robot_name,
             ok: false,
             error: Some(e.clone()),
             trajectory: None,
@@ -643,16 +759,28 @@ pub fn plan_and_emit(
     result
 }
 
-/// Plans a whole motion against a scene snapshot (nothing emitted).
+/// Plans a whole motion against a scene snapshot (nothing emitted). The
+/// trajectory is timed with the owning robot's limits.
 pub fn plan_motion_snapshot(
     host: &impl SessionHost,
     name: &str,
     options: &botrail_plan::PlanOptions,
 ) -> Result<PlannedMotion, String> {
     let snapshot = host.snapshot();
+    let owner = motion_owner(&snapshot, name)?;
     snapshot
-        .plan_motion(name, options, &traj_limits(&snapshot.robot))
+        .plan_motion(name, options, &traj_limits(&snapshot.robots()[owner].model))
         .map_err(|e| e.to_string())
+}
+
+/// The owning robot of a named motion.
+fn motion_owner(scene: &Scene, name: &str) -> Result<usize, String> {
+    scene
+        .motions()
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| m.robot)
+        .ok_or_else(|| format!("unknown motion `{name}`"))
 }
 
 /// Plans a whole motion against a scene snapshot and emits the outcome as a
@@ -665,16 +793,24 @@ pub fn plan_motion_and_emit(
     let t0 = host.now_ms();
     let result = plan_motion_snapshot(host, name, options);
     let ms = host.now_ms() - t0;
+    // The result plays back on the owning robot; an unknown motion (no
+    // owner) reports its error against the first robot.
+    let (owner, robot_name) = host.with_scene(|scene| {
+        let owner = motion_owner(scene, name).unwrap_or(0);
+        (owner, scene.robots()[owner].name.clone())
+    });
     let msg = match &result {
         Ok(planned) => ServerMessage::MotionResult {
+            robot: robot_name,
             ok: true,
             motion: name.to_string(),
             error: None,
-            trajectory: Some(trajectory_msg(host, &planned.trajectory)),
+            trajectory: Some(trajectory_msg(host, owner, &planned.trajectory)),
             segment_ends: planned.segment_ends.clone(),
             planning_time_ms: Some(ms),
         },
         Err(e) => ServerMessage::MotionResult {
+            robot: robot_name,
             ok: false,
             motion: name.to_string(),
             error: Some(e.clone()),
@@ -687,23 +823,31 @@ pub fn plan_motion_and_emit(
     result.map(|planned| (planned, ms))
 }
 
-/// Samples a trajectory at ~30Hz with per-sample FK for playback. Attached
-/// (grasped) obstacles get world-pose tracks baked alongside, whatever the
-/// robot's rendering path — the client never does FK for obstacles.
+/// Samples a trajectory of robot `robot` at ~30Hz with per-sample FK for
+/// playback. Obstacles attached to *that* robot get world-pose tracks baked
+/// alongside, whatever the robot's rendering path — the client never does
+/// FK for obstacles. (Objects held by other robots don't move during this
+/// playback; their live pose stands.)
 pub fn trajectory_msg(
     host: &impl SessionHost,
+    robot: usize,
     traj: &botrail_traj::JointTrajectory,
 ) -> wire::TrajectoryMsg {
-    let (robot, base, attachments) = host.with_scene(|scene| {
+    let (model, base, attachments) = host.with_scene(|scene| {
         (
-            scene.robot.clone(),
-            *scene.robot_base_pose(),
-            scene.attachments().to_vec(),
+            scene.robots()[robot].model.clone(),
+            *scene.robots()[robot].base_pose(),
+            scene
+                .attachments()
+                .iter()
+                .filter(|a| a.robot == robot)
+                .cloned()
+                .collect::<Vec<_>>(),
         )
     });
     let (times, joint_positions) = traj.resample(1.0 / 30.0);
     // USD-rendered robots do FK client-side; skip the precomputed poses.
-    let want_link_poses = matches!(&robot.source, botrail_model::RobotSource::UrdfXml(_));
+    let want_link_poses = matches!(&model.source, botrail_model::RobotSource::UrdfXml(_));
     let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
     let mut object_tracks = (!attachments.is_empty()).then(|| {
         attachments
@@ -716,8 +860,8 @@ pub fn trajectory_msg(
     });
     if link_poses.is_some() || object_tracks.is_some() {
         for q in &joint_positions {
-            let poses = botrail_kin::forward_kinematics_with_base(&robot, q, &base)
-                .expect("trajectory q has scene DOF");
+            let poses = botrail_kin::forward_kinematics_with_base(&model, q, &base)
+                .expect("trajectory q has robot DOF");
             if let Some(link_poses) = &mut link_poses {
                 link_poses.push(poses.iter().map(PoseMsg::from).collect());
             }
@@ -739,24 +883,9 @@ pub fn trajectory_msg(
     }
 }
 
-/// Trajectory limits from the URDF: joint velocity limits (defaulting to
-/// 1 rad/s where unspecified) and acceleration at twice the velocity bound
-/// (URDF has no acceleration field; reaches peak speed in 0.5s).
-pub fn traj_limits(model: &RobotModel) -> botrail_traj::Limits {
-    let velocity: Vec<f64> = model
-        .actuated_joints
-        .iter()
-        .map(|&ji| match model.joints[ji].limits {
-            Some(l) if l.velocity > 0.0 => l.velocity,
-            _ => 1.0,
-        })
-        .collect();
-    let acceleration = velocity.iter().map(|v| 2.0 * v).collect();
-    botrail_traj::Limits {
-        velocity,
-        acceleration,
-    }
-}
+/// Trajectory limits derived from the model (see
+/// [`botrail_scene::motion::traj_limits`]) — re-exported for hosts.
+pub use botrail_scene::motion::traj_limits;
 
 #[cfg(test)]
 mod tests {
@@ -926,16 +1055,73 @@ mod tests {
         // The state message's link poses follow the base.
         let out = host.out.borrow();
         match &out[0] {
-            ServerMessage::State {
-                base_pose,
-                link_poses,
-                ..
-            } => {
-                assert!((base_pose.position[0] - 1.0).abs() < 1e-12);
-                assert!((link_poses[0].position[1] - 2.0).abs() < 1e-12);
+            ServerMessage::State { robots, .. } => {
+                assert!((robots[0].base_pose.position[0] - 1.0).abs() < 1e-12);
+                assert!((robots[0].link_poses[0].position[1] - 2.0).abs() < 1e-12);
             }
             other => panic!("expected state, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn robot_addressed_messages_drive_the_named_robot() {
+        let host = TestHost::new();
+        let (model, second) = host.with_scene(|scene| {
+            let model = scene.robots()[0].model.clone();
+            let name = scene.add_robot(
+                model.clone(),
+                Some("arm_b"),
+                Isometry3::translation(1.0, 0.0, 0.0),
+            );
+            (model, name)
+        });
+        let _ = model;
+        assert_eq!(second, "arm_b");
+
+        handle_client_message(
+            &host,
+            r#"{"type":"set_joint_positions","robot":"arm_b","positions":[0.4]}"#,
+        );
+        assert!(host.logs.borrow().is_empty());
+        host.with_scene(|scene| {
+            assert_eq!(scene.robots()[1].joint_positions(), &[0.4]);
+            assert_eq!(scene.robots()[0].joint_positions(), &[0.0]);
+        });
+
+        // Unknown robot names are rejected and logged, nothing emitted.
+        host.out.borrow_mut().clear();
+        handle_client_message(
+            &host,
+            r#"{"type":"set_joint_positions","robot":"ghost","positions":[0.1]}"#,
+        );
+        assert!(host.message_types().is_empty());
+        assert_eq!(host.logs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn second_robot_plans_broadcast_with_the_robot_tag() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            let model = scene.robots()[0].model.clone();
+            scene.add_robot(model, Some("arm_b"), Isometry3::translation(1.0, 0.0, 0.0));
+        });
+        handle_client_message(
+            &host,
+            r#"{"type":"plan_request","robot":"arm_b","goal_positions":[0.6]}"#,
+        );
+        let out = host.out.borrow();
+        let ServerMessage::PlanResult {
+            robot,
+            ok,
+            trajectory,
+            ..
+        } = &out[0]
+        else {
+            panic!("expected plan_result, got {out:?}");
+        };
+        assert_eq!(robot, "arm_b");
+        assert!(ok);
+        assert!(trajectory.is_some());
     }
 
     /// TestHost with a robot whose source is a USD stage reference and a
@@ -1000,9 +1186,9 @@ mod tests {
         fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
             self.0.with_scene(f)
         }
-        fn robot_asset_url(&self, path: &Path) -> Option<String> {
+        fn robot_asset_url(&self, robot: usize, path: &Path) -> Option<String> {
             path.file_name()
-                .map(|f| format!("/usd-assets/{}", f.to_string_lossy()))
+                .map(|f| format!("/usd-assets/{robot}/{}", f.to_string_lossy()))
         }
         fn emit(&self, msg: &ServerMessage) {
             self.0.emit(msg);
@@ -1022,8 +1208,11 @@ mod tests {
         let ServerMessage::SceneInit { scene } = &msgs[0] else {
             panic!("expected scene_init");
         };
-        let asset = scene.usd_asset.as_ref().expect("usd_asset present");
-        assert_eq!(asset.url, "/usd-assets/arm.usda");
+        let asset = scene.robots[0]
+            .usd_asset
+            .as_ref()
+            .expect("usd_asset present");
+        assert_eq!(asset.url, "/usd-assets/0/arm.usda");
         assert_eq!(asset.articulation_root, "/R");
 
         // A host without asset serving (wasm) keeps the legacy path.
@@ -1032,7 +1221,7 @@ mod tests {
         let ServerMessage::SceneInit { scene } = &msgs[0] else {
             panic!("expected scene_init");
         };
-        assert!(scene.usd_asset.is_none());
+        assert!(scene.robots[0].usd_asset.is_none());
     }
 
     #[test]
@@ -1117,10 +1306,14 @@ mod tests {
         let tl = timeline.as_ref().unwrap();
         assert_eq!(tl.step_spans.len(), 3);
         assert_eq!(tl.step_spans[1].name, "move");
-        // The grasped box rides the trajectory's object track...
-        let tracks = tl.trajectory.object_tracks.as_ref().unwrap();
+        // A single robot track (sequences drive the first robot until R3),
+        // named after the instance...
+        assert_eq!(tl.robots.len(), 1);
+        assert_eq!(tl.robots[0].name, "r");
+        // ...and the grasped box rides the timeline's object track.
+        let tracks = &tl.objects;
         assert_eq!(tracks[0].name, "box");
-        assert_eq!(tracks[0].poses.len(), tl.trajectory.times.len());
+        assert_eq!(tracks[0].poses.len(), tl.robots[0].trajectory.times.len());
         let last = tracks[0].poses.last().unwrap();
         assert!((last.position[0] - 0.1 * 0.8f64.cos()).abs() < 1e-6);
         // ...and the signal lane records the mark edge.

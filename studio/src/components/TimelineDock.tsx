@@ -1,25 +1,27 @@
 import { useRef } from "react";
 
-import { sampleOverride } from "../playback";
+import { samplePlayback } from "../playback";
 import { useStudioStore } from "../store";
 
 const BAND_COLORS = ["#4a6fa5", "#5a8f6a", "#a5824a", "#7a5aa5", "#a55a6f"];
+const ROBOT_LANE_COLOR = "#4a8fa5";
 
 /**
  * Timing-chart overlay under the viewport: step bands, a playhead with
- * click-to-seek, cycle time, and one lane per signal. Rendered only when a
- * sequence timeline is loaded.
+ * click-to-seek, cycle time, one motion lane per robot (multi-robot
+ * timelines), and one lane per signal. Rendered only when a sequence
+ * timeline is loaded.
  */
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
-  const trajectory = useStudioStore((s) => s.trajectory);
+  const playback = useStudioStore((s) => s.playback);
   const recording = useStudioStore((s) => s.recording);
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const setPlayback = useStudioStore((s) => s.setPlayback);
   const setPlaying = useStudioStore((s) => s.setPlaying);
   const barRef = useRef<HTMLDivElement | null>(null);
 
-  if (!timeline || !trajectory || timeline.duration <= 0) return null;
+  if (!timeline || !playback || timeline.duration <= 0) return null;
   const duration = timeline.duration;
   const recordingLabel = recording
     ? `${recording.source.split("/").pop()} (${recording.mode})`
@@ -32,7 +34,7 @@ export function TimelineDock() {
     const frac = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
     const t = frac * duration;
     setPlaying(false);
-    setPlayback(t, ...sampleOverride(trajectory, t));
+    setPlayback(t, samplePlayback(playback, t));
   };
 
   const pct = (t: number) => `${(t / duration) * 100}%`;
@@ -63,6 +65,30 @@ export function TimelineDock() {
         ))}
         <div className="timeline-playhead" style={{ left: pct(playbackTime) }} />
       </div>
+      {/* Robot lanes: when several robots run, each gets a band lane of its
+          move intervals (labelled with the motion name). */}
+      {timeline.robots.length > 1 &&
+        timeline.robots.map((robot) => (
+          <div key={robot.name} className="timeline-lane">
+            <span className="timeline-lane-name" title={robot.name}>
+              {robot.name}
+            </span>
+            <div className="timeline-lane-track">
+              {robot.moves.map((move, i) => (
+                <div
+                  key={i}
+                  className="timeline-lane-on"
+                  title={`${move.name} · ${move.start.toFixed(2)}–${move.end.toFixed(2)}s`}
+                  style={{
+                    left: pct(move.start),
+                    width: `max(${((move.end - move.start) / duration) * 100}%, 2px)`,
+                    background: ROBOT_LANE_COLOR,
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        ))}
       {timeline.signals.map((signal) => (
         <div key={signal.name} className="timeline-lane">
           <span className="timeline-lane-name" title={signal.name}>

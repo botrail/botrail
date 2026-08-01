@@ -1,12 +1,15 @@
 //! USD animation export: bake robot link + object motion into a USD layer
 //! as `xformOp` timeSamples.
 //!
-//! Two robot paths:
+//! Each robot lands under `/World/<sanitized instance name>` (single-robot
+//! exporters pass `"Robot"`, keeping the historical layer shape). Two robot
+//! paths:
 //! - **USD-sourced robots** reference the original stage and override the
 //!   body prims with per-frame local transforms, keeping full visual
-//!   fidelity (materials, meshes) without re-authoring anything.
-//! - **URDF robots** are authored from scratch: flat link Xforms under
-//!   `/World/Robot` with the model's visual shapes as child gprims.
+//!   fidelity (materials, meshes) without re-authoring anything. Robots
+//!   sharing a source stage share one copied asset directory.
+//! - **URDF robots** are authored from scratch: flat link Xforms under the
+//!   robot prim with the model's visual shapes as child gprims.
 //!
 //! Obstacles land under `/World/Env` (their `/`-segmented names become
 //! nested prims); grasped objects get sampled tracks, the rest are static.
@@ -22,7 +25,7 @@
 //! the prim's parent* (nearest animated body ancestor, or the reference
 //! root, with any static intermediate transforms folded in).
 //!
-//! The animation layer is Z-up/meters; `/World/Robot` always carries a
+//! The animation layer is Z-up/meters; every robot prim carries a
 //! corrective `orient = F⁻¹→export, scale = mpu` pair so non-Z-up or
 //! non-meter robot stages compose correctly (identity for Isaac-style
 //! Z-up/meter assets).
@@ -87,18 +90,30 @@ pub struct ObjectSpec {
     pub track: PoseTrack,
 }
 
-pub struct AnimationInput<'a> {
+/// One robot's animation bundle: the instance names the prim under
+/// `/World` (sanitized) and the asset directory.
+pub struct RobotAnimation<'a> {
+    /// Scene instance name. Single-robot exporters pass `"Robot"` so the
+    /// layer keeps its pre-multi-robot shape (`/World/Robot`,
+    /// `<stem>_assets/robot/`) byte for byte.
+    pub name: &'a str,
     pub model: &'a RobotModel,
-    /// Frame times in seconds, strictly increasing, starting at 0.
-    pub times: &'a [f64],
     /// World pose of every link per frame (botrail Z-up meters), aligned
-    /// with `times`; inner vectors align with `model.links`.
+    /// with `AnimationInput::times`; inner vectors align with `model.links`.
     pub link_poses: &'a [Vec<Isometry3<f64>>],
     /// Joint positions per frame (rad / m, DOF order). When present and the
     /// robot is USD-sourced, `JointStateAPI` timeSamples are authored on the
     /// joint prims alongside the link transforms, so readers (botrail
     /// included) can recover q(t) without projecting link poses.
     pub joint_samples: Option<&'a [Vec<f64>]>,
+}
+
+pub struct AnimationInput<'a> {
+    /// One bundle per robot, in scene order.
+    pub robots: &'a [RobotAnimation<'a>],
+    /// Frame times in seconds, strictly increasing, starting at 0 — shared
+    /// by every robot and sampled object track.
+    pub times: &'a [f64],
     pub objects: &'a [ObjectSpec],
 }
 
@@ -150,35 +165,44 @@ pub fn export_animation(
     if n == 0 {
         return Err(UsdExportError::Input("no frames".into()));
     }
-    if input.link_poses.len() != n {
-        return Err(UsdExportError::Input(format!(
-            "{} frames but {} link pose sets",
-            n,
-            input.link_poses.len()
-        )));
+    if input.robots.is_empty() {
+        return Err(UsdExportError::Input("no robots".into()));
     }
-    for (f, poses) in input.link_poses.iter().enumerate() {
-        if poses.len() != input.model.links.len() {
+    for robot in input.robots {
+        if robot.link_poses.len() != n {
             return Err(UsdExportError::Input(format!(
-                "frame {f}: {} link poses for {} links",
-                poses.len(),
-                input.model.links.len()
-            )));
-        }
-    }
-    if let Some(joint_samples) = input.joint_samples {
-        if joint_samples.len() != n {
-            return Err(UsdExportError::Input(format!(
-                "{} frames but {} joint sample sets",
+                "robot `{}`: {} frames but {} link pose sets",
+                robot.name,
                 n,
-                joint_samples.len()
+                robot.link_poses.len()
             )));
         }
-        if joint_samples.iter().any(|q| q.len() != input.model.dof()) {
-            return Err(UsdExportError::Input(format!(
-                "joint samples must have {} values (model DOF)",
-                input.model.dof()
-            )));
+        for (f, poses) in robot.link_poses.iter().enumerate() {
+            if poses.len() != robot.model.links.len() {
+                return Err(UsdExportError::Input(format!(
+                    "robot `{}` frame {f}: {} link poses for {} links",
+                    robot.name,
+                    poses.len(),
+                    robot.model.links.len()
+                )));
+            }
+        }
+        if let Some(joint_samples) = robot.joint_samples {
+            if joint_samples.len() != n {
+                return Err(UsdExportError::Input(format!(
+                    "robot `{}`: {} frames but {} joint sample sets",
+                    robot.name,
+                    n,
+                    joint_samples.len()
+                )));
+            }
+            if joint_samples.iter().any(|q| q.len() != robot.model.dof()) {
+                return Err(UsdExportError::Input(format!(
+                    "robot `{}`: joint samples must have {} values (model DOF)",
+                    robot.name,
+                    robot.model.dof()
+                )));
+            }
         }
     }
     for obj in input.objects {
@@ -221,22 +245,49 @@ pub fn export_animation(
     layer.ensure_prim("/World", Specifier::Def, Some("Xform"));
 
     let mut assets = Vec::new();
-    match &input.model.source {
-        RobotSource::Usd {
-            path,
-            articulation_root,
-        } => {
-            let (info, _stage) =
-                robot_stage_info(path, &[], articulation_root, input.model, &mut warnings)?;
-            author_referenced_robot(&mut layer, input, &codes, &info, asset_stem, &mut warnings)?;
-            assets = robot_asset_copies(path, asset_stem, &mut warnings)?;
-        }
-        RobotSource::UrdfXml(_) => {
-            author_urdf_robot(&mut layer, input, &codes, &mut warnings)?;
+    // Robot prims under /World, uniquified from sanitized instance names;
+    // asset directories dedup by source stage (two instances of the same
+    // asset share one copy, both references point at it).
+    let mut used_prims: HashMap<String, usize> = HashMap::new();
+    let mut used_dirs: HashMap<String, usize> = HashMap::new();
+    let mut source_dirs: HashMap<PathBuf, String> = HashMap::new();
+    for robot in input.robots {
+        let prim_name = unique_child(&mut used_prims, &sanitize_name(robot.name));
+        let robot_prim = format!("/World/{prim_name}");
+        match &robot.model.source {
+            RobotSource::Usd {
+                path,
+                articulation_root,
+            } => {
+                let (info, _stage) =
+                    robot_stage_info(path, &[], articulation_root, robot.model, &mut warnings)?;
+                let dir = match source_dirs.get(path) {
+                    Some(dir) => dir.clone(),
+                    None => {
+                        let dir =
+                            unique_child(&mut used_dirs, &sanitize_name(robot.name).to_lowercase());
+                        source_dirs.insert(path.clone(), dir.clone());
+                        assets.extend(robot_asset_copies(path, asset_stem, &dir, &mut warnings)?);
+                        dir
+                    }
+                };
+                author_referenced_robot(
+                    &mut layer,
+                    robot,
+                    &codes,
+                    &info,
+                    &robot_prim,
+                    &format!("./{asset_stem}_assets/{dir}"),
+                    &mut warnings,
+                )?;
+            }
+            RobotSource::UrdfXml(_) => {
+                author_urdf_robot(&mut layer, robot, &codes, &robot_prim, &mut warnings)?;
+            }
         }
     }
 
-    author_objects(&mut layer, input, &codes, &mut warnings)?;
+    author_objects(&mut layer, input.objects, &codes, &mut warnings)?;
 
     Ok(ExportedAnimation {
         usda: layer.finish()?,
@@ -934,20 +985,20 @@ fn collect_stage_prims(
 
 fn author_referenced_robot(
     layer: &mut LayerBuilder,
-    input: &AnimationInput,
+    robot: &RobotAnimation,
     codes: &[f64],
     info: &RobotStageInfo,
-    asset_stem: &str,
+    robot_prim: &str,
+    asset_ref_dir: &str,
     warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
-    let robot_prim = "/World/Robot";
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     layer.prim_field(
         robot_prim,
         FieldKey::References,
         Value::ReferenceListOp(ListOp {
             prepended_items: vec![Reference {
-                asset_path: format!("./{asset_stem}_assets/robot/{}", asset_root_name(input)?),
+                asset_path: format!("{asset_ref_dir}/{}", asset_root_name(robot.model)?),
                 prim_path: sdf::path(&info.root_path)
                     .map_err(|e| UsdExportError::Author(e.to_string()))?,
                 layer_offset: Default::default(),
@@ -969,7 +1020,7 @@ fn author_referenced_robot(
         // animated ops (translate/orient carry F and the unit scale).
         let poses: Vec<Isometry3<f64>> = (0..codes.len())
             .map(|f| {
-                let body = info.frame.to_stage(&input.link_poses[f][root_link])
+                let body = info.frame.to_stage(&robot.link_poses[f][root_link])
                     * info.links[root_link].k_inv;
                 Isometry3::from_parts(
                     Translation3::from(info.frame.up_fix * (body.translation.vector * mpu)),
@@ -994,13 +1045,13 @@ fn author_referenced_robot(
             info.links
                 .iter()
                 .enumerate()
-                .map(|(i, link)| info.frame.to_stage(&input.link_poses[f][i]) * link.k_inv)
+                .map(|(i, link)| info.frame.to_stage(&robot.link_poses[f][i]) * link.k_inv)
                 .collect(),
         );
     }
     for (i, link) in info.links.iter().enumerate() {
         if link.rel_path.is_empty() {
-            continue; // authored on /World/Robot above
+            continue; // authored on the robot prim above
         }
         let prim = format!("{robot_prim}/{}", link.rel_path);
         let poses: Vec<Isometry3<f64>> = (0..n)
@@ -1016,8 +1067,16 @@ fn author_referenced_robot(
         layer.xform(&prim, &XformValue::Sampled(codes, poses), None);
     }
 
-    if let Some(joint_samples) = input.joint_samples {
-        author_joint_states(layer, input, codes, joint_samples, info, warnings);
+    if let Some(joint_samples) = robot.joint_samples {
+        author_joint_states(
+            layer,
+            robot,
+            codes,
+            joint_samples,
+            info,
+            robot_prim,
+            warnings,
+        );
     }
     Ok(())
 }
@@ -1028,15 +1087,16 @@ fn author_referenced_robot(
 /// UsdPhysics convention (degrees); linear ones are in stage units.
 fn author_joint_states(
     layer: &mut LayerBuilder,
-    input: &AnimationInput,
+    robot: &RobotAnimation,
     codes: &[f64],
     joint_samples: &[Vec<f64>],
     info: &RobotStageInfo,
+    robot_prim: &str,
     warnings: &mut Vec<String>,
 ) {
     use botrail_model::JointType;
     let root_prefix = format!("{}/", info.root_path);
-    for joint in &input.model.joints {
+    for joint in &robot.model.joints {
         let Some(qi) = joint.q_index else { continue };
         let Some(rel) = joint.name.strip_prefix(&root_prefix) else {
             warnings.push(format!(
@@ -1050,7 +1110,7 @@ fn author_joint_states(
             JointType::Prismatic => ("linear", |v, mpu| v / mpu),
             JointType::Fixed => continue,
         };
-        let prim = format!("/World/Robot/{rel}");
+        let prim = format!("{robot_prim}/{rel}");
         layer.ensure_prim(&prim, Specifier::Over, None);
         layer.prim_field(
             &prim,
@@ -1075,8 +1135,8 @@ fn author_joint_states(
 }
 
 /// File name of the robot's root stage inside the copied asset directory.
-fn asset_root_name(input: &AnimationInput) -> Result<String, UsdExportError> {
-    match &input.model.source {
+fn asset_root_name(model: &RobotModel) -> Result<String, UsdExportError> {
+    match &model.source {
         RobotSource::Usd { path, .. } => path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -1087,9 +1147,11 @@ fn asset_root_name(input: &AnimationInput) -> Result<String, UsdExportError> {
 
 /// Copy plan for the robot stage and its layer dependencies, mirroring the
 /// `.botrail` bundling scheme (paths relative to the stage directory).
+/// `dir_name` is the per-source directory under `<stem>_assets/`.
 fn robot_asset_copies(
     stage_path: &Path,
     asset_stem: &str,
+    dir_name: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<(PathBuf, PathBuf)>, UsdExportError> {
     let deps = crate::stage_dependencies(stage_path, &[])
@@ -1100,7 +1162,7 @@ fn robot_asset_copies(
         match dep.strip_prefix(stage_dir) {
             Ok(rel) => copies.push((
                 dep.clone(),
-                Path::new(&format!("{asset_stem}_assets/robot")).join(rel),
+                Path::new(&format!("{asset_stem}_assets/{dir_name}")).join(rel),
             )),
             Err(_) => warnings.push(format!(
                 "robot layer `{}` lies outside the stage directory; not copied (the reference may not resolve elsewhere)",
@@ -1115,17 +1177,18 @@ fn robot_asset_copies(
 
 fn author_urdf_robot(
     layer: &mut LayerBuilder,
-    input: &AnimationInput,
+    robot: &RobotAnimation,
     codes: &[f64],
+    robot_prim: &str,
     warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
-    layer.ensure_prim("/World/Robot", Specifier::Def, Some("Xform"));
+    layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     let mut used = HashMap::new();
-    for (i, link) in input.model.links.iter().enumerate() {
+    for (i, link) in robot.model.links.iter().enumerate() {
         let name = unique_child(&mut used, &sanitize_name(&link.name));
-        let prim = format!("/World/Robot/{name}");
+        let prim = format!("{robot_prim}/{name}");
         layer.ensure_prim(&prim, Specifier::Def, Some("Xform"));
-        let poses: Vec<Isometry3<f64>> = input.link_poses.iter().map(|p| p[i]).collect();
+        let poses: Vec<Isometry3<f64>> = robot.link_poses.iter().map(|p| p[i]).collect();
         layer.xform(&prim, &XformValue::Sampled(codes, poses), None);
         for (vi, shape) in link.visuals.iter().enumerate() {
             let shape_prim = format!("{prim}/Visual_{vi}");
@@ -1316,15 +1379,15 @@ fn unique_child(used: &mut HashMap<String, usize>, name: &str) -> String {
 
 fn author_objects(
     layer: &mut LayerBuilder,
-    input: &AnimationInput,
+    objects: &[ObjectSpec],
     codes: &[f64],
     warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
-    if input.objects.is_empty() {
+    if objects.is_empty() {
         return Ok(());
     }
     layer.ensure_prim("/World/Env", Specifier::Def, Some("Xform"));
-    for obj in input.objects {
+    for obj in objects {
         let mut parent = "/World/Env".to_string();
         let segments: Vec<&str> = obj.name.split('/').filter(|s| !s.is_empty()).collect();
         let (leaf, mids) = segments.split_last().unwrap_or((&"object", &[]));
@@ -1526,11 +1589,15 @@ mod tests {
             .collect();
 
         let joint_samples: Vec<Vec<f64>> = configs.to_vec();
-        let input = AnimationInput {
+        let robots = [RobotAnimation {
+            name: "Robot",
             model: &model,
-            times: &times,
             link_poses: &link_poses,
             joint_samples: Some(&joint_samples),
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
             objects: &[],
         };
         let warnings =
@@ -1685,11 +1752,15 @@ mod tests {
                 track: PoseTrack::Sampled(held_track.clone()),
             },
         ];
-        let input = AnimationInput {
+        let robots = [RobotAnimation {
+            name: "Robot",
             model: &model,
-            times: &times,
             link_poses: &link_poses,
             joint_samples: None,
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
             objects: &objects,
         };
         let warnings =
@@ -1757,11 +1828,15 @@ mod tests {
     fn export_input_validation() {
         let model =
             RobotModel::from_urdf_str(r#"<robot name="r"><link name="only"/></robot>"#).unwrap();
-        let empty = AnimationInput {
+        let robots = [RobotAnimation {
+            name: "Robot",
             model: &model,
-            times: &[],
             link_poses: &[],
             joint_samples: None,
+        }];
+        let empty = AnimationInput {
+            robots: &robots,
+            times: &[],
             objects: &[],
         };
         assert!(matches!(
@@ -1771,16 +1846,110 @@ mod tests {
 
         let times = [0.0];
         let bad_len = AnimationInput {
-            model: &model,
+            robots: &robots,
             times: &times,
-            link_poses: &[],
-            joint_samples: None,
             objects: &[],
         };
         assert!(matches!(
             export_animation(&bad_len, &ExportOptions::default(), "a"),
             Err(UsdExportError::Input(_))
         ));
+
+        let no_robots = AnimationInput {
+            robots: &[],
+            times: &times,
+            objects: &[],
+        };
+        assert!(matches!(
+            export_animation(&no_robots, &ExportOptions::default(), "a"),
+            Err(UsdExportError::Input(_))
+        ));
+    }
+
+    /// Two instances of one USD asset: each lands under its own
+    /// `/World/<name>` with independent motion, the copied asset directory
+    /// is shared (dedup), and both references point at it.
+    #[test]
+    fn two_robots_share_one_asset_copy() {
+        let dir = temp_dir("dual");
+        std::fs::write(dir.join("robot.usda"), ARM).unwrap();
+        let imported = import_robot(
+            &dir.join("robot.usda"),
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = imported.model;
+
+        let times = [0.0, 0.5];
+        let base_a = Isometry3::translation(0.0, -0.4, 0.0);
+        let base_b = Isometry3::translation(0.0, 0.4, 0.0);
+        let qs_a = [vec![0.0, 0.0], vec![0.8, -0.3]];
+        let qs_b = [vec![0.0, 0.0], vec![-0.5, 0.9]];
+        let poses = |base: &Isometry3<f64>, qs: &[Vec<f64>]| -> Vec<Vec<Isometry3<f64>>> {
+            qs.iter()
+                .map(|q| botrail_kin::forward_kinematics_with_base(&model, q, base).unwrap())
+                .collect()
+        };
+        let (poses_a, poses_b) = (poses(&base_a, &qs_a), poses(&base_b, &qs_b));
+        let robots = [
+            RobotAnimation {
+                name: "arm_a",
+                model: &model,
+                link_poses: &poses_a,
+                joint_samples: Some(&qs_a),
+            },
+            RobotAnimation {
+                name: "arm_b",
+                model: &model,
+                link_poses: &poses_b,
+                joint_samples: Some(&qs_b),
+            },
+        ];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
+            objects: &[],
+        };
+        let warnings =
+            write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // One shared asset copy, named after the first instance.
+        assert!(dir.join("cell_assets/arm_a/robot.usda").exists());
+        assert!(!dir.join("cell_assets/arm_b").exists());
+        let text = std::fs::read_to_string(dir.join("cell.usda")).unwrap();
+        assert_eq!(text.matches("./cell_assets/arm_a/robot.usda").count(), 2);
+
+        // Both robots' geometry composes at their own animated poses.
+        let stage = Stage::builder()
+            .resolver(SearchPathResolver::new(vec![dir.clone()]))
+            .open(&dir.join("cell.usda").display().to_string())
+            .unwrap();
+        let link1 = model
+            .links
+            .iter()
+            .position(|l| l.name == "/Robot/link1")
+            .unwrap();
+        for (f, t) in times.iter().enumerate() {
+            let worlds = composed_worlds(&stage, t * 60.0);
+            for (prim, poses) in [("arm_a", &poses_a), ("arm_b", &poses_b)] {
+                let geom = format!("/World/{prim}/link1/geom");
+                let m = worlds
+                    .get(&geom)
+                    .unwrap_or_else(|| panic!("missing {geom}"));
+                let expect = (poses[f][link1] * model.links[link1].visuals[0].origin).translation;
+                assert_close(
+                    mul_point(m, [0.0; 3]),
+                    [expect.x, expect.y, expect.z],
+                    1e-9,
+                    &format!("{prim} frame {f}"),
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

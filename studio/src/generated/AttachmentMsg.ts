@@ -6,6 +6,10 @@ import type { PoseMsg } from "./PoseMsg";
  */
 export type AttachmentMsg = { 
 /**
+ * Carrying robot instance name; `None` means the first robot.
+ */
+robot: string | null, 
+/**
  * Carrying link name.
  */
 link: string, 

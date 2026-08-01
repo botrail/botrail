@@ -66,7 +66,7 @@ def test_server_serves_scene_api(robot: bt.Robot) -> None:
                 time.sleep(0.05)
         assert payload is not None, "server did not come up within 5s"
         assert payload["type"] == "scene_init"
-        assert payload["scene"]["robot_name"] == "simple_arm"
-        assert len(payload["scene"]["links"]) == len(robot.link_names)
+        assert payload["scene"]["robots"][0]["name"] == "simple_arm"
+        assert len(payload["scene"]["robots"][0]["links"]) == len(robot.link_names)
     finally:
         server.stop()

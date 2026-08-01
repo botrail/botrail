@@ -1,6 +1,89 @@
 // Pure helpers for trajectory playback interpolation.
+//
+// Playback is normalized into `PlaybackTracks` — per-robot trajectories on
+// one clock plus world-pose object tracks — whatever produced it (a plan
+// preview, a motion, a sequence timeline, a USD recording). Sampling yields
+// the per-robot display overrides the viewport applies.
 
-import type { PoseMsg, TrajectoryMsg } from "./protocol";
+import type {
+  ObjectTrackMsg,
+  PoseMsg,
+  TimelineMsg,
+  TrajectoryMsg,
+} from "./protocol";
+
+/** Per-robot trajectories on a single clock. */
+export interface PlaybackTracks {
+  duration: number;
+  /** One track per moving robot; robots not listed stay at their live state. */
+  robots: { name: string; trajectory: TrajectoryMsg }[];
+  /** World-pose tracks of moving scene objects, sampled on `times`. */
+  objects: { times: number[]; tracks: ObjectTrackMsg[] } | null;
+}
+
+/** Display overrides at one playback instant. */
+export interface PlaybackSample {
+  /** Robot name -> world pose per link (legacy link-visual robots). */
+  poses: Record<string, PoseMsg[]> | null;
+  /** Robot name -> joint values (USD robots, client-side FK). */
+  joints: Record<string, number[]> | null;
+  /** Obstacle name -> world pose (attached objects riding along). */
+  objects: Record<string, PoseMsg> | null;
+}
+
+/** Tracks for a single-robot result trajectory (plan / motion preview). */
+export function tracksFromTrajectory(
+  robot: string,
+  traj: TrajectoryMsg,
+): PlaybackTracks {
+  return {
+    duration: traj.duration,
+    robots: [{ name: robot, trajectory: traj }],
+    objects:
+      traj.object_tracks && traj.object_tracks.length > 0
+        ? { times: traj.times, tracks: traj.object_tracks }
+        : null,
+  };
+}
+
+/** Tracks for a baked timeline (sequence rollout / USD recording). */
+export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
+  return {
+    duration: timeline.duration,
+    robots: timeline.robots.map((r) => ({
+      name: r.name,
+      trajectory: r.trajectory,
+    })),
+    objects:
+      timeline.objects.length > 0
+        ? {
+            // All robot tracks of a timeline share one sample grid.
+            times: timeline.robots[0]?.trajectory.times ?? [],
+            tracks: timeline.objects,
+          }
+        : null,
+  };
+}
+
+/** Every robot's override + object poses at time `t` (clamped). */
+export function samplePlayback(
+  tracks: PlaybackTracks,
+  t: number,
+): PlaybackSample {
+  let poses: Record<string, PoseMsg[]> | null = null;
+  let joints: Record<string, number[]> | null = null;
+  for (const { name, trajectory } of tracks.robots) {
+    if (trajectory.link_poses) {
+      (poses ??= {})[name] = samplePoses(
+        { ...trajectory, link_poses: trajectory.link_poses },
+        t,
+      );
+    } else {
+      (joints ??= {})[name] = sampleJoints(trajectory, t);
+    }
+  }
+  return { poses, joints, objects: sampleObjectPoses(tracks.objects, t) };
+}
 
 function lerp(a: number, b: number, u: number): number {
   return a + (b - a) * u;
@@ -42,45 +125,32 @@ function bracket(times: number[], t: number): [number, number, number] {
   return [lo, hi, (t - times[lo]) / (times[hi] - times[lo])];
 }
 
-/**
- * Playback override at time `t`: `[poses, joints, objectPoses]` —
- * precomputed poses for legacy robots, joint values for USD-rendered robots
- * (client-side FK), and world poses of attached objects riding along.
- */
-export function sampleOverride(
-  traj: TrajectoryMsg,
-  t: number,
-): [PoseMsg[] | null, number[] | null, Record<string, PoseMsg> | null] {
-  const objects = sampleObjectPoses(traj, t);
-  if (traj.link_poses) {
-    return [samplePoses({ ...traj, link_poses: traj.link_poses }, t), null, objects];
-  }
-  return [null, sampleJoints(traj, t), objects];
+function lerpPose(a: PoseMsg, b: PoseMsg, u: number): PoseMsg {
+  return {
+    position: [
+      lerp(a.position[0], b.position[0], u),
+      lerp(a.position[1], b.position[1], u),
+      lerp(a.position[2], b.position[2], u),
+    ],
+    quaternion: nlerpQuat(a.quaternion, b.quaternion, u),
+  };
 }
 
 /**
- * World poses of attached (grasped) objects at time `t`, keyed by obstacle
- * name. `null` when the trajectory carries no object tracks.
+ * World poses of moving objects at time `t`, keyed by obstacle name.
+ * `null` when there are no object tracks.
  */
 export function sampleObjectPoses(
-  traj: TrajectoryMsg,
+  objects: PlaybackTracks["objects"],
   t: number,
 ): Record<string, PoseMsg> | null {
-  const tracks = traj.object_tracks;
-  if (!tracks || tracks.length === 0) return null;
-  const [lo, hi, u] = bracket(traj.times, t);
+  if (!objects || objects.tracks.length === 0 || objects.times.length === 0) {
+    return null;
+  }
+  const [lo, hi, u] = bracket(objects.times, t);
   const out: Record<string, PoseMsg> = {};
-  for (const track of tracks) {
-    const pa = track.poses[lo];
-    const pb = track.poses[hi];
-    out[track.name] = {
-      position: [
-        lerp(pa.position[0], pb.position[0], u),
-        lerp(pa.position[1], pb.position[1], u),
-        lerp(pa.position[2], pb.position[2], u),
-      ],
-      quaternion: nlerpQuat(pa.quaternion, pb.quaternion, u),
-    };
+  for (const track of objects.tracks) {
+    out[track.name] = lerpPose(track.poses[lo], track.poses[hi], u);
   }
   return out;
 }
@@ -102,31 +172,8 @@ export function samplePoses(
   traj: TrajectoryMsg & { link_poses: PoseMsg[][] },
   t: number,
 ): PoseMsg[] {
-  const times = traj.times;
-  const last = times.length - 1;
-  if (t <= times[0]) return traj.link_poses[0];
-  if (t >= times[last]) return traj.link_poses[last];
-
-  let lo = 0;
-  let hi = last;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (times[mid] <= t) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-  const u = (t - times[lo]) / (times[hi] - times[lo]);
-  return traj.link_poses[lo].map((pa, link) => {
-    const pb = traj.link_poses[hi][link];
-    return {
-      position: [
-        lerp(pa.position[0], pb.position[0], u),
-        lerp(pa.position[1], pb.position[1], u),
-        lerp(pa.position[2], pb.position[2], u),
-      ],
-      quaternion: nlerpQuat(pa.quaternion, pb.quaternion, u),
-    };
-  });
+  const [lo, hi, u] = bracket(traj.times, t);
+  return traj.link_poses[lo].map((pa, link) =>
+    lerpPose(pa, traj.link_poses[hi][link], u),
+  );
 }

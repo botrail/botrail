@@ -1,7 +1,11 @@
 import { useMemo } from "react";
 
 import type { GeometryMsg, LinkMsg, PoseMsg, VisualMsg } from "../protocol";
-import { collidingLinkNames, useStudioStore } from "../store";
+import {
+  collidingLinkNames,
+  useStudioStore,
+  type RobotUiState,
+} from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 import { COLLISION_COLOR, linkColor } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
@@ -9,32 +13,45 @@ import { MeshVisual } from "./MeshVisual";
 const IDENTITY_POS: [number, number, number] = [0, 0, 0];
 const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
 
+/** Link-visual rendering of every non-USD robot (one instance per robot). */
 export function SceneView() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const linkPoses = useStudioStore((s) => s.linkPoses);
-  const overridePoses = useStudioStore((s) => s.overridePoses);
+  const robots = useStudioStore((s) => s.robots);
+  return (
+    <>
+      {robots
+        .filter((r) => !r.desc.usd_asset)
+        .map((r) => (
+          <LinkVisualRobot key={r.desc.name} robot={r} />
+        ))}
+    </>
+  );
+}
+
+function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
+  const name = robot.desc.name;
+  const overridePoses = useStudioStore(
+    (s) => s.overridePoses?.[name] ?? null,
+  );
   const collisions = useStudioStore((s) => s.collisions);
   const collidingLinks = useMemo(
-    () => collidingLinkNames(collisions),
-    [collisions],
+    () => collidingLinkNames(collisions, name),
+    [collisions, name],
   );
 
-  // USD-rendered robots draw through UsdRobotView instead.
-  if (!sceneDesc || sceneDesc.usd_asset) return null;
-
-  // During trajectory playback the robot renders at the override poses;
+  // During trajectory playback this robot renders at its override poses;
   // collision coloring refers to the live state, so it is suppressed.
-  const poses = overridePoses ?? linkPoses;
+  // Robots the playback doesn't drive stay live (their colors are valid).
+  const poses = overridePoses ?? robot.linkPoses;
   const playback = overridePoses !== null;
 
   // The click handler makes the robot opaque to picking: without it, R3F
   // ignores handler-less meshes and a click on the arm would select
-  // whatever obstacle lies behind it. Clicking the robot focuses the TCP.
+  // whatever obstacle lies behind it. Clicking a robot focuses its TCP.
   return (
     <group
       onClick={(e) => {
         e.stopPropagation();
-        useStudioStore.getState().selectTcp();
+        useStudioStore.getState().selectTcp(name);
       }}
       onPointerOver={(e) => {
         e.stopPropagation();
@@ -42,7 +59,7 @@ export function SceneView() {
       }}
       onPointerOut={cursorLeave}
     >
-      {sceneDesc.links.map((link, i) => (
+      {robot.desc.links.map((link, i) => (
         <LinkGroup
           key={i}
           link={link}

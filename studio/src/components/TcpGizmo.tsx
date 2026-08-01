@@ -2,31 +2,31 @@ import { useEffect, useRef, useState } from "react";
 import { TransformControls } from "@react-three/drei";
 import * as THREE from "three";
 
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import { sendTcpTarget } from "../ws";
 
 /**
- * Draggable TCP target. The gizmo moves a free-floating target object; every
- * change is sent to the server, which solves IK and streams the resulting
- * robot state back. While not dragging, the target tracks the actual TCP so
- * an unreachable drop visibly snaps back to where the arm really is.
+ * Draggable TCP target for the focused robot. The gizmo moves a free-
+ * floating target object; every change is sent to the server, which solves
+ * IK and streams the resulting robot state back. While not dragging, the
+ * target tracks the actual TCP so an unreachable drop visibly snaps back to
+ * where the arm really is.
  */
 export function TcpGizmo() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const tcpLink = useStudioStore((s) => s.tcpLink);
-  const linkPoses = useStudioStore((s) => s.linkPoses);
-  const gizmoMode = useStudioStore((s) => s.gizmoMode);
-  const ikStatus = useStudioStore((s) => s.ikStatus);
   const selection = useStudioStore((s) => s.selection);
+  const focusedRobot = selection.type === "tcp" ? selection.robot : null;
+  const robot = useStudioStore((s) => robotByName(s.robots, focusedRobot));
+  const gizmoMode = useStudioStore((s) => s.gizmoMode);
 
   const [target, setTarget] = useState<THREE.Group | null>(null);
   const draggingRef = useRef(false);
 
+  const tcpLink = robot?.tcpLink ?? null;
   const linkIndex =
-    sceneDesc && tcpLink
-      ? sceneDesc.links.findIndex((l) => l.name === tcpLink)
+    robot && tcpLink
+      ? robot.desc.links.findIndex((l) => l.name === tcpLink)
       : -1;
-  const pose = linkIndex >= 0 ? linkPoses[linkIndex] : undefined;
+  const pose = linkIndex >= 0 ? robot?.linkPoses[linkIndex] : undefined;
 
   // Track the real TCP while the user is not dragging.
   useEffect(() => {
@@ -41,16 +41,18 @@ export function TcpGizmo() {
   const overriding = useStudioStore(
     (s) => s.overridePoses !== null || s.overrideJoints !== null,
   );
-  if (!pose || !tcpLink || selection.type !== "tcp" || overriding) return null;
+  if (!robot || !pose || !tcpLink || overriding) return null;
 
+  const ikStatus = robot.ikStatus;
   const reachable = ikStatus === null || ikStatus.converged;
   const color = reachable ? "#4da3ff" : "#ff5555";
+  const robotName = robot.desc.name;
 
   const onDrag = () => {
     // objectChange can also fire on attach/programmatic updates; only
     // user drags may drive the robot.
     if (!target || !draggingRef.current) return;
-    sendTcpTarget({
+    sendTcpTarget(robotName, {
       link: tcpLink,
       pose: {
         position: [target.position.x, target.position.y, target.position.z],

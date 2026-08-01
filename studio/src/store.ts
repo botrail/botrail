@@ -7,7 +7,7 @@ import type {
   ObstacleMsg,
   PlanStatsMsg,
   PoseMsg,
-  SceneDescriptionMsg,
+  RobotDescMsg,
   DeviceMsg,
   SensorMsg,
   SequenceMsg,
@@ -15,33 +15,66 @@ import type {
   SignalDefMsg,
   SignalTrackMsg,
   StepSpanMsg,
-  TrajectoryMsg,
 } from "./protocol";
+import {
+  samplePlayback,
+  tracksFromTimeline,
+  tracksFromTrajectory,
+  type PlaybackSample,
+  type PlaybackTracks,
+} from "./playback";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
 
 /** What the viewport gizmo is currently editing. */
 export type Selection =
-  | { type: "tcp" }
+  | { type: "tcp"; robot: string }
   | { type: "obstacle"; name: string }
-  | { type: "robot" };
+  | { type: "robot"; robot: string };
+
+/** Per-robot UI state: the description plus the live server state. */
+export interface RobotUiState {
+  desc: RobotDescMsg;
+  /** Joint position vector, indexed by q_index (length = robot DOF). */
+  jointPositions: number[];
+  /** World pose of the robot's root link. */
+  basePose: PoseMsg;
+  /** World pose per link, aligned with desc.links. */
+  linkPoses: PoseMsg[];
+  /** Outcome of the last server-side IK solve for this robot. */
+  ikStatus: IkStatusMsg | null;
+  /** Link the TCP gizmo is attached to. */
+  tcpLink: string | null;
+}
 
 /** Actuated joints (those with a q_index), in q_index order. */
-function actuatedDof(scene: SceneDescriptionMsg): number {
-  return scene.joints.filter((j) => j.q_index !== null).length;
+function actuatedDof(desc: RobotDescMsg): number {
+  return desc.joints.filter((j) => j.q_index !== null).length;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
 }
 
-/** Names of links involved in at least one collision pair. */
-export function collidingLinkNames(collisions: CollisionPairMsg[]): Set<string> {
+/** The robot named `name`, or null. */
+export function robotByName(
+  robots: RobotUiState[],
+  name: string | null,
+): RobotUiState | null {
+  if (name === null) return null;
+  return robots.find((r) => r.desc.name === name) ?? null;
+}
+
+/** Names of `robot`'s links involved in at least one collision pair. */
+export function collidingLinkNames(
+  collisions: CollisionPairMsg[],
+  robot: string,
+): Set<string> {
   const set = new Set<string>();
   for (const pair of collisions) {
     for (const ref of [pair.a, pair.b]) {
-      if (ref.kind === "link") set.add(ref.name);
+      if (ref.kind === "link" && ref.robot === robot) set.add(ref.name);
     }
   }
   return set;
@@ -60,27 +93,25 @@ export function collidingObstacleNames(
   return set;
 }
 
-/** First-sample poses of every attached-object track (playback seeding). */
-function firstObjectPoses(traj: TrajectoryMsg): Record<string, PoseMsg> | null {
-  if (!traj.object_tracks || traj.object_tracks.length === 0) return null;
-  const out: Record<string, PoseMsg> = {};
-  for (const track of traj.object_tracks) out[track.name] = track.poses[0];
-  return out;
+/** Playback + first-sample overrides, spread into a store update. */
+function startPlayback(tracks: PlaybackTracks) {
+  const sample = samplePlayback(tracks, 0);
+  return {
+    playback: tracks,
+    playbackTime: 0,
+    playing: true,
+    overridePoses: sample.poses,
+    overrideJoints: sample.joints,
+    overrideObstaclePoses: sample.objects,
+  };
 }
 
 interface StudioState {
-  sceneDesc: SceneDescriptionMsg | null;
-  /** Joint position vector, indexed by q_index (length = DOF). */
-  jointPositions: number[];
-  /** World pose of the robot's root link. */
-  basePose: PoseMsg | null;
-  /** World pose per link, aligned with sceneDesc.links. */
-  linkPoses: PoseMsg[];
+  /** Robot instances, in server (scene) order. */
+  robots: RobotUiState[];
+  /** Robot the panels operate on (instance name). */
+  selectedRobot: string | null;
   connection: ConnectionStatus;
-  /** Outcome of the last server-side IK solve (null after non-IK updates). */
-  ikStatus: IkStatusMsg | null;
-  /** Link the TCP gizmo is attached to. */
-  tcpLink: string | null;
   gizmoMode: GizmoMode;
   /** Obstacles in the scene; re-sent in full by the server on every change. */
   obstacles: ObstacleMsg[];
@@ -90,22 +121,22 @@ interface StudioState {
   collisions: CollisionPairMsg[];
   /** Minimum robot-obstacle distance; null without obstacles. */
   minDistance: number | null;
-  /** Which object the viewport gizmo edits; defaults to the TCP. */
+  /** Which object the viewport gizmo edits; defaults to the first TCP. */
   selection: Selection;
-  /** Snapshot of a goal configuration (joints + link poses for the ghost). */
-  goal: { positions: number[]; linkPoses: PoseMsg[] } | null;
+  /** Snapshot of a goal configuration on one robot (ghost display). */
+  goal: { robot: string; positions: number[]; linkPoses: PoseMsg[] } | null;
   /** True while a plan request is in flight. */
   planning: boolean;
   planError: string | null;
   planStats: PlanStatsMsg | null;
-  /** Last planned trajectory (for preview playback). */
-  trajectory: TrajectoryMsg | null;
+  /** Last playable result (plan/motion/sequence/recording tracks). */
+  playback: PlaybackTracks | null;
   playbackTime: number;
   playing: boolean;
-  /** When set, the robot renders at these poses instead of the live state. */
-  overridePoses: PoseMsg[] | null;
-  /** Joint-space playback override (USD-rendered robots do FK client-side). */
-  overrideJoints: number[] | null;
+  /** Robot name -> link poses shown instead of the live state (playback). */
+  overridePoses: Record<string, PoseMsg[]> | null;
+  /** Robot name -> joint-space playback override (USD robots, client FK). */
+  overrideJoints: Record<string, number[]> | null;
   /** Playback poses of attached objects, keyed by obstacle name. */
   overrideObstaclePoses: Record<string, PoseMsg> | null;
   /** All motions in the scene; re-sent in full by the server on every change. */
@@ -121,10 +152,12 @@ interface StudioState {
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   sequenceError: string | null;
-  /** Step bands + signal lanes of the last baked timeline (the dock). */
+  /** Step bands, robot lanes + signal lanes of the last baked timeline. */
   timeline: {
     duration: number;
     stepSpans: StepSpanMsg[];
+    /** Per-robot move intervals (motion/ramp bands), in scene order. */
+    robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
   } | null;
   /** The USD recording behind the current playback, when there is one. */
@@ -144,27 +177,26 @@ interface StudioState {
 
   setConnection: (c: ConnectionStatus) => void;
   applyServerMessage: (msg: ServerMessage) => void;
-  /** Optimistic local update of a single DOF. */
-  setJointPosition: (qIndex: number, value: number) => void;
-  /** Reset every DOF to 0 (clamped into limits when present). */
-  resetJoints: () => void;
-  setTcpLink: (link: string) => void;
+  /** Optimistic local update of a single DOF on one robot. */
+  setJointPosition: (robot: string, qIndex: number, value: number) => void;
+  /** Reset a robot's DOFs to 0 (clamped into limits when present). */
+  resetJoints: (robot: string) => void;
+  setTcpLink: (robot: string, link: string) => void;
   setGizmoMode: (mode: GizmoMode) => void;
-  selectTcp: () => void;
+  /** Focus a robot's TCP (also makes it the panel-selected robot). */
+  selectTcp: (robot?: string) => void;
   selectObstacle: (name: string) => void;
-  selectRobot: () => void;
+  /** Focus a robot's base for placement (also panel-selects it). */
+  selectRobot: (robot: string) => void;
+  /** Panel robot selector; retargets a robot-scoped gizmo selection. */
+  setSelectedRobot: (robot: string) => void;
   beginSequenceSim: () => void;
   setGoalFromCurrent: () => void;
   clearGoal: () => void;
   beginPlanning: () => void;
   beginMotionPlanning: () => void;
-  /** Scrub/advance playback; poses or joints become the display override. */
-  setPlayback: (
-    t: number,
-    poses: PoseMsg[] | null,
-    joints: number[] | null,
-    obstaclePoses: Record<string, PoseMsg> | null,
-  ) => void;
+  /** Scrub/advance playback; the sample becomes the display override. */
+  setPlayback: (t: number, sample: PlaybackSample) => void;
   setPlaying: (playing: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
@@ -173,24 +205,20 @@ interface StudioState {
 }
 
 export const useStudioStore = create<StudioState>((set) => ({
-  sceneDesc: null,
-  jointPositions: [],
-  basePose: null,
-  linkPoses: [],
+  robots: [],
+  selectedRobot: null,
   connection: "connecting",
-  ikStatus: null,
-  tcpLink: null,
   gizmoMode: "translate",
   obstacles: [],
   frames: [],
   collisions: [],
   minDistance: null,
-  selection: { type: "tcp" },
+  selection: { type: "tcp", robot: "" },
   goal: null,
   planning: false,
   planError: null,
   planStats: null,
-  trajectory: null,
+  playback: null,
   playbackTime: 0,
   playing: false,
   overridePoses: null,
@@ -217,40 +245,55 @@ export const useStudioStore = create<StudioState>((set) => ({
 
   applyServerMessage: (msg) => {
     if (msg.type === "scene_init") {
-      set({
-        sceneDesc: msg.scene,
-        jointPositions: new Array(actuatedDof(msg.scene)).fill(0),
-        basePose: msg.scene.base_pose,
-        linkPoses: [],
-        ikStatus: null,
-        tcpLink: msg.scene.tcp_link,
-        obstacles: [],
-        frames: [],
-        collisions: [],
-        minDistance: null,
-        selection: { type: "tcp" },
-        goal: null,
-        planning: false,
-        planError: null,
-        planStats: null,
-        trajectory: null,
-        playbackTime: 0,
-        playing: false,
-        overridePoses: null,
-        overrideJoints: null,
-        overrideObstaclePoses: null,
-        motions: [],
-        sequences: [],
-        signalDefs: [],
-        sensors: [],
-        devices: [],
-        sequenceSimulating: false,
-        sequenceError: null,
-        timeline: null,
-        motionPlanning: false,
-        motionError: null,
-        segmentEnds: [],
-        motionStats: null,
+      set((s) => {
+        // A re-handshake (e.g. a robot was added) keeps the user's TCP link
+        // and selection for robots that survive by name.
+        const prev = new Map(s.robots.map((r) => [r.desc.name, r]));
+        const robots = msg.scene.robots.map((desc) => ({
+          desc,
+          jointPositions: new Array(actuatedDof(desc)).fill(0),
+          basePose: desc.base_pose,
+          linkPoses: [],
+          ikStatus: null,
+          tcpLink: prev.get(desc.name)?.tcpLink ?? desc.tcp_link,
+        }));
+        const surviving =
+          s.selectedRobot !== null &&
+          robots.some((r) => r.desc.name === s.selectedRobot);
+        const selected = surviving
+          ? s.selectedRobot
+          : (robots[0]?.desc.name ?? null);
+        return {
+          robots,
+          selectedRobot: selected,
+          obstacles: [],
+          frames: [],
+          collisions: [],
+          minDistance: null,
+          selection: { type: "tcp", robot: selected ?? "" },
+          goal: null,
+          planning: false,
+          planError: null,
+          planStats: null,
+          playback: null,
+          playbackTime: 0,
+          playing: false,
+          overridePoses: null,
+          overrideJoints: null,
+          overrideObstaclePoses: null,
+          motions: [],
+          sequences: [],
+          signalDefs: [],
+          sensors: [],
+          devices: [],
+          sequenceSimulating: false,
+          sequenceError: null,
+          timeline: null,
+          motionPlanning: false,
+          motionError: null,
+          segmentEnds: [],
+          motionStats: null,
+        };
       });
     } else if (msg.type === "obstacles") {
       set((s) => {
@@ -261,25 +304,20 @@ export const useStudioStore = create<StudioState>((set) => ({
           !msg.obstacles.some((o) => o.name === sel.name);
         return {
           obstacles: msg.obstacles,
-          selection: gone ? { type: "tcp" } : sel,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
         };
       });
     } else if (msg.type === "plan_result") {
       if (msg.ok && msg.trajectory) {
-        // Auto-start the preview. The trajectory is shared with motion
+        // Auto-start the preview. The playback is shared with motion
         // playback, so drop any stale motion badge/markers it left behind.
         set({
           planning: false,
           planError: null,
           planStats: msg.stats,
-          trajectory: msg.trajectory,
-          playbackTime: 0,
-          playing: true,
-          overridePoses: msg.trajectory.link_poses?.[0] ?? null,
-          overrideJoints: msg.trajectory.link_poses
-            ? null
-            : (msg.trajectory.joint_positions[0] ?? null),
-          overrideObstaclePoses: firstObjectPoses(msg.trajectory),
+          ...startPlayback(tracksFromTrajectory(msg.robot, msg.trajectory)),
           segmentEnds: [],
           motionStats: null,
           timeline: null,
@@ -300,8 +338,7 @@ export const useStudioStore = create<StudioState>((set) => ({
       set({ devices: msg.devices });
     } else if (msg.type === "sequence_result") {
       if (msg.ok && msg.timeline) {
-        const traj = msg.timeline.trajectory;
-        // The baked cycle plays through the shared trajectory machinery;
+        // The baked cycle plays through the shared playback machinery;
         // step ends double as the seek-bar tick marks.
         set({
           sequenceSimulating: false,
@@ -309,15 +346,14 @@ export const useStudioStore = create<StudioState>((set) => ({
           timeline: {
             duration: msg.timeline.duration,
             stepSpans: msg.timeline.step_spans,
+            robots: msg.timeline.robots.map((r) => ({
+              name: r.name,
+              moves: r.moves,
+            })),
             signals: msg.timeline.signals,
           },
           segmentEnds: msg.timeline.step_spans.map((s) => s.end),
-          trajectory: traj,
-          playbackTime: 0,
-          playing: true,
-          overridePoses: traj.link_poses?.[0] ?? null,
-          overrideJoints: traj.link_poses ? null : (traj.joint_positions[0] ?? null),
-          overrideObstaclePoses: firstObjectPoses(traj),
+          ...startPlayback(tracksFromTimeline(msg.timeline)),
           planStats: null,
           planError: null,
           motionStats: null,
@@ -332,9 +368,8 @@ export const useStudioStore = create<StudioState>((set) => ({
       }
     } else if (msg.type === "recording_result") {
       if (msg.ok && msg.timeline) {
-        const traj = msg.timeline.trajectory;
         // A baked USD recording (Isaac capture or botrail export) plays
-        // through the shared trajectory machinery. Joint-state recordings
+        // through the shared playback machinery. Joint-state recordings
         // carry joint_positions; transform recordings carry link_poses,
         // which USD robots apply via setLinkTransforms (baked mode).
         set({
@@ -347,15 +382,14 @@ export const useStudioStore = create<StudioState>((set) => ({
           timeline: {
             duration: msg.timeline.duration,
             stepSpans: msg.timeline.step_spans,
+            robots: msg.timeline.robots.map((r) => ({
+              name: r.name,
+              moves: r.moves,
+            })),
             signals: msg.timeline.signals,
           },
           segmentEnds: [],
-          trajectory: traj,
-          playbackTime: 0,
-          playing: true,
-          overridePoses: traj.link_poses?.[0] ?? null,
-          overrideJoints: traj.link_poses ? null : (traj.joint_positions[0] ?? null),
-          overrideObstaclePoses: firstObjectPoses(traj),
+          ...startPlayback(tracksFromTimeline(msg.timeline)),
           planStats: null,
           planError: null,
           motionStats: null,
@@ -376,82 +410,115 @@ export const useStudioStore = create<StudioState>((set) => ({
           motionError: null,
           motionStats: { planningTimeMs: msg.planning_time_ms ?? 0 },
           segmentEnds: msg.segment_ends,
-          trajectory: msg.trajectory,
-          playbackTime: 0,
-          playing: true,
-          overridePoses: msg.trajectory.link_poses?.[0] ?? null,
-          overrideJoints: msg.trajectory.link_poses
-            ? null
-            : (msg.trajectory.joint_positions[0] ?? null),
-          overrideObstaclePoses: firstObjectPoses(msg.trajectory),
+          ...startPlayback(tracksFromTrajectory(msg.robot, msg.trajectory)),
           planStats: null,
           planError: null,
           timeline: null,
           recording: null,
         });
       } else {
-        set({ motionPlanning: false, motionError: msg.error ?? "planning failed" });
+        set({
+          motionPlanning: false,
+          motionError: msg.error ?? "planning failed",
+        });
       }
     } else if (msg.type === "state") {
-      set({
-        jointPositions: msg.joint_positions,
-        basePose: msg.base_pose,
-        linkPoses: msg.link_poses,
-        ikStatus: msg.ik_status,
+      set((s) => ({
+        robots: s.robots.map((r) => {
+          const st = msg.robots.find((x) => x.name === r.desc.name);
+          return st
+            ? {
+                ...r,
+                jointPositions: st.joint_positions,
+                basePose: st.base_pose,
+                linkPoses: st.link_poses,
+                ikStatus: st.ik_status,
+              }
+            : r;
+        }),
         collisions: msg.collisions,
         minDistance: msg.min_distance,
-      });
+      }));
     }
     // Message types this build doesn't know (a newer server) fall through
     // untouched — a stale bundle must degrade, not crash to a black screen.
   },
 
-  setJointPosition: (qIndex, value) =>
-    set((s) => {
-      const next = s.jointPositions.slice();
-      next[qIndex] = value;
-      return { jointPositions: next };
-    }),
+  setJointPosition: (robot, qIndex, value) =>
+    set((s) => ({
+      robots: s.robots.map((r) => {
+        if (r.desc.name !== robot) return r;
+        const next = r.jointPositions.slice();
+        next[qIndex] = value;
+        return { ...r, jointPositions: next };
+      }),
+    })),
 
-  resetJoints: () =>
-    set((s) => {
-      const desc = s.sceneDesc;
-      const next = s.jointPositions.slice();
-      if (!desc) {
-        return { jointPositions: next.map(() => 0) };
-      }
-      for (const j of desc.joints) {
-        if (j.q_index === null) continue;
-        next[j.q_index] = j.limits ? clamp(0, j.limits[0], j.limits[1]) : 0;
-      }
-      return { jointPositions: next };
-    }),
+  resetJoints: (robot) =>
+    set((s) => ({
+      robots: s.robots.map((r) => {
+        if (r.desc.name !== robot) return r;
+        const next = r.jointPositions.slice();
+        for (const j of r.desc.joints) {
+          if (j.q_index === null) continue;
+          next[j.q_index] = j.limits ? clamp(0, j.limits[0], j.limits[1]) : 0;
+        }
+        return { ...r, jointPositions: next };
+      }),
+    })),
 
-  setTcpLink: (link) => set({ tcpLink: link, ikStatus: null }),
+  setTcpLink: (robot, link) =>
+    set((s) => ({
+      robots: s.robots.map((r) =>
+        r.desc.name === robot ? { ...r, tcpLink: link, ikStatus: null } : r,
+      ),
+    })),
   setGizmoMode: (mode) => set({ gizmoMode: mode }),
-  selectTcp: () => set({ selection: { type: "tcp" } }),
+  selectTcp: (robot) =>
+    set((s) => {
+      const name = robot ?? s.selectedRobot ?? s.robots[0]?.desc.name ?? "";
+      return { selection: { type: "tcp", robot: name }, selectedRobot: name };
+    }),
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
-  selectRobot: () => set({ selection: { type: "robot" } }),
+  selectRobot: (robot) =>
+    set({ selection: { type: "robot", robot }, selectedRobot: robot }),
+  setSelectedRobot: (robot) =>
+    set((s) => ({
+      selectedRobot: robot,
+      selection:
+        s.selection.type === "obstacle"
+          ? s.selection
+          : s.selection.type === "robot"
+            ? { type: "robot", robot }
+            : { type: "tcp", robot },
+    })),
 
   beginSequenceSim: () => set({ sequenceSimulating: true, sequenceError: null }),
   setGoalFromCurrent: () =>
-    set((s) => ({
-      goal:
-        s.linkPoses.length > 0
-          ? { positions: s.jointPositions.slice(), linkPoses: s.linkPoses }
-          : null,
-      planError: null,
-    })),
+    set((s) => {
+      const r = robotByName(s.robots, s.selectedRobot);
+      return {
+        goal:
+          r && r.linkPoses.length > 0
+            ? {
+                robot: r.desc.name,
+                positions: r.jointPositions.slice(),
+                linkPoses: r.linkPoses,
+              }
+            : null,
+        planError: null,
+      };
+    }),
   clearGoal: () => set({ goal: null, planError: null }),
   beginPlanning: () => set({ planning: true, planError: null }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
-  setPlayback: (t, poses, joints, obstaclePoses) =>
+  setPlayback: (t, sample) =>
     set({
       playbackTime: t,
-      overridePoses: poses,
-      overrideJoints: joints,
-      overrideObstaclePoses: obstaclePoses,
+      overridePoses: sample.poses,
+      overrideJoints: sample.joints,
+      overrideObstaclePoses: sample.objects,
     }),
   setPlaying: (playing) => set({ playing }),
   stopPlayback: () =>

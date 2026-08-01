@@ -1,23 +1,23 @@
 import type { GeometryMsg } from "../protocol";
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 
 const GHOST_COLOR = "#5b9dd9";
 
 /**
- * Translucent copy of the robot at the captured goal configuration.
+ * Translucent copy of the goal robot at the captured configuration.
  * Mesh visuals are skipped (primitive links only) — acceptable until mesh
  * loading gets a shared cached-material path.
  */
 export function GhostRobot() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
   const goal = useStudioStore((s) => s.goal);
+  const robot = useStudioStore((s) => robotByName(s.robots, goal?.robot ?? null));
 
   // USD-rendered robots get their ghost from UsdRobotView.
-  if (!sceneDesc || sceneDesc.usd_asset || !goal) return null;
+  if (!goal || !robot || robot.desc.usd_asset) return null;
 
   return (
     <>
-      {sceneDesc.links.map((link, i) => {
+      {robot.desc.links.map((link, i) => {
         const pose = goal.linkPoses[i];
         if (!pose) return null;
         return (

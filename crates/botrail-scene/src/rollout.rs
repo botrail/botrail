@@ -51,6 +51,20 @@ pub enum SeqError {
         name: String,
         limit: usize,
     },
+    /// Two robots met mid-cycle. Plans freeze the other robots at their
+    /// start-of-motion pose, so this is not a planning bug: the cycle needs
+    /// an interlock (§design-multi-robot 3.2) making one arm wait.
+    #[error(
+        "robots `{a}` and `{b}` collide at t = {t:.3}s ({link_a} × {link_b}); \
+         add an interlock (zone sensor / robot_done) so one waits for the other"
+    )]
+    RobotCollision {
+        t: f64,
+        a: String,
+        b: String,
+        link_a: String,
+        link_b: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -111,10 +125,12 @@ pub enum TrackSpan {
         t1: f64,
         pose: Isometry3<f64>,
     },
-    /// Rigidly attached: `world = link_pose(t) ∘ offset`.
+    /// Rigidly attached to a robot: `world = link_pose(t) ∘ offset`.
     Follow {
         t0: f64,
         t1: f64,
+        /// Carrying robot (scene index).
+        robot: usize,
         link: usize,
         offset: Isometry3<f64>,
     },
@@ -152,13 +168,25 @@ pub struct ObjectTrack {
     pub spans: Vec<TrackSpan>,
 }
 
+/// One robot's share of a baked timeline.
+#[derive(Debug, Clone)]
+pub struct RobotTrack {
+    /// Instance name.
+    pub name: String,
+    /// Whole-sequence joint track (holds still during waits).
+    pub trajectory: JointTrajectory,
+    /// Intervals a motion/ramp drove this robot (timeline robot lanes),
+    /// labelled with the motion name (or `ramp`).
+    pub moves: Vec<StepSpan>,
+}
+
 /// The baked result of a sequence rollout — what playback, USD export, and
 /// the timing chart consume. `duration` is the cycle time.
 #[derive(Debug, Clone)]
 pub struct SequenceTimeline {
     pub duration: f64,
-    /// Whole-sequence joint track (holds still during waits).
-    pub robot: JointTrajectory,
+    /// One track per robot, in scene order.
+    pub robots: Vec<RobotTrack>,
     /// Objects that were grasped at some point (everything else is static).
     pub objects: Vec<ObjectTrack>,
     pub signals: Vec<BoolTrack>,
@@ -166,11 +194,11 @@ pub struct SequenceTimeline {
 }
 
 impl SequenceTimeline {
-    /// World pose of a tracked object at `t`; `link_poses` must be the FK
-    /// world poses at the same instant.
+    /// World pose of a tracked object at `t`; `link_poses[robot]` must be
+    /// the FK world poses of that robot at the same instant.
     pub fn object_pose(
         track: &ObjectTrack,
-        link_poses: &[Isometry3<f64>],
+        link_poses: &[Vec<Isometry3<f64>>],
         t: f64,
     ) -> Option<Isometry3<f64>> {
         let span = track
@@ -183,7 +211,12 @@ impl SequenceTimeline {
             .or(track.spans.last())?;
         Some(match span {
             TrackSpan::Hold { pose, .. } => *pose,
-            TrackSpan::Follow { link, offset, .. } => link_poses[*link] * offset,
+            TrackSpan::Follow {
+                robot,
+                link,
+                offset,
+                ..
+            } => link_poses[*robot][*link] * offset,
             TrackSpan::Linear {
                 t0,
                 t1,
@@ -197,17 +230,22 @@ impl SequenceTimeline {
             }
         })
     }
+
+    /// The track of the robot instance named `name`.
+    pub fn robot_track(&self, name: &str) -> Option<&RobotTrack> {
+        self.robots.iter().find(|r| r.name == name)
+    }
 }
 
 impl Scene {
     /// Runs the scan loop for `name` against a clone of this scene (the
-    /// live scene is untouched). `limits` time-parameterizes the planned
-    /// motions, as in [`Scene::plan_motion`].
+    /// live scene is untouched). Planned motions are time-parameterized
+    /// with their owning robot's URDF-derived limits
+    /// ([`crate::motion::traj_limits`]).
     pub fn simulate_sequence(
         &self,
         name: &str,
         options: &RolloutOptions,
-        limits: &botrail_traj::Limits,
     ) -> Result<SequenceTimeline, SeqError> {
         let sequence = self
             .sequence(name)
@@ -215,23 +253,13 @@ impl Scene {
             .clone();
         self.validate_sequence(&sequence)
             .map_err(|(step, message)| SeqError::Validation { step, message })?;
-        Rollout::new(self.clone(), sequence, options.clone(), limits.clone()).run()
+        Rollout::new(self.clone(), sequence, options.clone()).run()
     }
 }
 
-struct Rollout {
-    world: Scene,
-    sequence: Sequence,
-    options: RolloutOptions,
-    limits: botrail_traj::Limits,
-
-    t: f64,
-    step: usize,
-    step_entered_at: f64,
-    /// Absolute end time of the motion/ramp started by the active step.
-    motion_end: Option<f64>,
-    /// The in-flight motion/ramp, for per-tick joint sampling.
-    active: Option<ActiveMove>,
+/// Per-robot scan-loop state: the commanded joints, the in-flight move,
+/// the tracking latch, and the accumulating baked track.
+struct RobotRuntime {
     /// Commanded joints (what the robot actually does).
     q: Vec<f64>,
     /// Joints as the motion/ramp asks for them, before any tracking offset.
@@ -240,15 +268,48 @@ struct Rollout {
     /// Previous tick's nominal, so a tracked solve can warm-start from the
     /// previous *command* plus the nominal increment.
     q_nom_prev: Vec<f64>,
+    /// The in-flight motion/ramp, for per-tick joint sampling. One slot —
+    /// matching the "one driver per robot per step" rule.
+    active: Option<ActiveMove>,
     /// Conveyor tracking: the latched part and the offset it has built up.
     tracking: Option<TrackLatch>,
+    // Accumulating baked track.
+    times: Vec<f64>,
+    positions: Vec<Vec<f64>>,
+    velocities: Vec<Vec<f64>>,
+    /// Intervals a move drove this robot (the timeline's robot lanes).
+    moves: Vec<StepSpan>,
+}
+
+impl RobotRuntime {
+    fn append_waypoint(&mut self, t: f64, q: Vec<f64>, v: Vec<f64>) {
+        let last = *self.times.last().expect("seeded with t = 0");
+        if t <= last + 1e-9 {
+            return;
+        }
+        self.times.push(t);
+        self.positions.push(q);
+        self.velocities.push(v);
+    }
+}
+
+struct Rollout {
+    world: Scene,
+    sequence: Sequence,
+    options: RolloutOptions,
+
+    t: f64,
+    step: usize,
+    step_entered_at: f64,
+    /// Absolute end times of the moves started by the active step (`Done`
+    /// waits for all of them).
+    step_move_ends: Vec<f64>,
+    /// Per-robot runtimes, in scene order (the deterministic advance order).
+    robots: Vec<RobotRuntime>,
     sensors: Vec<SensorRuntime>,
     devices: Vec<DeviceRuntime>,
 
     // Accumulating outputs.
-    times: Vec<f64>,
-    positions: Vec<Vec<f64>>,
-    velocities: Vec<Vec<f64>>,
     objects: Vec<ObjectTrack>,
     signals: Vec<BoolTrack>,
     step_spans: Vec<StepSpan>,
@@ -283,6 +344,16 @@ impl ActiveMove {
                 let s = u * u * (3.0 - 2.0 * u);
                 from.iter().zip(to).map(|(a, b)| a + (b - a) * s).collect()
             }
+        }
+    }
+
+    /// Absolute end time of this move.
+    fn end(&self) -> f64 {
+        match self {
+            ActiveMove::Traj { start, traj } => start + traj.duration(),
+            ActiveMove::Ramp {
+                start, duration, ..
+            } => start + duration,
         }
     }
 }
@@ -339,13 +410,7 @@ enum DeviceRuntime {
 }
 
 impl Rollout {
-    fn new(
-        world: Scene,
-        sequence: Sequence,
-        options: RolloutOptions,
-        limits: botrail_traj::Limits,
-    ) -> Self {
-        let q = world.joint_positions().to_vec();
+    fn new(world: Scene, sequence: Sequence, options: RolloutOptions) -> Self {
         // Signal lanes: internal relays, then sensor inputs, then device
         // outputs — all recorded as edge tracks for the timing chart.
         let mut signals: Vec<BoolTrack> = world
@@ -440,30 +505,41 @@ impl Rollout {
                 spans: vec![TrackSpan::Follow {
                     t0: 0.0,
                     t1: 0.0,
+                    robot: a.robot,
                     link: a.link,
                     offset: a.grasp,
                 }],
+            })
+            .collect();
+        let robots = world
+            .robots()
+            .iter()
+            .map(|sr| {
+                let q = sr.joint_positions().to_vec();
+                RobotRuntime {
+                    times: vec![0.0],
+                    positions: vec![q.clone()],
+                    velocities: vec![vec![0.0; q.len()]],
+                    q_nom: q.clone(),
+                    q_nom_prev: q.clone(),
+                    q,
+                    active: None,
+                    tracking: None,
+                    moves: Vec::new(),
+                }
             })
             .collect();
         Rollout {
             world,
             sequence,
             options,
-            limits,
             t: 0.0,
             step: 0,
             step_entered_at: 0.0,
-            motion_end: None,
-            active: None,
-            tracking: None,
+            step_move_ends: Vec::new(),
+            robots,
             sensors,
             devices,
-            times: vec![0.0],
-            positions: vec![q.clone()],
-            velocities: Vec::new(),
-            q_nom: q.clone(),
-            q_nom_prev: q.clone(),
-            q,
             objects,
             signals,
             step_spans: Vec::new(),
@@ -479,7 +555,6 @@ impl Rollout {
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
-        self.velocities.push(vec![0.0; self.q.len()]);
         self.update_sensors();
         self.enter_step()?;
         // Instantaneous steps may complete before the first tick.
@@ -505,24 +580,26 @@ impl Rollout {
         Ok(self.finish())
     }
 
-    /// Advances the robot joints and every device by one scan period.
+    /// Advances every robot's joints and every device by one scan period,
+    /// then verifies the robots stayed clear of each other.
     fn advance_world(&mut self) -> Result<(), SeqError> {
         let t = self.t;
         let dt = self.options.dt;
-        // Joints follow the in-flight motion/ramp (attached obstacles are
-        // re-synced by set_joint_positions).
-        if let Some(active) = &self.active {
-            self.q_nom = active.sample(t);
+        // Joints follow each robot's in-flight motion/ramp, in scene order
+        // (attached obstacles are re-synced by set_joint_positions_for).
+        for (r, rt) in self.robots.iter_mut().enumerate() {
+            let Some(active) = &rt.active else { continue };
+            rt.q_nom = active.sample(t);
             // Under a track the commanded joints are solved in
-            // `follow_tracked_part`, once this tick's part motion is known.
-            if self.tracking.is_none() {
-                self.q = self.q_nom.clone();
+            // `follow_tracked_parts`, once this tick's part motion is known.
+            if rt.tracking.is_none() {
+                rt.q = rt.q_nom.clone();
                 self.world
-                    .set_joint_positions(self.q.clone())
-                    .expect("sampled q has scene DOF");
+                    .set_joint_positions_for(r, rt.q.clone())
+                    .expect("sampled q has robot DOF");
             }
-            if self.motion_end.map(|end| t >= end - 1e-9).unwrap_or(false) {
-                self.active = None;
+            if t >= active.end() - 1e-9 {
+                rt.active = None;
             }
         }
 
@@ -658,16 +735,25 @@ impl Rollout {
                 pose,
             });
         }
-        self.follow_tracked_part()?;
+        self.follow_tracked_parts()?;
+        self.check_robot_collisions()?;
         Ok(())
     }
 
-    /// Conveyor tracking: re-solve the arm so this tick's commanded pose is
-    /// the nominal one carried by the part's motion since the latch. Runs
-    /// after the devices have moved the world, so the robot sees the part
-    /// where it is *now*.
-    fn follow_tracked_part(&mut self) -> Result<(), SeqError> {
-        let Some(latch) = &self.tracking else {
+    /// Conveyor tracking: re-solve each latched arm so this tick's
+    /// commanded pose is the nominal one carried by the part's motion since
+    /// the latch. Runs after the devices have moved the world, so the
+    /// robots see the parts where they are *now*; robots resolve in scene
+    /// order (deterministic).
+    fn follow_tracked_parts(&mut self) -> Result<(), SeqError> {
+        for r in 0..self.robots.len() {
+            self.follow_tracked_part(r)?;
+        }
+        Ok(())
+    }
+
+    fn follow_tracked_part(&mut self, r: usize) -> Result<(), SeqError> {
+        let Some(latch) = &self.robots[r].tracking else {
             return Ok(());
         };
         let (object, link, origin, frozen) =
@@ -689,29 +775,32 @@ impl Rollout {
                     message: format!("tracked obstacle `{object}` disappeared"),
                 })?;
             let offset = pose * origin.inverse();
-            if let Some(latch) = &mut self.tracking {
+            if let Some(latch) = &mut self.robots[r].tracking {
                 latch.offset = offset;
             }
             offset
         };
 
-        let nominal = self.world.fk(&self.q_nom).expect("q_nom has scene DOF")[link];
+        let rt = &self.robots[r];
+        let nominal = self
+            .world
+            .fk_for(r, &rt.q_nom)
+            .expect("q_nom has robot DOF")[link];
         let target = offset * nominal;
         // Warm start from what the robot did last tick plus this tick's
         // nominal increment: the solve then only absorbs one scan period of
         // part motion (and joints the offset cannot touch — the gripper —
         // follow the nominal exactly).
-        let seed: Vec<f64> = self
-            .q
-            .iter()
-            .zip(&self.q_nom)
-            .zip(&self.q_nom_prev)
-            .map(|((commanded, nominal), previous)| commanded + (nominal - previous))
-            .collect();
+        let seed: Vec<f64> =
+            rt.q.iter()
+                .zip(&rt.q_nom)
+                .zip(&rt.q_nom_prev)
+                .map(|((commanded, nominal), previous)| commanded + (nominal - previous))
+                .collect();
         let result = self
             .world
-            .solve_ik_world(link, &target, &seed, &TRACK_IK)
-            .expect("seed has scene DOF");
+            .solve_ik_world_for(r, link, &target, &seed, &TRACK_IK)
+            .expect("seed has robot DOF");
         if !result.converged {
             return Err(SeqError::Action {
                 step: self.step,
@@ -726,42 +815,83 @@ impl Rollout {
                 ),
             });
         }
-        let previous = self.q.clone();
-        self.q = result.q;
-        self.q_nom_prev = self.q_nom.clone();
+        let rt = &mut self.robots[r];
+        let previous = rt.q.clone();
+        rt.q = result.q;
+        rt.q_nom_prev = rt.q_nom.clone();
         self.world
-            .set_joint_positions(self.q.clone())
-            .expect("solved q has scene DOF");
+            .set_joint_positions_for(r, rt.q.clone())
+            .expect("solved q has robot DOF");
         // The move's own waypoints know nothing about the offset, so a
         // tracked tick bakes itself (velocities by difference).
         let dt = self.options.dt;
-        let velocity = self
-            .q
-            .iter()
-            .zip(&previous)
-            .map(|(now, before)| (now - before) / dt)
-            .collect();
-        let (t, q) = (self.t, self.q.clone());
-        self.append_waypoint(t, q, velocity);
+        let velocity =
+            rt.q.iter()
+                .zip(&previous)
+                .map(|(now, before)| (now - before) / dt)
+                .collect();
+        let (t, q) = (self.t, rt.q.clone());
+        rt.append_waypoint(t, q, velocity);
         Ok(())
     }
 
-    /// Latches onto `object`: from here the nominal poses ride its motion.
-    fn latch_track(&mut self, object: &str, link: Option<&str>) -> Result<(), SeqError> {
+    /// After every robot advanced: no two robots (or the objects they
+    /// carry) may touch. Only pairs spanning two different robots count —
+    /// self-collisions and static-obstacle contacts stay the planner's
+    /// concern.
+    fn check_robot_collisions(&self) -> Result<(), SeqError> {
+        if self.world.robots().len() < 2 {
+            return Ok(());
+        }
+        // Which robot a collider belongs to: its own links, or the robot
+        // carrying it (attached ids are remapped to obstacles by Scene).
+        let side = |id: botrail_collide::ColliderId| -> Option<(usize, String)> {
+            match id {
+                botrail_collide::ColliderId::Link { robot, link } => Some((
+                    robot,
+                    self.world.robots()[robot].model.links[link].name.clone(),
+                )),
+                botrail_collide::ColliderId::Obstacle(k) => {
+                    let name = &self.world.obstacles()[k].name;
+                    self.world.attachment(name).map(|a| (a.robot, name.clone()))
+                }
+                botrail_collide::ColliderId::Attached(_) => {
+                    unreachable!("attached ids are remapped by Scene")
+                }
+            }
+        };
+        for pair in self.world.check_collisions() {
+            if let (Some((ra, link_a)), Some((rb, link_b))) = (side(pair.a), side(pair.b)) {
+                if ra != rb {
+                    return Err(SeqError::RobotCollision {
+                        t: self.t,
+                        a: self.world.robots()[ra].name.clone(),
+                        b: self.world.robots()[rb].name.clone(),
+                        link_a,
+                        link_b,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Latches robot `r` onto `object`: from here its nominal poses ride
+    /// the part's motion.
+    fn latch_track(&mut self, r: usize, object: &str, link: Option<&str>) -> Result<(), SeqError> {
         let err = |message: String| SeqError::Action {
             step: self.step,
             name: self.step_name(self.step),
             message,
         };
+        let model = &self.world.robots()[r].model;
         let link = match link {
-            Some(name) => self
-                .world
-                .robot
+            Some(name) => model
                 .link_index(name)
                 .ok_or_else(|| err(format!("unknown link `{name}`")))?,
             // The wrist, not the fingertip: a pose says nothing about the
             // grip, so the solver must not be able to spend it.
-            None => self.world.robot.tool_mount_link(),
+            None => model.tool_mount_link(),
         };
         let origin = self
             .world
@@ -770,9 +900,10 @@ impl Rollout {
             .find(|o| o.name == object)
             .map(|o| o.pose)
             .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
-        self.q_nom = self.q.clone();
-        self.q_nom_prev = self.q.clone();
-        self.tracking = Some(TrackLatch {
+        let rt = &mut self.robots[r];
+        rt.q_nom = rt.q.clone();
+        rt.q_nom_prev = rt.q.clone();
+        rt.tracking = Some(TrackLatch {
             object: object.to_string(),
             link,
             origin,
@@ -782,11 +913,13 @@ impl Rollout {
         Ok(())
     }
 
-    /// Drops the track; the robot keeps the configuration it is in, so the
-    /// nominal frame is re-based onto it (releasing never moves the robot).
-    fn release_track(&mut self) {
-        self.tracking = None;
-        self.q_nom = self.q.clone();
+    /// Drops robot `r`'s track; the robot keeps the configuration it is in,
+    /// so the nominal frame is re-based onto it (releasing never moves the
+    /// robot).
+    fn release_track(&mut self, r: usize) {
+        let rt = &mut self.robots[r];
+        rt.tracking = None;
+        rt.q_nom = rt.q.clone();
     }
 
     /// Extends (or opens) a constant-velocity span covering this tick.
@@ -828,11 +961,13 @@ impl Rollout {
         if self.sensors.is_empty() {
             return;
         }
-        let needs_robot = self
-            .sensors
-            .iter()
-            .any(|s| matches!(s.watch, SensorWatch::Robot | SensorWatch::All));
-        let link_poses = needs_robot.then(|| self.world.link_poses());
+        let needs_robot = self.sensors.iter().any(|s| {
+            matches!(
+                s.watch,
+                SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::All
+            )
+        });
+        let link_poses = needs_robot.then(|| self.world.all_link_poses());
         let t = self.t;
         let mut edges = Vec::new();
         for sensor in &self.sensors {
@@ -840,9 +975,9 @@ impl Rollout {
             let watch_objects: Option<&[String]> = match &sensor.watch {
                 SensorWatch::Objects(names) => Some(names),
                 SensorWatch::AllObjects | SensorWatch::All => None,
-                SensorWatch::Robot => Some(&[]),
+                SensorWatch::Robot | SensorWatch::Robots(_) => Some(&[]),
             };
-            if !matches!(sensor.watch, SensorWatch::Robot) {
+            if !matches!(sensor.watch, SensorWatch::Robot | SensorWatch::Robots(_)) {
                 for (obstacle, collider) in self
                     .world
                     .obstacles()
@@ -867,15 +1002,24 @@ impl Rollout {
                 }
             }
             if !value {
-                if let (Some(poses), SensorWatch::Robot | SensorWatch::All) =
-                    (&link_poses, &sensor.watch)
+                if let (
+                    Some(poses),
+                    SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::All,
+                ) = (&link_poses, &sensor.watch)
                 {
-                    value = botrail_collide::robot_intersects(
-                        &self.world.robot_collider,
-                        poses,
-                        &sensor.collider,
-                        &sensor.pose,
-                    );
+                    let watched = |name: &str| match &sensor.watch {
+                        SensorWatch::Robots(names) => names.iter().any(|n| n == name),
+                        _ => true,
+                    };
+                    value = self.world.robots().iter().zip(poses).any(|(r, lp)| {
+                        watched(&r.name)
+                            && botrail_collide::robot_intersects(
+                                r.collider(),
+                                lp,
+                                &sensor.collider,
+                                &sensor.pose,
+                            )
+                    });
                 }
             }
             edges.push((sensor.lane, value));
@@ -924,9 +1068,11 @@ impl Rollout {
     fn condition_holds(&self, condition: &Condition) -> bool {
         match condition {
             Condition::Immediately => true,
-            Condition::Done => self
-                .motion_end
-                .map(|end| self.t >= end - 1e-9)
+            Condition::Done => self.step_move_ends.iter().all(|end| self.t >= end - 1e-9),
+            Condition::RobotDone { robot } => self
+                .world
+                .robot_index(robot)
+                .map(|r| self.robots[r].active.is_none())
                 .unwrap_or(true),
             Condition::Elapsed { seconds } => self.t - self.step_entered_at >= seconds - 1e-9,
             Condition::Signal { name, value } => {
@@ -954,7 +1100,7 @@ impl Rollout {
 
     fn enter_step(&mut self) -> Result<(), SeqError> {
         self.step_entered_at = self.t;
-        self.motion_end = None;
+        self.step_move_ends.clear();
         self.step_spans.push(StepSpan {
             name: self.step_name(self.step),
             start: self.t,
@@ -970,9 +1116,25 @@ impl Rollout {
         if let Some(span) = self.step_spans.last_mut() {
             span.end = self.t;
         }
-        // Hold the last configuration up to the transition instant, so the
-        // baked track stays exact through waits.
-        self.append_waypoint(self.t, self.q.clone(), vec![0.0; self.q.len()]);
+        // Hold every robot's last configuration up to the transition
+        // instant, so the baked tracks stay exact through waits.
+        let t = self.t;
+        for rt in &mut self.robots {
+            let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
+            rt.append_waypoint(t, q, zeros);
+        }
+    }
+
+    /// Resolves an action's robot reference; validation already vetted it,
+    /// so failures here are defensive.
+    fn action_robot(&self, robot: &Option<String>) -> Result<usize, SeqError> {
+        self.world
+            .resolve_seq_robot(robot)
+            .map_err(|message| SeqError::Action {
+                step: self.step,
+                name: self.step_name(self.step),
+                message,
+            })
     }
 
     fn fire(&mut self, action: &Action) -> Result<(), SeqError> {
@@ -985,44 +1147,65 @@ impl Rollout {
         };
         match action {
             Action::StartMotion { motion } => {
+                let owner = self
+                    .world
+                    .motions()
+                    .iter()
+                    .find(|m| &m.name == motion)
+                    .map(|m| m.robot)
+                    .ok_or_else(|| err(format!("unknown motion `{motion}`")))?;
                 // Plan against the world as it stands *now*: current q,
-                // moved obstacles, live grasps.
+                // moved obstacles, live grasps — the other robots are
+                // frozen collision bodies at their current configuration.
                 self.world
-                    .set_joint_positions(self.q.clone())
+                    .set_joint_positions_for(owner, self.robots[owner].q.clone())
                     .map_err(|e| err(e.to_string()))?;
+                let limits = crate::motion::traj_limits(&self.world.robots()[owner].model);
                 let planned = self
                     .world
-                    .plan_motion(motion, &self.options.plan, &self.limits)
+                    .plan_motion(motion, &self.options.plan, &limits)
                     .map_err(|e| SeqError::PlanFailed {
                         step: self.step,
                         name: self.step_name(self.step),
                         message: e.to_string(),
                     })?;
                 let traj = planned.trajectory;
+                let rt = &mut self.robots[owner];
                 for i in 0..traj.times.len() {
-                    self.append_waypoint(
+                    rt.append_waypoint(
                         self.t + traj.times[i],
                         traj.positions[i].clone(),
                         traj.velocities[i].clone(),
                     );
                 }
-                self.motion_end = Some(self.t + traj.duration());
+                let end = self.t + traj.duration();
+                self.step_move_ends.push(end);
+                rt.moves.push(StepSpan {
+                    name: motion.clone(),
+                    start: self.t,
+                    end,
+                });
                 // Joints follow the trajectory tick by tick (advance_world),
                 // so mid-motion sensors see the true robot state.
-                self.active = Some(ActiveMove::Traj {
+                rt.active = Some(ActiveMove::Traj {
                     start: self.t,
                     traj,
                 });
             }
-            Action::StartRamp { targets, duration } => {
-                let mut goal = self.q_nom.clone();
+            Action::StartRamp {
+                robot,
+                targets,
+                duration,
+            } => {
+                let r = self.action_robot(robot)?;
+                let model = self.world.robots()[r].model.clone();
+                let rt = &mut self.robots[r];
+                let mut goal = rt.q_nom.clone();
                 for (joint, value) in targets {
-                    let ji = self
-                        .world
-                        .robot
+                    let ji = model
                         .joint_index(joint)
                         .ok_or_else(|| err(format!("unknown joint `{joint}`")))?;
-                    let qi = self.world.robot.joints[ji]
+                    let qi = model.joints[ji]
                         .q_index
                         .ok_or_else(|| err(format!("joint `{joint}` is not actuated")))?;
                     goal[qi] = *value;
@@ -1030,24 +1213,32 @@ impl Rollout {
                 // Two rest-to-rest waypoints: cubic Hermite eases in/out.
                 // A tracked ramp cannot bake ahead — its poses are carried
                 // by a part that has not moved yet — so it bakes per tick.
-                if self.tracking.is_none() {
-                    self.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
+                if rt.tracking.is_none() {
+                    rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
-                self.motion_end = Some(self.t + duration);
-                self.active = Some(ActiveMove::Ramp {
+                let end = self.t + duration;
+                self.step_move_ends.push(end);
+                rt.moves.push(StepSpan {
+                    name: "ramp".to_string(),
+                    start: self.t,
+                    end,
+                });
+                rt.active = Some(ActiveMove::Ramp {
                     start: self.t,
                     duration: *duration,
-                    from: self.q_nom.clone(),
+                    from: rt.q_nom.clone(),
                     to: goal,
                 });
             }
             Action::Attach {
+                robot,
                 object,
                 link,
                 touch_links,
             } => {
+                let r = self.action_robot(robot)?;
                 self.world
-                    .set_joint_positions(self.q.clone())
+                    .set_joint_positions_for(r, self.robots[r].q.clone())
                     .map_err(|e| err(e.to_string()))?;
                 // The pose the object rested at until this instant — a
                 // freshly created track must tile [0, duration], so the
@@ -1059,7 +1250,7 @@ impl Rollout {
                     .find(|o| &o.name == object)
                     .map(|o| o.pose);
                 self.world
-                    .attach_obstacle(object, link.as_deref(), touch_links.as_deref())
+                    .attach_obstacle_to(r, object, link.as_deref(), touch_links.as_deref())
                     .map_err(|e| err(e.to_string()))?;
                 let attachment = self
                     .world
@@ -1078,21 +1269,28 @@ impl Rollout {
                 track.spans.push(TrackSpan::Follow {
                     t0: t,
                     t1: t,
+                    robot: attachment.robot,
                     link: attachment.link,
                     offset: attachment.grasp,
                 });
                 // Grasping the tracked part ends the chase: it moves with
                 // the robot now, so the offset it had at the grasp stands
                 // (which is what keeps the lift straight).
-                if let Some(latch) = &mut self.tracking {
+                if let Some(latch) = &mut self.robots[r].tracking {
                     if &latch.object == object {
                         latch.frozen = true;
                     }
                 }
             }
             Action::Detach { object } => {
+                // Sync the carrier so the object freezes where it truly is.
+                let carrier = self
+                    .world
+                    .attachment(object)
+                    .map(|a| a.robot)
+                    .ok_or_else(|| err(format!("`{object}` is not attached")))?;
                 self.world
-                    .set_joint_positions(self.q.clone())
+                    .set_joint_positions_for(carrier, self.robots[carrier].q.clone())
                     .map_err(|e| err(e.to_string()))?;
                 self.world
                     .detach_obstacle(object)
@@ -1114,13 +1312,21 @@ impl Rollout {
                 }
                 track.spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
             }
-            Action::Track { object, link } => {
+            Action::Track {
+                robot,
+                object,
+                link,
+            } => {
+                let r = self.action_robot(robot)?;
                 self.world
-                    .set_joint_positions(self.q.clone())
+                    .set_joint_positions_for(r, self.robots[r].q.clone())
                     .map_err(|e| err(e.to_string()))?;
-                self.latch_track(object, link.as_deref())?;
+                self.latch_track(r, object, link.as_deref())?;
             }
-            Action::Untrack => self.release_track(),
+            Action::Untrack { robot } => {
+                let r = self.action_robot(robot)?;
+                self.release_track(r);
+            }
             Action::Set { signal, value } => {
                 let t = self.t;
                 let track = self
@@ -1213,19 +1419,27 @@ impl Rollout {
         &mut self.objects[index]
     }
 
-    fn append_waypoint(&mut self, t: f64, q: Vec<f64>, v: Vec<f64>) {
-        let last = *self.times.last().expect("seeded with t = 0");
-        if t <= last + 1e-9 {
-            return;
-        }
-        self.times.push(t);
-        self.positions.push(q);
-        self.velocities.push(v);
-    }
-
     fn finish(mut self) -> SequenceTimeline {
         let duration = self.t;
-        self.append_waypoint(duration, self.q.clone(), vec![0.0; self.q.len()]);
+        let names: Vec<String> = self.world.robots().iter().map(|r| r.name.clone()).collect();
+        let robots = self
+            .robots
+            .into_iter()
+            .zip(names)
+            .map(|(mut rt, name)| {
+                let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
+                rt.append_waypoint(duration, q, zeros);
+                RobotTrack {
+                    name,
+                    trajectory: JointTrajectory {
+                        times: rt.times,
+                        positions: rt.positions,
+                        velocities: rt.velocities,
+                    },
+                    moves: rt.moves,
+                }
+            })
+            .collect();
         for track in &mut self.objects {
             if let Some(open) = track.spans.last_mut() {
                 *open.end_mut() = duration;
@@ -1233,11 +1447,7 @@ impl Rollout {
         }
         SequenceTimeline {
             duration,
-            robot: JointTrajectory {
-                times: self.times,
-                positions: self.positions,
-                velocities: self.velocities,
-            },
+            robots,
             objects: self.objects,
             signals: self.signals,
             step_spans: self.step_spans,
@@ -1274,10 +1484,6 @@ pub(crate) mod tests {
         Scene::new(Arc::new(
             botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
         ))
-    }
-
-    pub(crate) fn limits() -> botrail_traj::Limits {
-        botrail_traj::Limits::uniform(1, 1.0, 2.0)
     }
 
     fn joint_motion(scene: &mut Scene, name: &str, goal: f64) {
@@ -1327,9 +1533,7 @@ pub(crate) mod tests {
             ],
         });
         let options = RolloutOptions::default();
-        let tl = scene
-            .simulate_sequence("cycle", &options, &limits())
-            .unwrap();
+        let tl = scene.simulate_sequence("cycle", &options).unwrap();
 
         assert_eq!(tl.step_spans.len(), 3);
         let run = &tl.step_spans[0];
@@ -1337,16 +1541,16 @@ pub(crate) mod tests {
         let ret = &tl.step_spans[2];
         // Step boundaries quantize up to the scan period.
         assert!(run.start == 0.0 && run.end > 0.2);
-        assert!((tl.robot.sample(run.end)[0] - 0.8).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(run.end)[0] - 0.8).abs() < 1e-9);
         let wait_len = wait.end - wait.start;
         assert!(
             (0.5 - 1e-9..=0.5 + options.dt + 1e-9).contains(&wait_len),
             "wait_len = {wait_len}"
         );
         // The robot holds still through the wait.
-        assert!((tl.robot.sample(wait.start + 0.25)[0] - 0.8).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(wait.start + 0.25)[0] - 0.8).abs() < 1e-9);
         // The return motion starts where the previous ended and comes home.
-        assert!((tl.robot.sample(tl.duration)[0]).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(tl.duration)[0]).abs() < 1e-9);
         assert!((ret.end - tl.duration).abs() < 1e-12);
         // Cycle time covers both motions plus the wait.
         assert!(tl.duration > run.end + 0.5);
@@ -1362,6 +1566,7 @@ pub(crate) mod tests {
                 step(
                     "ramp",
                     vec![Action::StartRamp {
+                        robot: None,
                         targets: vec![("j".into(), 0.6)],
                         duration: 0.3,
                     }],
@@ -1386,12 +1591,12 @@ pub(crate) mod tests {
             ],
         });
         let tl = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
 
         // Cubic rest-to-rest ramp: exact midpoint halfway through.
-        assert!((tl.robot.sample(0.15)[0] - 0.3).abs() < 1e-9);
-        assert!((tl.robot.sample(0.3)[0] - 0.6).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(0.15)[0] - 0.3).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(0.3)[0] - 0.6).abs() < 1e-9);
         // mark + gate resolve in the same scan tick as the ramp's Done.
         let flag = &tl.signals[0];
         assert_eq!(flag.edges.first(), Some(&(0.0, false)));
@@ -1426,6 +1631,7 @@ pub(crate) mod tests {
                 step(
                     "grasp",
                     vec![Action::Attach {
+                        robot: None,
                         object: "box".into(),
                         link: None,
                         touch_links: None,
@@ -1450,7 +1656,7 @@ pub(crate) mod tests {
             ],
         });
         let tl = scene
-            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .simulate_sequence("pick", &RolloutOptions::default())
             .unwrap();
 
         assert_eq!(tl.objects.len(), 1);
@@ -1460,19 +1666,21 @@ pub(crate) mod tests {
         let TrackSpan::Follow {
             t0,
             t1,
+            robot,
             link,
             offset,
         } = &track.spans[0]
         else {
             panic!("expected follow span, got {track:?}");
         };
-        assert!(*t0 == 0.0 && *t1 > 0.2 && *link == 1);
+        assert!(*t0 == 0.0 && *t1 > 0.2 && *robot == 0 && *link == 1);
         // Mid-motion the box rides FK ∘ grasp.
         let t_mid = (t0 + t1) / 2.0;
-        let q = tl.robot.sample(t_mid);
+        let q = tl.robots[0].trajectory.sample(t_mid);
         let poses = scene.fk(&q).unwrap();
         let expected = poses[*link] * offset;
-        let via_track = SequenceTimeline::object_pose(track, &poses, t_mid).unwrap();
+        let via_track =
+            SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), t_mid).unwrap();
         assert!((via_track.translation.vector - expected.translation.vector).norm() < 1e-12);
         // After detach it holds at the rotated position for the rest.
         let TrackSpan::Hold {
@@ -1512,6 +1720,7 @@ pub(crate) mod tests {
                 step(
                     "grasp",
                     vec![Action::Attach {
+                        robot: None,
                         object: "box".into(),
                         link: None,
                         touch_links: None,
@@ -1528,7 +1737,7 @@ pub(crate) mod tests {
             ],
         });
         let tl = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
         // Before the grasp the object rests at its scene pose (the track
         // tiles [0, duration] with a leading Hold).
@@ -1538,8 +1747,9 @@ pub(crate) mod tests {
         };
         assert!(*t0 == 0.0 && (*t1 - 0.4).abs() < 0.011);
         assert!((pose.translation.vector - Vector3::new(0.1, 0.0, 0.5)).norm() < 1e-12);
-        let poses = scene.fk(&tl.robot.sample(0.2)).unwrap();
-        let early = SequenceTimeline::object_pose(track, &poses, 0.2).unwrap();
+        let poses = scene.fk(&tl.robots[0].trajectory.sample(0.2)).unwrap();
+        let early =
+            SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), 0.2).unwrap();
         assert!((early.translation.vector - Vector3::new(0.1, 0.0, 0.5)).norm() < 1e-12);
         assert!(matches!(track.spans[1], TrackSpan::Follow { .. }));
     }
@@ -1555,7 +1765,7 @@ pub(crate) mod tests {
                 steps,
             });
             let err = s
-                .simulate_sequence("bad", &RolloutOptions::default(), &limits())
+                .simulate_sequence("bad", &RolloutOptions::default())
                 .unwrap_err();
             let msg = err.to_string();
             assert!(
@@ -1597,6 +1807,7 @@ pub(crate) mod tests {
             vec![step(
                 "x",
                 vec![Action::StartRamp {
+                    robot: None,
                     targets: vec![("j".into(), 5.0)],
                     duration: 0.2,
                 }],
@@ -1613,6 +1824,7 @@ pub(crate) mod tests {
                         motion: "go".into(),
                     },
                     Action::StartRamp {
+                        robot: None,
                         targets: vec![("j".into(), 0.1)],
                         duration: 0.2,
                     },
@@ -1643,7 +1855,7 @@ pub(crate) mod tests {
             ..RolloutOptions::default()
         };
         assert!(matches!(
-            scene.simulate_sequence("stuck", &options, &limits()),
+            scene.simulate_sequence("stuck", &options),
             Err(SeqError::Timeout { .. })
         ));
 
@@ -1659,12 +1871,12 @@ pub(crate) mod tests {
             ..RolloutOptions::default()
         };
         assert!(matches!(
-            scene.simulate_sequence("chain", &tight, &limits()),
+            scene.simulate_sequence("chain", &tight),
             Err(SeqError::ImmediateLoop { .. })
         ));
         // Under the limit the chain is fine (zero-duration sequence).
         let ok = scene
-            .simulate_sequence("chain", &RolloutOptions::default(), &limits())
+            .simulate_sequence("chain", &RolloutOptions::default())
             .unwrap();
         assert_eq!(ok.duration, 0.0);
         assert_eq!(ok.step_spans.len(), 10);
@@ -1695,14 +1907,17 @@ pub(crate) mod tests {
             ],
         });
         let a = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
         let b = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
         assert_eq!(a.duration, b.duration);
-        assert_eq!(a.robot.times, b.robot.times);
-        assert_eq!(a.robot.positions, b.robot.positions);
+        assert_eq!(a.robots[0].trajectory.times, b.robots[0].trajectory.times);
+        assert_eq!(
+            a.robots[0].trajectory.positions,
+            b.robots[0].trajectory.positions
+        );
         assert_eq!(a.step_spans.len(), b.step_spans.len());
     }
 
@@ -1722,7 +1937,7 @@ pub(crate) mod tests {
             )],
         });
         let tl = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
         // Initially-true signal lets the gate pass at t = 0.
         assert_eq!(tl.duration, 0.0);
@@ -1807,9 +2022,7 @@ mod device_tests {
             ],
         });
         let options = RolloutOptions::default();
-        let tl = scene
-            .simulate_sequence("feed", &options, &limits())
-            .unwrap();
+        let tl = scene.simulate_sequence("feed", &options).unwrap();
 
         // Contact when the box face (half 0.02) meets the beam surface
         // (radius 0.005): origin at -0.025, i.e. 0.475 m / 0.25 m/s = 1.9 s.
@@ -1829,8 +2042,12 @@ mod device_tests {
         let track = &tl.objects[0];
         assert!(matches!(track.spans[0], TrackSpan::Linear { .. }));
         assert!(matches!(track.spans.last(), Some(TrackSpan::Hold { .. })));
-        let poses = scene.fk(&tl.robot.sample(tl.duration)).unwrap();
-        let end_pose = SequenceTimeline::object_pose(track, &poses, tl.duration).unwrap();
+        let poses = scene
+            .fk(&tl.robots[0].trajectory.sample(tl.duration))
+            .unwrap();
+        let end_pose =
+            SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), tl.duration)
+                .unwrap();
         let travelled = end_pose.translation.x - (-0.5);
         assert!(
             (travelled - 0.25 * feed_end).abs() < 1e-9,
@@ -1880,24 +2097,25 @@ mod device_tests {
             ],
         });
         let options = RolloutOptions::default();
-        let tl = scene
-            .simulate_sequence("open", &options, &limits())
-            .unwrap();
+        let tl = scene.simulate_sequence("open", &options).unwrap();
 
         // 0.3 m at 0.5 m/s = 0.6 s (+ scan quantization).
         let raise_end = tl.step_spans[0].end;
         assert!((raise_end - 0.6).abs() <= options.dt + 1e-9, "{raise_end}");
         // The door lands exactly 0.3 above its rest height.
         let track = &tl.objects[0];
-        let poses = scene.fk(&tl.robot.sample(tl.duration)).unwrap();
-        let end = SequenceTimeline::object_pose(track, &poses, tl.duration).unwrap();
+        let poses = scene
+            .fk(&tl.robots[0].trajectory.sample(tl.duration))
+            .unwrap();
+        let end = SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), tl.duration)
+            .unwrap();
         assert!(
             (end.translation.z - 0.5).abs() < 1e-12,
             "{}",
             end.translation.z
         );
         // Mid-travel sampling is linear (exact at 0.3 s: half way).
-        let mid = SequenceTimeline::object_pose(track, &poses, 0.3).unwrap();
+        let mid = SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), 0.3).unwrap();
         assert!(
             (mid.translation.z - 0.35).abs() < 1e-9,
             "{}",
@@ -1936,7 +2154,7 @@ mod device_tests {
         });
         // The arm is already inside the curtain at rest: fires at t = 0.
         let tl = scene
-            .simulate_sequence("s", &RolloutOptions::default(), &limits())
+            .simulate_sequence("s", &RolloutOptions::default())
             .unwrap();
         assert_eq!(tl.duration, 0.0);
         let lane = tl.signals.iter().find(|s| s.name == "curtain").unwrap();
@@ -1970,7 +2188,7 @@ mod device_tests {
                 steps,
             });
             let err = s
-                .simulate_sequence("bad", &RolloutOptions::default(), &limits())
+                .simulate_sequence("bad", &RolloutOptions::default())
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(needle), "expected `{needle}` in `{err}`");
@@ -2025,6 +2243,394 @@ mod device_tests {
 }
 
 #[cfg(test)]
+mod multi_actor_tests {
+    use super::*;
+    use crate::motion::{Segment, SegmentKind};
+    use crate::seq::{Sensor, SensorKind, SensorWatch, Step};
+    use botrail_model::Geometry;
+    use nalgebra::{Translation3, UnitQuaternion, Vector3};
+    use std::sync::Arc;
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    /// §1 in miniature: two 1-DOF sliders face each other across a shared
+    /// middle band. Fully extended rods overlap; one at a time clears.
+    const SLIDER: &str = r#"
+        <robot name="slider">
+          <link name="base"/>
+          <link name="rod">
+            <visual>
+              <origin xyz="0 0.25 0"/>
+              <geometry><box size="0.08 0.5 0.08"/></geometry>
+            </visual>
+          </link>
+          <joint name="s" type="prismatic">
+            <parent link="base"/><child link="rod"/>
+            <origin xyz="0 0 0.3"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="0" upper="0.6" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+
+    /// Robots `a` (pushing +y from y = -0.75) and `b` (mirrored at +0.75),
+    /// with the interlock zone over the shared band y ∈ [-0.2, 0.2] watching
+    /// only `a`. Motions: `<r>_in` extends into the band, `<r>_out` retreats.
+    fn dual_cell() -> Scene {
+        let model = Arc::new(botrail_model::RobotModel::from_urdf_str(SLIDER).unwrap());
+        let mut scene = crate::Scene::with_base(model.clone(), iso(0.0, -0.75, 0.0));
+        scene.rename_robot(0, "a");
+        let flipped = Isometry3::from_parts(
+            Translation3::new(0.0, 0.75, 0.0),
+            UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), std::f64::consts::PI),
+        );
+        scene.add_robot(model, Some("b"), flipped);
+        for (robot, name, goal) in [
+            (0, "a_in", 0.45),
+            (0, "a_out", 0.0),
+            (1, "b_in", 0.45),
+            (1, "b_out", 0.0),
+        ] {
+            scene
+                .add_segment_for(
+                    robot,
+                    name,
+                    Segment {
+                        kind: SegmentKind::Joint,
+                        goal_positions: vec![goal],
+                        constraints: vec![],
+                    },
+                )
+                .unwrap();
+        }
+        scene.upsert_sensor(Sensor {
+            name: "zone".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.3),
+                size: Vector3::new(0.4, 0.4, 0.4),
+            },
+            watch: SensorWatch::Robots(vec!["a".into()]),
+        });
+        scene
+    }
+
+    /// The §1 scenario with the interlock in place: A works the shared band
+    /// first, B waits for the zone to clear, both retreats run concurrently,
+    /// and the whole cycle bakes deterministically.
+    #[test]
+    fn zone_interlock_serializes_the_shared_band() {
+        let mut scene = dual_cell();
+        scene.upsert_sequence(Sequence {
+            name: "cell".into(),
+            steps: vec![
+                step(
+                    "A enter",
+                    vec![Action::StartMotion {
+                        motion: "a_in".into(),
+                    }],
+                    Condition::Done,
+                ),
+                // Async: A retreats while B already waits on the interlock.
+                step(
+                    "A retreat",
+                    vec![Action::StartMotion {
+                        motion: "a_out".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "B interlock",
+                    vec![],
+                    Condition::Signal {
+                        name: "zone".into(),
+                        value: false,
+                    },
+                ),
+                step(
+                    "B enter",
+                    vec![Action::StartMotion {
+                        motion: "b_in".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "B retreat",
+                    vec![Action::StartMotion {
+                        motion: "b_out".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "cycle end",
+                    vec![],
+                    Condition::All(vec![
+                        Condition::RobotDone { robot: "a".into() },
+                        Condition::RobotDone { robot: "b".into() },
+                    ]),
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("cell", &RolloutOptions::default())
+            .unwrap();
+
+        assert_eq!(tl.robots.len(), 2);
+        assert_eq!(tl.robots[0].name, "a");
+        assert_eq!(tl.robots[1].name, "b");
+        // Both arms actually ran their strokes.
+        let a_moves = &tl.robots[0].moves;
+        let b_moves = &tl.robots[1].moves;
+        assert_eq!(
+            a_moves.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["a_in", "a_out"]
+        );
+        assert_eq!(
+            b_moves.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["b_in", "b_out"]
+        );
+        // Concurrency: B enters while A is still retreating (the interlock
+        // released on zone exit, not on A's completion)...
+        assert!(
+            b_moves[0].start < a_moves[1].end - 1e-9,
+            "B started at {} but A finished retreating at {}",
+            b_moves[0].start,
+            a_moves[1].end
+        );
+        // ...but never before A cleared the shared band (the zone lane's
+        // falling edge).
+        let zone = tl.signals.iter().find(|s| s.name == "zone").unwrap();
+        let cleared = zone
+            .edges
+            .iter()
+            .rev()
+            .find(|(_, v)| !*v)
+            .map(|(t, _)| *t)
+            .unwrap();
+        assert!(b_moves[0].start >= cleared - 1e-9);
+        // The cycle ends when both robots are idle (RobotDone × 2).
+        let last_end = a_moves[1].end.max(b_moves[1].end);
+        assert!((tl.duration - last_end).abs() <= 0.011, "{}", tl.duration);
+
+        // Deterministic: an identical run bakes bit-identical tracks.
+        let again = scene
+            .simulate_sequence("cell", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(tl.duration, again.duration);
+        for (x, y) in tl.robots.iter().zip(&again.robots) {
+            assert_eq!(x.trajectory.times, y.trajectory.times);
+            assert_eq!(x.trajectory.positions, y.trajectory.positions);
+        }
+    }
+
+    /// Without the interlock both rods sweep into the band mid-flight —
+    /// each plan was valid against the other's *frozen* pose — and the tick
+    /// verification reports the collision with its time.
+    #[test]
+    fn dropping_the_interlock_reports_a_robot_collision() {
+        let mut scene = dual_cell();
+        scene.upsert_sequence(Sequence {
+            name: "clash".into(),
+            steps: vec![step(
+                "both enter",
+                vec![
+                    Action::StartMotion {
+                        motion: "a_in".into(),
+                    },
+                    Action::StartMotion {
+                        motion: "b_in".into(),
+                    },
+                ],
+                Condition::Done,
+            )],
+        });
+        let err = scene
+            .simulate_sequence("clash", &RolloutOptions::default())
+            .unwrap_err();
+        let SeqError::RobotCollision {
+            t, a, b, link_a, ..
+        } = &err
+        else {
+            panic!("expected RobotCollision, got {err}");
+        };
+        assert_eq!((a.as_str(), b.as_str()), ("a", "b"));
+        assert!(*t > 0.1 && *t < 1.0, "t = {t}");
+        assert!(link_a.contains("rod"));
+        let msg = err.to_string();
+        assert!(msg.contains("interlock"), "{msg}");
+    }
+
+    /// A handover writes as detach → attach: the object's track follows
+    /// robot `a`, holds, then follows robot `b`.
+    #[test]
+    fn handover_switches_the_carrier() {
+        let mut scene = dual_cell();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.0, 0.0, 0.3),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "pass".into(),
+            steps: vec![
+                step(
+                    "A grasp",
+                    vec![Action::Attach {
+                        robot: Some("a".into()),
+                        object: "box".into(),
+                        link: None,
+                        touch_links: None,
+                    }],
+                    Condition::Elapsed { seconds: 0.2 },
+                ),
+                step(
+                    "A place",
+                    vec![Action::Detach {
+                        object: "box".into(),
+                    }],
+                    Condition::Elapsed { seconds: 0.2 },
+                ),
+                step(
+                    "B grasp",
+                    vec![Action::Attach {
+                        robot: Some("b".into()),
+                        object: "box".into(),
+                        link: None,
+                        touch_links: None,
+                    }],
+                    Condition::Elapsed { seconds: 0.2 },
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("pass", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.objects[0];
+        let carriers: Vec<Option<usize>> = track
+            .spans
+            .iter()
+            .map(|s| match s {
+                TrackSpan::Follow { robot, .. } => Some(*robot),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carriers, [Some(0), None, Some(1)], "{track:?}");
+        // The live scene is untouched.
+        assert!(scene.attachments().is_empty());
+    }
+
+    /// Multi-robot authoring rules: ambiguous `robot=None`, double attach,
+    /// two drivers on one arm, and unknown robots in `robot_done`.
+    #[test]
+    fn multi_actor_validation_rules() {
+        let scene = dual_cell();
+        let check = |steps: Vec<Step>, needle: &str| {
+            let mut s = scene.clone();
+            s.add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.0, 0.0, 0.3),
+            )
+            .unwrap();
+            s.upsert_sequence(Sequence {
+                name: "bad".into(),
+                steps,
+            });
+            let err = s
+                .simulate_sequence("bad", &RolloutOptions::default())
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, SeqError::Validation { .. }) && msg.contains(needle),
+                "expected `{needle}` in `{msg}`"
+            );
+        };
+        // With two robots, an unaddressed ramp is ambiguous.
+        check(
+            vec![step(
+                "x",
+                vec![Action::StartRamp {
+                    robot: None,
+                    targets: vec![("s".into(), 0.1)],
+                    duration: 0.2,
+                }],
+                Condition::Done,
+            )],
+            "give the action a robot",
+        );
+        // One driver per robot per step; a second on the same arm is out.
+        check(
+            vec![step(
+                "x",
+                vec![
+                    Action::StartMotion {
+                        motion: "a_in".into(),
+                    },
+                    Action::StartRamp {
+                        robot: Some("a".into()),
+                        targets: vec![("s".into(), 0.1)],
+                        duration: 0.2,
+                    },
+                ],
+                Condition::Done,
+            )],
+            "per robot",
+        );
+        // One carrier at a time — a handover needs the detach in between.
+        check(
+            vec![
+                step(
+                    "a grabs",
+                    vec![Action::Attach {
+                        robot: Some("a".into()),
+                        object: "box".into(),
+                        link: None,
+                        touch_links: None,
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "b grabs too",
+                    vec![Action::Attach {
+                        robot: Some("b".into()),
+                        object: "box".into(),
+                        link: None,
+                        touch_links: None,
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+            "already attached",
+        );
+        // robot_done must name a robot that exists.
+        check(
+            vec![step(
+                "x",
+                vec![],
+                Condition::RobotDone {
+                    robot: "ghost".into(),
+                },
+            )],
+            "unknown robot",
+        );
+    }
+}
+
+#[cfg(test)]
 mod tracking_tests {
     use super::*;
     use crate::seq::{Action, Condition, Device, DeviceKind, Sequence, Step};
@@ -2074,10 +2680,6 @@ mod tracking_tests {
         ))
     }
 
-    fn limits() -> botrail_traj::Limits {
-        botrail_traj::Limits::uniform(3, 1.0, 2.0)
-    }
-
     /// Belt at 0.2 m/s with the part starting under the taught pose.
     fn cell() -> Scene {
         let mut scene = gantry();
@@ -2104,7 +2706,7 @@ mod tracking_tests {
     }
 
     fn tool_pose(scene: &Scene, q: &[f64]) -> Isometry3<f64> {
-        let link = scene.robot.link_index("tool").unwrap();
+        let link = scene.robot().link_index("tool").unwrap();
         scene.fk(q).unwrap()[link]
     }
 
@@ -2119,6 +2721,7 @@ mod tracking_tests {
                 step(
                     "latch",
                     vec![Action::Track {
+                        robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
                     }],
@@ -2127,6 +2730,7 @@ mod tracking_tests {
                 step(
                     "descend",
                     vec![Action::StartRamp {
+                        robot: None,
                         // taught: straight down onto the part at x = 0
                         targets: vec![("jz".into(), 0.05)],
                         duration: 0.5,
@@ -2136,13 +2740,13 @@ mod tracking_tests {
             ],
         });
         let tl = scene
-            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .simulate_sequence("pick", &RolloutOptions::default())
             .unwrap();
         assert!((tl.duration - 0.5).abs() < 1e-9, "{}", tl.duration);
 
         // The part has travelled 0.2 * 0.5 = 0.1 m; so has the tool, which
         // also completed the taught 0.35 m descent.
-        let end = tool_pose(&scene, &tl.robot.sample(tl.duration));
+        let end = tool_pose(&scene, &tl.robots[0].trajectory.sample(tl.duration));
         assert!(
             (end.translation.x - 0.1).abs() < 1e-4,
             "{}",
@@ -2156,7 +2760,7 @@ mod tracking_tests {
         // Mid-ramp the tool sits over the part throughout, not behind it.
         for i in 0..=10 {
             let t = tl.duration * f64::from(i) / 10.0;
-            let pose = tool_pose(&scene, &tl.robot.sample(t));
+            let pose = tool_pose(&scene, &tl.robots[0].trajectory.sample(t));
             assert!(
                 (pose.translation.x - 0.2 * t).abs() < 1e-3,
                 "t={t}: tool x {} vs part {}",
@@ -2177,6 +2781,7 @@ mod tracking_tests {
                 step(
                     "latch",
                     vec![Action::Track {
+                        robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
                     }],
@@ -2185,6 +2790,7 @@ mod tracking_tests {
                 step(
                     "descend",
                     vec![Action::StartRamp {
+                        robot: None,
                         targets: vec![("jz".into(), 0.05)],
                         duration: 0.5,
                     }],
@@ -2193,6 +2799,7 @@ mod tracking_tests {
                 step(
                     "grasp",
                     vec![Action::Attach {
+                        robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
                         touch_links: Some(vec!["tool".into()]),
@@ -2202,16 +2809,21 @@ mod tracking_tests {
                 step(
                     "lift",
                     vec![Action::StartRamp {
+                        robot: None,
                         targets: vec![("jz".into(), 0.4)],
                         duration: 0.5,
                     }],
                     Condition::Done,
                 ),
-                step("release", vec![Action::Untrack], Condition::Immediately),
+                step(
+                    "release",
+                    vec![Action::Untrack { robot: None }],
+                    Condition::Immediately,
+                ),
             ],
         });
         let tl = scene
-            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .simulate_sequence("pick", &RolloutOptions::default())
             .unwrap();
         let track = tl
             .objects
@@ -2219,11 +2831,11 @@ mod tracking_tests {
             .find(|o| o.name == "part")
             .expect("the grasped part is tracked");
         let poses = |t: f64| {
-            let q = tl.robot.sample(t);
+            let q = tl.robots[0].trajectory.sample(t);
             let link_poses = scene.fk(&q).unwrap();
             (
                 tool_pose(&scene, &q),
-                SequenceTimeline::object_pose(track, &link_poses, t).unwrap(),
+                SequenceTimeline::object_pose(track, std::slice::from_ref(&link_poses), t).unwrap(),
             )
         };
         let (_, at_grasp) = poses(0.5);
@@ -2246,21 +2858,26 @@ mod tracking_tests {
                 step(
                     "latch",
                     vec![Action::Track {
+                        robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
                     }],
                     Condition::Immediately,
                 ),
                 step("follow", vec![], Condition::Elapsed { seconds: 0.5 }),
-                step("release", vec![Action::Untrack], Condition::Immediately),
+                step(
+                    "release",
+                    vec![Action::Untrack { robot: None }],
+                    Condition::Immediately,
+                ),
                 step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
             ],
         });
         let tl = scene
-            .simulate_sequence("pick", &RolloutOptions::default(), &limits())
+            .simulate_sequence("pick", &RolloutOptions::default())
             .unwrap();
-        let at_release = tool_pose(&scene, &tl.robot.sample(0.5));
-        let at_end = tool_pose(&scene, &tl.robot.sample(tl.duration));
+        let at_release = tool_pose(&scene, &tl.robots[0].trajectory.sample(0.5));
+        let at_end = tool_pose(&scene, &tl.robots[0].trajectory.sample(tl.duration));
         assert!((at_release.translation.x - 0.1).abs() < 1e-4);
         assert!(
             (at_end.translation.vector - at_release.translation.vector).norm() < 1e-9,
@@ -2313,6 +2930,7 @@ mod tracking_tests {
                 step(
                     "latch",
                     vec![Action::Track {
+                        robot: None,
                         object: "part".into(),
                         link: Some("left".into()),
                     }],
@@ -2321,6 +2939,7 @@ mod tracking_tests {
                 step(
                     "close",
                     vec![Action::StartRamp {
+                        robot: None,
                         targets: vec![("finger_left".into(), 0.02)],
                         duration: 0.4,
                     }],
@@ -2329,11 +2948,7 @@ mod tracking_tests {
             ],
         });
         let err = scene
-            .simulate_sequence(
-                "s",
-                &RolloutOptions::default(),
-                &botrail_traj::Limits::uniform(3, 1.0, 2.0),
-            )
+            .simulate_sequence("s", &RolloutOptions::default())
             .expect_err("the gripper joint moves the servoed link")
             .to_string();
         assert!(err.contains("fights the track"), "{err}");
@@ -2362,12 +2977,13 @@ mod tracking_tests {
                 steps,
             });
             let err = scene
-                .simulate_sequence("s", &RolloutOptions::default(), &limits())
+                .simulate_sequence("s", &RolloutOptions::default())
                 .expect_err("expected `{needle}`")
                 .to_string();
             assert!(err.contains(needle), "expected `{needle}` in `{err}`");
         };
         let track = || Action::Track {
+            robot: None,
             object: "part".into(),
             link: None,
         };
@@ -2380,7 +2996,11 @@ mod tracking_tests {
             "already tracking",
         );
         check(
-            vec![step("loose", vec![Action::Untrack], Condition::Immediately)],
+            vec![step(
+                "loose",
+                vec![Action::Untrack { robot: None }],
+                Condition::Immediately,
+            )],
             "without an active track",
         );
         check(
@@ -2400,6 +3020,7 @@ mod tracking_tests {
             vec![step(
                 "ghost",
                 vec![Action::Track {
+                    robot: None,
                     object: "nope".into(),
                     link: None,
                 }],

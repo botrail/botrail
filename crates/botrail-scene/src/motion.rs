@@ -81,6 +81,10 @@ pub struct Segment {
 #[derive(Debug, Clone)]
 pub struct Motion {
     pub name: String,
+    /// Owning robot (index into `Scene::robots`): the goal configurations
+    /// are in this robot's DOF order and planning drives this robot (every
+    /// other robot is a frozen collision body).
+    pub robot: usize,
     pub segments: Vec<Segment>,
 }
 
@@ -130,11 +134,17 @@ impl Default for CartesianOptions {
     }
 }
 
-fn constraints_ok(scene: &Scene, q: &[f64], constraints: &[Constraint], tcp: usize) -> bool {
+fn constraints_ok(
+    scene: &Scene,
+    robot: usize,
+    q: &[f64],
+    constraints: &[Constraint],
+    tcp: usize,
+) -> bool {
     if constraints.is_empty() {
         return true;
     }
-    let Ok(poses) = scene.fk(q) else {
+    let Ok(poses) = scene.fk_for(robot, q) else {
         return false;
     };
     let pose = &poses[tcp];
@@ -166,8 +176,10 @@ fn joint_distance(a: &[f64], b: &[f64]) -> f64 {
 /// Follows a straight TCP line from `start_q` toward the TCP pose of
 /// `goal_q` with seed-continuous IK. Returns the joint path (both endpoints
 /// included; the final configuration is the IK-followed one).
+#[allow(clippy::too_many_arguments)]
 fn cartesian_line(
     scene: &Scene,
+    robot: usize,
     start_q: &[f64],
     goal_q: &[f64],
     constraints: &[Constraint],
@@ -182,8 +194,12 @@ fn cartesian_line(
     };
     // World-frame TCP poses; the base pose cancels out of the interpolated
     // targets only through solve_ik_world's re-expression.
-    let start_pose = scene.fk(start_q).map_err(|e| fail(0.0, &e.to_string()))?[tcp];
-    let goal_pose = scene.fk(goal_q).map_err(|e| fail(0.0, &e.to_string()))?[tcp];
+    let start_pose = scene
+        .fk_for(robot, start_q)
+        .map_err(|e| fail(0.0, &e.to_string()))?[tcp];
+    let goal_pose = scene
+        .fk_for(robot, goal_q)
+        .map_err(|e| fail(0.0, &e.to_string()))?[tcp];
 
     let dist = (goal_pose.translation.vector - start_pose.translation.vector).norm();
     let angle = start_pose.rotation.angle_to(&goal_pose.rotation);
@@ -209,7 +225,7 @@ fn cartesian_line(
             start_pose.rotation.slerp(&goal_pose.rotation, u),
         );
         let ik = scene
-            .solve_ik_world(tcp, &target, &q, &ik_options)
+            .solve_ik_world_for(robot, tcp, &target, &q, &ik_options)
             .map_err(|e| fail(u, &e.to_string()))?;
         if !ik.converged {
             return Err(fail(u, "IK did not converge (unreachable along the line)"));
@@ -217,10 +233,10 @@ fn cartesian_line(
         if joint_distance(&ik.q, &q) > options.jump_threshold {
             return Err(fail(u, "configuration jump (IK branch change)"));
         }
-        if !scene.is_state_valid(&ik.q) {
+        if !scene.is_state_valid_for(robot, &ik.q) {
             return Err(fail(u, "collision or joint limit violation"));
         }
-        if !constraints_ok(scene, &ik.q, constraints, tcp) {
+        if !constraints_ok(scene, robot, &ik.q, constraints, tcp) {
             return Err(fail(u, "constraint violation"));
         }
         q = ik.q.clone();
@@ -229,31 +245,35 @@ fn cartesian_line(
     Ok(path)
 }
 
-/// Plans one segment from `start_q`; returns the joint path.
+/// Plans one segment of robot `robot` from `start_q`; returns the joint
+/// path.
 fn plan_segment(
     scene: &Scene,
+    robot: usize,
     start_q: &[f64],
     segment: &Segment,
     tcp: usize,
     index: usize,
     plan_options: &botrail_plan::PlanOptions,
 ) -> Result<Vec<Vec<f64>>, MotionError> {
-    if segment.goal_positions.len() != scene.robot.dof() {
+    let model = &scene.robots()[robot].model;
+    if segment.goal_positions.len() != model.dof() {
         return Err(MotionError::WrongDof {
             index,
-            expected: scene.robot.dof(),
+            expected: model.dof(),
             got: segment.goal_positions.len(),
         });
     }
-    if !constraints_ok(scene, start_q, &segment.constraints, tcp) {
+    if !constraints_ok(scene, robot, start_q, &segment.constraints, tcp) {
         return Err(MotionError::StartViolatesConstraints { index });
     }
     match segment.kind {
         SegmentKind::Joint => {
-            let (lower, upper) = scene.robot.sampling_bounds();
+            let (lower, upper) = model.sampling_bounds();
             let space = botrail_plan::JointSpace { lower, upper };
             let mut is_valid = |q: &[f64]| {
-                scene.is_state_valid(q) && constraints_ok(scene, q, &segment.constraints, tcp)
+                scene.is_state_valid_for(robot, q)
+                    && constraints_ok(scene, robot, q, &segment.constraints, tcp)
             };
             botrail_plan::plan(
                 &space,
@@ -266,6 +286,7 @@ fn plan_segment(
         }
         SegmentKind::CartesianLine => cartesian_line(
             scene,
+            robot,
             start_q,
             &segment.goal_positions,
             &segment.constraints,
@@ -276,9 +297,29 @@ fn plan_segment(
     }
 }
 
-/// Plans every segment of `motion` starting from the scene's current
-/// configuration, time-parameterizes each segment (rest-to-rest at segment
-/// boundaries, teach-pendant style), and concatenates the results.
+/// Trajectory limits from the model: joint velocity limits (defaulting to
+/// 1 rad/s where unspecified) and acceleration at twice the velocity bound
+/// (URDF has no acceleration field; reaches peak speed in 0.5s).
+pub fn traj_limits(model: &botrail_model::RobotModel) -> botrail_traj::Limits {
+    let velocity: Vec<f64> = model
+        .actuated_joints
+        .iter()
+        .map(|&ji| match model.joints[ji].limits {
+            Some(l) if l.velocity > 0.0 => l.velocity,
+            _ => 1.0,
+        })
+        .collect();
+    let acceleration = velocity.iter().map(|v| 2.0 * v).collect();
+    botrail_traj::Limits {
+        velocity,
+        acceleration,
+    }
+}
+
+/// Plans every segment of `motion` — driving its owning robot, with every
+/// other robot as a frozen collision body — starting from that robot's
+/// current configuration, time-parameterizes each segment (rest-to-rest at
+/// segment boundaries, teach-pendant style), and concatenates the results.
 pub fn plan_motion(
     scene: &Scene,
     motion: &Motion,
@@ -288,16 +329,17 @@ pub fn plan_motion(
     if motion.segments.is_empty() {
         return Err(MotionError::EmptyMotion(motion.name.clone()));
     }
-    let tcp = scene.robot.default_tcp_link();
+    let robot = motion.robot;
+    let tcp = scene.robots()[robot].model.default_tcp_link();
     let timing = botrail_traj::TimingOptions::default();
 
-    let mut current = scene.joint_positions().to_vec();
+    let mut current = scene.robots()[robot].joint_positions().to_vec();
     let mut combined: Option<JointTrajectory> = None;
     let mut segment_ends = Vec::with_capacity(motion.segments.len());
     let mut segments = Vec::with_capacity(motion.segments.len());
 
     for (index, segment) in motion.segments.iter().enumerate() {
-        let path = plan_segment(scene, &current, segment, tcp, index, plan_options)?;
+        let path = plan_segment(scene, robot, &current, segment, tcp, index, plan_options)?;
         current = path.last().expect("paths are non-empty").clone();
         let traj = botrail_traj::time_parameterize(&path, limits, &timing)?;
         combined = Some(match combined {
@@ -366,6 +408,7 @@ mod tests {
         let scene = scene();
         let motion = Motion {
             name: "m".into(),
+            robot: 0,
             segments: vec![
                 seg(SegmentKind::Joint, vec![0.6, 0.4, -0.5, 0.2, 0.0, 0.0]),
                 seg(SegmentKind::Joint, vec![-0.4, 0.8, -1.0, 0.0, 0.3, 0.0]),
@@ -402,6 +445,7 @@ mod tests {
         let g2 = vec![-0.4, 0.8, -1.0, 0.0, 0.3, 0.0];
         let motion = Motion {
             name: "m".into(),
+            robot: 0,
             segments: vec![
                 seg(SegmentKind::Joint, g1.clone()),
                 seg(SegmentKind::Joint, g2.clone()),
@@ -446,7 +490,7 @@ mod tests {
         let start = vec![0.0, 1.1, -0.6, -0.5, 0.0, 0.0];
         let mut scene = scene;
         scene.set_joint_positions(start.clone()).unwrap();
-        let tcp = scene.robot.default_tcp_link();
+        let tcp = scene.robot().default_tcp_link();
         let start_pose = scene.link_poses()[tcp];
 
         // Goal configuration: IK to a pose 8cm lower, same orientation.
@@ -455,7 +499,7 @@ mod tests {
             start_pose.rotation,
         );
         let ik = botrail_kin::solve_ik(
-            &scene.robot,
+            scene.robot(),
             tcp,
             &target,
             &start,
@@ -466,6 +510,7 @@ mod tests {
 
         let path = cartesian_line(
             &scene,
+            0,
             &start,
             &ik.q,
             &[],
@@ -476,7 +521,7 @@ mod tests {
         .unwrap();
         // Every follow point's TCP lies on the straight segment (within tol).
         for q in &path {
-            let pose = botrail_kin::forward_kinematics(&scene.robot, q).unwrap()[tcp];
+            let pose = botrail_kin::forward_kinematics(scene.robot(), q).unwrap()[tcp];
             let p = pose.translation.vector;
             let a = start_pose.translation.vector;
             let b = target.translation.vector;
@@ -490,13 +535,14 @@ mod tests {
             );
         }
         let final_pose =
-            botrail_kin::forward_kinematics(&scene.robot, path.last().unwrap()).unwrap()[tcp];
+            botrail_kin::forward_kinematics(scene.robot(), path.last().unwrap()).unwrap()[tcp];
         assert!((final_pose.translation.vector - target.translation.vector).norm() < 1e-3);
 
         // Planned as a motion, the segment retains the IK follow path
         // (deterministic, so it matches the direct call above).
         let motion = Motion {
             name: "descend".into(),
+            robot: 0,
             segments: vec![seg(SegmentKind::CartesianLine, ik.q.clone())],
         };
         let planned = plan_motion(
@@ -521,7 +567,7 @@ mod tests {
         scene.set_robot_base_pose(base);
         let start = vec![0.0, 1.1, -0.6, -0.5, 0.0, 0.0];
         scene.set_joint_positions(start.clone()).unwrap();
-        let tcp = scene.robot.default_tcp_link();
+        let tcp = scene.robot().default_tcp_link();
         let start_pose = scene.link_poses()[tcp];
 
         // World-frame goal: 8cm straight down from the current TCP.
@@ -536,6 +582,7 @@ mod tests {
 
         let path = cartesian_line(
             &scene,
+            0,
             &start,
             &ik.q,
             &[],
@@ -579,6 +626,7 @@ mod tests {
         };
         let motion = Motion {
             name: "m".into(),
+            robot: 0,
             segments: vec![Segment {
                 kind: SegmentKind::Joint,
                 goal_positions: vec![FRAC_PI_2, FRAC_PI_2, 0.0, 0.0, 0.0, 0.0],
@@ -593,11 +641,17 @@ mod tests {
         )
         .unwrap();
         // Constraint holds along the sampled trajectory.
-        let tcp = scene.robot.default_tcp_link();
+        let tcp = scene.robot().default_tcp_link();
         let mut t = 0.0;
         while t <= planned.trajectory.duration() {
             let q = planned.trajectory.sample(t);
-            assert!(constraints_ok(&scene, &q, std::slice::from_ref(&cone), tcp));
+            assert!(constraints_ok(
+                &scene,
+                0,
+                &q,
+                std::slice::from_ref(&cone),
+                tcp
+            ));
             t += 0.1;
         }
     }
@@ -608,6 +662,7 @@ mod tests {
         // Upright start: tool +z points up, but the cone demands +x.
         let motion = Motion {
             name: "m".into(),
+            robot: 0,
             segments: vec![Segment {
                 kind: SegmentKind::Joint,
                 goal_positions: vec![0.0; 6],
@@ -630,10 +685,63 @@ mod tests {
     }
 
     #[test]
+    fn plan_detours_around_a_second_robot() {
+        let mut scene = scene();
+        // Robot 0 leans 1.2 rad toward +x; the goal is the same lean panned
+        // to -x. The straight joint interpolation sweeps the leaning arm
+        // through +y — straight at a second arm standing upright there.
+        let lean = vec![0.0, 1.2, 0.0, 0.0, 0.0, 0.0];
+        scene.set_joint_positions(lean.clone()).unwrap();
+        let blocker = Arc::new(RobotModel::from_urdf_str(ARM).unwrap());
+        scene.add_robot(
+            blocker,
+            Some("blocker"),
+            nalgebra::Isometry3::from_parts(
+                nalgebra::Translation3::new(0.0, 0.55, 0.0),
+                nalgebra::UnitQuaternion::identity(),
+            ),
+        );
+        let goal = vec![std::f64::consts::PI, 1.2, 0.0, 0.0, 0.0, 0.0];
+        let mid = vec![std::f64::consts::FRAC_PI_2, 1.2, 0.0, 0.0, 0.0, 0.0];
+        assert!(scene.is_state_valid_for(0, &lean));
+        assert!(scene.is_state_valid_for(0, &goal));
+        // The naive sweep collides with the second robot…
+        assert!(!scene.is_state_valid_for(0, &mid));
+        // …so the planner must detour, and every densified sample of the
+        // result stays clear of it.
+        let motion = Motion {
+            name: "swing".into(),
+            robot: 0,
+            segments: vec![seg(SegmentKind::Joint, goal.clone())],
+        };
+        let planned = plan_motion(
+            &scene,
+            &motion,
+            &botrail_plan::PlanOptions::default(),
+            &limits(),
+        )
+        .unwrap();
+        let traj = &planned.trajectory;
+        let end = traj.sample(traj.duration());
+        for (a, b) in end.iter().zip(&goal) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        let mut t = 0.0;
+        while t <= traj.duration() {
+            assert!(
+                scene.is_state_valid_for(0, &traj.sample(t)),
+                "collides with the second robot at t = {t}"
+            );
+            t += 0.05;
+        }
+    }
+
+    #[test]
     fn empty_motion_is_rejected() {
         let scene = scene();
         let motion = Motion {
             name: "empty".into(),
+            robot: 0,
             segments: vec![],
         };
         assert!(matches!(

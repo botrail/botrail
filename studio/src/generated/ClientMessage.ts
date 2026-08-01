@@ -7,4 +7,29 @@ import type { SegmentMsg } from "./SegmentMsg";
 import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
 
-export type ClientMessage = { "type": "set_joint_positions", positions: Array<number>, } | { "type": "set_tcp_target", link: string, pose: PoseMsg, } | { "type": "set_robot_base_pose", pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request", goal_positions: Array<number>, } | { "type": "add_segment", motion: string, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, };
+export type ClientMessage = { "type": "set_joint_positions", 
+/**
+ * Target robot instance name; `None` means the first robot.
+ */
+robot: string | null, positions: Array<number>, } | { "type": "set_tcp_target", 
+/**
+ * Target robot instance name; `None` means the first robot.
+ */
+robot: string | null, link: string, pose: PoseMsg, } | { "type": "set_robot_base_pose", 
+/**
+ * Target robot instance name; `None` means the first robot.
+ */
+robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string, 
+/**
+ * Carrying robot instance name; `None` means the first robot.
+ */
+robot: string | null, link: string | null, touch_links: Array<string> | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request", 
+/**
+ * Target robot instance name; `None` means the first robot.
+ */
+robot: string | null, goal_positions: Array<number>, } | { "type": "add_segment", motion: string, 
+/**
+ * Owner when the motion is created (an existing motion keeps its
+ * owner); `None` means the first robot.
+ */
+robot: string | null, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, };

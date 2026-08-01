@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { ActionMsg, ConditionMsg, SequenceMsg, StepMsg } from "../protocol";
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import { sendSimulateSequence, sendUpsertSequence } from "../ws";
 
 const SEQUENCE_NAME = "main";
@@ -43,6 +43,8 @@ function conditionLabel(condition: ConditionMsg): string {
       return "→";
     case "done":
       return "done";
+    case "robot_done":
+      return `${condition.robot} done`;
     case "elapsed":
       return `${condition.seconds.toFixed(2)}s`;
     case "signal":
@@ -61,7 +63,11 @@ export function SequencePanel() {
   const sequences = useStudioStore((s) => s.sequences);
   const motions = useStudioStore((s) => s.motions);
   const selection = useStudioStore((s) => s.selection);
-  const tcpLink = useStudioStore((s) => s.tcpLink);
+  // Grasp steps attach with the selected robot at its TCP link.
+  const selectedRobot = useStudioStore((s) => s.selectedRobot);
+  const tcpLink = useStudioStore(
+    (s) => robotByName(s.robots, s.selectedRobot)?.tcpLink ?? null,
+  );
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const error = useStudioStore((s) => s.sequenceError);
   const timeline = useStudioStore((s) => s.timeline);
@@ -104,7 +110,13 @@ export function SequencePanel() {
     append({
       name: `grasp ${short(selectedObstacle)}`,
       actions: [
-        { type: "attach", object: selectedObstacle, link: tcpLink, touch_links: null },
+        {
+          type: "attach",
+          robot: selectedRobot,
+          object: selectedObstacle,
+          link: tcpLink,
+          touch_links: null,
+        },
       ],
       transition: { type: "immediately" },
     });

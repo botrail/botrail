@@ -1,15 +1,14 @@
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 
-/** TCP gizmo controls: target link, gizmo mode, and IK feedback. */
+/** TCP gizmo controls for the selected robot: link, mode, IK feedback. */
 export function TcpPanel() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const tcpLink = useStudioStore((s) => s.tcpLink);
+  const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const setTcpLink = useStudioStore((s) => s.setTcpLink);
   const gizmoMode = useStudioStore((s) => s.gizmoMode);
   const setGizmoMode = useStudioStore((s) => s.setGizmoMode);
-  const ikStatus = useStudioStore((s) => s.ikStatus);
 
-  if (!sceneDesc) return null;
+  if (!robot) return null;
+  const ikStatus = robot.ikStatus;
 
   return (
     <section className="panel-section">
@@ -28,10 +27,10 @@ export function TcpPanel() {
         <label className="field">
           <span className="field-label">link</span>
           <select
-            value={tcpLink ?? ""}
-            onChange={(e) => setTcpLink(e.target.value)}
+            value={robot.tcpLink ?? ""}
+            onChange={(e) => setTcpLink(robot.desc.name, e.target.value)}
           >
-            {sceneDesc.links.map((l) => (
+            {robot.desc.links.map((l) => (
               <option key={l.name} value={l.name}>
                 {l.name}
               </option>

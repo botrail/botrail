@@ -3,4 +3,8 @@
 /**
  * One side of a collision pair.
  */
-export type ColliderRefMsg = { "kind": "link", name: string, } | { "kind": "obstacle", name: string, };
+export type ColliderRefMsg = { "kind": "link", 
+/**
+ * Owning robot instance name.
+ */
+robot: string, name: string, } | { "kind": "obstacle", name: string, };

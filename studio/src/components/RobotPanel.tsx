@@ -1,38 +1,55 @@
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import { sendRobotBasePose } from "../ws";
 
 /**
- * Robot base placement: the drag gizmo plus snap-to-frame (named mount
- * points imported from scene files).
+ * Robot selection and base placement: the instance selector (when several
+ * robots share the scene), the drag gizmo toggle, and snap-to-frame (named
+ * mount points imported from scene files).
  */
 export function RobotPanel() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const basePose = useStudioStore((s) => s.basePose);
+  const robots = useStudioStore((s) => s.robots);
+  const selectedRobot = useStudioStore((s) => s.selectedRobot);
+  const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const frames = useStudioStore((s) => s.frames);
   const selection = useStudioStore((s) => s.selection);
   const selectRobot = useStudioStore((s) => s.selectRobot);
   const selectTcp = useStudioStore((s) => s.selectTcp);
+  const setSelectedRobot = useStudioStore((s) => s.setSelectedRobot);
 
-  if (!sceneDesc || !basePose) return null;
-  const placing = selection.type === "robot";
-  const [x, y, z] = basePose.position;
+  if (!robot || selectedRobot === null) return null;
+  const placing = selection.type === "robot" && selection.robot === selectedRobot;
+  const [x, y, z] = robot.basePose.position;
 
   const onSnap = (name: string) => {
     const frame = frames.find((f) => f.name === name);
-    if (frame) sendRobotBasePose(frame.pose);
+    if (frame) sendRobotBasePose(selectedRobot, frame.pose);
   };
 
   return (
     <section className="panel-section">
       <div className="panel-head">
         <h2>Robot</h2>
-        <span className="badge">{sceneDesc.robot_name}</span>
+        {robots.length > 1 ? (
+          <select
+            value={selectedRobot}
+            onChange={(e) => setSelectedRobot(e.target.value)}
+            title="which robot the panels operate on"
+          >
+            {robots.map((r) => (
+              <option key={r.desc.name} value={r.desc.name}>
+                {r.desc.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="badge">{robot.desc.name}</span>
+        )}
       </div>
       <div className="tcp-controls">
         <div className="seg">
           <button
             className={placing ? "active" : ""}
-            onClick={() => (placing ? selectTcp() : selectRobot())}
+            onClick={() => (placing ? selectTcp() : selectRobot(selectedRobot))}
           >
             {placing ? "Done placing" : "Place base"}
           </button>

@@ -2,4 +2,8 @@
 import type { DeviceCommandMsg } from "./DeviceCommandMsg";
 import type { RampTargetMsg } from "./RampTargetMsg";
 
-export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_ramp", targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", object: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach", object: string, } | { "type": "track", object: string, link: string | null, } | { "type": "untrack" } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };
+/**
+ * Robot-addressed actions carry `robot` — the instance name, or `None`
+ * for the scene's sole robot (ambiguous, and rejected, with several).
+ */
+export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_ramp", robot: string | null, targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", robot: string | null, object: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach", object: string, } | { "type": "track", robot: string | null, object: string, link: string | null, } | { "type": "untrack", robot: string | null, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };

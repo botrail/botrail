@@ -9,8 +9,11 @@
 //! - Extracted meshes are materialized as content-hashed binary STL files
 //!   in the cache, so the existing mesh pipeline (VHACD collision cache,
 //!   `/meshes` serving, studio display) applies unchanged.
-//! - USD articulations (robots) are a later phase; this pass imports
-//!   geometry only.
+//! - USD articulation subtrees (robots) are NOT imported as geometry —
+//!   they would otherwise become static obstacles the robot self-collides
+//!   with. Their root prim paths are reported via
+//!   [`ImportedScene::robot_roots`]; import them with
+//!   [`import_robot`].
 //!
 //! Filtering: only visible, default-purpose prims are imported (guide /
 //! proxy / render are skipped). Leaf `Xform`/`Scope` prims with no children
@@ -97,6 +100,10 @@ pub struct ImportedScene {
     /// `nodes`/`frames` is already normalized to Z-up; clients rendering
     /// the *original* stage themselves need this to match.
     pub up_axis: &'static str,
+    /// Root prim paths of articulations found (and skipped) in the stage —
+    /// the discovery handle for importing each robot via [`import_robot`]
+    /// with `articulation_root`.
+    pub robot_roots: Vec<String>,
 }
 
 impl Default for ImportedScene {
@@ -106,6 +113,7 @@ impl Default for ImportedScene {
             frames: Vec::new(),
             warnings: Vec::new(),
             up_axis: "Y",
+            robot_roots: Vec::new(),
         }
     }
 }
@@ -272,6 +280,17 @@ impl Importer<'_> {
 
         let prim = view.prim();
         let path = prim.path().to_string();
+        // An articulation subtree is a robot, not scenery: importing its
+        // links as static obstacles would make the robot self-collide with
+        // its own rest-pose geometry. Skip the subtree wholesale and report
+        // the root so callers can import it via `import_robot`.
+        if prim
+            .has_api_schema("PhysicsArticulationRootAPI")
+            .unwrap_or(false)
+        {
+            self.out.robot_roots.push(path);
+            return Ok(());
+        }
         let visible =
             view.compute_visibility().unwrap_or(Visibility::Inherited) != Visibility::Invisible;
         let renderable = view.compute_purpose().unwrap_or_default() == Purpose::Default;
@@ -789,6 +808,69 @@ def Xform "Bin"
             ..Default::default()
         };
         (import_usd(&cell, &options).unwrap(), dir)
+    }
+
+    /// A Z-up cell containing scenery AND an articulated robot: the robot
+    /// subtree must be skipped (reported via `robot_roots`), the crate kept.
+    const CELL_WITH_ROBOT: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Cube "Crate"
+    {
+        double size = 0.2
+    }
+
+    def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "geom"
+            {
+                double size = 0.1
+            }
+        }
+
+        def Xform "Mount"
+        {
+        }
+    }
+
+    def Xform "PickFrame"
+    {
+    }
+}
+"#;
+
+    #[test]
+    fn articulation_subtrees_are_skipped_and_reported() {
+        let dir =
+            std::env::temp_dir().join(format!("botrail-usd-robotskip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cell.usda");
+        std::fs::write(&path, CELL_WITH_ROBOT).unwrap();
+        let scene = import_usd(&path, &ImportOptions::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The robot's link geometry did NOT become an obstacle, and nothing
+        // under the robot became a frame — but the rest of the cell did.
+        assert_eq!(scene.robot_roots, vec!["/World/Robot"]);
+        assert!(!scene
+            .nodes
+            .iter()
+            .any(|n| n.name.starts_with("/World/Robot")));
+        assert!(scene
+            .frames
+            .iter()
+            .all(|f| !f.name.starts_with("/World/Robot")));
+        assert_eq!(scene.nodes.len(), 1);
+        assert_eq!(scene.nodes[0].name, "/World/Crate");
+        assert!(scene.frames.iter().any(|f| f.name == "/World/PickFrame"));
     }
 
     fn node<'a>(scene: &'a ImportedScene, name: &str) -> &'a ImportedNode {

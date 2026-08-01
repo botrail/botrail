@@ -22,7 +22,7 @@ use parry3d_f64::query;
 use parry3d_f64::shape::SharedShape;
 use thiserror::Error;
 
-pub use acm::{detect_always_colliding, Acm};
+pub use acm::{detect_always_colliding, Acm, InterRobotAcm};
 pub use convert::to_parry_pose;
 
 #[derive(Debug, Error)]
@@ -38,7 +38,12 @@ type Parts = Vec<(Pose, SharedShape)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColliderId {
-    Link(usize),
+    /// A robot link: `robot` indexes the `robots` slice passed to
+    /// [`check_scene`], `link` the model's links.
+    Link {
+        robot: usize,
+        link: usize,
+    },
     Obstacle(usize),
     /// Index into the `attached` slice passed to [`check_scene`].
     Attached(usize),
@@ -50,11 +55,22 @@ pub struct CollisionPair {
     pub b: ColliderId,
 }
 
+/// One robot's collision inputs for [`check_scene`] /
+/// [`min_robot_obstacle_distance`]: its colliders, its world link poses
+/// (aligned with the model's links), and its intra-robot ACM.
+pub struct RobotQuery<'a> {
+    pub collider: &'a RobotCollider,
+    pub link_poses: &'a [Isometry3<f64>],
+    pub acm: &'a Acm,
+}
+
 /// An obstacle rigidly attached to a robot link (a grasped object): its
-/// world pose is `link_poses[link] * offset` at query time, so it moves with
-/// the robot. `skip_links` are links allowed to touch it — the carrying link
-/// and e.g. gripper fingers.
+/// world pose is `robots[robot].link_poses[link] * offset` at query time, so
+/// it moves with that robot. `skip_links` are links *of the carrying robot*
+/// allowed to touch it — the carrying link and e.g. gripper fingers; links
+/// of other robots are always checked.
 pub struct AttachedCollider<'a> {
+    pub robot: usize,
     pub link: usize,
     pub offset: Isometry3<f64>,
     pub collider: &'a ObstacleCollider,
@@ -252,65 +268,96 @@ fn parts_distance(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> Option<
     min
 }
 
-/// Checks self-collision (non-ACM link pairs), robot-vs-obstacle collision,
-/// and attached-object collision. `link_poses` must align with the model's
-/// links; obstacles are `(world_pose, collider)` pairs whose index becomes
+/// Checks, for every robot in `robots`: self-collision (non-ACM link
+/// pairs), robot-vs-robot collision (all cross-robot link pairs minus
+/// `inter_acm`), robot-vs-obstacle collision, and attached-object collision.
+/// Each robot's `link_poses` must align with its model's links; obstacles
+/// are `(world_pose, collider)` pairs whose index becomes
 /// `ColliderId::Obstacle`; attached objects (index → `ColliderId::Attached`)
-/// ride their carrying link and are checked against links (minus
-/// `skip_links`), obstacles, and each other.
+/// ride their carrying robot's link and are checked against all robots'
+/// links (minus the carrier's `skip_links`), obstacles, and each other.
 pub fn check_scene(
-    robot: &RobotCollider,
-    link_poses: &[Isometry3<f64>],
-    acm: &Acm,
+    robots: &[RobotQuery<'_>],
+    inter_acm: &InterRobotAcm,
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
 ) -> Vec<CollisionPair> {
-    let world: Vec<Pose> = link_poses.iter().map(to_parry_pose).collect();
+    let world: Vec<Vec<Pose>> = robots
+        .iter()
+        .map(|r| r.link_poses.iter().map(to_parry_pose).collect())
+        .collect();
     let mut pairs = Vec::new();
-    for i in 0..robot.links.len() {
-        if robot.links[i].is_empty() {
-            continue;
-        }
-        for j in (i + 1)..robot.links.len() {
-            if robot.links[j].is_empty() || acm.allows(i, j) {
+    for (r, robot) in robots.iter().enumerate() {
+        let links = &robot.collider.links;
+        for i in 0..links.len() {
+            if links[i].is_empty() {
                 continue;
             }
-            if parts_intersect(&world[i], &robot.links[i], &world[j], &robot.links[j]) {
-                pairs.push(CollisionPair {
-                    a: ColliderId::Link(i),
-                    b: ColliderId::Link(j),
-                });
+            for j in (i + 1)..links.len() {
+                if links[j].is_empty() || robot.acm.allows(i, j) {
+                    continue;
+                }
+                if parts_intersect(&world[r][i], &links[i], &world[r][j], &links[j]) {
+                    pairs.push(CollisionPair {
+                        a: ColliderId::Link { robot: r, link: i },
+                        b: ColliderId::Link { robot: r, link: j },
+                    });
+                }
+            }
+        }
+    }
+    for r1 in 0..robots.len() {
+        for r2 in (r1 + 1)..robots.len() {
+            for (i, parts_i) in robots[r1].collider.links.iter().enumerate() {
+                if parts_i.is_empty() {
+                    continue;
+                }
+                for (j, parts_j) in robots[r2].collider.links.iter().enumerate() {
+                    if parts_j.is_empty() || inter_acm.allows((r1, i), (r2, j)) {
+                        continue;
+                    }
+                    if parts_intersect(&world[r1][i], parts_i, &world[r2][j], parts_j) {
+                        pairs.push(CollisionPair {
+                            a: ColliderId::Link { robot: r1, link: i },
+                            b: ColliderId::Link { robot: r2, link: j },
+                        });
+                    }
+                }
             }
         }
     }
     for (k, (obs_pose, obs)) in obstacles.iter().enumerate() {
         let op = to_parry_pose(obs_pose);
-        for (i, parts) in robot.links.iter().enumerate() {
-            if parts.is_empty() {
-                continue;
-            }
-            if parts_intersect(&world[i], parts, &op, &obs.parts) {
-                pairs.push(CollisionPair {
-                    a: ColliderId::Link(i),
-                    b: ColliderId::Obstacle(k),
-                });
+        for (r, robot) in robots.iter().enumerate() {
+            for (i, parts) in robot.collider.links.iter().enumerate() {
+                if parts.is_empty() {
+                    continue;
+                }
+                if parts_intersect(&world[r][i], parts, &op, &obs.parts) {
+                    pairs.push(CollisionPair {
+                        a: ColliderId::Link { robot: r, link: i },
+                        b: ColliderId::Obstacle(k),
+                    });
+                }
             }
         }
     }
     let att_world: Vec<Pose> = attached
         .iter()
-        .map(|a| to_parry_pose(&(link_poses[a.link] * a.offset)))
+        .map(|a| to_parry_pose(&(robots[a.robot].link_poses[a.link] * a.offset)))
         .collect();
     for (k, att) in attached.iter().enumerate() {
-        for (i, parts) in robot.links.iter().enumerate() {
-            if parts.is_empty() || att.skip_links.contains(&i) {
-                continue;
-            }
-            if parts_intersect(&world[i], parts, &att_world[k], &att.collider.parts) {
-                pairs.push(CollisionPair {
-                    a: ColliderId::Link(i),
-                    b: ColliderId::Attached(k),
-                });
+        for (r, robot) in robots.iter().enumerate() {
+            for (i, parts) in robot.collider.links.iter().enumerate() {
+                if parts.is_empty() || (r == att.robot && att.skip_links.contains(&i)) {
+                    continue;
+                }
+                if parts_intersect(&world[r][i], parts, &att_world[k], &att.collider.parts) {
+                    pairs.push(CollisionPair {
+                        a: ColliderId::Link { robot: r, link: i },
+                        b: ColliderId::Attached(k),
+                    });
+                }
             }
         }
         for (j, (obs_pose, obs)) in obstacles.iter().enumerate() {
@@ -339,29 +386,33 @@ pub fn check_scene(
     pairs
 }
 
-/// Minimum distance between the robot side (links plus attached objects)
-/// and any obstacle (0 when colliding). `None` when there is nothing to
-/// measure.
+/// Minimum distance between the robot side (every robot's links plus
+/// attached objects) and any obstacle (0 when colliding). `None` when there
+/// is nothing to measure. Robot-robot clearance is not included.
 pub fn min_robot_obstacle_distance(
-    robot: &RobotCollider,
-    link_poses: &[Isometry3<f64>],
+    robots: &[RobotQuery<'_>],
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
 ) -> Option<f64> {
-    let world: Vec<Pose> = link_poses.iter().map(to_parry_pose).collect();
+    let world: Vec<Vec<Pose>> = robots
+        .iter()
+        .map(|r| r.link_poses.iter().map(to_parry_pose).collect())
+        .collect();
     let att_world: Vec<Pose> = attached
         .iter()
-        .map(|a| to_parry_pose(&(link_poses[a.link] * a.offset)))
+        .map(|a| to_parry_pose(&(robots[a.robot].link_poses[a.link] * a.offset)))
         .collect();
     let mut min: Option<f64> = None;
     for (obs_pose, obs) in obstacles {
         let op = to_parry_pose(obs_pose);
-        for (i, parts) in robot.links.iter().enumerate() {
-            if parts.is_empty() {
-                continue;
-            }
-            if let Some(d) = parts_distance(&world[i], parts, &op, &obs.parts) {
-                min = Some(min.map_or(d, |m| m.min(d)));
+        for (r, robot) in robots.iter().enumerate() {
+            for (i, parts) in robot.collider.links.iter().enumerate() {
+                if parts.is_empty() {
+                    continue;
+                }
+                if let Some(d) = parts_distance(&world[r][i], parts, &op, &obs.parts) {
+                    min = Some(min.map_or(d, |m| m.min(d)));
+                }
             }
         }
         for (k, att) in attached.iter().enumerate() {
@@ -416,23 +467,109 @@ mod tests {
         Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
     }
 
+    /// A one-robot query slice for the pre-multi-robot call shape.
+    fn solo<'a>(
+        collider: &'a RobotCollider,
+        link_poses: &'a [Isometry3<f64>],
+        acm: &'a Acm,
+    ) -> [RobotQuery<'a>; 1] {
+        [RobotQuery {
+            collider,
+            link_poses,
+            acm,
+        }]
+    }
+
+    fn link(robot: usize, link: usize) -> ColliderId {
+        ColliderId::Link { robot, link }
+    }
+
     #[test]
     fn self_collision_respects_acm() {
         let (model, collider, acm) = stack();
         // q = 0: a, b, c all coincide. a-b and b-c are adjacent (allowed);
         // only the non-adjacent a-c pair must be reported.
         let poses = botrail_kin::forward_kinematics(&model, &[0.0, 0.0]).unwrap();
-        let pairs = check_scene(&collider, &poses, &acm, &[], &[]);
+        let pairs = check_scene(
+            &solo(&collider, &poses, &acm),
+            &InterRobotAcm::default(),
+            &[],
+            &[],
+        );
         assert_eq!(
             pairs,
             vec![CollisionPair {
-                a: ColliderId::Link(0),
-                b: ColliderId::Link(2),
+                a: link(0, 0),
+                b: link(0, 2),
             }]
         );
         // Separate all three: no collisions.
         let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
-        assert!(check_scene(&collider, &poses, &acm, &[], &[]).is_empty());
+        assert!(check_scene(
+            &solo(&collider, &poses, &acm),
+            &InterRobotAcm::default(),
+            &[],
+            &[]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn robots_collide_with_each_other_unless_allowed() {
+        let (model, collider, acm) = stack();
+        // Two copies of the separated stack: robot 0 at the origin, robot 1
+        // shifted so its link a (at z=0) overlaps robot 0's link b (z=0.5).
+        let poses_a = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let shift = iso(0.0, 0.0, 0.5);
+        let poses_b: Vec<Isometry3<f64>> = poses_a.iter().map(|p| shift * p).collect();
+        let robots = [
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses_a,
+                acm: &acm,
+            },
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses_b,
+                acm: &acm,
+            },
+        ];
+        // Overlaps: (0,b)-(1,a) coincide at z=0.5, (0,c)-(1,b) at z=1.0.
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[]);
+        assert_eq!(
+            pairs,
+            vec![
+                CollisionPair {
+                    a: link(0, 1),
+                    b: link(1, 0),
+                },
+                CollisionPair {
+                    a: link(0, 2),
+                    b: link(1, 1),
+                },
+            ]
+        );
+        // Allowing both cross pairs silences them; intra-robot checks stay.
+        let mut inter = InterRobotAcm::default();
+        inter.allow((0, 1), (1, 0));
+        inter.allow((1, 1), (0, 2)); // reversed order must normalize
+        assert!(check_scene(&robots, &inter, &[], &[]).is_empty());
+
+        // Far apart: nothing regardless of the inter ACM.
+        let far: Vec<Isometry3<f64>> = poses_a.iter().map(|p| iso(5.0, 0.0, 0.0) * p).collect();
+        let robots = [
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses_a,
+                acm: &acm,
+            },
+            RobotQuery {
+                collider: &collider,
+                link_poses: &far,
+                acm: &acm,
+            },
+        ];
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[]).is_empty());
     }
 
     #[test]
@@ -443,22 +580,23 @@ mod tests {
 
         // Ball 0.3m to the side of link a (cube half-extent 0.1): gap 0.15.
         let far = [(iso(0.3, 0.0, 0.0), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &far, &[]).is_empty());
-        let d = min_robot_obstacle_distance(&collider, &poses, &far, &[]).unwrap();
+        let robots = solo(&collider, &poses, &acm);
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &far, &[]).is_empty());
+        let d = min_robot_obstacle_distance(&robots, &far, &[]).unwrap();
         assert!((d - 0.15).abs() < 1e-9, "d = {d}");
 
         // Ball overlapping link b (which sits at z = 0.5).
         let hit = [(iso(0.0, 0.0, 0.55), &ball)];
-        let pairs = check_scene(&collider, &poses, &acm, &hit, &[]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &hit, &[]);
         assert_eq!(
             pairs,
             vec![CollisionPair {
-                a: ColliderId::Link(1),
+                a: link(0, 1),
                 b: ColliderId::Obstacle(0),
             }]
         );
         assert_eq!(
-            min_robot_obstacle_distance(&collider, &poses, &hit, &[]).unwrap(),
+            min_robot_obstacle_distance(&robots, &hit, &[]).unwrap(),
             0.0
         );
     }
@@ -471,25 +609,28 @@ mod tests {
         let held = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
 
         // Sphere held 0.3m beside link c (link 2): clear of everything.
+        let robots = solo(&collider, &poses, &acm);
         let att = AttachedCollider {
+            robot: 0,
             link: 2,
             offset: iso(0.3, 0.0, 0.0),
             collider: &held,
             skip_links: &[2],
         };
-        assert!(check_scene(&collider, &poses, &acm, &[], &[att]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[att]).is_empty());
 
         // An obstacle overlapping the held sphere's *world* position
         // (0.3, 0, 1.0) — proves the offset composes with the link pose.
         let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
         let env = [(iso(0.3, 0.0, 1.0), &ball)];
         let att = AttachedCollider {
+            robot: 0,
             link: 2,
             offset: iso(0.3, 0.0, 0.0),
             collider: &held,
             skip_links: &[2],
         };
-        let pairs = check_scene(&collider, &poses, &acm, &env, &[att]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &env, &[att]);
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -502,13 +643,60 @@ mod tests {
         // from the held sphere (surface gap 0.1), links all >= 0.2 away.
         let env = [(iso(0.5, 0.0, 1.0), &ball)];
         let att = AttachedCollider {
+            robot: 0,
             link: 2,
             offset: iso(0.3, 0.0, 0.0),
             collider: &held,
             skip_links: &[2],
         };
-        let d = min_robot_obstacle_distance(&collider, &poses, &env, &[att]).unwrap();
+        let d = min_robot_obstacle_distance(&robots, &env, &[att]).unwrap();
         assert!((d - 0.1).abs() < 1e-9, "d = {d}");
+    }
+
+    #[test]
+    fn attached_object_hits_other_robots_despite_skip_links() {
+        let (model, collider, acm) = stack();
+        let poses_a = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        // Robot 1 far to the side, except its link a sits exactly where
+        // robot 0's held sphere rides (0.3, 0, 1.0).
+        let shift = iso(0.3, 0.0, 1.0);
+        let poses_b: Vec<Isometry3<f64>> = poses_a.iter().map(|p| shift * p).collect();
+        let robots = [
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses_a,
+                acm: &acm,
+            },
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses_b,
+                acm: &acm,
+            },
+        ];
+        let held = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        // skip_links names link 0 — but that only suppresses the *carrier's*
+        // (robot 0's) link 0; robot 1's link 0 must still be reported.
+        let att = AttachedCollider {
+            robot: 0,
+            link: 2,
+            offset: iso(0.3, 0.0, 0.0),
+            collider: &held,
+            skip_links: &[0, 2],
+        };
+        let pairs: Vec<CollisionPair> =
+            check_scene(&robots, &InterRobotAcm::default(), &[], &[att])
+                .into_iter()
+                .filter(|p| {
+                    matches!(p.a, ColliderId::Attached(_)) || matches!(p.b, ColliderId::Attached(_))
+                })
+                .collect();
+        assert_eq!(
+            pairs,
+            vec![CollisionPair {
+                a: link(1, 0),
+                b: ColliderId::Attached(0),
+            }]
+        );
     }
 
     #[test]
@@ -518,26 +706,29 @@ mod tests {
         let held = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
 
         // Sphere at the center of its carrying link c: touching the carrier.
+        let robots = solo(&collider, &poses, &acm);
         let overlapping = AttachedCollider {
+            robot: 0,
             link: 2,
             offset: Isometry3::identity(),
             collider: &held,
             skip_links: &[2],
         };
-        assert!(check_scene(&collider, &poses, &acm, &[], &[overlapping]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[overlapping]).is_empty());
 
         // Same but skip_links empty: the carrier contact must be reported.
         let reported = AttachedCollider {
+            robot: 0,
             link: 2,
             offset: Isometry3::identity(),
             collider: &held,
             skip_links: &[],
         };
-        let pairs = check_scene(&collider, &poses, &acm, &[], &[reported]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[reported]);
         assert_eq!(
             pairs,
             vec![CollisionPair {
-                a: ColliderId::Link(2),
+                a: link(0, 2),
                 b: ColliderId::Attached(0),
             }]
         );
@@ -559,19 +750,20 @@ mod tests {
         let acm = Acm::adjacent(&model);
         let poses = vec![Isometry3::identity()];
         let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        let robots = solo(&collider, &poses, &acm);
 
         let along_axis = [(iso(0.0, 0.0, 0.45), &ball)];
         assert_eq!(
-            check_scene(&collider, &poses, &acm, &along_axis, &[]).len(),
+            check_scene(&robots, &InterRobotAcm::default(), &along_axis, &[]).len(),
             1
         );
 
         let off_side = [(iso(0.3, 0.0, 0.0), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &off_side, &[]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &off_side, &[]).is_empty());
 
         // Beyond the cap (cylinder ends at z=0.5, ball spans 0.65..0.75).
         let beyond_cap = [(iso(0.0, 0.0, 0.7), &ball)];
-        assert!(check_scene(&collider, &poses, &acm, &beyond_cap, &[]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &beyond_cap, &[]).is_empty());
     }
 
     #[test]

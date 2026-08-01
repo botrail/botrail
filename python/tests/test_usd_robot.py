@@ -139,8 +139,8 @@ def test_studio_serves_usd_asset(robot_usd: Path) -> None:
             except OSError:
                 time.sleep(0.05)
         assert data is not None
-        asset = data["scene"]["usd_asset"]
-        assert asset == {"url": "/usd-assets/arm.usda", "articulation_root": "/Robot"}
+        asset = data["scene"]["robots"][0]["usd_asset"]
+        assert asset == {"url": "/usd-assets/0/arm.usda", "articulation_root": "/Robot"}
 
         # The referenced stage is served from the robot's directory.
         with urllib.request.urlopen(f"{server.url}{asset['url']}", timeout=1) as resp:
@@ -149,7 +149,7 @@ def test_studio_serves_usd_asset(robot_usd: Path) -> None:
 
         # Path traversal is rejected.
         try:
-            urllib.request.urlopen(f"{server.url}/usd-assets/foo/../arm.usda", timeout=1)
+            urllib.request.urlopen(f"{server.url}/usd-assets/0/foo/../arm.usda", timeout=1)
             raised = False
         except urllib.error.HTTPError as e:
             raised = e.code == 404

@@ -30,27 +30,39 @@ def motion(name: str) -> Action:
     return {"type": "start_motion", "motion": name}
 
 
-def ramp(targets: Mapping[str, float], duration: float) -> Action:
+def ramp(
+    targets: Mapping[str, float],
+    duration: float,
+    robot: Optional[str] = None,
+) -> Action:
     """Ramp joints to targets over ``duration`` s (gripper open/close);
-    await it with ``done()``."""
-    return {
+    await it with ``done()``. ``robot`` names the instance (required when
+    the scene has several robots)."""
+    action: Action = {
         "type": "start_ramp",
         "targets": [{"joint": j, "value": float(v)} for j, v in targets.items()],
         "duration": float(duration),
     }
+    if robot is not None:
+        action["robot"] = robot
+    return action
 
 
 def attach(
     obj: str,
     link: Optional[str] = None,
     touch_links: Optional[Iterable[str]] = None,
+    robot: Optional[str] = None,
 ) -> Action:
-    """Grasp: rigidly attach an obstacle at its current relative pose."""
+    """Grasp: rigidly attach an obstacle at its current relative pose.
+    ``robot`` names the carrying instance (required with several robots)."""
     action: Action = {"type": "attach", "object": obj}
     if link is not None:
         action["link"] = link
     if touch_links is not None:
         action["touch_links"] = list(touch_links)
+    if robot is not None:
+        action["robot"] = robot
     return action
 
 
@@ -59,7 +71,7 @@ def detach(obj: str) -> Action:
     return {"type": "detach", "object": obj}
 
 
-def track(obj: str, link: Optional[str] = None) -> Action:
+def track(obj: str, link: Optional[str] = None, robot: Optional[str] = None) -> Action:
     """Conveyor tracking: latch onto a moving part. Until :func:`untrack`,
     every commanded pose is carried by the part's motion since this step, so
     poses taught at the station keep meeting the part while it travels — the
@@ -69,12 +81,17 @@ def track(obj: str, link: Optional[str] = None) -> Action:
     action: Action = {"type": "track", "object": obj}
     if link is not None:
         action["link"] = link
+    if robot is not None:
+        action["robot"] = robot
     return action
 
 
-def untrack() -> Action:
+def untrack(robot: Optional[str] = None) -> Action:
     """Stop following the tracked part; the robot holds where it stands."""
-    return {"type": "untrack"}
+    action: Action = {"type": "untrack"}
+    if robot is not None:
+        action["robot"] = robot
+    return action
 
 
 def set_signal(name: str, value: bool = True) -> Action:
@@ -119,8 +136,14 @@ def immediately() -> Condition:
 
 
 def done() -> Condition:
-    """The motion/ramp started by this step has finished."""
+    """Every motion/ramp started by this step has finished."""
     return {"type": "done"}
+
+
+def robot_done(robot: str) -> Condition:
+    """The named robot has no motion/ramp in flight — whichever step
+    started it. The idle test interlocks are built from."""
+    return {"type": "robot_done", "robot": robot}
 
 
 def elapsed(seconds: float) -> Condition:

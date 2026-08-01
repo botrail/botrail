@@ -3,7 +3,7 @@ import { Canvas } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 
 import { isWasmMode } from "../backend";
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import { dropUsdScene } from "../ws";
 import { GhostRobot } from "./GhostRobot";
 import { ObstacleView } from "./ObstacleView";
@@ -19,14 +19,21 @@ import { WasmStageView } from "./WasmStageView";
 export function Viewport() {
   const connected = useStudioStore((s) => s.connection === "connected");
   const selection = useStudioStore((s) => s.selection);
-  const tcpLink = useStudioStore((s) => s.tcpLink);
+  const multi = useStudioStore((s) => s.robots.length > 1);
+  const focusedTcp = useStudioStore((s) =>
+    selection.type === "tcp"
+      ? (robotByName(s.robots, selection.robot)?.tcpLink ?? null)
+      : null,
+  );
 
+  // The robot name only disambiguates when several robots share the scene.
+  const scope = (robot: string) => (multi ? `${robot} · ` : "");
   const focusLabel =
     selection.type === "obstacle"
       ? `obstacle · ${selection.name}`
       : selection.type === "robot"
-        ? "robot base"
-        : `TCP · ${tcpLink ?? "—"}`;
+        ? `${scope(selection.robot)}robot base`
+        : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.

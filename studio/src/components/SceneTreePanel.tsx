@@ -5,16 +5,22 @@ import { useStudioStore } from "../store";
 import { sendRemoveDevice, sendRemoveSensor, sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
 
 /**
- * Hierarchy over obstacle/frame names (prim paths from USD imports group
- * naturally; flat names sit at the root). Per obstacle: show/hide (display
+ * Robots plus a hierarchy over obstacle/frame names (prim paths from USD
+ * imports group naturally; flat names sit at the root). Per robot: select
+ * (focus its TCP) and place its base. Per obstacle: show/hide (display
  * only, client-side) and a collision toggle (server-side `enabled`).
  */
 export function SceneTreePanel() {
+  const robots = useStudioStore((s) => s.robots);
+  const selectedRobot = useStudioStore((s) => s.selectedRobot);
+  const selectTcp = useStudioStore((s) => s.selectTcp);
+  const selectRobot = useStudioStore((s) => s.selectRobot);
   const obstacles = useStudioStore((s) => s.obstacles);
   const frames = useStudioStore((s) => s.frames);
   const sensors = useStudioStore((s) => s.sensors);
   const devices = useStudioStore((s) => s.devices);
   if (
+    robots.length === 0 &&
     obstacles.length === 0 &&
     frames.length === 0 &&
     sensors.length === 0 &&
@@ -27,8 +33,37 @@ export function SceneTreePanel() {
       <div className="panel-head">
         <h2>Scene</h2>
         <span className="badge muted">
+          {robots.length > 1 ? `${robots.length} robots · ` : ""}
           {obstacles.length} obj · {frames.length} frames
         </span>
+      </div>
+      <div className="scene-tree">
+        {robots.map((r) => {
+          const name = r.desc.name;
+          return (
+            <div
+              key={name}
+              className={`tree-row${selectedRobot === name ? " selected" : ""}`}
+            >
+              <span className="tree-twist" />
+              <span
+                className="tree-label"
+                title="select this robot"
+                onClick={() => selectTcp(name)}
+              >
+                {"\u{1F916} "}
+                {name}
+              </span>
+              <button
+                className="tree-toggle"
+                title="place robot base"
+                onClick={() => selectRobot(name)}
+              >
+                ⌖
+              </button>
+            </div>
+          );
+        })}
       </div>
       <Tree obstacles={obstacles} frames={frames} />
       {(sensors.length > 0 || devices.length > 0) && (
@@ -122,6 +157,7 @@ function Tree({
 function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
   const [open, setOpen] = useState(depth < 2);
   const selection = useStudioStore((s) => s.selection);
+  const selectedRobot = useStudioStore((s) => s.selectedRobot);
   const selectObstacle = useStudioStore((s) => s.selectObstacle);
   const hiddenObstacles = useStudioStore((s) => s.hiddenObstacles);
   const toggleObstacleHidden = useStudioStore((s) => s.toggleObstacleHidden);
@@ -176,11 +212,13 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
             />
           </>
         )}
-        {node.frame && (
+        {node.frame && selectedRobot !== null && (
           <button
             className="tree-toggle"
-            title="place robot base here"
-            onClick={() => node.frame && sendRobotBasePose(node.frame.pose)}
+            title={`place ${selectedRobot} base here`}
+            onClick={() =>
+              node.frame && sendRobotBasePose(selectedRobot, node.frame.pose)
+            }
           >
             ⌖
           </button>

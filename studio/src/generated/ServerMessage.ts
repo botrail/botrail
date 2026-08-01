@@ -2,11 +2,10 @@
 import type { CollisionPairMsg } from "./CollisionPairMsg";
 import type { DeviceMsg } from "./DeviceMsg";
 import type { FrameMsg } from "./FrameMsg";
-import type { IkStatusMsg } from "./IkStatusMsg";
 import type { MotionMsg } from "./MotionMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
-import type { PoseMsg } from "./PoseMsg";
+import type { RobotStateMsg } from "./RobotStateMsg";
 import type { SceneDescriptionMsg } from "./SceneDescriptionMsg";
 import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
@@ -14,19 +13,11 @@ import type { SignalDefMsg } from "./SignalDefMsg";
 import type { TimelineMsg } from "./TimelineMsg";
 import type { TrajectoryMsg } from "./TrajectoryMsg";
 
-export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "state", joint_positions: Array<number>, 
+export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "state", 
 /**
- * World pose of the robot's root link.
+ * One entry per robot, in `SceneDescriptionMsg::robots` order.
  */
-base_pose: PoseMsg, 
-/**
- * World pose per link, aligned with `SceneDescriptionMsg::links`.
- */
-link_poses: Array<PoseMsg>, 
-/**
- * Present when this state is the result of an IK solve.
- */
-ik_status: IkStatusMsg | null, 
+robots: Array<RobotStateMsg>, 
 /**
  * Colliding pairs at this configuration (empty when collision-free).
  */
@@ -34,7 +25,11 @@ collisions: Array<CollisionPairMsg>,
 /**
  * Minimum robot-obstacle distance; `null` without obstacles.
  */
-min_distance: number | null, } | { "type": "plan_result", ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
+min_distance: number | null, } | { "type": "plan_result", 
+/**
+ * Robot instance the plan is for (plays back on that robot).
+ */
+robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
 /**
  * Source layer path (display form).
  */
@@ -47,7 +42,11 @@ mode: string | null, warnings: Array<string>,
 /**
  * Playable timeline (no step/signal lanes) when ok.
  */
-timeline: TimelineMsg | null, } | { "type": "motion_result", ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
+timeline: TimelineMsg | null, } | { "type": "motion_result", 
+/**
+ * Owning robot instance (plays back on that robot).
+ */
+robot: string, ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
 /**
  * Time at which each segment ends (playback markers).
  */

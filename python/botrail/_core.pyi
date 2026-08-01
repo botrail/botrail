@@ -22,6 +22,12 @@ class Robot:
     def from_urdf_string(xml: str) -> "Robot": ...
     @staticmethod
     def from_xacro(path: Union[str, Path]) -> "Robot": ...
+    @staticmethod
+    def from_usd(
+        path: Union[str, Path],
+        articulation_root: Optional[str] = None,
+        search_paths: Optional[list[Union[str, Path]]] = None,
+    ) -> "Robot": ...
     @property
     def name(self) -> str: ...
     @property
@@ -44,14 +50,46 @@ class Robot:
     ) -> IkResult: ...
 
 class Scene:
-    def __init__(self, robot: Robot) -> None: ...
+    def __init__(
+        self,
+        robot: Robot,
+        base_position: Optional[tuple[float, float, float]] = None,
+        base_quaternion: Optional[tuple[float, float, float, float]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+    def add_robot(
+        self,
+        robot: Robot,
+        name: Optional[str] = None,
+        base_position: Optional[tuple[float, float, float]] = None,
+        base_quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> str: ...
     @property
     def robot(self) -> Robot: ...
     @property
+    def robots(self) -> list[str]: ...
+    def robot_of(self, name: str) -> Robot: ...
+    @property
+    def robot_base_pose(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
+    def robot_base_pose_of(
+        self, name: str
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
+    def set_robot_base_pose(
+        self,
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+        robot: Optional[str] = None,
+    ) -> None: ...
+    @property
     def joint_positions(self) -> list[float]: ...
-    def set_joint_positions(self, positions: list[float]) -> None: ...
+    def joint_positions_of(self, name: str) -> list[float]: ...
+    def set_joint_positions(
+        self, positions: list[float], robot: Optional[str] = None
+    ) -> None: ...
     def link_pose(
-        self, link_name: str
+        self, link_name: str, robot: Optional[str] = None
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
     def set_tcp_target(
         self,
@@ -59,6 +97,7 @@ class Scene:
         quaternion: Optional[tuple[float, float, float, float]] = None,
         link: Optional[str] = None,
         max_iters: int = 100,
+        robot: Optional[str] = None,
     ) -> IkResult: ...
     def add_box(
         self,
@@ -82,7 +121,37 @@ class Scene:
         position: tuple[float, float, float],
         quaternion: Optional[tuple[float, float, float, float]] = None,
     ) -> str: ...
+    def add_mesh(
+        self,
+        name: str,
+        path: Union[str, Path],
+        position: tuple[float, float, float],
+        scale: Optional[tuple[float, float, float]] = None,
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> str: ...
+    def load_usd(
+        self,
+        path: Union[str, Path],
+        prefix: Optional[str] = None,
+        search_paths: Optional[list[Union[str, Path]]] = None,
+    ) -> list[str]: ...
+    def add_frame(
+        self,
+        name: str,
+        position: tuple[float, float, float],
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> None: ...
+    @property
+    def frames(
+        self,
+    ) -> dict[
+        str, tuple[tuple[float, float, float], tuple[float, float, float, float]]
+    ]: ...
+    def frame(
+        self, name: str
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
     def remove_obstacle(self, name: str) -> None: ...
+    def set_obstacle_enabled(self, name: str, enabled: bool) -> None: ...
     def set_obstacle_pose(
         self,
         name: str,
@@ -99,6 +168,7 @@ class Scene:
         name: str,
         link: Optional[str] = None,
         touch_links: Optional[list[str]] = None,
+        robot: Optional[str] = None,
     ) -> None: ...
     def detach(self, name: str) -> None: ...
     @property
@@ -108,11 +178,13 @@ class Scene:
         trajectory: Trajectory,
         path: Union[str, Path],
         fps: float = 60.0,
+        robot: Optional[str] = None,
     ) -> list[str]: ...
     def play_usd_animation(
         self,
         path: Union[str, Path],
         force_transforms: bool = False,
+        robot_roots: Optional[dict[str, str]] = None,
     ) -> dict: ...
     def define_signal(self, name: str, initial: bool = False) -> None: ...
     def remove_signal(self, name: str) -> None: ...
@@ -137,6 +209,7 @@ class Scene:
         quaternion: Optional[tuple[float, float, float, float]] = None,
         watch: Optional[list[str]] = None,
         watch_robot: bool = False,
+        watch_robots: Optional[list[str]] = None,
     ) -> None: ...
     def add_beam_sensor(
         self,
@@ -146,6 +219,7 @@ class Scene:
         radius: float = 0.005,
         watch: Optional[list[str]] = None,
         watch_robot: bool = False,
+        watch_robots: Optional[list[str]] = None,
     ) -> None: ...
     def remove_sensor(self, name: str) -> None: ...
     @property
@@ -184,6 +258,7 @@ class Scene:
         max_iters: int = 10000,
         seed: Optional[int] = None,
         broadcast: bool = True,
+        robot: Optional[str] = None,
     ) -> Trajectory: ...
     def plan_to_pose(
         self,
@@ -193,6 +268,7 @@ class Scene:
         max_iters: int = 10000,
         seed: Optional[int] = None,
         broadcast: bool = True,
+        robot: Optional[str] = None,
     ) -> Trajectory: ...
     def add_segment(
         self,
@@ -205,6 +281,7 @@ class Scene:
         position_box: Optional[
             tuple[tuple[float, float, float], tuple[float, float, float]]
         ] = None,
+        robot: Optional[str] = None,
     ) -> None: ...
     def remove_segment(self, motion: str, index: int) -> None: ...
     def clear_motion(self, motion: str) -> None: ...
@@ -263,13 +340,19 @@ class SequenceTimeline:
     @property
     def duration(self) -> float: ...
     @property
+    def robots(self) -> list[str]: ...
+    @property
     def step_spans(self) -> list[tuple[str, float, float]]: ...
     @property
     def signals(self) -> list[tuple[str, list[tuple[float, bool]]]]: ...
-    def sample(self, t: float) -> list[float]: ...
+    def sample(self, t: float, robot: Optional[str] = None) -> list[float]: ...
+    def moves(
+        self, robot: Optional[str] = None
+    ) -> list[tuple[str, float, float]]: ...
     def object_pose(
         self, name: str, t: float
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
+    def robot_trajectory(self, robot: Optional[str] = None) -> Trajectory: ...
     @property
     def trajectory(self) -> Trajectory: ...
     def export_usd(

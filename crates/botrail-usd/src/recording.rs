@@ -12,10 +12,11 @@
 //!    recording (clients replay them with `setLinkTransforms`).
 //!
 //! Sampling walks the recording's own integer time codes (recorders author
-//! per frame), so no interpolation semantics leak in. The robot may live at
-//! any prim path — `/World/Robot` in a botrail export, the robot stage's
-//! own root when animation is layered directly, or wherever a simulator
-//! parked it; the link tree is located by structure.
+//! per frame), so no interpolation semantics leak in. Each robot may live
+//! at any prim path — `/World/<instance>` in a botrail export, the robot
+//! stage's own root when animation is layered directly, or wherever a
+//! simulator parked it; roots come from explicit options, the export
+//! convention, or (sole robot) structural search.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,11 @@ pub struct RecordingImportOptions {
     pub search_paths: Vec<PathBuf>,
     /// Ignore `JointStateAPI` even when present and use the transform tier.
     pub force_transforms: bool,
+    /// Explicit robot roots: `(instance name, prim path in the recording)`.
+    /// Robots not listed fall back to the export convention
+    /// (`/World/<sanitized name>`); a sole robot additionally falls back to
+    /// structural search (which cannot disambiguate identical twins).
+    pub robot_roots: Vec<(String, String)>,
 }
 
 /// How the robot part of the recording is best played back.
@@ -50,42 +56,60 @@ pub enum RecordingMode {
     Transforms,
 }
 
-pub struct ImportedRecording {
-    /// Frame times in seconds from 0 (the recording's own frame grid).
-    pub times: Vec<f64>,
+/// One robot's share of an imported recording.
+#[derive(Debug)]
+pub struct ImportedRobotRecording {
+    /// Instance name (as passed to [`import_recording`]).
+    pub name: String,
     pub mode: RecordingMode,
     /// q per frame (DOF order); present in [`RecordingMode::JointState`].
     pub joint_samples: Option<Vec<Vec<f64>>>,
     /// World link poses per frame (botrail Z-up meters), aligned with
     /// `model.links` — always present (playback and validation).
     pub link_poses: Vec<Vec<Isometry3<f64>>>,
+}
+
+#[derive(Debug)]
+pub struct ImportedRecording {
+    /// Frame times in seconds from 0 (the recording's own frame grid).
+    pub times: Vec<f64>,
+    /// One entry per robot, in input order.
+    pub robots: Vec<ImportedRobotRecording>,
     /// Obstacles that move during the recording: `(name, world pose per
     /// frame)` in the scene importer's obstacle-pose convention.
     pub object_tracks: Vec<(String, Vec<Isometry3<f64>>)>,
     pub warnings: Vec<String>,
 }
 
-/// Reads a recording composed at `path` against the given robot model.
-/// `obstacle_names` are the scene's obstacles; each is looked up by prim
-/// path (or under the export convention `/World/Env/<name>`) and gets a
-/// motion track when it actually moves.
+/// Per-robot structural facts resolved against the recording.
+struct RobotResolution {
+    name: String,
+    info: RobotStageInfo,
+    robot_up_fix: nalgebra::UnitQuaternion<f64>,
+    /// Range of this robot's links inside the tracked-path table.
+    start: usize,
+    stage_root: String,
+    model_root: String,
+}
+
+/// Reads a recording composed at `path` against the given robot models —
+/// `(instance name, model)` in scene order. `obstacle_names` are the
+/// scene's obstacles; each is looked up by prim path (or under the export
+/// convention `/World/Env/<name>`) and gets a motion track when it
+/// actually moves.
+///
+/// Robot roots resolve, per robot: an explicit entry in
+/// [`RecordingImportOptions::robot_roots`], else the export convention
+/// `/World/<sanitized name>`, else (sole robot only) a structural search.
 pub fn import_recording(
     path: &Path,
-    model: &RobotModel,
+    robots: &[(String, &RobotModel)],
     obstacle_names: &[String],
     options: &RecordingImportOptions,
 ) -> Result<ImportedRecording, UsdImportError> {
-    let (robot_stage_path, model_root) = match &model.source {
-        botrail_model::RobotSource::Usd {
-            path,
-            articulation_root,
-        } => (path.clone(), articulation_root.clone()),
-        _ => {
-            return Err(UsdImportError::Recording(
-                "recordings replay USD-sourced robots; this scene's robot came from URDF".into(),
-            ))
-        }
-    };
+    if robots.is_empty() {
+        return Err(UsdImportError::Recording("no robots".into()));
+    }
     let recording = |e: crate::export::UsdExportError| match e {
         // The shared opener speaks of "robot stages"; here it opened the
         // recording itself.
@@ -97,31 +121,82 @@ pub fn import_recording(
 
     let mut warnings = Vec::new();
     let opened = open_stage_prims(path, &options.search_paths).map_err(recording)?;
-    let stage_root = find_robot_root(&opened, &model_root, model).map_err(recording)?;
-    // The recording composes the robot subtree through whatever corrective
-    // transform it likes, so a scaled robot legitimately shows "non-rigid"
-    // here — the chain scale is handled below; drop that noise.
-    let mut info_warnings = Vec::new();
-    let info = robot_stage_info_on(&opened, &stage_root, &model_root, model, &mut info_warnings)
-        .map_err(recording)?;
-    warnings.extend(
-        info_warnings
-            .into_iter()
-            .filter(|w| !w.contains("non-rigid")),
-    );
 
-    // Botrail link axes were fixed at robot-import time by the *robot
-    // stage's* up axis: raw body axes relabel to botrail by its `F`, no
-    // matter how the recording embeds the subtree. Peel it off on the right.
-    let robot_up_fix = match stage_frame_metadata(&robot_stage_path, &options.search_paths) {
-        Ok(f) => f.up_fix,
-        Err(e) => {
-            warnings.push(format!(
-                "robot stage unreadable ({e}); assuming its axes match the recording's"
-            ));
-            opened.frame.up_fix
-        }
-    };
+    let mut resolutions: Vec<RobotResolution> = Vec::with_capacity(robots.len());
+    let mut tracked_paths: Vec<String> = Vec::new();
+    for (name, model) in robots {
+        let (robot_stage_path, model_root) = match &model.source {
+            botrail_model::RobotSource::Usd {
+                path,
+                articulation_root,
+            } => (path.clone(), articulation_root.clone()),
+            _ => {
+                return Err(UsdImportError::Recording(format!(
+                    "recordings replay USD-sourced robots; `{name}` came from URDF"
+                )))
+            }
+        };
+        let stage_root = match options.robot_roots.iter().find(|(n, _)| n == name) {
+            Some((_, root)) => {
+                if !opened.has_prim(root) {
+                    return Err(UsdImportError::Recording(format!(
+                        "robot root `{root}` (for `{name}`) not found in the recording"
+                    )));
+                }
+                root.clone()
+            }
+            None => {
+                let conventional = format!("/World/{}", sanitize_name(name));
+                if opened.has_prim(&conventional) {
+                    conventional
+                } else if robots.len() == 1 {
+                    find_robot_root(&opened, &model_root, model).map_err(recording)?
+                } else {
+                    return Err(UsdImportError::Recording(format!(
+                        "cannot locate robot `{name}` in the recording (no `{conventional}`); \
+                         pass robot_roots with its prim path"
+                    )));
+                }
+            }
+        };
+        // The recording composes the robot subtree through whatever
+        // corrective transform it likes, so a scaled robot legitimately
+        // shows "non-rigid" here — the chain scale is handled below; drop
+        // that noise.
+        let mut info_warnings = Vec::new();
+        let info =
+            robot_stage_info_on(&opened, &stage_root, &model_root, model, &mut info_warnings)
+                .map_err(recording)?;
+        warnings.extend(
+            info_warnings
+                .into_iter()
+                .filter(|w| !w.contains("non-rigid")),
+        );
+
+        // Botrail link axes were fixed at robot-import time by the *robot
+        // stage's* up axis: raw body axes relabel to botrail by its `F`, no
+        // matter how the recording embeds the subtree. Peel it off on the
+        // right.
+        let robot_up_fix = match stage_frame_metadata(&robot_stage_path, &options.search_paths) {
+            Ok(f) => f.up_fix,
+            Err(e) => {
+                warnings.push(format!(
+                    "robot stage unreadable ({e}); assuming its axes match the recording's"
+                ));
+                opened.frame.up_fix
+            }
+        };
+        let start = tracked_paths.len();
+        tracked_paths.extend(info.links.iter().map(|l| l.stage_path.clone()));
+        resolutions.push(RobotResolution {
+            name: name.clone(),
+            info,
+            robot_up_fix,
+            start,
+            stage_root,
+            model_root,
+        });
+    }
 
     // ---- obstacle prim resolution ---------------------------------------
     // Two homes per obstacle: its own prim path (an Isaac recording over
@@ -141,12 +216,8 @@ pub fn import_recording(
 
     // ---- time range: layer metadata, else scanned sample codes ----------
     let stage = &opened.stage;
-    let link_paths: Vec<String> = info.links.iter().map(|l| l.stage_path.clone()).collect();
-    let tracked_paths: Vec<String> = link_paths
-        .iter()
-        .cloned()
-        .chain(object_paths.iter().map(|(_, p)| p.clone()))
-        .collect();
+    let link_count = tracked_paths.len();
+    tracked_paths.extend(object_paths.iter().map(|(_, p)| p.clone()));
 
     let (mut start, mut end, mut tcps) = (None, None, 24.0f64);
     {
@@ -195,38 +266,75 @@ pub fn import_recording(
         .iter()
         .map(|&code| evaluate_chains(&chains, code))
         .collect();
-    let link_count = info.links.len();
 
-    // Robot links: body → link frame (`∘ K`), then stage coords → botrail:
-    // translation and the rotation's left side follow the *recording's*
-    // frame; the rotation's right side unlabels the *robot stage's* axes
-    // (the two coincide only when animation is layered straight onto the
-    // robot stage). `K` is authored in the robot stage's units; the chain's
-    // accumulated scale re-expresses it in recording units (a cm robot
-    // composed into a meter recording).
-    let ru_inv = robot_up_fix.inverse();
-    let link_poses: Vec<Vec<Isometry3<f64>>> = worlds
-        .iter()
-        .map(|frame| {
-            (0..link_count)
-                .map(|i| {
-                    let (body, scale) = frame[i];
-                    let k = info.links[i].k_inv.inverse();
-                    let k_scaled = Isometry3::from_parts(
-                        Translation3::from(k.translation.vector * scale),
-                        k.rotation,
-                    );
-                    let raw = body * k_scaled;
-                    Isometry3::from_parts(
-                        Translation3::from(
-                            info.frame.up_fix * (raw.translation.vector * info.frame.mpu),
-                        ),
-                        info.frame.up_fix * raw.rotation * ru_inv,
-                    )
-                })
-                .collect()
-        })
-        .collect();
+    // Recording frame conventions apply to every track equally.
+    let rec_frame = opened.frame;
+
+    let mut out_robots = Vec::with_capacity(robots.len());
+    for ((_, model), res) in robots.iter().zip(&resolutions) {
+        let info = &res.info;
+        let n_links = info.links.len();
+        // Robot links: body → link frame (`∘ K`), then stage coords →
+        // botrail: translation and the rotation's left side follow the
+        // *recording's* frame; the rotation's right side unlabels the
+        // *robot stage's* axes (the two coincide only when animation is
+        // layered straight onto the robot stage). `K` is authored in the
+        // robot stage's units; the chain's accumulated scale re-expresses
+        // it in recording units (a cm robot composed into a meter
+        // recording).
+        let ru_inv = res.robot_up_fix.inverse();
+        let link_poses: Vec<Vec<Isometry3<f64>>> = worlds
+            .iter()
+            .map(|frame| {
+                (0..n_links)
+                    .map(|i| {
+                        let (body, scale) = frame[res.start + i];
+                        let k = info.links[i].k_inv.inverse();
+                        let k_scaled = Isometry3::from_parts(
+                            Translation3::from(k.translation.vector * scale),
+                            k.rotation,
+                        );
+                        let raw = body * k_scaled;
+                        Isometry3::from_parts(
+                            Translation3::from(
+                                rec_frame.up_fix * (raw.translation.vector * rec_frame.mpu),
+                            ),
+                            rec_frame.up_fix * raw.rotation * ru_inv,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // ---- tier 1: JointStateAPI --------------------------------------
+        let joint_samples = if options.force_transforms {
+            None
+        } else {
+            read_joint_states(
+                stage,
+                model,
+                info,
+                &res.stage_root,
+                &res.model_root,
+                &codes,
+                &mut warnings,
+            )
+        };
+        let mode = if joint_samples.is_some() {
+            RecordingMode::JointState
+        } else {
+            RecordingMode::Transforms
+        };
+        if let Some(samples) = &joint_samples {
+            check_fk_residual(model, &link_poses, samples, &mut warnings);
+        }
+        out_robots.push(ImportedRobotRecording {
+            name: res.name.clone(),
+            mode,
+            joint_samples,
+            link_poses,
+        });
+    }
 
     // Obstacles: geometry convention (vertices were baked at import), and
     // only the ones that actually move.
@@ -238,10 +346,8 @@ pub fn import_recording(
             .map(|frame| {
                 let raw = &frame[idx].0;
                 Isometry3::from_parts(
-                    Translation3::from(
-                        info.frame.up_fix * (raw.translation.vector * info.frame.mpu),
-                    ),
-                    info.frame.up_fix * raw.rotation,
+                    Translation3::from(rec_frame.up_fix * (raw.translation.vector * rec_frame.mpu)),
+                    rec_frame.up_fix * raw.rotation,
                 )
             })
             .collect();
@@ -255,35 +361,9 @@ pub fn import_recording(
         }
     }
 
-    // ---- tier 1: JointStateAPI ------------------------------------------
-    let joint_samples = if options.force_transforms {
-        None
-    } else {
-        read_joint_states(
-            stage,
-            model,
-            &info,
-            &stage_root,
-            &model_root,
-            &codes,
-            &mut warnings,
-        )
-    };
-    let mode = if joint_samples.is_some() {
-        RecordingMode::JointState
-    } else {
-        RecordingMode::Transforms
-    };
-
-    if let Some(samples) = &joint_samples {
-        check_fk_residual(model, &link_poses, samples, &mut warnings);
-    }
-
     Ok(ImportedRecording {
         times,
-        mode,
-        joint_samples,
-        link_poses,
+        robots: out_robots,
         object_tracks,
         warnings,
     })
@@ -489,7 +569,8 @@ mod tests {
     use super::*;
     use crate::articulation::{import_robot, RobotImportOptions};
     use crate::export::{
-        write_animation, AnimationInput, ExportOptions, ObjectSpec, PoseTrack, TEST_ARM,
+        write_animation, AnimationInput, ExportOptions, ObjectSpec, PoseTrack, RobotAnimation,
+        TEST_ARM,
     };
     use botrail_model::Geometry;
     use nalgebra::{UnitQuaternion, Vector3};
@@ -572,11 +653,15 @@ mod tests {
             },
         ];
 
-        let input = AnimationInput {
+        let robots = [RobotAnimation {
+            name: "Robot",
             model: &model,
-            times: &times,
             link_poses: &link_poses,
             joint_samples: Some(&configs),
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
             objects: &objects,
         };
         let anim = dir.join("anim.usda");
@@ -606,7 +691,7 @@ mod tests {
         for (t, expect) in rec.times.iter().zip(&fx.times) {
             assert!((t - expect).abs() < 1e-12);
         }
-        for (f, poses) in rec.link_poses.iter().enumerate() {
+        for (f, poses) in rec.robots[0].link_poses.iter().enumerate() {
             for (i, pose) in poses.iter().enumerate() {
                 assert_pose_close(
                     pose,
@@ -623,16 +708,16 @@ mod tests {
         let fx = export_fixture(TEST_ARM, "joint");
         let rec = import_recording(
             &fx.anim,
-            &fx.model,
+            &[("Robot".to_string(), &fx.model)],
             &["box".into(), "table".into()],
             &RecordingImportOptions::default(),
         )
         .unwrap();
         assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
-        assert_eq!(rec.mode, RecordingMode::JointState);
+        assert_eq!(rec.robots[0].mode, RecordingMode::JointState);
 
         // q(t) roundtrips through float32 degrees.
-        let samples = rec.joint_samples.as_ref().unwrap();
+        let samples = rec.robots[0].joint_samples.as_ref().unwrap();
         for (f, q) in samples.iter().enumerate() {
             for (a, b) in q.iter().zip(&fx.configs[f]) {
                 assert!((a - b).abs() < 1e-5, "frame {f}: {a} vs {b}");
@@ -654,7 +739,7 @@ mod tests {
         let fx = export_fixture(TEST_ARM, "transforms");
         let rec = import_recording(
             &fx.anim,
-            &fx.model,
+            &[("Robot".to_string(), &fx.model)],
             &[],
             &RecordingImportOptions {
                 force_transforms: true,
@@ -662,9 +747,130 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(rec.mode, RecordingMode::Transforms);
-        assert!(rec.joint_samples.is_none());
+        assert_eq!(rec.robots[0].mode, RecordingMode::Transforms);
+        assert!(rec.robots[0].joint_samples.is_none());
         check_link_poses(&fx, &rec, 1e-6, "transforms");
+    }
+
+    /// Identical twins in one recording: the structural search cannot tell
+    /// them apart, but the export convention (`/World/<name>`) resolves
+    /// both, and each robot's q(t) comes back as its own.
+    #[test]
+    fn dual_robot_recording_roundtrip() {
+        let dir = temp_dir("dual");
+        std::fs::write(dir.join("robot.usda"), TEST_ARM).unwrap();
+        let imported = import_robot(
+            &dir.join("robot.usda"),
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = imported.model;
+
+        let times: Vec<f64> = (0..=12).map(|k| k as f64 / 60.0).collect();
+        let qs = |phase: f64| -> Vec<Vec<f64>> {
+            times
+                .iter()
+                .map(|t| vec![0.9 * (3.0 * t + phase).sin(), -0.3 + 0.8 * t])
+                .collect()
+        };
+        let (qs_a, qs_b) = (qs(0.0), qs(1.0));
+        let base_a = Isometry3::translation(0.0, -0.4, 0.0);
+        let base_b = Isometry3::translation(0.0, 0.4, 0.0);
+        let poses = |base: &Isometry3<f64>, qs: &[Vec<f64>]| -> Vec<Vec<Isometry3<f64>>> {
+            qs.iter()
+                .map(|q| forward_kinematics_with_base(&model, q, base).unwrap())
+                .collect()
+        };
+        let (poses_a, poses_b) = (poses(&base_a, &qs_a), poses(&base_b, &qs_b));
+        let robots = [
+            RobotAnimation {
+                name: "arm_a",
+                model: &model,
+                link_poses: &poses_a,
+                joint_samples: Some(&qs_a),
+            },
+            RobotAnimation {
+                name: "arm_b",
+                model: &model,
+                link_poses: &poses_b,
+                joint_samples: Some(&qs_b),
+            },
+        ];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
+            objects: &[],
+        };
+        let anim = dir.join("cell.usda");
+        write_animation(&anim, &input, &ExportOptions::default()).unwrap();
+
+        // Convention roots (`/World/arm_a`, `/World/arm_b`) — no explicit
+        // robot_roots needed for a botrail export.
+        let rec = import_recording(
+            &anim,
+            &[("arm_a".to_string(), &model), ("arm_b".to_string(), &model)],
+            &[],
+            &RecordingImportOptions::default(),
+        )
+        .unwrap();
+        assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
+        assert_eq!(rec.robots.len(), 2);
+        for (out, (expect_q, expect_poses)) in rec
+            .robots
+            .iter()
+            .zip([(&qs_a, &poses_a), (&qs_b, &poses_b)])
+        {
+            assert_eq!(out.mode, RecordingMode::JointState);
+            let samples = out.joint_samples.as_ref().unwrap();
+            for (f, q) in samples.iter().enumerate() {
+                for (a, b) in q.iter().zip(&expect_q[f]) {
+                    assert!((a - b).abs() < 1e-5, "{}: frame {f}: {a} vs {b}", out.name);
+                }
+            }
+            for (f, frame) in out.link_poses.iter().enumerate() {
+                for (i, pose) in frame.iter().enumerate() {
+                    assert_pose_close(
+                        pose,
+                        &expect_poses[f][i],
+                        1e-6,
+                        &format!("{} frame {f} link {i}", out.name),
+                    );
+                }
+            }
+        }
+
+        // An explicit root wins over the convention (cross-wiring the two
+        // instances swaps their tracks).
+        let swapped = import_recording(
+            &anim,
+            &[("arm_a".to_string(), &model)],
+            &[],
+            &RecordingImportOptions {
+                robot_roots: vec![("arm_a".to_string(), "/World/arm_b".to_string())],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let q0 = &swapped.robots[0].joint_samples.as_ref().unwrap()[3];
+        assert!((q0[0] - qs_b[3][0]).abs() < 1e-5, "explicit root ignored");
+
+        // A multi-robot import without locatable roots names the fix.
+        let err = import_recording(
+            &anim,
+            &[
+                ("ghost_a".to_string(), &model),
+                ("ghost_b".to_string(), &model),
+            ],
+            &[],
+            &RecordingImportOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("robot_roots"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A centimeters / Y-up robot stage: the recording composes it through
@@ -679,7 +885,7 @@ mod tests {
         for force in [false, true] {
             let rec = import_recording(
                 &fx.anim,
-                &fx.model,
+                &[("Robot".to_string(), &fx.model)],
                 &[],
                 &RecordingImportOptions {
                     force_transforms: force,
@@ -689,7 +895,7 @@ mod tests {
             .unwrap();
             assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
             assert_eq!(
-                rec.mode,
+                rec.robots[0].mode,
                 if force {
                     RecordingMode::Transforms
                 } else {

@@ -6,30 +6,50 @@ import {
   restoreLinkMaterials,
 } from "three-usd-robot/helpers";
 
-import type { PoseMsg, SceneDescriptionMsg } from "../protocol";
+import type { PoseMsg, RobotDescMsg } from "../protocol";
 import { collidingLinkNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 
 /**
- * Client-side USD robot rendering: the same stage the server planned
- * against is fetched from `/assets` and posed via three-usd-robot's FK —
- * the wire only carries joint values. Link/joint names are prim paths on
- * both sides, so state, collisions, and goals map 1:1.
+ * Client-side USD robot rendering, one instance per USD-sourced robot: the
+ * same stage the server planned against is fetched from `/usd-assets` and
+ * posed via three-usd-robot's FK — the wire only carries joint values.
+ * Link/joint names are prim paths on both sides, so state, collisions, and
+ * goals map 1:1 within each instance; the instance name scopes them.
  */
 export function UsdRobotView() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const url = sceneDesc?.usd_asset?.url;
+  const robots = useStudioStore((s) => s.robots);
+  return (
+    <>
+      {robots
+        .filter((r) => r.desc.usd_asset)
+        .map((r) => (
+          <UsdRobotInstance key={r.desc.name} name={r.desc.name} />
+        ))}
+    </>
+  );
+}
+
+function UsdRobotInstance({ name }: { name: string }) {
+  const state = useStudioStore(
+    (s) => s.robots.find((r) => r.desc.name === name) ?? null,
+  );
+  const url = state?.desc.usd_asset?.url;
   const [robot, setRobot] = useState<ThreeUsdRobot | null>(null);
   const [ghost, setGhost] = useState<ThreeUsdRobot | null>(null);
 
-  const jointPositions = useStudioStore((s) => s.jointPositions);
-  const overrideJoints = useStudioStore((s) => s.overrideJoints);
-  const overridePoses = useStudioStore((s) => s.overridePoses);
-  const basePose = useStudioStore((s) => s.basePose);
+  const overrideJoints = useStudioStore(
+    (s) => s.overrideJoints?.[name] ?? null,
+  );
+  const overridePoses = useStudioStore(
+    (s) => s.overridePoses?.[name] ?? null,
+  );
   const collisions = useStudioStore((s) => s.collisions);
   const goal = useStudioStore((s) => s.goal);
+  const myGoal = goal && goal.robot === name ? goal : null;
 
-  // Load once per asset URL (a new scene_init resets the store first).
+  // Load once per asset URL. The loader returns a fresh instance per call,
+  // so two robots sharing one asset get independent objects.
   useEffect(() => {
     if (!url) {
       setRobot(null);
@@ -50,72 +70,78 @@ export function UsdRobotView() {
     };
   }, [url]);
 
+  const desc = state?.desc ?? null;
+
   // Displayed joints: playback override wins over the live state. While a
   // link-pose (baked) override runs, setJointValues must stay silent — it
   // would snap the library back to fk display mode; when the override ends
   // (`baked` flips), this effect re-fires and that same call restores fk.
   const baked = overridePoses !== null;
-  const displayed = overrideJoints ?? jointPositions;
+  const displayed = overrideJoints ?? state?.jointPositions ?? null;
   useEffect(() => {
-    if (!robot || !sceneDesc || baked) return;
-    robot.setJointValues(jointMap(sceneDesc, displayed));
-  }, [robot, sceneDesc, displayed, baked]);
+    if (!robot || !desc || !displayed || baked) return;
+    robot.setJointValues(jointMap(desc, displayed));
+  }, [robot, desc, displayed, baked]);
 
   // Link-pose playback (transform-mode USD recordings): world-space link
   // targets drive the prims directly; the library undoes the robot
   // object's own placement, so recorded base motion replays correctly.
   useEffect(() => {
-    if (!robot || !sceneDesc || !overridePoses) return;
-    robot.setLinkTransforms(linkPoseMap(sceneDesc, overridePoses), {
+    if (!robot || !desc || !overridePoses) return;
+    robot.setLinkTransforms(linkPoseMap(desc, overridePoses), {
       space: "world",
     });
-  }, [robot, sceneDesc, overridePoses]);
+  }, [robot, desc, overridePoses]);
 
   // Base placement.
+  const basePose = state?.basePose ?? null;
   useEffect(() => {
     if (!robot || !basePose) return;
     applyPose(robot, basePose);
   }, [robot, basePose]);
 
-  // Collision highlight refers to the live state; suppress during playback.
+  // Collision highlight refers to the live state; suppress while playback
+  // drives this robot.
   const playback = overrideJoints !== null || baked;
   useEffect(() => {
-    if (!robot || !sceneDesc) return;
-    const names = playback ? new Set<string>() : collidingLinkNames(collisions);
-    for (const link of sceneDesc.links) {
+    if (!robot || !desc) return;
+    const names = playback
+      ? new Set<string>()
+      : collidingLinkNames(collisions, name);
+    for (const link of desc.links) {
       if (names.has(link.name)) {
         highlightLink(robot, link.name, { color: 0xff5555 });
       } else {
         restoreLinkMaterials(robot, link.name);
       }
     }
-  }, [robot, sceneDesc, collisions, playback]);
+  }, [robot, desc, collisions, playback, name]);
 
   // Translucent goal ghost, posed at the captured configuration.
   useEffect(() => {
-    if (!robot || !sceneDesc || !goal) {
+    if (!robot || !desc || !myGoal) {
       setGhost(null);
       return;
     }
     const g = createGhostRobot(robot, {
-      jointValues: jointMap(sceneDesc, goal.positions),
+      jointValues: jointMap(desc, myGoal.positions),
     });
     if (basePose) applyPose(g, basePose);
     setGhost(g);
     return () => setGhost(null);
-  }, [robot, sceneDesc, goal, basePose]);
+  }, [robot, desc, myGoal, basePose]);
 
   if (!robot) return null;
   // The click handler makes the robot opaque to picking: without it, R3F
   // ignores handler-less meshes and a click on the arm would select
-  // whatever obstacle lies behind it. Clicking the robot focuses the TCP.
+  // whatever obstacle lies behind it. Clicking a robot focuses its TCP.
   return (
     <>
       <primitive
         object={robot}
         onClick={(e: { stopPropagation: () => void }) => {
           e.stopPropagation();
-          useStudioStore.getState().selectTcp();
+          useStudioStore.getState().selectTcp(name);
         }}
         onPointerOver={(e: { stopPropagation: () => void }) => {
           e.stopPropagation();
@@ -130,7 +156,7 @@ export function UsdRobotView() {
 
 /** Link-pose array -> {body prim path: world pose} for three-usd-robot. */
 function linkPoseMap(
-  desc: SceneDescriptionMsg,
+  desc: RobotDescMsg,
   poses: PoseMsg[],
 ): Record<string, { position: [number, number, number]; quaternion: [number, number, number, number] }> {
   const map: Record<
@@ -146,7 +172,7 @@ function linkPoseMap(
 
 /** DOF vector -> {joint prim path: value} for three-usd-robot. */
 function jointMap(
-  desc: SceneDescriptionMsg,
+  desc: RobotDescMsg,
   positions: number[],
 ): Record<string, number> {
   const map: Record<string, number> = {};

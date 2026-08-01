@@ -1,36 +1,40 @@
 import { useMemo } from "react";
 
 import type { JointMsg } from "../protocol";
-import { useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import { sendJointPositions } from "../ws";
 
 const CONTINUOUS_RANGE: [number, number] = [-Math.PI, Math.PI];
 
+/** Joint sliders for the panel-selected robot. */
 export function JointPanel() {
-  const sceneDesc = useStudioStore((s) => s.sceneDesc);
-  const jointPositions = useStudioStore((s) => s.jointPositions);
+  const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const setJointPosition = useStudioStore((s) => s.setJointPosition);
   const resetJoints = useStudioStore((s) => s.resetJoints);
 
   // Actuated joints, in q_index order.
   const dofJoints = useMemo<JointMsg[]>(() => {
-    if (!sceneDesc) return [];
-    return sceneDesc.joints
+    if (!robot) return [];
+    return robot.desc.joints
       .filter((j) => j.q_index !== null)
       .sort((a, b) => (a.q_index as number) - (b.q_index as number));
-  }, [sceneDesc]);
+  }, [robot]);
+
+  if (!robot) return null;
+  const name = robot.desc.name;
 
   const commit = () => {
-    sendJointPositions(useStudioStore.getState().jointPositions.slice());
+    const live = robotByName(useStudioStore.getState().robots, name);
+    if (live) sendJointPositions(name, live.jointPositions.slice());
   };
 
   const onSlider = (qIndex: number, value: number) => {
-    setJointPosition(qIndex, value);
+    setJointPosition(name, qIndex, value);
     commit();
   };
 
   const onReset = () => {
-    resetJoints();
+    resetJoints(name);
     commit();
   };
 
@@ -46,7 +50,7 @@ export function JointPanel() {
         {dofJoints.map((joint) => {
           const qIndex = joint.q_index as number;
           const [lo, hi] = joint.limits ?? CONTINUOUS_RANGE;
-          const value = jointPositions[qIndex] ?? 0;
+          const value = robot.jointPositions[qIndex] ?? 0;
           return (
             <div className="joint" key={joint.name}>
               <div className="joint-row">

@@ -1,25 +1,83 @@
 # botrail 設計方針
 
-> ROS 非依存・UI ファーストのロボットモーション作成ライブラリ
+> ロボットセルをコードで組み、決定的に検証し、USD で渡す — ROS 非依存・UI ファーストのセル・オーサリングライブラリ
 
 ## 1. ビジョン
 
-**「`pip install botrail` と数行のコードだけで、ブラウザ上の 3D UI でロボットの環境構築・制約設定・モーション作成ができる」**
+**「`pip install botrail` と数行のコードだけで、ブラウザ上の 3D UI でロボットセルを組み立て、1 サイクルが成立することを決定的に検証し、USD で渡せる」**
 
-MoveIt が解いている問題(FK/IK・衝突回避・軌道計画)は多くのロボット開発で必要だが、その導入コスト(ROS 環境、launch/パラメータ設定、SRDF 生成、ビルド環境)は「アームを 1 台動かしたい」ユーザーには過剰である。botrail は次の 3 点を核とする。
+### 1.1 成果物の単位は「1 本の軌道」から「1 サイクルのセル」へ
 
-1. **軽量導入** — 依存ゼロの wheel を pip install するだけ。システムライブラリ・ビルド不要。
-2. **UI ファースト** — 環境(障害物)・制約・モーションを 3D UI 上で作り込み、コードと往復できる。可視化は「デバッグ用のおまけ」ではなく第一級のワークフロー。
+初期の botrail の成果物は 1 本の軌道だった(`plan_to_pose()` → CSV / URScript)。MoveIt との比較が成立するのはこの粒度である。しかし USD import(P3/P4)とシーケンス制御(S1〜S6)を経て、実際に出力されるものは一段上の粒度になった。
+
+| | 初期 | 現在 |
+|---|---|---|
+| 入力 | URDF + 手で置いた障害物 | URDF/Xacro/USD ロボット + USD ステージ(セルのレイアウト・機器・設置フレーム) |
+| 環境 | 静的な障害物 | センサ・コンベア・軸を持ち、工程に応じて**振る舞う** |
+| 著作物 | Motion(教示点列) | Sequence(工程 + 遷移条件)+ Motion |
+| 成果物 | JointTrajectory | SequenceTimeline — **サイクルタイム**、工程帯、信号波形、オブジェクト軌跡 |
+| 渡し先 | CSV / JSON / URScript | + USD アニメーション(usdview / Omniverse / Blender で再生) |
+
+`examples/sequence_demo.py` がこれを実演する: コンベア搬送 → ビームセンサ検出 → ベルトを止めずに追従把持 → パレットへ搬送。13 工程・**サイクルタイム 20.61s**(停止式なら 23.31s)が決定的に焼き上がり、そのまま USD になる。サイクルタイムは設備の現場で最も見られる数字であり、1 本の軌道の所要時間とは価値の階層が違う。**botrail が売るのは「セル 1 サイクルが成立することの保証と、その数字」である。**
+
+### 1.2 なぜ「環境の自由度」が武器になるのか — プランナの役割の転換
+
+既存のオフラインプログラミングツール(RoboDK、Visual Components、Process Simulate)では、動作は人が明示的に教示する。だから**レイアウトを 10 cm 動かすと教示が全部壊れる**。セルが「一度作ったら触りたくない資産」になる主因はこれである。
+
+botrail では教示点と工程だけを書けば、**動作は計画され、時間は計算結果として出てくる**。コンベア速度を変えても、パレットを動かしても、`simulate_sequence()` を呼び直せばセルは再び成立する — あるいは成立しないことが即座に分かる。
+
+> **プランナがあるから、環境を自由に動かしてもセルが壊れない。だから環境をデータとして、セルをコードとして扱える。**
+
+USD import が「環境を自由に入れられる」を、シーケンサが「環境が振る舞う」を、プランナが「環境を変えても壊れない」を担保する。3 つが揃って初めて意味を持つ構図であり、プランナは商品ではなくなった代わりにコンセプトの土台になった。
+
+### 1.3 4 本の柱
+
+| 柱 | 意味 | 実装での裏付け |
+|---|---|---|
+| **環境がデータである** | セルは USD から入り、ファイルとして持ち運べる | USD import(reference/variant/instancing、cm→m・Y-up→Z-up 正規化)、名前付きフレーム、`.botrail` の可搬プロジェクト |
+| **環境が振る舞う** | 環境は静的な障害物ではなく、センサ・機器・工程を持つ | PLC 語彙のシーケンサ(SFC 工程歩進 + 信号 + スキャンサイクル)、Zone/Beam センサ、Conveyor/LinearAxis、コンベアトラッキング |
+| **決定的に焼ける** | 同じ入力からは常に同じタイムラインが出る | rollout の決定性(2 回焼いて bit 一致をテストで保証)、サイクルタイム、タイミングチャート |
+| **成果物が開いている** | 誰のツールにも渡せる形式で出る | USD アニメーション書き出し(pxr で独立検証済み)、USD 録画の再生、CSV/JSON、URScript、Python コード生成 |
+
+**5 本目(構想): セルは URL で渡せる。** wasm でスタジオが静的配信できるのは botrail 固有の性質であり、競合はすべてインストールとライセンスを要するデスクトップアプリである。セルを 1 つの URL にして「開いて再生を押せばサイクルが動く」状態にできれば、これは構造的に真似されない配布・提案動線になる(§9)。
+
+この 4 本を成立させる前提として、初期からの 3 原則は不変である。
+
+1. **軽量導入** — 依存ゼロの wheel を pip install するだけ。システムライブラリ・ビルド不要、GPU 不要。
+2. **UI ファースト** — 環境・制約・モーション・工程を 3D UI 上で作り込み、コードと往復できる。可視化は「デバッグ用のおまけ」ではなく第一級のワークフロー。
 3. **どこでも動く** — コアは Rust。Python バインディング(pyo3)と wasm ビルド(ブラウザ完結)の両方を提供する。
 
 ### やらないこと(non-goals)
 
+- **物理シミュレーション(動力学・接触)** — 幾何 + 運動学 + 離散スキャンに徹する。**決定性はこの割り切りの直接の果実**であり、セルを diff・テスト・CI に載せられる根拠そのものなので、ここは崩さない。
+- **離散事象の生産シミュレーション**(スループット、バッファ、AGV、人の動線、統計) — FlexSim / Plant Simulation の領域。乱数と統計の世界に入ることは、決定性という最大の武器を自ら捨てることを意味する。botrail は「工場シミュレータ」ではなく **「セル検証器」** である: 1 サイクルの成立性・所要時間・干渉・到達性に賭ける。
+- **CAD(STEP/JT)の直接 import** — 入口は USD に賭け、変換は外部ツールの仕事とする。
 - ROS との統合レイヤの提供(ユーザー側で軌道を publish するのは自由)
-- 物理シミュレーション(動力学・接触)— 幾何と運動学に徹する
 - v1 での実機ドライバ実装(プラグインインターフェースの定義まで)
 - モバイルロボット・多脚などのプランニング(将来検討)
 
 ## 2. ポジショニング(既存ツールとの比較)
+
+比較対象は 2 層に分かれる。上のレイヤ(セルを組んで検証する)が現在の主戦場であり、下のレイヤ(ROS-free モーションプランニング)は botrail がそこに立つための土台である。
+
+### 2.1 上のレイヤ — セル・オーサリング / 検証
+
+| ツール | 導入 | セル環境 | 動作 | 成果物 |
+|---|---|---|---|---|
+| RoboDK | 商用・デスクトップ | CAD / 独自 | 明示教示中心 | 実機プログラム(ポスプロが豊富) |
+| Visual Components | 商用・デスクトップ | 独自コンポーネント | 教示 + コンポーネント挙動 | レイアウト検証・生産シミュレーション |
+| Process Simulate / DELMIA | 商用・PLM 統合 | CAD | 教示 | 工程検証(導入が重い) |
+| Isaac Sim | 無償だが GPU 必須・大型 | **USD ネイティブ** | 物理 + 学習 | USD / 合成データ |
+| Gazebo / Webots / CoppeliaSim | OSS | 独自 or SDF | 物理 | ROS トピック等 |
+| **botrail** | **pip / ブラウザ** | **USD import** | **計画 + PLC 工程** | **USD / CSV / 実機スクリプト** |
+
+上 3 つはセルを組む語彙を持つが閉じており、下 3 つは開いているが**工程の語彙を持たない**(ロボット単体の物理検証が主眼で、コンベア・センサ・工程歩進は各自スクリプトで書く)。
+
+**空白地帯: 「セルを開いた形式(USD + Python)で組み、決定的に検証し、開いた形式で渡す」OSS は存在しない。** 商用 OLP / シミュレータのセルはプロプライエタリなプロジェクトファイルの中にあり、diff も CI も原理的に不可能である。botrail のセルはテキスト(Python / `.botrail` JSON / USD)であり、git で管理でき、同じ入力からは常に同じタイムラインが焼ける。**レイアウト変更に対するサイクルタイムの回帰テストという運用は、現状どのツールでも成立しない。** これが botrail 固有の主張である。
+
+Isaac Sim との関係は競合ではなく補完である: Isaac の資産(USD ロボット・セル)をそのまま読み、書き出した USD は Omniverse で開ける。「Isaac 資産は持っているが、レイアウト検討とサイクル検証のために毎回 Isaac Sim を立ち上げるのは重い」という穴を埋める。
+
+### 2.2 下のレイヤ — ROS-free モーションプランニング
 
 | ツール | 導入 | UI | 備考 |
 |---|---|---|---|
@@ -32,74 +90,174 @@ MoveIt が解いている問題(FK/IK・衝突回避・軌道計画)は多くの
 | Jacobi Robotics | 商用 | Studio(Web) | 発想が最も近いがクローズド |
 | viser / meshcat / rerun | pip | Web(表示+gizmo) | 可視化のみ、プランニングなし |
 
-**botrail の空白地帯: 「pip 1発 + プランニング + 編集可能な 3D UI」を OSS で揃えたものは存在しない。** mplib(計画はあるが UI がない)と viser(UI はあるが計画がない)の間を埋める。wasm によるブラウザ完結デモは、導入前に価値を体験させる強力な入口にもなる。また xurdf 採用により **ROS なしで Xacro 形式のロボット記述をそのまま読める**ことも、実務ユーザーに対する地味だが効く差別化になる(実ロボットの記述は xacro が多く、他の ROS-free ツールはここで脱落しがち)。
+この層でも **「pip 1発 + プランニング + 編集可能な 3D UI」を OSS で揃えたものは存在しない。** mplib(計画はあるが UI がない)と viser(UI はあるが計画がない)の間を埋める位置は変わらない。また xurdf 採用により **ROS なしで Xacro 形式のロボット記述をそのまま読める**ことも、実務ユーザーに対する地味だが効く差別化になる(実ロボットの記述は xacro が多く、他の ROS-free ツールはここで脱落しがち)。
+
+### 2.3 想定ユーザーと入口
+
+- **一次ユーザー**: USD 隣接のロボティクス開発者・SIer・研究/教育。Isaac / Omniverse の資産を持ちながら、レイアウト検討とサイクル検証を軽く回したい層。
+- **入口**: wasm によるブラウザ完結デモ。導入前に価値を体験させる強力な入口であり、将来的にはセルそのものを URL で共有する動線になる。
+- **語り口の二層構造**: 対外的な一行目は「USD ネイティブ・ROS フリーのセル・オーサリング」という具体で入り、概念の背骨は「決定的なセル検証」に置く。前者だけでは Isaac の脇役に見え、後者だけでは何ができるか伝わらない。
+
+### 2.4 現時点の正直な穴
+
+コンセプトを誇張しないために、この節を維持する。
+
+- **単腕・直列工程のみ** — プロジェクト形式は複数ロボットを受けられるがコードは 1 台を強制し、SFC も分岐なしの直列。厳密には現状で成立しているのは「セル」より「ステーション」である。多台数 + 並列 SFC が最大の穴(§9)。
+- **USD を持っている層は Isaac / Omniverse ユーザーに偏る** — 伝統的な設備屋は STEP の世界にいる。当面はそこを取りに行かないと割り切る。
+- **PLC 語彙はメンタルモデルの互換であって実機接続ではない**(OPC-UA なし)。ここは誇張しない。実機との閉ループはベンダー I/O 出力(§9)で先に閉じる。
+- **物理がないため**、部品の落下・安定、ケーブル、把持の滑りは検証できない。botrail が答えるのは「掴めるか」ではなく **「届くか・ぶつからないか・何秒か」** である。
 
 ## 3. 全体アーキテクチャ
 
 ```
-                    ┌─────────────────────────────┐
-                    │   botrail studio (Web UI)   │
-                    │  TypeScript + three.js/R3F  │
-                    └──────────┬──────────────────┘
-                               │ SessionBackend インターフェース
-              ┌────────────────┴────────────────┐
-              │ WebSocket RPC                   │ in-process (wasm)
-    ┌─────────┴─────────┐             ┌─────────┴─────────┐
-    │  Python プロセス   │             │  botrail-wasm     │
-    │  botrail (pyo3)   │             │  (wasm-bindgen)   │
-    └─────────┬─────────┘             └─────────┬─────────┘
-              └────────────────┬────────────────┘
-                    ┌──────────┴──────────┐
-                    │  botrail-core (Rust) │
-                    │  model / kin / collide / plan / traj / scene
-                    └─────────────────────┘
+                ┌───────────────────────────────────┐
+                │      botrail studio (Web UI)      │
+                │  TypeScript + React + R3F         │
+                │  + three-usd-robot (USD 描画/FK)  │
+                └────────────────┬──────────────────┘
+                                 │ SessionBackend インターフェース
+              ┌──────────────────┴──────────────────┐
+              │ WebSocket RPC                       │ in-process (wasm)
+    ┌─────────┴─────────┐               ┌───────────┴───────┐
+    │  Python プロセス   │               │  botrail-wasm     │
+    │  botrail (pyo3)   │               │  (wasm-bindgen)   │
+    └─────────┬─────────┘               └───────────┬───────┘
+              └──────────────────┬──────────────────┘
+                    ┌────────────┴────────────┐
+                    │     botrail-session     │  メッセージディスパッチ
+                    │  (ホスト差分 = SessionHost) │  (両バインディング共通)
+                    └────────────┬────────────┘
+        ┌────────────────────────┴────────────────────────┐
+        │  botrail-core (Rust)                            │
+        │  model / kin / collide / plan / traj             │
+        │  scene (obstacles / motion / seq / rollout)      │
+        │  usd (import / export / recording) · export      │
+        └─────────────────────────────────────────────────┘
 ```
 
 ### 設計上の最重要ポイント
 
 - **UI はバックエンドを知らない。** UI は `SessionBackend`(シーン取得・変更適用・計画要求・軌道受信)という TypeScript インターフェースにのみ依存し、実装として (a) WebSocket RPC(Python サーバモード)と (b) wasm 直接呼び出し(ブラウザ完結モード)の 2 つを持つ。これで UI を一度書けば両モードで使い回せる。
-- **シーン・軌道・コマンドはすべて serde でシリアライズ可能な型として core に定義する。** プロトコルスキーマは Rust の型が唯一の真実で、TypeScript 型は自動生成する(ts-rs 等)。
-- **Python API と UI は同じ操作モデルを共有する。** 「UI でできることはすべて API でできる」を不変条件とし、UI 操作は内部的に API 呼び出しに落ちる。
+- **メッセージディスパッチは 1 箇所。** hub(pyo3)と wasm で鏡写しになりがちな処理は `botrail-session` に集約し、ホスト差分(scene アクセス・emit・時計・ログ・アセット URL)だけを `SessionHost` trait として注入する。**過去に「片方だけ直してもう片方が壊れる」バグを複数回踏んでおり**、この集約はその再発防止でもある。
+- **シーン・軌道・コマンドはすべて serde でシリアライズ可能な型として core に定義する。** プロトコルスキーマは Rust の型(`botrail-scene/src/wire.rs`)が唯一の真実で、TypeScript 型は ts-rs で自動生成する。
+- **Python API と UI は同じ操作モデルを共有する。** 「UI でできることはすべて API でできる」を不変条件とし、UI 操作は内部的に同じ wire メッセージに落ちる。
+- **コアは USD を知らない。** `botrail-usd` は境界クレートであり、Scene が受け取るのは正規化済み(m・Z-up)の障害物・フレーム・`RobotModel` である。書き出しも「Scene + 関節軌道 + オブジェクトトラック」を受けて USD を著作する片方向の依存になっている。これによりコアの型が USD に汚染されず、wasm ビルドでも同じ境界がそのまま成立する。
+- **USD ロボットのリンク名は prim パス**(three-usd-robot との naming contract)。サーバとクライアントが同じ識別子でリンクを指すため、衝突ハイライト・ゴールゴースト・録画再生のいずれも対応表なしで 1:1 に解決する。
 
 ### Rust ワークスペース構成
 
 ```
 crates/
   botrail-model     # URDF/Xacro パース(xurdf)、キネマティックツリー、関節・リミット
+  botrail-mesh      # メッシュ読み込み(STL/OBJ、bytes 入力で wasm 対応)
   botrail-kin       # FK / ヤコビアン / IK(減衰最小二乗+リミット考慮+null-space)
-  botrail-collide   # parry3d ベース。自己干渉+環境干渉、距離クエリ、ACM
-  botrail-scene     # ワールドモデル: 障害物(primitive/mesh)、attach/detach、フレーム
-  botrail-plan      # サンプリングベース計画(RRT-Connect → 拡張)、パス簡略化
-  botrail-traj      # 時間パラメタライズ(TOTG 系)、スプライン、リサンプリング
+  botrail-collide   # parry3d ベース。自己干渉+環境干渉、距離クエリ、ACM、VHACD 凸分解(rayon 並列は feature)
+  botrail-plan      # サンプリングベース計画(RRT-Connect、決定的シード)、ランダムショートカット
+  botrail-traj      # 時間パラメタライズ(IPTP 系)、Hermite サンプリング、リサンプリング
+  botrail-scene     # ワールド + 著作。lib.rs(障害物/フレーム/attach/センサ/デバイス)、
+                    #   motion.rs、seq.rs(シーケンス型)、rollout.rs(スキャンエンジン)、
+                    #   wire.rs(プロトコル型・ts-rs)、project.rs(.botrail + Python 生成)
+  botrail-usd       # USD 境界。lib.rs(シーン import)、articulation.rs(ロボット import)、
+                    #   export.rs(アニメーション書き出し)、recording.rs(録画読み込み)
   botrail-export    # ベンダースクリプトエクスポート(中間表現+ポストプロセッサ。URScript 実装済み、TM/AUBO/DENSO は今後)
-  botrail-mesh      # メッシュ読み込み(STL/OBJ、bytes 入力で wasm 対応)。DAE/glTF は importer 層へ
-  botrail-session   # 操作モデル(コマンド適用・undo/redo・イベント配信)。両バインディングの共通層
+  botrail-session   # メッセージディスパッチ(両バインディング共通。ホスト差分は SessionHost trait)
   botrail-py        # pyo3 バインディング + WebSocket/静的ファイルサーバ
   botrail-wasm      # wasm-bindgen バインディング
-studio/             # Web UI (TypeScript, React + react-three-fiber)
-python/             # Python パッケージング(maturin)、高レベル API、コード生成
+  botrail-bench     # 衝突・距離クエリのベンチ(docs/bench-parry3d.md)
+studio/             # Web UI (TypeScript, React + react-three-fiber + three-usd-robot)
+python/             # Python パッケージング(maturin)、高レベル API(seq ビルダ)、studio バンドル同梱
 ```
 
 ### エコシステム方針: 汎用部品は独立パッケージに切り出す
 
-ロボティクス一般に再利用可能な部品は、botrail 本体に抱え込まず独立クレート/パッケージとして開発・公開する。URDF/Xacro パーサの xurdf がその先例で、同じ方針を他にも適用する。
+ロボティクス一般に再利用可能な部品は、botrail 本体に抱え込まず独立クレート/パッケージとして開発・公開する。分割の基準は **「botrail のデータモデル(Scene/Motion)を知らなくても使えるか」** — 知らなくても使えるものは外に出す。
 
-- **xurdf**(既存)— URDF + Xacro パーサ。ROS ランタイム非依存で xacro(property/macro/include/if 等)を扱える点は botrail の差別化にも直結する(実ロボットの記述は xacro 形式が多い)。nalgebra ベースで botrail の数学スタックとも一致。
-- **メッシュ I/O クレート**(新規)— STL/OBJ/DAE を統一メッシュ構造体に読み込む独立クレート(Rust + wasm 対応、必要なら Python バインディングも)。Rust エコシステムで DAE 対応が薄いという穴を埋めるもので、単体でも価値がある。botrail 側の io 層はこれの薄いラッパにする。
-- 凸分解(衝突用メッシュ前処理)も、実装する場合はこのメッシュクレート側のオフライン機能として持たせる選択肢がある。
-
-分割の基準: 「botrail のデータモデル(Scene/Motion)を知らなくても使えるか」。知らなくても使えるものは外に出す。
+- **xurdf**(外部・既存)— URDF + Xacro パーサ。ROS ランタイム非依存で xacro(property/macro/include/if 等)を扱える点は botrail の差別化にも直結する。nalgebra ベースで botrail の数学スタックとも一致。
+- **three-usd-robot**(外部・既存)— studio 側の USD ロボット/ステージ描画とクライアント FK。botrail のデータモデルを知らない純粋な表示ライブラリであり、この方針の実例になっている(botrail 側の要求から `worldUp` オプションや `setLinkTransforms` の表示モード契約が入った)。
+- **openusd**(外部・固定 rev)— USD の読み書き。`botrail-usd` はこの上の薄い変換層に徹する。
+- **メッシュ I/O クレート**(未着手)— 当初は STL/OBJ/DAE の独立クレートとして切り出す計画だったが、`botrail-mesh` として同梱のまま STL/OBJ 止まりである。**DAE 対応は未着手**で、高忠実度の表示経路は USD import + three-usd-robot が担うようになった。DAE が要るのは URDF 系ロボットの visual メッシュであり、需要が出たときに再開する。凸分解は現状 `botrail-collide` 側のランタイム機能(キャッシュ付き)として持っている。
 
 ## 4. データモデル
 
-概念は 4 つに絞る。**Scene / Motion / Trajectory / Project**。
+概念は **ワールド / 著作物 / 焼き込み結果 / 保存形式** の 4 種に整理される。
 
-- **Scene** — ワールド中心: ロボット(URDF 由来のモデル+プランニンググループ定義)は base pose 付きでワールドに設置され、Scene の入出力(リンク姿勢・IK ターゲット・制約・障害物)はすべてワールド座標。障害物(box/sphere/cylinder/mesh)、フレーム、attach 状態、ACM(許容衝突行列)。プロジェクト形式 v2 はロボットを `robots: [{source, base_pose, joint_positions}]` の配列で持ち(コードは当面 1 台を強制)、マルチロボット拡張と USD 由来ロボット(`source` の enum 追加)を additive に受けられる。MoveIt の SRDF に相当する情報(グループ、エンドエフェクタ、デフォルト ACM)は botrail 独自の軽量フォーマットで持ち、**UI 上のセットアップウィザードで生成できるようにする**(MoveIt Setup Assistant の体験を Web で置き換える)。
-- **Motion** — 名前付きのセグメント列。各セグメント = `{ ゴール(関節値 or TCP 姿勢), 計画方式(joint-space plan / cartesian line), 制約, プランナ設定 }`。「教示点を並べてモーションを作る」という現場のメンタルモデルに合わせる。
-- **Trajectory** — 計画結果。時間パラメタライズ済みの関節軌道(サンプル列+区分多項式)。Motion にキャッシュされ、シーン変更で無効化される。
-- **Project (`.botrail`)** — Scene + Motion 群 + アセット(メッシュ)を束ねた保存形式。JSON(+アセットは zip 同梱)、バージョンフィールド付き。**UI で作ったプロジェクトを Python から `bt.Project.load()` で読んで実行時利用する**のが主要な往復動線。
+```
+Scene ──┬── Motion   ──(plan)──────→ PlannedMotion / Trajectory   1 本の動作
+        └── Sequence ──(simulate)──→ SequenceTimeline             1 サイクルのセル
+                                          ↓
+                             再生 / USD 書き出し / CSV / 検証
+        Project (.botrail) = Scene + Motion 群 + Sequence 群 + アセット
+```
 
-### 制約(v1 スコープ)
+**「著作物 → 焼き込み結果」の対が 2 組ある**のが要点で、両者は常に分けて持つ。著作物(教示点列・工程列)は所要時間に依存せず安定であり、焼き込み結果は計画とシミュレーションの計算結果として絶対時刻を持つ。ユーザーが編集するのは常に前者で、後者は再生・書き出し・検証が消費する。モーション所要時間は再計画のたびに変わるため、著作の側に時刻を持たせないことが「環境を動かしてもセルが壊れない」(§1.2)の前提になっている。
+
+### 4.1 Scene — ワールド
+
+ロボットは base pose 付きでワールドに設置され、Scene の入出力(リンク姿勢・IK ターゲット・制約・障害物)はすべてワールド座標。住人は以下の 8 種:
+
+| 要素 | 内容 |
+|---|---|
+| **Robot** | `RobotModel`(URDF / Xacro / USD 由来 — `RobotSource` enum)+ base pose + 関節値 |
+| **Obstacle** | box / sphere / cylinder / mesh。`enabled` で衝突判定と計画妥当性から除外できる(表示は残る)。USD 由来なら名前は prim パス |
+| **Frame** | 名前付きワールド姿勢。設置点・教示参照であり衝突対象ではない |
+| **Attachment** | 把持状態 `{ object, link, grasp: link←object の固定相対姿勢, touch_links }`。attach 中の障害物は環境集合から外れてリンク随伴集合に入り、計画・衝突・再生・書き出しのすべてで随伴する(MoveIt の attached collision object 相当) |
+| **ACM** | 許容衝突行列。隣接ペア + サンプリングによる常時衝突ペアの自動検出 |
+| **Sensor** | Zone(直方体の在荷/エリアセンサ)/ Beam(光電センサ = 細いカプセル)。`watch` で監視対象を絞る。**センサ名がそのまま読み取り専用の入力信号名になる** |
+| **Device** | Conveyor(ゾーン内の非 attach 障害物を等速搬送)/ LinearAxis(指定オブジェクト群の軸方向位置決め — 扉・リフタ・ストッパ・インデクサ) |
+| **SignalDef** | 内部信号(PLC の内部リレー M)の宣言 |
+
+Sensor / Device / SignalDef は **環境に振る舞いを与える住人**であり、Sequence からは名前で参照される(§1.3「環境が振る舞う」)。物理は解かず、センサは形状交差クエリ、コンベアはゾーン所属則で決める — 擬似だが決定的で頑健であり、これが §1.3「決定的に焼ける」の土台になる。
+
+MoveIt の SRDF に相当する情報(グループ、エンドエフェクタ、デフォルト ACM)は botrail 独自の軽量フォーマットで持ち、**UI 上のセットアップウィザードで生成できるようにする**(MoveIt Setup Assistant の体験を Web で置き換える)。ACM 自動生成はコア実装済み、ウィザード UI は未実装。
+
+### 4.2 Motion / PlannedMotion — 1 本の動作
+
+- **Motion** — 名前付きのセグメント列。各セグメント = `{ ゴール(関節値 or TCP 姿勢), 計画方式(joint-space plan / cartesian line), 制約 }`。「教示点を並べてモーションを作る」という現場のメンタルモデルに合わせる。
+- **PlannedMotion / Trajectory** — 計画結果。時間パラメタライズ済みの関節軌道(`JointTrajectory` = times / positions / velocities + Hermite サンプリング)を全セグメント連結で 1 本持ち、`segment_ends` で境界時刻を、`segments` でセグメントごとの疎なウェイポイント列(スクリプトエクスポータが消費)を保持する。各セグメント境界は静止する。
+- **軌道キャッシュは未実装** — 計画は要求のたびに走る。シーケンスも「毎回 `simulate()` で焼き直す」を基本とする(決定的なので、後から工程単位のキャッシュを足しても結果は変わらない)。
+
+### 4.3 Sequence / SequenceTimeline — 1 サイクルのセル
+
+**Sequence(著作物)** — PLC の工程歩進(IEC 61131-3 の SFC、三菱のステップラダー、OMRON の工程歩進命令として設備業界で共有されているメンタルモデル)に写像した工程列。各 `Step` は「突入時に発行するアクション」+「次工程への遷移条件」を持つ。v1 は直列(分岐なし)で、これは**タイムラインが一意に焼けること = USD 書き出しと検証の前提**を守るための制約である。
+
+| PLC の語彙 | botrail での対応物 |
+|---|---|
+| 入力接点(X) | Sensor の評価結果(読み取り専用) |
+| 出力コイル(Y) | `Action::Device`(コンベア ON/OFF、軸 MoveTo) |
+| 内部リレー(M) | `SignalDef` + `Action::Set` |
+| タイマ(TON) | `Condition::Elapsed` |
+| ロボットへの起動指令 + 完了信号 | `Action::StartMotion` + `Condition::Done` |
+| 位置決め完了(インポジション) | `Condition::DeviceDone` |
+| スキャンサイクル(入力→演算→出力) | rollout の Δt tick(既定 10 ms) |
+| タイミングチャート | studio の TimelineDock(工程帯 + 信号波形レーン) |
+
+アクションは他に `StartRamp`(汎用関節ランプ — グリッパ開閉をジョイントグループ概念なしで賄う)、`Attach` / `Detach`(把持・開放)、`Track` / `Untrack`(コンベアトラッキング — 教示姿勢を動くパーツに乗せ、ラインを止めずに拾う)。条件は他に `Immediately` / `Signal`(レベル評価)/ `All`(直列接点 = AND)/ `Any`(並列接点 = OR)。
+
+**SequenceTimeline(焼き込み結果)** — `simulate()` の出力。同じ Scene + Sequence からは常に **bit 一致**のタイムラインが焼ける(テストで保証)。
+
+```rust
+SequenceTimeline {
+    duration,      // = サイクルタイム
+    robot,         // JointTrajectory(待機区間はホールド)
+    objects,       // ObjectTrack: 動いたオブジェクトのみ
+    signals,       // BoolTrack: センサ・内部信号・デバイス状態の波形
+    step_spans,    // 各工程の [開始, 終了] + 名前
+}
+```
+
+`ObjectTrack` を **シンボリック区間**(`Hold` / `Follow { link, offset }` = 把持随伴 / `Linear { from, velocity }` = 搬送)で持つのが要点。任意レートで厳密に再サンプルできるため、30 Hz の studio 配信・60 fps の USD 書き出し・8 ms の CSV がすべて同一ソースから誤差なく出る。
+
+**再生・USD 書き出し・CSV・(将来の)アサーションはすべてこの型だけを消費する。** 逆に USD 録画の読み込み(`import_recording`)も同じ形に落とすので、Isaac Sim の録画と botrail 自身の焼き込みが同じ経路で再生される。
+
+### 4.4 Project (`.botrail`)
+
+Scene + Motion 群 + Sequence 群 + アセットを束ねた保存形式。バージョンフィールド付きの JSON(現行 v2)で、メッシュや USD ステージへの参照があるときだけ zip(`project.json` + `assets/`)になり、ロード時はコンテンツアドレスのキャッシュへ展開する — **元ファイルを消しても再ロードできる**のが可搬性の条件。
+
+拡張は **additive** に行う運用が確立している(version probe + `#[serde(default)]` + tagged enum): `frames` / `sequences` / `signals` / `sensors` / `devices` はすべて v2 のまま後から足された。ロボットは `robots: [{ source, base_pose, joint_positions }]` の配列で持ち(コードは当面 1 台を強制)、マルチロボット拡張と USD 由来ロボットを additive に受けられる。
+
+**UI で作ったプロジェクトを Python から `bt.Scene.load_project()` で読んで実行時利用する**のが主要な往復動線。あわせて `generate_python()` が「現在の状態を再現する Python スクリプト」を出力し、ここも全要素(障害物・フレーム・attach・シーケンス・センサ・デバイス)に対応する — セルがテキストとして出てくることが §2.1 の「git で管理できる」の実体である。
+
+### 4.5 制約(v1 スコープ)
 
 - 関節リミット(位置・速度・加速度)
 - 姿勢制約(ツール軸のコーン制約 — 「コップを傾けない」)
@@ -108,42 +266,80 @@ python/             # Python パッケージング(maturin)、高レベル API�
 
 ## 5. UI(botrail studio)機能スコープ
 
-v1 で提供する画面要素:
+### 5.1 実装済み
 
-1. **3D ビューポート** — ロボット表示、TCP ゴールの transform gizmo ドラッグ → リアルタイム IK 追従(到達不可/干渉時は色で警告)
-2. **シーン編集** — 障害物の追加・gizmo による移動/回転/スケール、メッシュのドラッグ&ドロップ読み込み、オブジェクトの attach/detach
-3. **モーションエディタ** — ウェイポイントのリスト/タイムライン、セグメントごとの計画方式・制約の設定、「計画」ボタン → 進捗表示 → 結果軌道
-4. **軌道プレビュー** — スライダ再生、ゴースト表示(スイープ確認)、干渉箇所のハイライト、関節速度/加速度グラフ
-5. **セットアップウィザード** — URDF 読み込み → グループ定義 → 自己干渉サンプリングによる ACM 生成
-6. **コード生成** — 現在のプロジェクトを再現する Python スクリプトのエクスポート。UI→コードの往復を保証する
+| 領域 | パネル / コンポーネント | 内容 |
+|---|---|---|
+| 3D ビューポート | `Viewport` / `SceneView` / `UsdRobotView` / `WasmStageView` | ロボット表示(URDF はサーバ FK、USD は three-usd-robot でクライアント FK)、クリックで TCP フォーカス、フォーカスチップ、メッシュ/USD のドラッグ&ドロップ読み込み |
+| 姿勢操作 | `TcpGizmo` / `TcpPanel` / `JointPanel` / `RobotBaseGizmo` / `RobotPanel` | TCP gizmo ドラッグ → リアルタイム IK(到達不可/干渉は色で警告)、関節スライダ、ベース配置とフレームへのスナップ |
+| シーン編集 | `ObstaclePanel` / `ObstacleView` / `SceneTreePanel` | 障害物の追加・gizmo 移動・寸法編集・削除、attach/detach(🧲 バッジ)、prim パス階層のツリー、表示 👁 と衝突有効/無効のトグル、フレームの ⌖ 配置 |
+| モーション | `MotionPanel` / `PlanPanel` / `GhostRobot` | ウェイポイント列の編集、ゴール設定(ゴースト表示)、計画要求 → 結果軌道、クリアランス表示 |
+| シーケンス | `SequencePanel` | 工程リスト(アクションチップ + 遷移)、プリセット追加(Motion / Wait / Grasp / Release)、simulate |
+| タイムライン | `TimelineDock` / `PlaybackDriver` | 工程帯 + 信号波形レーン(タイミングチャート)、サイクルタイム、クリックシーク、**世界再生**(ロボット + 把持物 + 搬送物を同一クロックで) |
+| センサ/デバイス | `SensorView` / `SceneTreePanel` | ゾーンの半透明ボリューム / ビームロッド、ON ハイライト、一覧行 |
 
-技術選定: TypeScript + React + react-three-fiber + zustand。通信は WebSocket 上の JSON(必要になったら MessagePack へ。計測してから)。
+### 5.2 未実装(v1 スコープに残っているもの)
+
+- **セットアップウィザード** — URDF 読み込み → グループ定義 → 自己干渉サンプリングによる ACM 生成。**ACM 自動生成はコア実装済みで、UI だけがない**(MoveIt Setup Assistant の体験を Web で置き換える構想)。
+- **コード生成の UI 導線** — `generate_python()` はコアにあるが studio にボタンがない。「UI→コードの往復」は Python 側からのみ成立している。
+- **関節速度/加速度グラフ** — 軌道プレビューは再生・シーク・ゴースト・干渉ハイライトまで。
+- **USD 書き出しのダウンロード** — Python からは `export_usd`。wasm は `export_to_string` があるので導線を足せば成立する(§9)。
+- **センサ/デバイスの作成フォーム** — 定義は Python 側を正とし、studio は一覧表示中心。
+- **プロジェクトの保存/読込 UI** — `.botrail` の入出力も現状 Python 側のみ。
+
+### 5.3 技術選定
+
+TypeScript + React + react-three-fiber + zustand。USD ロボット/ステージの描画とクライアント FK は three-usd-robot。通信は WebSocket 上の JSON(必要になったら MessagePack へ。計測してから)で、型は Rust から ts-rs 生成。
 
 ## 6. Python API スケッチ
 
 ```python
 import botrail as bt
 
-robot = bt.Robot.from_urdf("ur5e.urdf")           # メッシュも解決
+# ---- ロボットとセル環境 --------------------------------------------
+robot = bt.Robot.from_usd("franka.usd")             # from_urdf / from_xacro も
 scene = bt.Scene(robot)
-scene.add_box("table", size=(1.2, 0.8, 0.05), pose=bt.Pose(z=-0.03))
+scene.load_usd("factory.usda", prefix="env")        # 障害物 + 名前付きフレーム
+scene.set_robot_base_pose(*scene.frame("env/World/MountFrame"))
+scene.add_box("table", size=(0.6, 0.6, 0.05), position=(0.4, 0.0, 0.0))
 
-# UI を起動してシーン/モーションを編集(ブラウザが開く)
-bt.studio(scene)                                   # ブロッキング or 非同期どちらも可
+bt.studio(scene)                                    # ブラウザで studio を開く
 
-# --- あるいはコードだけで ---
-goal = robot.ik(bt.Pose(x=0.4, y=0.2, z=0.3, quat=...), seed=robot.home)
-traj = scene.plan(
-    start=robot.home,
-    goal=goal,
-    constraints=[bt.OrientationCone(axis="z", angle=0.2)],
-)
-traj.export_json("pick.json")
+# ---- 触る・計画する -------------------------------------------------
+scene.set_tcp_target((0.3, 0.1, 0.5))               # ライブ IK(studio に反映)
+scene.in_collision(), scene.min_obstacle_distance()
+traj = scene.plan_to_pose((0.4, 0.1, 0.3))          # IK → RRT-Connect → 時間パラメタライズ
 traj.export_csv("pick.csv", dt=0.008)
+traj.export_script("pick.script", dialect="urscript")
 
-# --- UI で作ったプロジェクトの実行時利用 ---
-proj = bt.Project.load("cell.botrail")
-traj = proj.motion("pick_and_place").plan()        # シーン変更があれば再計画
+# ---- 環境に振る舞いを与える -----------------------------------------
+scene.add_conveyor("conv", zone_position=(-0.45, 0.62, 0.60),
+                   zone_size=(1.3, 0.4, 0.14), velocity=(0.15, 0.0, 0.0))
+scene.add_beam_sensor("beam_pick", frm=(0.55, 0.42, 0.60), to=(0.55, 0.82, 0.60),
+                      watch=["/World/Conveyor/Box_A"])
+scene.define_signal("carrying")
+
+# ---- 工程を書く(PLC の工程歩進)------------------------------------
+sq = scene.sequence("pick_place")
+sq.step("feed",  actions=[bt.seq.start("conv"), bt.seq.motion("to_hover")],
+                 transition=bt.seq.all_of(bt.seq.signal("beam_pick"), bt.seq.done()))
+sq.step("latch", actions=[bt.seq.track(BOX)])       # ベルトを止めずに追従
+sq.step("grasp", actions=[bt.seq.attach(BOX, link="/panda/panda_hand"),
+                          bt.seq.set_signal("carrying")])
+sq.step("carry", actions=[bt.seq.untrack(), bt.seq.motion("to_pallet")])
+# 遷移を省略すると、動作があれば done、なければ immediately が補われる
+
+# ---- 焼く・渡す -----------------------------------------------------
+tl = scene.simulate_sequence("pick_place")          # 決定的
+print(tl.duration)                                  # = サイクルタイム
+for step, t0, t1 in tl.step_spans: ...              # 工程帯
+tl.export_usd("cell_anim.usda", fps=60)             # usdview / Omniverse / Blender で再生
+
+# ---- 往復 -----------------------------------------------------------
+scene.save_project("cell.botrail")                  # メッシュ/USD 資産を同梱
+scene2 = bt.Scene.load_project("cell.botrail")
+print(scene.generate_python())                      # 現在の状態を再現するスクリプト
+scene.play_usd_animation("cell_anim.usda")          # 録画(Isaac Sim 由来でも可)を studio で再生
 ```
 
 実機連携は v1 ではインターフェース定義のみ:
@@ -159,7 +355,7 @@ class TrajectoryExecutor(Protocol):
 |---|---|---|
 | 数学 | nalgebra | 低リスク(xurdf と共通) |
 | URDF/Xacro | xurdf | 自作クレートのため拡張が容易。mimic joint 等の対応範囲と package:// のメッシュパス解決は botrail 要件に合わせて確認・拡張 |
-| メッシュ読込 | 独立クレートとして新規開発(STL/OBJ/DAE) | botrail とは別パッケージで開発する並行トラック。M0 は STL/OBJ から始め、DAE 対応を M2 までに揃える(UR 系など主要 URDF の visual メッシュは DAE が多い) |
+| メッシュ読込 | `botrail-mesh`(同梱、STL/OBJ) | 当初計画の「独立クレート化 + DAE 対応」は**未着手**。高忠実度の表示経路を USD import + three-usd-robot が担うようになったため優先度が下がった。DAE が要るのは UR 系など DAE visual を持つ URDF ロボットで、需要が出たら再開する(§3 エコシステム方針) |
 | 衝突判定 | parry3d | **ベンチ検証済み([docs/bench-parry3d.md](bench-parry3d.md))。** ブール判定は 61 ペアのフルシーンで ~5µs と十分速い。ただし TriMesh 同士は包含を衝突として検出せず距離も誤るため、衝突形状はメッシュを VHACD 凸分解(ロード時 ~1s/メッシュ+キャッシュ)した compound に統一する。parry ≥0.23 は glam ベースになったため botrail-collide 境界で nalgebra⇔glam 変換を行う |
 | IK | 自前(減衰最小二乗+null-space) | TRAC-IK 級の成功率にはリスタート戦略等の作り込みが必要。まず gizmo 追従に十分な品質を優先 |
 | プランナ | 自前 RRT-Connect + shortcut | OMPL 移植ではなく自前実装。まず 1 本を堅牢に |
@@ -173,7 +369,7 @@ class TrajectoryExecutor(Protocol):
 体験の核である「触って動かせる」に最短で到達する順序にする。各マイルストーンはデモ可能な状態で締める。
 
 - **M0: 骨格**(~2週)**[完了]** — ワークスペース scaffold、xurdf による URDF/Xacro 読み込み+FK、pyo3 バインディング、three.js で robot 表示(WebSocket で関節状態配信)。`bt.studio(scene)` でブラウザにロボットが出る。メッシュは STL/OBJ から。ts-rs による protocol.ts 自動生成も導入済み。
-- **並行トラック: メッシュ I/O クレート** — M0 と並行して独立パッケージとして開発開始。M2 までに DAE 対応を入れ、botrail-io から差し替える。
+- **並行トラック: メッシュ I/O クレート**(**未着手**)— 独立パッケージ化と DAE 対応を M2 までに、という計画だったが実施していない。`botrail-mesh` が同梱のまま STL/OBJ を担い、高忠実度の表示は USD 経路に移った(§7)。
 - **M1: 触れる**(~2週)**[完了]** — ヤコビアン+DLS IK(特異点ストール脱出付き)、TCP gizmo ドラッグでリアルタイム IK、到達可否フィードバック。**ここが最初の「刺さる」デモ。**
 - **M2: ぶつかる**(~3週)**[完了]** — 自己干渉+環境干渉(botrail-collide、ソリッド形状規約)、contact ベース距離クエリ、障害物編集 UI(追加/選択/gizmo 移動/寸法編集/削除)、衝突ハイライト+クリアランス表示、ACM(隣接+サンプリングによる常時衝突ペア自動検出)。メッシュ衝突形状は実装済み(botrail-mesh + VHACD 凸分解、コンテンツハッシュのディスクキャッシュ付き。リンク・障害物とも対応)。セットアップウィザード UI は未実装(ACM 自動生成はコア実装済み)。
 - **M3: 計画する**(~3週)**[完了]** — RRT-Connect(決定的シード・妥当性コールバック方式)+ランダムショートカット、IPTP 系時間パラメタライズ(速度/加速度制限、Hermite サンプリング)、`scene.plan()`/`plan_to_pose()` + JSON/CSV エクスポート、studio のゴール設定(ゴースト表示)・計画要求・軌道再生(再生/シーク)。ジャーク制限(Ruckig 相当)と複数セグメントのモーション列は M4 以降。
@@ -187,17 +383,24 @@ class TrajectoryExecutor(Protocol):
 - **P9(残課題完結)[完了]** — (1) **wasm VHACD の Web Worker 化**: `decompose_usd_scene`(worker 内の別 wasm インスタンスで composition + VHACD → hull 点集合 JSON)+ `WasmSession::load_prepared_scene`(メインスレッドで hull → compound 再構築のみ、軽量)。フォールバックとして同期経路も維持。(2) **wasm ドロップ実機視認**: Chrome 上で合成 DragEvent によりドロップ → Worker 経由の取り込み → シーンツリー/障害物/clearance/ステージ描画まで確認。発見バグ 2 件を修正: `std::env::temp_dir()` が wasm で panic(キャッシュディレクトリ既定値を遅延解決に)、three-usd-robot の軸規約とのズレは v0.8.1 で解決(`worldUp` オプション追加。botrail は両ローダで `worldUp: "Z"` を明示 — **v0.8.1 の既定は "Y" なので明示必須**。手動 +90°X 補正は撤去、prepared JSON の up_axis はメタデータとして残置)。(3) **Isaac 公式アセットゴールデン照合**: 公開 S3 ミラーから Franka/UR10 を取得し照合 — **Franka 9 DOF・リミットが公式スペック(±2.8973 等、指 0–0.04m)と厳密一致、UR10 6 DOF ±2π 一致**。テストは `BOTRAIL_ISAAC_DIR` 指定時のみ実行(URSim と同方式)。重大バグを発見・修正: nalgebra `Rotation3::from_matrix` は**反復無制限**で、Franka 指リンクの悪条件行列で無限ループ → `from_matrix_eps(…, 100, …)` に変更。既知の残り: franka.usd の visual メッシュは外部参照(instanceable)のためローカルに無く、衝突は関節のみで幾何なし — アセットパックを `search_paths` に与えれば解決する設計。
 - **P10(デモ整備)[完了]** — `examples/demo.py` を Franka + 工場セルの USD デモに刷新。(1) ロボットは Isaac 公式 Franka(`franka.usd` + `Props/panda_*.usd` 12 ファイル + `Materials/Materials.usd`、計約 10MB)を初回実行時に公開 S3 ミラーから `~/.cache/botrail/assets/franka/` へダウンロード(`BOTRAIL_CACHE_DIR` 準拠)。Props を相対レイアウトのまま置くことで参照が解決し、**visual メッシュ込みで import・studio 描画とも完全動作**(P9 の既知課題「franka visual 外部参照」はこれで解消 — search_paths 不要)。(2) 環境は手書きの `examples/assets/factory.usda`(Z-up・m 単位、床・台座・コンベア・パレット・棚・安全柵の 36 プリミティブ + MountFrame/PickFrame/PlaceFrame の 3 フレーム)。全部 Cube/Cylinder なので VHACD 不要で即ロード。台座はロボット基部と 10mm クリアランス(基部 VHACD ハルが基準面下に ~2mm 膨らむため 5mm では HUD が 3.2mm 張り付きになる)。(3) ブラウザ実機確認済み: Franka 実メッシュ描画、ready ポーズ、ギズモ IK、Set goal → Plan → 再生(2.25s / 35ms)。発見した仕様上の注意: **プランナは関節値が上限値ちょうど(指 0.04m 等)のゴールを「out of limits」で弾く**(境界を排他扱い)— デモは 0.035 で回避、境界包含にするかは要検討。追補: ロボット描画(USD/URDF とも)にクリックハンドラを追加 — R3F はハンドラ無しメッシュをピッキングで素通しするため、アームをクリックすると背後の障害物が選択されてしまっていた(クリックで TCP フォーカス+stopPropagation)。あわせてホバーで pointer カーソル、ビューポート左下に現在フォーカス(TCP リンク/障害物名/robot base)のチップを常設。
 - **M5: 広める**(~2週)**[実装完了]** — botrail-wasm(wire プロトコル互換の `WasmSession`、v1 方針どおりシングルスレッド)+ studio の `SessionBackend` 抽象(WebSocket / wasm の 2 実装、UI 無変更)+ ブラウザ完結デモビルド(`scripts/build_wasm_demo.sh`、静的配信で全機能動作を検証済み)。GitHub Pages デプロイと PyPI リリースは workflow 整備済みで、リポジトリの push / Pages 有効化 / PyPI Trusted Publisher 設定後に発火する。ドキュメントサイトは未着手。hub/wasm で鏡写しだったメッセージディスパッチは botrail-session クレートに集約済み(ホスト差分は `SessionHost` trait — scene アクセス・emit・時計・ログ — として注入)。
+- **S1〜S6(セル化)[完了 2026-07]** — (S1) attach/detach と把持物込みの計画、(S2) USD アニメーション書き出し、(S3) PLC 型シーケンスコア(工程歩進 + 信号 + スキャンサイクル)、(S4) 擬似センサ・デバイス、(S5) USD 録画再生(Isaac Sim の録画も botrail 自身の書き出しも同じ経路)、(S6) コンベアトラッキング。設計と実装記録は [docs/design-sequence-control.md](design-sequence-control.md)。**これにより成果物の単位が「1 本の軌道」から「1 サイクルのセル」へ移った**(§1.1)。
 
-**成功条件(v1)**: 新規ユーザーが `pip install botrail` から 5 分以内に、UR5e 相当の URDF で障害物を避ける pick モーションを UI 上で作成し、CSV エクスポートまで到達できる。
+**成功条件(v1・軌道粒度)**: 新規ユーザーが `pip install botrail` から 5 分以内に、URDF/Xacro/USD のロボットで障害物を避ける pick モーションを UI 上で作成し、CSV エクスポートまで到達できる。
+
+**成功条件(セル粒度)**: USD のセル環境を読み込み、工程を並べて `simulate_sequence()` を回すとサイクルタイムが出て、`export_usd()` した USD が usdview / Omniverse で再生される。**`examples/sequence_demo.py`(13 工程・20.61s)で成立済み。** 次の水準は「レイアウトを変えて再 simulate し、サイクルタイムの差分が CI で検出される」こと(§9)。
 
 ## 9. 将来ロードマップ(v1 以降)
 
 - 最適化ベースプランナ(TrajOpt/CHOMP 系)によるパス品質向上
 - jerk 制限付き時間パラメタライズ(Ruckig 相当)
 - スクリプトエクスポートのバックエンド追加(TMScript / AUBO Lua / DENSO PAC — 実機検証できる協力者がいるものから)と Python カスタムバックエンドのプラグイン化、studio からのダウンロード(botrail-export は wasm でも動く純文字列生成)
+- **ベンダー I/O 出力** — export IR に SetDigitalOut / WaitDigitalIn / Sleep を追加し、シーケンスから I/O 付きの実機プログラムを生成する。検証したセルと実機プログラムが同一ソースから出る = 検証ループが閉じる(§2.4)
 - 実機プラグイン(UR / xArm 等 1 機種からリファレンス実装)
 - 物理シミュレータ連携(MuJoCo 等への軌道再生エクスポート)
-- マルチロボット / デュアルアーム(データモデルは複数ロボットを排除しない形で設計しておく)
+- マルチロボット / デュアルアーム + **SFC の並列分岐**(データモデルは複数ロボットを排除しない形で設計済み。§2.4 の最大の穴で、「セル」を名乗るための最優先課題)— 設計・実装プランは [docs/design-multi-robot.md](design-multi-robot.md)(調停はインターロック、並列 SFC なしで成立させる方針)
+- **セルのアサーション API と CI 統合** — `SequenceTimeline` はサイクルタイム・工程帯・クリアランス・信号波形をすでに保持しているので、これを assert できる薄い皮と pytest 例を足すだけで「決定的に焼ける」が運用可能な形になる(§1.3)
+- **パラメトリック・セル / パラメータスイープ** — レイアウトや搬送速度をパラメータにして振り、サイクルタイムを比較する。「環境の自由度」を主張する以上、実際に振れることを示す必要がある
+- **セルの URL 共有** — wasm の `export_to_string` + studio からのダウンロード/読み込みで、セルを 1 つのリンクとして渡す(§1.3 の 5 本目)
 - wasm マルチスレッド化
 
 ## 10. 開発運用

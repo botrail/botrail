@@ -17,7 +17,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
-        .route("/usd-assets/{*rest}", get(asset_handler))
+        .route("/usd-assets/{robot}/{*rest}", get(asset_handler))
         .route("/api/scene", get(scene_handler))
         .route("/api/project", get(project_get).post(project_post))
         .route("/api/export.py", get(python_export))
@@ -31,16 +31,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Arc<SceneHub>>) -> R
 
 async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
     let mut rx = hub.tx.subscribe();
-    for initial in [
-        hub.scene_init_json(),
-        hub.obstacles_json(),
-        hub.motions_json(),
-        hub.sequences_json(),
-        hub.sensors_json(),
-        hub.devices_json(),
-        hub.frames_json(),
-        hub.state_json(),
-    ] {
+    // The handshake order is defined once, in botrail_session — hand-rolled
+    // copies have drifted before (a dropped `sequences` message).
+    for initial in hub.handshake_jsons() {
         if socket.send(Message::Text(initial.into())).await.is_err() {
             return;
         }
@@ -77,10 +70,13 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
     }
 }
 
-/// Serves a USD robot's stage directory so the client-side loader can
-/// fetch the root layer and its relative references.
-async fn asset_handler(Path(rest): Path<String>, State(hub): State<Arc<SceneHub>>) -> Response {
-    let Some(dir) = hub.robot_asset_dir() else {
+/// Serves a USD robot's stage directory (namespaced by robot index) so the
+/// client-side loader can fetch the root layer and its relative references.
+async fn asset_handler(
+    Path((robot, rest)): Path<(usize, String)>,
+    State(hub): State<Arc<SceneHub>>,
+) -> Response {
+    let Some(dir) = hub.robot_asset_dir(robot) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // Reject path traversal; USD-internal references are always relative

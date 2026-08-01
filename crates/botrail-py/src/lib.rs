@@ -171,8 +171,21 @@ fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isom
         .into()
 }
 
-fn sensor_watch(watch: Option<Vec<String>>, watch_robot: bool) -> botrail_scene::seq::SensorWatch {
+fn sensor_watch(
+    watch: Option<Vec<String>>,
+    watch_robot: bool,
+    watch_robots: Option<Vec<String>>,
+) -> botrail_scene::seq::SensorWatch {
     use botrail_scene::seq::SensorWatch;
+    if let Some(robots) = watch_robots {
+        // Named robots combined with objects or "any robot" has no
+        // dedicated variant; watch everything (the superset) rather than
+        // silently dropping one.
+        return match (watch.as_deref(), watch_robot) {
+            (None | Some([]), false) => SensorWatch::Robots(robots),
+            _ => SensorWatch::All,
+        };
+    }
     match (watch, watch_robot) {
         (None, false) => SensorWatch::AllObjects,
         (None, true) => SensorWatch::All,
@@ -255,28 +268,71 @@ struct Scene {
     robot: Robot,
 }
 
+impl Scene {
+    /// Resolves an optional `robot=` argument to a robot index. `None`
+    /// means the sole robot and is an error when the scene has several.
+    fn resolve_robot(&self, robot: Option<&str>) -> PyResult<usize> {
+        self.hub.robot_index(robot).map_err(PyValueError::new_err)
+    }
+}
+
 #[pymethods]
 impl Scene {
     /// A scene with the robot root placed at the world-frame base pose
-    /// (identity when omitted).
+    /// (identity when omitted). `name` sets the robot's scene-unique
+    /// instance name (default: the model name).
     #[new]
-    #[pyo3(signature = (robot, base_position = None, base_quaternion = None))]
+    #[pyo3(signature = (robot, base_position = None, base_quaternion = None, name = None))]
     fn new(
         robot: &Robot,
         base_position: Option<[f64; 3]>,
         base_quaternion: Option<[f64; 4]>,
+        name: Option<&str>,
     ) -> Self {
         let base = pose_from(base_position.unwrap_or([0.0; 3]), base_quaternion);
-        let scene = botrail_scene::Scene::with_base(robot.inner.clone(), base);
+        let mut scene = botrail_scene::Scene::with_base(robot.inner.clone(), base);
+        if let Some(name) = name {
+            scene.rename_robot(0, name);
+        }
         Scene {
             hub: Arc::new(SceneHub::new(scene)),
             robot: robot.clone(),
         }
     }
 
+    /// Adds another robot instance and returns its (possibly uniquified)
+    /// scene-unique instance name. `name` defaults to the model name.
+    /// Connected studios pick the new robot up immediately (the handshake
+    /// is re-broadcast).
+    #[pyo3(signature = (robot, name = None, base_position = None, base_quaternion = None))]
+    fn add_robot(
+        &self,
+        robot: &Robot,
+        name: Option<&str>,
+        base_position: Option<[f64; 3]>,
+        base_quaternion: Option<[f64; 4]>,
+    ) -> String {
+        let base = pose_from(base_position.unwrap_or([0.0; 3]), base_quaternion);
+        self.hub.add_robot(robot.inner.clone(), name, base)
+    }
+
     #[getter]
     fn robot(&self) -> Robot {
         self.robot.clone()
+    }
+
+    /// Instance names of every robot in the scene, in insertion order.
+    #[getter]
+    fn robots(&self) -> Vec<String> {
+        self.hub.robot_names()
+    }
+
+    /// The model of the robot instance named `name`.
+    fn robot_of(&self, name: &str) -> PyResult<Robot> {
+        let index = self.resolve_robot(Some(name))?;
+        Ok(Robot {
+            inner: self.hub.robot_model(index),
+        })
     }
 
     /// World pose of the robot root as `(position, quaternion_xyzw)`.
@@ -285,12 +341,28 @@ impl Scene {
         self.hub.robot_base_pose()
     }
 
+    /// World base pose of the robot instance named `name`.
+    fn robot_base_pose_of(&self, name: &str) -> PyResult<([f64; 3], [f64; 4])> {
+        let index = self.resolve_robot(Some(name))?;
+        let pose = self.hub.robot_base_isometry_for(index);
+        let t = pose.translation;
+        let q = pose.rotation.coords;
+        Ok(([t.x, t.y, t.z], [q.x, q.y, q.z, q.w]))
+    }
+
     /// Places the robot root at the world-frame pose and pushes the new
     /// state to connected studio clients.
-    #[pyo3(signature = (position, quaternion = None))]
-    fn set_robot_base_pose(&self, position: [f64; 3], quaternion: Option<[f64; 4]>) {
+    #[pyo3(signature = (position, quaternion = None, robot = None))]
+    fn set_robot_base_pose(
+        &self,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
         self.hub
-            .set_robot_base_pose(pose_from(position, quaternion));
+            .set_robot_base_pose_for(index, pose_from(position, quaternion));
+        Ok(())
     }
 
     #[getter]
@@ -298,16 +370,26 @@ impl Scene {
         self.hub.joint_positions()
     }
 
-    fn set_joint_positions(&self, positions: Vec<f64>) -> PyResult<()> {
+    /// Joint configuration of the robot instance named `name`.
+    fn joint_positions_of(&self, name: &str) -> PyResult<Vec<f64>> {
+        let index = self.resolve_robot(Some(name))?;
+        Ok(self.hub.joint_positions_for(index))
+    }
+
+    #[pyo3(signature = (positions, robot = None))]
+    fn set_joint_positions(&self, positions: Vec<f64>, robot: Option<&str>) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
         self.hub
-            .set_joint_positions(positions)
+            .set_joint_positions_for(index, positions)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// World pose of a link as `(position, quaternion_xyzw)`.
-    fn link_pose(&self, link_name: &str) -> PyResult<([f64; 3], [f64; 4])> {
+    #[pyo3(signature = (link_name, robot = None))]
+    fn link_pose(&self, link_name: &str, robot: Option<&str>) -> PyResult<([f64; 3], [f64; 4])> {
+        let index = self.resolve_robot(robot)?;
         self.hub
-            .link_pose(link_name)
+            .link_pose_for(index, link_name)
             .ok_or_else(|| PyValueError::new_err(format!("unknown link `{link_name}`")))
     }
 
@@ -415,6 +497,12 @@ impl Scene {
         for warning in &imported.warnings {
             eprintln!("botrail: usd import: {warning}");
         }
+        for root in &imported.robot_roots {
+            eprintln!(
+                "botrail: usd import: skipped robot articulation at `{root}` — import it with \
+                 bt.Robot.from_usd(path, articulation_root={root:?})"
+            );
+        }
         let prefix = prefix.unwrap_or_default();
         let batch = imported
             .nodes
@@ -493,15 +581,17 @@ impl Scene {
     /// planning, and in playback) and collides as part of the robot.
     /// `link=None` uses the TCP link; `touch_links=None` allows contact
     /// with the link's subtree (the gripper).
-    #[pyo3(signature = (name, link = None, touch_links = None))]
+    #[pyo3(signature = (name, link = None, touch_links = None, robot = None))]
     fn attach(
         &self,
         name: &str,
         link: Option<&str>,
         touch_links: Option<Vec<String>>,
+        robot: Option<&str>,
     ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
         self.hub
-            .attach_obstacle(name, link, touch_links.as_deref())
+            .attach_obstacle_to(index, name, link, touch_links.as_deref())
             .map_err(scene_err)
     }
 
@@ -521,35 +611,48 @@ impl Scene {
     /// obstacles as prims, grasped objects riding along. USD-sourced robots
     /// reference their original stage (assets copied to a sibling
     /// `<stem>_assets/` directory); URDF robots are authored from the
-    /// model's visuals. Returns exporter warnings.
-    #[pyo3(signature = (trajectory, path, fps = 60.0))]
+    /// model's visuals. `robot` names the instance the trajectory belongs
+    /// to (required when the scene has several). Returns exporter warnings.
+    #[pyo3(signature = (trajectory, path, fps = 60.0, robot = None))]
     fn export_usd(
         &self,
         trajectory: &Trajectory,
         path: PathBuf,
         fps: f64,
+        robot: Option<&str>,
     ) -> PyResult<Vec<String>> {
+        let index = self.resolve_robot(robot)?;
         self.hub
-            .export_trajectory_usd(&trajectory.inner, &path, fps)
+            .export_trajectory_usd(index, &trajectory.inner, &path, fps)
             .map_err(PyValueError::new_err)
     }
 
     /// Plays a baked USD recording (an Isaac Sim capture or a botrail
-    /// export) on the scene's robot and broadcasts it to the studio.
+    /// export) on the scene's robots and broadcasts it to the studio.
     /// Joint playback is used when the layer carries `JointStateAPI`
     /// samples for every actuated joint; otherwise the recorded body
     /// transforms are replayed directly (`force_transforms` forces the
-    /// latter). Returns `{"mode", "duration", "warnings"}`.
-    #[pyo3(signature = (path, force_transforms = false))]
+    /// latter). With several robots each is located at
+    /// `/World/<sanitized instance name>` (the export convention);
+    /// `robot_roots` maps instance names to prim paths when the recording
+    /// placed them elsewhere. Returns `{"mode", "duration", "warnings"}`.
+    #[pyo3(signature = (path, force_transforms = false, robot_roots = None))]
     fn play_usd_animation<'py>(
         &self,
         py: Python<'py>,
         path: PathBuf,
         force_transforms: bool,
+        robot_roots: Option<std::collections::HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let (mode, duration, warnings, object_tracks) = self
             .hub
-            .play_usd_animation(&path, force_transforms)
+            .play_usd_animation(
+                &path,
+                force_transforms,
+                robot_roots
+                    .map(|m| m.into_iter().collect())
+                    .unwrap_or_default(),
+            )
             .map_err(PyValueError::new_err)?;
         let out = PyDict::new(py);
         out.set_item("mode", mode)?;
@@ -584,7 +687,8 @@ impl Scene {
     /// a list of obstacle names (default: every obstacle); pass
     /// `watch_robot=True` to sense robot links too (with `watch=[]` for a
     /// robot-only light curtain).
-    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false))]
+    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_zone_sensor(
         &self,
         name: &str,
@@ -593,6 +697,7 @@ impl Scene {
         quaternion: Option<[f64; 4]>,
         watch: Option<Vec<String>>,
         watch_robot: bool,
+        watch_robots: Option<Vec<String>>,
     ) -> PyResult<()> {
         self.hub.upsert_sensor(botrail_scene::seq::Sensor {
             name: name.to_string(),
@@ -600,14 +705,15 @@ impl Scene {
                 pose: pose_from(position, quaternion),
                 size: nalgebra::Vector3::new(size[0], size[1], size[2]),
             },
-            watch: sensor_watch(watch, watch_robot),
+            watch: sensor_watch(watch, watch_robot, watch_robots),
         });
         Ok(())
     }
 
     /// Adds a photoelectric beam sensor between two world points, ON while
     /// the beam is interrupted. Watch semantics as in `add_zone_sensor`.
-    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false))]
+    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false, watch_robots = None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_beam_sensor(
         &self,
         name: &str,
@@ -616,6 +722,7 @@ impl Scene {
         radius: f64,
         watch: Option<Vec<String>>,
         watch_robot: bool,
+        watch_robots: Option<Vec<String>>,
     ) -> PyResult<()> {
         self.hub.upsert_sensor(botrail_scene::seq::Sensor {
             name: name.to_string(),
@@ -624,7 +731,7 @@ impl Scene {
                 to: nalgebra::Point3::new(to[0], to[1], to[2]),
                 radius,
             },
-            watch: sensor_watch(watch, watch_robot),
+            watch: sensor_watch(watch, watch_robot, watch_robots),
         });
         Ok(())
     }
@@ -790,14 +897,16 @@ impl Scene {
     /// current configuration to `goal` (joint positions in DOF order).
     /// With `broadcast=True` (default) the result is also pushed to
     /// connected studio clients for preview playback.
-    #[pyo3(signature = (goal, max_iters = 10_000, seed = None, broadcast = true))]
+    #[pyo3(signature = (goal, max_iters = 10_000, seed = None, broadcast = true, robot = None))]
     fn plan(
         &self,
         goal: Vec<f64>,
         max_iters: usize,
         seed: Option<u64>,
         broadcast: bool,
+        robot: Option<&str>,
     ) -> PyResult<Trajectory> {
+        let index = self.resolve_robot(robot)?;
         let mut options = botrail_plan::PlanOptions {
             max_iters,
             ..botrail_plan::PlanOptions::default()
@@ -806,11 +915,12 @@ impl Scene {
             options.seed = seed;
         }
         let result = if broadcast {
-            self.hub.plan_and_broadcast(&goal, &options)
+            self.hub.plan_and_broadcast_for(index, &goal, &options)
         } else {
-            self.hub.plan_to(&goal, &options)
+            self.hub.plan_to_for(index, &goal, &options)
         };
         let (traj, path, _) = result.map_err(PyValueError::new_err)?;
+        let model = self.hub.robot_model(index);
         Ok(Trajectory {
             inner: traj,
             segment_ends: Vec::new(),
@@ -818,14 +928,12 @@ impl Scene {
                 kind: botrail_scene::motion::SegmentKind::Joint,
                 waypoints: path,
             }],
-            joint_names: self
-                .robot
-                .inner
+            joint_names: model
                 .actuated_joint_names()
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-            limits: hub::traj_limits(&self.robot.inner),
+            limits: hub::traj_limits(&model),
         })
     }
 
@@ -834,7 +942,7 @@ impl Scene {
     /// `orientation_cone=(axis_local, axis_world, angle_rad)` keeps the tool
     /// axis inside a cone; `position_box=(min, max)` keeps the TCP inside a
     /// world-aligned box. Both apply along the whole segment.
-    #[pyo3(signature = (motion, goal = None, kind = "joint", orientation_cone = None, position_box = None))]
+    #[pyo3(signature = (motion, goal = None, kind = "joint", orientation_cone = None, position_box = None, robot = None))]
     fn add_segment(
         &self,
         motion: &str,
@@ -842,7 +950,9 @@ impl Scene {
         kind: &str,
         orientation_cone: Option<([f64; 3], [f64; 3], f64)>,
         position_box: Option<([f64; 3], [f64; 3])>,
+        robot: Option<&str>,
     ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
         let kind = match kind {
             "joint" => botrail_scene::motion::SegmentKind::Joint,
             "cartesian_line" => botrail_scene::motion::SegmentKind::CartesianLine,
@@ -868,11 +978,11 @@ impl Scene {
         }
         let segment = botrail_scene::motion::Segment {
             kind,
-            goal_positions: goal.unwrap_or_else(|| self.hub.joint_positions()),
+            goal_positions: goal.unwrap_or_else(|| self.hub.joint_positions_for(index)),
             constraints,
         };
         self.hub
-            .add_segment(motion, segment)
+            .add_segment_for(index, motion, segment)
             .map_err(PyValueError::new_err)
     }
 
@@ -918,18 +1028,18 @@ impl Scene {
             self.hub.plan_motion_snapshot(motion, &options)
         }
         .map_err(PyValueError::new_err)?;
+        let owner = self.hub.motion_owner(motion).unwrap_or(0);
+        let model = self.hub.robot_model(owner);
         Ok(Trajectory {
             inner: planned.trajectory,
             segment_ends: planned.segment_ends,
             segments: planned.segments,
-            joint_names: self
-                .robot
-                .inner
+            joint_names: model
                 .actuated_joint_names()
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-            limits: hub::traj_limits(&self.robot.inner),
+            limits: hub::traj_limits(&model),
         })
     }
 
@@ -959,8 +1069,15 @@ impl Scene {
         }
 
         // A USD-sourced robot bundles its stage layers (root + sublayers +
-        // reference targets under the stage directory) as `robot/<relpath>`.
-        for robot in &mut project.robots {
+        // reference targets under the stage directory) as
+        // `robot/<relpath>` (`robot_<n>/<relpath>` for later robots, so two
+        // stages with same-named files cannot collide).
+        for (i, robot) in project.robots.iter_mut().enumerate() {
+            let bundle_dir = if i == 0 {
+                "robot".to_string()
+            } else {
+                format!("robot_{}", i + 1)
+            };
             let botrail_scene::project::RobotSourceMsg::Usd {
                 path: stage_path, ..
             } = &mut robot.source
@@ -976,7 +1093,7 @@ impl Scene {
             for dep in deps {
                 match dep.strip_prefix(&root_dir) {
                     Ok(rel) => assets.push((
-                        format!("robot/{}", rel.to_string_lossy().replace('\\', "/")),
+                        format!("{bundle_dir}/{}", rel.to_string_lossy().replace('\\', "/")),
                         dep.clone(),
                     )),
                     Err(_) => eprintln!(
@@ -991,7 +1108,7 @@ impl Scene {
                 .expect("root is inside its parent")
                 .to_string_lossy()
                 .replace('\\', "/");
-            *stage_path = format!("robot/{rel_root}");
+            *stage_path = format!("{bundle_dir}/{rel_root}");
         }
 
         if assets.is_empty() {
@@ -1020,9 +1137,9 @@ impl Scene {
         Ok(())
     }
 
-    /// Loads a `.botrail` project file into a fresh scene (robot included).
-    /// URDF robots rebuild from the embedded XML; USD robots re-import from
-    /// the referenced stage path.
+    /// Loads a `.botrail` project file into a fresh scene (robots
+    /// included). URDF robots rebuild from the embedded XML; USD robots
+    /// re-import from the referenced stage path.
     #[staticmethod]
     fn load_project(path: PathBuf) -> PyResult<Self> {
         use botrail_scene::project::RobotSourceMsg;
@@ -1030,33 +1147,44 @@ impl Scene {
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
         let project = read_project(&bytes)
             .map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
-        let robot_msg = project
-            .single_robot()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let scene = match &robot_msg.source {
-            RobotSourceMsg::Urdf { .. } => botrail_scene::Scene::from_project(&project)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?,
-            RobotSourceMsg::Usd {
-                path,
-                articulation_root,
-            } => {
-                let imported = botrail_usd::import_robot(
-                    std::path::Path::new(path),
-                    &botrail_usd::RobotImportOptions {
-                        articulation_root: Some(articulation_root.clone()),
-                        ..Default::default()
-                    },
-                )
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let mut scene = botrail_scene::Scene::new(Arc::new(imported.model));
-                scene
-                    .apply_project(&project)
+        let mut models = Vec::with_capacity(project.robots.len());
+        for robot_msg in &project.robots {
+            let model = match &robot_msg.source {
+                RobotSourceMsg::Urdf { xml } => Arc::new(
+                    RobotModel::from_urdf_str(xml)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                ),
+                RobotSourceMsg::Usd {
+                    path,
+                    articulation_root,
+                } => {
+                    let imported = botrail_usd::import_robot(
+                        std::path::Path::new(path),
+                        &botrail_usd::RobotImportOptions {
+                            articulation_root: Some(articulation_root.clone()),
+                            ..Default::default()
+                        },
+                    )
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                scene
-            }
-        };
+                    Arc::new(imported.model)
+                }
+            };
+            models.push(model);
+        }
+        let mut models = models.into_iter();
+        let first = models
+            .next()
+            .ok_or_else(|| PyValueError::new_err("project has no robots"))?;
+        let mut scene = botrail_scene::Scene::new(first);
+        for model in models {
+            scene.add_robot(model, None, nalgebra::Isometry3::identity());
+        }
+        // apply_project restores instance names, bases, and joints.
+        scene
+            .apply_project(&project)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let robot = Robot {
-            inner: scene.robot.clone(),
+            inner: scene.robot().clone(),
         };
         Ok(Scene {
             hub: Arc::new(SceneHub::new(scene)),
@@ -1071,7 +1199,7 @@ impl Scene {
     }
 
     /// IK to the given pose, then plan to the found configuration.
-    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 10_000, seed = None, broadcast = true))]
+    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 10_000, seed = None, broadcast = true, robot = None))]
     #[allow(clippy::too_many_arguments)]
     fn plan_to_pose(
         &self,
@@ -1081,18 +1209,21 @@ impl Scene {
         max_iters: usize,
         seed: Option<u64>,
         broadcast: bool,
+        robot: Option<&str>,
     ) -> PyResult<Trajectory> {
-        let link_index = resolve_link(&self.robot.inner, link)?;
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let link_index = resolve_link(&model, link)?;
         let (target, mode) = ik_target(position, quaternion);
         // The target is world-frame; re-express it in the robot base frame
         // for the base-frame solver.
-        let target = self.hub.robot_base_isometry().inverse() * target;
-        let seed_q = self.hub.joint_positions();
+        let target = self.hub.robot_base_isometry_for(index).inverse() * target;
+        let seed_q = self.hub.joint_positions_for(index);
         let options = botrail_kin::IkOptions {
             mode,
             ..botrail_kin::IkOptions::default()
         };
-        let ik = botrail_kin::solve_ik(&self.robot.inner, link_index, &target, &seed_q, &options)
+        let ik = botrail_kin::solve_ik(&model, link_index, &target, &seed_q, &options)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         if !ik.converged {
             return Err(PyValueError::new_err(format!(
@@ -1100,23 +1231,26 @@ impl Scene {
                 ik.pos_error, ik.rot_error
             )));
         }
-        self.plan(ik.q, max_iters, seed, broadcast)
+        self.plan(ik.q, max_iters, seed, broadcast, robot)
     }
 
     /// Solves IK toward the given pose (seeded from the current
     /// configuration), applies the best-effort result to the scene, and
     /// pushes it to connected studio clients. `quaternion=None` matches
     /// position only; `link` defaults to the TCP link.
-    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100))]
+    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100, robot = None))]
     fn set_tcp_target(
         &self,
         position: [f64; 3],
         quaternion: Option<[f64; 4]>,
         link: Option<&str>,
         max_iters: usize,
+        robot: Option<&str>,
     ) -> PyResult<IkResult> {
-        let link_index = resolve_link(&self.robot.inner, link)?;
-        let link_name = self.robot.inner.links[link_index].name.clone();
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let link_index = resolve_link(&model, link)?;
+        let link_name = model.links[link_index].name.clone();
         let pose = botrail_scene::wire::PoseMsg {
             position,
             quaternion: quaternion.unwrap_or([0.0, 0.0, 0.0, 1.0]),
@@ -1132,13 +1266,17 @@ impl Scene {
         };
         let result = self
             .hub
-            .set_tcp_target(&link_name, &pose, &options)
+            .set_tcp_target_for(index, &link_name, &pose, &options)
             .map_err(PyValueError::new_err)?;
         Ok(IkResult { inner: result })
     }
 
     fn __repr__(&self) -> String {
-        format!("Scene(robot='{}')", self.robot.inner.name)
+        let names = self.hub.robot_names();
+        match names.as_slice() {
+            [single] => format!("Scene(robot='{single}')"),
+            names => format!("Scene(robots={names:?})"),
+        }
     }
 }
 
@@ -1170,7 +1308,7 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
         .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)));
     let names: Vec<String> = archive
         .file_names()
-        .filter(|n| n.starts_with("assets/") || n.starts_with("robot/"))
+        .filter(|n| n.starts_with("assets/") || n.starts_with("robot/") || n.starts_with("robot_"))
         .map(str::to_string)
         .collect();
     for name in &names {
@@ -1200,7 +1338,7 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
     }
     for robot in &mut project.robots {
         if let botrail_scene::project::RobotSourceMsg::Usd { path, .. } = &mut robot.source {
-            if path.starts_with("robot/") {
+            if path.starts_with("robot/") || path.starts_with("robot_") {
                 *path = dir.join(&*path).display().to_string();
             }
         }
@@ -1547,7 +1685,7 @@ fn serve_studio(
     })
 }
 
-/// A baked sequence rollout: the cycle's joint track, grasped-object
+/// A baked sequence rollout: per-robot joint tracks, grasped-object
 /// motion, signal waveforms, and step spans (the timing chart).
 #[pyclass(frozen, module = "botrail._core")]
 struct SequenceTimeline {
@@ -1557,12 +1695,67 @@ struct SequenceTimeline {
     scene: botrail_scene::Scene,
 }
 
+impl SequenceTimeline {
+    /// Resolves an optional robot name to `(scene index, track)`. `None`
+    /// means the sole robot and is ambiguous when several exist.
+    fn track_for(
+        &self,
+        robot: Option<&str>,
+    ) -> PyResult<(usize, &botrail_scene::rollout::RobotTrack)> {
+        let names = || {
+            self.inner
+                .robots
+                .iter()
+                .map(|r| format!("`{}`", r.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match robot {
+            Some(name) => self
+                .inner
+                .robots
+                .iter()
+                .position(|r| r.name == name)
+                .map(|i| (i, &self.inner.robots[i]))
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown robot `{name}` (robots: {})", names()))
+                }),
+            None if self.inner.robots.len() == 1 => Ok((0, &self.inner.robots[0])),
+            None => Err(PyValueError::new_err(format!(
+                "the timeline has {} robots; pass robot=<name> (one of: {})",
+                self.inner.robots.len(),
+                names()
+            ))),
+        }
+    }
+
+    /// Every robot's FK world poses at time `t`.
+    fn all_poses_at(&self, t: f64) -> PyResult<Vec<Vec<nalgebra::Isometry3<f64>>>> {
+        self.inner
+            .robots
+            .iter()
+            .enumerate()
+            .map(|(r, track)| {
+                self.scene
+                    .fk_for(r, &track.trajectory.sample(t))
+                    .map_err(|e| PyValueError::new_err(e.to_string()))
+            })
+            .collect()
+    }
+}
+
 #[pymethods]
 impl SequenceTimeline {
     /// Cycle time in seconds.
     #[getter]
     fn duration(&self) -> f64 {
         self.inner.duration
+    }
+
+    /// Instance names of the robots on this timeline, in scene order.
+    #[getter]
+    fn robots(&self) -> Vec<String> {
+        self.inner.robots.iter().map(|r| r.name.clone()).collect()
     }
 
     /// `(step name, start, end)` per step, in execution order.
@@ -1585,9 +1778,23 @@ impl SequenceTimeline {
             .collect()
     }
 
-    /// Joint positions at time `t` (clamped to the cycle).
-    fn sample(&self, t: f64) -> Vec<f64> {
-        self.inner.robot.sample(t)
+    /// A robot's joint positions at time `t` (clamped to the cycle).
+    #[pyo3(signature = (t, robot = None))]
+    fn sample(&self, t: f64, robot: Option<&str>) -> PyResult<Vec<f64>> {
+        Ok(self.track_for(robot)?.1.trajectory.sample(t))
+    }
+
+    /// A robot's move intervals as `(label, start, end)` — the intervals a
+    /// motion (by name) or ramp drove it.
+    #[pyo3(signature = (robot = None))]
+    fn moves(&self, robot: Option<&str>) -> PyResult<Vec<(String, f64, f64)>> {
+        Ok(self
+            .track_for(robot)?
+            .1
+            .moves
+            .iter()
+            .map(|s| (s.name.clone(), s.start, s.end))
+            .collect())
     }
 
     /// World pose of a grasped/tracked object at time `t`.
@@ -1600,10 +1807,7 @@ impl SequenceTimeline {
             .ok_or_else(|| {
                 PyValueError::new_err(format!("`{name}` is not tracked by this timeline"))
             })?;
-        let poses = self
-            .scene
-            .fk(&self.inner.robot.sample(t))
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let poses = self.all_poses_at(t)?;
         let pose = botrail_scene::rollout::SequenceTimeline::object_pose(track, &poses, t)
             .ok_or_else(|| PyValueError::new_err("empty object track"))?;
         let q = pose.rotation.coords;
@@ -1613,28 +1817,37 @@ impl SequenceTimeline {
         ))
     }
 
-    /// The cycle's joint track as a [`Trajectory`] (CSV/JSON export, joint
-    /// access). Step boundaries land in `segment_ends`.
-    #[getter]
-    fn trajectory(&self) -> Trajectory {
-        Trajectory {
-            inner: self.inner.robot.clone(),
-            joint_names: self
-                .scene
-                .robot
+    /// A robot's cycle joint track as a [`Trajectory`] (CSV/JSON export,
+    /// joint access). Step boundaries land in `segment_ends`.
+    #[pyo3(signature = (robot = None))]
+    fn robot_trajectory(&self, robot: Option<&str>) -> PyResult<Trajectory> {
+        let (index, track) = self.track_for(robot)?;
+        let model = &self.scene.robots()[index].model;
+        Ok(Trajectory {
+            inner: track.trajectory.clone(),
+            joint_names: model
                 .actuated_joint_names()
                 .iter()
                 .map(|n| n.to_string())
                 .collect(),
             segment_ends: self.inner.step_spans.iter().map(|s| s.end).collect(),
             segments: Vec::new(),
-            limits: crate::hub::traj_limits(&self.scene.robot),
-        }
+            limits: crate::hub::traj_limits(model),
+        })
+    }
+
+    /// The sole robot's cycle track (see `robot_trajectory`; with several
+    /// robots this is ambiguous — name one).
+    #[getter]
+    fn trajectory(&self) -> PyResult<Trajectory> {
+        self.robot_trajectory(None)
     }
 
     /// Bakes the whole cycle to a USD animation layer (see
-    /// `Scene.export_usd`): robot + every obstacle, with grasped objects
-    /// riding, releasing, and resting exactly as simulated.
+    /// `Scene.export_usd`): every robot + every obstacle, with grasped
+    /// objects riding, releasing, resting — and handed over — exactly as
+    /// simulated. A sole robot exports under the historical `Robot` prim;
+    /// with several, each lands at `/World/<sanitized instance name>`.
     #[pyo3(signature = (path, fps = 60.0))]
     fn export_usd(&self, path: PathBuf, fps: f64) -> PyResult<Vec<String>> {
         if !(fps.is_finite() && fps > 0.0) {
@@ -1655,14 +1868,31 @@ impl SequenceTimeline {
         }
         times.push(duration);
 
-        let mut link_poses = Vec::with_capacity(times.len());
-        for &t in &times {
-            let poses = self
-                .scene
-                .fk(&self.inner.robot.sample(t))
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            link_poses.push(poses);
+        // Per-robot FK per frame (robot-major for the exporter)...
+        let mut robot_frames: Vec<Vec<Vec<nalgebra::Isometry3<f64>>>> =
+            Vec::with_capacity(self.inner.robots.len());
+        let mut joint_samples: Vec<Vec<Vec<f64>>> = Vec::with_capacity(self.inner.robots.len());
+        for (r, track) in self.inner.robots.iter().enumerate() {
+            let mut frames = Vec::with_capacity(times.len());
+            let mut samples = Vec::with_capacity(times.len());
+            for &t in &times {
+                let q = track.trajectory.sample(t);
+                frames.push(
+                    self.scene
+                        .fk_for(r, &q)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                );
+                samples.push(q);
+            }
+            robot_frames.push(frames);
+            joint_samples.push(samples);
         }
+        // ...and frame-major for the object tracks (handover-aware: each
+        // span names its carrying robot).
+        let all_frames: Vec<Vec<Vec<nalgebra::Isometry3<f64>>>> = (0..times.len())
+            .map(|k| robot_frames.iter().map(|rf| rf[k].clone()).collect())
+            .collect();
+
         let objects: Vec<botrail_usd::export::ObjectSpec> = self
             .scene
             .obstacles()
@@ -1676,7 +1906,7 @@ impl SequenceTimeline {
                             .map(|(k, &t)| {
                                 botrail_scene::rollout::SequenceTimeline::object_pose(
                                     track,
-                                    &link_poses[k],
+                                    &all_frames[k],
                                     t,
                                 )
                                 .unwrap_or(o.pose)
@@ -1692,13 +1922,36 @@ impl SequenceTimeline {
                 }
             })
             .collect();
-        let joint_samples: Vec<Vec<f64>> =
-            times.iter().map(|&t| self.inner.robot.sample(t)).collect();
+
+        // A sole robot keeps the historical `Robot` prim (byte compat).
+        let single = self.inner.robots.len() == 1;
+        let names: Vec<String> = self
+            .inner
+            .robots
+            .iter()
+            .map(|r| {
+                if single {
+                    "Robot".to_string()
+                } else {
+                    r.name.clone()
+                }
+            })
+            .collect();
+        let robots: Vec<botrail_usd::export::RobotAnimation> = self
+            .inner
+            .robots
+            .iter()
+            .enumerate()
+            .map(|(r, _)| botrail_usd::export::RobotAnimation {
+                name: &names[r],
+                model: &self.scene.robots()[r].model,
+                link_poses: &robot_frames[r],
+                joint_samples: Some(&joint_samples[r]),
+            })
+            .collect();
         let input = botrail_usd::export::AnimationInput {
-            model: &self.scene.robot,
+            robots: &robots,
             times: &times,
-            link_poses: &link_poses,
-            joint_samples: Some(&joint_samples),
             objects: &objects,
         };
         let options = botrail_usd::export::ExportOptions { fps };

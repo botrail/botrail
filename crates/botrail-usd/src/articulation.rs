@@ -216,24 +216,34 @@ impl RobotBuilder<'_> {
     ) -> Result<ImportedRobot, UsdImportError> {
         let art = |msg: String| UsdImportError::Articulation(msg);
 
-        let root_path =
-            match articulation_root {
-                Some(path) => prims
+        let root_path = match articulation_root {
+            Some(path) => prims
+                .iter()
+                .find(|p| p.path == path)
+                .ok_or_else(|| art(format!("articulation root `{path}` not found")))?
+                .path
+                .clone(),
+            None => {
+                let mut roots = prims
                     .iter()
-                    .find(|p| p.path == path)
-                    .ok_or_else(|| art(format!("articulation root `{path}` not found")))?
-                    .path
-                    .clone(),
-                None => prims
-                    .iter()
-                    .find(|p| p.is_articulation_root)
-                    .ok_or_else(|| {
+                    .filter(|p| p.is_articulation_root)
+                    .map(|p| p.path.clone());
+                let first =
+                    roots.next().ok_or_else(|| {
                         art("no prim with PhysicsArticulationRootAPI found (pass articulation_root)"
                         .to_string())
-                    })?
-                    .path
-                    .clone(),
-            };
+                    })?;
+                let rest: Vec<String> = roots.collect();
+                if !rest.is_empty() {
+                    self.warnings.push(format!(
+                        "stage has multiple articulation roots — importing `{first}` \
+                             (also found: {}); pass articulation_root to choose",
+                        rest.join(", ")
+                    ));
+                }
+                first
+            }
+        };
         let in_subtree =
             |p: &str| p == root_path || p.starts_with(&format!("{root_path}/")) || root_path == "/";
 
@@ -259,6 +269,31 @@ impl RobotBuilder<'_> {
                 Err(e) => self.warnings.push(format!("{}: {e}", info.path)),
             }
         }
+        // Joints may reference bodies outside the subtree (a shared mount
+        // in a multi-robot stage). Those bodies must not be dragged into
+        // this model: an outside parent acts exactly like a world anchor
+        // (it fixes the base), and an outside child cannot be modeled.
+        for joint in &mut joints {
+            if joint.body0.as_ref().is_some_and(|b0| !in_subtree(b0)) {
+                let b0 = joint.body0.take().expect("checked above");
+                self.warnings.push(format!(
+                    "{}: parent body `{b0}` is outside `{root_path}`; treated as a world anchor",
+                    joint.name
+                ));
+            }
+        }
+        let mut kept = Vec::with_capacity(joints.len());
+        for joint in joints {
+            if in_subtree(&joint.body1) {
+                kept.push(joint);
+            } else {
+                self.warnings.push(format!(
+                    "{}: child body `{}` is outside `{root_path}`; joint skipped",
+                    joint.name, joint.body1
+                ));
+            }
+        }
+        let joints = kept;
         if joints.is_empty() {
             return Err(art(format!("no physics joints under `{root_path}`")));
         }
@@ -781,6 +816,152 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         imported
+    }
+
+    /// Two arms sharing one mount body: each arm is its own articulation,
+    /// anchored to `/World/Base` (which belongs to neither subtree).
+    const DUAL: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "Base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom"
+        {
+            double size = 0.2
+        }
+    }
+
+    def Xform "ArmA" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "geom"
+            {
+                double size = 0.1
+            }
+        }
+
+        def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "geom"
+            {
+                double size = 0.1
+            }
+        }
+
+        def Scope "joints"
+        {
+            def PhysicsRevoluteJoint "mount"
+            {
+                rel physics:body0 = </World/Base>
+                rel physics:body1 = </World/ArmA/link1>
+                uniform token physics:axis = "Z"
+                float physics:lowerLimit = -90
+                float physics:upperLimit = 90
+            }
+
+            def PhysicsRevoluteJoint "elbow"
+            {
+                rel physics:body0 = </World/ArmA/link1>
+                rel physics:body1 = </World/ArmA/link2>
+                uniform token physics:axis = "Y"
+                float physics:lowerLimit = -90
+                float physics:upperLimit = 90
+            }
+        }
+    }
+
+    def Xform "ArmB" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "geom"
+            {
+                double size = 0.1
+            }
+        }
+
+        def Scope "joints"
+        {
+            def PhysicsRevoluteJoint "mount"
+            {
+                rel physics:body0 = </World/Base>
+                rel physics:body1 = </World/ArmB/link1>
+                uniform token physics:axis = "Z"
+                float physics:lowerLimit = -90
+                float physics:upperLimit = 90
+            }
+        }
+    }
+}
+"#;
+
+    fn import_dual(articulation_root: Option<&str>) -> ImportedRobot {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("botrail-usd-dual-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dual.usda");
+        std::fs::write(&path, DUAL).unwrap();
+        let imported = import_robot(
+            &path,
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                articulation_root: articulation_root.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        imported
+    }
+
+    #[test]
+    fn shared_mount_body_stays_out_of_the_subtree_model() {
+        let imported = import_dual(Some("/World/ArmA"));
+        let names: Vec<&str> = imported
+            .model
+            .links
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
+        // The outside mount body is NOT dragged in; the anchor joint acts
+        // like a world anchor, so link1 is the base and elbow still moves.
+        assert_eq!(names, vec!["/World/ArmA/link1", "/World/ArmA/link2"]);
+        assert_eq!(imported.model.dof(), 1);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("outside") && w.contains("/World/Base")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    #[test]
+    fn multiple_articulation_roots_warn_when_unspecified() {
+        let imported = import_dual(None);
+        // DFS-first root wins, loudly.
+        assert!(imported
+            .model
+            .links
+            .iter()
+            .all(|l| l.name.starts_with("/World/ArmA")));
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("multiple articulation roots") && w.contains("/World/ArmB")),
+            "{:?}",
+            imported.warnings
+        );
     }
 
     /// World pose of every link's first visual shape — the frame-invariant

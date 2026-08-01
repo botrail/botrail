@@ -97,36 +97,42 @@ function interact(): void {
   useStudioStore.getState().stopPlayback();
 }
 
-const throttledJointPositions = throttled<number[]>(
+const throttledJointPositions = throttledByKey<number[]>(
   SEND_INTERVAL_MS,
-  (positions) => rawSend({ type: "set_joint_positions", positions }),
+  (robot, positions) =>
+    rawSend({ type: "set_joint_positions", robot, positions }),
 );
 
-/** Send the full DOF vector, throttled to ~30 Hz. */
-export function sendJointPositions(positions: number[]): void {
+/** Send one robot's full DOF vector, throttled per robot to ~30 Hz. */
+export function sendJointPositions(robot: string, positions: number[]): void {
   interact();
-  throttledJointPositions(positions);
+  throttledJointPositions(robot, positions);
 }
 
-const throttledTcpTarget = throttled<{ link: string; pose: PoseMsg }>(
+const throttledTcpTarget = throttledByKey<{ link: string; pose: PoseMsg }>(
   SEND_INTERVAL_MS,
-  ({ link, pose }) => rawSend({ type: "set_tcp_target", link, pose }),
+  (robot, { link, pose }) =>
+    rawSend({ type: "set_tcp_target", robot, link, pose }),
 );
 
 /** Ask the server to IK-track a TCP target pose, throttled to ~30 Hz. */
-export function sendTcpTarget(target: { link: string; pose: PoseMsg }): void {
+export function sendTcpTarget(
+  robot: string,
+  target: { link: string; pose: PoseMsg },
+): void {
   interact();
-  throttledTcpTarget(target);
+  throttledTcpTarget(robot, target);
 }
 
-const throttledRobotBasePose = throttled<PoseMsg>(SEND_INTERVAL_MS, (pose) =>
-  rawSend({ type: "set_robot_base_pose", pose }),
+const throttledRobotBasePose = throttledByKey<PoseMsg>(
+  SEND_INTERVAL_MS,
+  (robot, pose) => rawSend({ type: "set_robot_base_pose", robot, pose }),
 );
 
-/** Place the robot's root link (world frame), throttled to ~30 Hz. */
-export function sendRobotBasePose(pose: PoseMsg): void {
+/** Place a robot's root link (world frame), throttled per robot to ~30 Hz. */
+export function sendRobotBasePose(robot: string, pose: PoseMsg): void {
   interact();
-  throttledRobotBasePose(pose);
+  throttledRobotBasePose(robot, pose);
 }
 
 /**
@@ -143,9 +149,9 @@ export async function dropUsdScene(
   return false;
 }
 
-/** Plan from the current configuration to `goal` (DOF order). */
-export function sendPlanRequest(goal: number[]): void {
-  rawSend({ type: "plan_request", goal_positions: goal });
+/** Plan a robot from its current configuration to `goal` (DOF order). */
+export function sendPlanRequest(robot: string, goal: number[]): void {
+  rawSend({ type: "plan_request", robot, goal_positions: goal });
 }
 
 /** Add an obstacle; the server may rename it and re-broadcasts the full list. */
@@ -177,8 +183,12 @@ export function sendSetObstacleEnabled(name: string, enabled: boolean): void {
  * grasp). `link = null` lets the server pick the default TCP link; touch
  * links default to the link's subtree (the gripper).
  */
-export function sendAttachObstacle(name: string, link: string | null): void {
-  rawSend({ type: "attach_obstacle", name, link, touch_links: null });
+export function sendAttachObstacle(
+  name: string,
+  robot: string,
+  link: string | null,
+): void {
+  rawSend({ type: "attach_obstacle", name, robot, link, touch_links: null });
 }
 
 /** Detach an obstacle; its pose freezes where the robot holds it. */
@@ -191,9 +201,16 @@ export function sendRemoveObstacle(name: string): void {
   rawSend({ type: "remove_obstacle", name });
 }
 
-/** Append a waypoint segment to a motion; the server creates it if missing. */
-export function sendAddSegment(motion: string, segment: SegmentMsg): void {
-  rawSend({ type: "add_segment", motion, segment });
+/**
+ * Append a waypoint segment to a motion; the server creates the motion if
+ * missing, owned by `robot` (an existing motion keeps its owner).
+ */
+export function sendAddSegment(
+  motion: string,
+  robot: string,
+  segment: SegmentMsg,
+): void {
+  rawSend({ type: "add_segment", motion, robot, segment });
 }
 
 /** Remove the segment at `index` from a motion (sent immediately). */
