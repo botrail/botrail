@@ -703,8 +703,15 @@ mod tests {
             motion.segments[0].constraints[0],
             Constraint::OrientationCone { angle, .. } if (angle - 0.8).abs() < 1e-12
         ));
-        // The reloaded scene still collision-checks (collider rebuilt).
-        assert!(!reloaded.check_collisions().is_empty() || true);
+        // The reloaded scene still collision-checks: the collider was rebuilt
+        // from the project, so it agrees with the original both on the
+        // colliding pairs and on the clearance — and a `None` clearance would
+        // mean it came back with no obstacle geometry at all.
+        assert_eq!(reloaded.check_collisions(), scene.check_collisions());
+        let clearance = reloaded
+            .min_obstacle_distance()
+            .expect("the rebuilt collider lost its obstacles");
+        assert!((clearance - scene.min_obstacle_distance().unwrap()).abs() < 1e-12);
     }
 
     #[test]

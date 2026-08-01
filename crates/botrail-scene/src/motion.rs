@@ -340,6 +340,7 @@ fn concatenate(mut head: JointTrajectory, tail: JointTrajectory) -> JointTraject
 mod tests {
     use super::*;
     use botrail_model::RobotModel;
+    use std::f64::consts::FRAC_PI_2;
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
@@ -567,7 +568,7 @@ mod tests {
         let mut scene = scene();
         // Start folded horizontally: tool +z points along world +x.
         scene
-            .set_joint_positions(vec![0.0, 1.5708, 0.0, 0.0, 0.0, 0.0])
+            .set_joint_positions(vec![0.0, FRAC_PI_2, 0.0, 0.0, 0.0, 0.0])
             .unwrap();
         // Goal: same fold, panned 90 degrees; the tool stays horizontal all
         // the way if the cone demands it.
@@ -580,7 +581,7 @@ mod tests {
             name: "m".into(),
             segments: vec![Segment {
                 kind: SegmentKind::Joint,
-                goal_positions: vec![1.5708, 1.5708, 0.0, 0.0, 0.0, 0.0],
+                goal_positions: vec![FRAC_PI_2, FRAC_PI_2, 0.0, 0.0, 0.0, 0.0],
                 constraints: vec![cone.clone()],
             }],
         };

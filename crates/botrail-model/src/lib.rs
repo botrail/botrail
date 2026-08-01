@@ -235,7 +235,10 @@ impl RobotModel {
         // Deepest link on one leaf's chain that every other leaf hangs off.
         let mut link = Some(*first);
         while let Some(current) = link {
-            if rest.iter().all(|&leaf| self.is_ancestor_or_self(current, leaf)) {
+            if rest
+                .iter()
+                .all(|&leaf| self.is_ancestor_or_self(current, leaf))
+            {
                 return current;
             }
             link = self.links[current]
@@ -554,11 +557,10 @@ mod tests {
         let model = RobotModel::from_urdf_str(GRIPPER).unwrap();
         let mount = model.tool_mount_link();
         assert_eq!(model.links[mount].name, "wrist");
-        // The deepest-leaf heuristic picks a fingertip, which is exactly the
-        // difference that matters for pose servoing.
-        assert!(model.links[model.default_tcp_link()].name.starts_with("finger")
-            || model.links[model.default_tcp_link()].name == "left"
-            || model.links[model.default_tcp_link()].name == "right");
+        // The deepest-leaf heuristic picks a fingertip instead, which is
+        // exactly the difference that matters for pose servoing.
+        let tcp = &model.links[model.default_tcp_link()].name;
+        assert!(tcp == "left" || tcp == "right", "{tcp}");
         // A single chain has no branch: mount == deepest link.
         let chain = RobotModel::from_urdf_str(TWO_LINK).unwrap();
         assert_eq!(chain.tool_mount_link(), chain.default_tcp_link());

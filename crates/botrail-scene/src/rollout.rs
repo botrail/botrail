@@ -2143,8 +2143,16 @@ mod tracking_tests {
         // The part has travelled 0.2 * 0.5 = 0.1 m; so has the tool, which
         // also completed the taught 0.35 m descent.
         let end = tool_pose(&scene, &tl.robot.sample(tl.duration));
-        assert!((end.translation.x - 0.1).abs() < 1e-4, "{}", end.translation.x);
-        assert!((end.translation.z - 0.05).abs() < 1e-4, "{}", end.translation.z);
+        assert!(
+            (end.translation.x - 0.1).abs() < 1e-4,
+            "{}",
+            end.translation.x
+        );
+        assert!(
+            (end.translation.z - 0.05).abs() < 1e-4,
+            "{}",
+            end.translation.z
+        );
         // Mid-ramp the tool sits over the part throughout, not behind it.
         for i in 0..=10 {
             let t = tl.duration * f64::from(i) / 10.0;

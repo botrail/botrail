@@ -1598,7 +1598,7 @@ mod tests {
                 let rel = joint.name.strip_prefix("/Robot").unwrap();
                 let raw = stage
                     .attribute(
-                        sdf::path(&format!("/World/Robot{rel}"))
+                        sdf::path(format!("/World/Robot{rel}"))
                             .unwrap()
                             .append_property("state:angular:physics:position")
                             .unwrap(),
