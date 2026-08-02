@@ -2,6 +2,8 @@
 
 **Build robot cells as code, verify them deterministically, ship them as USD.**
 
+Live Demo: https://botrail.github.io/botrail/
+
 ![botrail-demo](assets/botrail_demo.png)
 
 `pip install botrail`, a few lines of Python, and you get an interactive 3D
