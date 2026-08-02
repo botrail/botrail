@@ -101,11 +101,21 @@ pub fn decompose_usd_scene(
 struct WasmHost {
     scene: RefCell<Scene>,
     out: RefCell<Vec<String>>,
+    /// Base URL the robot's USD asset is served from, when the session was
+    /// built from one. The studio fetches the stage itself for rendering —
+    /// wasm only holds the kinematics — so it needs somewhere to fetch from.
+    asset_base: Option<String>,
 }
 
 impl SessionHost for WasmHost {
     fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
         f(&mut self.scene.borrow_mut())
+    }
+
+    fn robot_asset_url(&self, _robot: usize, path: &std::path::Path) -> Option<String> {
+        let base = self.asset_base.as_ref()?;
+        let file = path.file_name()?.to_string_lossy();
+        Some(format!("{}/{}", base.trim_end_matches('/'), file))
     }
 
     fn emit(&self, msg: &ServerMessage) {
@@ -138,6 +148,7 @@ impl WasmSession {
             host: WasmHost {
                 scene: RefCell::new(Scene::new(Arc::new(model))),
                 out: RefCell::new(Vec::new()),
+                asset_base: None,
             },
         })
     }
@@ -145,6 +156,54 @@ impl WasmSession {
     /// Session with the embedded sample arm (primitive-only 6-DOF).
     pub fn demo() -> Result<WasmSession, JsError> {
         Self::new(DEMO_URDF)
+    }
+
+    /// Session built from a USD robot handed over as its full layer set —
+    /// `names[i]` is the path layer `blobs[i]` is referenced by, relative to
+    /// `root`. The browser has no filesystem and the USD resolver is
+    /// synchronous, so the caller downloads the layers and passes them here.
+    ///
+    /// `asset_base` is where the *same* stage is served from, so the studio
+    /// can load it for rendering; the meshes stay in memory on this side.
+    #[wasm_bindgen(js_name = fromUsdRobot)]
+    pub fn from_usd_robot(
+        names: Vec<String>,
+        blobs: js_sys::Array,
+        root: &str,
+        articulation_root: Option<String>,
+        asset_base: Option<String>,
+    ) -> Result<WasmSession, JsError> {
+        if names.len() != blobs.length() as usize {
+            return Err(JsError::new("names and blobs must have the same length"));
+        }
+        let layers: Vec<(String, Vec<u8>)> = names
+            .into_iter()
+            .zip(blobs.iter())
+            .map(|(name, blob)| (name, js_sys::Uint8Array::new(&blob).to_vec()))
+            .collect();
+        let options = botrail_usd::RobotImportOptions {
+            articulation_root,
+            ..Default::default()
+        };
+        let imported = botrail_usd::import_robot_bundle(layers, root, &options)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        for warning in &imported.warnings {
+            web_log(&format!("botrail-wasm: usd robot import: {warning}"));
+        }
+        // Link geometry is named `usd:/<prim>`; publish the triangles under
+        // those names before anything asks for a collider.
+        botrail_collide::mesh::clear_memory_meshes();
+        for (path, mesh) in imported.meshes {
+            botrail_collide::mesh::register_memory_mesh(path, mesh);
+        }
+        let scene = Scene::new(Arc::new(imported.model));
+        Ok(WasmSession {
+            host: WasmHost {
+                scene: RefCell::new(scene),
+                out: RefCell::new(Vec::new()),
+                asset_base,
+            },
+        })
     }
 
     /// The connection handshake, in order:
@@ -293,4 +352,78 @@ fn web_log(text: &str) {
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = warn)]
     fn web_sys_log(s: &str);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The browser's robot path end to end, natively: layers as bytes ->
+    /// `import_robot_bundle` -> in-memory mesh registry -> a scene whose
+    /// collision checking actually uses that geometry.
+    ///
+    /// Runs only with `BOTRAIL_ISAAC_DIR` pointing at a downloaded Franka
+    /// (same convention as the golden tests). `from_usd_robot` itself takes
+    /// `js_sys` types and cannot be called off-browser, so this exercises
+    /// exactly what it wraps.
+    #[test]
+    fn bundled_robot_collides_against_its_in_memory_meshes() {
+        let Some(dir) = std::env::var_os("BOTRAIL_ISAAC_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        if !dir.join("franka.usd").exists() {
+            return;
+        }
+        let mut layers = Vec::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "usd" || e == "usda") {
+                    let rel = path
+                        .strip_prefix(&dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+                    layers.push((rel, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let options = botrail_usd::RobotImportOptions {
+            articulation_root: Some("/panda".to_string()),
+            ..Default::default()
+        };
+        let imported = botrail_usd::import_robot_bundle(layers, "franka.usd", &options).unwrap();
+        assert!(!imported.meshes.is_empty());
+
+        botrail_collide::mesh::clear_memory_meshes();
+        for (path, mesh) in imported.meshes {
+            botrail_collide::mesh::register_memory_mesh(path, mesh);
+        }
+        let mut scene = Scene::new(Arc::new(imported.model));
+
+        // Every link that carries geometry got a collider out of the
+        // registry — without it the robot would be a set of empty links and
+        // could never report a collision.
+        let ready = vec![0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035];
+        scene.set_joint_positions(ready).unwrap();
+        assert!(scene.check_collisions().is_empty(), "ready pose is clear");
+
+        // Drive the arm into the floor: geometry that exists must collide.
+        scene
+            .add_obstacle(
+                "floor",
+                botrail_model::Geometry::Box {
+                    size: nalgebra::Vector3::new(4.0, 4.0, 0.1),
+                },
+                nalgebra::Isometry3::translation(0.0, 0.0, 0.3),
+            )
+            .unwrap();
+        assert!(
+            !scene.check_collisions().is_empty(),
+            "a slab through the arm must be seen; in-memory meshes did not reach the collider"
+        );
+    }
 }

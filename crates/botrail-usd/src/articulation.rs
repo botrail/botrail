@@ -62,6 +62,10 @@ pub struct RobotImportOptions {
     /// Prim path of the articulation to import; defaults to the first prim
     /// carrying `PhysicsArticulationRootAPI`.
     pub articulation_root: Option<String>,
+    /// See [`crate::ImportOptions::meshes_in_memory`]. Link geometry then
+    /// names its triangles `usd:/<prim>` and ships them in
+    /// [`ImportedRobot::meshes`] instead of writing STL files.
+    pub meshes_in_memory: bool,
 }
 
 pub struct ImportedRobot {
@@ -70,6 +74,11 @@ pub struct ImportedRobot {
     /// Z-up, frame semantics) — a hint for initial base placement.
     pub root_pose: Isometry3<f64>,
     pub warnings: Vec<String>,
+    /// Populated when [`RobotImportOptions::meshes_in_memory`] is set: the
+    /// baked triangles behind each `usd:/<prim>` geometry path. Register
+    /// them with `botrail_collide::mesh::register_memory_mesh` before
+    /// building colliders.
+    pub meshes: Vec<(PathBuf, MeshData)>,
 }
 
 /// One prim recorded during the collection walk.
@@ -115,7 +124,40 @@ pub fn import_robot(
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+    import_robot_stage(&stage, path, options)
+}
 
+/// Imports a robot from a set of in-memory layers — the browser path, where
+/// there is no filesystem to resolve references against. `root` names the
+/// entry layer within `layers` (e.g. `franka.usd`); every layer it
+/// references must be present under the path the reference spells.
+///
+/// Forces `meshes_in_memory`: writing STL files is exactly what this variant
+/// exists to avoid.
+pub fn import_robot_bundle(
+    layers: Vec<(String, Vec<u8>)>,
+    root: &str,
+    options: &RobotImportOptions,
+) -> Result<ImportedRobot, UsdImportError> {
+    let stage = Stage::builder()
+        .resolver(crate::BundleResolver::new(layers))
+        .open(root)
+        .map_err(|e| UsdImportError::Open {
+            path: root.to_string(),
+            message: e.to_string(),
+        })?;
+    let options = RobotImportOptions {
+        meshes_in_memory: true,
+        ..options.clone()
+    };
+    import_robot_stage(&stage, Path::new(root), &options)
+}
+
+fn import_robot_stage(
+    stage: &Stage,
+    path: &Path,
+    options: &RobotImportOptions,
+) -> Result<ImportedRobot, UsdImportError> {
     // Stage normalization (USD defaults: centimeters, Y-up).
     let mut mpu = 0.01;
     let mut up_fix = y_up_to_z_up();
@@ -144,11 +186,13 @@ pub fn import_robot(
     .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
 
     let builder = RobotBuilder {
-        stage: &stage,
+        stage,
         source_path: path.to_path_buf(),
         mpu,
         up_fix,
         mesh_cache_dir: options.mesh_cache_dir.clone(),
+        meshes_in_memory: options.meshes_in_memory,
+        meshes: Vec::new(),
         warnings: Vec::new(),
     };
     builder.build(prims, options.articulation_root.as_deref())
@@ -205,6 +249,8 @@ struct RobotBuilder<'a> {
     mpu: f64,
     up_fix: UnitQuaternion<f64>,
     mesh_cache_dir: Option<PathBuf>,
+    meshes_in_memory: bool,
+    meshes: Vec<(PathBuf, MeshData)>,
     warnings: Vec<String>,
 }
 
@@ -399,6 +445,7 @@ impl RobotBuilder<'_> {
             model,
             root_pose,
             warnings: self.warnings,
+            meshes: self.meshes,
         })
     }
 
@@ -624,7 +671,11 @@ impl RobotBuilder<'_> {
                     indices: data.indices,
                 };
                 Geometry::Mesh {
-                    path: {
+                    path: if self.meshes_in_memory {
+                        let virtual_path = PathBuf::from(format!("usd:/{}", info.path));
+                        self.meshes.push((virtual_path.clone(), baked));
+                        virtual_path
+                    } else {
                         let dir = self
                             .mesh_cache_dir
                             .clone()
@@ -1027,5 +1078,146 @@ def Xform "World"
             } => assert_eq!(articulation_root, "/Robot"),
             other => panic!("expected Usd source, got {other:?}"),
         }
+    }
+
+    /// The browser path: layers handed over as bytes, references between
+    /// them resolved without touching a filesystem, and mesh geometry
+    /// returned in memory rather than written to the cache.
+    #[test]
+    fn bundled_layers_compose_without_a_filesystem() {
+        // A root layer whose link geometry lives in a referenced sublayer,
+        // spelled the way a real asset does it (`./Props/...`).
+        const ROOT: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def "geom" (prepend references = @./Props/base.usda@</Body>) {}
+    }
+
+    def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def PhysicsRevoluteJoint "j1"
+    {
+        rel physics:body0 = </Robot/base>
+        rel physics:body1 = </Robot/link1>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (0, 0, 0.5)
+        point3f physics:localPos1 = (0, 0, 0)
+    }
+}
+"#;
+        // A single tetrahedron: enough to prove the triangles came through.
+        const PROP: &str = r#"#usda 1.0
+(
+    defaultPrim = "Body"
+)
+def Xform "Body"
+{
+    def Mesh "Collision" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+    {
+        point3f[] points = [(0, 0, 0), (0.1, 0, 0), (0, 0.1, 0), (0, 0, 0.1)]
+        int[] faceVertexCounts = [3, 3, 3, 3]
+        int[] faceVertexIndices = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]
+    }
+}
+"#;
+        let layers = vec![
+            ("robot.usda".to_string(), ROOT.as_bytes().to_vec()),
+            ("Props/base.usda".to_string(), PROP.as_bytes().to_vec()),
+        ];
+        let imported =
+            import_robot_bundle(layers, "robot.usda", &RobotImportOptions::default()).unwrap();
+
+        assert_eq!(imported.model.dof(), 1, "{:?}", imported.warnings);
+        // The referenced layer's mesh arrived, and as memory rather than a
+        // path on disk.
+        assert_eq!(imported.meshes.len(), 1, "{:?}", imported.warnings);
+        let (path, mesh) = &imported.meshes[0];
+        assert!(
+            path.to_string_lossy().starts_with("usd:/"),
+            "{}",
+            path.display()
+        );
+        assert_eq!(mesh.indices.len(), 4);
+        assert!(!path.exists(), "in-memory import must not write files");
+    }
+
+    /// The bundle path must agree with the filesystem path on a real
+    /// multi-file asset. Runs only with `BOTRAIL_ISAAC_DIR` pointing at a
+    /// downloaded Franka (same convention as the golden tests).
+    #[test]
+    fn bundled_franka_matches_the_filesystem_import() {
+        let Some(dir) = std::env::var_os("BOTRAIL_ISAAC_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let root = dir.join("franka.usd");
+        if !root.exists() {
+            return;
+        }
+        let options = RobotImportOptions {
+            articulation_root: Some("/panda".to_string()),
+            ..Default::default()
+        };
+        let from_disk = import_robot(&root, &options).unwrap();
+
+        // Everything under the asset directory, keyed the way the
+        // references spell it (relative to franka.usd).
+        let mut layers = Vec::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "usd" || e == "usda") {
+                    let rel = path
+                        .strip_prefix(&dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
+                    layers.push((rel, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let from_bundle = import_robot_bundle(layers, "franka.usd", &options).unwrap();
+
+        assert_eq!(from_bundle.model.dof(), from_disk.model.dof());
+        let names = |m: &RobotModel| m.links.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&from_bundle.model), names(&from_disk.model));
+        assert_eq!(
+            from_bundle.model.actuated_joint_limits().len(),
+            from_disk.model.actuated_joint_limits().len()
+        );
+        // Geometry came through as memory, not as cache files.
+        assert!(
+            !from_bundle.meshes.is_empty(),
+            "no mesh reached memory: {:?}",
+            from_bundle.warnings
+        );
+    }
+
+    /// Reference spellings that name the same layer resolve to one entry.
+    #[test]
+    fn bundle_paths_normalize() {
+        assert_eq!(crate::normalize_bundle_path("./Props/a.usd"), "Props/a.usd");
+        assert_eq!(
+            crate::normalize_bundle_path("Props/../Props/a.usd"),
+            "Props/a.usd"
+        );
+        assert_eq!(
+            crate::normalize_bundle_path("omniverse://host/Props/a.usd"),
+            "Props/a.usd"
+        );
+        assert_eq!(crate::normalize_bundle_path("/a.usd"), "a.usd");
     }
 }

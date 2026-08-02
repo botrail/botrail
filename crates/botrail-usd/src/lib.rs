@@ -24,8 +24,9 @@ mod articulation;
 pub mod export;
 pub mod recording;
 
-pub use articulation::{import_robot, ImportedRobot, RobotImportOptions};
+pub use articulation::{import_robot, import_robot_bundle, ImportedRobot, RobotImportOptions};
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -236,6 +237,88 @@ impl Resolver for MemoryResolver {
 
     fn identity(&self) -> String {
         format!("botrail-memory:{}", self.name)
+    }
+}
+
+/// Serves a fixed set of in-memory layers keyed by normalized relative
+/// path, so a multi-file asset — a USD robot and everything it references —
+/// composes with no filesystem behind it.
+///
+/// This is the browser's [`SearchPathResolver`]: wasm cannot open files, and
+/// the `Resolver` trait is synchronous so it cannot fetch either. The caller
+/// downloads the layer set first (it knows the manifest) and hands the bytes
+/// over here.
+pub struct BundleResolver {
+    layers: HashMap<String, Vec<u8>>,
+}
+
+impl BundleResolver {
+    /// `layers` maps a layer's path *relative to the bundle root* — the same
+    /// spelling used in the references, e.g. `Props/panda_hand.usd` — to its
+    /// bytes.
+    pub fn new(layers: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
+        BundleResolver {
+            layers: layers
+                .into_iter()
+                .map(|(name, bytes)| (normalize_bundle_path(&name), bytes))
+                .collect(),
+        }
+    }
+}
+
+/// Collapses `./` and `../` segments and drops any scheme + host, so the
+/// many spellings of one layer (`./Props/a.usd`, `Props/../Props/a.usd`,
+/// `omniverse://host/Props/a.usd`) land on one key.
+fn normalize_bundle_path(path: &str) -> String {
+    let stripped = SearchPathResolver::strip(path);
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in stripped.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+impl Resolver for BundleResolver {
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
+        // A reference is written relative to the layer that made it, so an
+        // unanchored path is already bundle-relative.
+        let anchor_dir = anchor
+            .map(|a| a.to_string_lossy().to_string())
+            .and_then(|a| a.rsplit_once('/').map(|(dir, _)| dir.to_string()))
+            .unwrap_or_default();
+        if anchor_dir.is_empty() || asset_path.starts_with('/') {
+            return normalize_bundle_path(asset_path);
+        }
+        normalize_bundle_path(&format!("{anchor_dir}/{asset_path}"))
+    }
+
+    fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+        let key = normalize_bundle_path(asset_path);
+        self.layers
+            .contains_key(&key)
+            .then(|| ResolvedPath::new(&key))
+    }
+
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+        Some(ResolvedPath::new(normalize_bundle_path(asset_path)))
+    }
+
+    fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
+        let key = normalize_bundle_path(&resolved_path.to_string_lossy());
+        match self.layers.get(&key) {
+            Some(bytes) => Ok(Box::new(io::Cursor::new(bytes.clone()))),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, key)),
+        }
+    }
+
+    fn identity(&self) -> String {
+        format!("botrail-bundle:{}", self.layers.len())
     }
 }
 
@@ -642,7 +725,7 @@ impl SearchPathResolver {
         }
     }
 
-    fn strip(asset_path: &str) -> &str {
+    pub(crate) fn strip(asset_path: &str) -> &str {
         for scheme in ["omniverse://", "http://", "https://"] {
             if let Some(rest) = asset_path.strip_prefix(scheme) {
                 // Drop the host segment; keep the path relative.

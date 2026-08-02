@@ -68,8 +68,8 @@ impl Robot {
             &path,
             &botrail_usd::RobotImportOptions {
                 search_paths: search_paths.unwrap_or_default(),
-                mesh_cache_dir: None,
                 articulation_root,
+                ..Default::default()
             },
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

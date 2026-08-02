@@ -3,6 +3,7 @@
 //! content-addressed disk cache so the ~1s/mesh decomposition cost is paid
 //! once per distinct (file, scale) pair.
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
@@ -29,12 +30,50 @@ pub fn mesh_to_compound(mesh: &MeshData) -> Result<SharedShape, CollideError> {
     compound_from_point_sets(&decompose(mesh))
 }
 
+/// Meshes held in memory under a virtual path, consulted by
+/// [`load_mesh_compound`] before the filesystem.
+///
+/// A `Geometry::Mesh` names its triangles by path, which is a file
+/// everywhere except in the browser: the wasm build has no filesystem, so a
+/// USD import there emits `usd:/<prim>` identifiers and registers the
+/// triangles here. Keeping the registry behind the same lookup means every
+/// consumer of `Geometry::Mesh` — robot links included — works unchanged.
+static MEMORY_MESHES: std::sync::OnceLock<std::sync::RwLock<HashMap<PathBuf, MeshData>>> =
+    std::sync::OnceLock::new();
+
+fn memory_meshes() -> &'static std::sync::RwLock<HashMap<PathBuf, MeshData>> {
+    MEMORY_MESHES.get_or_init(Default::default)
+}
+
+/// Registers `mesh` under a virtual `path`, replacing any previous entry.
+pub fn register_memory_mesh(path: PathBuf, mesh: MeshData) {
+    memory_meshes()
+        .write()
+        .expect("memory mesh registry poisoned")
+        .insert(path, mesh);
+}
+
+/// Drops every registered in-memory mesh (a fresh import replaces them).
+pub fn clear_memory_meshes() {
+    memory_meshes()
+        .write()
+        .expect("memory mesh registry poisoned")
+        .clear();
+}
+
 /// Loads a mesh file (STL/OBJ), applies `scale`, and returns its VHACD
-/// compound, consulting the disk cache first.
+/// compound, consulting the in-memory registry and then the disk cache.
 pub fn load_mesh_compound(
     path: &std::path::Path,
     scale: &Vector3<f64>,
 ) -> Result<SharedShape, CollideError> {
+    if let Some(mesh) = memory_meshes()
+        .read()
+        .expect("memory mesh registry poisoned")
+        .get(path)
+    {
+        return mesh_to_compound(&mesh.scaled([scale.x, scale.y, scale.z]));
+    }
     let bytes = std::fs::read(path)
         .map_err(|e| CollideError::MeshLoad(format!("{}: {e}", path.display())))?;
     let key = cache_key(&bytes, scale);
