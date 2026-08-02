@@ -1,15 +1,86 @@
+"""Play a baked USD recording back into the studio.
+
+A recording is joint tracks addressed to robot *instances*, not to "the
+robot": botrail exports each one under `/World/<instance name>`, and
+playback looks the scene's robots up by that path. So a recording has to be
+played onto the cell it was baked from — and putting the two-arm recording
+on the single-arm cell is an error, not a degraded picture:
+
+    recording import failed: cannot locate robot `near` in the recording
+    (no `/World/near`); pass robot_roots with its prim path
+
+which is also the escape hatch when a recording came from somewhere else
+(Isaac Sim, say) and its prims are named differently: pass `robot_roots`.
+
+Run with:  python examples/play_record.py [recording.usda]
+"""
+
+import re
 import sys
-sys.path.insert(0, "examples")
+from pathlib import Path
 
-import botrail as bt
-from demo import build_scene
+sys.path.insert(0, str(Path(__file__).parent))
 
-scene = build_scene()
-server = bt.studio(scene, block=False)   # ブラウザが開く
+import botrail as bt  # noqa: E402
+import demo  # noqa: E402
+import dual_cell_demo  # noqa: E402
 
-res = scene.play_usd_animation("cell_seq.usda")
-print(res["mode"], f"{res['duration']:.2f}s", res["object_tracks"])
+DEFAULT = Path("cell_seq.usda")
 
-input("Enterで終了")
-server.stop()
 
+def robot_instances(recording: Path) -> set:
+    """The instance names a recording animates, read off the prim names
+    botrail exported them under. Empty for a binary `.usd`/`.usdc`, which
+    just means the cell has to be chosen by hand below."""
+    try:
+        text = recording.read_text()
+    except (UnicodeDecodeError, OSError):
+        return set()
+    # Direct children of /World; `Env` is the static scenery, not a robot.
+    return {
+        name
+        for name in re.findall(r'^    def Xform "([^"]+)"', text, re.M)
+        if name != "Env"
+    }
+
+
+def cell_for(recording: Path) -> bt.Scene:
+    """Rebuilds the cell the recording was baked from."""
+    names = robot_instances(recording)
+    if {"near", "far"} <= names:
+        print(f"{recording}: two-arm cell ({', '.join(sorted(names))})")
+        return dual_cell_demo.build_cell()
+    print(f"{recording}: single-arm cell")
+    return demo.build_scene()
+
+
+def main() -> None:
+    recording = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
+    if not recording.exists():
+        raise SystemExit(
+            f"{recording} not found — bake one first:\n"
+            "  python examples/sequence_demo.py     # -> cell_seq.usda\n"
+            "  python examples/dual_cell_demo.py    # -> cell_dual.usda"
+        )
+
+    scene = cell_for(recording)
+    server = bt.studio(scene, block=False)  # ブラウザが開く
+
+    result = scene.play_usd_animation(recording)
+    print(f"{result['mode']} {result['duration']:.2f}s")
+    print(f"  robots:  {', '.join(scene.robots)}")
+    print(f"  objects: {', '.join(result['object_tracks']) or '—'}")
+    # A recording baked before a layout change leaves the new scenery
+    # static and says so, once per prim — summarise rather than flood.
+    warnings = result["warnings"]
+    for warning in warnings[:3]:
+        print(f"  warning: {warning}")
+    if len(warnings) > 3:
+        print(f"  warning: … and {len(warnings) - 3} more (re-bake the recording)")
+
+    input("Enterで終了")
+    server.stop()
+
+
+if __name__ == "__main__":
+    main()

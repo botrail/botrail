@@ -63,6 +63,9 @@ python examples/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
                                   # without it
 python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
                                   # vs cycle time and clearance (no downloads)
+python examples/play_record.py \
+       cell_dual.usda             # replay a baked USD in the studio (any of
+                                  # the recordings above; omit for cell_seq)
 ```
 
 Or try the browser-only build (deploys to GitHub Pages from `main`, or build
