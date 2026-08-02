@@ -54,7 +54,7 @@ impl Scene {
             let Some(distance) = world.min_obstacle_distance() else {
                 continue;
             };
-            if best.as_ref().map_or(true, |b| distance < b.distance) {
+            if best.as_ref().is_none_or(|b| distance < b.distance) {
                 best = Some(Clearance {
                     distance,
                     t,

@@ -64,3 +64,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # The 0.1.0 wheels landed before the sdist was rejected; let a
+          # re-run upload the missing file instead of failing on the rest.
+          skip-existing: true

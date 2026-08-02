@@ -16,7 +16,8 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
-    "Topic :: Scientific/Engineering :: Robotics",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Human Machine Interfaces",
 ]
 
 [project.urls]
@@ -29,3 +30,7 @@ dev = ["pytest>=8"]
 manifest-path = "crates/botrail-py/Cargo.toml"
 module-name = "botrail._core"
 python-source = "python"
+# maturin auto-detects LICENSE into the metadata (License-File) but leaves it
+# out of workspace sdists — PyPI rejects that combination, so include it
+# explicitly.
+include = [{ path = "LICENSE", format = "sdist" }]
