@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+<title id="title">botrail logo mark</title>
+<desc id="desc">A lowercase b formed by parallel robot trajectory rails.</desc>
+
+<defs>
+  <linearGradient id="botrailRail" x1="58" y1="42" x2="198" y2="206" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#38BDF8"/>
+    <stop offset="1" stop-color="#20C997"/>
+  </linearGradient>
+  <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#020617" flood-opacity="0.20"/>
+  </filter>
+</defs>
+
+
+<rect x="16" y="16" width="224" height="224" rx="52" fill="#2a3957"/>
+<g aria-label="Stylized lowercase b made from robot trajectory rails">
+  <path d="M78 48V195"
+        fill="none" stroke="url(#botrailRail)" stroke-width="32"
+        stroke-linecap="round"/>
+  <path d="M78 48V195"
+        fill="none" stroke="#2a3957" stroke-width="10"
+        stroke-linecap="round"/>
+
+  <path d="M78 96
+           C105 73 148 72 175 94
+           C201 115 203 153 182 178
+           C160 204 118 205 91 182
+           C82 174 78 165 78 153"
+        fill="none" stroke="url(#botrailRail)" stroke-width="32"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M78 96
+           C105 73 148 72 175 94
+           C201 115 203 153 182 178
+           C160 204 118 205 91 182
+           C82 174 78 165 78 153"
+        fill="none" stroke="#2a3957" stroke-width="10"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g stroke="#C8FFF0" stroke-width="4.5" stroke-linecap="round" opacity="0.95">
+    <path d="M62 78H94"/>
+    <path d="M62 126H94"/>
+    <path d="M62 174H94"/>
+  </g>
+
+  <g fill="#F8FAFC" stroke="#2a3957" stroke-width="3">
+    <circle cx="78" cy="49" r="6.5"/>
+    <circle cx="178" cy="97" r="6.5"/>
+    <circle cx="183" cy="176" r="6.5"/>
+  </g>
+</g>
+
+</svg>

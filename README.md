@@ -2,6 +2,8 @@
 
 **Build robot cells as code, verify them deterministically, ship them as USD.**
 
+![botrail-demo](assets/botrail_demo.png)
+
 `pip install botrail`, a few lines of Python, and you get an interactive 3D
 studio in your browser for building robot cells — robots, obstacles,
 conveyors, sensors, and PLC-style sequences. The core is written in Rust —
