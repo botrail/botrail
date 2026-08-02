@@ -15,6 +15,12 @@ interface WasmSessionLike {
     prefix?: string | null,
   ): string[];
   load_prepared_scene(json: string): string[];
+  addRobotInstance(
+    source: string | null,
+    name: string | null,
+    basePosition: number[],
+    baseQuaternion?: number[] | null,
+  ): string[];
 }
 
 /**
@@ -53,7 +59,13 @@ const FRANKA_LAYERS = [
 const FRANKA_READY = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035];
 
 const CELL_STAGE = "cell/factory.usda";
-const CELL_MOUNT_FRAME = "/World/MountFrame";
+// The cell has two pedestals facing each other across the belt; the demo
+// stands an arm on each. The second is a copy of the first's model, so the
+// 10 MB of asset is fetched and parsed once.
+const CELL_MOUNTS: [string, string][] = [
+  ["near", "/World/MountFrame"],
+  ["far", "/World/MountFrameFar"],
+];
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const res = await fetch(url);
@@ -173,6 +185,7 @@ export class WasmBackend implements SessionBackend {
         root: string,
         articulationRoot?: string | null,
         assetBase?: string | null,
+        instanceName?: string | null,
       ): WasmSessionLike;
     };
   }): Promise<WasmSessionLike> {
@@ -186,6 +199,7 @@ export class WasmBackend implements SessionBackend {
         "franka.usd",
         "/panda",
         FRANKA_BASE,
+        CELL_MOUNTS[0][0],
       );
     } catch (err) {
       console.warn(
@@ -208,28 +222,59 @@ export class WasmBackend implements SessionBackend {
     }
     if (!(await this.loadUsdScene(bytes, "factory.usda"))) return;
 
-    // The mount frame only exists once the stage is in, so the placement
+    // The mount frames only exist once the stage is in, so the placement
     // has to follow the import rather than travel with the session.
-    const mount = useStudioStore
-      .getState()
-      .frames.find((f) => f.name === CELL_MOUNT_FRAME);
-    if (mount) {
-      this.send(
-        JSON.stringify({ type: "set_robot_base_pose", pose: mount.pose }),
-      );
+    const frames = useStudioStore.getState().frames;
+    const mounts = CELL_MOUNTS.map(
+      ([name, frame]) => [name, frames.find((f) => f.name === frame)] as const,
+    ).filter(([, mount]) => mount !== undefined);
+    if (mounts.length < 2) {
+      // A cell without the far pedestal: leave the single arm where it is.
+      this.placeArm(null, mounts[0]?.[1]?.pose);
+      return;
     }
+
+    // Stand the far arm up before placing either, so both exist when the
+    // poses go out. Facing back across the belt.
+    const [[, nearMount], [farName, farMount]] = mounts;
+    try {
+      for (const text of this.session!.addRobotInstance(
+        null,
+        farName,
+        [...farMount!.pose.position],
+        [0, 0, 1, 0],
+      )) {
+        this.handlers!.onMessage(text);
+      }
+    } catch (err) {
+      console.warn("botrail studio: could not add the second arm", err);
+    }
+    this.placeArm(null, nearMount!.pose);
+    this.placeArm(farName, farMount!.pose);
+    handlers.onStatus("connected");
+  }
+
+  /** Puts one arm on its pedestal in the ready pose. */
+  private placeArm(robot: string | null, pose?: { position: number[] }): void {
+    if (!pose) return;
+    const scoped = robot === null ? {} : { robot };
+    this.send(
+      JSON.stringify({ type: "set_robot_base_pose", ...scoped, pose }),
+    );
     // `desc.joints` counts fixed joints too; the store already sizes
     // `jointPositions` to the actuated DOF, which is what a pose must match.
-    const dof = useStudioStore.getState().robots[0]?.jointPositions.length ?? 0;
-    if (dof === FRANKA_READY.length) {
+    const arm = useStudioStore
+      .getState()
+      .robots.find((r) => robot === null || r.desc.name === robot);
+    if (arm?.jointPositions.length === FRANKA_READY.length) {
       this.send(
         JSON.stringify({
           type: "set_joint_positions",
+          ...scoped,
           positions: FRANKA_READY,
         }),
       );
     }
-    handlers.onStatus("connected");
   }
 
   send(text: string): void {

@@ -58,6 +58,9 @@ first run downloads NVIDIA's official Franka asset, ~10 MB):
 python examples/demo.py           # interactive studio: pose, plan, play
 python examples/sequence_demo.py  # 13-step cell: conveyor feed → tracked pick
                                   # → pallet; prints the cycle time, exports USD
+python examples/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
+                                  # zone interlock; --clash shows what happens
+                                  # without it
 python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
                                   # vs cycle time and clearance (no downloads)
 ```

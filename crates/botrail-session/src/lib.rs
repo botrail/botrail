@@ -406,6 +406,24 @@ pub fn set_obstacle_color(
     Ok(())
 }
 
+/// Renames a robot instance, returning the name it actually got. The
+/// roster lives in `scene_init`, and that message resets the client store,
+/// so the whole handshake follows it.
+pub fn rename_robot(host: &impl SessionHost, robot: usize, name: &str) -> String {
+    let final_name = host.with_scene(|scene| scene.rename_robot(robot, name));
+    for msg in initial_messages(host) {
+        host.emit(&msg);
+    }
+    final_name
+}
+
+/// Excuses a link pair of two different robots from collision checking.
+/// `state` carries the collision list, so clients need it resent.
+pub fn allow_inter_robot_collision(host: &impl SessionHost, a: (usize, usize), b: (usize, usize)) {
+    host.with_scene(|scene| scene.allow_inter_robot_collision(a, b));
+    emit_state(host);
+}
+
 pub fn set_obstacle_geometry(
     host: &impl SessionHost,
     name: &str,

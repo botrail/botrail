@@ -165,6 +165,8 @@ impl WasmSession {
     ///
     /// `asset_base` is where the *same* stage is served from, so the studio
     /// can load it for rendering; the meshes stay in memory on this side.
+    /// `instance_name` overrides the scene name the robot goes in under,
+    /// which otherwise comes from the asset.
     #[wasm_bindgen(js_name = fromUsdRobot)]
     pub fn from_usd_robot(
         names: Vec<String>,
@@ -172,6 +174,7 @@ impl WasmSession {
         root: &str,
         articulation_root: Option<String>,
         asset_base: Option<String>,
+        instance_name: Option<String>,
     ) -> Result<WasmSession, JsError> {
         if names.len() != blobs.length() as usize {
             return Err(JsError::new("names and blobs must have the same length"));
@@ -196,7 +199,10 @@ impl WasmSession {
         for (path, mesh) in imported.meshes {
             botrail_collide::mesh::register_memory_mesh(path, mesh);
         }
-        let scene = Scene::new(Arc::new(imported.model));
+        let mut scene = Scene::new(Arc::new(imported.model));
+        if let Some(name) = &instance_name {
+            scene.rename_robot(0, name);
+        }
         Ok(WasmSession {
             host: WasmHost {
                 scene: RefCell::new(scene),
@@ -327,9 +333,74 @@ impl WasmSession {
         self.emit_scene_updates();
         Ok(self.host.out.take())
     }
+    /// Adds a second (third, …) instance of a robot already in the scene —
+    /// the dual-arm case, where both arms are the same asset. The model is
+    /// shared, so nothing is re-parsed and no layer bytes have to cross into
+    /// wasm again; only the placement differs.
+    ///
+    /// `source` names the instance to copy (required once several exist).
+    /// Returns the whole handshake, not an incremental update: the robot
+    /// roster lives in `scene_init`, and that message resets the client's
+    /// store, so the content messages have to follow it.
+    #[wasm_bindgen(js_name = addRobotInstance)]
+    pub fn add_robot_instance(
+        &mut self,
+        source: Option<String>,
+        name: Option<String>,
+        base_position: Vec<f64>,
+        base_quaternion: Option<Vec<f64>>,
+    ) -> Result<Vec<String>, JsError> {
+        if base_position.len() != 3 {
+            return Err(JsError::new("base_position must be [x, y, z]"));
+        }
+        let rotation = match &base_quaternion {
+            Some(q) if q.len() == 4 => nalgebra::UnitQuaternion::from_quaternion(
+                nalgebra::Quaternion::new(q[3], q[0], q[1], q[2]),
+            ),
+            Some(_) => return Err(JsError::new("base_quaternion must be [x, y, z, w]")),
+            None => nalgebra::UnitQuaternion::identity(),
+        };
+        let base = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(base_position[0], base_position[1], base_position[2]),
+            rotation,
+        );
+        self.insert_robot_instance(source.as_deref(), name.as_deref(), base)
+            .map_err(|e| JsError::new(&e))?;
+        for msg in botrail_session::initial_messages(&self.host) {
+            self.host.emit(&msg);
+        }
+        Ok(self.host.out.take())
+    }
 }
 
 impl WasmSession {
+    /// The scene half of [`WasmSession::add_robot_instance`], split out so
+    /// it is reachable off-browser — composing the handshake reaches for
+    /// `Date.now`, which only exists in wasm.
+    fn insert_robot_instance(
+        &mut self,
+        source: Option<&str>,
+        name: Option<&str>,
+        base: nalgebra::Isometry3<f64>,
+    ) -> Result<String, String> {
+        self.host.with_scene(|scene| {
+            let index = match source {
+                Some(name) => scene
+                    .robot_index(name)
+                    .ok_or_else(|| format!("unknown robot `{name}`"))?,
+                None if scene.robots().len() == 1 => 0,
+                None => {
+                    return Err(format!(
+                        "scene has {} robots; pass the one to copy",
+                        scene.robots().len()
+                    ))
+                }
+            };
+            let model = scene.robots()[index].model.clone();
+            Ok(scene.add_robot(model, name, base))
+        })
+    }
+
     fn emit_scene_updates(&self) {
         let msgs = self.host.with_scene(|scene| {
             vec![
@@ -425,5 +496,44 @@ mod tests {
             !scene.check_collisions().is_empty(),
             "a slab through the arm must be seen; in-memory meshes did not reach the collider"
         );
+    }
+
+    /// The dual-arm browser case: a second instance shares the first one's
+    /// model, so no layer bytes cross into wasm twice.
+    #[test]
+    fn a_second_instance_reuses_the_loaded_model() {
+        let mut session = WasmSession::demo().unwrap();
+        let added = session
+            .insert_robot_instance(
+                None,
+                Some("b"),
+                nalgebra::Isometry3::translation(1.5, 0.0, 0.0),
+            )
+            .unwrap();
+        assert_eq!(added, "b");
+
+        session.host.with_scene(|scene| {
+            assert_eq!(
+                scene
+                    .robots()
+                    .iter()
+                    .map(|r| r.name.clone())
+                    .collect::<Vec<_>>(),
+                ["simple_arm", "b"]
+            );
+            // Shared model, not a re-parse.
+            assert!(Arc::ptr_eq(
+                &scene.robots()[0].model,
+                &scene.robots()[1].model
+            ));
+            let base = scene.robots()[1].base_pose().translation.vector;
+            assert!((base - nalgebra::Vector3::new(1.5, 0.0, 0.0)).norm() < 1e-12);
+        });
+
+        // With two robots the source is no longer implied.
+        let err = session
+            .insert_robot_instance(None, None, nalgebra::Isometry3::identity())
+            .unwrap_err();
+        assert!(err.contains("pass the one to copy"), "{err}");
     }
 }

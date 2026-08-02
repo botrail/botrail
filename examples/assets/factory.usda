@@ -738,6 +738,280 @@ def Xform "World"
         }
     }
 
+
+    # ------------------------------------- the second station
+
+    # A twin of the near-side arm, facing it across the belt on its own
+    # pedestal, palletising to its own pallet. Both arms are served by the
+    # *one* pick point on the belt, so the airspace over that point is
+    # contested — which is what the dual-cell demo's zone interlock is for.
+    def Xform "PedestalFar"
+    {
+        color3f[] primvars:displayColor = [(0.144, 0.162, 0.195)]
+        double3 xformOp:translate = (0, 1.24, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "BasePlate"
+        {
+            double size = 1
+            color3f[] primvars:displayColor = [(0.102, 0.11, 0.122)]
+            double3 xformOp:translate = (0, 0, 0.0125)
+            float3 xformOp:scale = (0.46, 0.46, 0.025)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "Column"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0.1875)
+            float3 xformOp:scale = (0.3, 0.3, 0.325)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "TopFlange"
+        {
+            double size = 1
+            color3f[] primvars:displayColor = [(0.266, 0.296, 0.342)]
+            double3 xformOp:translate = (0, 0, 0.37)
+            float3 xformOp:scale = (0.36, 0.36, 0.04)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cylinder "Anchor_1"
+        {
+            double radius = 0.014
+            double height = 0.03
+            uniform token axis = "Z"
+            color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
+            double3 xformOp:translate = (-0.19, -0.19, 0.04)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Cylinder "Anchor_2"
+        {
+            double radius = 0.014
+            double height = 0.03
+            uniform token axis = "Z"
+            color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
+            double3 xformOp:translate = (0.19, -0.19, 0.04)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Cylinder "Anchor_3"
+        {
+            double radius = 0.014
+            double height = 0.03
+            uniform token axis = "Z"
+            color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
+            double3 xformOp:translate = (-0.19, 0.19, 0.04)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Cylinder "Anchor_4"
+        {
+            double radius = 0.014
+            double height = 0.03
+            uniform token axis = "Z"
+            color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
+            double3 xformOp:translate = (0.19, 0.19, 0.04)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Xform "MountFrameFar"
+    {
+        double3 xformOp:translate = (0, 1.24, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "PalletFar"
+    {
+        color3f[] primvars:displayColor = [(0.434, 0.254, 0.102)]
+        double3 xformOp:translate = (-0.5, 1.66, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "BottomBoard_1"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -0.24, 0.011)
+            float3 xformOp:scale = (0.8, 0.12, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "BottomBoard_2"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0.011)
+            float3 xformOp:scale = (0.8, 0.12, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "BottomBoard_3"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0.24, 0.011)
+            float3 xformOp:scale = (0.8, 0.12, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Xform "Blocks"
+        {
+            color3f[] primvars:displayColor = [(0.351, 0.159, 0.045)]
+
+            def Cube "Block_1"
+            {
+                double size = 1
+                double3 xformOp:translate = (-0.35, -0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_2"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, -0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_3"
+            {
+                double size = 1
+                double3 xformOp:translate = (0.35, -0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_4"
+            {
+                double size = 1
+                double3 xformOp:translate = (-0.35, 0, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_5"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, 0, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_6"
+            {
+                double size = 1
+                double3 xformOp:translate = (0.35, 0, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_7"
+            {
+                double size = 1
+                double3 xformOp:translate = (-0.35, 0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_8"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, 0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Block_9"
+            {
+                double size = 1
+                double3 xformOp:translate = (0.35, 0.24, 0.07)
+                float3 xformOp:scale = (0.1, 0.1, 0.096)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+        }
+
+        def Cube "DeckBoard_1"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -0.25, 0.129)
+            float3 xformOp:scale = (0.8, 0.1, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "DeckBoard_2"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -0.125, 0.129)
+            float3 xformOp:scale = (0.8, 0.1, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "DeckBoard_3"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0.129)
+            float3 xformOp:scale = (0.8, 0.1, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "DeckBoard_4"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0.125, 0.129)
+            float3 xformOp:scale = (0.8, 0.1, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "DeckBoard_5"
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0.25, 0.129)
+            float3 xformOp:scale = (0.8, 0.1, 0.022)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "Crate_1"
+        {
+            double size = 1
+            color3f[] primvars:displayColor = [(0.527, 0.254, 0.076)]
+            double3 xformOp:translate = (-0.16, 0.04, 0.28)
+            float3 xformOp:scale = (0.28, 0.28, 0.28)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        # Sealing tape across the finished crate. Crate_2 stays bare: it is
+        # the one the robot stacks onto, and 2 mm of tape under the box would
+        # be a collision.
+        def Cube "Crate_1_Tape"
+        {
+            double size = 1
+            color3f[] primvars:displayColor = [(0.584, 0.604, 0.638)]
+            double3 xformOp:translate = (-0.16, 0.04, 0.4215)
+            float3 xformOp:scale = (0.05, 0.284, 0.003)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "Crate_2"
+        {
+            double size = 1
+            color3f[] primvars:displayColor = [(0.527, 0.254, 0.076)]
+            double3 xformOp:translate = (0.16, -0.04, 0.28)
+            float3 xformOp:scale = (0.28, 0.28, 0.28)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        # Taught place pose: a 60 mm box resting on Crate_2's lid (top 0.42),
+        # gripped the same way as at the pick but rotated a quarter turn, so
+        # the box lands square with the pallet.
+        def Xform "PlaceFrame"
+        {
+            double3 xformOp:translate = (0.16, -0.04, 0.45)
+            quatd xformOp:orient = (0, 0.7071067811865476, -0.7071067811865476, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+        }
+    }
+
     # ------------------------------------------------------------- storage
 
     # Single-bay pallet rack: blue uprights, orange load beams, wire decks.

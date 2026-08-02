@@ -147,3 +147,78 @@ def test_generated_python_rebuilds_two_robots(tmp_path: Path, duo: bt.Scene) -> 
     )
     position, _ = rebuilt.robot_base_pose_of("arm_b")
     assert position == pytest.approx((1.5, 0.0, 0.0))
+
+
+def test_allow_inter_robot_collision(robot: bt.Robot) -> None:
+    """Two arms sharing a spot collide until the pair is excused."""
+    scene = bt.Scene(robot)
+    # Second base close enough that the two base links overlap.
+    scene.add_robot(robot, name="arm_b", base_position=(0.05, 0.0, 0.0))
+
+    def pairs() -> list:
+        return [
+            (a[1], b[1])
+            for a, b in scene.check_collisions()
+            if a[0] == "link" and b[0] == "link"
+        ]
+
+    assert ("base_link", "base_link") in pairs()
+    scene.allow_inter_robot_collision("simple_arm", "base_link", "arm_b", "base_link")
+    assert ("base_link", "base_link") not in pairs()
+    # Only that pair is excused; the rest of the overlap still reports.
+    assert pairs()
+
+    # Order is immaterial: the pair is stored canonically.
+    scene2 = bt.Scene(robot)
+    scene2.add_robot(robot, name="arm_b", base_position=(0.05, 0.0, 0.0))
+    scene2.allow_inter_robot_collision("arm_b", "base_link", "simple_arm", "base_link")
+    assert ("base_link", "base_link") not in [
+        (a[1], b[1])
+        for a, b in scene2.check_collisions()
+        if a[0] == "link" and b[0] == "link"
+    ]
+
+
+def test_allow_inter_robot_collision_rejects_bad_pairs(duo: bt.Scene) -> None:
+    with pytest.raises(ValueError, match="unknown robot"):
+        duo.allow_inter_robot_collision("nope", "base_link", "arm_b", "base_link")
+    with pytest.raises(ValueError, match="no link"):
+        duo.allow_inter_robot_collision("simple_arm", "nope", "arm_b", "base_link")
+    # A robot's own links are the self-collision matrix's business.
+    with pytest.raises(ValueError, match="both sides"):
+        duo.allow_inter_robot_collision("arm_b", "base_link", "arm_b", "rod")
+
+
+def test_rename_robot(duo: bt.Scene) -> None:
+    assert duo.robots == ["simple_arm", "arm_b"]
+    assert duo.rename_robot("arm_b", "far") == "far"
+    assert duo.robots == ["simple_arm", "far"]
+    # Addressing follows the new name, and the old one is gone.
+    duo.set_joint_positions([0.3, 0.0, 0.0, 0.0, 0.0, 0.0], robot="far")
+    assert duo.joint_positions_of("far")[0] == pytest.approx(0.3)
+    with pytest.raises(ValueError, match="unknown robot"):
+        duo.joint_positions_of("arm_b")
+    with pytest.raises(ValueError, match="unknown robot"):
+        duo.rename_robot("arm_b", "x")
+    # A name already taken is uniquified rather than silently merged.
+    assert duo.rename_robot("far", "simple_arm") == "simple_arm_2"
+
+
+def test_rename_robot_carries_the_authored_cell(duo: bt.Scene) -> None:
+    """Sequences and zone sensors address robots by name, so a rename after
+    authoring has to move them too — otherwise the cell only breaks when it
+    is simulated."""
+    duo.add_zone_sensor(
+        "zone", position=(1.5, 0.0, 0.3), size=(0.6, 0.6, 0.6), watch_robots=["arm_b"]
+    )
+    duo.add_segment("b_out", goal=[0.4, 0.0, 0.0, 0.0, 0.0, 0.0], robot="arm_b")
+    sq = duo.sequence("cell")
+    sq.step("go", actions=[bt.seq.motion("b_out")])
+    sq.step("wait", transition=bt.seq.all_of(bt.seq.robot_done("arm_b")))
+    sq.step("open", actions=[bt.seq.ramp({"shoulder_pan": 0.1}, 0.2, robot="arm_b")])
+
+    duo.rename_robot("arm_b", "far")
+    # Simulating is the real test: an orphaned reference fails here.
+    timeline = duo.simulate_sequence("cell")
+    assert timeline.robots == ["simple_arm", "far"]
+    assert timeline.duration > 0.0

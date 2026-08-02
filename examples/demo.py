@@ -45,9 +45,11 @@ def fetch_franka() -> Path:
     return dest / "franka.usd"
 
 
-def build_scene() -> bt.Scene:
+def build_scene(name: str = None) -> bt.Scene:
+    """The factory cell with one Franka on the pedestal. `name` sets the
+    robot's instance name — worth spelling out when a second arm joins."""
     robot = bt.Robot.from_usd(fetch_franka())
-    scene = bt.Scene(robot)
+    scene = bt.Scene(robot, name=name)
     scene.load_usd(Path(__file__).parent / "assets" / "factory.usda")
     # Stand the robot on the pedestal's mount frame, in a natural ready pose.
     scene.set_robot_base_pose(*scene.frame("/World/MountFrame"))
@@ -78,18 +80,19 @@ def hand_pose(pose, standoff: float = 0.0):
     return tuple(p - depth * a for p, a in zip((x, y, z), tool_z)), quat
 
 
-def teach_grasp(scene: bt.Scene, pose, standoff: float = 0.0) -> list:
+def teach_grasp(scene: bt.Scene, pose, standoff: float = 0.0, robot: str = None) -> list:
     """Poses the robot so the gripper grasps at ``pose`` and returns the
     joint vector — the scripted form of dragging the studio's TCP gizmo.
-    Raises when IK misses, rather than teaching a bad pose."""
+    Raises when IK misses, rather than teaching a bad pose. ``robot`` names
+    the instance (required once the scene has several)."""
     position, quaternion = hand_pose(pose, standoff)
-    ik = scene.set_tcp_target(position, quaternion, link=HAND)
+    ik = scene.set_tcp_target(position, quaternion, link=HAND, robot=robot)
     if not ik.converged:
         raise RuntimeError(
             f"IK did not reach {tuple(round(v, 3) for v in position)}: "
             f"{ik.pos_error * 1e3:.1f} mm / {ik.rot_error:.3f} rad short"
         )
-    return list(scene.joint_positions)
+    return list(scene.joint_positions if robot is None else scene.joint_positions_of(robot))
 
 
 if __name__ == "__main__":

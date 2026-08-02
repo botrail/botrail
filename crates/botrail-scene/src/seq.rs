@@ -186,6 +186,21 @@ pub enum Condition {
     Any(Vec<Condition>),
 }
 
+impl Action {
+    /// The instance name this action is addressed to, when it carries one.
+    /// `StartMotion` is absent on purpose: it names a motion, and the
+    /// motion knows its own robot.
+    pub(crate) fn robot_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Action::StartRamp { robot, .. }
+            | Action::Attach { robot, .. }
+            | Action::Track { robot, .. }
+            | Action::Untrack { robot } => robot.as_mut(),
+            _ => None,
+        }
+    }
+}
+
 impl Condition {
     fn mentions_done(&self) -> bool {
         match self {

@@ -324,6 +324,48 @@ impl SceneHub {
         })
     }
 
+    /// Renames a robot instance; the new name is uniquified against the
+    /// others. Returns the name it actually got.
+    pub fn rename_robot(&self, robot: usize, name: &str) -> String {
+        botrail_session::rename_robot(self, robot, name)
+    }
+
+    /// Excuses a link pair of two *different* robots from collision
+    /// checking (shared mount plates, deliberately touching fixtures).
+    /// Names are resolved against the scene; `Err` describes what was not
+    /// found.
+    pub fn allow_inter_robot_collision(
+        &self,
+        robot_a: &str,
+        link_a: &str,
+        robot_b: &str,
+        link_b: &str,
+    ) -> Result<(), String> {
+        let resolved = self.with_scene(|scene| {
+            let robot = |name: &str| {
+                scene.robot_index(name).ok_or_else(|| {
+                    let names: Vec<_> = scene.robots().iter().map(|r| &r.name).collect();
+                    format!("unknown robot `{name}` (robots: {names:?})")
+                })
+            };
+            let (ia, ib) = (robot(robot_a)?, robot(robot_b)?);
+            if ia == ib {
+                return Err(format!(
+                    "`{robot_a}` is on both sides: this excuses a pair of *different* robots, \
+                     and a robot's own links are governed by its self-collision matrix"
+                ));
+            }
+            let link = |r: usize, name: &str| {
+                scene.robots()[r].model.link_index(name).ok_or_else(|| {
+                    format!("robot `{}` has no link `{name}`", scene.robots()[r].name)
+                })
+            };
+            Ok(((ia, link(ia, link_a)?), (ib, link(ib, link_b)?)))
+        })?;
+        botrail_session::allow_inter_robot_collision(self, resolved.0, resolved.1);
+        Ok(())
+    }
+
     /// `None` for an unknown obstacle; `Some(None)` for one with no colour.
     pub fn obstacle_color(&self, name: &str) -> Option<Option<[f32; 3]>> {
         self.with_scene(|scene| {

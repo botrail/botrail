@@ -54,6 +54,19 @@ pub enum SceneError {
     UnsupportedGeometry(String),
 }
 
+/// Rewrites `RobotDone` references inside a (possibly nested) condition.
+fn rename_in_condition(condition: &mut seq::Condition, old: &str, new: &str) {
+    match condition {
+        seq::Condition::RobotDone { robot } if robot == old => *robot = new.to_string(),
+        seq::Condition::All(parts) | seq::Condition::Any(parts) => {
+            for part in parts {
+                rename_in_condition(part, old, new);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Obstacle {
     pub name: String,
@@ -291,7 +304,34 @@ impl Scene {
             candidate = format!("{base}_{n}");
             n += 1;
         }
-        self.robots[robot].name = candidate.clone();
+        let old = std::mem::replace(&mut self.robots[robot].name, candidate.clone());
+
+        // Everything internal addresses robots by index, but the *authored*
+        // layer addresses them by instance name: sequence actions, the
+        // `RobotDone` condition, and the robot list a zone sensor watches.
+        // A rename that only touched the roster would leave those pointing
+        // at a robot that no longer exists, and the scene would not fail
+        // until the sequence was simulated.
+        let swap = |name: &mut String| {
+            if *name == old {
+                *name = candidate.clone();
+            }
+        };
+        for sensor in &mut self.sensors {
+            if let seq::SensorWatch::Robots(names) = &mut sensor.watch {
+                names.iter_mut().for_each(swap);
+            }
+        }
+        for sequence in &mut self.sequences {
+            for step in &mut sequence.steps {
+                for action in &mut step.actions {
+                    if let Some(name) = action.robot_mut() {
+                        swap(name);
+                    }
+                }
+                rename_in_condition(&mut step.transition, &old, &candidate);
+            }
+        }
         candidate
     }
 
@@ -1344,6 +1384,65 @@ mod tests {
         scene.allow_inter_robot_collision((0, 1), (1, 1));
         assert!(scene.check_collisions().is_empty());
         assert!(scene.is_state_valid_for(0, &[0.0]));
+    }
+
+    #[test]
+    fn renaming_a_robot_carries_the_authored_references_with_it() {
+        let mut scene = sample_scene();
+        let model = scene.robot().clone();
+        scene.add_robot(model, Some("b"), iso(2.0, 0.0, 0.0));
+
+        // A zone that watches only `b`, and a step addressed to it.
+        scene.upsert_sensor(seq::Sensor {
+            name: "zone".into(),
+            kind: seq::SensorKind::Zone {
+                pose: Isometry3::identity(),
+                size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+            },
+            watch: seq::SensorWatch::Robots(vec!["b".into()]),
+        });
+        scene.upsert_sequence(seq::Sequence {
+            name: "cell".into(),
+            steps: vec![seq::Step {
+                name: "wait".into(),
+                actions: vec![seq::Action::Untrack {
+                    robot: Some("b".into()),
+                }],
+                transition: seq::Condition::All(vec![
+                    seq::Condition::RobotDone { robot: "b".into() },
+                    seq::Condition::Immediately,
+                ]),
+            }],
+        });
+
+        assert_eq!(scene.rename_robot(1, "far"), "far");
+        assert_eq!(scene.robots()[1].name, "far");
+
+        // The authored layer addresses robots by name, so it has to move
+        // too — otherwise the sequence only fails when it is simulated.
+        match &scene.sensors()[0].watch {
+            seq::SensorWatch::Robots(names) => assert_eq!(names, &["far"]),
+            other => panic!("{other:?}"),
+        }
+        let step = &scene.sequences()[0].steps[0];
+        match &step.actions[0] {
+            seq::Action::Untrack { robot } => assert_eq!(robot.as_deref(), Some("far")),
+            other => panic!("{other:?}"),
+        }
+        match &step.transition {
+            seq::Condition::All(parts) => match &parts[0] {
+                seq::Condition::RobotDone { robot } => assert_eq!(robot, "far"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+
+        // A name already taken is uniquified, and references follow the
+        // name the robot actually got.
+        assert_eq!(
+            scene.rename_robot(1, scene.robots()[0].name.clone().as_str()),
+            format!("{}_2", scene.robots()[0].name)
+        );
     }
 
     #[test]
