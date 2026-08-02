@@ -36,7 +36,7 @@ USD import が「環境を自由に入れられる」を、シーケンサが「
 |---|---|---|
 | **環境がデータである** | セルは USD から入り、ファイルとして持ち運べる | USD import(reference/variant/instancing、cm→m・Y-up→Z-up 正規化)、名前付きフレーム、`.botrail` の可搬プロジェクト |
 | **環境が振る舞う** | 環境は静的な障害物ではなく、センサ・機器・工程を持つ | PLC 語彙のシーケンサ(SFC 工程歩進 + 信号 + スキャンサイクル)、Zone/Beam センサ、Conveyor/LinearAxis、コンベアトラッキング |
-| **決定的に焼ける** | 同じ入力からは常に同じタイムラインが出る | rollout の決定性(2 回焼いて bit 一致をテストで保証)、サイクルタイム、タイミングチャート |
+| **決定的に焼ける** | 同じ入力からは常に同じタイムラインが出る | rollout の決定性(2 回焼いて bit 一致をテストで保証)、サイクルタイム、タイミングチャート、タイムラインのアサーション API(`step_span` / `signal` / `min_clearance`)とセル回帰テスト |
 | **成果物が開いている** | 誰のツールにも渡せる形式で出る | USD アニメーション書き出し(pxr で独立検証済み)、USD 録画の再生、CSV/JSON、URScript、Python コード生成 |
 
 **5 本目(構想): セルは URL で渡せる。** wasm でスタジオが静的配信できるのは botrail 固有の性質であり、競合はすべてインストールとライセンスを要するデスクトップアプリである。セルを 1 つの URL にして「開いて再生を押せばサイクルが動く」状態にできれば、これは構造的に真似されない配布・提案動線になる(§9)。
@@ -102,9 +102,9 @@ Isaac Sim との関係は競合ではなく補完である: Isaac の資産(USD 
 
 コンセプトを誇張しないために、この節を維持する。
 
-- **単腕・直列工程のみ** — プロジェクト形式は複数ロボットを受けられるがコードは 1 台を強制し、SFC も分岐なしの直列。厳密には現状で成立しているのは「セル」より「ステーション」である。多台数 + 並列 SFC が最大の穴(§9)。
+- **協調計画なし・SFC は直列表記のみ** — マルチロボット(多台数設置・ロボット間干渉の tick 検証・ゾーンインターロック・2 台の studio 表示 / USD 書き出し)は 2026-08 の R0〜R4 で実装済みで、「厳密にはステーション」の但し書きは解除した([docs/design-multi-robot.md](design-multi-robot.md) §9)。正直に残る限界: 計画は他ロボットを現姿勢で凍結する(協調計画・swept volume 非対応 — 実行中干渉は tick 検証が時刻付きエラーで検出し、修正はユーザーのインターロック)、両腕同時把持(閉ループ)は不可、SFC の並列分岐**表記**は未提供(非同期起動 + `robot_done` で同等を書く。糖衣は需要待ち、同 §10)。
 - **USD を持っている層は Isaac / Omniverse ユーザーに偏る** — 伝統的な設備屋は STEP の世界にいる。当面はそこを取りに行かないと割り切る。
-- **PLC 語彙はメンタルモデルの互換であって実機接続ではない**(OPC-UA なし)。ここは誇張しない。実機との閉ループはベンダー I/O 出力(§9)で先に閉じる。
+- **PLC 語彙はメンタルモデルの互換であって実機接続ではない**(OPC-UA なし)。ここは誇張しない。実機との閉ループはベンダー I/O 出力(§9)で先に閉じ、制御論理の引き渡しも実機接続ではなく標準ファイルで行う構想 — シーケンスの PLCopen XML(IEC 61131-10)書き出し(§4.3・§4.6・§9)。
 - **物理がないため**、部品の落下・安定、ケーブル、把持の滑りは検証できない。botrail が答えるのは「掴めるか」ではなく **「届くか・ぶつからないか・何秒か」** である。
 
 ## 3. 全体アーキテクチャ
@@ -233,6 +233,19 @@ MoveIt の SRDF に相当する情報(グループ、エンドエフェクタ、
 
 アクションは他に `StartRamp`(汎用関節ランプ — グリッパ開閉をジョイントグループ概念なしで賄う)、`Attach` / `Detach`(把持・開放)、`Track` / `Untrack`(コンベアトラッキング — 教示姿勢を動くパーツに乗せ、ラインを止めずに拾う)。条件は他に `Immediately` / `Signal`(レベル評価)/ `All`(直列接点 = AND)/ `Any`(並列接点 = OR)。
 
+**IEC 61131-3 への整列を設計制約とする(2026-08 決定)。** botrail のシーケンサが 61131-3 の 5 言語のうち対応するものは **SFC** であり、ST は遷移条件・アクションを記述する式の層としてだけ使う(フル ST = 走査周期の処理系とベンダー FB の再実装はやらない)。SFC には標準交換形式 **PLCopen XML(IEC 61131-10)** が存在するので、その SFC 語彙(step / transition / divergence / actionBlock、遷移条件は ST 式)へ**無損失に写像できること**を Sequence モデルの設計制約として維持する。写像は現行モデルで既に素直に成立している:
+
+| botrail | PLCopen XML(SFC) |
+|---|---|
+| `Step`(アクション + 遷移条件) | `<step>` + `<actionBlock>` + `<transition>` |
+| `Signal` / `All` / `Any` | 遷移条件の ST 式(`AND` / `OR` / `NOT`) |
+| `Elapsed` | ステップ経過時間 `StepName.T >= T#5s` |
+| `Done` / `RobotDone` / `DeviceDone` | ハンドシェイク用 BOOL 変数(VAR 宣言込みで書き出す) |
+| `StartMotion` / `Attach` / `Track` 等 | N 修飾子のアクションが呼ぶスタブ FB(`FB_StartMotion` 等 — 実 PLC 側で実装に置換) |
+| 並列分岐(将来の糖衣、§2.4) | `simultaneousDivergence` に受け皿あり |
+
+この制約は PLCopen XML 書き出し(§4.6・§9)の前提であると同時に、PLC 語彙が設備業界の標準から漂流しないためのガードレールでもある。
+
 **SequenceTimeline(焼き込み結果)** — `simulate()` の出力。同じ Scene + Sequence からは常に **bit 一致**のタイムラインが焼ける(テストで保証)。
 
 ```rust
@@ -247,13 +260,15 @@ SequenceTimeline {
 
 `ObjectTrack` を **シンボリック区間**(`Hold` / `Follow { link, offset }` = 把持随伴 / `Linear { from, velocity }` = 搬送)で持つのが要点。任意レートで厳密に再サンプルできるため、30 Hz の studio 配信・60 fps の USD 書き出し・8 ms の CSV がすべて同一ソースから誤差なく出る。
 
-**再生・USD 書き出し・CSV・(将来の)アサーションはすべてこの型だけを消費する。** 逆に USD 録画の読み込み(`import_recording`)も同じ形に落とすので、Isaac Sim の録画と botrail 自身の焼き込みが同じ経路で再生される。
+**再生・USD 書き出し・CSV・アサーションはすべてこの型だけを消費する。** 逆に USD 録画の読み込み(`import_recording`)も同じ形に落とすので、Isaac Sim の録画と botrail 自身の焼き込みが同じ経路で再生される。
+
+アサーション層(2026-08 実装)は `tl.step_span(name)`(工程の締切)・`tl.signal(name)`(エッジ・レベル・ON 区間の波形クエリ)・`tl.min_clearance()` の 3 面。クリアランスは焼き込み時に記録せず、**タイムライン+焼き込み時スナップショットからの再走査**で測る — タイムラインは純粋な運動記録のまま保たれ、サンプリングレートは呼び出し側の選択になる。追従把持のティックや搬送物は rollout 自身が衝突検証しない領域であり、この再走査が唯一の計測になる(接触時は最初の接触時刻と接触ペアを報告する)。
 
 ### 4.4 Project (`.botrail`)
 
 Scene + Motion 群 + Sequence 群 + アセットを束ねた保存形式。バージョンフィールド付きの JSON(現行 v2)で、メッシュや USD ステージへの参照があるときだけ zip(`project.json` + `assets/`)になり、ロード時はコンテンツアドレスのキャッシュへ展開する — **元ファイルを消しても再ロードできる**のが可搬性の条件。
 
-拡張は **additive** に行う運用が確立している(version probe + `#[serde(default)]` + tagged enum): `frames` / `sequences` / `signals` / `sensors` / `devices` はすべて v2 のまま後から足された。ロボットは `robots: [{ source, base_pose, joint_positions }]` の配列で持ち(コードは当面 1 台を強制)、マルチロボット拡張と USD 由来ロボットを additive に受けられる。
+拡張は **additive** に行う運用が確立している(version probe + `#[serde(default)]` + tagged enum): `frames` / `sequences` / `signals` / `sensors` / `devices` はすべて v2 のまま後から足された。ロボットは `robots: [{ name, source, base_pose, joint_positions }]` の配列で持ち、複数台の保存/読込/Python 生成に対応済み(2026-08、単一ロボットの出力は従来とバイト互換 — `name` も additive)。
 
 **UI で作ったプロジェクトを Python から `bt.Scene.load_project()` で読んで実行時利用する**のが主要な往復動線。あわせて `generate_python()` が「現在の状態を再現する Python スクリプト」を出力し、ここも全要素(障害物・フレーム・attach・シーケンス・センサ・デバイス)に対応する — セルがテキストとして出てくることが §2.1 の「git で管理できる」の実体である。
 
@@ -263,6 +278,19 @@ Scene + Motion 群 + Sequence 群 + アセットを束ねた保存形式。バ�
 - 姿勢制約(ツール軸のコーン制約 — 「コップを傾けない」)
 - 位置領域制約(TCP を box 領域内に保つ)
 - パス全体 or ゴールのみへの適用を選択可能
+
+### 4.6 成果物の射影 — USD と PLCopen XML の棲み分け
+
+エクスポートは「一つの著作から、**受け手のエコシステムが標準にしている語彙**への射影」として整理する。焼き込みとは遷移条件を評価して分岐や待ちを一本の実現されたタイムラインへ潰す操作なので、**USD(焼き込みの出力)と PLCopen XML(焼き込みの入力)は同じものの別表現ではなく、相互に代替不可能な補完**である — USD には論理(条件・分岐 — 焼き込みで失われる情報そのもの)が乗らず、PLCopen XML には幾何・軌道が乗らない。
+
+| 出力 | 層 | 運ぶもの | 受け手 |
+|---|---|---|---|
+| USD | 焼き込み結果 | 幾何 + タイムライン(1 実現値) | 3D エコシステム(usdview / Omniverse / Blender)、レビュー・承認する人 |
+| CSV / URScript | 焼き込み結果 | うちロボット軌道 | ロボットコントローラ |
+| PLCopen XML(構想、§9) | 著作物 | うちシーケンス論理(SFC) | PLC IDE(Beremiz / CODESYS)、制御担当 |
+| Project / `generate_python()` | 著作物 | セル定義の全体 | botrail 自身(再現・再編集) |
+
+USD の customData にシーケンス構造を埋め込むことはしない — 読めるのが botrail だけでは「成果物が開いている」(§1.3)ことにならず、著作の保存形式は Project という権限分離を崩す理由もない。論理の開放性は IEC 61131-10 経由で果たす。なお仮想試運転側の容器規格 AutomationML(IEC 62714)は「PLCopen XML(論理)+ COLLADA(幾何)」を束ねる構成であり、botrail の USD + PLCopen XML の対はその現代版に相当する — 将来デジタルファクトリー側とブリッジする際の接点はここになる。
 
 ## 5. UI(botrail studio)機能スコープ
 
@@ -387,7 +415,7 @@ class TrajectoryExecutor(Protocol):
 
 **成功条件(v1・軌道粒度)**: 新規ユーザーが `pip install botrail` から 5 分以内に、URDF/Xacro/USD のロボットで障害物を避ける pick モーションを UI 上で作成し、CSV エクスポートまで到達できる。
 
-**成功条件(セル粒度)**: USD のセル環境を読み込み、工程を並べて `simulate_sequence()` を回すとサイクルタイムが出て、`export_usd()` した USD が usdview / Omniverse で再生される。**`examples/sequence_demo.py`(13 工程・20.61s)で成立済み。** 次の水準は「レイアウトを変えて再 simulate し、サイクルタイムの差分が CI で検出される」こと(§9)。
+**成功条件(セル粒度)**: USD のセル環境を読み込み、工程を並べて `simulate_sequence()` を回すとサイクルタイムが出て、`export_usd()` した USD が usdview / Omniverse で再生される。**`examples/sequence_demo.py`(13 工程・20.61s)で成立済み。** 次の水準「レイアウトを変えて再 simulate し、サイクルタイムの差分が CI で検出される」も 2026-08 に自リポジトリで成立: `python/tests/test_cell_regression.py` がサイクルタイム・工程順・信号ハンドシェイク・クリアランスを assert し、ビームセンサ移設 +0.25 m → サイクル +1.0 s の差分検出をテストする(§9)。
 
 ## 9. 将来ロードマップ(v1 以降)
 
@@ -395,11 +423,12 @@ class TrajectoryExecutor(Protocol):
 - jerk 制限付き時間パラメタライズ(Ruckig 相当)
 - スクリプトエクスポートのバックエンド追加(TMScript / AUBO Lua / DENSO PAC — 実機検証できる協力者がいるものから)と Python カスタムバックエンドのプラグイン化、studio からのダウンロード(botrail-export は wasm でも動く純文字列生成)
 - **ベンダー I/O 出力** — export IR に SetDigitalOut / WaitDigitalIn / Sleep を追加し、シーケンスから I/O 付きの実機プログラムを生成する。検証したセルと実機プログラムが同一ソースから出る = 検証ループが閉じる(§2.4)
+- **IEC 61131-3 整列の段階実装(SFC + ST 式 + PLCopen XML)** — §4.3 の写像制約を実利に変える 4 段: ① SequencePanel の遷移条件を ST 記法で**表示**(パーサ不要、コスト極小)→ ② `when("beam_pick AND NOT carrying")` 形式の **ST 式入力**(既存 Condition への小さなコンパイル。決定性そのまま)→ ③ シーケンスの **PLCopen XML(SFC POU)書き出し**(§4.6) — Beremiz / OpenPLC / CODESYS で開ける標準ファイルとして制御担当へ渡す(スタブ FB 方式。OSS ツールで開けるため書き出しの検証も CI で閉じられる)→ ④ **取り込み**サブセット(構造 + ST 式のみ、座標は無視、ベンダー FB はスタブ)は需要が見えてから。普及の重心は CODESYS 圏 + OSS であり、三菱/オムロン等の国産 IDE がネイティブに読む形式ではないことは誇張しない。フル ST 処理系と実 PLC 接続(OPC-UA)はやらない(§2.4)。着手順はセルのアサーション API が先で、ST 式は著作 API を次に触るときに同乗させる
 - 実機プラグイン(UR / xArm 等 1 機種からリファレンス実装)
 - 物理シミュレータ連携(MuJoCo 等への軌道再生エクスポート)
-- マルチロボット / デュアルアーム + **SFC の並列分岐**(データモデルは複数ロボットを排除しない形で設計済み。§2.4 の最大の穴で、「セル」を名乗るための最優先課題)— 設計・実装プランは [docs/design-multi-robot.md](design-multi-robot.md)(調停はインターロック、並列 SFC なしで成立させる方針)
-- **セルのアサーション API と CI 統合** — `SequenceTimeline` はサイクルタイム・工程帯・クリアランス・信号波形をすでに保持しているので、これを assert できる薄い皮と pytest 例を足すだけで「決定的に焼ける」が運用可能な形になる(§1.3)
-- **パラメトリック・セル / パラメータスイープ** — レイアウトや搬送速度をパラメータにして振り、サイクルタイムを比較する。「環境の自由度」を主張する以上、実際に振れることを示す必要がある
+- マルチロボット / デュアルアーム — **実装完了(2026-08、R0〜R4)**: 複数設置・per-robot 計画(他ロボットは凍結体)・ロボット間衝突の tick 検証・多アクターシーケンス(`robot_done` インターロック)・studio 複数表示・USD 書き出し/録画の per-robot 化まで一気通貫([docs/design-multi-robot.md](design-multi-robot.md) §9 に各フェーズの実装記録)。調停はインターロックで、並列 SFC なしで成立(同 §3.3)。残タスクは需要待ちの未決のみ(同 §10: default_robot 設定、SFC 並列の糖衣表記、studio ロボット追加 UI)
+- **セルのアサーション API と CI 統合** — **実装完了(2026-08)**: `SequenceTimeline` に `step_span(name)` / `signal(name)`(rising/falling エッジ・レベル・ON 区間)/ `min_clearance(dt)`(スナップショット再走査 — §4.3。float として比較でき、接触時は repr が時刻とペアを名指しする)。自リポジトリ CI のセル回帰テスト `python/tests/test_cell_regression.py`(ゴールデンサイクル ±0.25s・工程順・ハンドシェイク・クリアランス床・レイアウト変更→差分検出)まで一気通貫。README にも「Verify the cell, not just the trajectory」節として提示済み
+- **パラメトリック・セル / パラメータスイープ** — 実例あり(2026-08): `examples/sweep_demo.py` がベルト速度×レーン位置の 2 軸を振り、「速度はサイクルだけを動かし、レーンはクリアランスだけを削る」を決定的な表として出す。API としての sweep ヘルパ(並列焼き込み等)は需要待ち
 - **セルの URL 共有** — wasm の `export_to_string` + studio からのダウンロード/読み込みで、セルを 1 つのリンクとして渡す(§1.3 の 5 本目)
 - wasm マルチスレッド化
 
@@ -418,3 +447,4 @@ class TrajectoryExecutor(Protocol):
 - 凸分解をランタイムに含めるか、メッシュクレート側のオフライン機能として切り出すか
 - studio のセッション同時接続(複数ブラウザ)の扱い — v1 は単一クライアント想定でよい
 - npm パッケージとしての studio 単体配布(viser 的な利用)をするか
+- IEC 整列(§9)の詳細 — ST 式パーサの文法範囲(エッジ検出 `R_TRIG` 相当を式に含めるか)、PLCopen XML 書き出しの検証水準(XSD 検証まで / Beremiz・matiec を CI に入れて「開ける」まで確認するか)

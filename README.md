@@ -1,18 +1,39 @@
 # botrail
 
-**ROS-free robot motion authoring with a web-based 3D studio.**
+**Build robot cells as code, verify them deterministically, ship them as USD.**
 
 `pip install botrail`, a few lines of Python, and you get an interactive 3D
-studio in your browser for building environments and motions. The core is
-written in Rust — no ROS, no system dependencies.
+studio in your browser for building robot cells — robots, obstacles,
+conveyors, sensors, and PLC-style sequences. The core is written in Rust —
+no ROS, no system dependencies, no GPU.
+
+A cell in botrail is text (Python / `.botrail` JSON / USD): it diffs in git,
+it bakes into a bit-identical timeline every run, and it regression-tests in
+CI. Motions are *planned*, not taught point by point, so moving a pallet or
+a sensor doesn't break the cell — re-simulate and read the new cycle time.
 
 ## Highlights
 
 - **Robots from URDF, Xacro, or USD** — including Isaac Sim articulations
   (`bt.Robot.from_usd("franka.usd")`), rendered at full visual fidelity
   with [three-usd-robot](https://github.com/neka-nat/three-usd-robot).
+  Multiple robots per cell, with tick-checked inter-robot collisions and
+  zone interlocks.
 - **USD scene import** (usda/usdc/usdz, references, variants, instancing) —
   stages become obstacles and named mount frames, normalized to meters / Z-up.
+- **Environments that behave** — a PLC-style step sequencer (entry actions +
+  transition conditions on a fixed scan cycle), zone/beam sensors, conveyors
+  and linear axes, and conveyor *tracking*: taught poses ride the moving
+  part, so the belt never stops for the pick.
+- **Deterministic bake** — `simulate_sequence()` turns Scene + Sequence into
+  a bit-identical `SequenceTimeline`: cycle time, step spans, signal
+  waveforms, object tracks.
+- **Assertable timelines** — `step_span()` / `signal()` / `min_clearance()`
+  turn a bake into pytest-able cell checks (cycle budgets, sensor timing,
+  safety margins) that run in CI.
+- **Open deliverables** — USD animation (plays in usdview / Omniverse /
+  Blender), CSV/JSON, robot programs (URScript), Python code generation —
+  and Isaac Sim recordings play back through the same pipeline.
 - **Interactive posing** — draggable TCP gizmo with live IK, joint sliders.
 - **Collision checking** — primitives and STL/OBJ meshes (cached VHACD convex
   decomposition), live highlighting, clearance readout.
@@ -20,18 +41,21 @@ written in Rust — no ROS, no system dependencies.
   waypoint motions with Cartesian-line segments and path constraints,
   trajectory playback in the studio.
 - **Portable projects** — save/load `.botrail` files (meshes and USD stages
-  bundled), regenerate any scene as a Python script, export trajectories to
-  CSV/JSON or robot programs (URScript).
+  bundled), regenerate any scene as a Python script.
 - **Runs entirely in the browser** — the wasm build serves the full studio as
   a static page, no server; drop a USD file straight into the viewport.
 
 ## Try it
 
-Run the bundled demo — a Franka Panda in a small USD factory cell (the first
-run downloads NVIDIA's official Franka asset, ~10 MB):
+Run the bundled demos — a Franka Panda in a small USD factory cell (the
+first run downloads NVIDIA's official Franka asset, ~10 MB):
 
 ```bash
-python examples/demo.py
+python examples/demo.py           # interactive studio: pose, plan, play
+python examples/sequence_demo.py  # 13-step cell: conveyor feed → tracked pick
+                                  # → pallet; prints the cycle time, exports USD
+python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
+                                  # vs cycle time and clearance (no downloads)
 ```
 
 Or try the browser-only build (deploys to GitHub Pages from `main`, or build
@@ -70,6 +94,48 @@ traj.export_csv("motion.csv", dt=0.008)
 scene.save_project("cell.botrail")            # meshes/USD bundled when needed
 print(scene.generate_python())                # script reproducing the scene
 ```
+
+## Verify the cell, not just the trajectory
+
+Give the environment behavior, write the process as steps, and bake:
+
+```python
+scene.add_box("crate", size=(0.04, 0.04, 0.04), position=(-0.5, 0.6, 0.3))
+scene.add_conveyor("belt", zone_position=(-0.2, 0.6, 0.3),
+                   zone_size=(1.2, 0.3, 0.3), velocity=(0.25, 0.0, 0.0),
+                   running=False)
+scene.add_beam_sensor("eye", frm=(0.0, 0.4, 0.3), to=(0.0, 0.8, 0.3))
+scene.add_segment("approach", goal=[0.6, -0.5, 0.8, 0.0, 0.4, 0.0])
+
+sq = scene.sequence("cycle")
+sq.step("feed", actions=[bt.seq.start("belt")], transition=bt.seq.signal("eye"))
+sq.step("stop", actions=[bt.seq.stop("belt")])
+sq.step("pick", actions=[bt.seq.motion("approach")])
+
+tl = scene.simulate_sequence("cycle")   # deterministic: bit-identical every run
+print(tl.duration)                      # cycle time in seconds
+tl.export_usd("cycle.usda", fps=60)     # replay in usdview / Omniverse / Blender
+```
+
+Because the bake is deterministic, the same numbers are regression tests —
+the workflow botrail exists for:
+
+```python
+def test_cell_cycle():
+    tl = build_cell().simulate_sequence("cycle")
+    assert tl.duration <= 8.0                # cycle-time budget
+    assert tl.step_span("feed").end <= 2.0   # the crate arrives on time
+    assert tl.signal("eye").rising_edges()   # the handshake happened
+    assert tl.min_clearance() > 0.05         # closest approach, meters
+```
+
+Move the beam sensor 0.25 m downstream and the cycle grows by exactly
+1.0 s — a layout edit becomes a failing test instead of a shop-floor
+surprise. This repository runs such a cell in its own CI
+([python/tests/test_cell_regression.py](python/tests/test_cell_regression.py)),
+and [examples/sweep_demo.py](examples/sweep_demo.py) runs the same loop as a
+parameter study (belt speed moves the cycle; lane position eats the
+clearance).
 
 ## Development
 

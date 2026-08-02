@@ -9,6 +9,7 @@ pub mod motion;
 pub mod project;
 pub mod rollout;
 pub mod seq;
+pub mod verify;
 pub mod wire;
 
 use std::sync::Arc;

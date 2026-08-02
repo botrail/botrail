@@ -1958,6 +1958,275 @@ impl SequenceTimeline {
         botrail_usd::export::write_animation(&path, &input, &options)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
+
+    /// The baked interval of the named step (assertion-friendly view of
+    /// one `step_spans` row).
+    fn step_span(&self, name: &str) -> PyResult<Span> {
+        self.inner
+            .step_spans
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| Span {
+                name: s.name.clone(),
+                start: s.start,
+                end: s.end,
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown step `{name}` (steps: {})",
+                    self.inner
+                        .step_spans
+                        .iter()
+                        .map(|s| format!("`{}`", s.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+    }
+
+    /// The named waveform lane — an internal signal, a sensor, or a
+    /// device's running state.
+    fn signal(&self, name: &str) -> PyResult<SignalTrack> {
+        self.inner
+            .signals
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| SignalTrack {
+                inner: s.clone(),
+                duration: self.inner.duration,
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown signal `{name}` (lanes: {})",
+                    self.inner
+                        .signals
+                        .iter()
+                        .map(|s| format!("`{}`", s.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+    }
+
+    /// The tightest robot-to-environment approach over the cycle, sampled
+    /// every `dt` seconds against the scene the timeline was baked from
+    /// (carried and conveyed objects replay their baked motion; robot-robot
+    /// contact is already a hard rollout error). Raises when the cell has
+    /// nothing to measure.
+    #[pyo3(signature = (dt = 0.01))]
+    fn min_clearance(&self, dt: f64) -> PyResult<Clearance> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        self.scene
+            .timeline_min_clearance(&self.inner, dt)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .map(|inner| Clearance { inner })
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "nothing to measure: the cell has no enabled environment \
+                     obstacle with collision geometry",
+                )
+            })
+    }
+}
+
+/// One step's baked interval on a timeline.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct Span {
+    name: String,
+    start: f64,
+    end: f64,
+}
+
+#[pymethods]
+impl Span {
+    /// Step name.
+    #[getter]
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    /// Start time in seconds.
+    #[getter]
+    fn start(&self) -> f64 {
+        self.start
+    }
+
+    /// End time in seconds.
+    #[getter]
+    fn end(&self) -> f64 {
+        self.end
+    }
+
+    /// `end - start`.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.end - self.start
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Span('{}', {:.3}s..{:.3}s)",
+            self.name, self.start, self.end
+        )
+    }
+}
+
+/// A signal/sensor/device waveform lane on a baked timeline.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct SignalTrack {
+    inner: botrail_scene::rollout::BoolTrack,
+    duration: f64,
+}
+
+#[pymethods]
+impl SignalTrack {
+    /// Lane name.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    /// `(time, new value)` edges, starting with `(0, initial)`.
+    #[getter]
+    fn edges(&self) -> Vec<(f64, bool)> {
+        self.inner.edges.clone()
+    }
+
+    /// The level at time `t`.
+    fn value_at(&self, t: f64) -> bool {
+        self.inner.value_at(t)
+    }
+
+    /// Times the lane turns ON (the initial level at 0 is not an edge).
+    fn rising_edges(&self) -> Vec<f64> {
+        self.inner
+            .edges
+            .windows(2)
+            .filter(|w| !w[0].1 && w[1].1)
+            .map(|w| w[1].0)
+            .collect()
+    }
+
+    /// Times the lane turns OFF.
+    fn falling_edges(&self) -> Vec<f64> {
+        self.inner
+            .edges
+            .windows(2)
+            .filter(|w| w[0].1 && !w[1].1)
+            .map(|w| w[1].0)
+            .collect()
+    }
+
+    /// `(start, end)` intervals the lane is ON; an interval still open at
+    /// the cycle end closes at `duration`.
+    fn high_spans(&self) -> Vec<(f64, f64)> {
+        let mut spans = Vec::new();
+        let mut on_since: Option<f64> = None;
+        for &(t, v) in &self.inner.edges {
+            match (on_since, v) {
+                (None, true) => on_since = Some(t),
+                (Some(t0), false) => {
+                    spans.push((t0, t));
+                    on_since = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(t0) = on_since {
+            spans.push((t0, self.duration));
+        }
+        spans
+    }
+
+    /// Total ON time over the cycle.
+    fn high_total(&self) -> f64 {
+        self.high_spans().iter().map(|(a, b)| b - a).sum()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SignalTrack('{}', {} rising, on {:.3}s of {:.3}s)",
+            self.inner.name,
+            self.rising_edges().len(),
+            self.high_total(),
+            self.duration
+        )
+    }
+}
+
+/// The tightest robot-to-environment approach on a timeline. Compares and
+/// converts like its `distance`, so `assert tl.min_clearance() >= 0.005`
+/// reads directly — and its repr names the time (and touching pair) when
+/// the assertion fires.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct Clearance {
+    inner: botrail_scene::verify::Clearance,
+}
+
+#[pymethods]
+impl Clearance {
+    /// Distance in meters (0 while touching).
+    #[getter]
+    fn distance(&self) -> f64 {
+        self.inner.distance
+    }
+
+    /// When it first happens (seconds on the timeline).
+    #[getter]
+    fn t(&self) -> f64 {
+        self.inner.t
+    }
+
+    /// The touching `(robot side, obstacle)` names while in contact.
+    #[getter]
+    fn pair(&self) -> Option<(String, String)> {
+        self.inner.pair.clone()
+    }
+
+    fn __float__(&self) -> f64 {
+        self.inner.distance
+    }
+
+    fn __richcmp__(
+        &self,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<bool> {
+        let value = if let Ok(c) = other.downcast::<Clearance>() {
+            c.get().inner.distance
+        } else {
+            other.extract::<f64>()?
+        };
+        let ordering = self
+            .inner
+            .distance
+            .partial_cmp(&value)
+            .ok_or_else(|| PyValueError::new_err("cannot compare a NaN clearance"))?;
+        Ok(op.matches(ordering))
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner.pair {
+            Some((a, b)) => format!(
+                "Clearance(contact at t={:.3}s: {a} <-> {b})",
+                self.inner.t
+            ),
+            None if self.inner.distance <= 0.0 => {
+                format!("Clearance(contact at t={:.3}s)", self.inner.t)
+            }
+            None => format!(
+                "Clearance({:.4} m at t={:.3}s)",
+                self.inner.distance, self.inner.t
+            ),
+        }
+    }
 }
 
 #[pymodule]
@@ -1967,6 +2236,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IkResult>()?;
     m.add_class::<Trajectory>()?;
     m.add_class::<SequenceTimeline>()?;
+    m.add_class::<Span>()?;
+    m.add_class::<SignalTrack>()?;
+    m.add_class::<Clearance>()?;
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
