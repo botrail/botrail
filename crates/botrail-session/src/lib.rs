@@ -16,7 +16,7 @@ use botrail_scene::motion::{PlannedMotion, Segment};
 use botrail_scene::wire::{
     self, ClientMessage, IkStatusMsg, PoseMsg, SceneDescriptionMsg, ServerMessage,
 };
-use botrail_scene::{Scene, SceneError};
+use botrail_scene::{ObstacleSpec, Scene, SceneError};
 use nalgebra::Isometry3;
 
 /// Environment plumbing a session runs on.
@@ -362,7 +362,7 @@ pub fn add_obstacle(
 /// (importers add tens to hundreds at once). Returns the final names.
 pub fn add_obstacles(
     host: &impl SessionHost,
-    batch: Vec<(String, Geometry, Isometry3<f64>)>,
+    batch: Vec<ObstacleSpec>,
 ) -> Result<Vec<String>, SceneError> {
     let names = host.with_scene(|scene| scene.add_obstacles(batch))?;
     emit_obstacles_and_state(host);
@@ -392,6 +392,16 @@ pub fn set_obstacle_enabled(
     enabled: bool,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_enabled(name, enabled))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+pub fn set_obstacle_color(
+    host: &impl SessionHost,
+    name: &str,
+    color: Option<[f32; 3]>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_color(name, color))?;
     emit_obstacles_and_state(host);
     Ok(())
 }

@@ -44,6 +44,8 @@ struct PreparedNode {
     name: String,
     geometry: wire::GeometryMsg,
     pose: wire::PoseMsg,
+    #[serde(default)]
+    color: Option<[f32; 3]>,
     hulls: Option<Vec<Vec<[f64; 3]>>>,
 }
 
@@ -74,6 +76,7 @@ pub fn decompose_usd_scene(
                 name: format!("{prefix}{}", node.name),
                 geometry: wire::geometry_msg(&node.geometry, &mut no_mesh),
                 pose: wire::PoseMsg::from(&node.pose),
+                color: node.color,
                 hulls: node
                     .mesh_data
                     .as_ref()
@@ -174,7 +177,7 @@ impl WasmSession {
             .with_scene(|scene| -> Result<(), String> {
                 for node in prepared.nodes {
                     let pose = (&node.pose).into();
-                    match node.hulls {
+                    let added = match node.hulls {
                         Some(hulls) => {
                             let shape = botrail_collide::mesh::compound_from_hulls(&hulls)
                                 .map_err(|e| e.to_string())?;
@@ -186,16 +189,19 @@ impl WasmSession {
                                 },
                                 pose,
                                 botrail_collide::ObstacleCollider::from_shape(shape),
-                            );
+                            )
                         }
                         None => {
                             let geometry = wire::geometry_from_msg(&node.geometry)
                                 .map_err(|e| e.to_string())?;
                             scene
                                 .add_obstacle(&node.name, geometry, pose)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| e.to_string())?
                         }
-                    }
+                    };
+                    scene
+                        .set_obstacle_color(&added, node.color)
+                        .map_err(|e| e.to_string())?;
                 }
                 for frame in prepared.frames {
                     scene.add_frame(&frame.name, (&frame.pose).into());
@@ -233,7 +239,7 @@ impl WasmSession {
             .with_scene(|scene| -> Result<(), String> {
                 for node in imported.nodes {
                     let name = format!("{prefix}{}", node.name);
-                    match node.mesh_data {
+                    let added = match node.mesh_data {
                         Some(mesh) => {
                             let shape = botrail_collide::mesh::mesh_to_compound(&mesh)
                                 .map_err(|e| e.to_string())?;
@@ -242,14 +248,15 @@ impl WasmSession {
                                 node.geometry,
                                 node.pose,
                                 botrail_collide::ObstacleCollider::from_shape(shape),
-                            );
+                            )
                         }
-                        None => {
-                            scene
-                                .add_obstacle(&name, node.geometry, node.pose)
-                                .map_err(|e| e.to_string())?;
-                        }
-                    }
+                        None => scene
+                            .add_obstacle(&name, node.geometry, node.pose)
+                            .map_err(|e| e.to_string())?,
+                    };
+                    scene
+                        .set_obstacle_color(&added, node.color)
+                        .map_err(|e| e.to_string())?;
                 }
                 for frame in imported.frames {
                     scene.add_frame(&format!("{prefix}{}", frame.name), frame.pose);

@@ -88,6 +88,9 @@ pub struct ObjectSpec {
     pub name: String,
     pub geometry: Geometry,
     pub track: PoseTrack,
+    /// `primvars:displayColor` to author, linear RGB. `None` falls back to
+    /// the neutral environment grey.
+    pub color: Option<[f32; 3]>,
 }
 
 /// One robot's animation bundle: the instance names the prim under
@@ -1210,10 +1213,12 @@ fn author_shape(
         prim,
         &shape.geometry,
         &XformValue::Static(shape.origin),
+        None,
         warnings,
     )
 }
 
+/// Fallback shade for geometry with no authored colour of its own.
 const ENV_COLOR: [f32; 3] = [0.604, 0.639, 0.698];
 
 /// Authors a geometry prim (with display color) whose transform is `pose`.
@@ -1222,6 +1227,7 @@ fn author_geometry(
     prim: &str,
     geometry: &Geometry,
     pose: &XformValue,
+    color: Option<[f32; 3]>,
     _warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
     let extent = |half: [f64; 3]| {
@@ -1352,15 +1358,12 @@ fn author_geometry(
             layer.xform(prim, pose, None);
         }
     }
+    let [r, g, b] = color.unwrap_or(ENV_COLOR);
     layer.attr(
         prim,
         "primvars:displayColor",
         "color3f[]",
-        AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(
-            ENV_COLOR[0],
-            ENV_COLOR[1],
-            ENV_COLOR[2],
-        )])),
+        AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(r, g, b)])),
     );
     Ok(())
 }
@@ -1410,7 +1413,7 @@ fn author_objects(
             PoseTrack::Static(x) => XformValue::Static(*x),
             PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples.clone()),
         };
-        author_geometry(layer, &prim, &obj.geometry, &pose, warnings)?;
+        author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
     }
     Ok(())
 }
@@ -1745,11 +1748,13 @@ mod tests {
                     size: Vector3::new(0.1, 0.1, 0.1),
                 },
                 track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.05)),
+                color: Some([0.8, 0.3, 0.1]),
             },
             ObjectSpec {
                 name: "held".into(),
                 geometry: Geometry::Sphere { radius: 0.03 },
                 track: PoseTrack::Sampled(held_track.clone()),
+                color: None,
             },
         ];
         let robots = [RobotAnimation {
@@ -1815,6 +1820,28 @@ mod tests {
                 &format!("box frame {f}"),
             );
         }
+
+        // Each object keeps its own colour; one with none falls back to the
+        // neutral environment grey rather than inheriting its neighbour's.
+        let color = |path: &str| -> Vec<gf::Vec3f> {
+            stage
+                .prim(path)
+                .attribute("primvars:displayColor")
+                .get()
+                .unwrap()
+                .expect("authored displayColor")
+        };
+        let painted = color("/World/Env/World/Conveyor/Box_A");
+        assert_eq!(painted.len(), 1);
+        assert!((painted[0].x - 0.8).abs() < 1e-6, "{:?}", painted[0]);
+        assert!((painted[0].y - 0.3).abs() < 1e-6, "{:?}", painted[0]);
+        assert!((painted[0].z - 0.1).abs() < 1e-6, "{:?}", painted[0]);
+        let fallback = color("/World/Env/held");
+        assert!(
+            (fallback[0].x - ENV_COLOR[0]).abs() < 1e-6,
+            "{:?}",
+            fallback[0]
+        );
 
         // The mesh visual made it through with its triangles.
         let usda = std::fs::read_to_string(dir.join("anim.usda")).unwrap();

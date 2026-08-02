@@ -274,6 +274,18 @@ impl Scene {
     fn resolve_robot(&self, robot: Option<&str>) -> PyResult<usize> {
         self.hub.robot_index(robot).map_err(PyValueError::new_err)
     }
+
+    /// Applies an `add_*` call's optional `color=`, passing the obstacle's
+    /// final name through. A `None` colour is left alone so the obstacle
+    /// keeps the viewer's neutral shading.
+    fn paint(&self, name: String, color: Option<[f32; 3]>) -> PyResult<String> {
+        if color.is_some() {
+            self.hub
+                .set_obstacle_color(&name, color)
+                .map_err(scene_err)?;
+        }
+        Ok(name)
+    }
 }
 
 #[pymethods]
@@ -395,15 +407,17 @@ impl Scene {
 
     /// Adds a box obstacle (full extents, meters). Returns the final name,
     /// which may be uniquified. Changes are pushed to connected studios.
-    #[pyo3(signature = (name, size, position, quaternion = None))]
+    #[pyo3(signature = (name, size, position, quaternion = None, color = None))]
     fn add_box(
         &self,
         name: &str,
         size: [f64; 3],
         position: [f64; 3],
         quaternion: Option<[f64; 4]>,
+        color: Option<[f32; 3]>,
     ) -> PyResult<String> {
-        self.hub
+        let name = self
+            .hub
             .add_obstacle(
                 name,
                 botrail_model::Geometry::Box {
@@ -411,28 +425,32 @@ impl Scene {
                 },
                 pose_from(position, quaternion),
             )
-            .map_err(scene_err)
+            .map_err(scene_err)?;
+        self.paint(name, color)
     }
 
-    #[pyo3(signature = (name, radius, position, quaternion = None))]
+    #[pyo3(signature = (name, radius, position, quaternion = None, color = None))]
     fn add_sphere(
         &self,
         name: &str,
         radius: f64,
         position: [f64; 3],
         quaternion: Option<[f64; 4]>,
+        color: Option<[f32; 3]>,
     ) -> PyResult<String> {
-        self.hub
+        let name = self
+            .hub
             .add_obstacle(
                 name,
                 botrail_model::Geometry::Sphere { radius },
                 pose_from(position, quaternion),
             )
-            .map_err(scene_err)
+            .map_err(scene_err)?;
+        self.paint(name, color)
     }
 
     /// Adds a cylinder obstacle (URDF convention: axis along local +z).
-    #[pyo3(signature = (name, radius, length, position, quaternion = None))]
+    #[pyo3(signature = (name, radius, length, position, quaternion = None, color = None))]
     fn add_cylinder(
         &self,
         name: &str,
@@ -440,20 +458,23 @@ impl Scene {
         length: f64,
         position: [f64; 3],
         quaternion: Option<[f64; 4]>,
+        color: Option<[f32; 3]>,
     ) -> PyResult<String> {
-        self.hub
+        let name = self
+            .hub
             .add_obstacle(
                 name,
                 botrail_model::Geometry::Cylinder { radius, length },
                 pose_from(position, quaternion),
             )
-            .map_err(scene_err)
+            .map_err(scene_err)?;
+        self.paint(name, color)
     }
 
     /// Adds a mesh obstacle from an STL/OBJ file. The collision shape is a
     /// VHACD convex decomposition (computed on first load, then cached on
     /// disk); the studio renders the original mesh.
-    #[pyo3(signature = (name, path, position, scale = None, quaternion = None))]
+    #[pyo3(signature = (name, path, position, scale = None, quaternion = None, color = None))]
     fn add_mesh(
         &self,
         name: &str,
@@ -461,9 +482,11 @@ impl Scene {
         position: [f64; 3],
         scale: Option<[f64; 3]>,
         quaternion: Option<[f64; 4]>,
+        color: Option<[f32; 3]>,
     ) -> PyResult<String> {
         let s = scale.unwrap_or([1.0; 3]);
-        self.hub
+        let name = self
+            .hub
             .add_obstacle(
                 name,
                 botrail_model::Geometry::Mesh {
@@ -472,7 +495,8 @@ impl Scene {
                 },
                 pose_from(position, quaternion),
             )
-            .map_err(scene_err)
+            .map_err(scene_err)?;
+        self.paint(name, color)
     }
 
     /// Imports the static geometry of a USD stage (usda/usdc/usdz —
@@ -507,7 +531,12 @@ impl Scene {
         let batch = imported
             .nodes
             .into_iter()
-            .map(|n| (format!("{prefix}{}", n.name), n.geometry, n.pose))
+            .map(|n| botrail_scene::ObstacleSpec {
+                name: format!("{prefix}{}", n.name),
+                geometry: n.geometry,
+                pose: n.pose,
+                color: n.color,
+            })
             .collect();
         let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
         self.hub.add_frames(
@@ -552,6 +581,14 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Sets an obstacle's display colour, linear RGB in 0..1. `None` hands
+    /// the shading back to the viewer. Display only — collision and planning
+    /// see the same geometry either way.
+    #[pyo3(signature = (name, color))]
+    fn set_obstacle_color(&self, name: &str, color: Option<[f32; 3]>) -> PyResult<()> {
+        self.hub.set_obstacle_color(name, color).map_err(scene_err)
+    }
+
     #[pyo3(signature = (name, position, quaternion = None))]
     fn set_obstacle_pose(
         &self,
@@ -573,6 +610,14 @@ impl Scene {
     fn obstacle_pose(&self, name: &str) -> PyResult<([f64; 3], [f64; 4])> {
         self.hub
             .obstacle_pose(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
+    }
+
+    /// An obstacle's display colour as linear RGB, or `None` when it has
+    /// none and the viewer picks the shading.
+    fn obstacle_color(&self, name: &str) -> PyResult<Option<[f32; 3]>> {
+        self.hub
+            .obstacle_color(name)
             .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
     }
 
@@ -1919,6 +1964,7 @@ impl SequenceTimeline {
                     name: o.name.clone(),
                     geometry: o.geometry.clone(),
                     track,
+                    color: o.color,
                 }
             })
             .collect();

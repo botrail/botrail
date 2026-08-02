@@ -13,6 +13,20 @@ import { MeshVisual } from "./MeshVisual";
 const NEUTRAL_COLOR = "#9aa3b2";
 const SELECT_EDGE_COLOR = "#cdd4df";
 
+/**
+ * The obstacle's own colour, or null when the scene file authored none.
+ *
+ * `ObstacleMsg.color` carries `primvars:displayColor`, which USD defines in
+ * linear space — the same space three works in — so it is handed over as-is
+ * rather than through a hex string, which would be read back as sRGB and come
+ * out washed out.
+ */
+function authoredColor(obstacle: ObstacleMsg): THREE.Color | null {
+  if (!obstacle.color) return null;
+  const [r, g, b] = obstacle.color;
+  return new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+}
+
 /** Draws every obstacle, handles click-to-select, and drives the move gizmo. */
 export function ObstacleView() {
   const obstacles = useStudioStore((s) => s.obstacles);
@@ -88,7 +102,11 @@ function ObstacleNode({
     selectObstacle(name);
   };
 
-  const color = colliding ? COLLISION_COLOR : NEUTRAL_COLOR;
+  // Scenery the author styled is drawn as scenery: solid, and it casts. An
+  // obstacle with no authored colour is a bare collision proxy, so it keeps
+  // the translucent look that lets you see the robot through it.
+  const tint = useMemo(() => authoredColor(obstacle), [obstacle]);
+  const color = colliding ? new THREE.Color(COLLISION_COLOR) : (tint ?? new THREE.Color(NEUTRAL_COLOR));
 
   return (
     <>
@@ -96,6 +114,7 @@ function ObstacleNode({
         <ObstacleGeometry
           geometry={obstacle.geometry}
           color={color}
+          solid={tint !== null}
           selected={selected}
           onSelect={onSelect}
         />
@@ -121,11 +140,13 @@ function ObstacleNode({
 function ObstacleGeometry({
   geometry,
   color,
+  solid,
   selected,
   onSelect,
 }: {
   geometry: GeometryMsg;
-  color: string;
+  color: THREE.Color;
+  solid: boolean;
   selected: boolean;
   onSelect: (e: ThreeEvent<MouseEvent>) => void;
 }) {
@@ -137,6 +158,10 @@ function ObstacleGeometry({
       cursorEnter();
     },
     onPointerOut: () => cursorLeave(),
+    // A see-through proxy casting a hard shadow reads as a glitch, so only
+    // solid scenery casts. Everything receives.
+    castShadow: solid,
+    receiveShadow: true,
   };
 
   switch (geometry.kind) {
@@ -144,7 +169,7 @@ function ObstacleGeometry({
       return (
         <mesh {...pick}>
           <boxGeometry args={geometry.size} />
-          <ObstacleMaterial color={color} />
+          <ObstacleMaterial color={color} solid={solid} />
           {highlight}
         </mesh>
       );
@@ -156,7 +181,7 @@ function ObstacleGeometry({
           <cylinderGeometry
             args={[geometry.radius, geometry.radius, geometry.length, 32]}
           />
-          <ObstacleMaterial color={color} />
+          <ObstacleMaterial color={color} solid={solid} />
           {highlight}
         </mesh>
       );
@@ -164,7 +189,7 @@ function ObstacleGeometry({
       return (
         <mesh {...pick}>
           <sphereGeometry args={[geometry.radius, 32, 24]} />
-          <ObstacleMaterial color={color} />
+          <ObstacleMaterial color={color} solid={solid} />
           {highlight}
         </mesh>
       );
@@ -173,7 +198,7 @@ function ObstacleGeometry({
       if (!geometry.url) return null;
       return (
         <group {...pick}>
-          <MeshVisual geometry={geometry} color={color} />
+          <MeshVisual geometry={geometry} color={`#${color.getHexString()}`} />
         </group>
       );
     default:
@@ -181,14 +206,14 @@ function ObstacleGeometry({
   }
 }
 
-function ObstacleMaterial({ color }: { color: string }) {
+function ObstacleMaterial({ color, solid }: { color: THREE.Color; solid: boolean }) {
   return (
     <meshStandardMaterial
       color={color}
-      roughness={0.7}
+      roughness={solid ? 0.8 : 0.7}
       metalness={0.05}
-      transparent
-      opacity={0.85}
+      transparent={!solid}
+      opacity={solid ? 1 : 0.85}
     />
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import * as THREE from "three";
 import { ThreeUsdRobotLoader, type ThreeUsdRobot } from "three-usd-robot";
 import {
   createGhostRobot,
@@ -60,7 +61,16 @@ function UsdRobotInstance({ name }: { name: string }) {
     new ThreeUsdRobotLoader({ worldUp: "Z" })
       .loadAsync(url)
       .then((r) => {
-        if (!cancelled) setRobot(r);
+        if (cancelled) return;
+        // The loader leaves shadows off; the arm is the one thing in the
+        // scene whose shadow tells you how far above the part it is.
+        r.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        setRobot(r);
       })
       .catch((e) =>
         console.error("botrail studio: failed to load USD robot", e),

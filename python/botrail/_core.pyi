@@ -105,6 +105,7 @@ class Scene:
         size: tuple[float, float, float],
         position: tuple[float, float, float],
         quaternion: Optional[tuple[float, float, float, float]] = None,
+        color: Optional[tuple[float, float, float]] = None,
     ) -> str: ...
     def add_sphere(
         self,
@@ -112,6 +113,7 @@ class Scene:
         radius: float,
         position: tuple[float, float, float],
         quaternion: Optional[tuple[float, float, float, float]] = None,
+        color: Optional[tuple[float, float, float]] = None,
     ) -> str: ...
     def add_cylinder(
         self,
@@ -120,6 +122,7 @@ class Scene:
         length: float,
         position: tuple[float, float, float],
         quaternion: Optional[tuple[float, float, float, float]] = None,
+        color: Optional[tuple[float, float, float]] = None,
     ) -> str: ...
     def add_mesh(
         self,
@@ -128,6 +131,7 @@ class Scene:
         position: tuple[float, float, float],
         scale: Optional[tuple[float, float, float]] = None,
         quaternion: Optional[tuple[float, float, float, float]] = None,
+        color: Optional[tuple[float, float, float]] = None,
     ) -> str: ...
     def load_usd(
         self,
@@ -152,6 +156,10 @@ class Scene:
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
     def remove_obstacle(self, name: str) -> None: ...
     def set_obstacle_enabled(self, name: str, enabled: bool) -> None: ...
+    def set_obstacle_color(
+        self, name: str, color: Optional[tuple[float, float, float]]
+    ) -> None: ...
+    def obstacle_color(self, name: str) -> Optional[tuple[float, float, float]]: ...
     def set_obstacle_pose(
         self,
         name: str,

@@ -1,6 +1,8 @@
-import { Suspense } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Suspense, useEffect } from "react";
+import { Canvas, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
+import * as THREE from "three";
+import { RoomEnvironment } from "three-stdlib";
 
 import { isWasmMode } from "../backend";
 import { robotByName, useStudioStore } from "../store";
@@ -15,6 +17,45 @@ import { TcpGizmo } from "./TcpGizmo";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
+
+/**
+ * Image-based lighting, so the robot's PBR materials (the Isaac Franka ships
+ * real metalness/roughness maps) have something to reflect instead of
+ * rendering dull under bare lights.
+ *
+ * `RoomEnvironment` is procedural — it builds the environment from emissive
+ * boxes rather than fetching an HDRI, which keeps the studio working with no
+ * network. The intensity is low: this is a sheen on top of the key light, not
+ * the light source.
+ */
+function IndoorLighting() {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  useEffect(() => {
+    const pmrem = new THREE.PMREMGenerator(gl);
+    const room = RoomEnvironment();
+    const target = pmrem.fromScene(room, 0.04);
+    // three-stdlib's RoomEnvironment has no dispose() of its own, and the
+    // baked cube map is all we keep.
+    room.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.geometry.dispose();
+        (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach(
+          (m) => m.dispose(),
+        );
+      }
+    });
+    pmrem.dispose();
+    scene.environment = target.texture;
+    scene.environmentIntensity = 0.32;
+    return () => {
+      scene.environment = null;
+      target.dispose();
+    };
+  }, [gl, scene]);
+  return null;
+}
 
 export function Viewport() {
   const connected = useStudioStore((s) => s.connection === "connected");
@@ -57,6 +98,7 @@ export function Viewport() {
       onDrop={onDrop}
     >
       <Canvas
+        shadows="soft"
         camera={{
           position: [1.6, -1.6, 1.2],
           up: [0, 0, 1],
@@ -67,9 +109,30 @@ export function Viewport() {
         onPointerMissed={() => useStudioStore.getState().selectTcp()}
       >
         <color attach="background" args={["#15171c"]} />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[3, 3, 6]} intensity={1.1} />
-        <hemisphereLight args={["#8899aa", "#20242c", 0.4]} />
+        {/* The environment map does the ambient work, so the lights below it
+            are only the key and a fill; stacking a bright ambient on top of
+            an IBL is what flattens a scene out. */}
+        <IndoorLighting />
+        <ambientLight intensity={0.12} />
+        {/* Key light. The shadow camera covers a cell-sized volume; a
+            default-sized one would clip the shadows off at 5 cm. */}
+        <directionalLight
+          position={[3, 3, 6]}
+          intensity={1.05}
+          castShadow
+          shadow-mapSize={[2048, 2048]}
+          shadow-bias={-0.0006}
+          shadow-normalBias={0.02}
+          shadow-camera-left={-4}
+          shadow-camera-right={4}
+          shadow-camera-top={4}
+          shadow-camera-bottom={-4}
+          shadow-camera-near={0.1}
+          shadow-camera-far={20}
+        />
+        {/* Fill from the opposite side so the shadowed faces don't go flat. */}
+        <directionalLight position={[-3, -2, 2]} intensity={0.3} />
+        <hemisphereLight args={["#8899aa", "#20242c", 0.25]} />
 
         {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor). */}
         <Grid

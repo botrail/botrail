@@ -103,3 +103,28 @@ def test_obstacle_enable_toggle() -> None:
 
     scene.set_obstacle_enabled("blocker", True)
     assert scene.in_collision()
+
+
+def test_obstacle_colour_is_optional_and_settable(scene: bt.Scene) -> None:
+    # A bare obstacle has no authored appearance: the viewer decides.
+    scene.add_box("plain", (0.1, 0.1, 0.1), (0.5, 0.0, 0.1))
+    assert scene.obstacle_color("plain") is None
+
+    scene.add_box("painted", (0.1, 0.1, 0.1), (0.5, 0.3, 0.1), color=(0.8, 0.3, 0.1))
+    assert scene.obstacle_color("painted") == pytest.approx((0.8, 0.3, 0.1))
+
+    scene.set_obstacle_color("plain", (0.0, 0.5, 1.0))
+    assert scene.obstacle_color("plain") == pytest.approx((0.0, 0.5, 1.0))
+    scene.set_obstacle_color("plain", None)
+    assert scene.obstacle_color("plain") is None
+
+    with pytest.raises(ValueError):
+        scene.obstacle_color("nope")
+
+
+def test_colour_never_affects_collision(scene: bt.Scene) -> None:
+    scene.add_sphere("ball", 0.05, (1.0, 0.0, 0.2), color=(1.0, 0.0, 0.0))
+    before = scene.min_obstacle_distance()
+    scene.set_obstacle_color("ball", None)
+    assert scene.min_obstacle_distance() == before
+    assert scene.check_collisions() == []

@@ -1,4 +1,4 @@
-# botrail
+![botrail-logo](assets/botrail-logo.svg)
 
 **Build robot cells as code, verify them deterministically, ship them as USD.**
 

@@ -62,6 +62,19 @@ pub struct Obstacle {
     /// Disabled obstacles keep their geometry but are excluded from
     /// collision checking (and therefore from planning validity).
     pub enabled: bool,
+    /// Display colour, linear RGB — the authored `primvars:displayColor` for
+    /// imported scenery. `None` leaves the shading to the viewer, which is
+    /// what a bare `add_box` gets. Never affects collision or planning.
+    pub color: Option<[f32; 3]>,
+}
+
+/// One obstacle in an [`Scene::add_obstacles`] batch.
+#[derive(Debug, Clone)]
+pub struct ObstacleSpec {
+    pub name: String,
+    pub geometry: Geometry,
+    pub pose: Isometry3<f64>,
+    pub color: Option<[f32; 3]>,
 }
 
 /// A named world-frame pose — a mount point / teach reference, typically
@@ -466,6 +479,7 @@ impl Scene {
             geometry,
             pose,
             enabled: true,
+            color: None,
         });
         self.obstacle_colliders.push(collider);
         Ok(name)
@@ -475,23 +489,21 @@ impl Scene {
     /// (in parallel under the `parallel` feature — mesh VHACD dominates),
     /// and nothing is inserted if any geometry fails. Returns the final
     /// (possibly uniquified) names.
-    pub fn add_obstacles(
-        &mut self,
-        batch: Vec<(String, Geometry, Isometry3<f64>)>,
-    ) -> Result<Vec<String>, SceneError> {
-        let geometries: Vec<Geometry> = batch.iter().map(|(_, g, _)| g.clone()).collect();
+    pub fn add_obstacles(&mut self, batch: Vec<ObstacleSpec>) -> Result<Vec<String>, SceneError> {
+        let geometries: Vec<Geometry> = batch.iter().map(|s| s.geometry.clone()).collect();
         let colliders = botrail_collide::build_obstacle_colliders(&geometries)
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| SceneError::UnsupportedGeometry(e.to_string()))?;
         let mut names = Vec::with_capacity(batch.len());
-        for ((name, geometry, pose), collider) in batch.into_iter().zip(colliders) {
-            let name = self.unique_name(&name);
+        for (spec, collider) in batch.into_iter().zip(colliders) {
+            let name = self.unique_name(&spec.name);
             self.obstacles.push(Obstacle {
                 name: name.clone(),
-                geometry,
-                pose,
+                geometry: spec.geometry,
+                pose: spec.pose,
                 enabled: true,
+                color: spec.color,
             });
             self.obstacle_colliders.push(collider);
             names.push(name);
@@ -515,6 +527,7 @@ impl Scene {
             geometry,
             pose,
             enabled: true,
+            color: None,
         });
         self.obstacle_colliders.push(collider);
         name
@@ -551,6 +564,18 @@ impl Scene {
     pub fn set_obstacle_enabled(&mut self, name: &str, enabled: bool) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].enabled = enabled;
+        Ok(())
+    }
+
+    /// Sets the display colour (linear RGB); `None` hands the shading back to
+    /// the viewer. Display only — collision and planning are unaffected.
+    pub fn set_obstacle_color(
+        &mut self,
+        name: &str,
+        color: Option<[f32; 3]>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].color = color;
         Ok(())
     }
 

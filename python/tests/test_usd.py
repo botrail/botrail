@@ -128,3 +128,44 @@ def test_project_roundtrip_preserves_frames(scene: bt.Scene, cell: Path, tmp_pat
     (fx, fy, fz), _ = reloaded.frame("/World/MountFrame")
     assert (fx, fy, fz) == pytest.approx((0.1, 0.0, 0.4))
     assert "scene.add_frame(\"/World/MountFrame\"" in reloaded.generate_python()
+
+
+def test_load_usd_carries_display_colour(tmp_path: Path) -> None:
+    """A group's constant displayColor paints its subtree; a prim can
+    override it, and a prim with none is left to the viewer."""
+    stage = tmp_path / "painted.usda"
+    stage.write_text(
+        """#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "World" {
+    def Xform "Rig" {
+        color3f[] primvars:displayColor = [(0.2, 0.4, 0.6)]
+
+        def Cube "Frame" { double size = 0.2 }
+
+        def Cube "Guard" {
+            double size = 0.2
+            color3f[] primvars:displayColor = [(0.9, 0.7, 0.1)]
+            double3 xformOp:translate = (0.5, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Cube "Plain" {
+        double size = 0.2
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"""
+    )
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene.load_usd(stage)
+
+    assert scene.obstacle_color("/World/Rig/Frame") == pytest.approx((0.2, 0.4, 0.6))
+    assert scene.obstacle_color("/World/Rig/Guard") == pytest.approx((0.9, 0.7, 0.1))
+    assert scene.obstacle_color("/World/Plain") is None

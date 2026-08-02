@@ -12,7 +12,7 @@ use std::time::Instant;
 use botrail_kin::IkOptions;
 use botrail_model::Geometry;
 use botrail_scene::wire::{self, PoseMsg, ServerMessage};
-use botrail_scene::{Scene, SceneError};
+use botrail_scene::{ObstacleSpec, Scene, SceneError};
 use botrail_session::SessionHost;
 use nalgebra::Isometry3;
 use tokio::sync::broadcast;
@@ -286,10 +286,7 @@ impl SceneHub {
     }
 
     /// Adds many obstacles with one broadcast; returns the final names.
-    pub fn add_obstacles(
-        &self,
-        batch: Vec<(String, Geometry, Isometry3<f64>)>,
-    ) -> Result<Vec<String>, SceneError> {
+    pub fn add_obstacles(&self, batch: Vec<ObstacleSpec>) -> Result<Vec<String>, SceneError> {
         botrail_session::add_obstacles(self, batch)
     }
 
@@ -299,6 +296,14 @@ impl SceneHub {
 
     pub fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> Result<(), SceneError> {
         botrail_session::set_obstacle_enabled(self, name, enabled)
+    }
+
+    pub fn set_obstacle_color(
+        &self,
+        name: &str,
+        color: Option<[f32; 3]>,
+    ) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_color(self, name, color)
     }
 
     pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {
@@ -316,6 +321,14 @@ impl SceneHub {
             let t = o.pose.translation;
             let q = o.pose.rotation.coords;
             Some(([t.x, t.y, t.z], [q.x, q.y, q.z, q.w]))
+        })
+    }
+
+    /// `None` for an unknown obstacle; `Some(None)` for one with no colour.
+    pub fn obstacle_color(&self, name: &str) -> Option<Option<[f32; 3]>> {
+        self.with_scene(|scene| {
+            let o = scene.obstacles().iter().find(|o| o.name == name)?;
+            Some(o.color)
         })
     }
 
@@ -476,6 +489,7 @@ impl SceneHub {
                     name: o.name.clone(),
                     geometry: o.geometry.clone(),
                     track,
+                    color: o.color,
                 }
             })
             .collect();

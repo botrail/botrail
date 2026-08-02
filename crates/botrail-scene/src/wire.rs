@@ -204,6 +204,11 @@ pub struct ObstacleMsg {
     /// Disabled obstacles render but are excluded from collision checking.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Display colour, linear RGB, from the scene file's
+    /// `primvars:displayColor`. Absent means "no authored appearance": the
+    /// studio then draws the obstacle as a neutral collision proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
     /// Present while the obstacle is attached to (grasped by) a robot link.
     #[serde(default)]
     pub attached_to: Option<AttachmentMsg>,
@@ -1414,6 +1419,7 @@ pub fn obstacles_message(
                 geometry: geometry_msg(&o.geometry, &mut mesh_url),
                 pose: PoseMsg::from(&o.pose),
                 enabled: o.enabled,
+                color: o.color,
                 attached_to: scene.attachment(&o.name).map(|a| attachment_msg(scene, a)),
             })
             .collect(),

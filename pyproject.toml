@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "botrail"
-version = "0.1.0"
-description = "ROS-free robot motion authoring library with a web-based 3D studio"
+version = "0.1.1"
+description = "Build robot cells as code, verify them deterministically, ship them as USD — ROS-free, with a web-based 3D studio"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT OR Apache-2.0" }
+license = { text = "MIT" }
 authors = [{ name = "neka-nat", email = "nekanat.stock@gmail.com" }]
 keywords = ["robotics", "motion-planning", "urdf", "xacro", "kinematics"]
 classifiers = [

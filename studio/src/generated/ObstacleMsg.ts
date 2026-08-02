@@ -13,6 +13,12 @@ pose: PoseMsg,
  */
 enabled: boolean, 
 /**
+ * Display colour, linear RGB, from the scene file's
+ * `primvars:displayColor`. Absent means "no authored appearance": the
+ * studio then draws the obstacle as a neutral collision proxy.
+ */
+color?: [number, number, number] | null, 
+/**
  * Present while the obstacle is attached to (grasped by) a robot link.
  */
 attached_to: AttachmentMsg | null, };

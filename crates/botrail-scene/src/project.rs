@@ -24,7 +24,7 @@ use crate::wire::{
     ConditionMsg, ConstraintMsg, DeviceMsg, FrameMsg, GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg,
     SegmentKindMsg, SensorMsg, SequenceMsg, SignalDefMsg,
 };
-use crate::Scene;
+use crate::{ObstacleSpec, Scene};
 
 pub const PROJECT_VERSION: u32 = 2;
 
@@ -212,6 +212,7 @@ impl Scene {
                     geometry: geometry_msg(&o.geometry, &mut mesh_url),
                     pose: PoseMsg::from(&o.pose),
                     enabled: o.enabled,
+                    color: o.color,
                     attached_to: self
                         .attachment(&o.name)
                         .map(|a| crate::wire::attachment_msg(self, a)),
@@ -304,17 +305,27 @@ impl Scene {
         let mut obstacles = Vec::with_capacity(project.obstacles.len());
         for o in &project.obstacles {
             let geometry = geometry_from_project(&o.geometry).map_err(ProjectError::Scene)?;
-            obstacles.push((o.name.clone(), geometry, (&o.pose).into(), o.enabled));
+            obstacles.push((
+                ObstacleSpec {
+                    name: o.name.clone(),
+                    geometry,
+                    pose: (&o.pose).into(),
+                    color: o.color,
+                },
+                o.enabled,
+            ));
         }
 
         while let Some(existing) = self.obstacles().first().map(|o| o.name.clone()) {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (name, geometry, pose, enabled) in obstacles {
+        for (spec, enabled) in obstacles {
             let final_name = self
-                .add_obstacle(&name, geometry, pose)
+                .add_obstacle(&spec.name, spec.geometry, spec.pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
+            self.set_obstacle_color(&final_name, spec.color)
+                .expect("obstacle was just added");
             if !enabled {
                 self.set_obstacle_enabled(&final_name, false)
                     .expect("obstacle was just added");
@@ -787,6 +798,9 @@ mod tests {
             )
             .unwrap();
         scene
+            .set_obstacle_color("wall", Some([0.2, 0.4, 0.6]))
+            .unwrap();
+        scene
             .set_joint_positions(vec![0.1, 0.2, -0.3, 0.0, 0.4, 0.0])
             .unwrap();
         scene
@@ -829,6 +843,7 @@ mod tests {
         assert!((base.translation.vector - Vector3::new(0.5, -0.2, 0.8)).norm() < 1e-12);
         assert_eq!(reloaded.obstacles().len(), 1);
         assert_eq!(reloaded.obstacles()[0].name, "wall");
+        assert_eq!(reloaded.obstacles()[0].color, Some([0.2, 0.4, 0.6]));
         assert_eq!(reloaded.motions().len(), 1);
         let motion = &reloaded.motions()[0];
         assert_eq!(motion.name, "main");

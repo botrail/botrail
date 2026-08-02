@@ -34,7 +34,9 @@ use botrail_mesh::MeshData;
 use botrail_model::Geometry;
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion, Vector3};
 use openusd::ar::{Asset, DefaultResolver, ResolvedPath, Resolver};
-use openusd::schemas::geom::{self, Imageable, PointBased, Purpose, Visibility, Xformable};
+use openusd::schemas::geom::{
+    self, Boundable, Gprim, Imageable, PointBased, Purpose, Visibility, Xformable,
+};
 use openusd::usd::{Prim, SchemaBase, SchemaKind, Stage, TimeCode};
 use openusd::{gf, sdf};
 use thiserror::Error;
@@ -77,6 +79,9 @@ pub struct ImportedNode {
     pub geometry: Geometry,
     /// World pose, meters / Z-up.
     pub pose: Isometry3<f64>,
+    /// Authored `primvars:displayColor`, linear RGB. `None` when the prim
+    /// leaves it to the renderer.
+    pub color: Option<[f32; 3]>,
     /// Present when [`ImportOptions::meshes_in_memory`] is set: the baked
     /// (normalized) triangle mesh, for direct collider construction.
     pub mesh_data: Option<MeshData>,
@@ -130,6 +135,10 @@ impl SchemaBase for AnyPrim {
 }
 impl Imageable for AnyPrim {}
 impl Xformable for AnyPrim {}
+// Gprim only adds attribute accessors, so an untyped view can read the
+// display primvars off any prim without knowing its concrete schema.
+impl Boundable for AnyPrim {}
+impl Gprim for AnyPrim {}
 
 pub fn import_usd(path: &Path, options: &ImportOptions) -> Result<ImportedScene, UsdImportError> {
     let mut search_paths = options.search_paths.clone();
@@ -182,7 +191,7 @@ fn import_stage(stage: &Stage, options: &ImportOptions) -> Result<ImportedScene,
 
     let root = stage.prim(sdf::Path::abs_root());
     importer
-        .walk(root, gf::Matrix4d::default())
+        .walk(root, gf::Matrix4d::default(), None)
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
     Ok(importer.out)
 }
@@ -235,6 +244,22 @@ pub(crate) fn y_up_to_z_up() -> UnitQuaternion<f64> {
     UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::FRAC_PI_2)
 }
 
+/// The prim's own `primvars:displayColor`, if it is a single constant value.
+///
+/// botrail shades a whole obstacle uniformly, so only the constant case
+/// carries meaning — and only the constant case is the one USD inherits down
+/// the namespace. A longer array is per-vertex/per-face data belonging to
+/// that one gprim; taking its first element would invent a flat colour the
+/// author never asked for and then leak it onto the children, so it is left
+/// to the renderer instead.
+fn display_color(view: &AnyPrim) -> Option<[f32; 3]> {
+    let values: Vec<gf::Vec3f> = view.display_color_attr().get().ok().flatten()?;
+    match values.as_slice() {
+        [c] => Some([c.x, c.y, c.z]),
+        _ => None,
+    }
+}
+
 struct Importer<'a> {
     stage: &'a Stage,
     meters_per_unit: f64,
@@ -267,7 +292,12 @@ impl Importer<'_> {
         }
     }
 
-    fn walk(&mut self, prim: Prim, parent_world: gf::Matrix4d) -> anyhow::Result<()> {
+    fn walk(
+        &mut self,
+        prim: Prim,
+        parent_world: gf::Matrix4d,
+        parent_color: Option<[f32; 3]>,
+    ) -> anyhow::Result<()> {
         let view = AnyPrim(prim);
         // USD row-vector convention: localToWorld = local * parentLocalToWorld.
         let world = match view.local_to_parent_transform(TimeCode::EARLIEST) {
@@ -277,6 +307,10 @@ impl Importer<'_> {
                 parent_world
             }
         };
+        // A constant `displayColor` is inherited down the namespace, so a
+        // group Xform can paint its whole subtree and a child can override.
+        let authored = display_color(&view);
+        let color = authored.or(parent_color);
 
         let prim = view.prim();
         let path = prim.path().to_string();
@@ -298,7 +332,7 @@ impl Importer<'_> {
         let children = view.prim().children()?;
 
         if visible && renderable {
-            if let Err(e) = self.import_geometry(view.prim(), &path, &type_name, &world) {
+            if let Err(e) = self.import_geometry(view.prim(), &path, &type_name, &world, color) {
                 self.warn(view.prim().path(), e.to_string());
             }
         }
@@ -311,7 +345,7 @@ impl Importer<'_> {
         }
 
         for child in children {
-            self.walk(child, world)?;
+            self.walk(child, world, color)?;
         }
         Ok(())
     }
@@ -322,12 +356,14 @@ impl Importer<'_> {
         path: &str,
         type_name: &str,
         world: &gf::Matrix4d,
+        color: Option<[f32; 3]>,
     ) -> anyhow::Result<()> {
         let (pose, residual) = self.normalized_pose(world);
         let node = |geometry, pose| ImportedNode {
             name: path.to_string(),
             geometry,
             pose,
+            color,
             mesh_data: None,
         };
         // Per-local-axis scale for primitive dimensions.
@@ -369,6 +405,7 @@ impl Importer<'_> {
                             scale: Vector3::new(1.0, 1.0, 1.0),
                         },
                         pose,
+                        color,
                         mesh_data: Some(baked),
                     });
                 } else {
@@ -957,6 +994,58 @@ def Xform "W" {
         let c = node(&scene, "/W/C");
         assert!((c.pose.translation.vector - Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-9);
         assert!(matches!(c.geometry, Geometry::Box { size } if (size.z - 0.5).abs() < 1e-12));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_color_is_read_and_inherited() {
+        let dir = std::env::temp_dir().join(format!("botrail-usd-color-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "W"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "W" {
+    def Xform "Painted" {
+        color3f[] primvars:displayColor = [(0.25, 0.5, 0.75)]
+
+        def Cube "Inherits" { double size = 0.1 }
+
+        def Cube "Overrides" {
+            double size = 0.1
+            color3f[] primvars:displayColor = [(1, 0, 0)]
+        }
+
+        def Cube "PerVertex" {
+            double size = 0.1
+            color3f[] primvars:displayColor = [(1, 0, 0), (0, 1, 0)]
+        }
+    }
+
+    def Cube "Bare" { double size = 0.1 }
+}
+"#;
+        let path = dir.join("color.usda");
+        std::fs::write(&path, usda).unwrap();
+        let scene = import_usd(&path, &ImportOptions::default()).unwrap();
+
+        assert_eq!(
+            node(&scene, "/W/Painted/Inherits").color,
+            Some([0.25, 0.5, 0.75])
+        );
+        assert_eq!(
+            node(&scene, "/W/Painted/Overrides").color,
+            Some([1.0, 0.0, 0.0])
+        );
+        // A multi-element array is per-vertex data, not a flat colour for the
+        // whole prim — it falls back to what the group painted.
+        assert_eq!(
+            node(&scene, "/W/Painted/PerVertex").color,
+            Some([0.25, 0.5, 0.75])
+        );
+        assert_eq!(node(&scene, "/W/Bare").color, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
