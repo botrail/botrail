@@ -2194,11 +2194,7 @@ impl Clearance {
         self.inner.distance
     }
 
-    fn __richcmp__(
-        &self,
-        other: &Bound<'_, PyAny>,
-        op: pyo3::basic::CompareOp,
-    ) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: pyo3::basic::CompareOp) -> PyResult<bool> {
         let value = if let Ok(c) = other.downcast::<Clearance>() {
             c.get().inner.distance
         } else {
@@ -2214,10 +2210,7 @@ impl Clearance {
 
     fn __repr__(&self) -> String {
         match &self.inner.pair {
-            Some((a, b)) => format!(
-                "Clearance(contact at t={:.3}s: {a} <-> {b})",
-                self.inner.t
-            ),
+            Some((a, b)) => format!("Clearance(contact at t={:.3}s: {a} <-> {b})", self.inner.t),
             None if self.inner.distance <= 0.0 => {
                 format!("Clearance(contact at t={:.3}s)", self.inner.t)
             }

@@ -262,7 +262,11 @@ mod tests {
     fn carried_object_clearance_is_measured_against_the_wall() {
         let mut scene = sample_scene();
         scene
-            .add_obstacle("held", Geometry::Sphere { radius: 0.005 }, iso(0.1, 0.0, 0.5))
+            .add_obstacle(
+                "held",
+                Geometry::Sphere { radius: 0.005 },
+                iso(0.1, 0.0, 0.5),
+            )
             .unwrap();
         scene
             .add_obstacle(
@@ -296,7 +300,9 @@ mod tests {
                 ),
                 step(
                     "move",
-                    vec![Action::StartMotion { motion: "go".into() }],
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
                     Condition::Done,
                 ),
             ],
