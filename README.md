@@ -1,6 +1,6 @@
 ![botrail-logo](assets/botrail-logo.svg)
 
-**Build robot cells as code, verify them deterministically, ship them as USD.**
+**Beyond motion planning. Build robot cells as code.**
 
 Live Demo: https://botrail.github.io/botrail/
 
