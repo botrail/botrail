@@ -29,6 +29,8 @@ export interface PlaybackSample {
   joints: Record<string, number[]> | null;
   /** Obstacle name -> world pose (attached objects riding along). */
   objects: Record<string, PoseMsg> | null;
+  /** Objects stowed at this instant; not drawn. */
+  stowed: Set<string>;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -82,7 +84,12 @@ export function samplePlayback(
       (joints ??= {})[name] = sampleJoints(trajectory, t);
     }
   }
-  return { poses, joints, objects: sampleObjectPoses(tracks.objects, t) };
+  return {
+    poses,
+    joints,
+    objects: sampleObjectPoses(tracks.objects, t),
+    stowed: sampleStowedObjects(tracks.objects, t),
+  };
 }
 
 function lerp(a: number, b: number, u: number): number {
@@ -153,6 +160,26 @@ export function sampleObjectPoses(
     out[track.name] = lerpPose(track.poses[lo], track.poses[hi], u);
   }
   return out;
+}
+
+/**
+ * Objects that are stowed at time `t` — waiting in a magazine or taken off
+ * the line — and so should not be drawn. A track with no `visible` flags is
+ * on the line throughout, which is every track a cell without magazines
+ * produces.
+ */
+export function sampleStowedObjects(
+  objects: PlaybackTracks["objects"],
+  t: number,
+): Set<string> {
+  const stowed = new Set<string>();
+  if (!objects || objects.times.length === 0) return stowed;
+  const [lo, , ] = bracket(objects.times, t);
+  for (const track of objects.tracks) {
+    const flags = track.visible ?? [];
+    if (flags.length > 0 && !flags[lo]) stowed.add(track.name);
+  }
+  return stowed;
 }
 
 /** Joint positions at time `t`, linearly interpolated. */

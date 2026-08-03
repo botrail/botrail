@@ -85,6 +85,42 @@ pub enum DeviceKind {
         position: f64,
         range: (f64, f64),
     },
+    /// Feeds parked objects onto the line, one every `interval` seconds
+    /// while running. Its running state is recorded as an output-signal
+    /// lane, like a conveyor's.
+    ///
+    /// The pool is finite on purpose. A baked timeline is a *fixed set of
+    /// named object tracks* — nothing can be born mid-run and still have a
+    /// track or a USD prim — so an endless line is a magazine of carriers
+    /// plus a [`DeviceKind::Sink`] that returns them. Member `i` waits at
+    /// `park ∘ translate(pitch * i)`, which spreads the magazine out
+    /// instead of stacking it at one point.
+    ///
+    /// A member that does not start on its parking slot starts out on the
+    /// line: that is how a belt is authored already-loaded.
+    Source {
+        pool: Vec<String>,
+        park: Isometry3<f64>,
+        pitch: Vector3<f64>,
+        /// Where a released member enters the line.
+        pose: Isometry3<f64>,
+        /// Seconds between releases. `0` makes it an *indexing* feeder:
+        /// one carrier per [`DeviceCommand::Start`], nothing on its own.
+        /// A sequence that names the carrier each step takes needs that —
+        /// on a timer, a carrier released while the cell is busy goes past
+        /// unclaimed and every later step is off by one.
+        interval: f64,
+        running: bool,
+    },
+    /// Returns any unattached object that reaches its zone to the named
+    /// source's magazine, freeing it to be fed again. The end of a line,
+    /// or the return run of a belt.
+    Sink {
+        zone_pose: Isometry3<f64>,
+        zone_size: Vector3<f64>,
+        /// Source device the object goes back to.
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -662,6 +698,22 @@ impl Scene {
                     }
                     (DeviceKind::Conveyor { .. }, DeviceCommand::MoveTo(_)) => Err(format!(
                         "conveyor `{device}` has no position; use start/stop"
+                    )),
+                    (DeviceKind::Source { .. }, DeviceCommand::Start | DeviceCommand::Stop) => {
+                        Ok(())
+                    }
+                    (DeviceKind::Source { .. }, DeviceCommand::SetSpeed(v)) => {
+                        if v.is_finite() && *v >= 0.0 {
+                            Ok(())
+                        } else {
+                            Err(format!("set_speed({v}) is not a feed period"))
+                        }
+                    }
+                    (DeviceKind::Source { .. }, DeviceCommand::MoveTo(_)) => {
+                        Err(format!("source `{device}` has no position; use start/stop"))
+                    }
+                    (DeviceKind::Sink { .. }, _) => Err(format!(
+                        "sink `{device}` is always collecting and takes no command"
                     )),
                     (DeviceKind::LinearAxis { range, .. }, DeviceCommand::MoveTo(p)) => {
                         if !p.is_finite() || *p < range.0 - 1e-9 || *p > range.1 + 1e-9 {

@@ -91,6 +91,11 @@ pub struct ObjectSpec {
     /// `primvars:displayColor` to author, linear RGB. `None` falls back to
     /// the neutral environment grey.
     pub color: Option<[f32; 3]>,
+    /// One flag per animation frame: false hides the prim that frame.
+    /// Empty means always visible. USD carries this natively as animated
+    /// `visibility`, so a magazine full of stock stays out of the picture
+    /// in usdview exactly as it does in the studio.
+    pub visible: Vec<bool>,
 }
 
 /// One robot's animation bundle: the instance names the prim under
@@ -1414,6 +1419,18 @@ fn author_objects(
             PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples.clone()),
         };
         author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
+        if !obj.visible.is_empty() {
+            let samples: sdf::TimeSampleMap = codes
+                .iter()
+                .enumerate()
+                .map(|(k, &code)| {
+                    let shown = obj.visible.get(k).copied().unwrap_or(true);
+                    let token = if shown { "inherited" } else { "invisible" };
+                    (code, Value::Token(tf::Token::from(token)))
+                })
+                .collect();
+            layer.attr(&prim, "visibility", "token", AttrValue::Samples(samples));
+        }
     }
     Ok(())
 }
@@ -1749,12 +1766,14 @@ mod tests {
                 },
                 track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.05)),
                 color: Some([0.8, 0.3, 0.1]),
+                visible: Vec::new(),
             },
             ObjectSpec {
                 name: "held".into(),
                 geometry: Geometry::Sphere { radius: 0.03 },
                 track: PoseTrack::Sampled(held_track.clone()),
                 color: None,
+                visible: Vec::new(),
             },
         ];
         let robots = [RobotAnimation {

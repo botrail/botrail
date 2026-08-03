@@ -844,6 +844,75 @@ impl Scene {
         Ok(())
     }
 
+    /// Adds a feeder: every `interval` seconds while running it puts the
+    /// next waiting member of `pool` at `position`.
+    ///
+    /// The pool is finite because a baked timeline holds a fixed set of
+    /// named object tracks — an endless line is this plus an `add_sink`
+    /// that returns carriers to the magazine. Member `i` waits at
+    /// `park + pitch * i`, and a member that does not start on its slot
+    /// starts out on the line (an already-loaded belt).
+    #[pyo3(signature = (name, pool, park, position, pitch = None, interval = 0.0, running = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_source(
+        &self,
+        name: &str,
+        pool: Vec<String>,
+        park: [f64; 3],
+        position: [f64; 3],
+        pitch: Option<[f64; 3]>,
+        interval: f64,
+        running: bool,
+    ) -> PyResult<()> {
+        for object in &pool {
+            if self.hub.obstacle_pose(object).is_none() {
+                return Err(PyValueError::new_err(format!(
+                    "unknown obstacle `{object}`"
+                )));
+            }
+        }
+        let pitch = pitch.unwrap_or([0.0; 3]);
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::Source {
+                pool,
+                park: pose_from(park, None),
+                pitch: nalgebra::Vector3::new(pitch[0], pitch[1], pitch[2]),
+                pose: pose_from(position, None),
+                interval,
+                running,
+            },
+        });
+        Ok(())
+    }
+
+    /// Adds the far end of a line: any unattached carrier reaching the zone
+    /// goes back to `source`'s magazine, free to be fed again.
+    #[pyo3(signature = (name, zone_position, zone_size, source, zone_quaternion = None))]
+    fn add_sink(
+        &self,
+        name: &str,
+        zone_position: [f64; 3],
+        zone_size: [f64; 3],
+        source: &str,
+        zone_quaternion: Option<[f64; 4]>,
+    ) -> PyResult<()> {
+        if !self.hub.device_names().iter().any(|d| d == source) {
+            return Err(PyValueError::new_err(format!(
+                "unknown source device `{source}`"
+            )));
+        }
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::Sink {
+                zone_pose: pose_from(zone_position, zone_quaternion),
+                zone_size: nalgebra::Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                source: source.to_string(),
+            },
+        });
+        Ok(())
+    }
+
     /// Adds a linear axis (door / lifter / indexer) moving the listed
     /// obstacles along `axis` at `speed`, positioned within `range` by
     /// `bt.seq.move_to`; await it with `bt.seq.device_done`.
@@ -1891,6 +1960,22 @@ impl SequenceTimeline {
         ))
     }
 
+    /// Whether a tracked object should be drawn at `t`. False only while
+    /// it is stowed — waiting in a magazine, or taken off the line.
+    fn object_visible(&self, name: &str, t: f64) -> PyResult<bool> {
+        let track = self
+            .inner
+            .objects
+            .iter()
+            .find(|o| o.name == name)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("`{name}` is not tracked by this timeline"))
+            })?;
+        Ok(botrail_scene::rollout::SequenceTimeline::object_visible(
+            track, t,
+        ))
+    }
+
     /// A robot's cycle joint track as a [`Trajectory`] (CSV/JSON export,
     /// joint access). Step boundaries land in `segment_ends`.
     #[pyo3(signature = (robot = None))]
@@ -1972,7 +2057,26 @@ impl SequenceTimeline {
             .obstacles()
             .iter()
             .map(|o| {
-                let track = match self.inner.objects.iter().find(|t| t.name == o.name) {
+                let found = self.inner.objects.iter().find(|t| t.name == o.name);
+                // Stowed frames become animated `visibility` on the prim, so
+                // a magazine of stock stays out of the picture in usdview
+                // the same way it does in the studio.
+                let visible: Vec<bool> = found
+                    .map(|track| {
+                        times
+                            .iter()
+                            .map(|&t| {
+                                botrail_scene::rollout::SequenceTimeline::object_visible(track, t)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let visible = if visible.iter().all(|v| *v) {
+                    Vec::new()
+                } else {
+                    visible
+                };
+                let track = match found {
                     Some(track) => botrail_usd::export::PoseTrack::Sampled(
                         times
                             .iter()
@@ -1994,6 +2098,7 @@ impl SequenceTimeline {
                     geometry: o.geometry.clone(),
                     track,
                     color: o.color,
+                    visible,
                 }
             })
             .collect();

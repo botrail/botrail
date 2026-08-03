@@ -658,6 +658,7 @@ pub fn timeline_msg(
         .map(|track| wire::ObjectTrackMsg {
             name: track.name.clone(),
             poses: Vec::with_capacity(grid.len()),
+            visible: Vec::with_capacity(grid.len()),
         })
         .collect();
     if !object_tracks.is_empty() {
@@ -680,7 +681,17 @@ pub fn timeline_msg(
                     botrail_scene::rollout::SequenceTimeline::object_pose(track, &all_poses, t)
                         .unwrap_or_default();
                 msg.poses.push(PoseMsg::from(&pose));
+                msg.visible
+                    .push(botrail_scene::rollout::SequenceTimeline::object_visible(
+                        track, t,
+                    ));
             }
+        }
+    }
+
+    for msg in &mut object_tracks {
+        if msg.visible.iter().all(|v| *v) {
+            msg.visible.clear();
         }
     }
 
@@ -913,6 +924,9 @@ pub fn trajectory_msg(
             .map(|a| wire::ObjectTrackMsg {
                 name: a.object.clone(),
                 poses: Vec::with_capacity(joint_positions.len()),
+                // A grasped object rides the arm the whole way; nothing to
+                // hide.
+                visible: Vec::new(),
             })
             .collect::<Vec<_>>()
     });

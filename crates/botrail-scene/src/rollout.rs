@@ -134,6 +134,16 @@ pub enum TrackSpan {
         link: usize,
         offset: Isometry3<f64>,
     },
+    /// Held, and out of sight: waiting in a magazine, or consumed at the
+    /// end of a line. The pose is still defined (collision and queries see
+    /// it), but nothing should draw it — a carrier queueing off-line is
+    /// stock, not scenery, and watching it teleport onto the belt is the
+    /// one thing that gives a recirculating line away.
+    Stowed {
+        t0: f64,
+        t1: f64,
+        pose: Isometry3<f64>,
+    },
     /// Conveyed at constant velocity from `from` (rotation unchanged).
     Linear {
         t0: f64,
@@ -147,6 +157,7 @@ impl TrackSpan {
     fn end_mut(&mut self) -> &mut f64 {
         match self {
             TrackSpan::Hold { t1, .. }
+            | TrackSpan::Stowed { t1, .. }
             | TrackSpan::Follow { t1, .. }
             | TrackSpan::Linear { t1, .. } => t1,
         }
@@ -155,6 +166,7 @@ impl TrackSpan {
     pub fn range(&self) -> (f64, f64) {
         match self {
             TrackSpan::Hold { t0, t1, .. }
+            | TrackSpan::Stowed { t0, t1, .. }
             | TrackSpan::Follow { t0, t1, .. }
             | TrackSpan::Linear { t0, t1, .. } => (*t0, *t1),
         }
@@ -194,6 +206,20 @@ pub struct SequenceTimeline {
 }
 
 impl SequenceTimeline {
+    /// Whether a tracked object should be drawn at `t`. False only while it
+    /// is stowed — waiting in a magazine or taken off the line.
+    pub fn object_visible(track: &ObjectTrack, t: f64) -> bool {
+        let span = track
+            .spans
+            .iter()
+            .find(|s| {
+                let (t0, t1) = s.range();
+                t >= t0 - 1e-9 && t <= t1 + 1e-9
+            })
+            .or(track.spans.last());
+        !matches!(span, Some(TrackSpan::Stowed { .. }))
+    }
+
     /// World pose of a tracked object at `t`; `link_poses[robot]` must be
     /// the FK world poses of that robot at the same instant.
     pub fn object_pose(
@@ -210,7 +236,7 @@ impl SequenceTimeline {
             })
             .or(track.spans.last())?;
         Some(match span {
-            TrackSpan::Hold { pose, .. } => *pose,
+            TrackSpan::Hold { pose, .. } | TrackSpan::Stowed { pose, .. } => *pose,
             TrackSpan::Follow {
                 robot,
                 link,
@@ -407,6 +433,29 @@ enum DeviceRuntime {
         target: f64,
         lane: usize,
     },
+    Source {
+        name: String,
+        pool: Vec<String>,
+        park: Isometry3<f64>,
+        pitch: Vector3<f64>,
+        pose: Isometry3<f64>,
+        interval: f64,
+        running: bool,
+        /// Seconds until the next release is due.
+        due: f64,
+        /// Per pool member: waiting in the magazine rather than out on the
+        /// line. Seeded from where the scene put it, so a belt authored
+        /// already-loaded stays loaded.
+        parked: Vec<bool>,
+        lane: usize,
+    },
+    Sink {
+        name: String,
+        zone_pose: Isometry3<f64>,
+        zone_half: Vector3<f64>,
+        /// Index into `devices` of the source this returns members to.
+        source: usize,
+    },
 }
 
 impl Rollout {
@@ -493,9 +542,106 @@ impl Rollout {
                             lane,
                         }
                     }
+                    DeviceKind::Source {
+                        pool,
+                        park,
+                        pitch,
+                        pose,
+                        interval,
+                        running,
+                    } => {
+                        signals.push(BoolTrack {
+                            name: device.name.clone(),
+                            edges: vec![(0.0, *running)],
+                        });
+                        // Seeded from the world: a member sitting on its
+                        // parking slot is waiting, anything else is already
+                        // out on the line.
+                        let parked = pool
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| {
+                                world
+                                    .obstacles()
+                                    .iter()
+                                    .find(|o| &o.name == name)
+                                    .is_some_and(|o| {
+                                        let slot = park.translation.vector + pitch * i as f64;
+                                        (o.pose.translation.vector - slot).norm() < 1e-6
+                                    })
+                            })
+                            .collect();
+                        DeviceRuntime::Source {
+                            name: device.name.clone(),
+                            pool: pool.clone(),
+                            park: *park,
+                            pitch: *pitch,
+                            pose: *pose,
+                            interval: *interval,
+                            running: *running,
+                            due: 0.0,
+                            parked,
+                            lane,
+                        }
+                    }
+                    DeviceKind::Sink {
+                        zone_pose,
+                        zone_size,
+                        source,
+                    } => {
+                        signals.push(BoolTrack {
+                            name: device.name.clone(),
+                            edges: vec![(0.0, false)],
+                        });
+                        DeviceRuntime::Sink {
+                            name: device.name.clone(),
+                            zone_pose: *zone_pose,
+                            zone_half: zone_size / 2.0,
+                            // Resolved after the pass: sources may come later
+                            // in the list.
+                            source: world
+                                .devices()
+                                .iter()
+                                .position(|d| &d.name == source)
+                                .unwrap_or(usize::MAX),
+                        }
+                    }
                 }
             })
             .collect();
+        // Carriers waiting in a magazine at t = 0 are stock: stowed from
+        // the start, so a run never opens on a pile of parts that then
+        // teleport onto the line.
+        let mut stowed: Vec<ObjectTrack> = Vec::new();
+        for device in &devices {
+            if let DeviceRuntime::Source {
+                pool,
+                parked,
+                park,
+                pitch,
+                ..
+            } = device
+            {
+                for (i, name) in pool.iter().enumerate() {
+                    if !parked[i] {
+                        continue;
+                    }
+                    let slot = Isometry3::from_parts(
+                        nalgebra::Translation3::from(park.translation.vector + pitch * i as f64),
+                        park.rotation,
+                    );
+                    stowed.push(ObjectTrack {
+                        name: name.clone(),
+                        spans: vec![TrackSpan::Stowed {
+                            t0: 0.0,
+                            t1: 0.0,
+                            pose: slot,
+                        }],
+                    });
+                }
+            }
+        }
+
         // Objects grasped before the sequence starts follow from t = 0.
         let objects = world
             .attachments()
@@ -510,6 +656,7 @@ impl Rollout {
                     offset: a.grasp,
                 }],
             })
+            .chain(stowed)
             .collect();
         let robots = world
             .robots()
@@ -612,6 +759,8 @@ impl Rollout {
             .map(|a| a.object.clone())
             .collect();
         let mut moved: Vec<(String, Isometry3<f64>, Vector3<f64>)> = Vec::new();
+        // (source device index, object) pairs a sink caught this tick.
+        let mut returned: Vec<(usize, String)> = Vec::new();
         let mut lane_updates: Vec<(usize, bool)> = Vec::new();
         for device in &mut self.devices {
             match device {
@@ -681,6 +830,31 @@ impl Rollout {
                         ));
                     }
                 }
+                DeviceRuntime::Sink {
+                    zone_pose,
+                    zone_half,
+                    source,
+                    ..
+                } => {
+                    for obstacle in self.world.obstacles() {
+                        if attached.iter().any(|a| a == &obstacle.name) {
+                            continue;
+                        }
+                        let local = zone_pose.inverse().transform_point(&nalgebra::Point3::from(
+                            obstacle.pose.translation.vector,
+                        ));
+                        if local.x.abs() <= zone_half.x
+                            && local.y.abs() <= zone_half.y
+                            && local.z.abs() <= zone_half.z
+                        {
+                            returned.push((*source, obstacle.name.clone()));
+                        }
+                    }
+                }
+                // Releases are a second pass: a member returned this tick
+                // should be feedable this tick, which needs the returns in
+                // before any source looks at its magazine.
+                DeviceRuntime::Source { .. } => {}
             }
         }
         for (lane, value) in lane_updates {
@@ -735,9 +909,133 @@ impl Rollout {
                 pose,
             });
         }
+        self.return_to_magazines(returned);
+        self.feed_from_sources(dt);
         self.follow_tracked_parts()?;
         self.check_robot_collisions()?;
         Ok(())
+    }
+
+    /// Sinks: put what reached them back in the magazine it came from.
+    fn return_to_magazines(&mut self, returned: Vec<(usize, String)>) {
+        for (source, object) in returned {
+            let Some(DeviceRuntime::Source {
+                pool,
+                park,
+                pitch,
+                parked,
+                ..
+            }) = self.devices.get_mut(source)
+            else {
+                continue;
+            };
+            let Some(i) = pool.iter().position(|n| *n == object) else {
+                // Something else drifted through the sink; a sink only owns
+                // its source's carriers.
+                continue;
+            };
+            if parked[i] {
+                continue;
+            }
+            parked[i] = true;
+            let slot = Isometry3::from_parts(
+                nalgebra::Translation3::from(park.translation.vector + *pitch * i as f64),
+                park.rotation,
+            );
+            self.teleport_object(&object, slot, true);
+        }
+    }
+
+    /// Sources: release the next waiting carrier when one is due.
+    fn feed_from_sources(&mut self, dt: f64) {
+        for i in 0..self.devices.len() {
+            let (object, pose, lane_off) = {
+                let DeviceRuntime::Source {
+                    pool,
+                    pose,
+                    interval,
+                    running,
+                    due,
+                    parked,
+                    lane,
+                    ..
+                } = &mut self.devices[i]
+                else {
+                    continue;
+                };
+                if !*running {
+                    continue;
+                }
+                *due -= dt;
+                if *due > 1e-12 {
+                    continue;
+                }
+                let Some(next) = parked.iter().position(|p| *p) else {
+                    // Magazine empty: stay due, so the next return feeds
+                    // immediately rather than waiting out another interval.
+                    *due = 0.0;
+                    continue;
+                };
+                parked[next] = false;
+                let lane = *lane;
+                let one_shot = *interval <= 0.0;
+                if one_shot {
+                    // An indexing feeder: one carrier per Start. Sequences
+                    // that name the carrier each step takes need supply to
+                    // be demand-driven — on a timer, a carrier released
+                    // while the cell is busy elsewhere goes past unclaimed
+                    // and every later step is off by one.
+                    *running = false;
+                } else {
+                    *due = *interval;
+                }
+                (pool[next].clone(), *pose, one_shot.then_some(lane))
+            };
+            self.teleport_object(&object, pose, false);
+            if let Some(lane) = lane_off {
+                let t = self.t;
+                self.set_lane(lane, t, false);
+            }
+        }
+    }
+
+    /// Records an instantaneous jump: whatever span was open closes here and
+    /// a hold at the new pose begins. Teleports are how a magazine takes a
+    /// carrier back and how a source puts one on the line — the alternative,
+    /// creating and destroying objects, has no place in a timeline whose
+    /// object tracks are a fixed named set.
+    fn teleport_object(&mut self, name: &str, to: Isometry3<f64>, stowed: bool) {
+        let t = self.t;
+        let from = self
+            .world
+            .obstacles()
+            .iter()
+            .find(|o| o.name == name)
+            .map(|o| o.pose);
+        let Some(from) = from else { return };
+        self.world
+            .set_obstacle_pose(name, to)
+            .expect("teleported obstacle exists");
+        let track = self.object_track_at(name, from, t);
+        if let Some(open) = track.spans.last_mut() {
+            let end = open.end_mut();
+            if *end < t {
+                *end = t;
+            }
+        }
+        track.spans.push(if stowed {
+            TrackSpan::Stowed {
+                t0: t,
+                t1: t,
+                pose: to,
+            }
+        } else {
+            TrackSpan::Hold {
+                t0: t,
+                t1: t,
+                pose: to,
+            }
+        });
     }
 
     /// Conveyor tracking: re-solve each latched arm so this tick's
@@ -1091,7 +1389,10 @@ impl Rollout {
                     target,
                     ..
                 } => name == device && (target - position).abs() < 1e-9,
-                DeviceRuntime::Conveyor { .. } => false,
+                // Nothing to be "done" with: these run continuously.
+                DeviceRuntime::Conveyor { .. }
+                | DeviceRuntime::Source { .. }
+                | DeviceRuntime::Sink { .. } => false,
             }),
             Condition::All(cs) => cs.iter().all(|c| self.condition_holds(c)),
             Condition::Any(cs) => cs.iter().any(|c| self.condition_holds(c)),
@@ -1343,9 +1644,10 @@ impl Rollout {
                 let t = self.t;
                 let mut lane_update = None;
                 let found = self.devices.iter_mut().find(|d| match d {
-                    DeviceRuntime::Conveyor { name, .. } | DeviceRuntime::Axis { name, .. } => {
-                        name == device
-                    }
+                    DeviceRuntime::Conveyor { name, .. }
+                    | DeviceRuntime::Axis { name, .. }
+                    | DeviceRuntime::Source { name, .. }
+                    | DeviceRuntime::Sink { name, .. } => name == device,
                 });
                 let Some(found) = found else {
                     return Err(err(format!("unknown device `{device}`")));
@@ -1358,6 +1660,27 @@ impl Rollout {
                     (DeviceRuntime::Conveyor { running, lane, .. }, DeviceCommand::Stop) => {
                         *running = false;
                         lane_update = Some((*lane, false));
+                    }
+                    (
+                        DeviceRuntime::Source {
+                            running, due, lane, ..
+                        },
+                        DeviceCommand::Start,
+                    ) => {
+                        *running = true;
+                        // Re-starting re-triggers: the feed is due now, so a
+                        // Start always yields a carrier rather than landing
+                        // mid-interval.
+                        *due = 0.0;
+                        lane_update = Some((*lane, true));
+                    }
+                    (DeviceRuntime::Source { running, lane, .. }, DeviceCommand::Stop) => {
+                        *running = false;
+                        lane_update = Some((*lane, false));
+                    }
+                    (DeviceRuntime::Source { interval, .. }, DeviceCommand::SetSpeed(seconds)) => {
+                        // A source's "speed" is its feed period.
+                        *interval = *seconds;
                     }
                     (DeviceRuntime::Conveyor { velocity, .. }, DeviceCommand::SetSpeed(speed)) => {
                         let norm = velocity.norm();
@@ -1967,6 +2290,158 @@ mod device_tests {
 
     /// Conveyor feed with a photoelectric beam: the box trips the beam at
     /// the analytic time and the conveyor stops on the next scan.
+    /// A magazine + a belt + a sink is an endless line built out of a
+    /// finite pool: every carrier goes round more than once, and the object
+    /// tracks stay continuous across the jumps.
+    #[test]
+    fn a_source_and_sink_recirculate_a_finite_pool() {
+        let mut scene = sample_scene();
+        let pool: Vec<String> = (0..3).map(|i| format!("c{i}")).collect();
+        for (i, name) in pool.iter().enumerate() {
+            scene
+                .add_obstacle(
+                    name,
+                    Geometry::Box {
+                        size: Vector3::new(0.04, 0.04, 0.04),
+                    },
+                    iso(-1.5, 0.5 - 0.1 * i as f64, 0.5),
+                )
+                .unwrap();
+        }
+        scene.upsert_device(Device {
+            name: "feed".into(),
+            kind: DeviceKind::Source {
+                pool: pool.clone(),
+                park: iso(-1.5, 0.5, 0.5),
+                pitch: Vector3::new(0.0, -0.1, 0.0),
+                pose: iso(-0.8, 0.5, 0.5),
+                interval: 1.0,
+                running: true,
+            },
+        });
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(0.0, 0.5, 0.5),
+                zone_size: Vector3::new(2.0, 0.3, 0.3),
+                velocity: Vector3::new(0.4, 0.0, 0.0),
+                running: true,
+            },
+        });
+        scene.upsert_device(Device {
+            name: "out".into(),
+            kind: DeviceKind::Sink {
+                zone_pose: iso(0.9, 0.5, 0.5),
+                zone_size: Vector3::new(0.2, 0.3, 0.3),
+                source: "feed".into(),
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "run".into(),
+            steps: vec![Step {
+                name: "run".into(),
+                actions: vec![],
+                transition: Condition::Elapsed { seconds: 12.0 },
+            }],
+        });
+
+        let tl = scene
+            .simulate_sequence("run", &RolloutOptions::default())
+            .unwrap();
+        let track = |name: &str| {
+            tl.objects
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("no track for {name}"))
+        };
+
+        for name in &pool {
+            let t = track(name);
+            // Spans tile the whole run with no gap — a teleport must close
+            // the span it interrupts, not leave a hole in the timeline.
+            let mut cursor = 0.0;
+            for span in &t.spans {
+                let (t0, t1) = span.range();
+                assert!(
+                    (t0 - cursor).abs() < 1e-9,
+                    "{name}: gap before {t0} (cursor {cursor})"
+                );
+                cursor = t1;
+            }
+            assert!(cursor >= 12.0 - 1e-6, "{name}: track ends at {cursor}");
+
+            // Went round more than once: each lap is one jump upstream.
+            let laps = (0..1200)
+                .map(|i| {
+                    SequenceTimeline::object_pose(t, &[], i as f64 * 0.01)
+                        .unwrap()
+                        .translation
+                        .x
+                })
+                .collect::<Vec<_>>()
+                .windows(2)
+                .filter(|w| w[1] < w[0] - 0.5)
+                .count();
+            assert!(laps >= 2, "{name} only went round {laps} time(s)");
+        }
+    }
+
+    /// A carrier the robot is holding must not be swept up by the sink it
+    /// happens to be carried over.
+    #[test]
+    fn a_sink_leaves_grasped_carriers_alone() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "c0",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.9, 0.5, 0.5),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "feed".into(),
+            kind: DeviceKind::Source {
+                pool: vec!["c0".into()],
+                park: iso(-1.5, 0.5, 0.5),
+                pitch: Vector3::zeros(),
+                pose: iso(-0.8, 0.5, 0.5),
+                interval: 1.0,
+                running: false,
+            },
+        });
+        scene.upsert_device(Device {
+            name: "out".into(),
+            kind: DeviceKind::Sink {
+                zone_pose: iso(0.9, 0.5, 0.5),
+                zone_size: Vector3::new(0.4, 0.4, 0.4),
+                source: "feed".into(),
+            },
+        });
+        scene.attach_obstacle("c0", None, None).unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "hold".into(),
+            steps: vec![Step {
+                name: "hold".into(),
+                actions: vec![],
+                transition: Condition::Elapsed { seconds: 1.0 },
+            }],
+        });
+        let tl = scene
+            .simulate_sequence("hold", &RolloutOptions::default())
+            .unwrap();
+        let track = tl.objects.iter().find(|o| o.name == "c0").unwrap();
+        assert!(
+            track
+                .spans
+                .iter()
+                .all(|s| matches!(s, TrackSpan::Follow { .. })),
+            "the sink took a carrier out of the gripper: {:?}",
+            track.spans
+        );
+    }
+
     #[test]
     fn conveyor_feed_trips_the_beam_on_time() {
         let mut scene = sample_scene();

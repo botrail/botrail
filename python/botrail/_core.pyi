@@ -245,6 +245,24 @@ class Scene:
         zone_quaternion: Optional[tuple[float, float, float, float]] = None,
         running: bool = True,
     ) -> None: ...
+    def add_source(
+        self,
+        name: str,
+        pool: list[str],
+        park: tuple[float, float, float],
+        position: tuple[float, float, float],
+        pitch: Optional[tuple[float, float, float]] = None,
+        interval: float = 0.0,
+        running: bool = False,
+    ) -> None: ...
+    def add_sink(
+        self,
+        name: str,
+        zone_position: tuple[float, float, float],
+        zone_size: tuple[float, float, float],
+        source: str,
+        zone_quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> None: ...
     def add_linear_axis(
         self,
         name: str,
@@ -364,6 +382,7 @@ class SequenceTimeline:
     def object_pose(
         self, name: str, t: float
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...
+    def object_visible(self, name: str, t: float) -> bool: ...
     def robot_trajectory(self, robot: Optional[str] = None) -> Trajectory: ...
     @property
     def trajectory(self) -> Trajectory: ...

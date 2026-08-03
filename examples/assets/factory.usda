@@ -191,24 +191,24 @@ def Xform "World"
         {
             double size = 1
             color3f[] primvars:displayColor = [(0.024, 0.027, 0.033)]
-            double3 xformOp:translate = (0, 0, 0.51)
-            float3 xformOp:scale = (2.9, 0.44, 0.08)
+            double3 xformOp:translate = (-0.45, 0, 0.51)
+            float3 xformOp:scale = (3.8, 0.44, 0.08)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
         def Cube "SideFrameFront"
         {
             double size = 1
-            double3 xformOp:translate = (0, -0.245, 0.48)
-            float3 xformOp:scale = (2.94, 0.05, 0.16)
+            double3 xformOp:translate = (-0.45, -0.245, 0.48)
+            float3 xformOp:scale = (3.84, 0.05, 0.16)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
         def Cube "SideFrameBack"
         {
             double size = 1
-            double3 xformOp:translate = (0, 0.245, 0.48)
-            float3 xformOp:scale = (2.94, 0.05, 0.16)
+            double3 xformOp:translate = (-0.45, 0.245, 0.48)
+            float3 xformOp:scale = (3.84, 0.05, 0.16)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
@@ -219,8 +219,8 @@ def Xform "World"
         {
             double size = 1
             color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
-            double3 xformOp:translate = (0, -0.2325, 0.575)
-            float3 xformOp:scale = (2.94, 0.025, 0.05)
+            double3 xformOp:translate = (-0.45, -0.2325, 0.575)
+            float3 xformOp:scale = (3.84, 0.025, 0.05)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
@@ -228,8 +228,8 @@ def Xform "World"
         {
             double size = 1
             color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
-            double3 xformOp:translate = (0, 0.2325, 0.575)
-            float3 xformOp:scale = (2.94, 0.025, 0.05)
+            double3 xformOp:translate = (-0.45, 0.2325, 0.575)
+            float3 xformOp:scale = (3.84, 0.025, 0.05)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
@@ -249,7 +249,7 @@ def Xform "World"
             double height = 0.44
             uniform token axis = "Y"
             color3f[] primvars:displayColor = [(0.474, 0.503, 0.552)]
-            double3 xformOp:translate = (-1.43, 0, 0.505)
+            double3 xformOp:translate = (-2.33, 0, 0.505)
             uniform token[] xformOpOrder = ["xformOp:translate"]
         }
 
@@ -305,6 +305,37 @@ def Xform "World"
 
         # Leg stands. Every post tops out at 0.40, under the robot base, so
         # the middle stand can sit right at the pick station.
+        def Xform "StandInfeed"
+        {
+            color3f[] primvars:displayColor = [(0.144, 0.162, 0.195)]
+            double3 xformOp:translate = (-2.0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "PostFront"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, -0.2, 0.2)
+                float3 xformOp:scale = (0.06, 0.06, 0.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "PostBack"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, 0.2, 0.2)
+                float3 xformOp:scale = (0.06, 0.06, 0.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "Foot"
+            {
+                double size = 1
+                double3 xformOp:translate = (0, 0, 0.006)
+                float3 xformOp:scale = (0.14, 0.52, 0.012)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+        }
+
         def Xform "StandWest"
         {
             color3f[] primvars:displayColor = [(0.144, 0.162, 0.195)]
@@ -1394,11 +1425,30 @@ def Xform "World"
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             }
 
-            def Cube "PanelWest"
+            # The conveyor passes through the guard, so the west panel is
+            # in three pieces around the opening — which is how guarding is
+            # always done where a line crosses a cell boundary.
+            def Cube "PanelWestSouth"
             {
                 double size = 1
-                double3 xformOp:translate = (-2, 0, 0.6)
-                float3 xformOp:scale = (0.02, 4.0, 0.86)
+                double3 xformOp:translate = (-2, -0.85, 0.6)
+                float3 xformOp:scale = (0.02, 2.3, 0.86)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "PanelWestNorth"
+            {
+                double size = 1
+                double3 xformOp:translate = (-2, 1.475, 0.6)
+                float3 xformOp:scale = (0.02, 1.05, 0.86)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "PanelWestHeader"
+            {
+                double size = 1
+                double3 xformOp:translate = (-2, 0.62, 0.885)
+                float3 xformOp:scale = (0.02, 0.65, 0.29)
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             }
 

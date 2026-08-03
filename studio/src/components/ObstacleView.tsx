@@ -40,6 +40,8 @@ export function ObstacleView() {
   const collisions = useStudioStore((s) => s.collisions);
   const selection = useStudioStore((s) => s.selection);
   const hiddenObstacles = useStudioStore((s) => s.hiddenObstacles);
+  // Stowed during playback: waiting in a magazine, or taken off the line.
+  const stowed = useStudioStore((s) => s.stowedObstacles);
   const collidingObstacles = useMemo(
     () => collidingObstacleNames(collisions),
     [collisions],
@@ -48,7 +50,9 @@ export function ObstacleView() {
 
   return (
     <>
-      {obstacles.filter((o) => !hiddenObstacles.has(o.name)).map((o) => (
+      {obstacles
+        .filter((o) => !hiddenObstacles.has(o.name) && !stowed.has(o.name))
+        .map((o) => (
         <ObstacleNode
           key={o.name}
           obstacle={o}

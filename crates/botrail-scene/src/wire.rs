@@ -283,6 +283,11 @@ pub struct ObjectTrackMsg {
     pub name: String,
     /// One world pose per trajectory sample.
     pub poses: Vec<PoseMsg>,
+    /// One flag per sample: false while the object is stowed (waiting in a
+    /// magazine, or taken off the line) and should not be drawn. Empty
+    /// means "always visible" — what every track was before magazines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible: Vec<bool>,
 }
 
 /// A TCP path constraint (see `motion::Constraint`).
@@ -405,6 +410,21 @@ pub enum DeviceKindMsg {
         speed: f64,
         position: f64,
         range: [f64; 2],
+    },
+    /// Feeds parked carriers onto the line every `interval` seconds.
+    Source {
+        pool: Vec<String>,
+        park: PoseMsg,
+        pitch: [f64; 3],
+        pose: PoseMsg,
+        interval: f64,
+        running: bool,
+    },
+    /// Returns carriers that reach its zone to `source`'s magazine.
+    Sink {
+        zone_pose: PoseMsg,
+        zone_size: [f64; 3],
+        source: String,
     },
 }
 
@@ -1311,6 +1331,30 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 position: *position,
                 range: [range.0, range.1],
             },
+            DeviceKind::Source {
+                pool,
+                park,
+                pitch,
+                pose,
+                interval,
+                running,
+            } => DeviceKindMsg::Source {
+                pool: pool.clone(),
+                park: PoseMsg::from(park),
+                pitch: [pitch.x, pitch.y, pitch.z],
+                pose: PoseMsg::from(pose),
+                interval: *interval,
+                running: *running,
+            },
+            DeviceKind::Sink {
+                zone_pose,
+                zone_size,
+                source,
+            } => DeviceKindMsg::Sink {
+                zone_pose: PoseMsg::from(zone_pose),
+                zone_size: [zone_size.x, zone_size.y, zone_size.z],
+                source: source.clone(),
+            },
         },
     }
 }
@@ -1343,6 +1387,30 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 speed: *speed,
                 position: *position,
                 range: (range[0], range[1]),
+            },
+            DeviceKindMsg::Source {
+                pool,
+                park,
+                pitch,
+                pose,
+                interval,
+                running,
+            } => DeviceKind::Source {
+                pool: pool.clone(),
+                park: park.into(),
+                pitch: Vector3::new(pitch[0], pitch[1], pitch[2]),
+                pose: pose.into(),
+                interval: *interval,
+                running: *running,
+            },
+            DeviceKindMsg::Sink {
+                zone_pose,
+                zone_size,
+                source,
+            } => DeviceKind::Sink {
+                zone_pose: zone_pose.into(),
+                zone_size: Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                source: source.clone(),
             },
         },
     }

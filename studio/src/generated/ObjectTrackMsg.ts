@@ -13,4 +13,10 @@ name: string,
 /**
  * One world pose per trajectory sample.
  */
-poses: Array<PoseMsg>, };
+poses: Array<PoseMsg>, 
+/**
+ * One flag per sample: false while the object is stowed (waiting in a
+ * magazine, or taken off the line) and should not be drawn. Empty
+ * means "always visible" — what every track was before magazines.
+ */
+visible?: Array<boolean>, };

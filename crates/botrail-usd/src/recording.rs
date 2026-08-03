@@ -644,6 +644,7 @@ mod tests {
                 },
                 track: PoseTrack::Sampled(box_track.clone()),
                 color: None,
+                visible: Vec::new(),
             },
             ObjectSpec {
                 name: "table".into(),
@@ -652,6 +653,7 @@ mod tests {
                 },
                 track: PoseTrack::Static(Isometry3::translation(0.5, 0.0, -0.01)),
                 color: None,
+                visible: Vec::new(),
             },
         ];
 

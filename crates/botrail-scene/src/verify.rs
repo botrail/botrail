@@ -116,7 +116,9 @@ fn apply_state(
                     world.attach_obstacle_to(*robot, &track.name, Some(&link_name), None)?;
                 }
             }
-            TrackSpan::Hold { pose, .. } => {
+            // Stowed is a hold that is simply not drawn; for replay
+            // into a live scene the pose is all that matters.
+            TrackSpan::Hold { pose, .. } | TrackSpan::Stowed { pose, .. } => {
                 if entered {
                     if world.attachment(&track.name).is_some() {
                         world.detach_obstacle(&track.name)?;

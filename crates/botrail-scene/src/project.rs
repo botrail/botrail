@@ -654,6 +654,35 @@ pub fn generate_python(project: &ProjectFile) -> String {
                     py_tuple(range),
                 ));
             }
+            crate::wire::DeviceKindMsg::Source {
+                pool,
+                park,
+                pitch,
+                pose,
+                interval,
+                running,
+            } => {
+                let items: Vec<String> = pool.iter().map(|n| format!("{n:?}")).collect();
+                out.push_str(&format!(
+                    "scene.add_source({:?}, pool=[{}], park={}, pitch={}, position={}, interval={interval}, running={})\n",
+                    device.name,
+                    items.join(", "),
+                    py_tuple(&park.position),
+                    py_tuple(pitch),
+                    py_tuple(&pose.position),
+                    if *running { "True" } else { "False" },
+                ));
+            }
+            crate::wire::DeviceKindMsg::Sink {
+                zone_pose,
+                zone_size,
+                source,
+            } => out.push_str(&format!(
+                "scene.add_sink({:?}, zone_position={}, zone_size={}, source={source:?})\n",
+                device.name,
+                py_tuple(&zone_pose.position),
+                py_tuple(zone_size),
+            )),
         }
     }
     for signal in &project.signals {

@@ -532,6 +532,7 @@ impl SceneHub {
                     geometry: o.geometry.clone(),
                     track,
                     color: o.color,
+                    visible: Vec::new(),
                 }
             })
             .collect();
@@ -636,6 +637,9 @@ impl SceneHub {
                         .map(|(name, poses)| wire::ObjectTrackMsg {
                             name: name.clone(),
                             poses: poses.iter().map(wire::PoseMsg::from).collect(),
+                            // A recording carries poses only; anything in it
+                            // was on the line when it was baked.
+                            visible: Vec::new(),
                         })
                         .collect(),
                     step_spans: Vec::new(),

@@ -126,6 +126,7 @@ function startPlayback(tracks: PlaybackTracks) {
     overridePoses: sample.poses,
     overrideJoints: sample.joints,
     overrideObstaclePoses: sample.objects,
+    stowedObstacles: sample.stowed,
   };
 }
 
@@ -162,6 +163,9 @@ interface StudioState {
   overrideJoints: Record<string, number[]> | null;
   /** Playback poses of attached objects, keyed by obstacle name. */
   overrideObstaclePoses: Record<string, PoseMsg> | null;
+  /** Objects stowed at the current playback instant — waiting in a
+   * magazine or off the line — and therefore not drawn. */
+  stowedObstacles: Set<string>;
   /** All motions in the scene; re-sent in full by the server on every change. */
   motions: MotionMsg[];
   /** PLC-style sequences; re-sent in full by the server on every change. */
@@ -250,6 +254,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   overridePoses: null,
   overrideJoints: null,
   overrideObstaclePoses: null,
+  stowedObstacles: new Set<string>(),
   motions: [],
   sequences: [],
   signalDefs: [],
@@ -307,6 +312,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           overridePoses: null,
           overrideJoints: null,
           overrideObstaclePoses: null,
+          stowedObstacles: new Set<string>(),
           motions: [],
           sequences: [],
           signalDefs: [],
@@ -569,6 +575,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overridePoses: sample.poses,
       overrideJoints: sample.joints,
       overrideObstaclePoses: sample.objects,
+      stowedObstacles: sample.stowed,
     }),
   setPlaying: (playing) => set({ playing }),
   stopPlayback: () =>
