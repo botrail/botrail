@@ -1,7 +1,9 @@
-# Builds the browser-complete wasm demo and deploys it to GitHub Pages.
+# Builds the documentation site (mkdocs) and the browser-complete wasm demo,
+# then deploys both to GitHub Pages: docs at /, demo at /demo/.
+#
 # Enable Pages (Settings -> Pages -> Source: GitHub Actions) once, then every
-# push to main redeploys the demo.
-name: Deploy demo
+# push to main redeploys.
+name: Deploy site
 
 on:
   push:
@@ -37,10 +39,29 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: studio/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+
       - run: ./scripts/build_wasm_demo.sh
+
+      # mkdocstrings reads the API documentation off the imported module (the
+      # pyo3 `///` comments), so the extension has to be built first.
+      - name: Build the docs site
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python maturin
+          uv pip install --python .venv/bin/python --group docs
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
+          .venv/bin/mkdocs build --strict
+
+      - name: Place the wasm demo under /demo/
+        run: cp -r studio/dist-wasm site/demo
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: studio/dist-wasm
+          path: site
 
   deploy:
     needs: build

@@ -2,7 +2,8 @@
 
 **Beyond motion planning. Build robot cells as code.**
 
-Live Demo: https://botrail.github.io/botrail/
+Documentation: https://botrail.github.io/botrail/ ·
+Live Demo: https://botrail.github.io/botrail/demo/
 
 ![botrail-demo](assets/botrail_demo.png)
 
@@ -69,8 +70,10 @@ python examples/play_record.py \
                                   # the recordings above; omit for cell_seq)
 ```
 
-Or try the browser-only build (deploys to GitHub Pages from `main`, or build
-it locally):
+Or try the browser-only build ([deployed from `main`][demo], or build it
+locally):
+
+[demo]: https://botrail.github.io/botrail/demo/
 
 ```bash
 ./scripts/build_wasm_demo.sh          # needs wasm-pack + wasm32 target
@@ -167,8 +170,15 @@ cargo test                                # Rust workspace
 python -m pytest python/tests             # Python bindings
 ```
 
-Architecture and contributor notes live in [docs/DESIGN.md](docs/DESIGN.md)
-and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Docs (mkdocs, published at the link above):
+
+```bash
+uv pip install --group docs
+mkdocs serve                              # needs `maturin develop` first
+```
+
+Contributor notes are in the
+[Contributing](https://botrail.github.io/botrail/contributing/) page;
 
 ## License
 

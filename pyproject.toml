@@ -25,6 +25,9 @@ Repository = "https://github.com/botrail/botrail"
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# The API reference is generated from the pyo3 docstrings, so building the docs
+# also needs the extension importable (maturin develop).
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=1.0", "ruff"]
 
 [tool.maturin]
 manifest-path = "crates/botrail-py/Cargo.toml"

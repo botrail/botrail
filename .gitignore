@@ -19,6 +19,9 @@ python/botrail/_studio/
 
 *.so
 
+# Docs (mkdocs build output)
+site/
+
 # Editors
 .vscode/
 .idea/

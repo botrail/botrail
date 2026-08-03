@@ -1,0 +1,112 @@
+site_name: botrail
+site_description: Build robot cells as code, verify them deterministically, ship them as USD.
+site_url: https://botrail.github.io/botrail/
+repo_url: https://github.com/botrail/botrail
+repo_name: botrail/botrail
+edit_uri: edit/main/docs/
+copyright: MIT licensed
+
+docs_dir: docs
+site_dir: site
+strict: true
+
+# The logo and screenshots live in the repository's assets/ because the README
+# reads them from there. This hook publishes that directory into the built site
+# so the docs link the same files instead of carrying a second copy.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+# `mkdocs serve` rebuilds the API reference when the bindings change.
+watch:
+  - python/botrail
+
+theme:
+  name: material
+  logo: assets/botrail-mark.svg
+  favicon: assets/botrail-mark.svg
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  # Lets tutorials include real lines from examples/ instead of copies that rot.
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            # botrail's API is a compiled pyo3 extension: the docstrings are the
+            # Rust `///` comments and exist only on the imported module. Without
+            # force_inspection griffe would read python/botrail/_core.pyi, which
+            # carries signatures but no documentation.
+            force_inspection: true
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            heading_level: 2
+            # Inspection cannot recover declaration order from a compiled
+            # module, so ask for the order it can actually deliver.
+            members_order: alphabetical
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            docstring_section_style: table
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Your first cell: getting-started/first-cell.md
+  - API reference:
+      - Robot: reference/api/robot.md
+      - Scene: reference/api/scene.md
+      - Trajectory: reference/api/trajectory.md
+      - Timeline: reference/api/timeline.md
+      - Sequences (bt.seq): reference/api/seq.md
+      - Studio: reference/api/studio.md
+  - Contributing: contributing.md

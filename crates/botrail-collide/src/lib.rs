@@ -1,6 +1,6 @@
 //! Collision checking for botrail on top of parry3d.
 //!
-//! Shape policy (from `docs/bench-parry3d.md`): only *solid* parry shapes
+//! Shape policy (from `design/bench-parry3d.md`): only *solid* parry shapes
 //! are used — primitives map directly, meshes map to VHACD convex compounds
 //! (see [`mesh`], with a content-addressed disk cache). Raw `TriMesh` is
 //! never used as collision geometry because parry's surface semantics

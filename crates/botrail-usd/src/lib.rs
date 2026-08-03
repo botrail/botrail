@@ -3,7 +3,7 @@
 //! as botrail geometry — world-posed primitives and meshes, normalized to
 //! botrail conventions (meters, Z-up).
 //!
-//! Boundary rules (docs/DESIGN.md):
+//! Boundary rules (design/DESIGN.md):
 //! - The core never sees USD: the importer emits [`ImportedScene`] built
 //!   from `botrail_model::Geometry` + nalgebra poses.
 //! - Extracted meshes are materialized as content-hashed binary STL files

@@ -16,7 +16,7 @@ use parry3d_f64::transformation::vhacd::{VHACDParameters, VHACD};
 use crate::CollideError;
 
 /// Voxelization resolution for VHACD (bench-validated starting point, see
-/// docs/bench-parry3d.md: ~0.8-1.0s/mesh, 12-17 pieces at 64).
+/// design/bench-parry3d.md: ~0.8-1.0s/mesh, 12-17 pieces at 64).
 pub const VHACD_RESOLUTION: u32 = 64;
 
 /// Bump when the decomposition parameters or cache layout change; stale

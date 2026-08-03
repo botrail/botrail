@@ -14,7 +14,7 @@ botrail-mesh.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
 # Pre-1.0 pure-Rust USD implementation: pin an exact rev (crates.io releases
-# lag main significantly; see the spike notes in docs/DESIGN.md).
+# lag main significantly; see the spike notes in design/DESIGN.md).
 openusd = { git = "https://github.com/mxpv/openusd", rev = "659917514b462834293094b93d62b5decb7133db", features = ["geom", "physics"] }
 anyhow = "1"
 

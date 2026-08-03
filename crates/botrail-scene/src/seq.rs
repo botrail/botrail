@@ -3,7 +3,7 @@
 //! SFC / step-ladder mental model. The robot is one device among several:
 //! motions are *started* by an action and *awaited* by a condition.
 //!
-//! Vocabulary mapping (see docs/design-sequence-control.md §3):
+//! Vocabulary mapping (see design/design-sequence-control.md §3):
 //! internal signals = internal relays (M), `Elapsed` = an on-delay timer
 //! (TON), `Done` = the robot's completion signal, the scan loop lives in
 //! [`crate::rollout`].

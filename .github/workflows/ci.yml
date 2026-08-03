@@ -37,6 +37,12 @@ jobs:
           uv pip install --python .venv/bin/python maturin pytest
           VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
           .venv/bin/python -m pytest python/tests -q
+      # The API reference is generated from the extension built above; --strict
+      # fails on broken links and unresolved API cross-references.
+      - name: Build the docs site
+        run: |
+          uv pip install --python .venv/bin/python --group docs
+          .venv/bin/mkdocs build --strict
 
   studio:
     runs-on: ubuntu-latest
