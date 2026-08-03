@@ -165,6 +165,18 @@ export const sendUpdateObstaclePose = throttledByKey<PoseMsg>(
   (name, pose) => rawSend({ type: "update_obstacle_pose", name, pose }),
 );
 
+/**
+ * Move a whole subtree in one message. Throttled under one key because a
+ * group drag is one gesture, and batched because the server rebroadcasts
+ * the obstacle list per pose write.
+ */
+export const sendUpdatePoses = throttledByKey<{
+  obstacles: [string, PoseMsg][];
+  frames: [string, PoseMsg][];
+}>(SEND_INTERVAL_MS, (_key, { obstacles, frames }) =>
+  rawSend({ type: "update_poses", obstacles, frames }),
+);
+
 /** Resize/reshape an obstacle (sent immediately). */
 export function sendUpdateObstacleGeometry(
   name: string,

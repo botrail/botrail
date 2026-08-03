@@ -166,6 +166,9 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             set_obstacle_pose(host, &name, (&pose).into())
                 .map_err(|e| format!("rejected update_obstacle_pose: {e}"))
         }
+        ClientMessage::UpdatePoses { obstacles, frames } => {
+            update_poses(host, obstacles, frames).map_err(|e| format!("rejected update_poses: {e}"))
+        }
         ClientMessage::UpdateObstacleGeometry { name, geometry } => {
             wire::geometry_from_msg(&geometry)
                 .and_then(|geometry| {
@@ -403,6 +406,33 @@ pub fn set_obstacle_color(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_color(name, color))?;
     emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Writes a batch of obstacle (and frame) poses with a single broadcast.
+/// Nothing is applied unless every name resolves, so a group drag cannot
+/// half-move a subtree.
+pub fn update_poses(
+    host: &impl SessionHost,
+    obstacles: Vec<(String, PoseMsg)>,
+    frames: Vec<(String, PoseMsg)>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| {
+        for (name, _) in &obstacles {
+            if !scene.obstacles().iter().any(|o| &o.name == name) {
+                return Err(SceneError::UnknownObstacle(name.clone()));
+            }
+        }
+        for (name, pose) in &obstacles {
+            scene.set_obstacle_pose(name, pose.into())?;
+        }
+        for (name, pose) in &frames {
+            scene.add_frame(name, pose.into());
+        }
+        Ok::<(), SceneError>(())
+    })?;
+    emit_obstacles_and_state(host);
+    host.emit(&host.with_scene(|scene| wire::frames_message(scene)));
     Ok(())
 }
 
@@ -1053,6 +1083,71 @@ mod tests {
         );
         assert_eq!(host.message_types(), ["obstacles", "state"]);
         assert_eq!(host.scene.borrow().obstacles().len(), 1);
+    }
+
+    #[test]
+    fn update_poses_moves_a_subtree_in_one_broadcast() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            for (name, z) in [("/W/Pedestal/Plate", 0.1), ("/W/Pedestal/Column", 0.4)] {
+                scene
+                    .add_obstacle(
+                        name,
+                        Geometry::Sphere { radius: 0.02 },
+                        Isometry3::translation(0.0, 0.0, z),
+                    )
+                    .unwrap();
+            }
+            scene.add_frame("/W/Pedestal/Mount", Isometry3::translation(0.0, 0.0, 0.6));
+        });
+
+        handle_client_message(
+            &host,
+            r#"{"type":"update_poses",
+                "obstacles":[
+                  ["/W/Pedestal/Plate",{"position":[1.0,0.0,0.1],"quaternion":[0,0,0,1]}],
+                  ["/W/Pedestal/Column",{"position":[1.0,0.0,0.4],"quaternion":[0,0,0,1]}]],
+                "frames":[
+                  ["/W/Pedestal/Mount",{"position":[1.0,0.0,0.6],"quaternion":[0,0,0,1]}]]}"#,
+        );
+
+        // One obstacles + state pair for the whole subtree, plus frames —
+        // not one broadcast per member.
+        assert_eq!(host.message_types(), ["obstacles", "state", "frames"]);
+        let scene = host.scene.borrow();
+        for name in ["/W/Pedestal/Plate", "/W/Pedestal/Column"] {
+            let o = scene.obstacles().iter().find(|o| o.name == name).unwrap();
+            assert!((o.pose.translation.x - 1.0).abs() < 1e-12, "{name}");
+        }
+        // The teach frame came with it; leaving it behind would silently
+        // invalidate anything taught against this machine.
+        let mount = scene.frame("/W/Pedestal/Mount").unwrap();
+        assert!((mount.pose.translation.x - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn update_poses_is_all_or_nothing() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "real",
+                    Geometry::Sphere { radius: 0.02 },
+                    Isometry3::identity(),
+                )
+                .unwrap();
+        });
+        handle_client_message(
+            &host,
+            r#"{"type":"update_poses","obstacles":[
+                 ["real",{"position":[5.0,0.0,0.0],"quaternion":[0,0,0,1]}],
+                 ["ghost",{"position":[5.0,0.0,0.0],"quaternion":[0,0,0,1]}]]}"#,
+        );
+        // A typo in one member must not half-move the subtree.
+        assert!(host.message_types().is_empty());
+        assert_eq!(host.logs.borrow().len(), 1);
+        let scene = host.scene.borrow();
+        assert_eq!(scene.obstacles()[0].pose.translation.x, 0.0);
     }
 
     #[test]

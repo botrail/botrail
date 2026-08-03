@@ -300,6 +300,7 @@ USD の customData にシーケンス構造を埋め込むことはしない —
 |---|---|---|
 | 3D ビューポート | `Viewport` / `SceneView` / `UsdRobotView` / `WasmStageView` | ロボット表示(URDF はサーバ FK、USD は three-usd-robot でクライアント FK)、クリックで TCP フォーカス、フォーカスチップ、メッシュ/USD のドラッグ&ドロップ読み込み |
 | 姿勢操作 | `TcpGizmo` / `TcpPanel` / `JointPanel` / `RobotBaseGizmo` / `RobotPanel` | TCP gizmo ドラッグ → リアルタイム IK(到達不可/干渉は色で警告)、関節スライダ、ベース配置とフレームへのスナップ |
+| レイアウト編集 | `ObstacleView` の `GroupGizmo` / `SceneTreePanel` / `store.drillChain` | **インポートしたサブツリーを 1 剛体として**移動・回転。ビューポートのクリックは**1 回目が機械、もう 1 回で部品**(`/World/Pedestal` → `/World/Pedestal/Column`)で、ステージルート(全障害物がその下にある階層)は選択対象から外す — 「全部」を選ぶのはクリックの意味ではないため。シーンツリーからは任意の階層を直接選べる。**教示フレームも一緒に動く** — 機械だけ動かしてフレームを置き去りにするのは静かに壊れたセルなので。ドラッグは `update_poses`(バッチ)1 通で送り、4px 未満の移動だけをクリックとみなす(ドラッグ終了時に部品へ降りてしまうため) |
 | シーン編集 | `ObstaclePanel` / `ObstacleView` / `SceneTreePanel` | 障害物の追加・gizmo 移動・寸法編集・削除、attach/detach(🧲 バッジ)、prim パス階層のツリー、表示 👁 と衝突有効/無効のトグル、フレームの ⌖ 配置 |
 | モーション | `MotionPanel` / `PlanPanel` / `GhostRobot` | ウェイポイント列の編集、ゴール設定(ゴースト表示)、計画要求 → 結果軌道、クリアランス表示 |
 | シーケンス | `SequencePanel` | 工程リスト(アクションチップ + 遷移)、プリセット追加(Motion / Wait / Grasp / Release)、simulate |

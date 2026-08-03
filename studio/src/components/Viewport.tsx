@@ -72,9 +72,11 @@ export function Viewport() {
   const focusLabel =
     selection.type === "obstacle"
       ? `obstacle · ${selection.name}`
-      : selection.type === "robot"
-        ? `${scope(selection.robot)}robot base`
-        : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
+      : selection.type === "group"
+        ? `group · ${selection.path}`
+        : selection.type === "robot"
+          ? `${scope(selection.robot)}robot base`
+          : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.

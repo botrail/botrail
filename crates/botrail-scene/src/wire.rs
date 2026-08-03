@@ -697,6 +697,20 @@ pub enum ClientMessage {
         name: String,
         pose: PoseMsg,
     },
+    /// Batched pose write: the studio's group gizmo drags a whole imported
+    /// subtree (a pedestal, a conveyor) rather than one prim. One message
+    /// rather than one per member, because each pose write rebroadcasts the
+    /// entire obstacle list — a 20-prim group would otherwise cost 20 full
+    /// broadcasts per drag frame.
+    ///
+    /// Frames ride along: a teach frame left behind by the machine it was
+    /// taught on is a silently wrong cell, not a cosmetic issue.
+    UpdatePoses {
+        #[serde(default)]
+        obstacles: Vec<(String, PoseMsg)>,
+        #[serde(default)]
+        frames: Vec<(String, PoseMsg)>,
+    },
     UpdateObstacleGeometry {
         name: String,
         geometry: GeometryMsg,

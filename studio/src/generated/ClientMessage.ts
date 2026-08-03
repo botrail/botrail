@@ -19,7 +19,7 @@ robot: string | null, link: string, pose: PoseMsg, } | { "type": "set_robot_base
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string, 
+robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_poses", obstacles: Array<[string, PoseMsg]>, frames: Array<[string, PoseMsg]>, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string, 
 /**
  * Carrying robot instance name; `None` means the first robot.
  */

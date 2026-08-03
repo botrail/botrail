@@ -27,10 +27,33 @@ import {
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
 
+
+/**
+ * Selection steps for a viewport click on `name`, outermost first, ending
+ * at the obstacle itself: `/World/Pedestal` then `/World/Pedestal/Column`.
+ *
+ * The stage root is skipped when every obstacle sits under it — selecting
+ * "everything" is never what a click on one machine means. A scene with
+ * several roots keeps them all, since there each root *is* a machine.
+ */
+export function drillChain(name: string, allNames: string[]): string[] {
+  const parts = name.split("/").filter(Boolean);
+  const chain: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    const path = `/${parts.slice(0, i).join("/")}`;
+    if (i === 1 && allNames.every((n) => n.startsWith(`${path}/`))) continue;
+    chain.push(path);
+  }
+  chain.push(name);
+  return chain;
+}
+
 /** What the viewport gizmo is currently editing. */
 export type Selection =
   | { type: "tcp"; robot: string }
   | { type: "obstacle"; name: string }
+  /** An imported subtree (`/World/Pedestal`), moved as one rigid body. */
+  | { type: "group"; path: string }
   | { type: "robot"; robot: string };
 
 /** Per-robot UI state: the description plus the live server state. */
@@ -186,6 +209,9 @@ interface StudioState {
   /** Focus a robot's TCP (also makes it the panel-selected robot). */
   selectTcp: (robot?: string) => void;
   selectObstacle: (name: string) => void;
+  selectGroup: (path: string) => void;
+  /** Viewport click: the machine first, a further click drills in. */
+  selectFromViewport: (name: string) => void;
   /** Focus a robot's base for placement (also panel-selects it). */
   selectRobot: (robot: string) => void;
   /** Panel robot selector; retargets a robot-scoped gizmo selection. */
@@ -204,7 +230,7 @@ interface StudioState {
   toggleObstacleHidden: (name: string) => void;
 }
 
-export const useStudioStore = create<StudioState>((set) => ({
+export const useStudioStore = create<StudioState>((set, get) => ({
   robots: [],
   selectedRobot: null,
   connection: "connecting",
@@ -480,6 +506,30 @@ export const useStudioStore = create<StudioState>((set) => ({
       return { selection: { type: "tcp", robot: name }, selectedRobot: name };
     }),
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
+  selectGroup: (path) => set({ selection: { type: "group", path } }),
+  selectFromViewport: (name) => {
+    const { obstacles, selection } = get();
+    const chain = drillChain(
+      name,
+      obstacles.map((o: ObstacleMsg) => o.name),
+    );
+    // Already somewhere in this obstacle's chain? Step one level in.
+    // Anything else — empty space, another machine — starts over at the top.
+    const current =
+      selection.type === "group"
+        ? selection.path
+        : selection.type === "obstacle" && selection.name === name
+          ? name
+          : null;
+    const at = current === null ? -1 : chain.indexOf(current);
+    const next = chain[Math.min(at + 1, chain.length - 1)];
+    set({
+      selection:
+        next === name
+          ? { type: "obstacle", name }
+          : { type: "group", path: next },
+    });
+  },
   selectRobot: (robot) =>
     set({ selection: { type: "robot", robot }, selectedRobot: robot }),
   setSelectedRobot: (robot) =>

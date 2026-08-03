@@ -159,12 +159,19 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
   const selection = useStudioStore((s) => s.selection);
   const selectedRobot = useStudioStore((s) => s.selectedRobot);
   const selectObstacle = useStudioStore((s) => s.selectObstacle);
+  const selectGroup = useStudioStore((s) => s.selectGroup);
   const hiddenObstacles = useStudioStore((s) => s.hiddenObstacles);
   const toggleObstacleHidden = useStudioStore((s) => s.toggleObstacleHidden);
 
   const kids = [...node.children.values()];
   const o = node.obstacle;
-  const selected = o && selection.type === "obstacle" && selection.name === o.name;
+  // A node with children is a subtree from the imported stage — a machine,
+  // not a part of one. Selecting it moves everything under it as one body,
+  // which is what "the pedestal" means when the pedestal is three plates.
+  const isGroup = kids.length > 0;
+  const selected = isGroup
+    ? selection.type === "group" && selection.path === node.path
+    : o && selection.type === "obstacle" && selection.name === o.name;
   const hidden = o ? hiddenObstacles.has(o.name) : false;
 
   return (
@@ -182,8 +189,10 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
         )}
         <span
           className="tree-label"
-          onClick={() => o && selectObstacle(o.name)}
-          title={node.path}
+          onClick={() =>
+            isGroup ? selectGroup(node.path) : o && selectObstacle(o.name)
+          }
+          title={isGroup ? `${node.path} — move as one` : node.path}
         >
           {node.label}
         </span>
