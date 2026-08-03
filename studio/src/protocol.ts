@@ -39,6 +39,7 @@ export type { DeviceMsg } from "./generated/DeviceMsg";
 export type { DeviceKindMsg } from "./generated/DeviceKindMsg";
 export type { DeviceCommandMsg } from "./generated/DeviceCommandMsg";
 export type { JointMsg } from "./generated/JointMsg";
+export type { JointMimicMsg } from "./generated/JointMimicMsg";
 export type { RobotDescMsg } from "./generated/RobotDescMsg";
 export type { RobotStateMsg } from "./generated/RobotStateMsg";
 export type { RobotTimelineMsg } from "./generated/RobotTimelineMsg";

@@ -20,6 +20,13 @@ export function JointPanel() {
       .sort((a, b) => (a.q_index as number) - (b.q_index as number));
   }, [robot]);
 
+  // Joints driven by another one: shown as read-out, since commanding
+  // them means moving their source.
+  const mimicJoints = useMemo<JointMsg[]>(
+    () => (robot ? robot.desc.joints.filter((j) => j.mimic !== null) : []),
+    [robot],
+  );
+
   if (!robot) return null;
   const name = robot.desc.name;
 
@@ -68,7 +75,23 @@ export function JointPanel() {
             </div>
           );
         })}
-        {dofJoints.length === 0 && (
+        {mimicJoints.map((joint) => {
+          const mimic = joint.mimic!;
+          const source = robot.desc.joints.find((j) => j.name === mimic.joint);
+          const q = source?.q_index ?? null;
+          const driver = q === null ? 0 : (robot.jointPositions[q] ?? 0);
+          const value = mimic.multiplier * driver + mimic.offset;
+          return (
+            <div className="joint joint-mimic" key={joint.name}>
+              <div className="joint-row">
+                <span className="joint-name">{joint.name}</span>
+                <span className="joint-value">{value.toFixed(3)}</span>
+              </div>
+              <div className="joint-note">follows {mimic.joint}</div>
+            </div>
+          );
+        })}
+        {dofJoints.length === 0 && mimicJoints.length === 0 && (
           <div className="empty">No actuated joints</div>
         )}
       </div>

@@ -186,9 +186,16 @@ function jointMap(
   positions: number[],
 ): Record<string, number> {
   const map: Record<string, number> = {};
+  const qIndex = new Map(desc.joints.map((j) => [j.name, j.q_index]));
   for (const joint of desc.joints) {
     if (joint.q_index !== null) {
       map[joint.name] = positions[joint.q_index] ?? 0;
+    } else if (joint.mimic) {
+      // Mimic joints hold no DOF of their own; the server sends the
+      // relation so the renderer can place them from their source.
+      const source = qIndex.get(joint.mimic.joint) ?? null;
+      const value = source === null ? 0 : (positions[source] ?? 0);
+      map[joint.name] = joint.mimic.multiplier * value + joint.mimic.offset;
     }
   }
   return map;

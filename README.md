@@ -21,8 +21,9 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
 - **Robots from URDF, Xacro, or USD** — including Isaac Sim articulations
   (`bt.Robot.from_usd("franka.usd")`), rendered at full visual fidelity
   with [three-usd-robot](https://github.com/neka-nat/three-usd-robot).
-  Multiple robots per cell, with tick-checked inter-robot collisions and
-  zone interlocks.
+  Mimic joints (URDF `<mimic>`, USD `PhysxMimicJointAPI`) are followed, so
+  a two-finger gripper costs one DOF, not two. Multiple robots per cell,
+  with tick-checked inter-robot collisions and zone interlocks.
 - **USD scene import** (usda/usdc/usdz, references, variants, instancing) —
   stages become obstacles and named mount frames, normalized to meters / Z-up.
 - **Environments that behave** — a PLC-style step sequencer (entry actions +

@@ -37,18 +37,15 @@ pub fn forward_kinematics_with_base(
     poses[model.root_link] = *base;
     for &ji in &model.joint_order {
         let joint = &model.joints[ji];
+        // Mimic joints have no entry in `q`; the model derives their value
+        // from the joint that drives them.
+        let value = model.joint_value(ji, q);
         let motion = match joint.joint_type {
-            JointType::Revolute | JointType::Continuous => {
-                let angle = q[joint.q_index.expect("actuated joint has q_index")];
-                Isometry3::from_parts(
-                    Translation3::identity(),
-                    UnitQuaternion::from_axis_angle(&joint.axis, angle),
-                )
-            }
-            JointType::Prismatic => {
-                let d = q[joint.q_index.expect("actuated joint has q_index")];
-                Translation3::from(joint.axis.into_inner() * d).into()
-            }
+            JointType::Revolute | JointType::Continuous => Isometry3::from_parts(
+                Translation3::identity(),
+                UnitQuaternion::from_axis_angle(&joint.axis, value),
+            ),
+            JointType::Prismatic => Translation3::from(joint.axis.into_inner() * value).into(),
             JointType::Fixed => Isometry3::identity(),
         };
         poses[joint.child_link] = poses[joint.parent_link] * joint.origin * motion;
@@ -125,6 +122,32 @@ mod tests {
         let poses = forward_kinematics(&model, &[0.3]).unwrap();
         let t = poses[model.link_index("carriage").unwrap()].translation;
         assert!((t.y - 0.3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mimic_joint_follows_its_source() {
+        // A gripper whose right finger mirrors the left: one DOF closes both.
+        let urdf = r#"
+        <robot name="gripper">
+          <link name="palm"/><link name="left"/><link name="right"/>
+          <joint name="finger_left" type="prismatic">
+            <parent link="palm"/><child link="left"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+          </joint>
+          <joint name="finger_right" type="prismatic">
+            <parent link="palm"/><child link="right"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-0.04" upper="0" effort="1" velocity="1"/>
+            <mimic joint="finger_left" multiplier="-1"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        assert_eq!(model.dof(), 1);
+        let poses = forward_kinematics(&model, &[0.03]).unwrap();
+        let y = |link: &str| poses[model.link_index(link).unwrap()].translation.y;
+        assert!((y("left") - 0.03).abs() < 1e-12);
+        assert!((y("right") + 0.03).abs() < 1e-12, "{}", y("right"));
     }
 
     #[test]

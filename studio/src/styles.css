@@ -193,6 +193,16 @@ body {
   color: var(--text);
 }
 
+/* Driven by another joint: readable, but plainly not a control. */
+.joint-mimic .joint-name {
+  color: var(--muted);
+}
+
+.joint-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .joint-value {
   color: var(--accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

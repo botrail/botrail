@@ -595,7 +595,15 @@ impl Scene {
                         .ok_or_else(|| format!("unknown joint `{joint}`"))?;
                     let j = &model.joints[ji];
                     if j.q_index.is_none() {
-                        return Err(format!("joint `{joint}` is not actuated"));
+                        // A mimic joint is commandable, just not directly:
+                        // say which joint to ramp instead.
+                        return Err(match j.mimic {
+                            Some(m) => format!(
+                                "joint `{joint}` follows `{}`; ramp that joint instead",
+                                model.joints[m.source_joint].name
+                            ),
+                            None => format!("joint `{joint}` is not actuated"),
+                        });
                     }
                     if let Some(l) = &j.limits {
                         if *value < l.lower - 1e-9 || *value > l.upper + 1e-9 {

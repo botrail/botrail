@@ -29,6 +29,14 @@ pub enum ModelError {
     UnsupportedJointType { name: String, joint_type: String },
     #[error("joint `{0}` has a zero-length axis")]
     ZeroAxis(String),
+    #[error("joint `{joint}` mimics `{driver}`, which does not exist")]
+    UnknownMimicSource { joint: String, driver: String },
+    #[error("joint `{joint}` mimics `{driver}`, which has no degree of freedom")]
+    MimicSourceNotActuated { joint: String, driver: String },
+    #[error("fixed joint `{0}` cannot mimic another joint")]
+    MimicOnFixedJoint(String),
+    #[error("joint `{0}` is part of a mimic cycle")]
+    MimicCycle(String),
 }
 
 /// Joint types supported by botrail. URDF `floating`/`planar` are rejected.
@@ -66,6 +74,21 @@ pub struct JointLimits {
     pub effort: f64,
 }
 
+/// A joint driven by another joint through a fixed affine relation —
+/// URDF `<mimic>`, USD `PhysxMimicJointAPI`. The classic case is a
+/// two-finger gripper whose second finger mirrors the first.
+///
+/// A mimic joint has no degree of freedom of its own: its value is
+/// `multiplier * q[source] + offset`, so it never appears in `q`.
+#[derive(Debug, Clone, Copy)]
+pub struct JointMimic {
+    /// Index of the driving joint. [`RobotModel::from_parts`] flattens
+    /// mimic chains, so this always names an actuated joint.
+    pub source_joint: usize,
+    pub multiplier: f64,
+    pub offset: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Joint {
     pub name: String,
@@ -73,12 +96,19 @@ pub struct Joint {
     /// Transform from the parent link frame to the child link frame at q = 0.
     pub origin: Isometry3<f64>,
     pub axis: Unit<Vector3<f64>>,
-    /// Position limits; `None` for fixed and continuous joints.
+    /// Position limits; `None` for fixed and continuous joints. On a mimic
+    /// joint these are informational: botrail computes the joint's value
+    /// from its source and does not clamp it (a URDF that declares mimic
+    /// limits without applying the multiplier is common enough that
+    /// enforcing them would freeze real grippers).
     pub limits: Option<JointLimits>,
     pub parent_link: usize,
     pub child_link: usize,
-    /// Index into the joint position vector `q`; `None` for fixed joints.
+    /// Index into the joint position vector `q`; `None` for fixed and
+    /// mimic joints.
     pub q_index: Option<usize>,
+    /// Set when this joint follows another one; see [`JointMimic`].
+    pub mimic: Option<JointMimic>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +157,8 @@ pub struct RobotModel {
     pub root_link: usize,
     /// Joint indices ordered parent-before-child (tree traversal order).
     pub joint_order: Vec<usize>,
-    /// Indices of non-fixed joints, in `q`-vector order (base to tip).
+    /// Indices of the joints carrying a DOF, in `q`-vector order (base to
+    /// tip). Fixed and mimic joints are excluded.
     pub actuated_joints: Vec<usize>,
     pub source: RobotSource,
 }
@@ -249,17 +280,56 @@ impl RobotModel {
     }
 
     /// Actuated joints that move `link` — its ancestors in the chain, i.e.
-    /// exactly the DOFs a solver can use to place it.
+    /// exactly the DOFs a solver can use to place it. A mimic ancestor
+    /// contributes the joint that drives *it*, since that is the DOF the
+    /// solver would actually have to spend.
     pub fn driving_joints(&self, link: usize) -> Vec<usize> {
         let mut out = Vec::new();
         let mut current = link;
         while let Some(ji) = self.links[current].parent_joint {
-            if self.joints[ji].q_index.is_some() {
-                out.push(ji);
+            let driver = match self.joints[ji].mimic {
+                Some(m) => Some(m.source_joint),
+                None if self.joints[ji].q_index.is_some() => Some(ji),
+                None => None,
+            };
+            if let Some(driver) = driver {
+                if !out.contains(&driver) {
+                    out.push(driver);
+                }
             }
             current = self.joints[ji].parent_link;
         }
         out
+    }
+
+    /// Value of joint `joint` in configuration `q`: its own DOF value, the
+    /// mimic relation for a mimic joint, and 0 for a fixed one.
+    pub fn joint_value(&self, joint: usize, q: &[f64]) -> f64 {
+        let joint = &self.joints[joint];
+        if let Some(m) = joint.mimic {
+            let source = self.joints[m.source_joint]
+                .q_index
+                .expect("mimic sources are actuated after from_parts");
+            return m.multiplier * q[source] + m.offset;
+        }
+        match joint.q_index {
+            Some(qi) => q[qi],
+            None => 0.0,
+        }
+    }
+
+    /// [`RobotModel::joint_value`] for every joint, indexed like `joints`.
+    pub fn joint_values(&self, q: &[f64]) -> Vec<f64> {
+        (0..self.joints.len())
+            .map(|ji| self.joint_value(ji, q))
+            .collect()
+    }
+
+    /// Joints that follow another joint, in model order.
+    pub fn mimic_joints(&self) -> Vec<usize> {
+        (0..self.joints.len())
+            .filter(|&ji| self.joints[ji].mimic.is_some())
+            .collect()
     }
 
     fn is_ancestor_or_self(&self, ancestor: usize, link: usize) -> bool {
@@ -338,6 +408,13 @@ impl RobotModel {
             })
             .collect();
 
+        let joint_index: HashMap<&str, usize> = robot
+            .joints
+            .iter()
+            .enumerate()
+            .map(|(i, j)| (j.name.as_str(), i))
+            .collect();
+
         let mut joints = Vec::with_capacity(robot.joints.len());
         for (ji, j) in robot.joints.iter().enumerate() {
             let joint_type = match j.joint_type.as_str() {
@@ -372,6 +449,23 @@ impl RobotModel {
                 }),
                 _ => None,
             };
+            let mimic = j
+                .mimic
+                .as_ref()
+                .map(|m| {
+                    joint_index
+                        .get(m.joint.as_str())
+                        .map(|&source_joint| JointMimic {
+                            source_joint,
+                            multiplier: m.multiplier,
+                            offset: m.offset,
+                        })
+                        .ok_or_else(|| ModelError::UnknownMimicSource {
+                            joint: j.name.clone(),
+                            driver: m.joint.clone(),
+                        })
+                })
+                .transpose()?;
             let _ = ji;
             joints.push(Joint {
                 name: j.name.clone(),
@@ -382,6 +476,7 @@ impl RobotModel {
                 parent_link,
                 child_link,
                 q_index: None,
+                mimic,
             });
         }
 
@@ -390,9 +485,9 @@ impl RobotModel {
 
     /// Builds a model from converted parts, computing the tree invariants:
     /// per-link parent joints, root detection, breadth-first joint order,
-    /// q-index assignment, and loop rejection. Callers may leave
-    /// `Joint::q_index` and `Link::parent_joint` unset — both are assigned
-    /// here. This is the entry point for non-URDF importers.
+    /// q-index assignment, mimic resolution, and loop rejection. Callers may
+    /// leave `Joint::q_index` and `Link::parent_joint` unset — both are
+    /// assigned here. This is the entry point for non-URDF importers.
     pub fn from_parts(
         name: String,
         mut links: Vec<Link>,
@@ -402,6 +497,10 @@ impl RobotModel {
         for link in &mut links {
             link.parent_joint = None;
         }
+        for joint in &mut joints {
+            joint.q_index = None;
+        }
+        flatten_mimics(&mut joints)?;
         for (ji, j) in joints.iter().enumerate() {
             if links[j.child_link].parent_joint.is_some() {
                 return Err(ModelError::MultipleParents(
@@ -438,7 +537,7 @@ impl RobotModel {
         while let Some(li) = queue.pop_front() {
             for &ji in &children[li] {
                 joint_order.push(ji);
-                if joints[ji].joint_type.dof() > 0 {
+                if joints[ji].joint_type.dof() > 0 && joints[ji].mimic.is_none() {
                     joints[ji].q_index = Some(actuated_joints.len());
                     actuated_joints.push(ji);
                 }
@@ -462,6 +561,57 @@ impl RobotModel {
             source,
         })
     }
+}
+
+/// Rewrites every mimic relation to point straight at a joint that carries
+/// a DOF, so a mimic joint's value is one multiply-add away from `q`. A
+/// joint mimicking a mimic joint composes: following `a = m1*b + o1` with
+/// `b = m2*c + o2` gives `a = m1*m2*c + m1*o2 + o1`. URDF does not forbid
+/// such chains, and nothing downstream should have to walk them.
+fn flatten_mimics(joints: &mut [Joint]) -> Result<(), ModelError> {
+    let count = joints.len();
+    for ji in 0..count {
+        let Some(mut mimic) = joints[ji].mimic else {
+            continue;
+        };
+        if joints[ji].joint_type.dof() == 0 {
+            return Err(ModelError::MimicOnFixedJoint(joints[ji].name.clone()));
+        }
+        // Bounded by the joint count: a longer walk can only be a cycle.
+        let mut resolved = false;
+        for _ in 0..count {
+            if mimic.source_joint >= count {
+                return Err(ModelError::UnknownMimicSource {
+                    joint: joints[ji].name.clone(),
+                    driver: format!("joint index {}", mimic.source_joint),
+                });
+            }
+            if mimic.source_joint == ji {
+                return Err(ModelError::MimicCycle(joints[ji].name.clone()));
+            }
+            let source = &joints[mimic.source_joint];
+            if source.joint_type.dof() == 0 {
+                return Err(ModelError::MimicSourceNotActuated {
+                    joint: joints[ji].name.clone(),
+                    driver: source.name.clone(),
+                });
+            }
+            let Some(next) = source.mimic else {
+                resolved = true;
+                break;
+            };
+            mimic = JointMimic {
+                source_joint: next.source_joint,
+                multiplier: mimic.multiplier * next.multiplier,
+                offset: mimic.multiplier * next.offset + mimic.offset,
+            };
+        }
+        if !resolved {
+            return Err(ModelError::MimicCycle(joints[ji].name.clone()));
+        }
+        joints[ji].mimic = Some(mimic);
+    }
+    Ok(())
 }
 
 /// Converts a URDF pose (xyz + fixed-axis rpy) to an isometry.
@@ -551,6 +701,146 @@ mod tests {
       </joint>
     </robot>
     "#;
+
+    /// The same gripper wired as a real one: the right finger mirrors the
+    /// left through `<mimic>`, so the pair costs a single DOF.
+    const MIMIC_GRIPPER: &str = r#"
+    <robot name="arm">
+      <link name="base"/>
+      <link name="wrist"/>
+      <link name="left"/>
+      <link name="right"/>
+      <joint name="elbow" type="revolute">
+        <parent link="base"/><child link="wrist"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/>
+      </joint>
+      <joint name="finger_left" type="prismatic">
+        <parent link="wrist"/><child link="left"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+      </joint>
+      <joint name="finger_right" type="prismatic">
+        <parent link="wrist"/><child link="right"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="-0.04" upper="0" effort="1" velocity="1"/>
+        <mimic joint="finger_left" multiplier="-1" offset="0.005"/>
+      </joint>
+    </robot>
+    "#;
+
+    #[test]
+    fn mimic_joints_cost_no_dof_and_follow_their_source() {
+        let model = RobotModel::from_urdf_str(MIMIC_GRIPPER).unwrap();
+        assert_eq!(model.dof(), 2);
+        assert_eq!(model.actuated_joint_names(), vec!["elbow", "finger_left"]);
+
+        let right = model.joint_index("finger_right").unwrap();
+        assert_eq!(model.joints[right].q_index, None);
+        let mimic = model.joints[right].mimic.unwrap();
+        assert_eq!(
+            mimic.source_joint,
+            model.joint_index("finger_left").unwrap()
+        );
+        assert_eq!((mimic.multiplier, mimic.offset), (-1.0, 0.005));
+
+        // q = [elbow, finger_left]; the right finger follows the formula.
+        let q = [0.2, 0.03];
+        assert_eq!(model.joint_value(right, &q), -0.03 + 0.005);
+        assert_eq!(
+            model.joint_value(model.joint_index("elbow").unwrap(), &q),
+            0.2
+        );
+        assert_eq!(model.mimic_joints(), vec![right]);
+        // Fixed joints report 0 rather than reading `q`.
+        let chain = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let tool = chain.joint_index("tool_joint").unwrap();
+        assert_eq!(chain.joint_value(tool, &[0.5]), 0.0);
+    }
+
+    #[test]
+    fn mimic_chains_are_flattened_to_a_dof() {
+        // c mimics b mimics a: c = 3*(2*qa + 0.5) + 0.25.
+        let urdf = r#"
+        <robot name="chain">
+          <link name="l0"/><link name="l1"/><link name="l2"/><link name="l3"/>
+          <joint name="a" type="revolute">
+            <parent link="l0"/><child link="l1"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="1" velocity="1"/>
+          </joint>
+          <joint name="b" type="revolute">
+            <parent link="l1"/><child link="l2"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="1" velocity="1"/>
+            <mimic joint="a" multiplier="2" offset="0.5"/>
+          </joint>
+          <joint name="c" type="revolute">
+            <parent link="l2"/><child link="l3"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="1" velocity="1"/>
+            <mimic joint="b" multiplier="3" offset="0.25"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        assert_eq!(model.dof(), 1);
+        let a = model.joint_index("a").unwrap();
+        let c = model.joints[model.joint_index("c").unwrap()].mimic.unwrap();
+        assert_eq!(c.source_joint, a);
+        assert_eq!((c.multiplier, c.offset), (6.0, 1.75));
+        assert_eq!(model.joint_values(&[1.0]), vec![1.0, 2.5, 7.75]);
+    }
+
+    #[test]
+    fn rejects_broken_mimic_declarations() {
+        let joint = |extra: &str| {
+            format!(
+                r#"
+                <robot name="r">
+                  <link name="a"/><link name="b"/><link name="c"/>
+                  <joint name="j1" type="fixed">
+                    <parent link="a"/><child link="b"/>
+                  </joint>
+                  <joint name="j2" type="revolute">
+                    <parent link="b"/><child link="c"/>
+                    <axis xyz="0 0 1"/>
+                    <limit lower="-1" upper="1" effort="1" velocity="1"/>
+                    {extra}
+                  </joint>
+                </robot>"#
+            )
+        };
+        let err = RobotModel::from_urdf_str(&joint(r#"<mimic joint="nope"/>"#)).unwrap_err();
+        assert!(
+            matches!(err, ModelError::UnknownMimicSource { .. }),
+            "{err}"
+        );
+        // A fixed joint has no value to follow.
+        let err = RobotModel::from_urdf_str(&joint(r#"<mimic joint="j1"/>"#)).unwrap_err();
+        assert!(
+            matches!(err, ModelError::MimicSourceNotActuated { .. }),
+            "{err}"
+        );
+        let err = RobotModel::from_urdf_str(&joint(r#"<mimic joint="j2"/>"#)).unwrap_err();
+        assert!(matches!(err, ModelError::MimicCycle(_)), "{err}");
+    }
+
+    #[test]
+    fn mimic_ancestors_report_the_joint_that_drives_them() {
+        let model = RobotModel::from_urdf_str(MIMIC_GRIPPER).unwrap();
+        let names = |link: &str| {
+            let mut out: Vec<String> = model
+                .driving_joints(model.link_index(link).unwrap())
+                .into_iter()
+                .map(|ji| model.joints[ji].name.clone())
+                .collect();
+            out.sort();
+            out
+        };
+        // Moving the right fingertip means moving `finger_left`.
+        assert_eq!(names("right"), vec!["elbow", "finger_left"]);
+        assert_eq!(names("left"), vec!["elbow", "finger_left"]);
+    }
 
     #[test]
     fn tool_mount_is_the_link_the_tool_hangs_off() {

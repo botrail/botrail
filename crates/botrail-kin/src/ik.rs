@@ -85,11 +85,20 @@ pub fn jacobian(model: &RobotModel, poses: &[Isometry3<f64>], link: usize) -> DM
 
     let p_end = poses[link].translation.vector;
     let mut jac = DMatrix::zeros(6, model.dof());
-    for (col, &ji) in model.actuated_joints.iter().enumerate() {
+    for (ji, joint) in model.joints.iter().enumerate() {
         if !on_chain[ji] {
             continue;
         }
-        let joint = &model.joints[ji];
+        // A mimic joint moves with its source at `multiplier` times the
+        // rate, so its twist belongs in the source's column — the chain
+        // rule, not a column of its own (it has no DOF to own one).
+        let (driver, scale) = match joint.mimic {
+            Some(m) => (m.source_joint, m.multiplier),
+            None => (ji, 1.0),
+        };
+        let Some(col) = model.joints[driver].q_index else {
+            continue;
+        };
         // The joint frame coincides with the child link frame; rotation about
         // its own axis leaves the axis invariant, so the child pose rotation
         // maps the local axis to world coordinates.
@@ -97,14 +106,18 @@ pub fn jacobian(model: &RobotModel, poses: &[Isometry3<f64>], link: usize) -> DM
         match joint.joint_type {
             JointType::Revolute | JointType::Continuous => {
                 let p_joint = poses[joint.child_link].translation.vector;
-                let linear = world_axis.cross(&(p_end - p_joint));
-                jac.fixed_view_mut::<3, 1>(0, col).copy_from(&linear);
-                jac.fixed_view_mut::<3, 1>(3, col).copy_from(&world_axis);
+                let linear = world_axis.cross(&(p_end - p_joint)) * scale;
+                let angular = world_axis * scale;
+                let mut lin = jac.fixed_view_mut::<3, 1>(0, col);
+                lin += linear;
+                let mut ang = jac.fixed_view_mut::<3, 1>(3, col);
+                ang += angular;
             }
             JointType::Prismatic => {
-                jac.fixed_view_mut::<3, 1>(0, col).copy_from(&world_axis);
+                let mut lin = jac.fixed_view_mut::<3, 1>(0, col);
+                lin += world_axis * scale;
             }
-            JointType::Fixed => unreachable!("fixed joints are not actuated"),
+            JointType::Fixed => {}
         }
     }
     jac
@@ -274,6 +287,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Planar 2R whose second joint follows the first at half rate: one
+    /// DOF, two moving joints on the chain to the tool.
+    const MIMIC_CHAIN: &str = r#"
+    <robot name="coupled">
+      <link name="base"/><link name="link1"/><link name="link2"/><link name="tool"/>
+      <joint name="q1" type="revolute">
+        <parent link="base"/><child link="link1"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3" upper="3" effort="1" velocity="1"/>
+      </joint>
+      <joint name="q2" type="revolute">
+        <parent link="link1"/><child link="link2"/>
+        <origin xyz="1 0 0"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3" upper="3" effort="1" velocity="1"/>
+        <mimic joint="q1" multiplier="0.5" offset="0.1"/>
+      </joint>
+      <joint name="tip" type="fixed">
+        <parent link="link2"/><child link="tool"/>
+        <origin xyz="1 0 0"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn jacobian_folds_mimic_joints_into_their_source() {
+        let model = RobotModel::from_urdf_str(MIMIC_CHAIN).unwrap();
+        assert_eq!(model.dof(), 1);
+        let tool = model.link_index("tool").unwrap();
+        let q = [0.35];
+        let poses = forward_kinematics(&model, &q).unwrap();
+        let jac = jacobian(&model, &poses, tool);
+
+        // Finite differences over the single DOF move both joints, so a
+        // Jacobian that ignored the mimic term would be off by its share.
+        let h = 1e-7;
+        let poses_p = forward_kinematics(&model, &[q[0] + h]).unwrap();
+        let dp = (poses_p[tool].translation.vector - poses[tool].translation.vector) / h;
+        let dr = (poses_p[tool].rotation * poses[tool].rotation.inverse()).scaled_axis() / h;
+        for row in 0..3 {
+            assert!(
+                (jac[(row, 0)] - dp[row]).abs() < 1e-5,
+                "linear mismatch at {row}: {} vs {}",
+                jac[(row, 0)],
+                dp[row]
+            );
+            assert!(
+                (jac[(row + 3, 0)] - dr[row]).abs() < 1e-5,
+                "angular mismatch at {row}: {} vs {}",
+                jac[(row + 3, 0)],
+                dr[row]
+            );
+        }
+        // The coupled joint turns 1.5x as fast as the DOF alone would.
+        assert!((jac[(5, 0)] - 1.5).abs() < 1e-9, "{}", jac[(5, 0)]);
     }
 
     #[test]

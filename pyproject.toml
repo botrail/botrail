@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/neka-nat/botrail"
+Repository = "https://github.com/botrail/botrail"
 
 [dependency-groups]
 dev = ["pytest>=8"]

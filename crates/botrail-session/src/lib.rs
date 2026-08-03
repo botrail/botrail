@@ -1303,6 +1303,7 @@ mod tests {
             parent_link: 0,
             child_link: 1,
             q_index: None,
+            mimic: None,
         }];
         let model = botrail_model::RobotModel::from_parts(
             "usdbot".into(),

@@ -3,6 +3,7 @@
 mod hub;
 mod server;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -105,6 +106,51 @@ impl Robot {
     #[getter]
     fn joint_limits(&self) -> Vec<Option<(f64, f64)>> {
         self.inner.actuated_joint_limits()
+    }
+
+    /// Joints that follow another joint (URDF `<mimic>`, USD
+    /// `PhysxMimicJointAPI`) instead of carrying a DOF of their own:
+    /// `{joint: (source joint, multiplier, offset)}`. Their value is
+    /// `multiplier * <source position> + offset`, and they never appear in
+    /// `joint_names` or in a joint position vector.
+    #[getter]
+    fn mimic_joints(&self) -> BTreeMap<String, (String, f64, f64)> {
+        self.inner
+            .mimic_joints()
+            .into_iter()
+            .map(|ji| {
+                let joint = &self.inner.joints[ji];
+                let mimic = joint.mimic.expect("listed as a mimic joint");
+                (
+                    joint.name.clone(),
+                    (
+                        self.inner.joints[mimic.source_joint].name.clone(),
+                        mimic.multiplier,
+                        mimic.offset,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Value of every joint at `positions`, keyed by joint name: the DOF
+    /// value for actuated joints, the mimic relation for driven ones, and
+    /// 0 for fixed joints.
+    fn joint_values(&self, positions: Vec<f64>) -> PyResult<BTreeMap<String, f64>> {
+        if positions.len() != self.inner.dof() {
+            return Err(PyValueError::new_err(format!(
+                "expected {} joint positions, got {}",
+                self.inner.dof(),
+                positions.len()
+            )));
+        }
+        Ok(self
+            .inner
+            .joints
+            .iter()
+            .zip(self.inner.joint_values(&positions))
+            .map(|(joint, value)| (joint.name.clone(), value))
+            .collect())
     }
 
     #[getter]

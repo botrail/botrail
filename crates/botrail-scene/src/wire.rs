@@ -117,10 +117,25 @@ impl From<JointType> for JointTypeMsg {
 pub struct JointMsg {
     pub name: String,
     pub joint_type: JointTypeMsg,
-    /// Index into the joint position vector; `None` for fixed joints.
+    /// Index into the joint position vector; `None` for fixed and mimic
+    /// joints.
     pub q_index: Option<usize>,
     /// `[lower, upper]` position limits; `None` for fixed/continuous joints.
     pub limits: Option<[f64; 2]>,
+    /// Set when this joint follows another one instead of carrying a DOF.
+    pub mimic: Option<JointMimicMsg>,
+}
+
+/// A joint's coupling to the joint that drives it: the joint's value is
+/// `multiplier * <source position> + offset`. Clients need this to place a
+/// mimic joint (a gripper's second finger) when they run their own FK.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct JointMimicMsg {
+    /// Name of the driving joint; always one with a `q_index`.
+    pub joint: String,
+    pub multiplier: f64,
+    pub offset: f64,
 }
 
 /// Reference to the robot's source USD stage, for client-side rendering
@@ -910,6 +925,11 @@ impl SceneDescriptionMsg {
                             }
                             _ => None,
                         },
+                        mimic: joint.mimic.map(|m| JointMimicMsg {
+                            joint: model.joints[m.source_joint].name.clone(),
+                            multiplier: m.multiplier,
+                            offset: m.offset,
+                        }),
                     })
                     .collect();
                 RobotDescMsg {
@@ -1621,6 +1641,35 @@ mod tests {
         assert_eq!(robot["joints"][0]["joint_type"], "revolute");
         assert_eq!(robot["joints"][0]["q_index"], 0);
         assert_eq!(robot["tcp_link"], "tip");
+    }
+
+    #[test]
+    fn mimic_joints_are_described_for_client_side_fk() {
+        let urdf = r#"
+        <robot name="gripper_bot">
+          <link name="palm"/><link name="left"/><link name="right"/>
+          <joint name="finger_left" type="prismatic">
+            <parent link="palm"/><child link="left"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+          </joint>
+          <joint name="finger_right" type="prismatic">
+            <parent link="palm"/><child link="right"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-0.04" upper="0" effort="1" velocity="1"/>
+            <mimic joint="finger_left" multiplier="-1" offset="0.001"/>
+          </joint>
+        </robot>"#;
+        let scene = Scene::new(Arc::new(RobotModel::from_urdf_str(urdf).unwrap()));
+        let desc =
+            SceneDescriptionMsg::from_scene(&scene, |_| (String::new(), String::new()), |_| None);
+        let joints = &desc.robots[0].joints;
+        assert_eq!(joints[0].q_index, Some(0));
+        assert!(joints[0].mimic.is_none());
+        assert_eq!(joints[1].q_index, None);
+        let mimic = joints[1].mimic.as_ref().unwrap();
+        assert_eq!(mimic.joint, "finger_left");
+        assert_eq!((mimic.multiplier, mimic.offset), (-1.0, 0.001));
     }
 
     #[test]

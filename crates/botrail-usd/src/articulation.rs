@@ -42,6 +42,49 @@ use crate::{
     AnyPrim, SearchPathResolver, UsdImportError,
 };
 
+/// Every `PhysxMimicJointAPI` instance name (one per dof of a joint).
+const MIMIC_INSTANCES: [&str; 6] = ["rotX", "rotY", "rotZ", "transX", "transY", "transZ"];
+
+/// The API instance a revolute/prismatic joint's single dof answers to:
+/// its `physics:axis` letter under the prefix its type implies.
+fn axis_instance(joint_type: JointType, axis_token: Option<&str>) -> Option<&'static str> {
+    instance_for(
+        joint_type,
+        match axis_token {
+            Some("X") => 'X',
+            Some("Y") => 'Y',
+            _ => 'Z',
+        },
+    )
+}
+
+/// [`axis_instance`] from a raw (pre up-axis-fix) joint axis, which the
+/// importer always builds as an exact basis vector.
+fn raw_axis_instance(joint_type: JointType, axis: &Vector3<f64>) -> Option<&'static str> {
+    instance_for(
+        joint_type,
+        if axis.x != 0.0 {
+            'X'
+        } else if axis.y != 0.0 {
+            'Y'
+        } else {
+            'Z'
+        },
+    )
+}
+
+fn instance_for(joint_type: JointType, letter: char) -> Option<&'static str> {
+    match (joint_type, letter) {
+        (JointType::Revolute | JointType::Continuous, 'X') => Some("rotX"),
+        (JointType::Revolute | JointType::Continuous, 'Y') => Some("rotY"),
+        (JointType::Revolute | JointType::Continuous, _) => Some("rotZ"),
+        (JointType::Prismatic, 'X') => Some("transX"),
+        (JointType::Prismatic, 'Y') => Some("transY"),
+        (JointType::Prismatic, _) => Some("transZ"),
+        (JointType::Fixed, _) => None,
+    }
+}
+
 /// Untyped joint view granting the shared [`JointBase`] accessors
 /// (bodies, localPose0/1) for any concrete joint type.
 pub(crate) struct AnyJoint(pub(crate) Prim);
@@ -107,6 +150,19 @@ struct JointRecord {
     upper: Option<f64>,
     max_velocity: Option<f64>,
     effort: f64,
+    /// `PhysxMimicJointAPI`, as authored (USD units).
+    mimic: Option<MimicRecord>,
+}
+
+/// One `PhysxMimicJointAPI` instance, straight off the prim.
+struct MimicRecord {
+    /// Prim path of the reference joint (`...:referenceJoint`).
+    reference: String,
+    /// The reference joint's coupled axis (`...:referenceJointAxis`), e.g.
+    /// `rotZ`; `None` when unauthored.
+    reference_axis: Option<String>,
+    gearing: f64,
+    offset: f64,
 }
 
 pub fn import_robot(
@@ -411,8 +467,10 @@ impl RobotBuilder<'_> {
                 parent_link: parent,
                 child_link: child,
                 q_index: None,
+                mimic: None,
             });
         }
+        self.resolve_mimics(&joints, &mut model_joints);
 
         let root_prim = prim_by_path[root_path.as_str()];
         let name = root_prim
@@ -539,6 +597,8 @@ impl RobotBuilder<'_> {
         .map(f64::from)
         .unwrap_or(0.0);
 
+        let mimic = self.read_mimic(info, joint_type, axis_token.as_ref().map(|t| t.as_str()));
+
         Ok(Some(JointRecord {
             name: info.path.clone(),
             joint_type,
@@ -551,7 +611,129 @@ impl RobotBuilder<'_> {
             upper,
             max_velocity,
             effort,
+            mimic,
         }))
+    }
+
+    /// Reads `PhysxMimicJointAPI` off a joint prim. The API is
+    /// multiple-apply, keyed by the *mimic* joint's own axis
+    /// (`rotX`..`transZ`); a revolute/prismatic joint has exactly one axis,
+    /// so only that instance can be represented.
+    fn read_mimic(
+        &mut self,
+        info: &PrimInfo,
+        joint_type: JointType,
+        axis_token: Option<&str>,
+    ) -> Option<MimicRecord> {
+        let own_instance = axis_instance(joint_type, axis_token)?;
+        let rel = |instance: &str| {
+            info.prim
+                .relationship(format!("physxMimicJoint:{instance}:referenceJoint").as_str())
+                .targets()
+                .ok()
+                .and_then(|t| t.first().map(|p| p.to_string()))
+        };
+        let Some(reference) = rel(own_instance) else {
+            // Report a coupling authored on an axis this joint does not
+            // move rather than dropping it silently.
+            if let Some(other) = MIMIC_INSTANCES
+                .iter()
+                .find(|instance| **instance != own_instance && rel(instance).is_some())
+            {
+                self.warnings.push(format!(
+                    "{}: mimic joint authored on `{other}` but the joint moves about `{own_instance}`; ignored",
+                    info.path
+                ));
+            }
+            return None;
+        };
+        let attr = |suffix: &str| {
+            info.prim
+                .attribute(format!("physxMimicJoint:{own_instance}:{suffix}").as_str())
+                .get::<f32>()
+                .ok()
+                .flatten()
+                .map(f64::from)
+        };
+        Some(MimicRecord {
+            reference,
+            reference_axis: info
+                .prim
+                .attribute(format!("physxMimicJoint:{own_instance}:referenceJointAxis").as_str())
+                .get::<openusd::tf::Token>()
+                .ok()
+                .flatten()
+                .map(|t| t.to_string()),
+            gearing: attr("gearing").unwrap_or(1.0),
+            offset: attr("offset").unwrap_or(0.0),
+        })
+    }
+
+    /// Turns each joint's `PhysxMimicJointAPI` into a model mimic relation.
+    ///
+    /// PhysX constrains the pair as `qA + G·qB + γ = 0`, i.e.
+    /// `qA = -G·qB - γ`, with USD's joint units (degrees for angular dofs,
+    /// stage units for linear ones). Converting both sides into botrail's
+    /// radians/meters scales the gearing by the two joints' unit factors and
+    /// the offset by the mimic joint's own.
+    fn resolve_mimics(&mut self, records: &[JointRecord], model_joints: &mut [Joint]) {
+        let index: HashMap<String, usize> = model_joints
+            .iter()
+            .enumerate()
+            .map(|(i, j)| (j.name.clone(), i))
+            .collect();
+        let record_by_name: HashMap<&str, &JointRecord> =
+            records.iter().map(|r| (r.name.as_str(), r)).collect();
+
+        for record in records {
+            let Some(mimic) = &record.mimic else { continue };
+            let Some(&ji) = index.get(record.name.as_str()) else {
+                continue; // world anchor: no model joint to carry the relation
+            };
+            let Some(&source_joint) = index.get(mimic.reference.as_str()) else {
+                self.warnings.push(format!(
+                    "{}: mimic reference joint `{}` is not part of this articulation; ignored",
+                    record.name, mimic.reference
+                ));
+                continue;
+            };
+            let Some(source) = record_by_name.get(mimic.reference.as_str()) else {
+                continue;
+            };
+            // The model gives every joint one axis, so a coupling to some
+            // other axis of the reference joint cannot be represented.
+            let source_instance = raw_axis_instance(source.joint_type, &source.axis);
+            if let (Some(authored), Some(actual)) = (&mimic.reference_axis, source_instance) {
+                if authored != actual {
+                    self.warnings.push(format!(
+                        "{}: mimic references `{}` on axis `{authored}`, which is not the axis it moves about (`{actual}`); ignored",
+                        record.name, mimic.reference
+                    ));
+                    continue;
+                }
+            }
+            let (Some(k_a), Some(k_b)) = (
+                self.joint_unit(record.joint_type),
+                self.joint_unit(source.joint_type),
+            ) else {
+                continue;
+            };
+            model_joints[ji].mimic = Some(botrail_model::JointMimic {
+                source_joint,
+                multiplier: -mimic.gearing * k_a / k_b,
+                offset: -mimic.offset * k_a,
+            });
+        }
+    }
+
+    /// botrail units per USD unit for a joint's position: degrees to
+    /// radians for angular dofs, stage units to meters for linear ones.
+    fn joint_unit(&self, joint_type: JointType) -> Option<f64> {
+        match joint_type {
+            JointType::Revolute | JointType::Continuous => Some(std::f64::consts::PI / 180.0),
+            JointType::Prismatic => Some(self.mpu),
+            JointType::Fixed => None,
+        }
     }
 
     fn joint_limits(&self, joint: &JointRecord) -> Option<JointLimits> {
@@ -867,6 +1049,128 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         imported
+    }
+
+    /// Coupled joints on a centimetre stage: `j2` follows `j1` (angular,
+    /// degrees) and `j4` follows `j3` (linear, stage units), so both unit
+    /// conversions of `PhysxMimicJointAPI` are exercised.
+    const MIMIC: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "left" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "right" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </Robot/base>
+        }
+
+        def PhysicsRevoluteJoint "j1"
+        {
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link1>
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+
+        def PhysicsRevoluteJoint "j2" (prepend apiSchemas = ["PhysxMimicJointAPI:rotZ"])
+        {
+            rel physics:body0 = </Robot/link1>
+            rel physics:body1 = </Robot/link2>
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+            float physxMimicJoint:rotZ:gearing = -0.5
+            float physxMimicJoint:rotZ:offset = 30
+            rel physxMimicJoint:rotZ:referenceJoint = </Robot/joints/j1>
+            uniform token physxMimicJoint:rotZ:referenceJointAxis = "rotZ"
+        }
+
+        def PhysicsPrismaticJoint "j3"
+        {
+            rel physics:body0 = </Robot/link2>
+            rel physics:body1 = </Robot/left>
+            uniform token physics:axis = "X"
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 4
+        }
+
+        def PhysicsPrismaticJoint "j4" (prepend apiSchemas = ["PhysxMimicJointAPI:transX"])
+        {
+            rel physics:body0 = </Robot/left>
+            rel physics:body1 = </Robot/right>
+            uniform token physics:axis = "X"
+            float physics:lowerLimit = -4
+            float physics:upperLimit = 0
+            float physxMimicJoint:transX:gearing = 1
+            float physxMimicJoint:transX:offset = 2
+            rel physxMimicJoint:transX:referenceJoint = </Robot/joints/j3>
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn mimic_joints_import_as_coupled_dofs() {
+        let imported = import_arm(MIMIC);
+        let model = &imported.model;
+        // Four moving joints, two of them driven: two DOFs.
+        assert_eq!(model.dof(), 2, "{:?}", imported.warnings);
+        assert_eq!(
+            model.actuated_joint_names(),
+            vec!["/Robot/joints/j1", "/Robot/joints/j3"]
+        );
+
+        // PhysX couples the pair as qA + G*qB + gamma = 0, so a gearing of
+        // -0.5 means the joint turns at +0.5x, and the 30 deg offset lands
+        // as -30 deg in radians.
+        let angular = model.joints[model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert_eq!(
+            angular.source_joint,
+            model.joint_index("/Robot/joints/j1").unwrap()
+        );
+        assert!((angular.multiplier - 0.5).abs() < 1e-12);
+        assert!((angular.offset + 30f64.to_radians()).abs() < 1e-12);
+
+        // Linear: gearing is unitless between two prismatic joints, the
+        // offset converts out of centimetres.
+        let linear = model.joints[model.joint_index("/Robot/joints/j4").unwrap()]
+            .mimic
+            .unwrap();
+        assert!((linear.multiplier + 1.0).abs() < 1e-12);
+        assert!((linear.offset + 0.02).abs() < 1e-12, "{}", linear.offset);
+    }
+
+    #[test]
+    fn mimic_on_an_axis_the_joint_does_not_move_is_reported() {
+        let usda = MIMIC
+            .replace("PhysxMimicJointAPI:transX", "PhysxMimicJointAPI:rotX")
+            .replace("physxMimicJoint:transX", "physxMimicJoint:rotX");
+        let imported = import_arm(&usda);
+        // j4 keeps its own DOF, and the dropped coupling is reported.
+        assert_eq!(imported.model.dof(), 3);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/joints/j4") && w.contains("rotX")),
+            "{:?}",
+            imported.warnings
+        );
     }
 
     /// Two arms sharing one mount body: each arm is its own articulation,

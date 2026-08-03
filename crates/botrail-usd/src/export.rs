@@ -1104,8 +1104,13 @@ fn author_joint_states(
 ) {
     use botrail_model::JointType;
     let root_prefix = format!("{}/", info.root_path);
-    for joint in &robot.model.joints {
-        let Some(qi) = joint.q_index else { continue };
+    for (ji, joint) in robot.model.joints.iter().enumerate() {
+        // Mimic joints carry no `q` entry but do move: author the value the
+        // model derives for them, so a reader that trusts joint state sees
+        // the whole articulation, gripper included.
+        if joint.q_index.is_none() && joint.mimic.is_none() {
+            continue;
+        }
         let Some(rel) = joint.name.strip_prefix(&root_prefix) else {
             warnings.push(format!(
                 "joint `{}` lies outside the articulation root; joint state not authored",
@@ -1131,7 +1136,10 @@ fn author_joint_states(
         let samples: sdf::TimeSampleMap = codes
             .iter()
             .zip(joint_samples)
-            .map(|(code, q)| (*code, Value::Float(to_stage(q[qi], info.frame.mpu) as f32)))
+            .map(|(code, q)| {
+                let value = robot.model.joint_value(ji, q);
+                (*code, Value::Float(to_stage(value, info.frame.mpu) as f32))
+            })
             .collect();
         layer.attr(
             &prim,
@@ -1706,6 +1714,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn mimic_joints_get_their_derived_joint_state() {
+        // `j2` follows `j1` at half rate (PhysX gearing -0.5), leaving one
+        // DOF; the joint it drives still has to show up in the animation.
+        let usda = ARM.replace(
+            "        def PhysicsRevoluteJoint \"j2\"\n        {",
+            "        def PhysicsRevoluteJoint \"j2\" (prepend apiSchemas = \
+             [\"PhysxMimicJointAPI:rotY\"])\n        {\n            \
+             float physxMimicJoint:rotY:gearing = -0.5\n            \
+             rel physxMimicJoint:rotY:referenceJoint = </Robot/joints/j1>\n            \
+             uniform token physxMimicJoint:rotY:referenceJointAxis = \"rotZ\"",
+        );
+        let dir = temp_dir("mimic");
+        std::fs::write(dir.join("robot.usda"), &usda).unwrap();
+        let model = import_robot(
+            &dir.join("robot.usda"),
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .model;
+        assert_eq!(model.dof(), 1);
+
+        let times = [0.0, 0.5];
+        let configs = [vec![0.0], vec![0.8]];
+        let link_poses: Vec<Vec<Isometry3<f64>>> = configs
+            .iter()
+            .map(|q| botrail_kin::forward_kinematics(&model, q).unwrap())
+            .collect();
+        let joint_samples = configs.to_vec();
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
+        }];
+        let warnings = write_animation(
+            &dir.join("anim.usda"),
+            &AnimationInput {
+                robots: &robots,
+                times: &times,
+                objects: &[],
+            },
+            &ExportOptions::default(),
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let stage = Stage::builder()
+            .resolver(SearchPathResolver::new(vec![dir.clone()]))
+            .open(&dir.join("anim.usda").display().to_string())
+            .unwrap();
+        let state_at = |joint: &str, t: f64| -> f64 {
+            let raw = stage
+                .attribute(
+                    sdf::path(format!("/World/Robot/joints/{joint}"))
+                        .unwrap()
+                        .append_property("state:angular:physics:position")
+                        .unwrap(),
+                )
+                .get_at::<sdf::Value>(TimeCode::new(t * 60.0))
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing joint state on {joint}"));
+            match raw {
+                sdf::Value::Float(v) => v as f64,
+                sdf::Value::Double(v) => v,
+                other => panic!("unexpected joint state value {other:?}"),
+            }
+        };
+        for (f, t) in times.iter().enumerate() {
+            assert!((state_at("j1", *t) - configs[f][0].to_degrees()).abs() < 1e-3);
+            assert!(
+                (state_at("j2", *t) - (0.5 * configs[f][0]).to_degrees()).abs() < 1e-3,
+                "frame {f}: {}",
+                state_at("j2", *t)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

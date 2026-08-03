@@ -3430,6 +3430,49 @@ mod tracking_tests {
         assert!(err.contains("wrist"), "{err}");
     }
 
+    /// A mimic joint is commandable, just not directly — the rejection has
+    /// to name the joint that actually drives it.
+    #[test]
+    fn ramping_a_mimic_joint_points_at_its_source() {
+        let urdf = r#"
+        <robot name="arm">
+          <link name="base"/><link name="left"/><link name="right"/>
+          <joint name="finger_left" type="prismatic">
+            <parent link="base"/><child link="left"/>
+            <origin xyz="0 0.02 0"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+          </joint>
+          <joint name="finger_right" type="prismatic">
+            <parent link="base"/><child link="right"/>
+            <origin xyz="0 -0.02 0"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-0.04" upper="0" effort="1" velocity="1"/>
+            <mimic joint="finger_left" multiplier="-1"/>
+          </joint>
+        </robot>"#;
+        let mut scene = Scene::new(std::sync::Arc::new(
+            botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
+        ));
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![step(
+                "close",
+                vec![Action::StartRamp {
+                    robot: None,
+                    targets: vec![("finger_right".into(), -0.02)],
+                    duration: 0.4,
+                }],
+                Condition::Done,
+            )],
+        });
+        let err = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .expect_err("a driven joint cannot be ramped on its own")
+            .to_string();
+        assert!(err.contains("follows `finger_left`"), "{err}");
+    }
+
     /// Authoring-time rules: one track at a time, no stray release, and no
     /// planned motions while the frame is moving.
     #[test]
