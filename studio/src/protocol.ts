@@ -38,6 +38,8 @@ export type { SensorWatchMsg } from "./generated/SensorWatchMsg";
 export type { DeviceMsg } from "./generated/DeviceMsg";
 export type { DeviceKindMsg } from "./generated/DeviceKindMsg";
 export type { DeviceCommandMsg } from "./generated/DeviceCommandMsg";
+export type { VehiclePathMsg } from "./generated/VehiclePathMsg";
+export type { VehicleStationMsg } from "./generated/VehicleStationMsg";
 export type { JointMsg } from "./generated/JointMsg";
 export type { JointMimicMsg } from "./generated/JointMimicMsg";
 export type { RobotDescMsg } from "./generated/RobotDescMsg";

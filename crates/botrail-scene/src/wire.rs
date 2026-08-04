@@ -441,6 +441,32 @@ pub enum DeviceKindMsg {
         zone_size: [f64; 3],
         source: String,
     },
+    /// A guided transport vehicle: drives station to station along an
+    /// authored path, carrying its body obstacles rigidly.
+    Vehicle {
+        path: VehiclePathMsg,
+        body: Vec<String>,
+        speed: f64,
+        turn_speed: f64,
+        start: String,
+    },
+}
+
+/// An authored vehicle guide path: floor waypoints plus named station
+/// stops (as waypoint indices).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct VehiclePathMsg {
+    pub waypoints: Vec<[f64; 2]>,
+    pub stations: Vec<VehicleStationMsg>,
+    pub ring: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct VehicleStationMsg {
+    pub name: String,
+    pub index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -449,8 +475,16 @@ pub enum DeviceKindMsg {
 pub enum DeviceCommandMsg {
     Start,
     Stop,
-    SetSpeed { speed: f64 },
-    MoveTo { position: f64 },
+    SetSpeed {
+        speed: f64,
+    },
+    MoveTo {
+        position: f64,
+    },
+    /// Send a vehicle to a named station; await with `device_done`.
+    Goto {
+        station: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1117,6 +1151,9 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 DeviceCommand::MoveTo(position) => DeviceCommandMsg::MoveTo {
                     position: *position,
                 },
+                DeviceCommand::Goto { station } => DeviceCommandMsg::Goto {
+                    station: station.clone(),
+                },
             },
         },
     }
@@ -1173,6 +1210,9 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
                 DeviceCommandMsg::Stop => DeviceCommand::Stop,
                 DeviceCommandMsg::SetSpeed { speed } => DeviceCommand::SetSpeed(*speed),
                 DeviceCommandMsg::MoveTo { position } => DeviceCommand::MoveTo(*position),
+                DeviceCommandMsg::Goto { station } => DeviceCommand::Goto {
+                    station: station.clone(),
+                },
             },
         },
     }
@@ -1375,6 +1415,30 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 zone_size: [zone_size.x, zone_size.y, zone_size.z],
                 source: source.clone(),
             },
+            DeviceKind::Vehicle {
+                path,
+                body,
+                speed,
+                turn_speed,
+                start,
+            } => DeviceKindMsg::Vehicle {
+                path: VehiclePathMsg {
+                    waypoints: path.waypoints.iter().map(|p| [p.x, p.y]).collect(),
+                    stations: path
+                        .stations
+                        .iter()
+                        .map(|(name, index)| VehicleStationMsg {
+                            name: name.clone(),
+                            index: *index,
+                        })
+                        .collect(),
+                    ring: path.ring,
+                },
+                body: body.clone(),
+                speed: *speed,
+                turn_speed: *turn_speed,
+                start: start.clone(),
+            },
         },
     }
 }
@@ -1431,6 +1495,31 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 zone_pose: zone_pose.into(),
                 zone_size: Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
                 source: source.clone(),
+            },
+            DeviceKindMsg::Vehicle {
+                path,
+                body,
+                speed,
+                turn_speed,
+                start,
+            } => DeviceKind::Vehicle {
+                path: crate::seq::VehiclePath {
+                    waypoints: path
+                        .waypoints
+                        .iter()
+                        .map(|p| nalgebra::Point2::new(p[0], p[1]))
+                        .collect(),
+                    stations: path
+                        .stations
+                        .iter()
+                        .map(|s| (s.name.clone(), s.index))
+                        .collect(),
+                    ring: path.ring,
+                },
+                body: body.clone(),
+                speed: *speed,
+                turn_speed: *turn_speed,
+                start: start.clone(),
             },
         },
     }

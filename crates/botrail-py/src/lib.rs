@@ -994,6 +994,123 @@ impl Scene {
         Ok(())
     }
 
+    /// Adds a guided transport vehicle (an AGV / AMR as the cell sees it):
+    /// it drives station to station along `path` — straight legs at
+    /// `speed`, in-place pivot turns at `turn_speed` — carrying the `body`
+    /// obstacles rigidly. Dispatch it with `bt.seq.goto(name, station)` and
+    /// await arrival with `bt.seq.device_done(name)`. The arrival heading
+    /// is the last leg's direction, so the waypoint before a station sets
+    /// how the vehicle docks. Body entries name obstacles exactly, or as
+    /// subtree prefixes (`"/World/AGV"` takes every obstacle under it).
+    #[pyo3(signature = (name, body, path, stations, speed = 0.5,
+                        turn_speed = std::f64::consts::FRAC_PI_2,
+                        start = None, ring = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_vehicle(
+        &self,
+        name: &str,
+        body: Vec<String>,
+        path: Vec<[f64; 2]>,
+        stations: std::collections::BTreeMap<String, usize>,
+        speed: f64,
+        turn_speed: f64,
+        start: Option<String>,
+        ring: bool,
+    ) -> PyResult<()> {
+        if path.len() < 2 {
+            return Err(PyValueError::new_err(format!(
+                "path needs at least 2 waypoints, got {}",
+                path.len()
+            )));
+        }
+        if stations.is_empty() {
+            return Err(PyValueError::new_err(
+                "stations is empty; name at least the stop the vehicle starts at",
+            ));
+        }
+        for (station, index) in &stations {
+            if *index >= path.len() {
+                return Err(PyValueError::new_err(format!(
+                    "station `{station}` points at waypoint {index}, \
+                     but the path has {}",
+                    path.len()
+                )));
+            }
+        }
+        if !(speed.is_finite() && speed > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "speed must be positive, got {speed}"
+            )));
+        }
+        if !(turn_speed.is_finite() && turn_speed > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "turn_speed must be positive, got {turn_speed}"
+            )));
+        }
+        // The default start is the lowest-index station (deterministic).
+        let start = match start {
+            Some(s) => {
+                if !stations.contains_key(&s) {
+                    return Err(PyValueError::new_err(format!(
+                        "start `{s}` is not a station (stations: {})",
+                        stations
+                            .keys()
+                            .map(|k| format!("`{k}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                s
+            }
+            None => stations
+                .iter()
+                .min_by_key(|(name, index)| (**index, (*name).clone()))
+                .map(|(name, _)| name.clone())
+                .expect("stations is non-empty"),
+        };
+        // Body entries: exact obstacle names, or subtree prefixes.
+        let known = self.hub.obstacle_names();
+        let mut members: Vec<String> = Vec::new();
+        for entry in &body {
+            if known.iter().any(|n| n == entry) {
+                members.push(entry.clone());
+                continue;
+            }
+            let prefix = format!("{}/", entry.trim_end_matches('/'));
+            let hits: Vec<String> = known
+                .iter()
+                .filter(|n| n.starts_with(&prefix))
+                .cloned()
+                .collect();
+            if hits.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "body entry `{entry}` matches no obstacle (exactly or as a prefix)"
+                )));
+            }
+            members.extend(hits);
+        }
+        let mut seen = std::collections::HashSet::new();
+        members.retain(|m| seen.insert(m.clone()));
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::Vehicle {
+                path: botrail_scene::seq::VehiclePath {
+                    waypoints: path
+                        .iter()
+                        .map(|p| nalgebra::Point2::new(p[0], p[1]))
+                        .collect(),
+                    stations: stations.into_iter().collect(),
+                    ring,
+                },
+                body: members,
+                speed,
+                turn_speed,
+                start,
+            },
+        });
+        Ok(())
+    }
+
     fn remove_device(&self, name: &str) -> PyResult<()> {
         self.hub.remove_device(name).map_err(scene_err)
     }

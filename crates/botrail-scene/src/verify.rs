@@ -139,6 +139,20 @@ fn apply_state(
                 pose.translation.vector += velocity * (t.clamp(*t0, *t1) - t0);
                 world.set_obstacle_pose(&track.name, pose)?;
             }
+            TrackSpan::Pivot {
+                t0,
+                t1,
+                from,
+                center,
+                omega,
+            } => {
+                if entered && world.attachment(&track.name).is_some() {
+                    world.detach_obstacle(&track.name)?;
+                }
+                let pose =
+                    crate::rollout::pivot_pose(from, center, omega * (t.clamp(*t0, *t1) - t0));
+                world.set_obstacle_pose(&track.name, pose)?;
+            }
         }
     }
     Ok(())

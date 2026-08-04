@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import agv_cell_demo  # noqa: E402
 import botrail as bt  # noqa: E402
 import demo  # noqa: E402
 import dual_cell_demo  # noqa: E402
@@ -44,12 +45,26 @@ def robot_instances(recording: Path) -> set:
     }
 
 
+def has_vehicle(recording: Path) -> bool:
+    """Does the recording animate an AGV? Its body is scenery, so it lands
+    under `/World/Env`, not beside the robots — the cell still has to be
+    rebuilt with the vehicle in it, or the body prims resolve to nothing
+    and the AGV sits frozen at the warehouse while its cycle plays."""
+    try:
+        return '"agv"' in recording.read_text()
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
 def cell_for(recording: Path) -> bt.Scene:
     """Rebuilds the cell the recording was baked from."""
     names = robot_instances(recording)
     if {"near", "far"} <= names:
         print(f"{recording}: two-arm cell ({', '.join(sorted(names))})")
         return dual_cell_demo.build_cell()
+    if has_vehicle(recording):
+        print(f"{recording}: single-arm cell + AGV")
+        return agv_cell_demo.build_scene()
     print(f"{recording}: single-arm cell")
     return demo.build_scene()
 

@@ -65,6 +65,19 @@ pub enum SeqError {
         link_a: String,
         link_b: String,
     },
+    /// A travelling vehicle's body met the environment. Travel is authored,
+    /// not planned, so this is the aisle check failing: widen the aisle,
+    /// move the shelf, or re-teach the path.
+    #[error(
+        "vehicle `{vehicle}` collides with `{obstacle}` at t = {t:.3}s \
+         (body part `{body}`); widen the aisle or re-teach the path"
+    )]
+    VehicleCollision {
+        t: f64,
+        vehicle: String,
+        body: String,
+        obstacle: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +164,33 @@ pub enum TrackSpan {
         from: Isometry3<f64>,
         velocity: nalgebra::Vector3<f64>,
     },
+    /// Turning in place with a vehicle: rotated about the vertical axis
+    /// through `center` at constant `omega` (rad/s, +Z right-hand). The
+    /// first rotating rigid motion a device produces — closed form, so any
+    /// resample rate is exact.
+    Pivot {
+        t0: f64,
+        t1: f64,
+        from: Isometry3<f64>,
+        /// Floor point of the pivot axis (its z is irrelevant).
+        center: nalgebra::Point3<f64>,
+        omega: f64,
+    },
+}
+
+/// Rigid rotation of `from` about the vertical line through `center` by
+/// `phi` radians.
+pub(crate) fn pivot_pose(
+    from: &Isometry3<f64>,
+    center: &nalgebra::Point3<f64>,
+    phi: f64,
+) -> Isometry3<f64> {
+    let rot = nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), phi);
+    let arm = from.translation.vector - center.coords;
+    Isometry3::from_parts(
+        nalgebra::Translation3::from(center.coords + rot * arm),
+        rot * from.rotation,
+    )
 }
 
 impl TrackSpan {
@@ -159,7 +199,8 @@ impl TrackSpan {
             TrackSpan::Hold { t1, .. }
             | TrackSpan::Stowed { t1, .. }
             | TrackSpan::Follow { t1, .. }
-            | TrackSpan::Linear { t1, .. } => t1,
+            | TrackSpan::Linear { t1, .. }
+            | TrackSpan::Pivot { t1, .. } => t1,
         }
     }
 
@@ -168,7 +209,8 @@ impl TrackSpan {
             TrackSpan::Hold { t0, t1, .. }
             | TrackSpan::Stowed { t0, t1, .. }
             | TrackSpan::Follow { t0, t1, .. }
-            | TrackSpan::Linear { t0, t1, .. } => (*t0, *t1),
+            | TrackSpan::Linear { t0, t1, .. }
+            | TrackSpan::Pivot { t0, t1, .. } => (*t0, *t1),
         }
     }
 }
@@ -254,6 +296,13 @@ impl SequenceTimeline {
                 pose.translation.vector += velocity * dt;
                 pose
             }
+            TrackSpan::Pivot {
+                t0,
+                t1,
+                from,
+                center,
+                omega,
+            } => pivot_pose(from, center, omega * (t.clamp(*t0, *t1) - t0)),
         })
     }
 
@@ -456,6 +505,184 @@ enum DeviceRuntime {
         /// Index into `devices` of the source this returns members to.
         source: usize,
     },
+    Vehicle {
+        name: String,
+        waypoints: Vec<nalgebra::Point2<f64>>,
+        stations: Vec<(String, usize)>,
+        ring: bool,
+        body: Vec<String>,
+        speed: f64,
+        turn_speed: f64,
+        /// SE(2) reference frame: floor position + yaw. The body rides this
+        /// frame's rigid motion; its own z never changes.
+        position: nalgebra::Point2<f64>,
+        heading: f64,
+        /// Waypoint index the vehicle is parked at (`None` while travelling).
+        at: Option<usize>,
+        /// Commanded station's waypoint index (`DeviceDone` = parked there).
+        target: usize,
+        /// Remaining legs of the active goto, front first.
+        legs: std::collections::VecDeque<Leg>,
+        lane: usize,
+    },
+}
+
+/// One piece of a vehicle's route.
+enum Leg {
+    /// Pivot in place to the absolute heading `to` at signed rate `omega`.
+    Turn { to: f64, omega: f64 },
+    /// Drive straight to `to` along unit `dir`.
+    Straight {
+        to: nalgebra::Point2<f64>,
+        dir: nalgebra::Vector2<f64>,
+    },
+}
+
+/// The net rigid motion a vehicle applied over one sub-interval of a tick.
+enum VehiclePiece {
+    Lin {
+        velocity: Vector3<f64>,
+    },
+    Piv {
+        center: nalgebra::Point3<f64>,
+        omega: f64,
+    },
+}
+
+/// One travelling vehicle's tick worth of motion: its name, body members,
+/// and exact sub-tick `(τ0, τ1, piece)` intervals.
+type VehicleMove = (String, Vec<String>, Vec<(f64, f64, VehiclePiece)>);
+
+/// Wraps to `(-π, π]` — the exact-π case turns counter-clockwise, fixed, so
+/// a 180° about-face is deterministic.
+fn wrap_angle(a: f64) -> f64 {
+    let mut a = a % std::f64::consts::TAU;
+    if a <= -std::f64::consts::PI {
+        a += std::f64::consts::TAU;
+    } else if a > std::f64::consts::PI {
+        a -= std::f64::consts::TAU;
+    }
+    a
+}
+
+/// The heading a parked vehicle faces: along the leg leaving its waypoint
+/// (wrapping on a ring), or along the leg arriving at it when nothing
+/// leaves (the open path's last waypoint).
+fn initial_heading(waypoints: &[nalgebra::Point2<f64>], ring: bool, at: usize) -> f64 {
+    let n = waypoints.len();
+    let dir_from = |i: usize, j: usize| {
+        let d = waypoints[j] - waypoints[i];
+        (d.norm() > 1e-9).then(|| d.y.atan2(d.x))
+    };
+    // The next distinct waypoint ahead, then the previous distinct one.
+    for step in 1..n {
+        let j = if ring {
+            (at + step) % n
+        } else if at + step < n {
+            at + step
+        } else {
+            break;
+        };
+        if let Some(h) = dir_from(at, j) {
+            return h;
+        }
+    }
+    for step in 1..n {
+        let j = if ring {
+            (at + n - (step % n)) % n
+        } else if step <= at {
+            at - step
+        } else {
+            break;
+        };
+        if let Some(h) = dir_from(j, at) {
+            return h;
+        }
+    }
+    0.0
+}
+
+/// Waypoint indices from `from` to `to` (exclusive of `from`, inclusive of
+/// `to`): the straight index walk on an open path; on a ring, whichever way
+/// around is shorter by distance (ties go forward).
+fn vehicle_route(
+    waypoints: &[nalgebra::Point2<f64>],
+    ring: bool,
+    from: usize,
+    to: usize,
+) -> Vec<usize> {
+    if from == to {
+        return Vec::new();
+    }
+    if !ring {
+        return if from < to {
+            ((from + 1)..=to).collect()
+        } else {
+            (to..from).rev().collect()
+        };
+    }
+    let n = waypoints.len();
+    let walk_by = |step: usize| {
+        let mut walk = Vec::new();
+        let mut i = from;
+        while i != to {
+            i = (i + step) % n;
+            walk.push(i);
+        }
+        walk
+    };
+    let forward = walk_by(1);
+    let backward = walk_by(n - 1);
+    let length = |walk: &[usize]| {
+        let mut prev = from;
+        let mut total = 0.0;
+        for &i in walk {
+            total += (waypoints[i] - waypoints[prev]).norm();
+            prev = i;
+        }
+        total
+    };
+    if length(&backward) + 1e-12 < length(&forward) {
+        backward
+    } else {
+        forward
+    }
+}
+
+/// Expands a route into turn/straight legs from the vehicle's current
+/// heading. Coincident waypoints contribute no leg.
+fn build_legs(
+    waypoints: &[nalgebra::Point2<f64>],
+    route: &[usize],
+    start: nalgebra::Point2<f64>,
+    heading: f64,
+    turn_speed: f64,
+) -> std::collections::VecDeque<Leg> {
+    let mut legs = std::collections::VecDeque::new();
+    let mut position = start;
+    let mut heading = heading;
+    for &i in route {
+        let to = waypoints[i];
+        let d = to - position;
+        if d.norm() < 1e-9 {
+            continue;
+        }
+        let leg_heading = d.y.atan2(d.x);
+        let dphi = wrap_angle(leg_heading - heading);
+        if dphi.abs() > 1e-9 {
+            legs.push_back(Leg::Turn {
+                to: leg_heading,
+                omega: dphi.signum() * turn_speed,
+            });
+        }
+        legs.push_back(Leg::Straight {
+            to,
+            dir: d / d.norm(),
+        });
+        heading = leg_heading;
+        position = to;
+    }
+    legs
 }
 
 impl Rollout {
@@ -604,6 +831,42 @@ impl Rollout {
                                 .iter()
                                 .position(|d| &d.name == source)
                                 .unwrap_or(usize::MAX),
+                        }
+                    }
+                    DeviceKind::Vehicle {
+                        path,
+                        body,
+                        speed,
+                        turn_speed,
+                        start,
+                    } => {
+                        signals.push(BoolTrack {
+                            name: device.name.clone(),
+                            edges: vec![(0.0, false)],
+                        });
+                        // Validation vetted the station; a missing one only
+                        // happens on unvalidated direct use, and parks at 0.
+                        let at = path.station(start).unwrap_or(0);
+                        let position = path
+                            .waypoints
+                            .get(at)
+                            .copied()
+                            .unwrap_or_else(nalgebra::Point2::origin);
+                        let heading = initial_heading(&path.waypoints, path.ring, at);
+                        DeviceRuntime::Vehicle {
+                            name: device.name.clone(),
+                            waypoints: path.waypoints.clone(),
+                            stations: path.stations.clone(),
+                            ring: path.ring,
+                            body: body.clone(),
+                            speed: *speed,
+                            turn_speed: *turn_speed,
+                            position,
+                            heading,
+                            at: Some(at),
+                            target: at,
+                            legs: std::collections::VecDeque::new(),
+                            lane,
                         }
                     }
                 }
@@ -762,6 +1025,9 @@ impl Rollout {
         // (source device index, object) pairs a sink caught this tick.
         let mut returned: Vec<(usize, String)> = Vec::new();
         let mut lane_updates: Vec<(usize, bool)> = Vec::new();
+        // Per travelling vehicle: its exact sub-tick motion pieces, applied
+        // to the body after this loop (span recording needs `&mut self`).
+        let mut vehicle_moves: Vec<VehicleMove> = Vec::new();
         for device in &mut self.devices {
             match device {
                 DeviceRuntime::Conveyor {
@@ -851,6 +1117,98 @@ impl Rollout {
                         }
                     }
                 }
+                DeviceRuntime::Vehicle {
+                    name,
+                    body,
+                    speed,
+                    position,
+                    heading,
+                    at,
+                    target,
+                    legs,
+                    lane,
+                    ..
+                } => {
+                    if legs.is_empty() {
+                        continue;
+                    }
+                    // Walk the legs through this tick's time budget. Leg
+                    // boundaries land at exact sub-tick instants, so the
+                    // recorded spans (and any resample of them) are exact;
+                    // world poses advance at tick boundaries like every
+                    // other device.
+                    let mut remaining = dt;
+                    let mut pieces: Vec<(f64, f64, VehiclePiece)> = Vec::new();
+                    while remaining > 1e-12 {
+                        let Some(leg) = legs.front() else { break };
+                        let tau0 = t - remaining;
+                        match leg {
+                            Leg::Turn { to, omega } => {
+                                let left = wrap_angle(to - *heading);
+                                let need = left / omega; // same sign ⇒ ≥ 0
+                                if need <= 1e-12 {
+                                    *heading = *to;
+                                    legs.pop_front();
+                                    continue;
+                                }
+                                let step = need.min(remaining);
+                                pieces.push((
+                                    tau0,
+                                    tau0 + step,
+                                    VehiclePiece::Piv {
+                                        center: nalgebra::Point3::new(position.x, position.y, 0.0),
+                                        omega: *omega,
+                                    },
+                                ));
+                                if step >= need - 1e-12 {
+                                    *heading = *to;
+                                    legs.pop_front();
+                                } else {
+                                    *heading = wrap_angle(*heading + omega * step);
+                                }
+                                remaining -= step;
+                            }
+                            Leg::Straight { to, dir } => {
+                                let need = (to - *position).norm() / *speed;
+                                if need <= 1e-12 {
+                                    *position = *to;
+                                    legs.pop_front();
+                                    continue;
+                                }
+                                let step = need.min(remaining);
+                                pieces.push((
+                                    tau0,
+                                    tau0 + step,
+                                    VehiclePiece::Lin {
+                                        velocity: Vector3::new(dir.x * *speed, dir.y * *speed, 0.0),
+                                    },
+                                ));
+                                if step >= need - 1e-12 {
+                                    *position = *to;
+                                    legs.pop_front();
+                                } else {
+                                    *position += *dir * (*speed * step);
+                                }
+                                remaining -= step;
+                            }
+                        }
+                    }
+                    // A tick fully consumed ends exactly at t (float dust in
+                    // `t - remaining + step` would otherwise leave the span
+                    // an ulp short and trip the settle check mid-route).
+                    if remaining <= 1e-12 {
+                        if let Some(last) = pieces.last_mut() {
+                            last.1 = t;
+                        }
+                    }
+                    if legs.is_empty() {
+                        *at = Some(*target);
+                        lane_updates.push((*lane, false));
+                    }
+                    if !pieces.is_empty() {
+                        vehicle_moves.push((name.clone(), body.clone(), pieces));
+                    }
+                }
                 // Releases are a second pass: a member returned this tick
                 // should be feedable this tick, which needs the returns in
                 // before any source looks at its magazine.
@@ -873,15 +1231,19 @@ impl Rollout {
                 .expect("moved obstacle exists");
             self.extend_linear_span(name, rest, *velocity);
         }
-        // Objects that stopped riding (zone exit / device stop) settle into
-        // a hold at their current pose.
+        self.apply_vehicle_moves(vehicle_moves)?;
+        // Objects that stopped riding (zone exit / device stop / vehicle
+        // arrival) settle into a hold at their current pose.
         let moved_names: Vec<&String> = moved.iter().map(|(n, _, _)| n).collect();
         let settled: Vec<(String, Isometry3<f64>)> = self
             .objects
             .iter()
             .filter(|track| {
                 !moved_names.iter().any(|n| **n == track.name)
-                    && matches!(track.spans.last(), Some(TrackSpan::Linear { t1, .. }) if *t1 < t)
+                    && matches!(
+                        track.spans.last(),
+                        Some(TrackSpan::Linear { t1, .. } | TrackSpan::Pivot { t1, .. }) if *t1 < t
+                    )
             })
             .map(|track| track.name.clone())
             .filter_map(|name| {
@@ -899,7 +1261,7 @@ impl Rollout {
                 .find(|tr| tr.name == name)
                 .and_then(|tr| tr.spans.last())
             {
-                Some(TrackSpan::Linear { t1, .. }) => *t1,
+                Some(TrackSpan::Linear { t1, .. } | TrackSpan::Pivot { t1, .. }) => *t1,
                 _ => t,
             };
             let track = self.object_track_at(&name, pose, t_stop);
@@ -1253,6 +1615,158 @@ impl Rollout {
         }
     }
 
+    /// Applies each travelling vehicle's tick motion to its body obstacles
+    /// — composing the exact sub-tick pieces onto the world poses and
+    /// recording them as Linear/Pivot spans — then runs the aisle check.
+    fn apply_vehicle_moves(&mut self, moves: Vec<VehicleMove>) -> Result<(), SeqError> {
+        for (_, body, pieces) in &moves {
+            for member in body {
+                if self.world.attachment(member).is_some() {
+                    // Grasped body parts are the robot's problem, like any
+                    // other advection exclusion.
+                    continue;
+                }
+                let Some(mut pose) = self
+                    .world
+                    .obstacles()
+                    .iter()
+                    .find(|o| &o.name == member)
+                    .map(|o| o.pose)
+                else {
+                    continue;
+                };
+                for (tau0, tau1, piece) in pieces {
+                    let from = pose;
+                    pose = match piece {
+                        VehiclePiece::Lin { velocity } => {
+                            let mut next = from;
+                            next.translation.vector += velocity * (tau1 - tau0);
+                            next
+                        }
+                        VehiclePiece::Piv { center, omega } => {
+                            pivot_pose(&from, center, omega * (tau1 - tau0))
+                        }
+                    };
+                    self.extend_vehicle_span(member, from, *tau0, *tau1, piece);
+                }
+                self.world
+                    .set_obstacle_pose(member, pose)
+                    .expect("body member exists");
+            }
+        }
+        self.check_vehicle_collisions(&moves)
+    }
+
+    /// Extends (or opens) the exact sub-tick span covering one vehicle
+    /// piece. Straights merge with straights of the same velocity, pivots
+    /// with pivots about the same axis — a whole leg bakes to one span.
+    fn extend_vehicle_span(
+        &mut self,
+        name: &str,
+        from: Isometry3<f64>,
+        tau0: f64,
+        tau1: f64,
+        piece: &VehiclePiece,
+    ) {
+        if tau1 - tau0 < 1e-12 {
+            return;
+        }
+        let track = self.object_track_at(name, from, tau0);
+        let merged = match (track.spans.last_mut(), piece) {
+            (Some(TrackSpan::Linear { t1, velocity, .. }), VehiclePiece::Lin { velocity: v })
+                if (*velocity - v).norm() < 1e-12 && (*t1 - tau0).abs() < 1e-9 =>
+            {
+                *t1 = tau1;
+                true
+            }
+            (
+                Some(TrackSpan::Pivot {
+                    t1, center, omega, ..
+                }),
+                VehiclePiece::Piv {
+                    center: c,
+                    omega: o,
+                },
+            ) if (center.coords - c.coords).norm() < 1e-12
+                && (*omega - o).abs() < 1e-12
+                && (*t1 - tau0).abs() < 1e-9 =>
+            {
+                *t1 = tau1;
+                true
+            }
+            _ => false,
+        };
+        if merged {
+            return;
+        }
+        if let Some(open) = track.spans.last_mut() {
+            let end = open.end_mut();
+            if *end < tau0 {
+                *end = tau0;
+            }
+        }
+        track.spans.push(match piece {
+            VehiclePiece::Lin { velocity } => TrackSpan::Linear {
+                t0: tau0,
+                t1: tau1,
+                from,
+                velocity: *velocity,
+            },
+            VehiclePiece::Piv { center, omega } => TrackSpan::Pivot {
+                t0: tau0,
+                t1: tau1,
+                from,
+                center: *center,
+                omega: *omega,
+            },
+        });
+    }
+
+    /// A travelling vehicle's body must clear everything it does not carry
+    /// — the aisle check. Only vehicles that moved this tick are checked,
+    /// so a parked vehicle touching its dock guide is legitimate authoring.
+    fn check_vehicle_collisions(&self, moves: &[VehicleMove]) -> Result<(), SeqError> {
+        for (vehicle, body, _) in moves {
+            for member in body {
+                let Some((k, obstacle)) = self
+                    .world
+                    .obstacles()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, o)| &o.name == member)
+                else {
+                    continue;
+                };
+                if !obstacle.enabled || self.world.attachment(member).is_some() {
+                    continue;
+                }
+                let collider = &self.world.obstacle_colliders[k];
+                for (j, other) in self.world.obstacles().iter().enumerate() {
+                    if j == k
+                        || !other.enabled
+                        || body.iter().any(|b| b == &other.name)
+                        || self.world.attachment(&other.name).is_some()
+                    {
+                        continue;
+                    }
+                    if collider.intersects(
+                        &obstacle.pose,
+                        &self.world.obstacle_colliders[j],
+                        &other.pose,
+                    ) {
+                        return Err(SeqError::VehicleCollision {
+                            t: self.t,
+                            vehicle: vehicle.clone(),
+                            body: member.clone(),
+                            obstacle: other.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Evaluates every pseudo-sensor at the current world state and records
     /// edges on its input lane.
     fn update_sensors(&mut self) {
@@ -1389,6 +1903,8 @@ impl Rollout {
                     target,
                     ..
                 } => name == device && (target - position).abs() < 1e-9,
+                // Parked at the commanded station (in-position).
+                DeviceRuntime::Vehicle { name, legs, .. } => name == device && legs.is_empty(),
                 // Nothing to be "done" with: these run continuously.
                 DeviceRuntime::Conveyor { .. }
                 | DeviceRuntime::Source { .. }
@@ -1647,7 +2163,8 @@ impl Rollout {
                     DeviceRuntime::Conveyor { name, .. }
                     | DeviceRuntime::Axis { name, .. }
                     | DeviceRuntime::Source { name, .. }
-                    | DeviceRuntime::Sink { name, .. } => name == device,
+                    | DeviceRuntime::Sink { name, .. }
+                    | DeviceRuntime::Vehicle { name, .. } => name == device,
                 });
                 let Some(found) = found else {
                     return Err(err(format!("unknown device `{device}`")));
@@ -1699,6 +2216,49 @@ impl Rollout {
                     ) => {
                         *target = *goal;
                         if (*target - *position).abs() > 1e-9 {
+                            lane_update = Some((*lane, true));
+                        }
+                    }
+                    (
+                        DeviceRuntime::Vehicle {
+                            waypoints,
+                            stations,
+                            ring,
+                            turn_speed,
+                            position,
+                            heading,
+                            at,
+                            target,
+                            legs,
+                            lane,
+                            ..
+                        },
+                        DeviceCommand::Goto { station },
+                    ) => {
+                        // A real dispatcher can amend an order in flight;
+                        // deterministic v1 keeps travel uninterruptible.
+                        if !legs.is_empty() {
+                            return Err(err(format!(
+                                "vehicle `{device}` is still travelling; wait for \
+                                 device_done before the next goto"
+                            )));
+                        }
+                        let to = stations
+                            .iter()
+                            .find(|(n, _)| n == station)
+                            .map(|(_, i)| *i)
+                            .ok_or_else(|| {
+                                err(format!("vehicle `{device}` has no station `{station}`"))
+                            })?;
+                        let from = at.unwrap_or(*target);
+                        let route = vehicle_route(waypoints, *ring, from, to);
+                        *legs = build_legs(waypoints, &route, *position, *heading, *turn_speed);
+                        *target = to;
+                        if legs.is_empty() {
+                            // Already there (or a zero-length route).
+                            *at = Some(to);
+                        } else {
+                            *at = None;
                             lane_update = Some((*lane, true));
                         }
                     }
@@ -2681,7 +3241,7 @@ mod device_tests {
             )],
             "read-only",
         );
-        // device_done needs an axis.
+        // device_done needs a positioning device (axis or vehicle).
         check(
             &scene,
             vec![step(
@@ -2691,7 +3251,7 @@ mod device_tests {
                     device: "conv".into(),
                 },
             )],
-            "conveyor",
+            "no in-position",
         );
         // Axis commands must stay in range; conveyors have no position.
         check(
@@ -3546,5 +4106,446 @@ mod tracking_tests {
             )],
             "unknown obstacle",
         );
+    }
+}
+
+#[cfg(test)]
+mod vehicle_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::seq::{Device, DeviceKind, Step, VehiclePath};
+    use botrail_model::Geometry;
+    use nalgebra::{Point2, Translation3, UnitQuaternion};
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    /// An L: 2 m along +x, then 1 m along +y. Stations at both ends.
+    fn l_path() -> VehiclePath {
+        VehiclePath {
+            waypoints: vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(2.0, 0.0),
+                Point2::new(2.0, 1.0),
+            ],
+            stations: vec![("a".into(), 0), ("c".into(), 2)],
+            ring: false,
+        }
+    }
+
+    /// 0.5 m/s cruise, 90°/s pivot: the L takes 4 + 1 + 2 = 7 s.
+    fn agv(body: Vec<String>) -> Device {
+        Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                path: l_path(),
+                body,
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+            },
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "agv".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "agv".into(),
+        }
+    }
+
+    fn chassis_scene() -> Scene {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "chassis",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(0.3, 0.2, 0.1),
+            )
+            .unwrap();
+        scene.upsert_device(agv(vec!["chassis".into()]));
+        scene
+    }
+
+    /// No robot drives, so `object_pose` never needs FK.
+    fn no_fk(scene: &Scene) -> Vec<Vec<Isometry3<f64>>> {
+        scene
+            .robots()
+            .iter()
+            .map(|r| vec![Isometry3::identity(); r.model.links.len()])
+            .collect()
+    }
+
+    #[test]
+    fn vehicle_arrives_at_the_analytic_time_with_the_body_carried() {
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![
+                step("go", vec![goto("c")], device_done()),
+                step("dwell", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap();
+
+        // 2 m at 0.5 + 90° at 90°/s + 1 m at 0.5, plus the dwell.
+        assert!(
+            (tl.duration - 7.2).abs() < 0.021,
+            "duration = {}",
+            tl.duration
+        );
+        let arrival = tl.step_spans[0].end;
+        assert!((arrival - 7.0).abs() < 0.011, "arrival = {arrival}");
+
+        // The moving lane goes on at dispatch, off at arrival.
+        let lane = tl.signals.iter().find(|s| s.name == "agv").unwrap();
+        assert_eq!(lane.edges.len(), 3, "{:?}", lane.edges);
+        assert_eq!(lane.edges[1], (0.0, true));
+        assert!(!lane.edges[2].1 && (lane.edges[2].0 - 7.0).abs() < 0.011);
+
+        // Net rigid motion: +2 x, pivot +90° about (2, 0), +1 y.
+        let track = tl.objects.iter().find(|o| o.name == "chassis").unwrap();
+        let end = SequenceTimeline::object_pose(track, &no_fk(&scene), tl.duration).unwrap();
+        assert!(
+            (end.translation.vector - Vector3::new(1.8, 1.3, 0.1)).norm() < 1e-9,
+            "end = {:?}",
+            end.translation.vector
+        );
+        let quarter = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), FRAC_PI_2);
+        assert!(end.rotation.angle_to(&quarter) < 1e-9);
+        // After arrival the body settles into a hold at the parked pose.
+        assert!(matches!(track.spans.last(), Some(TrackSpan::Hold { .. })));
+    }
+
+    #[test]
+    fn vehicle_spans_bake_one_span_per_leg_and_resample_exactly() {
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap();
+        let track = tl.objects.iter().find(|o| o.name == "chassis").unwrap();
+
+        // Whole legs merge: straight, pivot, straight — three spans, not 700.
+        assert_eq!(track.spans.len(), 3, "{:?}", track.spans);
+        assert!(matches!(track.spans[0], TrackSpan::Linear { .. }));
+        assert!(matches!(track.spans[1], TrackSpan::Pivot { .. }));
+        assert!(matches!(track.spans[2], TrackSpan::Linear { .. }));
+
+        let fk = no_fk(&scene);
+        // Mid-straight: 1 s at 0.5 m/s along +x.
+        let mid = SequenceTimeline::object_pose(track, &fk, 1.0).unwrap();
+        assert!((mid.translation.vector - Vector3::new(0.8, 0.2, 0.1)).norm() < 1e-9);
+        // Mid-turn (t = 4.5 ⇒ 45° about (2, 0)): closed form, no resample grid.
+        let mid = SequenceTimeline::object_pose(track, &fk, 4.5).unwrap();
+        let phi = FRAC_PI_2 * 0.5;
+        let expected = Vector3::new(
+            2.0 + 0.3 * phi.cos() - 0.2 * phi.sin(),
+            0.3 * phi.sin() + 0.2 * phi.cos(),
+            0.1,
+        );
+        assert!(
+            (mid.translation.vector - expected).norm() < 1e-9,
+            "mid = {:?}, expected = {expected:?}",
+            mid.translation.vector
+        );
+        let eighth = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), phi);
+        assert!(mid.rotation.angle_to(&eighth) < 1e-9);
+    }
+
+    #[test]
+    fn vehicle_round_trip_composes_to_a_half_turn_about_home() {
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![
+                step("out", vec![goto("c")], device_done()),
+                step("back", vec![goto("a")], device_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("cycle", &RolloutOptions::default())
+            .unwrap();
+        // Return: about-face (2 s) + 1 m (2 s) + 90° (1 s) + 2 m (4 s) = 9 s.
+        assert!(
+            (tl.duration - 16.0).abs() < 0.031,
+            "duration = {}",
+            tl.duration
+        );
+        // The vehicle is back at `a` facing −x: the cycle's net rigid motion
+        // is a half turn about home, and the body carries it exactly.
+        let track = tl.objects.iter().find(|o| o.name == "chassis").unwrap();
+        let end = SequenceTimeline::object_pose(track, &no_fk(&scene), tl.duration).unwrap();
+        assert!(
+            (end.translation.vector - Vector3::new(-0.3, -0.2, 0.1)).norm() < 1e-9,
+            "end = {:?}",
+            end.translation.vector
+        );
+        let half = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), PI);
+        assert!(end.rotation.angle_to(&half) < 1e-9);
+    }
+
+    #[test]
+    fn vehicle_rollout_is_deterministic() {
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let options = RolloutOptions::default();
+        let a = scene.simulate_sequence("out", &options).unwrap();
+        let b = scene.simulate_sequence("out", &options).unwrap();
+        assert_eq!(a.duration.to_bits(), b.duration.to_bits());
+        let fk = no_fk(&scene);
+        let track = |tl: &SequenceTimeline| {
+            tl.objects
+                .iter()
+                .find(|o| o.name == "chassis")
+                .unwrap()
+                .clone()
+        };
+        let (ta, tb) = (track(&a), track(&b));
+        assert_eq!(ta.spans.len(), tb.spans.len());
+        for k in 0..=72 {
+            let t = k as f64 * 0.1;
+            let pa = SequenceTimeline::object_pose(&ta, &fk, t).unwrap();
+            let pb = SequenceTimeline::object_pose(&tb, &fk, t).unwrap();
+            for i in 0..3 {
+                assert_eq!(
+                    pa.translation.vector[i].to_bits(),
+                    pb.translation.vector[i].to_bits()
+                );
+            }
+            assert_eq!(
+                pa.rotation
+                    .coords
+                    .iter()
+                    .map(|c| c.to_bits())
+                    .collect::<Vec<_>>(),
+                pb.rotation
+                    .coords
+                    .iter()
+                    .map(|c| c.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_travelling_vehicle_reports_the_aisle_collision() {
+        let mut scene = chassis_scene();
+        scene
+            .add_obstacle(
+                "wall",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(1.0, 0.2, 0.1),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap_err();
+        match err {
+            SeqError::VehicleCollision {
+                t,
+                vehicle,
+                body,
+                obstacle,
+            } => {
+                // Faces touch after 0.5 m of travel at 0.5 m/s.
+                assert!((0.99..=1.05).contains(&t), "t = {t}");
+                assert_eq!(vehicle, "agv");
+                assert_eq!(body, "chassis");
+                assert_eq!(obstacle, "wall");
+            }
+            other => panic!("expected VehicleCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goto_while_travelling_is_rejected() {
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![
+                step("go", vec![goto("c")], Condition::Elapsed { seconds: 0.5 }),
+                step("amend", vec![goto("a")], device_done()),
+            ],
+        });
+        let err = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("still travelling"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn vehicle_validation_names_the_problem() {
+        let check = |scene: &Scene, sequence: &str, needle: &str| {
+            let err = scene
+                .simulate_sequence(sequence, &RolloutOptions::default())
+                .unwrap_err();
+            assert!(
+                matches!(err, SeqError::Validation { .. }) && err.to_string().contains(needle),
+                "expected `{needle}` in: {err}"
+            );
+        };
+        // Unknown goto station.
+        let mut scene = chassis_scene();
+        scene.upsert_sequence(Sequence {
+            name: "bad".into(),
+            steps: vec![step("go", vec![goto("nowhere")], device_done())],
+        });
+        check(&scene, "bad", "no station `nowhere`");
+        // Goto on a non-vehicle.
+        let mut scene = chassis_scene();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(0.0, 0.0, 0.5),
+                zone_size: Vector3::new(1.0, 1.0, 0.2),
+                velocity: Vector3::new(0.1, 0.0, 0.0),
+                running: false,
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "bad".into(),
+            steps: vec![step(
+                "go",
+                vec![Action::Device {
+                    device: "belt".into(),
+                    command: DeviceCommand::Goto {
+                        station: "a".into(),
+                    },
+                }],
+                Condition::Immediately,
+            )],
+        });
+        check(&scene, "bad", "not a vehicle");
+        // A station pointing past the path.
+        let mut scene = chassis_scene();
+        scene.upsert_device(Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)],
+                    stations: vec![("a".into(), 0), ("ghost".into(), 9)],
+                    ring: false,
+                },
+                body: vec!["chassis".into()],
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "any".into(),
+            steps: vec![step("noop", vec![], Condition::Immediately)],
+        });
+        check(&scene, "any", "points at waypoint 9");
+    }
+
+    #[test]
+    fn a_ring_walks_the_shorter_way_around() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "cart",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.0, 0.0, 1.5),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point2::new(0.0, 0.0),
+                        Point2::new(2.0, 0.0),
+                        Point2::new(2.0, 2.0),
+                        Point2::new(0.0, 2.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("d".into(), 3)],
+                    ring: true,
+                },
+                body: vec!["cart".into()],
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("d")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap();
+        // Backward around the ring: 90° turn (1 s) + one 2 m side (4 s),
+        // not the three-side walk (6 m).
+        assert!(
+            (tl.duration - 5.0).abs() < 0.011,
+            "duration = {}",
+            tl.duration
+        );
+    }
+
+    #[test]
+    fn vehicle_device_round_trips_through_wire_and_project() {
+        let scene = {
+            let mut scene = chassis_scene();
+            scene.upsert_sequence(Sequence {
+                name: "out".into(),
+                steps: vec![step("go", vec![goto("c")], device_done())],
+            });
+            scene
+        };
+        let msg = crate::wire::device_msg(&scene.devices()[0]);
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: crate::wire::DeviceMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+        let rebuilt = crate::wire::device_msg(&crate::wire::device_from_msg(&back));
+        assert_eq!(msg, rebuilt);
+
+        // The generated script re-authors the vehicle and the dispatch.
+        let code = crate::project::generate_python(&scene.to_project());
+        assert!(code.contains("scene.add_vehicle(\"agv\""), "{code}");
+        assert!(code.contains("stations={\"a\": 0, \"c\": 2}"), "{code}");
+        assert!(code.contains("bt.seq.goto(\"agv\", \"c\")"), "{code}");
+        assert!(code.contains("bt.seq.device_done(\"agv\")"), "{code}");
     }
 }

@@ -13,6 +13,7 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { SensorView } from "./SensorView";
+import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
@@ -160,6 +161,7 @@ export function Viewport() {
           <GhostRobot />
           <ObstacleView />
           <SensorView />
+          <VehiclePathView />
           <TcpGizmo />
           <RobotBaseGizmo />
           <PlaybackDriver />

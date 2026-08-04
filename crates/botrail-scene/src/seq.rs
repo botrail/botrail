@@ -121,6 +121,51 @@ pub enum DeviceKind {
         /// Source device the object goes back to.
         source: String,
     },
+    /// A guided transport vehicle (AGV / AMR seen from the cell): drives
+    /// station to station along an authored path — straight legs at
+    /// `speed`, in-place pivot turns at `turn_speed` — carrying its body
+    /// obstacles rigidly. Commanded with [`DeviceCommand::Goto`];
+    /// `DeviceDone` means parked at the commanded station (in-position,
+    /// like an axis). Its moving state is an output-signal lane.
+    ///
+    /// The path is the model of the tape on the floor: travel is authored,
+    /// never planned. The arrival heading is the last leg's direction, so
+    /// the approach waypoint before a station is what sets how the vehicle
+    /// docks.
+    Vehicle {
+        path: VehiclePath,
+        /// Obstacles carried rigidly as the vehicle's body.
+        body: Vec<String>,
+        /// Cruise speed on straight legs (m/s).
+        speed: f64,
+        /// Pivot-turn rate (rad/s).
+        turn_speed: f64,
+        /// Station the vehicle starts parked at.
+        start: String,
+    },
+}
+
+/// An authored guide path. Waypoints are floor points (the vehicle frame
+/// stays on the floor plane); stations are the named stops a `Goto` can
+/// target, as waypoint indices — the point-table mental model of a PLC
+/// positioning unit.
+#[derive(Debug, Clone)]
+pub struct VehiclePath {
+    pub waypoints: Vec<nalgebra::Point2<f64>>,
+    /// `(name, waypoint index)` pairs.
+    pub stations: Vec<(String, usize)>,
+    /// A closed loop: a goto walks whichever way around is shorter.
+    pub ring: bool,
+}
+
+impl VehiclePath {
+    /// Waypoint index of the named station.
+    pub fn station(&self, name: &str) -> Option<usize> {
+        self.stations
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, i)| *i)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +174,11 @@ pub enum DeviceCommand {
     Stop,
     SetSpeed(f64),
     MoveTo(f64),
+    /// Send a vehicle to a named station (the dispatch order); await it
+    /// with `DeviceDone`.
+    Goto {
+        station: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -421,6 +471,9 @@ impl Scene {
                 ));
             }
         }
+        for device in &self.devices {
+            self.validate_vehicle(device).map_err(|m| (None, m))?;
+        }
         // Tracking and grasping are modes the steps switch on and off, so
         // their rules are checked by walking the (linear) step list once —
         // per robot for tracking, per object for grasps.
@@ -560,6 +613,80 @@ impl Scene {
         }
     }
 
+    /// A vehicle definition the scan engine can honour: a walkable path,
+    /// resolvable stations and body obstacles, positive rates. Run once per
+    /// simulate, so a broken definition fails with a message instead of a
+    /// runtime surprise.
+    fn validate_vehicle(&self, device: &Device) -> Result<(), String> {
+        let DeviceKind::Vehicle {
+            path,
+            body,
+            speed,
+            turn_speed,
+            start,
+        } = &device.kind
+        else {
+            return Ok(());
+        };
+        let dev = &device.name;
+        if path.waypoints.len() < 2 {
+            return Err(format!(
+                "vehicle `{dev}` needs at least 2 waypoints, got {}",
+                path.waypoints.len()
+            ));
+        }
+        if path.stations.is_empty() {
+            return Err(format!("vehicle `{dev}` has no stations"));
+        }
+        for (name, index) in &path.stations {
+            if *index >= path.waypoints.len() {
+                return Err(format!(
+                    "vehicle `{dev}` station `{name}` points at waypoint {index}, \
+                     but the path has {}",
+                    path.waypoints.len()
+                ));
+            }
+            if path
+                .stations
+                .iter()
+                .filter(|(other, _)| other == name)
+                .count()
+                > 1
+            {
+                return Err(format!("vehicle `{dev}` has two stations named `{name}`"));
+            }
+        }
+        if path.station(start).is_none() {
+            let known: Vec<String> = path
+                .stations
+                .iter()
+                .map(|(n, _)| format!("`{n}`"))
+                .collect();
+            return Err(format!(
+                "vehicle `{dev}` starts at unknown station `{start}` (stations: {})",
+                known.join(", ")
+            ));
+        }
+        if !(speed.is_finite() && *speed > 0.0) {
+            return Err(format!(
+                "vehicle `{dev}` speed must be positive, got {speed}"
+            ));
+        }
+        if !(turn_speed.is_finite() && *turn_speed > 0.0) {
+            return Err(format!(
+                "vehicle `{dev}` turn_speed must be positive, got {turn_speed}"
+            ));
+        }
+        for name in body {
+            if !self.obstacles.iter().any(|o| &o.name == name) {
+                return Err(format!(
+                    "vehicle `{dev}` body names unknown obstacle `{name}`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_action(
         &self,
         action: &Action,
@@ -694,6 +821,26 @@ impl Scene {
                     .find(|d| &d.name == device)
                     .ok_or_else(|| format!("unknown device `{device}`"))?;
                 match (&found.kind, command) {
+                    (DeviceKind::Vehicle { path, .. }, DeviceCommand::Goto { station }) => {
+                        if path.station(station).is_none() {
+                            let known: Vec<String> = path
+                                .stations
+                                .iter()
+                                .map(|(n, _)| format!("`{n}`"))
+                                .collect();
+                            return Err(format!(
+                                "vehicle `{device}` has no station `{station}` (stations: {})",
+                                known.join(", ")
+                            ));
+                        }
+                        Ok(())
+                    }
+                    (DeviceKind::Vehicle { .. }, _) => {
+                        Err(format!("vehicle `{device}` only takes goto commands"))
+                    }
+                    (_, DeviceCommand::Goto { .. }) => Err(format!(
+                        "`{device}` is not a vehicle; goto drives a vehicle to a station"
+                    )),
                     (DeviceKind::Conveyor { .. }, DeviceCommand::Start | DeviceCommand::Stop) => {
                         Ok(())
                     }
@@ -767,9 +914,13 @@ impl Scene {
                     .iter()
                     .find(|d| &d.name == device)
                     .ok_or_else(|| format!("unknown device `{device}`"))?;
-                if !matches!(found.kind, DeviceKind::LinearAxis { .. }) {
+                if !matches!(
+                    found.kind,
+                    DeviceKind::LinearAxis { .. } | DeviceKind::Vehicle { .. }
+                ) {
                     return Err(format!(
-                        "`device_done` waits for a linear axis; `{device}` is a conveyor"
+                        "`device_done` waits for a positioning device \
+                         (linear axis or vehicle); `{device}` has no in-position"
                     ));
                 }
                 Ok(())

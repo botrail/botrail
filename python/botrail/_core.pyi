@@ -275,6 +275,17 @@ class Scene:
         range: tuple[float, float],
         position: float = 0.0,
     ) -> None: ...
+    def add_vehicle(
+        self,
+        name: str,
+        body: list[str],
+        path: list[tuple[float, float]],
+        stations: dict[str, int],
+        speed: float = 0.5,
+        turn_speed: float = 1.5707963267948966,
+        start: Optional[str] = None,
+        ring: bool = False,
+    ) -> None: ...
     def remove_device(self, name: str) -> None: ...
     @property
     def device_names(self) -> list[str]: ...

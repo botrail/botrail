@@ -127,6 +127,17 @@ def move_to(device: str, position: float) -> Action:
     }
 
 
+def goto(device: str, station: str) -> Action:
+    """Dispatch a vehicle to a named station (the AGV call); await arrival
+    with ``device_done``. Travel is uninterruptible: a second goto while
+    the vehicle is still moving is a sequencing error."""
+    return {
+        "type": "device",
+        "device": device,
+        "command": {"type": "goto", "station": station},
+    }
+
+
 # --------------------------------------------------------------- conditions
 
 

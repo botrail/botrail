@@ -683,6 +683,34 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 py_tuple(&zone_pose.position),
                 py_tuple(zone_size),
             )),
+            crate::wire::DeviceKindMsg::Vehicle {
+                path,
+                body,
+                speed,
+                turn_speed,
+                start,
+            } => {
+                let waypoints: Vec<String> = path
+                    .waypoints
+                    .iter()
+                    .map(|p| format!("({}, {})", p[0], p[1]))
+                    .collect();
+                let stations: Vec<String> = path
+                    .stations
+                    .iter()
+                    .map(|s| format!("{:?}: {}", s.name, s.index))
+                    .collect();
+                let members: Vec<String> = body.iter().map(|n| format!("{n:?}")).collect();
+                out.push_str(&format!(
+                    "scene.add_vehicle({:?}, body=[{}], path=[{}], stations={{{}}}, \
+                     speed={speed}, turn_speed={turn_speed}, start={start:?}{})\n",
+                    device.name,
+                    members.join(", "),
+                    waypoints.join(", "),
+                    stations.join(", "),
+                    if path.ring { ", ring=True" } else { "" },
+                ));
+            }
         }
     }
     for signal in &project.signals {
@@ -779,6 +807,9 @@ fn py_action(action: &ActionMsg) -> String {
             }
             crate::wire::DeviceCommandMsg::MoveTo { position } => {
                 format!("bt.seq.move_to({device:?}, {position})")
+            }
+            crate::wire::DeviceCommandMsg::Goto { station } => {
+                format!("bt.seq.goto({device:?}, {station:?})")
             }
         },
     }

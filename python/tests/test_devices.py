@@ -5,6 +5,8 @@ import pytest
 
 import botrail as bt
 
+SQ2 = math.sqrt(0.5)
+
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 
@@ -130,4 +132,84 @@ def test_tracking_rules_are_reported(scene: bt.Scene) -> None:
     sq.step("latch", actions=[bt.seq.track("crate")])
     sq.step("move", actions=[bt.seq.motion("go")])
     with pytest.raises(ValueError, match="release the track first"):
+        sq.simulate()
+
+
+def test_vehicle_goto_carries_the_body(scene: bt.Scene) -> None:
+    # An L-shaped guide path well away from the arm: 2 m along +x, a 90°
+    # pivot, then 1 m along +y — 4 + 1 + 2 s at 0.5 m/s and 90°/s. The
+    # body is named by prefix and rides the frame rigidly, rotation included.
+    scene.add_box("agv/chassis", (0.2, 0.2, 0.2), (0.3, 2.2, 0.1))
+    scene.add_box("agv/mast", (0.05, 0.05, 0.3), (0.3, 2.2, 0.35))
+    scene.add_vehicle(
+        "agv",
+        body=["agv"],
+        path=[(0.0, 2.0), (2.0, 2.0), (2.0, 3.0)],
+        stations={"dock": 0, "warehouse": 2},
+        speed=0.5,
+        turn_speed=math.pi / 2,
+        start="dock",
+    )
+    assert "agv" in scene.device_names
+
+    sq = scene.sequence("haul")
+    sq.step(
+        "out",
+        actions=[bt.seq.goto("agv", "warehouse")],
+        transition=bt.seq.device_done("agv"),
+    )
+    tl = sq.simulate()
+
+    assert abs(tl.duration - 7.0) <= 0.011
+    lanes = dict(tl.signals)
+    assert [v for _, v in lanes["agv"]] == [False, True, False]
+    # Net rigid motion: +2 x, pivot +90° about (2, 2), +1 y.
+    p, q = tl.object_pose("agv/chassis", tl.duration)
+    assert max(abs(a - b) for a, b in zip(p, (1.8, 3.3, 0.1))) < 1e-9
+    assert abs(q[2] - SQ2) < 1e-9 and abs(q[3] - SQ2) < 1e-9
+    # Mid-turn sample is the closed form, not a resample grid.
+    p, q = tl.object_pose("agv/chassis", 4.5)
+    phi = math.pi / 4
+    expected = (
+        2.0 + 0.3 * math.cos(phi) - 0.2 * math.sin(phi),
+        2.0 + 0.3 * math.sin(phi) + 0.2 * math.cos(phi),
+        0.1,
+    )
+    assert max(abs(a - b) for a, b in zip(p, expected)) < 1e-9
+    # The live scene is untouched.
+    pos, _ = scene.obstacle_pose("agv/chassis")
+    assert pos[0] == 0.3
+
+    # The generated script re-authors the vehicle and the dispatch.
+    code = scene.generate_python()
+    assert 'scene.add_vehicle("agv"' in code
+    assert 'bt.seq.goto("agv", "warehouse")' in code
+
+
+def test_vehicle_authoring_errors(scene: bt.Scene) -> None:
+    scene.add_box("cart", (0.1, 0.1, 0.1), (0.0, 2.0, 0.05))
+    with pytest.raises(ValueError, match="matches no obstacle"):
+        scene.add_vehicle(
+            "agv", body=["ghost"], path=[(0.0, 2.0), (1.0, 2.0)], stations={"a": 0}
+        )
+    with pytest.raises(ValueError, match="points at waypoint"):
+        scene.add_vehicle(
+            "agv", body=["cart"], path=[(0.0, 2.0), (1.0, 2.0)], stations={"a": 9}
+        )
+    with pytest.raises(ValueError, match="not a station"):
+        scene.add_vehicle(
+            "agv",
+            body=["cart"],
+            path=[(0.0, 2.0), (1.0, 2.0)],
+            stations={"a": 0},
+            start="b",
+        )
+    # A second goto while travelling is a sequencing error.
+    scene.add_vehicle(
+        "agv", body=["cart"], path=[(0.0, 2.0), (1.0, 2.0)], stations={"a": 0, "b": 1}
+    )
+    sq = scene.sequence("amend")
+    sq.step("go", actions=[bt.seq.goto("agv", "b")], transition=bt.seq.elapsed(0.5))
+    sq.step("again", actions=[bt.seq.goto("agv", "a")], transition=bt.seq.device_done("agv"))
+    with pytest.raises(ValueError, match="still travelling"):
         sq.simulate()
