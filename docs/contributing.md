@@ -1,9 +1,8 @@
 # Contributing
 
 botrail is a Rust workspace with pyo3 bindings and a React studio bundled into
-the Python package. This page covers building it from source; the architecture
-notes and design records live in the repository under
-[`design/`](https://github.com/botrail/botrail/tree/main/design).
+the Python package. This page covers building it from source. For a reader's
+view of how the pieces fit, see [Architecture](concepts/architecture.md).
 
 ## Build from source
 
@@ -79,7 +78,6 @@ studio/                web UI (vite + React + react-three-fiber)
 python/botrail/        python package (high-level API, bundled studio assets)
 examples/              demo: Isaac Franka + hand-authored USD factory cell
 docs/                  this documentation site (mkdocs)
-design/                architecture (DESIGN.md) + design records
 ```
 
 ## Working on these docs

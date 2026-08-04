@@ -110,6 +110,24 @@ nav:
       - Two arms, one belt: tutorials/two-robots.md
       - Parameter sweeps: tutorials/parameter-sweep.md
       - Export and replay USD: tutorials/replay-usd.md
+  - Guides:
+      - Robots: guides/robots.md
+      - Scene and obstacles: guides/scene-and-obstacles.md
+      - USD import: guides/usd-import.md
+      - Collision checking: guides/collision.md
+      - Motion planning: guides/motion-planning.md
+      - Sequences: guides/sequences.md
+      - Sensors and devices: guides/sensors-and-devices.md
+      - Attach and tracking: guides/attach-and-tracking.md
+      - Timeline assertions: guides/timeline-assertions.md
+      - Export: guides/export.md
+      - Projects: guides/projects.md
+      - The studio: guides/studio.md
+      - Browser-only botrail: guides/browser-only.md
+  - Concepts:
+      - Why botrail: concepts/why-botrail.md
+      - Determinism: concepts/determinism.md
+      - Architecture: concepts/architecture.md
   - API reference:
       - Robot: reference/api/robot.md
       - Scene: reference/api/scene.md

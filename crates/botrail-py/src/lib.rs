@@ -1234,11 +1234,12 @@ impl Scene {
         })
     }
 
-    /// Saves the scene (robot URDF, joint state, obstacles, motions) as a
-    /// self-contained `.botrail` project file.
-    /// Saves the project. Plain JSON when everything is self-contained; a
-    /// zip archive (`project.json` + `assets/`) when mesh files are
-    /// referenced, so the file stays portable across machines.
+    /// Saves the whole cell — robots (URDF embedded, USD by reference),
+    /// joint state, obstacles, frames, motions, sequences, signals,
+    /// sensors, and devices — as a `.botrail` project file. Plain JSON
+    /// when everything is self-contained; a zip archive (`project.json` +
+    /// `assets/`) when mesh files are referenced, so the file stays
+    /// portable across machines.
     fn save_project(&self, path: PathBuf) -> PyResult<()> {
         let io_err = |e: std::io::Error| PyIOError::new_err(format!("{}: {e}", path.display()));
         let mut project = self.hub.project();

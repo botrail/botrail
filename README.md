@@ -178,7 +178,7 @@ mkdocs serve                              # needs `maturin develop` first
 ```
 
 Contributor notes are in the
-[Contributing](https://botrail.github.io/botrail/contributing/) page;
+[Contributing](https://botrail.github.io/botrail/contributing/) page.
 
 ## License
 

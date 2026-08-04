@@ -1,0 +1,95 @@
+# Sequences
+
+A sequence is the cell's process, written the way a PLC writes one: a list of
+**steps**, each with entry **actions** and a **transition condition**,
+evaluated on a fixed scan cycle. If you have read a step-ladder or SFC
+program, you already know this model.
+
+```python
+sq = scene.sequence("cycle")
+sq.step("feed",  actions=[bt.seq.start("belt")], transition=bt.seq.signal("eye"))
+sq.step("stop",  actions=[bt.seq.stop("belt")])
+sq.step("pick",  actions=[bt.seq.motion("approach")])
+sq.step("work",  transition=bt.seq.elapsed(0.5))
+
+tl = scene.simulate_sequence("cycle")        # or sq.simulate()
+```
+
+## The scan model
+
+The rollout advances in fixed ticks (`dt=0.01` s by default). Each scan: fire
+the current step's entry actions (on the first scan of the step), evaluate its
+transition, move on when it holds. Sensors update, devices advect, signals
+latch — all on the same clock. The discreteness is not an approximation to
+apologize for; it is the PLC execution model, and it is what makes the bake
+[deterministic](../concepts/determinism.md).
+
+## Steps
+
+```python
+sq.step(name, actions=[...], transition=...)
+```
+
+Omit `transition` and the obvious default is supplied: a step that starts a
+motion or ramp waits for it (`done()`); a step that starts nothing passes
+`immediately()`. That is why `stop`-style steps take zero time in the step
+table.
+
+Re-calling `scene.sequence(name)` starts that sequence over from zero steps —
+a builder accumulates, it does not append across calls. A scene holds any
+number of sequences (`sequence_names`, `remove_sequence`); the two-arm demo
+keeps its `--clash` variant alongside the real one.
+
+## Actions and conditions
+
+The full vocabulary lives in the [`bt.seq` reference](../reference/api/seq.md).
+The shape of it:
+
+| | |
+| --- | --- |
+| Drive the robot | `motion(name)` — planned; `ramp(targets, duration)` — guarded, fixed-time |
+| Handle parts | `attach` / `detach`, `track` / `untrack` |
+| Drive devices | `start` / `stop` / `set_speed` / `move_to` |
+| Signal | `set_signal(name, value)` |
+| Wait on | `done()`, `robot_done(robot)`, `elapsed(s)`, `signal(name, value)`, `device_done(device)` |
+| Combine | `all_of(...)` — series contacts; `any_of(...)` — parallel contacts |
+
+Internal signals are declared up front (`scene.define_signal("carrying")`) —
+PLC internal relays, written by actions, read by transitions, and visible as
+waveform lanes on the baked timeline.
+
+## Motions plan at their step
+
+`bt.seq.motion("x")` does not replay a pre-planned path. The motion is planned
+**when the step starts**, against a snapshot of the world at that moment:
+whatever the robot is carrying rides along, and other robots stand frozen
+where they happen to be. A cell edit upstream of a step therefore changes what
+the step plans — which is the point.
+
+## Several robots
+
+Actions name their robot (`bt.seq.motion("far_to_pick")` on a motion authored
+with `robot="far"`, `bt.seq.ramp(..., robot="far")`), and steps interleave
+freely. Two idioms carry all the coordination:
+
+* release early — `transition=bt.seq.immediately()` on the step that starts a
+  transfer, so the sequence moves on while the motion runs;
+* re-synchronize — `bt.seq.robot_done("far")` to wait for a specific arm to
+  land, and zone-sensor interlocks to keep contested space exclusive.
+
+The rollout checks robot-against-robot collision every tick; a meeting is a
+hard, timestamped error, not a warning. The
+[Two arms, one belt](../tutorials/two-robots.md) tutorial builds this up
+properly.
+
+## The bake
+
+```python
+tl = scene.simulate_sequence("cycle", dt=0.01, max_duration=120.0)
+```
+
+One call, one [`SequenceTimeline`][botrail.SequenceTimeline]: cycle time, step
+spans, signal waveforms, per-robot joint tracks, object motion. Deterministic
+— same scene in, bit-identical timeline out — and therefore
+[assertable](timeline-assertions.md). Connected studios receive the bake and
+show it in the timeline dock.

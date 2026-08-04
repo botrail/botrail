@@ -102,5 +102,8 @@ layout edit becomes a failing test instead of a shop-floor surprise.
 | Load a robot, plan a motion, open the studio | [Quickstart](getting-started/quickstart.md) |
 | Build a cell that runs a cycle and test it | [Your first cell](getting-started/first-cell.md) |
 | Watch real cells get built, step by step | [Tutorials](tutorials/index.md) |
+| Go deep on one topic — tracking, sensors, export… | [Guides](guides/robots.md) |
+| Learn the studio UI | [The studio](guides/studio.md) |
+| Understand the positioning and the trade-offs | [Why botrail](concepts/why-botrail.md) |
 | Look up a method | [API reference](reference/api/robot.md) |
 | Build from source or contribute | [Contributing](contributing.md) |
