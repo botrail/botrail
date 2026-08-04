@@ -20,6 +20,7 @@ import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 from sequence_demo import BOX, TOUCH, build_cycle  # noqa: E402
+import agv_cell_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -88,6 +89,23 @@ def main() -> None:
         time.sleep(1.5)
         page.screenshot(path=OUT / "sequence.png")
         print("wrote sequence.png")
+        server.stop()
+
+        # ---- 4. the transport cell: guide path, stations, load sensor -----
+        scene = agv_cell_demo.build_scene()
+        name = agv_cell_demo.build_cycle(scene)
+        server = bt.studio(scene, block=False, open_browser=False)
+        page.goto(server.url)
+        page.wait_for_selector("canvas")
+        time.sleep(2.0)
+        tl = scene.simulate_sequence(name, max_duration=90.0)
+        page.wait_for_selector(".timeline-bands", timeout=20000)
+        page.evaluate("window.__CAM = {pos: [2.2, -4.6, 3.9], look: [-0.1, -1.2, 0.2]}")
+        # Let the playhead reach the handover: the arm over the deck, the
+        # gate zone lit, all four lanes populated.
+        time.sleep(20.5)
+        page.screenshot(path=OUT / "vehicle.png")
+        print("wrote vehicle.png")
         server.stop()
 
         browser.close()

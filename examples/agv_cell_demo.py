@@ -236,7 +236,7 @@ def build_scene(clash: bool = False) -> bt.Scene:
     return scene
 
 
-def build_cycle(scene: bt.Scene) -> str:
+def build_cycle(scene: bt.Scene, call_delay: float = 0.0) -> str:
     """Teaches the poses and writes the handover cycle; returns its name.
 
     The shape of it is the one a cell PLC would write: the vehicle is
@@ -283,14 +283,32 @@ def build_cycle(scene: bt.Scene) -> str:
     scene.add_segment("home", goal=with_fingers(home, OPEN))
 
     sq = scene.sequence("agv_service")
-    # The call goes out while the arm is still picking: the vehicle drives
-    # up to the gate and waits there. `goto` and `start_motion` are both
-    # fire-and-await, one per actor, so this step runs them in parallel.
-    sq.step(
-        "呼出",
-        actions=[bt.seq.goto("agv", "gate"), bt.seq.motion("to_pick")],
-        transition=bt.seq.all_of(bt.seq.device_done("agv"), bt.seq.done()),
-    )
+    if call_delay > 0.0:
+        # A late dispatcher: the arm starts on time and only the *call* is
+        # held back, which is the deterministic stand-in for arrival
+        # variation (see `agv_sweep_demo.py`). `start_motion` is
+        # fire-and-await, so the arm keeps picking through the wait and
+        # `robot_done` collects it afterwards.
+        sq.step("ピック", actions=[bt.seq.motion("to_pick")],
+                transition=bt.seq.immediately())
+        sq.step("配車遅れ", transition=bt.seq.elapsed(call_delay))
+        sq.step(
+            "呼出",
+            actions=[bt.seq.goto("agv", "gate")],
+            transition=bt.seq.all_of(
+                bt.seq.device_done("agv"), bt.seq.robot_done("panda")
+            ),
+        )
+    else:
+        # The call goes out while the arm is still picking: the vehicle
+        # drives up to the gate and waits there. `goto` and `start_motion`
+        # are both fire-and-await, one per actor, so this step runs them in
+        # parallel.
+        sq.step(
+            "呼出",
+            actions=[bt.seq.goto("agv", "gate"), bt.seq.motion("to_pick")],
+            transition=bt.seq.all_of(bt.seq.device_done("agv"), bt.seq.done()),
+        )
     sq.step("グリッパ閉", actions=[bt.seq.ramp({f: CLOSED for f in fingers}, 0.4)])
     sq.step("把持", actions=[bt.seq.attach(CARTON, link=HAND, touch_links=PADS)])
     sq.step("持上げ", actions=[bt.seq.motion("lift")])

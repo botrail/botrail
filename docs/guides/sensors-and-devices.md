@@ -1,7 +1,8 @@
 # Sensors and devices
 
 This is what makes a botrail environment *behave* rather than sit there:
-sensors that read the world into signals, and devices that move parts of it.
+sensors that read the world into signals, and devices that move parts of it
+— belts, axes, magazines and vehicles.
 Both live on the same scan clock as the [sequencer](sequences.md), and both
 show up as waveform lanes on the baked timeline.
 
@@ -99,6 +100,25 @@ sq.step("open_door", actions=[bt.seq.move_to("door", 0.6)],
 
 The axis moves its listed obstacles along `axis` at `speed`, clamped to
 `range`; `device_done` is the in-position condition.
+
+## Vehicles
+
+The fifth device is a guided transport vehicle: it drives an authored path
+station to station, carries its body and whatever is on its deck, and is
+commanded with `goto` / awaited with `device_done` — the same pair a linear
+axis uses.
+
+```python
+scene.add_vehicle("agv", body=["/World/AGV"],
+                  path=[(-2.6, -2.9), (0.0, -2.9)],
+                  stations={"warehouse": 0, "dock": 1},
+                  speed=0.8, start="warehouse")
+```
+
+A robot can ride one, which makes it an AMR. Vehicles have enough of their
+own rules — the aisle check, trays, mounted sensors, what happens to planned
+motions while driving — to get their own page:
+[Vehicles and AMRs](vehicles-and-amr.md).
 
 ## Housekeeping
 

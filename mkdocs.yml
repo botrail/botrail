@@ -118,6 +118,7 @@ nav:
       - Motion planning: guides/motion-planning.md
       - Sequences: guides/sequences.md
       - Sensors and devices: guides/sensors-and-devices.md
+      - Vehicles and AMRs: guides/vehicles-and-amr.md
       - Attach and tracking: guides/attach-and-tracking.md
       - Timeline assertions: guides/timeline-assertions.md
       - Export: guides/export.md
