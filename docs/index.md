@@ -101,5 +101,6 @@ layout edit becomes a failing test instead of a shop-floor surprise.
 | Install the package and check it works | [Installation](getting-started/installation.md) |
 | Load a robot, plan a motion, open the studio | [Quickstart](getting-started/quickstart.md) |
 | Build a cell that runs a cycle and test it | [Your first cell](getting-started/first-cell.md) |
+| Watch real cells get built, step by step | [Tutorials](tutorials/index.md) |
 | Look up a method | [API reference](reference/api/robot.md) |
 | Build from source or contribute | [Contributing](contributing.md) |

@@ -43,3 +43,8 @@ waits for it (`done()`), a step that starts nothing falls through
 ## Reference
 
 ::: botrail.seq
+    options:
+      # Pure Python, so static analysis works here and keeps the source
+      # order: actions first, then conditions, then the builder.
+      force_inspection: false
+      members_order: source

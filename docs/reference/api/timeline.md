@@ -24,7 +24,7 @@ Returned by [`SequenceTimeline.step_span`][botrail.SequenceTimeline.step_span]:
 one step's interval, in a form that reads well in an assertion
 (`assert tl.step_span("feed").end <= 2.0`).
 
-::: botrail._core.Span
+::: botrail.Span
 
 ## SignalTrack
 
@@ -32,7 +32,7 @@ Returned by [`SequenceTimeline.signal`][botrail.SequenceTimeline.signal]. One
 boolean waveform lane — an internal signal, a sensor, or a device's running
 state — with edge and duty queries on top of it.
 
-::: botrail._core.SignalTrack
+::: botrail.SignalTrack
 
 ## Clearance
 
@@ -42,4 +42,4 @@ tightest robot-to-environment approach over the cycle, with the time and the
 pair it happened at. It compares against plain floats, so
 `assert tl.min_clearance() > 0.05` works directly.
 
-::: botrail._core.Clearance
+::: botrail.Clearance

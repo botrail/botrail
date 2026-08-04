@@ -189,9 +189,12 @@ bt.studio(scene)
 
 ## Next
 
-* Try the richer demos in the repository: a tracking pick where the belt never
-  stops (`examples/sequence_demo.py`), and two arms sharing one infeed behind a
-  zone interlock (`examples/dual_cell_demo.py`).
+* The [tutorials](../tutorials/index.md) build on exactly this: a tracking
+  pick where the belt never stops
+  ([Pick from a moving belt](../tutorials/sequence-cell.md)), the full CI
+  workflow ([Verify the cell in CI](../tutorials/verify-in-ci.md)), and two
+  arms sharing one infeed behind a zone interlock
+  ([Two arms, one belt](../tutorials/two-robots.md)).
 * Look up what else a scene can hold — sources and sinks, linear axes, zone
   sensors, attachments — in the [Scene reference](../reference/api/scene.md).
 * Browse the sequence vocabulary in the [`bt.seq` reference](../reference/api/seq.md).

@@ -2,10 +2,13 @@
 
 from . import seq
 from ._core import (
+    Clearance,
     IkResult,
     Robot,
     Scene,
     SequenceTimeline,
+    SignalTrack,
+    Span,
     StudioServer,
     Trajectory,
     __version__,
@@ -13,10 +16,13 @@ from ._core import (
 from ._launcher import studio
 
 __all__ = [
+    "Clearance",
     "IkResult",
     "Robot",
     "Scene",
     "SequenceTimeline",
+    "SignalTrack",
+    "Span",
     "StudioServer",
     "Trajectory",
     "seq",

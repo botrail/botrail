@@ -102,6 +102,14 @@ nav:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
       - Your first cell: getting-started/first-cell.md
+  - Tutorials:
+      - tutorials/index.md
+      - Pose and plan: tutorials/pose-and-plan.md
+      - Pick from a moving belt: tutorials/sequence-cell.md
+      - Verify the cell in CI: tutorials/verify-in-ci.md
+      - Two arms, one belt: tutorials/two-robots.md
+      - Parameter sweeps: tutorials/parameter-sweep.md
+      - Export and replay USD: tutorials/replay-usd.md
   - API reference:
       - Robot: reference/api/robot.md
       - Scene: reference/api/scene.md

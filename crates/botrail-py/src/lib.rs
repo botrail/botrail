@@ -306,8 +306,10 @@ impl IkResult {
     }
 }
 
-/// A robot in a workspace. Shared with the studio server: joint state
-/// changes made here are pushed to connected browsers immediately.
+/// The cell: one or more robots in a workspace, with the obstacles,
+/// frames, sensors, devices, motions, and sequences around them. Shared
+/// with the studio server: state changes made here are pushed to
+/// connected browsers immediately.
 #[pyclass(frozen, module = "botrail._core")]
 struct Scene {
     hub: Arc<SceneHub>,
