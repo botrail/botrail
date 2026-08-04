@@ -15,8 +15,10 @@ import type {
 /** Per-robot trajectories on a single clock. */
 export interface PlaybackTracks {
   duration: number;
-  /** One track per moving robot; robots not listed stay at their live state. */
-  robots: { name: string; trajectory: TrajectoryMsg }[];
+  /** One track per moving robot; robots not listed stay at their live state.
+   *  `base` is present only for a robot riding a vehicle, sampled on the
+   *  trajectory's own times. */
+  robots: { name: string; trajectory: TrajectoryMsg; base?: PoseMsg[] }[];
   /** World-pose tracks of moving scene objects, sampled on `times`. */
   objects: { times: number[]; tracks: ObjectTrackMsg[] } | null;
 }
@@ -31,6 +33,8 @@ export interface PlaybackSample {
   objects: Record<string, PoseMsg> | null;
   /** Objects stowed at this instant; not drawn. */
   stowed: Set<string>;
+  /** Robot name -> base pose, for robots riding a vehicle. */
+  bases: Record<string, PoseMsg> | null;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -55,6 +59,7 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
     robots: timeline.robots.map((r) => ({
       name: r.name,
       trajectory: r.trajectory,
+      base: r.base && r.base.length > 0 ? r.base : undefined,
     })),
     objects:
       timeline.objects.length > 0
@@ -74,7 +79,11 @@ export function samplePlayback(
 ): PlaybackSample {
   let poses: Record<string, PoseMsg[]> | null = null;
   let joints: Record<string, number[]> | null = null;
-  for (const { name, trajectory } of tracks.robots) {
+  let bases: Record<string, PoseMsg> | null = null;
+  for (const { name, trajectory, base } of tracks.robots) {
+    if (base && base.length > 0) {
+      (bases ??= {})[name] = samplePose(trajectory.times, base, t);
+    }
     if (trajectory.link_poses) {
       (poses ??= {})[name] = samplePoses(
         { ...trajectory, link_poses: trajectory.link_poses },
@@ -87,8 +96,24 @@ export function samplePlayback(
   return {
     poses,
     joints,
+    bases,
     objects: sampleObjectPoses(tracks.objects, t),
     stowed: sampleStowedObjects(tracks.objects, t),
+  };
+}
+
+/** One interpolated pose from a pose track sampled on `times`. */
+function samplePose(times: number[], poses: PoseMsg[], t: number): PoseMsg {
+  const [i, j, u] = bracket(times, t);
+  const a = poses[i];
+  const b = poses[j] ?? a;
+  return {
+    position: [
+      lerp(a.position[0], b.position[0], u),
+      lerp(a.position[1], b.position[1], u),
+      lerp(a.position[2], b.position[2], u),
+    ],
+    quaternion: nlerpQuat(a.quaternion, b.quaternion, u),
   };
 }
 

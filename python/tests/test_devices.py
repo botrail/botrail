@@ -213,3 +213,135 @@ def test_vehicle_authoring_errors(scene: bt.Scene) -> None:
     sq.step("again", actions=[bt.seq.goto("agv", "a")], transition=bt.seq.device_done("agv"))
     with pytest.raises(ValueError, match="still travelling"):
         sq.simulate()
+
+
+def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene) -> None:
+    # A deck 0.3 m up, and a carton resting on it. Nothing declares the
+    # carton as cargo — being in the zone is what makes it cargo.
+    scene.add_box("agv/base", (0.6, 0.4, 0.3), (0.0, 2.0, 0.15))
+    scene.add_box("crate", (0.1, 0.1, 0.1), (0.0, 2.0, 0.35))
+    scene.add_box("bystander", (0.1, 0.1, 0.1), (0.0, 2.8, 0.05))
+    scene.add_vehicle(
+        "agv",
+        body=["agv"],
+        path=[(0.0, 2.0), (2.0, 2.0)],
+        stations={"a": 0, "b": 1},
+        speed=0.5,
+        start="a",
+        tray_position=(0.0, 0.0, 0.35),
+        tray_size=(0.6, 0.4, 0.2),
+    )
+    # Load-present, riding along; and the same zone bolted to the floor.
+    scene.add_zone_sensor("loaded", position=(0.0, 0.0, 0.35), size=(0.6, 0.4, 0.2),
+                          watch=["crate"], mount="agv")
+    scene.add_zone_sensor("at_a", position=(0.0, 2.0, 0.35), size=(0.6, 0.4, 0.2),
+                          watch=["crate"])
+
+    sq = scene.sequence("haul")
+    sq.step("go", actions=[bt.seq.goto("agv", "b")], transition=bt.seq.device_done("agv"))
+    tl = sq.simulate()
+
+    assert abs(tl.duration - 4.0) <= 0.011  # 2 m at 0.5 m/s
+    p_end, _ = tl.object_pose("crate", tl.duration)
+    assert max(abs(a - b) for a, b in zip(p_end, (2.0, 2.0, 0.35))) < 1e-9
+    # The bystander was never cargo.
+    with pytest.raises(ValueError, match="crate|bystander|unknown"):
+        tl.object_pose("bystander", tl.duration)
+    # The mounted eye keeps its load; the floor fixture loses it.
+    lanes = dict(tl.signals)
+    assert [v for _, v in lanes["loaded"]] == [False, True]
+    assert [v for _, v in lanes["at_a"]] == [False, True, False]
+    assert tl.signal("loaded").value_at(tl.duration)
+    assert not tl.signal("at_a").value_at(tl.duration)
+
+
+def test_vehicle_reverses_out_instead_of_turning(scene: bt.Scene) -> None:
+    # Out and back on a straight run. Turning around costs two 180 deg
+    # pivots; reversing costs none, and the machine ends facing the way it
+    # started — which is what a dead-end dock forces.
+    scene.add_box("agv/base", (0.4, 0.3, 0.2), (0.0, 2.0, 0.1))
+    common = dict(body=["agv"], path=[(0.0, 2.0), (1.0, 2.0)],
+                  stations={"a": 0, "b": 1}, speed=0.5,
+                  turn_speed=math.pi / 2, start="a")
+
+    def cycle(**extra) -> float:
+        scene.add_vehicle("agv", **common, **extra)
+        sq = scene.sequence("cycle")
+        sq.step("out", actions=[bt.seq.goto("agv", "b")],
+                transition=bt.seq.device_done("agv"))
+        sq.step("back", actions=[bt.seq.goto("agv", "a")],
+                transition=bt.seq.device_done("agv"))
+        tl = sq.simulate()
+        _, q = tl.object_pose("agv/base", tl.duration)
+        return tl.duration, q
+
+    turning, q_turn = cycle()
+    reversing, q_back = cycle(allow_reverse=True)
+    # 2 x 2 s of driving, plus a 180 deg about-face (2 s) only when turning.
+    assert abs(turning - 6.0) <= 0.011, turning
+    assert abs(reversing - 4.0) <= 0.011, reversing
+    # Turning around leaves it facing back the way it came; reversing does
+    # not turn it at all.
+    assert abs(abs(q_turn[2]) - 1.0) < 1e-6, q_turn   # yaw = pi
+    assert abs(q_back[2]) < 1e-9, q_back              # yaw = 0
+
+
+def test_mounted_robot_base_rides_the_vehicle(scene: bt.Scene) -> None:
+    # An arm on a chassis: its base stops being a scene constant.
+    scene.add_box("agv/base", (0.6, 0.4, 0.3), (0.0, 2.0, 0.15))
+    scene.add_vehicle(
+        "amr",
+        body=["agv"],
+        path=[(0.0, 2.0), (2.0, 2.0)],
+        stations={"a": 0, "b": 1},
+        speed=0.5,
+        start="a",
+    )
+    scene.mount_robot("amr", offset_position=(0.0, 0.0, 0.3))
+    # Mounting places it on the parked vehicle at once.
+    pos, _ = scene.robot_base_pose
+    assert max(abs(a - b) for a, b in zip(pos, (0.0, 2.0, 0.3))) < 1e-12
+
+    sq = scene.sequence("go")
+    sq.step("drive", actions=[bt.seq.goto("amr", "b")], transition=bt.seq.device_done("amr"))
+    sq.step("dwell", transition=bt.seq.elapsed(1.0))
+    tl = sq.simulate()
+
+    # The base track exists and keeps a constant offset to the body it is
+    # bolted to (the chassis box is drawn about its own centre, 0.15 up).
+    for t in (0.0, 2.0, 4.0, tl.duration):
+        base, _ = tl.base_pose(t)
+        body, _ = tl.object_pose("agv/base", t)
+        offset = tuple(a - b for a, b in zip(base, body))
+        assert max(abs(a - b) for a, b in zip(offset, (0.0, 0.0, 0.15))) < 1e-9, t
+    end, _ = tl.base_pose(tl.duration)
+    assert max(abs(a - b) for a, b in zip(end, (2.0, 2.0, 0.3))) < 1e-9
+
+
+def test_plan_while_driving_is_rejected_but_a_ramp_is_not(scene: bt.Scene) -> None:
+    scene.add_box("agv/base", (0.6, 0.4, 0.3), (0.0, 2.0, 0.15))
+    scene.add_vehicle("amr", body=["agv"], path=[(0.0, 2.0), (2.0, 2.0)],
+                      stations={"a": 0, "b": 1}, speed=0.5, start="a")
+    scene.mount_robot("amr", offset_position=(0.0, 0.0, 0.3))
+    scene.add_segment("reach", goal=[0.2, -0.4, 0.9, 0.0, 0.9, 0.0])
+
+    # A ramp alongside the drive: fine, and it actually moves the arm.
+    joint = scene.robot.joint_names[1]
+    sq = scene.sequence("stow")
+    sq.step(
+        "drive",
+        actions=[bt.seq.goto("amr", "b"), bt.seq.ramp({joint: -0.5}, 1.0)],
+        transition=bt.seq.device_done("amr"),
+    )
+    tl = sq.simulate()
+    assert abs(tl.sample(tl.duration)[1] - (-0.5)) < 1e-9
+
+    # A planned motion in the same step: rejected, with the reason.
+    sq = scene.sequence("bad")
+    sq.step(
+        "drive",
+        actions=[bt.seq.goto("amr", "b"), bt.seq.motion("reach")],
+        transition=bt.seq.device_done("amr"),
+    )
+    with pytest.raises(ValueError, match="cannot start while `amr` is driving"):
+        sq.simulate()

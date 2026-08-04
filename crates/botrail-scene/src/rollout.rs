@@ -11,7 +11,9 @@ use botrail_traj::JointTrajectory;
 use nalgebra::Isometry3;
 use thiserror::Error;
 
-use crate::seq::{Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence};
+use crate::seq::{
+    vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
+};
 use crate::Scene;
 use botrail_collide::ObstacleCollider;
 use nalgebra::Vector3;
@@ -178,6 +180,96 @@ pub enum TrackSpan {
     },
 }
 
+/// Advances `from` by one vehicle motion piece lasting `dt`.
+fn apply_piece(from: &Isometry3<f64>, piece: &VehiclePiece, dt: f64) -> Isometry3<f64> {
+    match piece {
+        VehiclePiece::Lin { velocity } => {
+            let mut next = *from;
+            next.translation.vector += velocity * dt;
+            next
+        }
+        VehiclePiece::Piv { center, omega } => pivot_pose(from, center, omega * dt),
+    }
+}
+
+/// Appends one vehicle motion piece to a span list, merging with the open
+/// span when it continues it — so a whole leg bakes to a single span.
+/// Seeds a leading rest span when the list is empty and the motion starts
+/// after t = 0, keeping the tiling from zero.
+fn push_vehicle_span(
+    spans: &mut Vec<TrackSpan>,
+    from: Isometry3<f64>,
+    tau0: f64,
+    tau1: f64,
+    piece: &VehiclePiece,
+) {
+    if tau1 - tau0 < 1e-12 {
+        return;
+    }
+    if spans.is_empty() && tau0 > 0.0 {
+        spans.push(TrackSpan::Hold {
+            t0: 0.0,
+            t1: tau0,
+            pose: from,
+        });
+    }
+    let merged = match (spans.last_mut(), piece) {
+        (Some(TrackSpan::Linear { t1, velocity, .. }), VehiclePiece::Lin { velocity: v })
+            if (*velocity - v).norm() < 1e-12 && (*t1 - tau0).abs() < 1e-9 =>
+        {
+            *t1 = tau1;
+            true
+        }
+        (
+            Some(TrackSpan::Pivot {
+                t1, center, omega, ..
+            }),
+            VehiclePiece::Piv {
+                center: c,
+                omega: o,
+            },
+        ) if (center.coords - c.coords).norm() < 1e-12
+            && (*omega - o).abs() < 1e-12
+            && (*t1 - tau0).abs() < 1e-9 =>
+        {
+            *t1 = tau1;
+            true
+        }
+        _ => false,
+    };
+    if merged {
+        return;
+    }
+    // A gap means the vehicle stood still in between. Stretching the
+    // previous span across it would keep *travelling* through the stop —
+    // the rest has to be recorded as a rest.
+    if let Some(open) = spans.last() {
+        let (_, end) = open.range();
+        if end < tau0 - 1e-12 {
+            spans.push(TrackSpan::Hold {
+                t0: end,
+                t1: tau0,
+                pose: from,
+            });
+        }
+    }
+    spans.push(match piece {
+        VehiclePiece::Lin { velocity } => TrackSpan::Linear {
+            t0: tau0,
+            t1: tau1,
+            from,
+            velocity: *velocity,
+        },
+        VehiclePiece::Piv { center, omega } => TrackSpan::Pivot {
+            t0: tau0,
+            t1: tau1,
+            from,
+            center: *center,
+            omega: *omega,
+        },
+    });
+}
+
 /// Rigid rotation of `from` about the vertical line through `center` by
 /// `phi` radians.
 pub(crate) fn pivot_pose(
@@ -232,6 +324,10 @@ pub struct RobotTrack {
     /// Intervals a motion/ramp drove this robot (timeline robot lanes),
     /// labelled with the motion name (or `ramp`).
     pub moves: Vec<StepSpan>,
+    /// Where the robot's base was over time — `Some` only for a robot that
+    /// rides a vehicle. Spans tile `[0, duration]` in the same vocabulary
+    /// the load uses, because it is the same rigid motion.
+    pub base: Option<Vec<TrackSpan>>,
 }
 
 /// The baked result of a sequence rollout — what playback, USD export, and
@@ -269,14 +365,28 @@ impl SequenceTimeline {
         link_poses: &[Vec<Isometry3<f64>>],
         t: f64,
     ) -> Option<Isometry3<f64>> {
-        let span = track
-            .spans
+        Self::span_pose(&track.spans, link_poses, t)
+    }
+
+    /// Where a mounted robot's base was at `t`.
+    pub fn base_pose(track: &RobotTrack, t: f64) -> Option<Isometry3<f64>> {
+        Self::span_pose(track.base.as_deref()?, &[], t)
+    }
+
+    /// Pose from a span list at `t` (spans tile `[0, duration]`; the last
+    /// one extends past its end).
+    pub fn span_pose(
+        spans: &[TrackSpan],
+        link_poses: &[Vec<Isometry3<f64>>],
+        t: f64,
+    ) -> Option<Isometry3<f64>> {
+        let span = spans
             .iter()
             .find(|s| {
                 let (t0, t1) = s.range();
                 t >= t0 - 1e-9 && t <= t1 + 1e-9
             })
-            .or(track.spans.last())?;
+            .or(spans.last())?;
         Some(match span {
             TrackSpan::Hold { pose, .. } | TrackSpan::Stowed { pose, .. } => *pose,
             TrackSpan::Follow {
@@ -354,6 +464,8 @@ struct RobotRuntime {
     velocities: Vec<Vec<f64>>,
     /// Intervals a move drove this robot (the timeline's robot lanes).
     moves: Vec<StepSpan>,
+    /// Base motion, for a robot riding a vehicle.
+    base: Option<Vec<TrackSpan>>,
 }
 
 impl RobotRuntime {
@@ -458,10 +570,21 @@ struct TrackLatch {
 
 struct SensorRuntime {
     collider: ObstacleCollider,
+    /// Authored pose — world for a fixture, vehicle-frame for a mounted one.
     pose: Isometry3<f64>,
+    /// Device index of the vehicle this rides on, if any.
+    mount: Option<usize>,
     watch: SensorWatch,
     /// Index of this sensor's lane in the signal tracks.
     lane: usize,
+}
+
+/// Is `point` inside the box centred on `pose` with half-extents `half`?
+fn inside_zone(pose: &Isometry3<f64>, half: &Vector3<f64>, point: &Isometry3<f64>) -> bool {
+    let local = pose
+        .inverse()
+        .transform_point(&nalgebra::Point3::from(point.translation.vector));
+    local.x.abs() <= half.x && local.y.abs() <= half.y && local.z.abs() <= half.z
 }
 
 enum DeviceRuntime {
@@ -513,6 +636,9 @@ enum DeviceRuntime {
         body: Vec<String>,
         speed: f64,
         turn_speed: f64,
+        allow_reverse: bool,
+        /// Load deck in the vehicle frame (pose, half-extents).
+        tray: Option<(Isometry3<f64>, Vector3<f64>)>,
         /// SE(2) reference frame: floor position + yaw. The body rides this
         /// frame's rigid motion; its own z never changes.
         position: nalgebra::Point2<f64>,
@@ -550,8 +676,14 @@ enum VehiclePiece {
 }
 
 /// One travelling vehicle's tick worth of motion: its name, body members,
-/// and exact sub-tick `(τ0, τ1, piece)` intervals.
-type VehicleMove = (String, Vec<String>, Vec<(f64, f64, VehiclePiece)>);
+/// the load deck as it stood at the *start* of the tick (whatever was on it
+/// then rides), and the exact sub-tick `(τ0, τ1, piece)` intervals.
+struct VehicleMove {
+    name: String,
+    body: Vec<String>,
+    tray: Option<(Isometry3<f64>, Vector3<f64>)>,
+    pieces: Vec<(f64, f64, VehiclePiece)>,
+}
 
 /// Wraps to `(-π, π]` — the exact-π case turns counter-clockwise, fixed, so
 /// a 180° about-face is deterministic.
@@ -563,43 +695,6 @@ fn wrap_angle(a: f64) -> f64 {
         a -= std::f64::consts::TAU;
     }
     a
-}
-
-/// The heading a parked vehicle faces: along the leg leaving its waypoint
-/// (wrapping on a ring), or along the leg arriving at it when nothing
-/// leaves (the open path's last waypoint).
-fn initial_heading(waypoints: &[nalgebra::Point2<f64>], ring: bool, at: usize) -> f64 {
-    let n = waypoints.len();
-    let dir_from = |i: usize, j: usize| {
-        let d = waypoints[j] - waypoints[i];
-        (d.norm() > 1e-9).then(|| d.y.atan2(d.x))
-    };
-    // The next distinct waypoint ahead, then the previous distinct one.
-    for step in 1..n {
-        let j = if ring {
-            (at + step) % n
-        } else if at + step < n {
-            at + step
-        } else {
-            break;
-        };
-        if let Some(h) = dir_from(at, j) {
-            return h;
-        }
-    }
-    for step in 1..n {
-        let j = if ring {
-            (at + n - (step % n)) % n
-        } else if step <= at {
-            at - step
-        } else {
-            break;
-        };
-        if let Some(h) = dir_from(j, at) {
-            return h;
-        }
-    }
-    0.0
 }
 
 /// Waypoint indices from `from` to `to` (exclusive of `from`, inclusive of
@@ -657,6 +752,7 @@ fn build_legs(
     start: nalgebra::Point2<f64>,
     heading: f64,
     turn_speed: f64,
+    allow_reverse: bool,
 ) -> std::collections::VecDeque<Leg> {
     let mut legs = std::collections::VecDeque::new();
     let mut position = start;
@@ -667,7 +763,16 @@ fn build_legs(
         if d.norm() < 1e-9 {
             continue;
         }
-        let leg_heading = d.y.atan2(d.x);
+        let travel = d.y.atan2(d.x);
+        // Backing up is just facing the other way while travelling the same
+        // direction — worth it whenever it is the shorter turn, which is
+        // exactly when a machine would reverse rather than turn around.
+        let leg_heading =
+            if allow_reverse && wrap_angle(travel - heading).abs() > std::f64::consts::FRAC_PI_2 {
+                wrap_angle(travel + std::f64::consts::PI)
+            } else {
+                travel
+            };
         let dphi = wrap_angle(leg_heading - heading);
         if dphi.abs() > 1e-9 {
             legs.push_back(Leg::Turn {
@@ -718,6 +823,10 @@ impl Rollout {
                 SensorRuntime {
                     collider,
                     pose,
+                    mount: sensor
+                        .mount
+                        .as_ref()
+                        .and_then(|name| world.devices().iter().position(|d| &d.name == name)),
                     watch: sensor.watch.clone(),
                     lane,
                 }
@@ -839,6 +948,8 @@ impl Rollout {
                         speed,
                         turn_speed,
                         start,
+                        allow_reverse,
+                        tray,
                     } => {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
@@ -852,7 +963,7 @@ impl Rollout {
                             .get(at)
                             .copied()
                             .unwrap_or_else(nalgebra::Point2::origin);
-                        let heading = initial_heading(&path.waypoints, path.ring, at);
+                        let heading = path.heading_at(at);
                         DeviceRuntime::Vehicle {
                             name: device.name.clone(),
                             waypoints: path.waypoints.clone(),
@@ -861,6 +972,8 @@ impl Rollout {
                             body: body.clone(),
                             speed: *speed,
                             turn_speed: *turn_speed,
+                            allow_reverse: *allow_reverse,
+                            tray: tray.map(|(pose, size)| (pose, size / 2.0)),
                             position,
                             heading,
                             at: Some(at),
@@ -936,6 +1049,7 @@ impl Rollout {
                     active: None,
                     tracking: None,
                     moves: Vec::new(),
+                    base: sr.mount.as_ref().map(|_| Vec::new()),
                 }
             })
             .collect();
@@ -1121,6 +1235,7 @@ impl Rollout {
                     name,
                     body,
                     speed,
+                    tray,
                     position,
                     heading,
                     at,
@@ -1132,6 +1247,12 @@ impl Rollout {
                     if legs.is_empty() {
                         continue;
                     }
+                    // The deck as it stands *now*: what is on it at the top
+                    // of the tick is what travels this tick. Capturing it
+                    // before the walk also settles the ordering question —
+                    // a part placed mid-tick joins on the next one.
+                    let deck =
+                        tray.map(|(pose, half)| (vehicle_frame(position, *heading) * pose, half));
                     // Walk the legs through this tick's time budget. Leg
                     // boundaries land at exact sub-tick instants, so the
                     // recorded spans (and any resample of them) are exact;
@@ -1206,7 +1327,12 @@ impl Rollout {
                         lane_updates.push((*lane, false));
                     }
                     if !pieces.is_empty() {
-                        vehicle_moves.push((name.clone(), body.clone(), pieces));
+                        vehicle_moves.push(VehicleMove {
+                            name: name.clone(),
+                            body: body.clone(),
+                            tray: deck,
+                            pieces,
+                        });
                     }
                 }
                 // Releases are a second pass: a member returned this tick
@@ -1231,10 +1357,17 @@ impl Rollout {
                 .expect("moved obstacle exists");
             self.extend_linear_span(name, rest, *velocity);
         }
-        self.apply_vehicle_moves(vehicle_moves)?;
+        // A part a conveyor already moved this tick is that conveyor's; one
+        // device per part per tick keeps the bake single-valued.
+        let advected: Vec<String> = moved.iter().map(|(n, _, _)| n.clone()).collect();
+        let riders = self.apply_vehicle_moves(vehicle_moves, &advected)?;
         // Objects that stopped riding (zone exit / device stop / vehicle
         // arrival) settle into a hold at their current pose.
-        let moved_names: Vec<&String> = moved.iter().map(|(n, _, _)| n).collect();
+        let moved_names: Vec<&String> = moved
+            .iter()
+            .map(|(n, _, _)| n)
+            .chain(riders.iter())
+            .collect();
         let settled: Vec<(String, Isometry3<f64>)> = self
             .objects
             .iter()
@@ -1618,9 +1751,40 @@ impl Rollout {
     /// Applies each travelling vehicle's tick motion to its body obstacles
     /// — composing the exact sub-tick pieces onto the world poses and
     /// recording them as Linear/Pivot spans — then runs the aisle check.
-    fn apply_vehicle_moves(&mut self, moves: Vec<VehicleMove>) -> Result<(), SeqError> {
-        for (_, body, pieces) in &moves {
-            for member in body {
+    /// Returns the names that rode a deck this tick (they settle like any
+    /// other carried part when the vehicle stops).
+    fn apply_vehicle_moves(
+        &mut self,
+        moves: Vec<VehicleMove>,
+        advected: &[String],
+    ) -> Result<Vec<String>, SeqError> {
+        // Whatever sits on a deck travels exactly like the body does, so the
+        // two are carried by the same code — the only difference is that the
+        // load is worked out per tick and the body is fixed.
+        let moves: Vec<(VehicleMove, Vec<String>)> = moves
+            .into_iter()
+            .map(|mv| {
+                let riders = match &mv.tray {
+                    None => Vec::new(),
+                    Some((zone, half)) => self
+                        .world
+                        .obstacles()
+                        .iter()
+                        .filter(|o| {
+                            !mv.body.iter().any(|b| b == &o.name)
+                                && self.world.attachment(&o.name).is_none()
+                                && !advected.iter().any(|n| n == &o.name)
+                                && inside_zone(zone, half, &o.pose)
+                        })
+                        .map(|o| o.name.clone())
+                        .collect(),
+                };
+                (mv, riders)
+            })
+            .collect();
+        for (mv, riders) in &moves {
+            let (body, pieces) = (&mv.body, &mv.pieces);
+            for member in body.iter().chain(riders) {
                 if self.world.attachment(member).is_some() {
                     // Grasped body parts are the robot's problem, like any
                     // other advection exclusion.
@@ -1637,29 +1801,42 @@ impl Rollout {
                 };
                 for (tau0, tau1, piece) in pieces {
                     let from = pose;
-                    pose = match piece {
-                        VehiclePiece::Lin { velocity } => {
-                            let mut next = from;
-                            next.translation.vector += velocity * (tau1 - tau0);
-                            next
-                        }
-                        VehiclePiece::Piv { center, omega } => {
-                            pivot_pose(&from, center, omega * (tau1 - tau0))
-                        }
-                    };
+                    pose = apply_piece(&from, piece, tau1 - tau0);
                     self.extend_vehicle_span(member, from, *tau0, *tau1, piece);
                 }
                 self.world
                     .set_obstacle_pose(member, pose)
                     .expect("body member exists");
             }
+            // A robot riding this vehicle moves by the same pieces. Deriving
+            // its base this way rather than recomposing `frame ∘ offset`
+            // keeps it *exactly* rigid with the body it is bolted to, which
+            // is what any check of the pair will ask.
+            for r in 0..self.world.robots().len() {
+                let rides = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .is_some_and(|m| m.device == mv.name);
+                if !rides {
+                    continue;
+                }
+                let mut base = *self.world.robots()[r].base_pose();
+                for (tau0, tau1, piece) in pieces {
+                    let from = base;
+                    base = apply_piece(&from, piece, tau1 - tau0);
+                    if let Some(spans) = self.robots[r].base.as_mut() {
+                        push_vehicle_span(spans, from, *tau0, *tau1, piece);
+                    }
+                }
+                self.world.set_robot_base_pose_for(r, base);
+            }
         }
-        self.check_vehicle_collisions(&moves)
+        self.check_vehicle_collisions(&moves)?;
+        Ok(moves.into_iter().flat_map(|(_, riders)| riders).collect())
     }
 
     /// Extends (or opens) the exact sub-tick span covering one vehicle
-    /// piece. Straights merge with straights of the same velocity, pivots
-    /// with pivots about the same axis — a whole leg bakes to one span.
+    /// piece for a carried obstacle.
     fn extend_vehicle_span(
         &mut self,
         name: &str,
@@ -1672,62 +1849,22 @@ impl Rollout {
             return;
         }
         let track = self.object_track_at(name, from, tau0);
-        let merged = match (track.spans.last_mut(), piece) {
-            (Some(TrackSpan::Linear { t1, velocity, .. }), VehiclePiece::Lin { velocity: v })
-                if (*velocity - v).norm() < 1e-12 && (*t1 - tau0).abs() < 1e-9 =>
-            {
-                *t1 = tau1;
-                true
-            }
-            (
-                Some(TrackSpan::Pivot {
-                    t1, center, omega, ..
-                }),
-                VehiclePiece::Piv {
-                    center: c,
-                    omega: o,
-                },
-            ) if (center.coords - c.coords).norm() < 1e-12
-                && (*omega - o).abs() < 1e-12
-                && (*t1 - tau0).abs() < 1e-9 =>
-            {
-                *t1 = tau1;
-                true
-            }
-            _ => false,
-        };
-        if merged {
-            return;
-        }
-        if let Some(open) = track.spans.last_mut() {
-            let end = open.end_mut();
-            if *end < tau0 {
-                *end = tau0;
-            }
-        }
-        track.spans.push(match piece {
-            VehiclePiece::Lin { velocity } => TrackSpan::Linear {
-                t0: tau0,
-                t1: tau1,
-                from,
-                velocity: *velocity,
-            },
-            VehiclePiece::Piv { center, omega } => TrackSpan::Pivot {
-                t0: tau0,
-                t1: tau1,
-                from,
-                center: *center,
-                omega: *omega,
-            },
-        });
+        push_vehicle_span(&mut track.spans, from, tau0, tau1, piece);
     }
 
     /// A travelling vehicle's body must clear everything it does not carry
     /// — the aisle check. Only vehicles that moved this tick are checked,
     /// so a parked vehicle touching its dock guide is legitimate authoring.
-    fn check_vehicle_collisions(&self, moves: &[VehicleMove]) -> Result<(), SeqError> {
-        for (vehicle, body, _) in moves {
-            for member in body {
+    /// The load is checked too, and counts as carried: a part on the deck
+    /// may touch the body it rides on, but not the shelf it passes.
+    fn check_vehicle_collisions(
+        &self,
+        moves: &[(VehicleMove, Vec<String>)],
+    ) -> Result<(), SeqError> {
+        for (mv, riders) in moves {
+            let (vehicle, body) = (&mv.name, &mv.body);
+            let carried = |name: &String| body.contains(name) || riders.contains(name);
+            for member in body.iter().chain(riders) {
                 let Some((k, obstacle)) = self
                     .world
                     .obstacles()
@@ -1744,7 +1881,7 @@ impl Rollout {
                 for (j, other) in self.world.obstacles().iter().enumerate() {
                     if j == k
                         || !other.enabled
-                        || body.iter().any(|b| b == &other.name)
+                        || carried(&other.name)
                         || self.world.attachment(&other.name).is_some()
                     {
                         continue;
@@ -1783,6 +1920,15 @@ impl Rollout {
         let t = self.t;
         let mut edges = Vec::new();
         for sensor in &self.sensors {
+            // A mounted sensor's geometry is authored in its vehicle's
+            // frame, so its world pose is re-resolved every tick — that is
+            // the whole difference between a fixture and one that travels.
+            let pose = match sensor.mount.and_then(|d| self.devices.get(d)) {
+                Some(DeviceRuntime::Vehicle {
+                    position, heading, ..
+                }) => vehicle_frame(position, *heading) * sensor.pose,
+                _ => sensor.pose,
+            };
             let mut value = false;
             let watch_objects: Option<&[String]> = match &sensor.watch {
                 SensorWatch::Objects(names) => Some(names),
@@ -1804,10 +1950,7 @@ impl Rollout {
                             continue;
                         }
                     }
-                    if sensor
-                        .collider
-                        .intersects(&sensor.pose, collider, &obstacle.pose)
-                    {
+                    if sensor.collider.intersects(&pose, collider, &obstacle.pose) {
                         value = true;
                         break;
                     }
@@ -1829,7 +1972,7 @@ impl Rollout {
                                 r.collider(),
                                 lp,
                                 &sensor.collider,
-                                &sensor.pose,
+                                &pose,
                             )
                     });
                 }
@@ -1971,6 +2114,27 @@ impl Rollout {
                     .find(|m| &m.name == motion)
                     .map(|m| m.robot)
                     .ok_or_else(|| err(format!("unknown motion `{motion}`")))?;
+                // A plan is baked in world coordinates when it starts, so a
+                // base that moves underneath it invalidates every waypoint.
+                // Same rule as planning under a conveyor track, and the same
+                // escape: ramps are re-evaluated per tick, so those may run
+                // while the machine drives (stow the arm and go).
+                if let Some(mount) = self.world.robots()[owner].mount.clone() {
+                    let travelling = self.devices.iter().any(|d| match d {
+                        DeviceRuntime::Vehicle { name, legs, .. } => {
+                            *name == mount.device && !legs.is_empty()
+                        }
+                        _ => false,
+                    });
+                    if travelling {
+                        return Err(err(format!(
+                            "motion `{motion}` cannot start while `{}` is driving: plans are \
+                             baked in world coordinates, so wait for device_done first \
+                             (a ramp may run while travelling)",
+                            mount.device
+                        )));
+                    }
+                }
                 // Plan against the world as it stands *now*: current q,
                 // moved obstacles, live grasps — the other robots are
                 // frozen collision bodies at their current configuration.
@@ -2225,6 +2389,7 @@ impl Rollout {
                             stations,
                             ring,
                             turn_speed,
+                            allow_reverse,
                             position,
                             heading,
                             at,
@@ -2252,7 +2417,14 @@ impl Rollout {
                             })?;
                         let from = at.unwrap_or(*target);
                         let route = vehicle_route(waypoints, *ring, from, to);
-                        *legs = build_legs(waypoints, &route, *position, *heading, *turn_speed);
+                        *legs = build_legs(
+                            waypoints,
+                            &route,
+                            *position,
+                            *heading,
+                            *turn_speed,
+                            *allow_reverse,
+                        );
                         *target = to;
                         if legs.is_empty() {
                             // Already there (or a zero-length route).
@@ -2320,6 +2492,32 @@ impl Rollout {
                         velocities: rt.velocities,
                     },
                     moves: rt.moves,
+                    // The cycle usually ends parked: close a travelling span
+                    // at its own end and rest there, rather than extending it
+                    // to the horn and driving off the timeline.
+                    base: rt.base.map(|mut spans| {
+                        match spans.last() {
+                            Some(span @ (TrackSpan::Linear { .. } | TrackSpan::Pivot { .. })) => {
+                                let (_, end) = span.range();
+                                if end < duration - 1e-12 {
+                                    let pose = SequenceTimeline::span_pose(&spans, &[], end)
+                                        .expect("non-empty base track");
+                                    spans.push(TrackSpan::Hold {
+                                        t0: end,
+                                        t1: duration,
+                                        pose,
+                                    });
+                                }
+                            }
+                            Some(_) => {
+                                if let Some(open) = spans.last_mut() {
+                                    *open.end_mut() = duration;
+                                }
+                            }
+                            None => {}
+                        }
+                        spans
+                    }),
                 }
             })
             .collect();
@@ -2369,7 +2567,7 @@ pub(crate) mod tests {
         ))
     }
 
-    fn joint_motion(scene: &mut Scene, name: &str, goal: f64) {
+    pub(crate) fn joint_motion(scene: &mut Scene, name: &str, goal: f64) {
         scene
             .add_segment(
                 name,
@@ -3031,6 +3229,7 @@ mod device_tests {
                 radius: 0.005,
             },
             watch: SensorWatch::AllObjects,
+            mount: None,
         });
         scene.upsert_sequence(Sequence {
             name: "feed".into(),
@@ -3175,6 +3374,7 @@ mod device_tests {
                 size: Vector3::new(0.4, 0.4, 0.4),
             },
             watch: SensorWatch::Robot,
+            mount: None,
         });
         scene.upsert_sequence(Sequence {
             name: "s".into(),
@@ -3215,6 +3415,7 @@ mod device_tests {
                 size: Vector3::new(0.1, 0.1, 0.1),
             },
             watch: SensorWatch::AllObjects,
+            mount: None,
         });
         let check = |scene: &Scene, steps: Vec<Step>, needle: &str| {
             let mut s = scene.clone();
@@ -3354,6 +3555,7 @@ mod multi_actor_tests {
                 size: Vector3::new(0.4, 0.4, 0.4),
             },
             watch: SensorWatch::Robots(vec!["a".into()]),
+            mount: None,
         });
         scene
     }
@@ -4153,6 +4355,8 @@ mod vehicle_tests {
                 speed: 0.5,
                 turn_speed: FRAC_PI_2,
                 start: "a".into(),
+                allow_reverse: false,
+                tray: None,
             },
         }
     }
@@ -4468,6 +4672,8 @@ mod vehicle_tests {
                 speed: 0.5,
                 turn_speed: FRAC_PI_2,
                 start: "a".into(),
+                allow_reverse: false,
+                tray: None,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -4506,6 +4712,8 @@ mod vehicle_tests {
                 speed: 0.5,
                 turn_speed: FRAC_PI_2,
                 start: "a".into(),
+                allow_reverse: false,
+                tray: None,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -4547,5 +4755,632 @@ mod vehicle_tests {
         assert!(code.contains("stations={\"a\": 0, \"c\": 2}"), "{code}");
         assert!(code.contains("bt.seq.goto(\"agv\", \"c\")"), "{code}");
         assert!(code.contains("bt.seq.device_done(\"agv\")"), "{code}");
+    }
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::seq::{Device, DeviceKind, Sensor, SensorKind, SensorWatch, Step, VehiclePath};
+    use botrail_model::Geometry;
+    use nalgebra::{Point2, Translation3, UnitQuaternion};
+    use std::f64::consts::FRAC_PI_2;
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "agv".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "agv".into(),
+        }
+    }
+
+    /// An L with a deck: 2 m along +x, pivot, 1 m along +y. The deck is a
+    /// 0.4 m box centred over the frame, 0.2 m up.
+    fn deck_scene() -> Scene {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "chassis",
+                Geometry::Box {
+                    size: Vector3::new(0.4, 0.3, 0.2),
+                },
+                iso(0.0, 0.0, 0.1),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point2::new(0.0, 0.0),
+                        Point2::new(2.0, 0.0),
+                        Point2::new(2.0, 1.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: vec!["chassis".into()],
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                allow_reverse: false,
+                tray: Some((iso(0.0, 0.0, 0.2), Vector3::new(0.4, 0.3, 0.2))),
+            },
+        });
+        scene
+    }
+
+    fn no_fk(scene: &Scene) -> Vec<Vec<Isometry3<f64>>> {
+        scene
+            .robots()
+            .iter()
+            .map(|r| vec![Isometry3::identity(); r.model.links.len()])
+            .collect()
+    }
+
+    #[test]
+    fn a_part_on_the_deck_rides_the_whole_route() {
+        let mut scene = deck_scene();
+        // Resting on the deck at the start: inside the tray zone.
+        scene
+            .add_obstacle(
+                "carton",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.05, 0.0, 0.25),
+            )
+            .unwrap();
+        // Standing beside the vehicle, outside the zone: must not move.
+        scene
+            .add_obstacle(
+                "bystander",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.0, 0.6, 0.05),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("haul", &RolloutOptions::default())
+            .unwrap();
+
+        let fk = no_fk(&scene);
+        let track = |name: &str| tl.objects.iter().find(|o| o.name == name).cloned();
+        let carton = track("carton").expect("the load has a track");
+        let end = SequenceTimeline::object_pose(&carton, &fk, tl.duration).unwrap();
+        // Same rigid motion as the body: +2 x, pivot +90° about (2, 0), +1 y.
+        // The load sat 0.05 ahead of the frame, so the turn swings it to +y.
+        assert!(
+            (end.translation.vector - Vector3::new(2.0, 1.05, 0.25)).norm() < 1e-9,
+            "end = {:?}",
+            end.translation.vector
+        );
+        let quarter = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), FRAC_PI_2);
+        assert!(end.rotation.angle_to(&quarter) < 1e-9);
+        // It stayed on the deck the whole way: the offset to the body is
+        // constant, which is what "rides" has to mean.
+        let chassis = track("chassis").expect("the body has a track");
+        for k in 0..=70 {
+            let t = k as f64 * 0.1;
+            let c = SequenceTimeline::object_pose(&carton, &fk, t).unwrap();
+            let b = SequenceTimeline::object_pose(&chassis, &fk, t).unwrap();
+            let offset = b.inverse() * c;
+            assert!(
+                (offset.translation.vector - Vector3::new(0.05, 0.0, 0.15)).norm() < 1e-9,
+                "t = {t}: {:?}",
+                offset.translation.vector
+            );
+        }
+        // Nothing was picked up that was not on the deck.
+        assert!(track("bystander").is_none(), "the bystander must not move");
+    }
+
+    #[test]
+    fn a_part_the_deck_drives_under_joins_the_load() {
+        let mut scene = deck_scene();
+        // Hovering over the second leg, above the chassis but inside the
+        // deck zone: the vehicle drives under it and it becomes cargo. A
+        // part only has to *be* on the deck — there is no load action.
+        scene
+            .add_obstacle(
+                "carton",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(2.0, 0.6, 0.28),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("haul", &RolloutOptions::default())
+            .unwrap();
+        let fk = no_fk(&scene);
+        let carton = tl.objects.iter().find(|o| o.name == "carton").unwrap();
+
+        // Still where it was left while the vehicle is on the first leg.
+        let early = SequenceTimeline::object_pose(carton, &fk, 2.0).unwrap();
+        assert!(
+            (early.translation.vector - Vector3::new(2.0, 0.6, 0.28)).norm() < 1e-9,
+            "early = {:?}",
+            early.translation.vector
+        );
+        // The deck's front edge reaches it at vy = 0.4, i.e. t = 5.8 s, and
+        // from there it travels the remaining 0.6 m with the vehicle.
+        let end = SequenceTimeline::object_pose(carton, &fk, tl.duration).unwrap();
+        assert!(
+            (end.translation.vector - Vector3::new(2.0, 1.2, 0.28)).norm() < 1e-9,
+            "end = {:?}",
+            end.translation.vector
+        );
+        // Its first span is the rest before it was picked up.
+        assert!(matches!(carton.spans.first(), Some(TrackSpan::Hold { .. })));
+    }
+
+    #[test]
+    fn a_grasped_part_is_the_robots_not_the_decks() {
+        let mut scene = deck_scene();
+        scene
+            .add_obstacle(
+                "carton",
+                Geometry::Box {
+                    size: Vector3::new(0.05, 0.05, 0.05),
+                },
+                iso(0.0, 0.0, 0.25),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "hold".into(),
+            steps: vec![
+                step(
+                    "grasp",
+                    vec![Action::Attach {
+                        robot: None,
+                        object: "carton".into(),
+                        link: None,
+                        touch_links: None,
+                    }],
+                    Condition::Immediately,
+                ),
+                step("go", vec![goto("c")], device_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("hold", &RolloutOptions::default())
+            .unwrap();
+        let carton = tl.objects.iter().find(|o| o.name == "carton").unwrap();
+        // Grasp wins: every span is a Follow, never a vehicle span.
+        assert!(
+            carton
+                .spans
+                .iter()
+                .all(|s| matches!(s, TrackSpan::Follow { .. })),
+            "{:?}",
+            carton.spans
+        );
+    }
+
+    #[test]
+    fn a_mounted_sensor_travels_with_its_vehicle() {
+        let mut scene = deck_scene();
+        scene
+            .add_obstacle(
+                "carton",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.05, 0.0, 0.25),
+            )
+            .unwrap();
+        // A load-present eye over the deck, authored in the vehicle frame.
+        scene.upsert_sensor(Sensor {
+            name: "loaded".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.25),
+                size: Vector3::new(0.4, 0.3, 0.2),
+            },
+            watch: SensorWatch::Objects(vec!["carton".into()]),
+            mount: Some("agv".into()),
+        });
+        // The same zone bolted to the floor, for contrast.
+        scene.upsert_sensor(Sensor {
+            name: "fixture".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.25),
+                size: Vector3::new(0.4, 0.3, 0.2),
+            },
+            watch: SensorWatch::Objects(vec!["carton".into()]),
+            mount: None,
+        });
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("haul", &RolloutOptions::default())
+            .unwrap();
+
+        let lane = |name: &str| tl.signals.iter().find(|s| s.name == name).unwrap();
+        // The mounted eye sees its load for the whole run — it moves with
+        // it. (Every lane seeds false and records its first reading at t=0.)
+        let loaded = lane("loaded");
+        assert_eq!(
+            loaded.edges,
+            vec![(0.0, false), (0.0, true)],
+            "{:?}",
+            loaded.edges
+        );
+        // The floor fixture sees the same load at t = 0 and loses it as
+        // soon as the vehicle pulls away — the mounted/fixed distinction in
+        // one pair of lanes.
+        let fixture = lane("fixture");
+        assert_eq!(fixture.edges.len(), 3, "{:?}", fixture.edges);
+        assert_eq!(&fixture.edges[..2], &[(0.0, false), (0.0, true)]);
+        let (dropped_at, value) = fixture.edges[2];
+        assert!(!value && dropped_at < 1.0, "dropped at {dropped_at}");
+    }
+
+    #[test]
+    fn the_load_is_checked_against_the_aisle_too() {
+        let mut scene = deck_scene();
+        // A tall load on the deck, and a bridge the *body* clears (its top
+        // is 0.2) but the load does not.
+        scene
+            .add_obstacle(
+                "carton",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.4),
+                },
+                iso(0.0, 0.0, 0.25),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "bridge",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 1.0, 0.1),
+                },
+                iso(1.0, 0.0, 0.45),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("haul", &RolloutOptions::default())
+            .unwrap_err();
+        match err {
+            SeqError::VehicleCollision { body, obstacle, .. } => {
+                // The *load* is what hits it — the body passes under.
+                assert_eq!(body, "carton");
+                assert_eq!(obstacle, "bridge");
+            }
+            other => panic!("expected VehicleCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tray_and_mount_round_trip_through_wire() {
+        let scene = deck_scene();
+        let msg = crate::wire::device_msg(&scene.devices()[0]);
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: crate::wire::DeviceMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+        assert_eq!(
+            crate::wire::device_msg(&crate::wire::device_from_msg(&back)),
+            msg
+        );
+        // A vehicle without a deck keeps its pre-V1 JSON shape.
+        let mut plain = scene.devices()[0].clone();
+        if let DeviceKind::Vehicle { tray, .. } = &mut plain.kind {
+            *tray = None;
+        }
+        let json = serde_json::to_string(&crate::wire::device_msg(&plain)).unwrap();
+        assert!(!json.contains("tray"), "{json}");
+
+        let sensor = Sensor {
+            name: "loaded".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.25),
+                size: Vector3::new(0.4, 0.3, 0.2),
+            },
+            watch: SensorWatch::AllObjects,
+            mount: Some("agv".into()),
+        };
+        let msg = crate::wire::sensor_msg(&sensor);
+        let back: crate::wire::SensorMsg =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(back.mount.as_deref(), Some("agv"));
+        assert_eq!(crate::wire::sensor_from_msg(&back).mount, sensor.mount);
+    }
+
+    #[test]
+    fn mount_validation_names_the_problem() {
+        let check = |scene: &Scene, needle: &str| {
+            let err = scene
+                .simulate_sequence("haul", &RolloutOptions::default())
+                .unwrap_err();
+            assert!(
+                matches!(err, SeqError::Validation { .. }) && err.to_string().contains(needle),
+                "expected `{needle}` in: {err}"
+            );
+        };
+        let mut scene = deck_scene();
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let mut ghost = scene.clone();
+        ghost.upsert_sensor(Sensor {
+            name: "eye".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.2),
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+            watch: SensorWatch::AllObjects,
+            mount: Some("nowhere".into()),
+        });
+        check(&ghost, "unknown device `nowhere`");
+
+        let mut belt = scene.clone();
+        belt.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(0.0, 0.0, 0.5),
+                zone_size: Vector3::new(1.0, 1.0, 0.2),
+                velocity: Vector3::new(0.1, 0.0, 0.0),
+                running: false,
+            },
+        });
+        belt.upsert_sensor(Sensor {
+            name: "eye".into(),
+            kind: SensorKind::Zone {
+                pose: iso(0.0, 0.0, 0.2),
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+            watch: SensorWatch::AllObjects,
+            mount: Some("belt".into()),
+        });
+        check(&belt, "not a vehicle");
+    }
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::seq::{Device, DeviceKind, Step, VehiclePath};
+    use botrail_model::Geometry;
+    use nalgebra::{Point2, Translation3, UnitQuaternion};
+    use std::f64::consts::FRAC_PI_2;
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "amr".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "amr".into(),
+        }
+    }
+
+    /// The 1-DOF arm of `sample_scene`, riding a chassis that runs 2 m
+    /// along +x then 1 m along +y. Mount 0.3 m up.
+    fn amr_scene() -> Scene {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "chassis",
+                Geometry::Box {
+                    size: Vector3::new(0.4, 0.3, 0.2),
+                },
+                iso(0.0, 0.0, 0.1),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "amr".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point2::new(0.0, 0.0),
+                        Point2::new(2.0, 0.0),
+                        Point2::new(2.0, 1.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: vec!["chassis".into()],
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                allow_reverse: false,
+                tray: None,
+            },
+        });
+        scene.mount_robot(0, "amr", iso(0.0, 0.0, 0.3)).unwrap();
+        scene
+    }
+
+    #[test]
+    fn mounting_places_the_base_on_the_parked_vehicle() {
+        let scene = amr_scene();
+        // Parked at (0, 0) facing +x, so the base is straight up from it.
+        let base = scene.robots()[0].base_pose();
+        assert!((base.translation.vector - Vector3::new(0.0, 0.0, 0.3)).norm() < 1e-12);
+        assert!(scene.robot_mount(0).is_some());
+    }
+
+    #[test]
+    fn the_base_rides_the_vehicle_and_rests_when_it_stops() {
+        let mut scene = amr_scene();
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![
+                step("drive", vec![goto("c")], device_done()),
+                step("dwell", vec![], Condition::Elapsed { seconds: 2.0 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.robots[0];
+        let base = track
+            .base
+            .as_ref()
+            .expect("a mounted robot has a base track");
+        assert!(base.first().is_some());
+
+        // Mid-straight, mid-turn, and after arrival.
+        let at = |t: f64| SequenceTimeline::base_pose(track, t).unwrap();
+        assert!((at(1.0).translation.vector - Vector3::new(0.5, 0.0, 0.3)).norm() < 1e-9);
+        // The turn is about the vehicle frame, which the base sits directly
+        // above — so it turns on the spot and only its orientation changes.
+        let mid = at(4.5);
+        assert!((mid.translation.vector - Vector3::new(2.0, 0.0, 0.3)).norm() < 1e-9);
+        let eighth = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), FRAC_PI_2 * 0.5);
+        assert!(mid.rotation.angle_to(&eighth) < 1e-9);
+        // Parked: the base rests instead of coasting on past the timeline —
+        // the last travelling span must not simply be stretched to the end.
+        let arrived = at(7.05);
+        for t in (71..=90).map(|k| k as f64 * 0.1) {
+            let p = at(t);
+            assert!(
+                (p.translation.vector - arrived.translation.vector).norm() < 1e-9,
+                "base drifted at t = {t}: {:?}",
+                p.translation.vector
+            );
+        }
+        // ...and it agrees with the body it is bolted to, exactly.
+        let chassis = tl.objects.iter().find(|o| o.name == "chassis").unwrap();
+        let fk = vec![vec![
+            Isometry3::identity();
+            scene.robots()[0].model.links.len()
+        ]];
+        for k in 0..=90 {
+            let t = k as f64 * 0.1;
+            let body = SequenceTimeline::object_pose(chassis, &fk, t).unwrap();
+            let offset = body.inverse() * at(t);
+            assert!(
+                (offset.translation.vector - Vector3::new(0.0, 0.0, 0.2)).norm() < 1e-9,
+                "t = {t}: {:?}",
+                offset.translation.vector
+            );
+        }
+    }
+
+    #[test]
+    fn a_ramp_may_run_while_driving_but_a_plan_may_not() {
+        let mut scene = amr_scene();
+        joint_motion(&mut scene, "reach", 0.5);
+        // A ramp alongside the drive: allowed, and the arm ends up moved.
+        scene.upsert_sequence(Sequence {
+            name: "stow".into(),
+            steps: vec![step(
+                "drive",
+                vec![
+                    goto("c"),
+                    Action::StartRamp {
+                        robot: None,
+                        targets: vec![("j".into(), 0.4)],
+                        duration: 1.0,
+                    },
+                ],
+                device_done(),
+            )],
+        });
+        let tl = scene
+            .simulate_sequence("stow", &RolloutOptions::default())
+            .unwrap();
+        assert!((tl.robots[0].trajectory.sample(tl.duration)[0] - 0.4).abs() < 1e-9);
+
+        // A planned motion in the same step: rejected by name.
+        scene.upsert_sequence(Sequence {
+            name: "bad".into(),
+            steps: vec![step(
+                "drive",
+                vec![
+                    goto("c"),
+                    Action::StartMotion {
+                        motion: "reach".into(),
+                    },
+                ],
+                device_done(),
+            )],
+        });
+        let err = scene
+            .simulate_sequence("bad", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot start while `amr` is driving"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn mounting_rejects_a_non_vehicle_and_an_unknown_device() {
+        let mut scene = amr_scene();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(0.0, 0.0, 0.5),
+                zone_size: Vector3::new(1.0, 1.0, 0.2),
+                velocity: Vector3::new(0.1, 0.0, 0.0),
+                running: false,
+            },
+        });
+        let err = scene
+            .mount_robot(0, "belt", Isometry3::identity())
+            .unwrap_err();
+        assert!(err.to_string().contains("not a vehicle"), "{err}");
+        let err = scene
+            .mount_robot(0, "nowhere", Isometry3::identity())
+            .unwrap_err();
+        assert!(err.to_string().contains("nowhere"), "{err}");
     }
 }

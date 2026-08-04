@@ -103,8 +103,10 @@ function UsdRobotInstance({ name }: { name: string }) {
     });
   }, [robot, desc, overridePoses]);
 
-  // Base placement.
-  const basePose = state?.basePose ?? null;
+  // Base placement. A robot riding a vehicle has no fixed base, so while a
+  // timeline plays its base comes from the track rather than the scene.
+  const overrideBase = useStudioStore((s) => s.overrideBases?.[name] ?? null);
+  const basePose = overrideBase ?? state?.basePose ?? null;
   useEffect(() => {
     if (!robot || !basePose) return;
     applyPose(robot, basePose);

@@ -40,6 +40,7 @@ export type { DeviceKindMsg } from "./generated/DeviceKindMsg";
 export type { DeviceCommandMsg } from "./generated/DeviceCommandMsg";
 export type { VehiclePathMsg } from "./generated/VehiclePathMsg";
 export type { VehicleStationMsg } from "./generated/VehicleStationMsg";
+export type { VehicleTrayMsg } from "./generated/VehicleTrayMsg";
 export type { JointMsg } from "./generated/JointMsg";
 export type { JointMimicMsg } from "./generated/JointMimicMsg";
 export type { RobotDescMsg } from "./generated/RobotDescMsg";

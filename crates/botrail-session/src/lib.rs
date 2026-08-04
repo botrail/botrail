@@ -652,6 +652,13 @@ pub fn timeline_msg(
         .map(|(times, _)| times.as_slice())
         .unwrap_or(&[]);
 
+    // A mounted robot's base moves; everything that does FK off it has to
+    // ask the track, not the parked scene.
+    let base_at = |r: usize, t: f64| -> nalgebra::Isometry3<f64> {
+        botrail_scene::rollout::SequenceTimeline::base_pose(&timeline.robots[r], t)
+            .unwrap_or(*scene.robots()[r].base_pose())
+    };
+
     let mut object_tracks: Vec<wire::ObjectTrackMsg> = timeline
         .objects
         .iter()
@@ -671,7 +678,7 @@ pub fn timeline_msg(
                     botrail_kin::forward_kinematics_with_base(
                         &sr.model,
                         &sampled[r].1[k],
-                        sr.base_pose(),
+                        &base_at(r, t),
                     )
                     .expect("timeline q has robot DOF")
                 })
@@ -707,8 +714,9 @@ pub fn timeline_msg(
                 .then(|| {
                     joint_positions
                         .iter()
-                        .map(|q| {
-                            botrail_kin::forward_kinematics_with_base(&sr.model, q, sr.base_pose())
+                        .zip(&times)
+                        .map(|(q, &t)| {
+                            botrail_kin::forward_kinematics_with_base(&sr.model, q, &base_at(r, t))
                                 .expect("timeline q has robot DOF")
                                 .iter()
                                 .map(PoseMsg::from)
@@ -716,7 +724,18 @@ pub fn timeline_msg(
                         })
                         .collect()
                 });
+            // USD robots do FK in the browser, so a moving base has to go
+            // over as its own track for the studio to place them.
+            let base = if track.base.is_some() {
+                times
+                    .iter()
+                    .map(|&t| PoseMsg::from(&base_at(r, t)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             wire::RobotTimelineMsg {
+                base,
                 name: track.name.clone(),
                 trajectory: wire::TrajectoryMsg {
                     duration: timeline.duration,

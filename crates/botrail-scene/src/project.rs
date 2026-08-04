@@ -689,6 +689,8 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 speed,
                 turn_speed,
                 start,
+                allow_reverse,
+                tray,
             } => {
                 let waypoints: Vec<String> = path
                     .waypoints
@@ -701,15 +703,27 @@ pub fn generate_python(project: &ProjectFile) -> String {
                     .map(|s| format!("{:?}: {}", s.name, s.index))
                     .collect();
                 let members: Vec<String> = body.iter().map(|n| format!("{n:?}")).collect();
+                let deck = match tray {
+                    Some(t) => format!(
+                        ", tray_position={}, tray_size={}",
+                        py_tuple(&t.pose.position),
+                        py_tuple(&t.size)
+                    ),
+                    None => String::new(),
+                };
                 out.push_str(&format!(
                     "scene.add_vehicle({:?}, body=[{}], path=[{}], stations={{{}}}, \
-                     speed={speed}, turn_speed={turn_speed}, start={start:?}{})\n",
+                     speed={speed}, turn_speed={turn_speed}, start={start:?}{}{deck})\n",
                     device.name,
                     members.join(", "),
                     waypoints.join(", "),
                     stations.join(", "),
                     if path.ring { ", ring=True" } else { "" },
                 ));
+                if *allow_reverse {
+                    out.truncate(out.len() - 1);
+                    out.push_str(", allow_reverse=True)\n");
+                }
             }
         }
     }

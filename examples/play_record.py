@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import agv_cell_demo  # noqa: E402
+import amr_demo  # noqa: E402
 import botrail as bt  # noqa: E402
 import demo  # noqa: E402
 import dual_cell_demo  # noqa: E402
@@ -45,6 +46,15 @@ def robot_instances(recording: Path) -> set:
     }
 
 
+def marks(recording: Path, needle: str) -> bool:
+    """Does the recording mention `needle`? Cells are told apart by a prim
+    only one of them has."""
+    try:
+        return needle in recording.read_text()
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
 def has_vehicle(recording: Path) -> bool:
     """Does the recording animate an AGV? Its body is scenery, so it lands
     under `/World/Env`, not beside the robots — the cell still has to be
@@ -62,6 +72,11 @@ def cell_for(recording: Path) -> bt.Scene:
     if {"near", "far"} <= names:
         print(f"{recording}: two-arm cell ({', '.join(sorted(names))})")
         return dual_cell_demo.build_cell()
+    # The AMR carries its own arm and has no cell at all, so check it first:
+    # its body prims are named like the AGV's.
+    if marks(recording, '"stand_place"'):
+        print(f"{recording}: AMR (arm riding the vehicle)")
+        return amr_demo.build_scene()
     if has_vehicle(recording):
         print(f"{recording}: single-arm cell + AGV")
         return agv_cell_demo.build_scene()

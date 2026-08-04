@@ -41,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import botrail as bt  # noqa: E402
-from demo import HAND, build_scene as build_factory_cell  # noqa: E402
+from demo import HAND, build_scene as build_factory_cell, teach_grasp  # noqa: E402
 
 # ------------------------------------------------------ the vehicle: MiR250
 #
@@ -86,7 +86,10 @@ BLACK = (0.010, 0.010, 0.011)
 LANE_Y = -2.90
 WAREHOUSE = (-2.60, LANE_Y)
 GATE = (0.0, LANE_Y)
-DOCK = (0.0, -1.35)
+# As far in as the cell allows: 30 mm further and the body clips the
+# pallet's deck boards, which is also why the handover ends up at the very
+# limit of the arm's reach (see `build_cycle`).
+DOCK = (0.0, -1.15)
 CLASH_DOCK = (0.0, -0.75)
 
 # Not the spec 2.0 m/s, and the reason is worth stating: V0 vehicles move at
@@ -102,6 +105,21 @@ SPEED = 0.8
 TURN = math.radians(45.0)
 
 READY = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035]
+
+# The carton the cell hands over, and the gripper stroke around it — the
+# same numbers the single-arm cell uses.
+CARTON = "/World/Conveyor/Box_A"
+BOX_SIZE = 0.06
+OPEN, CLOSED = 0.039, 0.029
+PADS = ["/panda/panda_leftfinger", "/panda/panda_rightfinger"]
+HOVER = 0.15
+# The deck the load actually rests on. The drawn shell tops out at 303 mm,
+# but collision runs on its convex decomposition, and the convex hull of a
+# dished top fills the dish — so the deck the checker sees is a few
+# millimetres higher than the one you can see. Setting the carton on the
+# drawn surface is rejected as a collision; 310 mm is the first height that
+# clears, and the 7 mm it floats by is invisible.
+DECK_TOP = 0.310
 
 
 def fetch_mir250() -> Path:
@@ -179,6 +197,21 @@ def build_scene(clash: bool = False) -> bt.Scene:
         speed=SPEED,
         turn_speed=TURN,
         start="warehouse",
+        # It backs out of the dock rather than turning around in it. That is
+        # what the machine does, and here it is also what fits: a pivot
+        # sweeps the body's half-diagonal (0.49 m), which from this dock
+        # reaches straight into the pallet — the cycle fails with a
+        # `VehicleCollision` on the way out if you turn this off.
+        allow_reverse=True,
+        # The load deck, in the vehicle's own frame. Anything resting in it
+        # rides along — there is no load or unload action to author, which
+        # is the same bargain the conveyor makes with its zone. It is drawn
+        # a little larger than the 800 x 580 deck on purpose: the zone
+        # answers "is this aboard", and a carton set down on the very edge
+        # is aboard. Its floor is the deck top, so nothing on the ground
+        # can be mistaken for cargo.
+        tray_position=(BODY_DX, 0.0, DECK_TOP + 0.06),
+        tray_size=(0.84, 0.62, 0.12),
     )
     # Presence at the dock, and the interlock zone the arm shares with the
     # gate approach. One watches the vehicle, the other watches the arm —
@@ -191,46 +224,79 @@ def build_scene(clash: bool = False) -> bt.Scene:
         "gate_zone", position=(0.0, -1.15, 0.6), size=(1.1, 1.5, 1.2),
         watch_robots=["panda"],
     )
+    # Load-present, and the one sensor here that has to travel: bolted to
+    # the floor it would report the carton for the moment it is set down and
+    # then lose it. Mounted, it is authored in the vehicle's frame and
+    # re-resolved every scan, so it still reads "loaded" out on the aisle —
+    # which is what a departure permit has to be able to ask.
+    scene.add_zone_sensor(
+        "tray_loaded", position=(BODY_DX, 0.0, DECK_TOP + 0.06), size=(0.84, 0.62, 0.12),
+        watch=[CARTON], mount="agv",
+    )
     return scene
 
 
-def teach(scene: bt.Scene, position) -> list:
-    """The joint vector that puts the hand at `position` — the scripted
-    form of dragging the studio's TCP gizmo."""
-    ik = scene.set_tcp_target(position, link=HAND)
-    if not ik.converged:
-        raise RuntimeError(f"IK missed {position}: {ik.pos_error * 1e3:.1f} mm short")
-    return list(scene.joint_positions)
-
-
 def build_cycle(scene: bt.Scene) -> str:
-    """Teaches the two arm poses and writes the interlocked cycle."""
-    over_gate = teach(scene, (0.0, -0.62, 0.62))
-    scene.set_joint_positions(READY)
+    """Teaches the poses and writes the handover cycle; returns its name.
 
-    scene.add_segment("reach_gate", goal=over_gate)
-    scene.add_segment("retreat", goal=READY)
+    The shape of it is the one a cell PLC would write: the vehicle is
+    called while the arm is still picking, waits outside the gate, and only
+    comes in once the arm's zone is clear; the arm in turn waits on
+    `dock_occupied` before reaching over the deck, and the departure permit
+    asks the vehicle's own load sensor whether it actually has the carton.
+    """
+    names = scene.robot.joint_names
+    fingers = [n for n in names if "panda_finger_joint" in n]
+    home = list(scene.joint_positions)
+    pick = scene.frame("/World/Conveyor/PickFrame")
+
+    # The handover point: the deck's leading edge. It is not a free choice
+    # — the cell's pallet keeps the vehicle at y = -1.15, which puts the
+    # deck edge at exactly 0.75 m from the robot's base, and that is this
+    # arm's limit. 50 mm further onto the deck is already out of reach.
+    # A layout that wants margin has to move the pallet or the pedestal;
+    # this is the kind of thing the check exists to make visible.
+    deck = ((DOCK[0], DOCK[1] + 0.40, DECK_TOP + BOX_SIZE / 2 + 0.002), pick[1])
+
+    # Teach hover-first at each station so the grasp warm-starts from the
+    # pose above it, and go home between stations — the deck is a 180 deg
+    # swing from the belt (the house rule from the single-arm cell).
+    hover_q = teach_grasp(scene, pick, standoff=HOVER)
+    grasp_q = teach_grasp(scene, pick)
+    scene.set_joint_positions(home)
+    over_deck_q = teach_grasp(scene, deck, standoff=HOVER)
+    on_deck_q = teach_grasp(scene, deck)
+    scene.set_joint_positions(home)
+
+    def with_fingers(q: list, width: float) -> list:
+        q = list(q)
+        for f in fingers:
+            q[names.index(f)] = width
+        return q
+
+    scene.add_segment("to_pick", goal=with_fingers(hover_q, OPEN))
+    scene.add_segment("to_pick", goal=with_fingers(grasp_q, OPEN))
+    scene.add_segment("lift", goal=with_fingers(hover_q, CLOSED))
+    scene.add_segment("to_deck", goal=with_fingers(over_deck_q, CLOSED))
+    scene.add_segment("to_deck", goal=with_fingers(on_deck_q, CLOSED))
+    scene.add_segment("clear", goal=with_fingers(over_deck_q, OPEN))
+    scene.add_segment("home", goal=with_fingers(home, OPEN))
 
     sq = scene.sequence("agv_service")
-    # The order goes out while the arm is still working: the vehicle drives
-    # up to the gate and the arm keeps hold of the cell. Both start here —
-    # `goto` and `start_motion` are both fire-and-await, one per actor.
+    # The call goes out while the arm is still picking: the vehicle drives
+    # up to the gate and waits there. `goto` and `start_motion` are both
+    # fire-and-await, one per actor, so this step runs them in parallel.
     sq.step(
         "呼出",
-        actions=[bt.seq.goto("agv", "gate"), bt.seq.motion("reach_gate")],
-        transition=bt.seq.device_done("agv"),
+        actions=[bt.seq.goto("agv", "gate"), bt.seq.motion("to_pick")],
+        transition=bt.seq.all_of(bt.seq.device_done("agv"), bt.seq.done()),
     )
-    # The interlock, and the one wait in this cycle that is load-bearing:
-    # the vehicle is parked at the gate and may not come in until the arm
-    # is out of the shared airspace. The retreat starts here, and what ends
-    # the step is the *zone going off* — the arm's position, not a timer
-    # and not the motion's own completion (it clears the zone well before
-    # it finishes parking).
-    sq.step(
-        "入構待ち",
-        actions=[bt.seq.motion("retreat")],
-        transition=bt.seq.signal("gate_zone", False),
-    )
+    sq.step("グリッパ閉", actions=[bt.seq.ramp({f: CLOSED for f in fingers}, 0.4)])
+    sq.step("把持", actions=[bt.seq.attach(CARTON, link=HAND, touch_links=PADS)])
+    sq.step("持上げ", actions=[bt.seq.motion("lift")])
+    # The interlock: the loaded arm is out of the shared airspace by now,
+    # and that — not a timer — is what lets the vehicle come in.
+    sq.step("入構許可", transition=bt.seq.signal("gate_zone", False))
     sq.step(
         "入構",
         actions=[bt.seq.goto("agv", "dock")],
@@ -238,8 +304,21 @@ def build_cycle(scene: bt.Scene) -> str:
             bt.seq.device_done("agv"), bt.seq.signal("dock_occupied")
         ),
     )
-    # V1 turns this dwell into a real transfer onto the vehicle's tray.
-    sq.step("移載", transition=bt.seq.elapsed(1.0))
+    # The handshake in the other direction: the arm does not reach over the
+    # deck until the vehicle reports itself parked there.
+    sq.step("移載", actions=[bt.seq.motion("to_deck")])
+    sq.step("開放", actions=[bt.seq.ramp({f: OPEN for f in fingers}, 0.4)])
+    sq.step("離脱", actions=[bt.seq.detach(CARTON)])
+    sq.step("退避", actions=[bt.seq.motion("clear")])
+    sq.step("復帰", actions=[bt.seq.motion("home")])
+    # Departure permit, asked of the machine itself: the deck's own sensor
+    # says it has the carton, and the arm is clear of the gate.
+    sq.step(
+        "発進許可",
+        transition=bt.seq.all_of(
+            bt.seq.signal("tray_loaded"), bt.seq.signal("gate_zone", False)
+        ),
+    )
     sq.step(
         "搬出",
         actions=[bt.seq.goto("agv", "warehouse")],
@@ -264,13 +343,20 @@ def main() -> None:
     for step, start, end in tl.step_spans:
         print(f"  {step:<8} {start:6.2f} – {end:6.2f}s")
     lanes = dict(tl.signals)
-    # What the interlock actually cost: the vehicle sat at the gate for
-    # this long, held by the arm's position.
-    wait = tl.step_span("入構待ち")
-    print(f"held at the gate for {wait.end - wait.start:.2f}s "
-          f"(arm left the zone at {wait.end:.2f}s)")
-    print("agv moving: " + ", ".join(f"{t:.2f}→{'on' if v else 'off'}"
-                                     for t, v in lanes["agv"]))
+    edges = lambda lane: ", ".join(f"{t:.2f}→{'on' if v else 'off'}" for t, v in lanes[lane])
+    for lane in ("agv", "dock_occupied", "gate_zone", "tray_loaded"):
+        print(f"  {lane:<14} {edges(lane)}")
+    # The point of the mounted sensor: it still reads "loaded" once the
+    # vehicle has left, which is what makes it a departure permit rather
+    # than a snapshot.
+    loaded_at = next(t for t, v in lanes["tray_loaded"] if v)
+    left_at = next(t for t, v in reversed(lanes["agv"]) if v)
+    print(f"loaded at {loaded_at:.2f}s, still loaded when it pulls out at {left_at:.2f}s: "
+          f"{tl.signal('tray_loaded').value_at(tl.duration)}")
+    # Where the carton ended up — it rode the deck out of the cell.
+    carried = tl.object_pose(CARTON, tl.duration)[0]
+    print(f"carton ends at {tuple(round(v, 3) for v in carried)} "
+          f"(placed at y = {DOCK[1] + 0.40:.2f})")
 
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")

@@ -52,6 +52,8 @@ pub enum SceneError {
     UnknownRobot(String),
     #[error("{0}")]
     UnsupportedGeometry(String),
+    #[error("{0}")]
+    BadMount(String),
 }
 
 /// Rewrites `RobotDone` references inside a (possibly nested) condition.
@@ -132,6 +134,9 @@ pub struct SceneRobot {
     collider: RobotCollider,
     /// Intra-robot allowed collision matrix.
     acm: Acm,
+    /// Vehicle this robot rides on, if any: its base is then derived from
+    /// that vehicle's frame rather than set directly.
+    pub mount: Option<crate::seq::RobotMount>,
 }
 
 impl SceneRobot {
@@ -161,6 +166,7 @@ impl SceneRobot {
                 joint_positions,
                 collider,
                 acm,
+                mount: None,
             },
             warnings,
         )
@@ -386,6 +392,45 @@ impl Scene {
     pub fn set_robot_base_pose_for(&mut self, robot: usize, pose: Isometry3<f64>) {
         self.robots[robot].base = pose;
         self.sync_attached_poses();
+    }
+
+    /// Puts robot `robot` on the vehicle `device`, `offset` from its frame:
+    /// from here its base is derived, not set. The base moves to where the
+    /// vehicle is parked immediately, so the live scene shows the machine
+    /// assembled before any sequence runs.
+    pub fn mount_robot(
+        &mut self,
+        robot: usize,
+        device: &str,
+        offset: Isometry3<f64>,
+    ) -> Result<(), SceneError> {
+        let start = match self.devices.iter().find(|d| d.name == device) {
+            Some(crate::seq::Device {
+                kind: crate::seq::DeviceKind::Vehicle { path, start, .. },
+                ..
+            }) => path.frame_at(start).ok_or_else(|| {
+                SceneError::BadMount(format!(
+                    "vehicle `{device}` starts at unknown station `{start}`"
+                ))
+            })?,
+            Some(_) => {
+                return Err(SceneError::BadMount(format!(
+                    "`{device}` is not a vehicle; only vehicles carry robots"
+                )))
+            }
+            None => return Err(SceneError::UnknownDevice(device.to_string())),
+        };
+        self.robots[robot].mount = Some(crate::seq::RobotMount {
+            device: device.to_string(),
+            offset,
+        });
+        self.set_robot_base_pose_for(robot, start * offset);
+        Ok(())
+    }
+
+    /// The vehicle a robot rides on, with its mounting offset.
+    pub fn robot_mount(&self, robot: usize) -> Option<&crate::seq::RobotMount> {
+        self.robots[robot].mount.as_ref()
     }
 
     /// World pose of every link of the first robot at configuration `q`
@@ -1400,6 +1445,7 @@ mod tests {
                 size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
             },
             watch: seq::SensorWatch::Robots(vec!["b".into()]),
+            mount: None,
         });
         scene.upsert_sequence(seq::Sequence {
             name: "cell".into(),

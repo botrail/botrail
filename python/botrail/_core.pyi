@@ -67,6 +67,13 @@ class Scene:
         base_position: Optional[tuple[float, float, float]] = None,
         base_quaternion: Optional[tuple[float, float, float, float]] = None,
     ) -> str: ...
+    def mount_robot(
+        self,
+        device: str,
+        offset_position: Optional[tuple[float, float, float]] = None,
+        offset_quaternion: Optional[tuple[float, float, float, float]] = None,
+        robot: Optional[str] = None,
+    ) -> None: ...
     @property
     def robot(self) -> Robot: ...
     @property
@@ -225,6 +232,7 @@ class Scene:
         watch: Optional[list[str]] = None,
         watch_robot: bool = False,
         watch_robots: Optional[list[str]] = None,
+        mount: Optional[str] = None,
     ) -> None: ...
     def add_beam_sensor(
         self,
@@ -235,6 +243,7 @@ class Scene:
         watch: Optional[list[str]] = None,
         watch_robot: bool = False,
         watch_robots: Optional[list[str]] = None,
+        mount: Optional[str] = None,
     ) -> None: ...
     def remove_sensor(self, name: str) -> None: ...
     @property
@@ -285,6 +294,10 @@ class Scene:
         turn_speed: float = 1.5707963267948966,
         start: Optional[str] = None,
         ring: bool = False,
+        allow_reverse: bool = False,
+        tray_position: Optional[tuple[float, float, float]] = None,
+        tray_size: Optional[tuple[float, float, float]] = None,
+        tray_quaternion: Optional[tuple[float, float, float, float]] = None,
     ) -> None: ...
     def remove_device(self, name: str) -> None: ...
     @property
@@ -393,6 +406,11 @@ class SequenceTimeline:
     def moves(
         self, robot: Optional[str] = None
     ) -> list[tuple[str, float, float]]: ...
+    def base_pose(
+        self, t: float, robot: Optional[str] = None
+    ) -> Optional[
+        tuple[tuple[float, float, float], tuple[float, float, float, float]]
+    ]: ...
     def object_pose(
         self, name: str, t: float
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]: ...

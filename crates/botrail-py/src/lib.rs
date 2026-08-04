@@ -376,6 +376,26 @@ impl Scene {
         self.hub.add_robot(robot.inner.clone(), name, base)
     }
 
+    /// Puts a robot on a vehicle: from here its base is derived from that
+    /// vehicle's frame, `offset` away, and re-derived every scan tick — an
+    /// arm and a chassis become an AMR. Planned motions cannot start while
+    /// the vehicle is driving (a plan is baked in world coordinates); ramps
+    /// can, which is how an arm stows itself on the move.
+    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None))]
+    fn mount_robot(
+        &self,
+        device: &str,
+        offset_position: Option<[f64; 3]>,
+        offset_quaternion: Option<[f64; 4]>,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        let offset = pose_from(offset_position.unwrap_or([0.0; 3]), offset_quaternion);
+        self.hub
+            .mount_robot(index, device, offset)
+            .map_err(scene_err)
+    }
+
     #[getter]
     fn robot(&self) -> Robot {
         self.robot.clone()
@@ -809,7 +829,7 @@ impl Scene {
     /// a list of obstacle names (default: every obstacle); pass
     /// `watch_robot=True` to sense robot links too (with `watch=[]` for a
     /// robot-only light curtain).
-    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None))]
+    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None, mount = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_zone_sensor(
         &self,
@@ -820,6 +840,7 @@ impl Scene {
         watch: Option<Vec<String>>,
         watch_robot: bool,
         watch_robots: Option<Vec<String>>,
+        mount: Option<String>,
     ) -> PyResult<()> {
         self.hub.upsert_sensor(botrail_scene::seq::Sensor {
             name: name.to_string(),
@@ -828,13 +849,14 @@ impl Scene {
                 size: nalgebra::Vector3::new(size[0], size[1], size[2]),
             },
             watch: sensor_watch(watch, watch_robot, watch_robots),
+            mount,
         });
         Ok(())
     }
 
     /// Adds a photoelectric beam sensor between two world points, ON while
     /// the beam is interrupted. Watch semantics as in `add_zone_sensor`.
-    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false, watch_robots = None))]
+    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false, watch_robots = None, mount = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_beam_sensor(
         &self,
@@ -845,6 +867,7 @@ impl Scene {
         watch: Option<Vec<String>>,
         watch_robot: bool,
         watch_robots: Option<Vec<String>>,
+        mount: Option<String>,
     ) -> PyResult<()> {
         self.hub.upsert_sensor(botrail_scene::seq::Sensor {
             name: name.to_string(),
@@ -854,6 +877,7 @@ impl Scene {
                 radius,
             },
             watch: sensor_watch(watch, watch_robot, watch_robots),
+            mount,
         });
         Ok(())
     }
@@ -1004,7 +1028,9 @@ impl Scene {
     /// subtree prefixes (`"/World/AGV"` takes every obstacle under it).
     #[pyo3(signature = (name, body, path, stations, speed = 0.5,
                         turn_speed = std::f64::consts::FRAC_PI_2,
-                        start = None, ring = false))]
+                        start = None, ring = false, allow_reverse = false,
+                        tray_position = None, tray_size = None,
+                        tray_quaternion = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_vehicle(
         &self,
@@ -1016,6 +1042,10 @@ impl Scene {
         turn_speed: f64,
         start: Option<String>,
         ring: bool,
+        allow_reverse: bool,
+        tray_position: Option<[f64; 3]>,
+        tray_size: Option<[f64; 3]>,
+        tray_quaternion: Option<[f64; 4]>,
     ) -> PyResult<()> {
         if path.len() < 2 {
             return Err(PyValueError::new_err(format!(
@@ -1091,6 +1121,27 @@ impl Scene {
         }
         let mut seen = std::collections::HashSet::new();
         members.retain(|m| seen.insert(m.clone()));
+        // The load deck, given in the vehicle frame: anything resting in it
+        // rides along, so a part the arm sets down simply joins the load.
+        let tray = match (tray_position, tray_size) {
+            (Some(position), Some(size)) => {
+                if size.iter().any(|v| !(v.is_finite() && *v > 0.0)) {
+                    return Err(PyValueError::new_err(format!(
+                        "tray_size must be positive, got {size:?}"
+                    )));
+                }
+                Some((
+                    pose_from(position, tray_quaternion),
+                    nalgebra::Vector3::new(size[0], size[1], size[2]),
+                ))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "a tray needs both tray_position and tray_size",
+                ))
+            }
+        };
         self.hub.upsert_device(botrail_scene::seq::Device {
             name: name.to_string(),
             kind: botrail_scene::seq::DeviceKind::Vehicle {
@@ -1106,6 +1157,8 @@ impl Scene {
                 speed,
                 turn_speed,
                 start,
+                allow_reverse,
+                tray,
             },
         });
         Ok(())
@@ -2045,9 +2098,20 @@ impl SequenceTimeline {
             .iter()
             .enumerate()
             .map(|(r, track)| {
-                self.scene
-                    .fk_for(r, &track.trajectory.sample(t))
-                    .map_err(|e| PyValueError::new_err(e.to_string()))
+                let q = track.trajectory.sample(t);
+                // A robot riding a vehicle carries its base in the track.
+                match botrail_scene::rollout::SequenceTimeline::base_pose(track, t) {
+                    Some(base) => botrail_kin::forward_kinematics_with_base(
+                        &self.scene.robots()[r].model,
+                        &q,
+                        &base,
+                    )
+                    .map_err(|e| PyValueError::new_err(e.to_string())),
+                    None => self
+                        .scene
+                        .fk_for(r, &q)
+                        .map_err(|e| PyValueError::new_err(e.to_string())),
+                }
             })
             .collect()
     }
@@ -2104,6 +2168,21 @@ impl SequenceTimeline {
             .iter()
             .map(|s| (s.name.clone(), s.start, s.end))
             .collect())
+    }
+
+    /// Where a mounted robot's base was at time `t` — `None` for a robot
+    /// bolted to the floor, whose base is a scene constant.
+    #[pyo3(signature = (t, robot = None))]
+    fn base_pose(&self, t: f64, robot: Option<&str>) -> PyResult<Option<([f64; 3], [f64; 4])>> {
+        let (_, track) = self.track_for(robot)?;
+        let Some(pose) = botrail_scene::rollout::SequenceTimeline::base_pose(track, t) else {
+            return Ok(None);
+        };
+        let q = pose.rotation.coords;
+        Ok(Some((
+            [pose.translation.x, pose.translation.y, pose.translation.z],
+            [q.x, q.y, q.z, q.w],
+        )))
     }
 
     /// World pose of a grasped/tracked object at time `t`.
@@ -2202,11 +2281,21 @@ impl SequenceTimeline {
             let mut samples = Vec::with_capacity(times.len());
             for &t in &times {
                 let q = track.trajectory.sample(t);
-                frames.push(
-                    self.scene
+                // A robot riding a vehicle has a base that moves, so FK has
+                // to be taken against the baked base, not the parked scene.
+                let poses = match botrail_scene::rollout::SequenceTimeline::base_pose(track, t) {
+                    Some(base) => botrail_kin::forward_kinematics_with_base(
+                        &self.scene.robots()[r].model,
+                        &q,
+                        &base,
+                    )
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                    None => self
+                        .scene
                         .fk_for(r, &q)
                         .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                );
+                };
+                frames.push(poses);
                 samples.push(q);
             }
             robot_frames.push(frames);

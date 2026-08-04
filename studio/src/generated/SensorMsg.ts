@@ -5,4 +5,9 @@ import type { SensorWatchMsg } from "./SensorWatchMsg";
 /**
  * A pseudo-sensor: geometric test published as a read-only input signal.
  */
-export type SensorMsg = { name: string, kind: SensorKindMsg, watch: SensorWatchMsg, };
+export type SensorMsg = { name: string, kind: SensorKindMsg, watch: SensorWatchMsg, 
+/**
+ * Vehicle this sensor rides on; its geometry is then read in that
+ * vehicle's frame. `None` (the usual case) is a floor fixture.
+ */
+mount?: string | null, };

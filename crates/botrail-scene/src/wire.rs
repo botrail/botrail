@@ -366,6 +366,10 @@ pub struct SensorMsg {
     pub name: String,
     pub kind: SensorKindMsg,
     pub watch: SensorWatchMsg,
+    /// Vehicle this sensor rides on; its geometry is then read in that
+    /// vehicle's frame. `None` (the usual case) is a floor fixture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -449,6 +453,12 @@ pub enum DeviceKindMsg {
         speed: f64,
         turn_speed: f64,
         start: String,
+        /// May it drive a leg backwards instead of turning around for it?
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        allow_reverse: bool,
+        /// Load deck in the vehicle frame: pose plus full size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tray: Option<VehicleTrayMsg>,
     },
 }
 
@@ -460,6 +470,14 @@ pub struct VehiclePathMsg {
     pub waypoints: Vec<[f64; 2]>,
     pub stations: Vec<VehicleStationMsg>,
     pub ring: bool,
+}
+
+/// A vehicle's load deck, in the vehicle frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct VehicleTrayMsg {
+    pub pose: PoseMsg,
+    pub size: [f64; 3],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -616,6 +634,10 @@ pub struct RobotTimelineMsg {
     /// name — the timeline's robot lanes.
     #[serde(default)]
     pub moves: Vec<StepSpanMsg>,
+    /// Base pose per sample, for a robot riding a vehicle. Empty for the
+    /// usual bolted-down robot, whose base is in the scene description.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base: Vec<PoseMsg>,
 }
 
 /// A baked sequence rollout: each robot rides its own embedded trajectory
@@ -1313,6 +1335,7 @@ pub fn sequences_message(scene: &Scene) -> ServerMessage {
 
 pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
     SensorMsg {
+        mount: sensor.mount.clone(),
         name: sensor.name.clone(),
         kind: match &sensor.kind {
             SensorKind::Zone { pose, size } => SensorKindMsg::Zone {
@@ -1341,6 +1364,7 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
 
 pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
     Sensor {
+        mount: msg.mount.clone(),
         name: msg.name.clone(),
         kind: match &msg.kind {
             SensorKindMsg::Zone { pose, size } => SensorKind::Zone {
@@ -1421,7 +1445,14 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 speed,
                 turn_speed,
                 start,
+                allow_reverse,
+                tray,
             } => DeviceKindMsg::Vehicle {
+                allow_reverse: *allow_reverse,
+                tray: tray.map(|(pose, size)| VehicleTrayMsg {
+                    pose: PoseMsg::from(&pose),
+                    size: [size.x, size.y, size.z],
+                }),
                 path: VehiclePathMsg {
                     waypoints: path.waypoints.iter().map(|p| [p.x, p.y]).collect(),
                     stations: path
@@ -1502,7 +1533,16 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 speed,
                 turn_speed,
                 start,
+                allow_reverse,
+                tray,
             } => DeviceKind::Vehicle {
+                allow_reverse: *allow_reverse,
+                tray: tray.as_ref().map(|t| {
+                    (
+                        (&t.pose).into(),
+                        Vector3::new(t.size[0], t.size[1], t.size[2]),
+                    )
+                }),
                 path: crate::seq::VehiclePath {
                     waypoints: path
                         .waypoints

@@ -264,6 +264,21 @@ impl SceneHub {
         botrail_session::set_robot_base_pose_for(self, robot, pose);
     }
 
+    /// Puts a robot on a vehicle; the base then follows it. Broadcasts the
+    /// new state, since mounting moves the robot to the vehicle at once.
+    pub fn mount_robot(
+        &self,
+        robot: usize,
+        device: &str,
+        offset: Isometry3<f64>,
+    ) -> Result<(), SceneError> {
+        let result = self.with_scene(|scene| scene.mount_robot(robot, device, offset));
+        if result.is_ok() {
+            botrail_session::emit_state(self);
+        }
+        result
+    }
+
     pub fn set_tcp_target_for(
         &self,
         robot: usize,
@@ -608,7 +623,32 @@ impl SceneHub {
                     robots: rec
                         .robots
                         .iter()
-                        .map(|r| wire::RobotTimelineMsg {
+                        .enumerate()
+                        .map(|(i, r)| wire::RobotTimelineMsg {
+                            // Joint values alone cannot place a robot whose
+                            // base moved — a recorded AMR would replay with
+                            // its arm left behind at the parked base. The
+                            // root link's recorded pose *is* the base, so
+                            // send it whenever it actually moves.
+                            base: {
+                                let root = scene.robots()[i].model.root_link;
+                                let first = r.link_poses.first().map(|f| f[root]);
+                                let moves = first.is_some_and(|a| {
+                                    r.link_poses.iter().any(|f| {
+                                        (f[root].translation.vector - a.translation.vector).norm()
+                                            > 1e-9
+                                            || f[root].rotation.angle_to(&a.rotation) > 1e-9
+                                    })
+                                });
+                                if moves && r.mode == RecordingMode::JointState {
+                                    r.link_poses
+                                        .iter()
+                                        .map(|f| wire::PoseMsg::from(&f[root]))
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                }
+                            },
                             name: r.name.clone(),
                             trajectory: wire::TrajectoryMsg {
                                 duration,

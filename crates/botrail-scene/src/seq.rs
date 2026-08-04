@@ -27,6 +27,11 @@ pub struct Sensor {
     pub name: String,
     pub kind: SensorKind,
     pub watch: SensorWatch,
+    /// Vehicle this sensor rides on: its `kind` geometry is then read in
+    /// that vehicle's frame and re-resolved every scan tick (a load-present
+    /// eye on a deck, or a protective field that travels with the machine).
+    /// `None` — the usual case — is a fixture bolted to the floor.
+    pub mount: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +147,18 @@ pub enum DeviceKind {
         turn_speed: f64,
         /// Station the vehicle starts parked at.
         start: String,
+        /// May it drive a leg backwards rather than turn around for it?
+        /// A differential-drive machine backs out of a dead end instead of
+        /// pirouetting in it — and a pivot sweeps the body's half-diagonal,
+        /// so in a dock that is often the difference between fitting and
+        /// not. Off (the default) keeps every arrival nose-first.
+        allow_reverse: bool,
+        /// Load deck, as a box *in the vehicle frame*: any unattached
+        /// obstacle whose origin lies inside it rides along, rotation
+        /// included. It is the conveyor's zone rule moved onto a moving
+        /// frame — so a part placed on the deck simply joins the load, with
+        /// no load/unload action to author and nothing to keep in step.
+        tray: Option<(Isometry3<f64>, Vector3<f64>)>,
     },
 }
 
@@ -166,6 +183,69 @@ impl VehiclePath {
             .find(|(n, _)| n == name)
             .map(|(_, i)| *i)
     }
+
+    /// The heading a vehicle parked at waypoint `at` faces: along the leg
+    /// leaving it (wrapping on a ring), or along the leg arriving when
+    /// nothing leaves — the open path's last waypoint.
+    pub fn heading_at(&self, at: usize) -> f64 {
+        let n = self.waypoints.len();
+        let dir = |i: usize, j: usize| {
+            let d = self.waypoints[j] - self.waypoints[i];
+            (d.norm() > 1e-9).then(|| d.y.atan2(d.x))
+        };
+        for step in 1..n {
+            let j = if self.ring {
+                (at + step) % n
+            } else if at + step < n {
+                at + step
+            } else {
+                break;
+            };
+            if let Some(h) = dir(at, j) {
+                return h;
+            }
+        }
+        for step in 1..n {
+            let j = if self.ring {
+                (at + n - (step % n)) % n
+            } else if step <= at {
+                at - step
+            } else {
+                break;
+            };
+            if let Some(h) = dir(j, at) {
+                return h;
+            }
+        }
+        0.0
+    }
+
+    /// The SE(2) frame of a vehicle parked at the named station.
+    pub fn frame_at(&self, station: &str) -> Option<Isometry3<f64>> {
+        let at = self.station(station)?;
+        let p = self.waypoints.get(at)?;
+        Some(vehicle_frame(p, self.heading_at(at)))
+    }
+}
+
+/// The SE(2) frame of a vehicle: floor position plus heading about +Z.
+pub fn vehicle_frame(position: &nalgebra::Point2<f64>, heading: f64) -> Isometry3<f64> {
+    Isometry3::from_parts(
+        nalgebra::Translation3::new(position.x, position.y, 0.0),
+        nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), heading),
+    )
+}
+
+/// A robot riding on a vehicle: its base is `vehicle frame ∘ offset`,
+/// re-derived every scan tick. Mounting is what makes an AMR out of an arm
+/// and a chassis, and it is deliberately an attribute of the *robot* — the
+/// vehicle knows nothing about its passenger.
+#[derive(Debug, Clone)]
+pub struct RobotMount {
+    /// Vehicle device name.
+    pub device: String,
+    /// Where the robot's base sits in the vehicle's frame.
+    pub offset: Isometry3<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +554,31 @@ impl Scene {
         for device in &self.devices {
             self.validate_vehicle(device).map_err(|m| (None, m))?;
         }
+        for sensor in &self.sensors {
+            let Some(mount) = &sensor.mount else { continue };
+            match self.devices.iter().find(|d| &d.name == mount) {
+                Some(d) if matches!(d.kind, DeviceKind::Vehicle { .. }) => {}
+                Some(_) => {
+                    return Err((
+                        None,
+                        format!(
+                            "sensor `{}` is mounted on `{mount}`, which is not a vehicle \
+                             (only vehicles carry sensors)",
+                            sensor.name
+                        ),
+                    ))
+                }
+                None => {
+                    return Err((
+                        None,
+                        format!(
+                            "sensor `{}` is mounted on unknown device `{mount}`",
+                            sensor.name
+                        ),
+                    ))
+                }
+            }
+        }
         // Tracking and grasping are modes the steps switch on and off, so
         // their rules are checked by walking the (linear) step list once —
         // per robot for tracking, per object for grasps.
@@ -624,10 +729,20 @@ impl Scene {
             speed,
             turn_speed,
             start,
+            tray,
+            ..
         } = &device.kind
         else {
             return Ok(());
         };
+        if let Some((_, size)) = tray {
+            if size.iter().any(|v| !(v.is_finite() && *v > 0.0)) {
+                return Err(format!(
+                    "vehicle `{}` tray size must be positive, got {size:?}",
+                    device.name
+                ));
+            }
+        }
         let dev = &device.name;
         if path.waypoints.len() < 2 {
             return Err(format!(
