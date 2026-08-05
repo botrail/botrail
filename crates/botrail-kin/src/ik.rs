@@ -28,6 +28,16 @@ pub struct IkOptions {
     pub orientation_weight: f64,
     /// Maximum joint-space step norm per iteration (rad / m).
     pub max_step: f64,
+    /// Additional attempts when the seeded solve does not converge — the
+    /// escape hatch for seeds pinned against joint limits or parked on a
+    /// singularity (a robot whose limits exclude zero starts exactly
+    /// there). The first restart seeds from the limits midpoint, later
+    /// ones from uniform samples within the sampling bounds, all drawn
+    /// from a fixed-seed generator: the same call returns the same answer,
+    /// every time. `0` disables restarts — the streaming/tracking
+    /// configuration, where a warm-seeded solve jumping to a different
+    /// solution branch would teleport the arm.
+    pub restarts: usize,
 }
 
 impl Default for IkOptions {
@@ -40,6 +50,7 @@ impl Default for IkOptions {
             damping: 0.05,
             orientation_weight: 0.5,
             max_step: 0.5,
+            restarts: 4,
         }
     }
 }
@@ -49,11 +60,13 @@ impl IkOptions {
     /// tolerances, but enough iterations to settle within a single message
     /// (a 6-DOF solve iteration is microseconds; the badge shown to the
     /// user reflects the final solve of a drag, so it must not stop short).
+    /// No restarts: a per-frame solve must stay on its solution branch.
     pub fn streaming() -> Self {
         IkOptions {
             max_iters: 100,
             tol_pos: 1e-4,
             tol_rot: 1e-3,
+            restarts: 0,
             ..IkOptions::default()
         }
     }
@@ -148,7 +161,9 @@ fn pose_error(current: &Isometry3<f64>, target: &Isometry3<f64>) -> (Vector3<f64
 }
 
 /// Solves for a configuration placing `link` at `target`, starting from
-/// `seed`. Always returns the best configuration found; check `converged`.
+/// `seed`. When the seeded solve does not converge, up to
+/// [`IkOptions::restarts`] deterministically-seeded attempts follow.
+/// Always returns the best configuration found; check `converged`.
 pub fn solve_ik(
     model: &RobotModel,
     link: usize,
@@ -162,6 +177,49 @@ pub fn solve_ik(
             got: seed.len(),
         });
     }
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut best = solve_attempt(model, link, target, seed, options, &mut rng)?;
+    if best.converged {
+        return Ok(best);
+    }
+    let score = |r: &IkResult| r.pos_error + options.orientation_weight * r.rot_error;
+    let (lower, upper) = model.sampling_bounds();
+    for restart in 0..options.restarts {
+        let seed: Vec<f64> = lower
+            .iter()
+            .zip(&upper)
+            .map(|(lo, hi)| {
+                if restart == 0 {
+                    // The centered configuration first: it is the analytic
+                    // antidote to a seed clamped against its limits.
+                    0.5 * (lo + hi)
+                } else {
+                    lo + 0.5 * (jitter_unit(&mut rng) + 1.0) * (hi - lo)
+                }
+            })
+            .collect();
+        let result = solve_attempt(model, link, target, &seed, options, &mut rng)?;
+        if result.converged || score(&result) < score(&best) {
+            best = result;
+        }
+        if best.converged {
+            break;
+        }
+    }
+    Ok(best)
+}
+
+/// One damped-least-squares descent from `seed`; `rng` feeds the
+/// singularity-stall kick and is threaded through so successive attempts
+/// stay deterministic as a sequence.
+fn solve_attempt(
+    model: &RobotModel,
+    link: usize,
+    target: &Isometry3<f64>,
+    seed: &[f64],
+    options: &IkOptions,
+    rng: &mut u64,
+) -> Result<IkResult, KinError> {
     let task_dim = match options.mode {
         IkMode::Position => 3,
         IkMode::Pose => 6,
@@ -170,7 +228,6 @@ pub fn solve_ik(
 
     let mut q = seed.to_vec();
     clamp_to_limits(model, &mut q);
-    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
 
     let mut best: Option<IkResult> = None;
     for iter in 0..=options.max_iters {
@@ -226,7 +283,7 @@ pub fn solve_ik(
             // move along its own axis produces dq = 0): kick the
             // configuration to break the symmetry, then keep iterating.
             for qi in q.iter_mut() {
-                *qi += 0.05 * jitter_unit(&mut rng);
+                *qi += 0.05 * jitter_unit(rng);
             }
             clamp_to_limits(model, &mut q);
             continue;
@@ -393,6 +450,102 @@ mod tests {
             "stalled: pos_err={}, rot_err={}, iters={}",
             result.pos_error, result.rot_error, result.iters
         );
+    }
+
+    /// The Franka FR3 kinematics (joint frames/limits from the catalog
+    /// URDF, geometry dropped): joints 4 and 6 have limits excluding zero,
+    /// so the neutral configuration clamps onto two limits at once — and
+    /// the plain descent pins there instead of converging. This is the
+    /// failure observed live against the model catalog.
+    const LIMIT_PINNED: &str = r#"
+    <robot name="fr3_frames">
+      <link name="l0"/><link name="l1"/><link name="l2"/><link name="l3"/>
+      <link name="l4"/><link name="l5"/><link name="l6"/><link name="l7"/><link name="tip"/>
+      <joint name="j1" type="revolute">
+        <parent link="l0"/><child link="l1"/>
+        <origin xyz="0 0 0.333"/><axis xyz="0 0 1"/>
+        <limit lower="-2.9007" upper="2.9007" effort="87" velocity="2.62"/>
+      </joint>
+      <joint name="j2" type="revolute">
+        <parent link="l1"/><child link="l2"/>
+        <origin rpy="-1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-1.8361" upper="1.8361" effort="87" velocity="2.62"/>
+      </joint>
+      <joint name="j3" type="revolute">
+        <parent link="l2"/><child link="l3"/>
+        <origin xyz="0 -0.316 0" rpy="1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-2.9007" upper="2.9007" effort="87" velocity="2.62"/>
+      </joint>
+      <joint name="j4" type="revolute">
+        <parent link="l3"/><child link="l4"/>
+        <origin xyz="0.0825 0 0" rpy="1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-3.077" upper="-0.1169" effort="87" velocity="2.62"/>
+      </joint>
+      <joint name="j5" type="revolute">
+        <parent link="l4"/><child link="l5"/>
+        <origin xyz="-0.0825 0.384 0" rpy="-1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-2.8763" upper="2.8763" effort="12" velocity="5.26"/>
+      </joint>
+      <joint name="j6" type="revolute">
+        <parent link="l5"/><child link="l6"/>
+        <origin rpy="1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="0.4398" upper="4.6216" effort="12" velocity="4.18"/>
+      </joint>
+      <joint name="j7" type="revolute">
+        <parent link="l6"/><child link="l7"/>
+        <origin xyz="0.088 0 0" rpy="1.57079633 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-3.0508" upper="3.0508" effort="12" velocity="5.26"/>
+      </joint>
+      <joint name="j8" type="fixed">
+        <parent link="l7"/><child link="tip"/>
+        <origin xyz="0 0 0.107"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn restarts_rescue_a_limit_pinned_seed() {
+        let model = RobotModel::from_urdf_str(LIMIT_PINNED).unwrap();
+        let tip = model.link_index("tip").unwrap();
+        // The exact configuration the live catalog check used.
+        let q_true = [0.3, -0.6, 0.2, -1.8, 0.15, 1.6, 0.5];
+        let target = forward_kinematics(&model, &q_true).unwrap()[tip];
+        let seed = model.neutral_positions();
+
+        // The plain descent must genuinely fail here, or this test guards
+        // nothing.
+        let plain = IkOptions {
+            restarts: 0,
+            ..IkOptions::default()
+        };
+        let stuck = solve_ik(&model, tip, &target, &seed, &plain).unwrap();
+        assert!(!stuck.converged, "fixture no longer pins: {stuck:?}");
+
+        let rescued = solve_ik(&model, tip, &target, &seed, &IkOptions::default()).unwrap();
+        assert!(rescued.converged, "{rescued:?}");
+        let reached = forward_kinematics(&model, &rescued.q).unwrap()[tip];
+        let (e_pos, e_rot) = pose_error(&reached, &target);
+        assert!(e_pos.norm() < 1e-4 && e_rot.norm() < 1e-3);
+    }
+
+    #[test]
+    fn restarts_are_deterministic() {
+        let model = RobotModel::from_urdf_str(LIMIT_PINNED).unwrap();
+        let tip = model.link_index("tip").unwrap();
+        let target =
+            forward_kinematics(&model, &[0.3, -0.6, 0.2, -1.8, 0.15, 1.6, 0.5]).unwrap()[tip];
+        let seed = model.neutral_positions();
+        let a = solve_ik(&model, tip, &target, &seed, &IkOptions::default()).unwrap();
+        let b = solve_ik(&model, tip, &target, &seed, &IkOptions::default()).unwrap();
+        // Bit-identical, not merely close: the restart seeds come from a
+        // fixed-seed generator.
+        assert_eq!(a.q, b.q);
+        assert_eq!(a.iters, b.iters);
+        assert_eq!(a.converged, b.converged);
+    }
+
+    #[test]
+    fn streaming_solves_never_restart() {
+        assert_eq!(IkOptions::streaming().restarts, 0);
     }
 
     #[test]

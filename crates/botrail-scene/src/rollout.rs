@@ -546,7 +546,9 @@ impl ActiveMove {
 }
 
 /// Per-tick tracking solve: warm-started from the nominal configuration,
-/// so it only has to absorb one scan period of part motion.
+/// so it only has to absorb one scan period of part motion. No restarts —
+/// a restart could land on another solution branch and teleport the arm
+/// mid-track.
 const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
     mode: botrail_kin::IkMode::Pose,
     max_iters: 100,
@@ -555,6 +557,7 @@ const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
     damping: 0.05,
     orientation_weight: 0.5,
     max_step: 0.5,
+    restarts: 0,
 };
 
 /// An active conveyor track: taught poses are carried by `offset`, which is

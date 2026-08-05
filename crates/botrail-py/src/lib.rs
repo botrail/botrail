@@ -216,9 +216,13 @@ impl Robot {
 
     /// Solves inverse kinematics. With `quaternion=None` only the position
     /// is matched. `link` defaults to the TCP link, `seed` to the neutral
-    /// configuration. Always returns the best configuration found; check
-    /// `result.converged`.
-    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100))]
+    /// configuration. When the seeded solve does not converge, up to
+    /// `restarts` further attempts run from deterministically generated
+    /// seeds (limits midpoint first, then fixed-seed uniform samples within
+    /// the limits) — the same call always returns the same answer. Pass
+    /// `restarts=0` to solve strictly from the given seed. Always returns
+    /// the best configuration found; check `result.converged`.
+    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100, restarts = None))]
     fn ik(
         &self,
         position: [f64; 3],
@@ -226,14 +230,17 @@ impl Robot {
         link: Option<&str>,
         seed: Option<Vec<f64>>,
         max_iters: usize,
+        restarts: Option<usize>,
     ) -> PyResult<IkResult> {
         let (target, mode) = ik_target(position, quaternion);
         let link_index = resolve_link(&self.inner, link)?;
         let seed = seed.unwrap_or_else(|| self.inner.neutral_positions());
+        let defaults = botrail_kin::IkOptions::default();
         let options = botrail_kin::IkOptions {
             mode,
             max_iters,
-            ..botrail_kin::IkOptions::default()
+            restarts: restarts.unwrap_or(defaults.restarts),
+            ..defaults
         };
         let result = botrail_kin::solve_ik(&self.inner, link_index, &target, &seed, &options)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -60,6 +60,7 @@ class Robot:
         link: Optional[str] = None,
         seed: Optional[list[float]] = None,
         max_iters: int = 100,
+        restarts: Optional[int] = None,
     ) -> IkResult: ...
     def attach_tool(
         self,

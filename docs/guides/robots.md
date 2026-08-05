@@ -149,6 +149,12 @@ ik.rot_error     # rad
 ```
 
 `link` defaults to the TCP link and `seed` to the neutral configuration.
+When a seed does not converge — a robot whose limits exclude zero starts
+clamped against them, the FR3 famously so — the solver retries from
+deterministically generated seeds (limits midpoint, then fixed-seed samples
+within the limits), so the same call returns the same answer every time;
+`restarts=0` disables this. The studio's drag-to-pose solver never restarts:
+a per-frame solve must stay on its solution branch.
 Inside a scene, [`set_tcp_target`][botrail.Scene.set_tcp_target] is the same
 solve seeded from the current pose — and applied.
 
