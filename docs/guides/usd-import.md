@@ -48,6 +48,11 @@ degree/unit conversion, `articulation_root`, `search_paths`). USD-sourced
 robots keep a pointer to their stage, which the exporter uses to reference the
 original asset at full visual fidelity.
 
+A stage with rigid bodies but no physics joints — a coupling, a fingertip, a
+static fixture — imports too: the bodies weld together at their stage poses
+and the model comes out with zero DOF, a perfectly good scene citizen for
+collision checking and [tool mounting](robots.md#mounting-a-tool).
+
 ## Round trip
 
 USD is also how animation leaves and re-enters botrail:

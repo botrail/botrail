@@ -34,7 +34,9 @@ jobs:
       - name: Build extension and run tests
         run: |
           uv venv .venv
-          uv pip install --python .venv/bin/python maturin pytest
+          # pyyaml: the from_catalog tests fake out huggingface_hub, but the
+          # manifest parsing still imports the real `yaml`.
+          uv pip install --python .venv/bin/python maturin pytest pyyaml
           VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
           .venv/bin/python -m pytest python/tests -q
       # The API reference is generated from the extension built above; --strict

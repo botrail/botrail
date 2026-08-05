@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use botrail_model::{Geometry, RobotModel, RobotSource, Shape};
+use botrail_model::{Geometry, RobotModel, Shape};
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use openusd::schemas::geom::Xformable;
 use openusd::schemas::physics::JointBase;
@@ -262,11 +262,8 @@ pub fn export_animation(
     for robot in input.robots {
         let prim_name = unique_child(&mut used_prims, &sanitize_name(robot.name));
         let robot_prim = format!("/World/{prim_name}");
-        match &robot.model.source {
-            RobotSource::Usd {
-                path,
-                articulation_root,
-            } => {
+        match robot.model.source.usd_stage() {
+            Some((path, articulation_root)) => {
                 let (info, _stage) =
                     robot_stage_info(path, &[], articulation_root, robot.model, &mut warnings)?;
                 let dir = match source_dirs.get(path) {
@@ -274,7 +271,7 @@ pub fn export_animation(
                     None => {
                         let dir =
                             unique_child(&mut used_dirs, &sanitize_name(robot.name).to_lowercase());
-                        source_dirs.insert(path.clone(), dir.clone());
+                        source_dirs.insert(path.to_path_buf(), dir.clone());
                         assets.extend(robot_asset_copies(path, asset_stem, &dir, &mut warnings)?);
                         dir
                     }
@@ -289,7 +286,9 @@ pub fn export_animation(
                     &mut warnings,
                 )?;
             }
-            RobotSource::UrdfXml(_) => {
+            // URDF robots and composites have no single stage to reference;
+            // their geometry bakes into per-link transforms.
+            None => {
                 author_urdf_robot(&mut layer, robot, &codes, &robot_prim, &mut warnings)?;
             }
         }
@@ -1152,12 +1151,12 @@ fn author_joint_states(
 
 /// File name of the robot's root stage inside the copied asset directory.
 fn asset_root_name(model: &RobotModel) -> Result<String, UsdExportError> {
-    match &model.source {
-        RobotSource::Usd { path, .. } => path
+    match model.source.usd_stage() {
+        Some((path, _)) => path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .ok_or_else(|| UsdExportError::RobotStage("robot stage path has no file name".into())),
-        _ => unreachable!("only called for USD robots"),
+        None => unreachable!("only called for USD robots"),
     }
 }
 

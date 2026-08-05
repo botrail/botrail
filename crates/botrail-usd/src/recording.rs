@@ -125,12 +125,9 @@ pub fn import_recording(
     let mut resolutions: Vec<RobotResolution> = Vec::with_capacity(robots.len());
     let mut tracked_paths: Vec<String> = Vec::new();
     for (name, model) in robots {
-        let (robot_stage_path, model_root) = match &model.source {
-            botrail_model::RobotSource::Usd {
-                path,
-                articulation_root,
-            } => (path.clone(), articulation_root.clone()),
-            _ => {
+        let (robot_stage_path, model_root) = match model.source.usd_stage() {
+            Some((path, articulation_root)) => (path.to_path_buf(), articulation_root.to_string()),
+            None => {
                 return Err(UsdImportError::Recording(format!(
                     "recordings replay USD-sourced robots; `{name}` came from URDF"
                 )))

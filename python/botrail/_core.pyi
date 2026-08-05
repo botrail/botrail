@@ -28,6 +28,12 @@ class Robot:
         articulation_root: Optional[str] = None,
         search_paths: Optional[list[Union[str, Path]]] = None,
     ) -> "Robot": ...
+    @staticmethod
+    def from_catalog(
+        id: str,
+        revision: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> "Robot": ...
     @property
     def name(self) -> str: ...
     @property
@@ -51,6 +57,16 @@ class Robot:
         seed: Optional[list[float]] = None,
         max_iters: int = 100,
     ) -> IkResult: ...
+    def attach_tool(
+        self,
+        tool: "Robot",
+        flange: str,
+        mount: str,
+        offset_position: Optional[tuple[float, float, float]] = None,
+        offset_quaternion: Optional[tuple[float, float, float, float]] = None,
+        tcp: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> "Robot": ...
 
 class Scene:
     def __init__(

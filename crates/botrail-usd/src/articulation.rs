@@ -23,6 +23,14 @@
 //! up-axis fix (and axes/vertices rotated), yielding a Z-up-modeled robot.
 //! PhysX's `physxJoint:maxJointVelocity` (deg/s or units/s) feeds the
 //! velocity limit when authored.
+//!
+//! # Joint couplings (mimic)
+//!
+//! Two encodings collapse a driven joint into its source's DOF:
+//! `PhysxMimicJointAPI` (USD units, PhysX sign convention) and the
+//! `botrail:mimic` customData dictionary URDF converters author (URDF
+//! semantics: `q = multiplier·q_source + offset`, SI units regardless of
+//! stage units). When both are present the applied schema wins.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -150,19 +158,36 @@ struct JointRecord {
     upper: Option<f64>,
     max_velocity: Option<f64>,
     effort: f64,
-    /// `PhysxMimicJointAPI`, as authored (USD units).
+    /// Joint coupling, as authored (see [`MimicRecord`] for units).
     mimic: Option<MimicRecord>,
 }
 
-/// One `PhysxMimicJointAPI` instance, straight off the prim.
-struct MimicRecord {
-    /// Prim path of the reference joint (`...:referenceJoint`).
-    reference: String,
-    /// The reference joint's coupled axis (`...:referenceJointAxis`), e.g.
-    /// `rotZ`; `None` when unauthored.
-    reference_axis: Option<String>,
-    gearing: f64,
-    offset: f64,
+/// A joint coupling read off a joint prim, in one of the two encodings
+/// botrail understands.
+enum MimicRecord {
+    /// One `PhysxMimicJointAPI` instance, straight off the prim. PhysX
+    /// couples the pair as `qA + gearing·qB + offset = 0`, in USD joint
+    /// units (degrees for angular dofs, stage units for linear ones).
+    Physx {
+        /// Prim path of the reference joint (`...:referenceJoint`).
+        reference: String,
+        /// The reference joint's coupled axis (`...:referenceJointAxis`),
+        /// e.g. `rotZ`; `None` when unauthored.
+        reference_axis: Option<String>,
+        gearing: f64,
+        offset: f64,
+    },
+    /// The `botrail:mimic` customData dictionary, authored by URDF-to-USD
+    /// converters (UsdPhysics has no native mimic schema). It carries the
+    /// URDF `<mimic>` relation verbatim: `q = multiplier·q_source + offset`
+    /// in SI units (radians/meters), independent of stage units.
+    CustomData {
+        /// Name of the source joint — its prim name (last path segment),
+        /// or a full prim path.
+        joint: String,
+        multiplier: f64,
+        offset: f64,
+    },
 }
 
 pub fn import_robot(
@@ -395,10 +420,51 @@ impl RobotBuilder<'_> {
                 ));
             }
         }
-        let joints = kept;
-        if joints.is_empty() {
-            return Err(art(format!("no physics joints under `{root_path}`")));
+        let mut joints = kept;
+        // A stage may articulate a static part — rigid bodies wired by no
+        // joint at all (couplings, fingertips), at most world-anchored. A
+        // rigid assembly *is* a weld: anchor every body to one root at its
+        // relative stage pose, and the model comes out with zero DOF.
+        if !joints.iter().any(|j| j.body0.is_some()) {
+            let bodies: Vec<&PrimInfo> = prims
+                .iter()
+                .filter(|p| p.is_body && in_subtree(&p.path))
+                .collect();
+            if bodies.is_empty() && joints.is_empty() {
+                return Err(art(format!(
+                    "no physics joints or rigid bodies under `{root_path}`"
+                )));
+            }
+            if let Some(&first_body) = bodies.first() {
+                // Weld root: the world-anchored body when one is named,
+                // else the first body in prim order.
+                let first = joints
+                    .iter()
+                    .find_map(|anchor| bodies.iter().copied().find(|b| b.path == anchor.body1))
+                    .unwrap_or(first_body);
+                let (first_iso, _) = decompose_matrix(&first.world);
+                for body in bodies.iter().filter(|b| b.path != first.path) {
+                    let (iso, _) = decompose_matrix(&body.world);
+                    joints.push(JointRecord {
+                        // `:` cannot appear in a prim name, so the synthetic
+                        // name can never collide with a real joint's path.
+                        name: format!("{}:weld", body.path),
+                        joint_type: JointType::Fixed,
+                        body0: Some(first.path.clone()),
+                        body1: body.path.clone(),
+                        local_pose0: first_iso.inverse() * iso,
+                        local_pose1: Isometry3::identity(),
+                        axis: Vector3::z(),
+                        lower: None,
+                        upper: None,
+                        max_velocity: None,
+                        effort: 0.0,
+                        mimic: None,
+                    });
+                }
+            }
         }
+        let joints = joints;
 
         // ---- bodies --------------------------------------------------
         // Discovery order (stable prim order), bodies referenced by joints
@@ -597,7 +663,19 @@ impl RobotBuilder<'_> {
         .map(f64::from)
         .unwrap_or(0.0);
 
-        let mimic = self.read_mimic(info, joint_type, axis_token.as_ref().map(|t| t.as_str()));
+        let physx = self.read_mimic(info, joint_type, axis_token.as_ref().map(|t| t.as_str()));
+        let custom = self.read_custom_mimic(info, joint_type);
+        let mimic = match (physx, custom) {
+            (Some(physx), Some(_)) => {
+                self.warnings.push(format!(
+                    "{}: both PhysxMimicJointAPI and botrail:mimic customData authored; \
+                     using PhysxMimicJointAPI",
+                    info.path
+                ));
+                Some(physx)
+            }
+            (physx, custom) => physx.or(custom),
+        };
 
         Ok(Some(JointRecord {
             name: info.path.clone(),
@@ -655,7 +733,7 @@ impl RobotBuilder<'_> {
                 .flatten()
                 .map(f64::from)
         };
-        Some(MimicRecord {
+        Some(MimicRecord::Physx {
             reference,
             reference_axis: info
                 .prim
@@ -669,13 +747,66 @@ impl RobotBuilder<'_> {
         })
     }
 
-    /// Turns each joint's `PhysxMimicJointAPI` into a model mimic relation.
+    /// Reads the `botrail:mimic` customData dictionary off a joint prim.
+    /// pxr treats the `:` in `SetCustomDataByKey("botrail:mimic", ...)` as a
+    /// namespace delimiter and nests the entry
+    /// (`customData = { dictionary botrail = { dictionary mimic = {...} } }`),
+    /// so look there first and fall back to a flat `botrail:mimic` key.
+    fn read_custom_mimic(&mut self, info: &PrimInfo, joint_type: JointType) -> Option<MimicRecord> {
+        let sdf::Value::Dictionary(top) = info.prim.custom_data().ok().flatten()? else {
+            return None;
+        };
+        let entry = match top.get("botrail") {
+            Some(sdf::Value::Dictionary(ns)) => ns.get("mimic"),
+            _ => top.get("botrail:mimic"),
+        }?;
+        let sdf::Value::Dictionary(entry) = entry else {
+            self.warnings.push(format!(
+                "{}: botrail:mimic customData is not a dictionary; ignored",
+                info.path
+            ));
+            return None;
+        };
+        if joint_type == JointType::Fixed {
+            self.warnings.push(format!(
+                "{}: botrail:mimic customData on a fixed joint; ignored",
+                info.path
+            ));
+            return None;
+        }
+        let joint = match entry.get("joint") {
+            Some(sdf::Value::String(s)) => s.clone(),
+            Some(sdf::Value::Token(t)) => t.to_string(),
+            _ => {
+                self.warnings.push(format!(
+                    "{}: botrail:mimic customData names no source `joint`; ignored",
+                    info.path
+                ));
+                return None;
+            }
+        };
+        let number = |key: &str, default: f64| match entry.get(key) {
+            Some(sdf::Value::Double(d)) => *d,
+            Some(sdf::Value::Float(f)) => *f as f64,
+            Some(sdf::Value::Int(i)) => *i as f64,
+            _ => default,
+        };
+        Some(MimicRecord::CustomData {
+            joint,
+            multiplier: number("multiplier", 1.0),
+            offset: number("offset", 0.0),
+        })
+    }
+
+    /// Turns each joint's coupling record into a model mimic relation.
     ///
     /// PhysX constrains the pair as `qA + G·qB + γ = 0`, i.e.
     /// `qA = -G·qB - γ`, with USD's joint units (degrees for angular dofs,
     /// stage units for linear ones). Converting both sides into botrail's
     /// radians/meters scales the gearing by the two joints' unit factors and
-    /// the offset by the mimic joint's own.
+    /// the offset by the mimic joint's own. `botrail:mimic` customData
+    /// already speaks URDF (SI, `q = m·q_src + o`) and passes through
+    /// unchanged.
     fn resolve_mimics(&mut self, records: &[JointRecord], model_joints: &mut [Joint]) {
         let index: HashMap<String, usize> = model_joints
             .iter()
@@ -690,40 +821,119 @@ impl RobotBuilder<'_> {
             let Some(&ji) = index.get(record.name.as_str()) else {
                 continue; // world anchor: no model joint to carry the relation
             };
-            let Some(&source_joint) = index.get(mimic.reference.as_str()) else {
-                self.warnings.push(format!(
-                    "{}: mimic reference joint `{}` is not part of this articulation; ignored",
-                    record.name, mimic.reference
-                ));
-                continue;
+            let resolved = match mimic {
+                MimicRecord::Physx {
+                    reference,
+                    reference_axis,
+                    gearing,
+                    offset,
+                } => {
+                    let Some(&source_joint) = index.get(reference.as_str()) else {
+                        self.warnings.push(format!(
+                            "{}: mimic reference joint `{reference}` is not part of this articulation; ignored",
+                            record.name
+                        ));
+                        continue;
+                    };
+                    let Some(source) = record_by_name.get(reference.as_str()) else {
+                        continue;
+                    };
+                    // The model gives every joint one axis, so a coupling to
+                    // some other axis of the reference joint cannot be
+                    // represented.
+                    let source_instance = raw_axis_instance(source.joint_type, &source.axis);
+                    if let (Some(authored), Some(actual)) = (reference_axis, source_instance) {
+                        if authored != actual {
+                            self.warnings.push(format!(
+                                "{}: mimic references `{reference}` on axis `{authored}`, which is not the axis it moves about (`{actual}`); ignored",
+                                record.name
+                            ));
+                            continue;
+                        }
+                    }
+                    let (Some(k_a), Some(k_b)) = (
+                        self.joint_unit(record.joint_type),
+                        self.joint_unit(source.joint_type),
+                    ) else {
+                        continue;
+                    };
+                    Some(botrail_model::JointMimic {
+                        source_joint,
+                        multiplier: -gearing * k_a / k_b,
+                        offset: -offset * k_a,
+                    })
+                }
+                MimicRecord::CustomData {
+                    joint,
+                    multiplier,
+                    offset,
+                } => self
+                    .resolve_custom_source(&record.name, joint, ji, model_joints, &index)
+                    .map(|source_joint| botrail_model::JointMimic {
+                        source_joint,
+                        multiplier: *multiplier,
+                        offset: *offset,
+                    }),
             };
-            let Some(source) = record_by_name.get(mimic.reference.as_str()) else {
-                continue;
-            };
-            // The model gives every joint one axis, so a coupling to some
-            // other axis of the reference joint cannot be represented.
-            let source_instance = raw_axis_instance(source.joint_type, &source.axis);
-            if let (Some(authored), Some(actual)) = (&mimic.reference_axis, source_instance) {
-                if authored != actual {
-                    self.warnings.push(format!(
-                        "{}: mimic references `{}` on axis `{authored}`, which is not the axis it moves about (`{actual}`); ignored",
-                        record.name, mimic.reference
-                    ));
-                    continue;
+            if let Some(resolved) = resolved {
+                model_joints[ji].mimic = Some(resolved);
+            }
+        }
+    }
+
+    /// Finds the model joint a `botrail:mimic` entry names: an exact prim
+    /// path if given one, otherwise the unique joint whose prim name (last
+    /// path segment) matches. Rejections warn rather than fail the import —
+    /// the joint then simply keeps its own DOF.
+    fn resolve_custom_source(
+        &mut self,
+        mimic_name: &str,
+        source: &str,
+        ji: usize,
+        model_joints: &[Joint],
+        index: &HashMap<String, usize>,
+    ) -> Option<usize> {
+        let found = match index.get(source) {
+            Some(&si) => Some(si),
+            None => {
+                let matches: Vec<usize> = model_joints
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, j)| j.name.rsplit('/').next() == Some(source))
+                    .map(|(i, _)| i)
+                    .collect();
+                match matches.as_slice() {
+                    [one] => Some(*one),
+                    [] => {
+                        self.warnings.push(format!(
+                            "{mimic_name}: botrail:mimic source `{source}` is not part of this articulation; ignored"
+                        ));
+                        None
+                    }
+                    _ => {
+                        self.warnings.push(format!(
+                            "{mimic_name}: botrail:mimic source `{source}` matches several joints; ignored"
+                        ));
+                        None
+                    }
                 }
             }
-            let (Some(k_a), Some(k_b)) = (
-                self.joint_unit(record.joint_type),
-                self.joint_unit(source.joint_type),
-            ) else {
-                continue;
-            };
-            model_joints[ji].mimic = Some(botrail_model::JointMimic {
-                source_joint,
-                multiplier: -mimic.gearing * k_a / k_b,
-                offset: -mimic.offset * k_a,
-            });
+        }?;
+        // Cheap local checks for relations the model would reject with a
+        // hard error (the importer's contract is warn-and-continue).
+        if found == ji {
+            self.warnings.push(format!(
+                "{mimic_name}: botrail:mimic source is the joint itself; ignored"
+            ));
+            return None;
         }
+        if model_joints[found].joint_type == JointType::Fixed {
+            self.warnings.push(format!(
+                "{mimic_name}: botrail:mimic source `{source}` is a fixed joint; ignored"
+            ));
+            return None;
+        }
+        Some(found)
     }
 
     /// botrail units per USD unit for a joint's position: degrees to
@@ -1173,8 +1383,196 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         );
     }
 
-    /// Two arms sharing one mount body: each arm is its own articulation,
-    /// anchored to `/World/Base` (which belongs to neither subtree).
+    /// The `botrail:mimic` customData encoding, exactly as pxr serializes
+    /// `SetCustomDataByKey("botrail:mimic", {...})` — the `:` becomes a
+    /// nested namespace dictionary. Authored on a centimetre stage with a
+    /// radian offset: customData carries URDF SI values, so nothing may be
+    /// rescaled on import.
+    const CUSTOM_MIMIC: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+    def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) { def Cube "geom" { double size = 1 } }
+
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </Robot/base>
+        }
+
+        def PhysicsRevoluteJoint "j1"
+        {
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link1>
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+
+        def PhysicsRevoluteJoint "j2" (
+            customData = {
+                dictionary botrail = {
+                    dictionary mimic = {
+                        string joint = "j1"
+                        double multiplier = -0.5
+                        double offset = 0.25
+                    }
+                }
+            }
+        )
+        {
+            rel physics:body0 = </Robot/link1>
+            rel physics:body1 = </Robot/link2>
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn custom_data_mimic_imports_with_urdf_units() {
+        let imported = import_arm(CUSTOM_MIMIC);
+        let model = &imported.model;
+        assert_eq!(model.dof(), 1, "{:?}", imported.warnings);
+        assert_eq!(model.actuated_joint_names(), vec!["/Robot/joints/j1"]);
+
+        // URDF semantics pass through untouched: no degree conversion, no
+        // stage-unit scaling (the stage is centimetres, the offset radians).
+        let mimic = model.joints[model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert_eq!(
+            mimic.source_joint,
+            model.joint_index("/Robot/joints/j1").unwrap()
+        );
+        assert_eq!(mimic.multiplier, -0.5);
+        assert_eq!(mimic.offset, 0.25);
+    }
+
+    #[test]
+    fn custom_data_mimic_with_unknown_source_keeps_the_dof() {
+        let usda = CUSTOM_MIMIC.replace("string joint = \"j1\"", "string joint = \"nope\"");
+        let imported = import_arm(&usda);
+        assert_eq!(imported.model.dof(), 2);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/joints/j2") && w.contains("`nope`")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    #[test]
+    fn physx_mimic_wins_over_custom_data() {
+        // j2 carries both encodings with contradicting couplings; the
+        // applied schema is authoritative and the conflict is reported.
+        let usda = CUSTOM_MIMIC.replace(
+            "        def PhysicsRevoluteJoint \"j2\" (",
+            "        def PhysicsRevoluteJoint \"j2\" (\n            \
+             prepend apiSchemas = [\"PhysxMimicJointAPI:rotZ\"]",
+        );
+        let usda = usda.replace(
+            "            uniform token physics:axis = \"Z\"\n            float physics:lowerLimit = -90\n            float physics:upperLimit = 90\n        }\n    }\n}",
+            "            uniform token physics:axis = \"Z\"\n            float physics:lowerLimit = -90\n            float physics:upperLimit = 90\n            float physxMimicJoint:rotZ:gearing = -0.5\n            float physxMimicJoint:rotZ:offset = 30\n            rel physxMimicJoint:rotZ:referenceJoint = </Robot/joints/j1>\n        }\n    }\n}",
+        );
+        let imported = import_arm(&usda);
+        let model = &imported.model;
+        assert_eq!(model.dof(), 1, "{:?}", imported.warnings);
+        let mimic = model.joints[model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        // PhysX semantics (gearing -0.5 -> +0.5x, 30 deg -> -30 deg), not
+        // the customData numbers.
+        assert!((mimic.multiplier - 0.5).abs() < 1e-12);
+        assert!((mimic.offset + 30f64.to_radians()).abs() < 1e-12);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("both PhysxMimicJointAPI and botrail:mimic")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    /// A static part (coupling, fingertip): rigid bodies under an
+    /// articulation root, no joints anywhere.
+    const JOINT_LESS: &str = r#"#usda 1.0
+(
+    defaultPrim = "Part"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Part" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 0.05 }
+    }
+
+    def Xform "cap" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0.1, 0, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "geom" { double size = 0.02 }
+    }
+}
+"#;
+
+    #[test]
+    fn joint_less_bodies_weld_at_their_stage_poses() {
+        let imported = import_arm(JOINT_LESS);
+        let model = &imported.model;
+        assert_eq!(model.dof(), 0, "{:?}", imported.warnings);
+        assert_eq!(model.links.len(), 2);
+        assert_eq!(model.links[model.root_link].name, "/Part/body");
+
+        // The synthetic weld reproduces the relative stage pose.
+        let poses = botrail_kin::forward_kinematics(model, &[]).unwrap();
+        let cap = poses[model.link_index("/Part/cap").unwrap()].translation;
+        assert!((cap.x - 0.1).abs() < 1e-9 && cap.z - 0.3 < 1e-9, "{cap:?}");
+    }
+
+    #[test]
+    fn joint_less_single_body_imports_as_a_static_part() {
+        // Strip the second body: a lone rigid body is the smallest dof=0 part.
+        let start = JOINT_LESS.find("    def Xform \"cap\"").unwrap();
+        let usda = format!("{}}}\n", &JOINT_LESS[..start]);
+        let imported = import_arm(&usda);
+        assert_eq!(imported.model.dof(), 0, "{:?}", imported.warnings);
+        assert_eq!(imported.model.links.len(), 1);
+    }
+
+    #[test]
+    fn world_anchored_static_part_roots_at_the_anchored_body() {
+        // The pre-#4 workaround: a body1-only fixed joint anchoring the
+        // part. It must keep loading, and the anchor picks the weld root —
+        // here the *second* body, which prim order alone would not choose.
+        let usda = JOINT_LESS.replace(
+            "    def Xform \"cap\"",
+            "    def PhysicsFixedJoint \"anchor\"\n    {\n        \
+             rel physics:body1 = </Part/cap>\n    }\n\n    def Xform \"cap\"",
+        );
+        let imported = import_arm(&usda);
+        let model = &imported.model;
+        assert_eq!(model.dof(), 0, "{:?}", imported.warnings);
+        assert_eq!(model.links.len(), 2);
+        assert_eq!(model.links[model.root_link].name, "/Part/cap");
+    }
     const DUAL: &str = r#"#usda 1.0
 (
     defaultPrim = "World"

@@ -30,6 +30,30 @@ re-modeled as Z-up. `articulation_root` defaults to the first prim carrying
 (`omniverse://`) references against local directories. Anything skipped during
 import is printed, not swallowed.
 
+## The model catalog
+
+Instead of hunting down URDFs, load released packages straight from the
+[botrail catalog](https://huggingface.co/datasets/botrail/botrail-catalog)
+(needs the optional extra: `pip install botrail[catalog]`):
+
+```python
+robot = bt.Robot.from_catalog("2f-85")                       # newest revision
+robot = bt.Robot.from_catalog("robotiq/2f/2f-85/r1",
+                              revision="<dataset commit sha>")  # pinned
+```
+
+Ids resolve exactly or by any unambiguous shorthand (`2f-85`,
+`robotiq/2f-85`). Every load resolves to a concrete dataset commit and records
+it in the robot's source, so a saved project — and the script the studio
+exports — replays the *same bytes* later; that is the
+[determinism story](../concepts/determinism.md) extended to model acquisition.
+Downloads land in the standard Hugging Face cache. Packages whose meshes
+cannot be redistributed are `recipe_only`: `from_catalog` raises and points at
+building them locally with botrail-catalog-builder.
+
+A TCP declared by the package manifest (`frames.tcp_default`) becomes the
+model's `tcp_link` automatically — the grasp center, not a fingertip.
+
 ## What a model knows
 
 ```python
@@ -37,13 +61,14 @@ robot.dof            # actuated joints
 robot.joint_names    # in q-vector order — every `positions` list uses this order
 robot.joint_limits   # (lower, upper) per joint, None for continuous
 robot.link_names
-robot.tcp_link       # deepest leaf; the default end-effector link
+robot.tcp_link       # declared TCP if any (catalog, attach_tool), else deepest leaf
 ```
 
 ## Mimic joints
 
-Joints that follow another joint — URDF `<mimic>`, USD `PhysxMimicJointAPI` —
-never appear in `joint_names` or in a position vector. A two-finger gripper
+Joints that follow another joint — URDF `<mimic>`, USD
+`PhysxMimicJointAPI`, or the `botrail:mimic` customData that URDF-to-USD
+converters author — never appear in `joint_names` or in a position vector. A two-finger gripper
 with a mimicked second finger costs **one** DOF, not two:
 
 ```python
@@ -62,6 +87,37 @@ the mimic relations applied.
     `mimic joint authored on `rotX` but the joint moves about `transX`; ignored`
     and keeps both fingers as independent DOF. If your vector is one longer
     than you expected, read the import notices.
+
+## Mounting a tool
+
+`attach_tool` welds an end-effector onto a flange and returns the composite —
+one kinematic tree whose DOF vector is the arm's joints followed by the
+tool's, mimic joints included. Neither input changes; robots are immutable.
+
+```python
+arm = bt.Robot.from_catalog("ur5e")
+gripper = bt.Robot.from_catalog("2f-85")
+
+robot = arm.attach_tool(
+    gripper,
+    flange="flange",                       # arm-side link (ISO 9409-1 face)
+    mount="robotiq_arg2f_base_link",       # tool-side link — its root
+    offset_position=(0, 0, 0.0139),        # e.g. the coupling's thickness
+)
+robot.dof        # 6 + 1
+robot.tcp_link   # the gripper's declared TCP — IK now targets the grasp center
+```
+
+The composite's TCP comes from `tcp=` if you pass it, else from a TCP the tool
+declares (catalog manifests do), else the deepest-leaf heuristic — which on a
+merged model would pick an arbitrary fingertip, exactly the case the explicit
+TCP exists for. The weld is a fixed joint, so the flange/mount pair is treated
+like any adjacent pair in collision checking. If the two models share a link
+or joint name, pass `prefix="g_"` to namespace the tool's names. Saved
+projects and exported scripts carry the attachment and rebuild it on load.
+
+`mount` must be the tool's *root* link; welding a tool by a mid-chain link
+would need re-rooting its tree, which botrail refuses rather than guesses.
 
 ## IK without a scene
 

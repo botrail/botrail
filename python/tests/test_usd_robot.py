@@ -228,3 +228,45 @@ def test_ur10_golden() -> None:
     for lo, hi in robot.joint_limits:
         assert lo == pytest.approx(-2 * math.pi, abs=1e-4)
         assert hi == pytest.approx(2 * math.pi, abs=1e-4)
+
+
+# A static part (coupling, fingertip): rigid bodies, zero physics joints.
+JOINT_LESS = """#usda 1.0
+(
+    defaultPrim = "Coupling"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Coupling" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 0.05 }
+    }
+
+    def Xform "cap" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.03)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "geom" { double size = 0.02 }
+    }
+}
+"""
+
+
+def test_joint_less_articulation_imports_as_dof0(tmp_path: Path) -> None:
+    path = tmp_path / "coupling.usda"
+    path.write_text(JOINT_LESS)
+    robot = bt.Robot.from_usd(path)
+    assert robot.dof == 0
+    assert robot.joint_names == []
+    assert set(robot.link_names) == {"/Coupling/body", "/Coupling/cap"}
+
+    # A dof=0 robot still works as a scene citizen: poses, collision.
+    scene = bt.Scene(robot)
+    scene.set_joint_positions([])
+    (_, _, cap_z), _ = scene.link_pose("/Coupling/cap")
+    assert cap_z == pytest.approx(0.03)
+    assert not scene.in_collision()

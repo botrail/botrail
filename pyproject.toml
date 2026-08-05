@@ -20,11 +20,18 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Human Machine Interfaces",
 ]
 
+[project.optional-dependencies]
+# Robot.from_catalog downloads packages from the Hugging Face dataset
+# botrail/botrail-catalog; the base wheel stays dependency-free.
+catalog = ["huggingface_hub>=0.24"]
+
 [project.urls]
 Repository = "https://github.com/botrail/botrail"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# pyyaml: the from_catalog tests fake out huggingface_hub with a local
+# fixture, but the manifest parsing still imports the real `yaml`.
+dev = ["pytest>=8", "pyyaml>=6"]
 # The API reference is generated from the pyo3 docstrings, so building the docs
 # also needs the extension importable (maturin develop). The markers keep the
 # whole range resolvable: mkdocstrings 1.0 requires 3.10+, while the wheel

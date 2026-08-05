@@ -129,9 +129,9 @@ impl SceneHub {
     /// Directory `/usd-assets/{robot}/*` serves (that robot's stage
     /// directory, so relative references inside the stage resolve).
     pub fn robot_asset_dir(&self, robot: usize) -> Option<PathBuf> {
-        self.with_scene(|scene| match &scene.robots().get(robot)?.model.source {
-            botrail_model::RobotSource::Usd { path, .. } => path.parent().map(|p| p.to_path_buf()),
-            _ => None,
+        self.with_scene(|scene| {
+            let (path, _) = scene.robots().get(robot)?.model.source.usd_stage()?;
+            path.parent().map(|p| p.to_path_buf())
         })
     }
 

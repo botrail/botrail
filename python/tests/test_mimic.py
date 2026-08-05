@@ -175,3 +175,62 @@ def test_usd_mimic_joint_imports_as_a_coupled_dof(tmp_path: Path) -> None:
     (_, right_y, _), _ = scene.link_pose("/Gripper/right")
     assert left_y == pytest.approx(0.03)
     assert right_y == pytest.approx(-0.03)
+
+
+# The same gripper as URDF-to-USD converters author it: no PhysX schema,
+# the URDF `<mimic>` relation carried as `botrail:mimic` customData
+# (serialized by pxr as a nested namespace dictionary).
+USD_GRIPPER_CUSTOM_DATA = USD_GRIPPER.replace(
+    """        def PhysicsPrismaticJoint "finger_right" (
+            prepend apiSchemas = ["PhysxMimicJointAPI:transY"]
+        )
+        {
+            rel physics:body0 = </Gripper/palm>
+            rel physics:body1 = </Gripper/right>
+            uniform token physics:axis = "Y"
+            float physics:lowerLimit = -0.04
+            float physics:upperLimit = 0
+            float physxMimicJoint:transY:gearing = 1
+            float physxMimicJoint:transY:offset = 0
+            rel physxMimicJoint:transY:referenceJoint = </Gripper/joints/finger_left>
+            uniform token physxMimicJoint:transY:referenceJointAxis = "transY"
+        }""",
+    """        def PhysicsPrismaticJoint "finger_right" (
+            customData = {
+                dictionary botrail = {
+                    dictionary mimic = {
+                        string joint = "finger_left"
+                        double multiplier = -1
+                        double offset = 0
+                    }
+                }
+            }
+        )
+        {
+            rel physics:body0 = </Gripper/palm>
+            rel physics:body1 = </Gripper/right>
+            uniform token physics:axis = "Y"
+            float physics:lowerLimit = -0.04
+            float physics:upperLimit = 0
+        }""",
+)
+
+
+def test_usd_custom_data_mimic_matches_the_urdf_path(tmp_path: Path) -> None:
+    assert USD_GRIPPER_CUSTOM_DATA != USD_GRIPPER  # the replace applied
+    path = tmp_path / "gripper.usda"
+    path.write_text(USD_GRIPPER_CUSTOM_DATA)
+    robot = bt.Robot.from_usd(path)
+
+    assert robot.dof == 1
+    assert robot.joint_names == ["/Gripper/joints/finger_left"]
+    assert robot.mimic_joints == {
+        "/Gripper/joints/finger_right": ("/Gripper/joints/finger_left", -1.0, 0.0)
+    }
+
+    scene = bt.Scene(robot)
+    scene.set_joint_positions([0.03])
+    (_, left_y, _), _ = scene.link_pose("/Gripper/left")
+    (_, right_y, _), _ = scene.link_pose("/Gripper/right")
+    assert left_y == pytest.approx(0.03)
+    assert right_y == pytest.approx(-0.03)

@@ -37,6 +37,19 @@ pub enum ModelError {
     MimicOnFixedJoint(String),
     #[error("joint `{0}` is part of a mimic cycle")]
     MimicCycle(String),
+    #[error("flange link `{0}` does not exist on the robot")]
+    UnknownFlange(String),
+    #[error("mount link `{0}` does not exist on the tool")]
+    UnknownMount(String),
+    #[error("TCP link `{0}` does not exist on the tool")]
+    UnknownTcp(String),
+    #[error(
+        "mount link `{link}` is not the tool's root link (`{root}`); botrail welds the tool by \
+         its root — re-root the tool model or mount it by `{root}`"
+    )]
+    MountNotRoot { link: String, root: String },
+    #[error("`{0}` names both a robot and a tool {1}; pass a prefix to keep them apart")]
+    NameCollision(String, &'static str),
 }
 
 /// Joint types supported by botrail. URDF `floating`/`planar` are rejected.
@@ -147,6 +160,55 @@ pub enum RobotSource {
         path: PathBuf,
         articulation_root: String,
     },
+    /// A model catalog package (`Robot.from_catalog`): the catalog id, the
+    /// resolved dataset revision, and the fetched package's own source.
+    Catalog {
+        /// Full catalog id (e.g. `robotiq/2f/2f-85/r1`), as resolved.
+        id: String,
+        /// The dataset commit SHA the package was fetched at — a floating
+        /// "newest" pins to a concrete revision here.
+        revision: String,
+        /// TCP link declared by the package manifest (`frames.tcp_default`),
+        /// reapplied when the model is rebuilt from `inner`.
+        tcp: Option<String>,
+        /// The fetched file's own source (URDF XML / USD reference), so
+        /// projects rebuild without touching the network.
+        inner: Box<RobotSource>,
+    },
+    /// A robot composed by [`RobotModel::attach_tool`]: both part sources
+    /// plus the weld parameters, so the composite can be rebuilt.
+    Composite {
+        base: Box<RobotSource>,
+        tool: Box<RobotSource>,
+        /// Base-side link the tool is welded to.
+        flange: String,
+        /// Tool-side link (its root) welded to the flange, pre-prefix.
+        mount: String,
+        /// Flange-to-mount transform (e.g. a coupling's thickness).
+        offset: Isometry3<f64>,
+        /// Tool-side TCP link name as passed by the caller, pre-prefix.
+        tcp: Option<String>,
+        /// Prefix applied to every tool link/joint name in the composite.
+        prefix: Option<String>,
+    },
+}
+
+impl RobotSource {
+    /// The USD stage this robot renders and replays from, when its geometry
+    /// maps one-to-one onto a referenced stage: a [`RobotSource::Usd`]
+    /// import, possibly wrapped by a catalog record. Composites and
+    /// URDF-sourced robots return `None` — their animation bakes into
+    /// per-link transforms instead.
+    pub fn usd_stage(&self) -> Option<(&Path, &str)> {
+        match self {
+            RobotSource::Usd {
+                path,
+                articulation_root,
+            } => Some((path, articulation_root)),
+            RobotSource::Catalog { inner, .. } => inner.usd_stage(),
+            RobotSource::UrdfXml(_) | RobotSource::Composite { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -161,6 +223,10 @@ pub struct RobotModel {
     /// tip). Fixed and mimic joints are excluded.
     pub actuated_joints: Vec<usize>,
     pub source: RobotSource,
+    /// Explicitly declared TCP link ([`RobotModel::attach_tool`], catalog
+    /// metadata). When set it overrides the deepest-leaf heuristic in
+    /// [`RobotModel::default_tcp_link`].
+    pub tcp_link: Option<usize>,
 }
 
 impl RobotModel {
@@ -235,10 +301,15 @@ impl RobotModel {
             .collect()
     }
 
-    /// Default end-effector link: the leaf reached through the longest joint
-    /// chain from the root (ties broken by traversal order). This is a
-    /// heuristic for tools/TCP frames, which URDF does not mark explicitly.
+    /// Default end-effector link: the explicitly declared TCP when one is
+    /// set (tool attachment, catalog metadata), otherwise the leaf reached
+    /// through the longest joint chain from the root (ties broken by
+    /// traversal order) — a heuristic for tools/TCP frames, which URDF does
+    /// not mark explicitly.
     pub fn default_tcp_link(&self) -> usize {
+        if let Some(tcp) = self.tcp_link {
+            return tcp;
+        }
         let mut depth = vec![0usize; self.links.len()];
         let mut best = self.root_link;
         for &ji in &self.joint_order {
@@ -559,7 +630,114 @@ impl RobotModel {
             joint_order,
             actuated_joints,
             source,
+            tcp_link: None,
         })
+    }
+
+    /// Welds a tool (end-effector) onto this robot's `flange` link and
+    /// returns the composite: one kinematic tree whose DOF vector is this
+    /// robot's joints followed by the tool's (mimic joints keep following
+    /// their source). `offset` is the flange-to-mount transform — a
+    /// coupling's thickness, for instance.
+    ///
+    /// `mount` must be the tool's root link (a URDF tree cannot hang off a
+    /// mid-chain link without re-rooting). `tcp` optionally names a tool
+    /// link to become the composite's TCP; when omitted, a TCP declared on
+    /// the tool model carries over. `prefix` is prepended to every tool
+    /// link/joint name — required when the two models share a name.
+    pub fn attach_tool(
+        &self,
+        tool: &RobotModel,
+        flange: &str,
+        mount: &str,
+        offset: Isometry3<f64>,
+        tcp: Option<&str>,
+        prefix: Option<&str>,
+    ) -> Result<RobotModel, ModelError> {
+        let flange_index = self
+            .link_index(flange)
+            .ok_or_else(|| ModelError::UnknownFlange(flange.to_string()))?;
+        let mount_index = tool
+            .link_index(mount)
+            .ok_or_else(|| ModelError::UnknownMount(mount.to_string()))?;
+        if mount_index != tool.root_link {
+            return Err(ModelError::MountNotRoot {
+                link: mount.to_string(),
+                root: tool.links[tool.root_link].name.clone(),
+            });
+        }
+        let tool_tcp = match tcp {
+            Some(name) => Some(
+                tool.link_index(name)
+                    .ok_or_else(|| ModelError::UnknownTcp(name.to_string()))?,
+            ),
+            // A TCP the tool declares (catalog metadata) survives mounting.
+            None => tool.tcp_link,
+        };
+        let rename = |name: &str| match prefix {
+            Some(p) => format!("{p}{name}"),
+            None => name.to_string(),
+        };
+
+        let link_offset = self.links.len();
+        let mut links = self.links.clone();
+        for link in &tool.links {
+            let name = rename(&link.name);
+            if self.link_index(&name).is_some() {
+                return Err(ModelError::NameCollision(name, "link"));
+            }
+            links.push(Link {
+                name,
+                ..link.clone()
+            });
+        }
+
+        let joint_offset = self.joints.len();
+        let mut joints = self.joints.clone();
+        for joint in &tool.joints {
+            let name = rename(&joint.name);
+            if self.joint_index(&name).is_some() {
+                return Err(ModelError::NameCollision(name, "joint"));
+            }
+            joints.push(Joint {
+                name,
+                parent_link: joint.parent_link + link_offset,
+                child_link: joint.child_link + link_offset,
+                // Tool-internal index; `q_index` is reassigned by from_parts.
+                mimic: joint.mimic.map(|m| JointMimic {
+                    source_joint: m.source_joint + joint_offset,
+                    ..m
+                }),
+                ..joint.clone()
+            });
+        }
+        joints.push(Joint {
+            name: format!("{flange}_to_{}", rename(mount)),
+            joint_type: JointType::Fixed,
+            origin: offset,
+            axis: Unit::new_unchecked(Vector3::z()),
+            limits: None,
+            parent_link: flange_index,
+            child_link: link_offset + tool.root_link,
+            q_index: None,
+            mimic: None,
+        });
+
+        let source = RobotSource::Composite {
+            base: Box::new(self.source.clone()),
+            tool: Box::new(tool.source.clone()),
+            flange: flange.to_string(),
+            mount: mount.to_string(),
+            offset,
+            tcp: tcp.map(str::to_string),
+            prefix: prefix.map(str::to_string),
+        };
+        let mut model = Self::from_parts(self.name.clone(), links, joints, source)?;
+        // The base's own TCP (if any) sits behind the tool now and does not
+        // carry over; without a tool TCP the deepest-leaf heuristic applies,
+        // which lands inside the tool.
+        model.tcp_link = tool_tcp.map(|tcp| tcp + link_offset);
+        Ok(model)
     }
 }
 
@@ -871,6 +1049,150 @@ mod tests {
         assert_eq!(names("wrist"), vec!["elbow"]);
         assert_eq!(names("left"), vec!["elbow", "finger_left"]);
         assert!(names("base").is_empty());
+    }
+
+    /// A one-DOF mimic gripper whose root is its mounting plate, with an
+    /// explicit TCP frame between the fingers.
+    const TOOL: &str = r#"
+    <robot name="gripper">
+      <link name="mount_plate"/>
+      <link name="finger_l"/>
+      <link name="finger_r"/>
+      <link name="grasp_center"/>
+      <joint name="drive" type="prismatic">
+        <parent link="mount_plate"/><child link="finger_l"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="0" upper="0.04" effort="1" velocity="1"/>
+      </joint>
+      <joint name="follow" type="prismatic">
+        <parent link="mount_plate"/><child link="finger_r"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="-0.04" upper="0" effort="1" velocity="1"/>
+        <mimic joint="drive" multiplier="-1"/>
+      </joint>
+      <joint name="tcp_joint" type="fixed">
+        <parent link="mount_plate"/><child link="grasp_center"/>
+        <origin xyz="0 0 0.12"/>
+      </joint>
+    </robot>
+    "#;
+
+    #[test]
+    fn attach_tool_composes_the_kinematics() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let tool = RobotModel::from_urdf_str(TOOL).unwrap();
+        let offset = Isometry3::from_parts(
+            Translation3::new(0.0, 0.0, 0.0139),
+            UnitQuaternion::identity(),
+        );
+        let combined = arm
+            .attach_tool(
+                &tool,
+                "tool",
+                "mount_plate",
+                offset,
+                Some("grasp_center"),
+                None,
+            )
+            .unwrap();
+
+        // Arm DOF + the gripper's single actuated joint.
+        assert_eq!(combined.dof(), 2);
+        assert_eq!(combined.actuated_joint_names(), vec!["shoulder", "drive"]);
+        // The mimic relation survives with its source remapped.
+        let follow = combined.joint_index("follow").unwrap();
+        let mimic = combined.joints[follow].mimic.unwrap();
+        assert_eq!(mimic.source_joint, combined.joint_index("drive").unwrap());
+        // The declared TCP wins over the deepest-leaf heuristic.
+        assert_eq!(
+            combined.links[combined.default_tcp_link()].name,
+            "grasp_center"
+        );
+        // The weld carries the offset.
+        let weld = combined.joint_index("tool_to_mount_plate").unwrap();
+        assert_eq!(combined.joints[weld].joint_type, JointType::Fixed);
+        assert!((combined.joints[weld].origin.translation.z - 0.0139).abs() < 1e-12);
+        // The originals are untouched.
+        assert_eq!(arm.dof(), 1);
+        assert_eq!(tool.dof(), 1);
+        // The composite records how it was built.
+        assert!(matches!(combined.source, RobotSource::Composite { .. }));
+    }
+
+    #[test]
+    fn attach_tool_without_tcp_inherits_the_tool_declaration() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let mut tool = RobotModel::from_urdf_str(TOOL).unwrap();
+        tool.tcp_link = Some(tool.link_index("grasp_center").unwrap());
+        let combined = arm
+            .attach_tool(
+                &tool,
+                "tool",
+                "mount_plate",
+                Isometry3::identity(),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            combined.links[combined.default_tcp_link()].name,
+            "grasp_center"
+        );
+    }
+
+    #[test]
+    fn attach_tool_prefix_disambiguates_collisions() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        // A "tool" that reuses the arm's link names wholesale.
+        let clone = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let err = arm
+            .attach_tool(
+                &clone,
+                "tool",
+                "base_link",
+                Isometry3::identity(),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelError::NameCollision(_, "link")), "{err}");
+
+        let combined = arm
+            .attach_tool(
+                &clone,
+                "tool",
+                "base_link",
+                Isometry3::identity(),
+                None,
+                Some("t2_"),
+            )
+            .unwrap();
+        assert_eq!(combined.dof(), 2);
+        assert!(combined.link_index("t2_base_link").is_some());
+        assert!(combined.joint_index("t2_shoulder").is_some());
+    }
+
+    #[test]
+    fn attach_tool_rejects_bad_frames() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let tool = RobotModel::from_urdf_str(TOOL).unwrap();
+        let id = Isometry3::identity();
+        assert!(matches!(
+            arm.attach_tool(&tool, "nope", "mount_plate", id, None, None),
+            Err(ModelError::UnknownFlange(_))
+        ));
+        assert!(matches!(
+            arm.attach_tool(&tool, "tool", "nope", id, None, None),
+            Err(ModelError::UnknownMount(_))
+        ));
+        assert!(matches!(
+            arm.attach_tool(&tool, "tool", "finger_l", id, None, None),
+            Err(ModelError::MountNotRoot { .. })
+        ));
+        assert!(matches!(
+            arm.attach_tool(&tool, "tool", "mount_plate", id, Some("nope"), None),
+            Err(ModelError::UnknownTcp(_))
+        ));
     }
 
     #[test]

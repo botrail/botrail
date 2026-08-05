@@ -1,5 +1,6 @@
 //! Python bindings for botrail (`botrail._core`).
 
+mod catalog;
 mod hub;
 mod server;
 
@@ -82,6 +83,33 @@ impl Robot {
         })
     }
 
+    /// Loads a robot or tool from the botrail model catalog (the Hugging
+    /// Face dataset `botrail/botrail-catalog`) by id — exact
+    /// (`robotiq/2f/2f-85/r1`) or any unambiguous shorthand (`2f-85`,
+    /// `robotiq/2f-85`). Needs the optional dependency `huggingface_hub`
+    /// (`pip install botrail[catalog]`).
+    ///
+    /// `revision` pins a dataset commit SHA; without it the newest catalog
+    /// is fetched and the resolved SHA is recorded in the robot's source,
+    /// so saved projects and generated scripts replay bit-identically.
+    /// Downloads land in the standard Hugging Face cache. `format` forces
+    /// `"urdf"` or `"usd"`; by default the URDF is preferred. A TCP the
+    /// package manifest declares (`frames.tcp_default`) becomes `tcp_link`.
+    /// Packages distributed as `recipe_only`/`metadata_only` raise with a
+    /// pointer to building them locally.
+    #[staticmethod]
+    #[pyo3(signature = (id, revision = None, format = None))]
+    fn from_catalog(
+        py: Python<'_>,
+        id: &str,
+        revision: Option<&str>,
+        format: Option<&str>,
+    ) -> PyResult<Self> {
+        Ok(Robot {
+            inner: catalog::robot_from_catalog(py, id, revision, format)?,
+        })
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -158,7 +186,9 @@ impl Robot {
         self.inner.links.iter().map(|l| l.name.clone()).collect()
     }
 
-    /// Default end-effector link name (deepest leaf in the kinematic tree).
+    /// Default end-effector link name: the TCP declared by a tool
+    /// attachment or catalog manifest when present, otherwise the deepest
+    /// leaf in the kinematic tree.
     #[getter]
     fn tcp_link(&self) -> String {
         self.inner.links[self.inner.default_tcp_link()].name.clone()
@@ -188,6 +218,44 @@ impl Robot {
         let result = botrail_kin::solve_ik(&self.inner, link_index, &target, &seed, &options)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(IkResult { inner: result })
+    }
+
+    /// Welds a tool (end-effector) onto this robot's `flange` link and
+    /// returns the composite robot; neither input is modified. The DOF
+    /// vector becomes this robot's joints followed by the tool's, mimic
+    /// joints included. `offset` places the tool's `mount` link relative to
+    /// the flange (e.g. a coupling's thickness); `mount` must be the tool's
+    /// root link. `tcp` names a tool link to become the composite's
+    /// `tcp_link` — otherwise a TCP declared on the tool carries over,
+    /// falling back to the deepest-leaf heuristic. When both models share a
+    /// link/joint name, pass `prefix` to namespace the tool's names.
+    ///
+    /// ```python
+    /// robot = ur5e.attach_tool(
+    ///     gripper, flange="flange", mount="robotiq_arg2f_base_link",
+    ///     offset_position=(0, 0, 0.0139), tcp="tcp",
+    /// )
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (tool, flange, mount, offset_position = None, offset_quaternion = None, tcp = None, prefix = None))]
+    fn attach_tool(
+        &self,
+        tool: &Robot,
+        flange: &str,
+        mount: &str,
+        offset_position: Option<[f64; 3]>,
+        offset_quaternion: Option<[f64; 4]>,
+        tcp: Option<&str>,
+        prefix: Option<&str>,
+    ) -> PyResult<Robot> {
+        let offset = pose_from(offset_position.unwrap_or([0.0; 3]), offset_quaternion);
+        Ok(Robot {
+            inner: Arc::new(
+                self.inner
+                    .attach_tool(&tool.inner, flange, mount, offset, tcp, prefix)
+                    .map_err(model_err)?,
+            ),
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -1504,34 +1572,26 @@ impl Scene {
     /// re-import from the referenced stage path.
     #[staticmethod]
     fn load_project(path: PathBuf) -> PyResult<Self> {
-        use botrail_scene::project::RobotSourceMsg;
         let bytes = std::fs::read(&path)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
         let project = read_project(&bytes)
             .map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+        let import_usd = |path: &str, articulation_root: &str| {
+            botrail_usd::import_robot(
+                std::path::Path::new(path),
+                &botrail_usd::RobotImportOptions {
+                    articulation_root: Some(articulation_root.to_string()),
+                    ..Default::default()
+                },
+            )
+            .map(|imported| imported.model)
+            .map_err(|e| e.to_string())
+        };
         let mut models = Vec::with_capacity(project.robots.len());
         for robot_msg in &project.robots {
-            let model = match &robot_msg.source {
-                RobotSourceMsg::Urdf { xml } => Arc::new(
-                    RobotModel::from_urdf_str(xml)
-                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                ),
-                RobotSourceMsg::Usd {
-                    path,
-                    articulation_root,
-                } => {
-                    let imported = botrail_usd::import_robot(
-                        std::path::Path::new(path),
-                        &botrail_usd::RobotImportOptions {
-                            articulation_root: Some(articulation_root.clone()),
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                    Arc::new(imported.model)
-                }
-            };
-            models.push(model);
+            let model = botrail_scene::project::model_from_source(&robot_msg.source, &import_usd)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            models.push(Arc::new(model));
         }
         let mut models = models.into_iter();
         let first = models

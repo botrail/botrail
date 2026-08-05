@@ -87,17 +87,15 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// The `scene_init` message, with mesh/asset URLs mapped through the host.
 pub fn scene_init_message(host: &impl SessionHost, scene: &Scene) -> ServerMessage {
-    let usd_asset = |robot: usize| match &scene.robots()[robot].model.source {
-        botrail_model::RobotSource::Usd {
-            path,
-            articulation_root,
-        } => host
-            .robot_asset_url(robot, path)
-            .map(|url| wire::UsdAssetMsg {
-                url,
-                articulation_root: articulation_root.clone(),
-            }),
-        _ => None,
+    let usd_asset = |robot: usize| match scene.robots()[robot].model.source.usd_stage() {
+        Some((path, articulation_root)) => {
+            host.robot_asset_url(robot, path)
+                .map(|url| wire::UsdAssetMsg {
+                    url,
+                    articulation_root: articulation_root.to_string(),
+                })
+        }
+        None => None,
     };
     ServerMessage::SceneInit {
         scene: SceneDescriptionMsg::from_scene(scene, |p| host.mesh_url(p), usd_asset),
@@ -710,20 +708,19 @@ pub fn timeline_msg(
         .map(|(r, (track, (times, joint_positions)))| {
             let sr = &scene.robots()[r];
             // USD-rendered robots do FK client-side; skip precomputed poses.
-            let link_poses = matches!(&sr.model.source, botrail_model::RobotSource::UrdfXml(_))
-                .then(|| {
-                    joint_positions
-                        .iter()
-                        .zip(&times)
-                        .map(|(q, &t)| {
-                            botrail_kin::forward_kinematics_with_base(&sr.model, q, &base_at(r, t))
-                                .expect("timeline q has robot DOF")
-                                .iter()
-                                .map(PoseMsg::from)
-                                .collect()
-                        })
-                        .collect()
-                });
+            let link_poses = sr.model.source.usd_stage().is_none().then(|| {
+                joint_positions
+                    .iter()
+                    .zip(&times)
+                    .map(|(q, &t)| {
+                        botrail_kin::forward_kinematics_with_base(&sr.model, q, &base_at(r, t))
+                            .expect("timeline q has robot DOF")
+                            .iter()
+                            .map(PoseMsg::from)
+                            .collect()
+                    })
+                    .collect()
+            });
             // USD robots do FK in the browser, so a moving base has to go
             // over as its own track for the studio to place them.
             let base = if track.base.is_some() {
@@ -935,7 +932,7 @@ pub fn trajectory_msg(
     });
     let (times, joint_positions) = traj.resample(1.0 / 30.0);
     // USD-rendered robots do FK client-side; skip the precomputed poses.
-    let want_link_poses = matches!(&model.source, botrail_model::RobotSource::UrdfXml(_));
+    let want_link_poses = model.source.usd_stage().is_none();
     let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
     let mut object_tracks = (!attachments.is_empty()).then(|| {
         attachments

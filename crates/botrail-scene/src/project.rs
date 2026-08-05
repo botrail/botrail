@@ -54,6 +54,133 @@ pub enum RobotSourceMsg {
         path: String,
         articulation_root: String,
     },
+    /// A catalog package (`Robot.from_catalog`): id + pinned revision for
+    /// provenance and script export, plus the fetched inner source so
+    /// loading needs no network.
+    Catalog {
+        id: String,
+        revision: String,
+        #[serde(default)]
+        tcp: Option<String>,
+        inner: Box<RobotSourceMsg>,
+    },
+    /// A tool welded onto a base robot (`Robot.attach_tool`): both part
+    /// sources plus the weld parameters, so loading re-runs the attach.
+    Composite {
+        base: Box<RobotSourceMsg>,
+        tool: Box<RobotSourceMsg>,
+        flange: String,
+        mount: String,
+        offset: PoseMsg,
+        #[serde(default)]
+        tcp: Option<String>,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
+}
+
+/// [`RobotSourceMsg`] from a model's provenance record.
+fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
+    match source {
+        botrail_model::RobotSource::UrdfXml(xml) => RobotSourceMsg::Urdf { xml: xml.clone() },
+        botrail_model::RobotSource::Usd {
+            path,
+            articulation_root,
+        } => RobotSourceMsg::Usd {
+            path: path.display().to_string(),
+            articulation_root: articulation_root.clone(),
+        },
+        botrail_model::RobotSource::Catalog {
+            id,
+            revision,
+            tcp,
+            inner,
+        } => RobotSourceMsg::Catalog {
+            id: id.clone(),
+            revision: revision.clone(),
+            tcp: tcp.clone(),
+            inner: Box::new(robot_source_msg(inner)),
+        },
+        botrail_model::RobotSource::Composite {
+            base,
+            tool,
+            flange,
+            mount,
+            offset,
+            tcp,
+            prefix,
+        } => RobotSourceMsg::Composite {
+            base: Box::new(robot_source_msg(base)),
+            tool: Box::new(robot_source_msg(tool)),
+            flange: flange.clone(),
+            mount: mount.clone(),
+            offset: PoseMsg::from(offset),
+            tcp: tcp.clone(),
+            prefix: prefix.clone(),
+        },
+    }
+}
+
+/// Rebuilds a robot model from its persisted source. `import_usd` supplies
+/// the USD importer, which lives outside this crate — pass a closure that
+/// errors when importing is unavailable in the caller's context.
+pub fn model_from_source(
+    msg: &RobotSourceMsg,
+    import_usd: &dyn Fn(&str, &str) -> Result<botrail_model::RobotModel, String>,
+) -> Result<botrail_model::RobotModel, ProjectError> {
+    match msg {
+        RobotSourceMsg::Urdf { xml } => botrail_model::RobotModel::from_urdf_str(xml)
+            .map_err(|e| ProjectError::Robot(e.to_string())),
+        RobotSourceMsg::Usd {
+            path,
+            articulation_root,
+        } => import_usd(path, articulation_root).map_err(ProjectError::Robot),
+        RobotSourceMsg::Catalog {
+            id,
+            revision,
+            tcp,
+            inner,
+        } => {
+            // Rebuild from the embedded inner source (no network), then
+            // restore the catalog provenance and manifest TCP on the model.
+            let mut model = model_from_source(inner, import_usd)?;
+            if let Some(tcp) = tcp {
+                model.tcp_link = model.link_index(tcp);
+            }
+            let inner_source = std::mem::replace(
+                &mut model.source,
+                botrail_model::RobotSource::UrdfXml(String::new()),
+            );
+            model.source = botrail_model::RobotSource::Catalog {
+                id: id.clone(),
+                revision: revision.clone(),
+                tcp: tcp.clone(),
+                inner: Box::new(inner_source),
+            };
+            Ok(model)
+        }
+        RobotSourceMsg::Composite {
+            base,
+            tool,
+            flange,
+            mount,
+            offset,
+            tcp,
+            prefix,
+        } => {
+            let base = model_from_source(base, import_usd)?;
+            let tool = model_from_source(tool, import_usd)?;
+            base.attach_tool(
+                &tool,
+                flange,
+                mount,
+                offset.into(),
+                tcp.as_deref(),
+                prefix.as_deref(),
+            )
+            .map_err(|e| ProjectError::Robot(e.to_string()))
+        }
+    }
 }
 
 /// One robot in a project.
@@ -188,18 +315,7 @@ impl Scene {
                 .iter()
                 .map(|r| ProjectRobotMsg {
                     name: Some(r.name.clone()),
-                    source: match &r.model.source {
-                        botrail_model::RobotSource::UrdfXml(xml) => {
-                            RobotSourceMsg::Urdf { xml: xml.clone() }
-                        }
-                        botrail_model::RobotSource::Usd {
-                            path,
-                            articulation_root,
-                        } => RobotSourceMsg::Usd {
-                            path: path.display().to_string(),
-                            articulation_root: articulation_root.clone(),
-                        },
-                    },
+                    source: robot_source_msg(&r.model.source),
                     base_pose: PoseMsg::from(r.base_pose()),
                     joint_positions: r.joint_positions().to_vec(),
                 })
@@ -241,14 +357,12 @@ impl Scene {
     pub fn from_project(project: &ProjectFile) -> Result<Scene, ProjectError> {
         let mut models = Vec::with_capacity(project.robots.len());
         for robot_msg in &project.robots {
-            let RobotSourceMsg::Urdf { xml } = &robot_msg.source else {
-                return Err(ProjectError::Robot(
+            let robot = model_from_source(&robot_msg.source, &|_, _| {
+                Err(
                     "USD-sourced robot: re-import it via the USD importer, then apply_project"
                         .to_string(),
-                ));
-            };
-            let robot = botrail_model::RobotModel::from_urdf_str(xml)
-                .map_err(|e| ProjectError::Robot(e.to_string()))?;
+                )
+            })?;
             models.push(Arc::new(robot));
         }
         let mut iter = models.into_iter();
@@ -437,6 +551,65 @@ fn robot_kwarg_for_name(project: &ProjectFile, name: &Option<String>) -> String 
     robot_kwarg(project, index)
 }
 
+/// Emits Python that builds `source` into the variable `var`; embedded URDF
+/// text goes into an `r'''...'''` constant named `konst`. Composites emit
+/// their parts first (`{var}_tool`, `{konst}_TOOL`), then the attach call.
+fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst: &str) {
+    match source {
+        RobotSourceMsg::Urdf { xml } => {
+            // Triple-quote guard: a URDF containing ''' would break the literal.
+            let urdf = xml.replace("'''", "'\\''\\''\\'");
+            out.push_str(&format!("{konst} = r'''{urdf}'''\n\n"));
+            out.push_str(&format!("{var} = bt.Robot.from_urdf_string({konst})\n"));
+        }
+        RobotSourceMsg::Usd {
+            path,
+            articulation_root,
+        } => {
+            out.push_str(&format!(
+                "{var} = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
+            ));
+        }
+        RobotSourceMsg::Catalog { id, revision, .. } => {
+            // Deterministic re-fetch: the pinned revision makes this the
+            // same bytes the project was authored from.
+            out.push_str(&format!(
+                "{var} = bt.Robot.from_catalog({id:?}, revision={revision:?})\n"
+            ));
+        }
+        RobotSourceMsg::Composite {
+            base,
+            tool,
+            flange,
+            mount,
+            offset,
+            tcp,
+            prefix,
+        } => {
+            emit_robot_build(out, base, var, konst);
+            let tool_var = format!("{var}_tool");
+            emit_robot_build(out, tool, &tool_var, &format!("{konst}_TOOL"));
+            let mut kwargs = String::new();
+            if !is_identity_pose(offset) {
+                kwargs.push_str(&format!(
+                    ", offset_position={}, offset_quaternion={}",
+                    py_tuple(&offset.position),
+                    py_tuple(&offset.quaternion)
+                ));
+            }
+            if let Some(tcp) = tcp {
+                kwargs.push_str(&format!(", tcp={tcp:?}"));
+            }
+            if let Some(prefix) = prefix {
+                kwargs.push_str(&format!(", prefix={prefix:?}"));
+            }
+            out.push_str(&format!(
+                "{var} = {var}.attach_tool({tool_var}, flange={flange:?}, mount={mount:?}{kwargs})\n"
+            ));
+        }
+    }
+}
+
 /// Generates a standalone Python script that rebuilds the project with the
 /// botrail API. The robot sources are embedded so the script is
 /// self-contained.
@@ -454,27 +627,12 @@ pub fn generate_python(project: &ProjectFile) -> String {
         } else {
             format!("robot_{}", i + 1)
         };
-        match &robot_msg.source {
-            RobotSourceMsg::Urdf { xml } => {
-                // Triple-quote guard: a URDF containing ''' would break the literal.
-                let urdf = xml.replace("'''", "'\\''\\''\\'");
-                let konst = if i == 0 {
-                    "URDF".to_string()
-                } else {
-                    format!("URDF_{}", i + 1)
-                };
-                out.push_str(&format!("{konst} = r'''{urdf}'''\n\n"));
-                out.push_str(&format!("{var} = bt.Robot.from_urdf_string({konst})\n"));
-            }
-            RobotSourceMsg::Usd {
-                path,
-                articulation_root,
-            } => {
-                out.push_str(&format!(
-                    "{var} = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
-                ));
-            }
-        }
+        let konst = if i == 0 {
+            "URDF".to_string()
+        } else {
+            format!("URDF_{}", i + 1)
+        };
+        emit_robot_build(&mut out, &robot_msg.source, &var, &konst);
         let mut kwargs = String::new();
         if multi {
             if let Some(name) = &robot_msg.name {
