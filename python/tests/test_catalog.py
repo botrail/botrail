@@ -54,8 +54,15 @@ def Xform "Plate" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
 """
 
 
-def _manifest(pid: str, tcp: str | None = None, distribution: str = "public") -> str:
+def _manifest(
+    pid: str,
+    tcp: str | None = None,
+    mount: str | None = None,
+    distribution: str = "public",
+) -> str:
     frames = f"  tcp_default: {tcp}\n" if tcp else ""
+    if mount:
+        frames += f"  mount_frame: {mount}\n"
     return (
         f"schema_version: '0.1'\nid: {pid}\ndistribution: {distribution}\n"
         f"frames:\n  flange_frame: link1\n{frames}"
@@ -101,7 +108,10 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     add(
         COUPLING_ID,
         "public",
-        {"manifest.yaml": _manifest(COUPLING_ID), "usd/model.usda": COUPLING_USD},
+        {
+            "manifest.yaml": _manifest(COUPLING_ID, mount="body"),
+            "usd/model.usda": COUPLING_USD,
+        },
         {"urdf": None, "usd": "usd/model.usda"},
     )
     add(
@@ -117,9 +127,11 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     calls: dict = {"repo": repo}
     fake = types.ModuleType("huggingface_hub")
 
-    def dataset_info(repo_id, repo_type=None, revision=None):
+    # huggingface_hub 1.x signature: keyword-only, and no `repo_type`
+    # (that argument was 0.x-only here) — a strict fake so passing it again
+    # fails this suite before it fails users.
+    def dataset_info(repo_id, *, revision=None, timeout=None, files_metadata=False, token=None):
         assert repo_id == "botrail/botrail-catalog"
-        assert repo_type == "dataset"
         calls["revision_requested"] = revision
         return types.SimpleNamespace(sha=SHA)
 
@@ -207,3 +219,31 @@ def test_catalog_tool_mounts_on_a_catalog_robot(catalog: dict) -> None:
     combined = arm.attach_tool(plate, flange="tool_tip", mount="/Plate/body")
     assert combined.dof == 1
     assert "/Plate/body" in combined.link_names
+
+
+def test_manifest_frames_enable_argument_free_mounting(
+    catalog: dict, tmp_path: Path
+) -> None:
+    arm = bt.Robot.from_catalog("mini")
+    plate = bt.Robot.from_catalog("plate")
+    # The manifests declared the faces, so nobody has to name them.
+    assert arm.flange_link == "link1"
+    assert plate.mount_link == "/Plate/body"
+    combined = arm.attach_tool(plate)
+    assert "/Plate/body" in combined.link_names
+    # The plate declares no onward flange: the stack ends here.
+    assert combined.flange_link is None
+    # Without any declaration, botrail refuses to guess a flange.
+    bare = bt.Robot.from_urdf_string(ARM_URDF)
+    with pytest.raises(ValueError, match="flange"):
+        bare.attach_tool(plate)
+
+    # The nested source — a composite of two catalog parts, one of them
+    # USD — survives a project roundtrip without network access.
+    scene = bt.Scene(combined)
+    project = tmp_path / "cell.botrail"
+    scene.save_project(project)
+    del sys.modules["huggingface_hub"]
+    reloaded = bt.Scene.load_project(project)
+    assert reloaded.robot.dof == 1
+    assert "/Plate/body" in reloaded.robot.link_names

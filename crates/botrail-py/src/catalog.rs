@@ -62,8 +62,9 @@ pub fn from_catalog(
 
     // Pin the revision to a commit SHA before any download, so every file
     // comes from one consistent snapshot and projects can replay it.
+    // `dataset_info` implies the repo type and (unlike the download calls)
+    // takes no `repo_type` argument on huggingface_hub 1.x — do not pass it.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("repo_type", "dataset")?;
     kwargs.set_item("revision", revision)?;
     let info = hub
         .call_method("dataset_info", (REPO_ID,), Some(&kwargs))
@@ -128,9 +129,12 @@ pub fn from_catalog(
             .map_err(|e| err(format!("{}: {e}", model_path.display())))?
     };
 
-    // The manifest's declared TCP beats the deepest-leaf heuristic. USD
-    // link names are prim paths; match by last path segment there.
-    let tcp = manifest.tcp_default.as_deref().and_then(|name| {
+    // The manifest's declared frames beat the heuristics: tcp_default
+    // replaces the deepest-leaf guess, flange/mount give `attach_tool` its
+    // argument-free defaults. USD link names are prim paths; match by last
+    // path segment there.
+    let resolve = |field: &str, name: Option<&str>| -> Option<usize> {
+        let name = name?;
         let index = model.link_index(name).or_else(|| {
             let matches: Vec<usize> = (0..model.links.len())
                 .filter(|&i| model.links[i].name.rsplit('/').next() == Some(name))
@@ -142,20 +146,27 @@ pub fn from_catalog(
         });
         if index.is_none() {
             eprintln!(
-                "botrail: catalog `{}`: manifest tcp_default `{name}` is not a link; using the \
-                 default TCP heuristic",
+                "botrail: catalog `{}`: manifest {field} `{name}` is not a link; ignored",
                 entry.id
             );
         }
         index
-    });
+    };
+    let tcp = resolve("tcp_default", manifest.tcp_default.as_deref());
+    let flange = resolve("flange_frame", manifest.flange_frame.as_deref());
+    let mount = resolve("mount_frame", manifest.mount_frame.as_deref());
     model.tcp_link = tcp;
+    model.flange_link = flange;
+    model.mount_link = mount;
 
+    let link_name = |i: usize| model.links[i].name.clone();
     let inner = std::mem::replace(&mut model.source, RobotSource::UrdfXml(String::new()));
     model.source = RobotSource::Catalog {
         id: entry.id,
         revision: sha,
-        tcp: tcp.map(|i| model.links[i].name.clone()),
+        tcp: tcp.map(link_name),
+        flange: flange.map(link_name),
+        mount: mount.map(link_name),
         inner: Box::new(inner),
     };
     Ok(model)
@@ -249,6 +260,8 @@ fn resolve_entry(
 /// module runs at all).
 struct ManifestBits {
     tcp_default: Option<String>,
+    flange_frame: Option<String>,
+    mount_frame: Option<String>,
 }
 
 fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
@@ -257,13 +270,19 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         std::fs::read_to_string(&path).map_err(|e| err(format!("{}: {e}", path.display())))?;
     let yaml = py.import("yaml")?;
     let manifest = yaml.call_method1("safe_load", (text,))?;
-    let tcp_default = manifest
-        .get_item("frames")
-        .ok()
-        .and_then(|frames| frames.get_item("tcp_default").ok())
-        .and_then(|v| v.extract::<Option<String>>().ok())
-        .flatten();
-    Ok(ManifestBits { tcp_default })
+    let frame = |key: &str| {
+        manifest
+            .get_item("frames")
+            .ok()
+            .and_then(|frames| frames.get_item(key).ok())
+            .and_then(|v| v.extract::<Option<String>>().ok())
+            .flatten()
+    };
+    Ok(ManifestBits {
+        tcp_default: frame("tcp_default"),
+        flange_frame: frame("flange_frame"),
+        mount_frame: frame("mount_frame"),
+    })
 }
 
 /// The pyo3-facing wrapper: builds the model and wraps it for Python.

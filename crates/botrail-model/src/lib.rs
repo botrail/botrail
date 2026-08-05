@@ -44,6 +44,11 @@ pub enum ModelError {
     #[error("TCP link `{0}` does not exist on the tool")]
     UnknownTcp(String),
     #[error(
+        "the robot declares no flange frame to mount a tool on (catalog packages do); pass \
+         `flange=` explicitly"
+    )]
+    NoFlangeDeclared,
+    #[error(
         "mount link `{link}` is not the tool's root link (`{root}`); botrail welds the tool by \
          its root — re-root the tool model or mount it by `{root}`"
     )]
@@ -171,6 +176,12 @@ pub enum RobotSource {
         /// TCP link declared by the package manifest (`frames.tcp_default`),
         /// reapplied when the model is rebuilt from `inner`.
         tcp: Option<String>,
+        /// Tool-mounting face declared by the manifest
+        /// (`frames.flange_frame`), reapplied on rebuild.
+        flange: Option<String>,
+        /// Mounting face declared by the manifest (`frames.mount_frame`),
+        /// reapplied on rebuild.
+        mount: Option<String>,
         /// The fetched file's own source (URDF XML / USD reference), so
         /// projects rebuild without touching the network.
         inner: Box<RobotSource>,
@@ -227,6 +238,14 @@ pub struct RobotModel {
     /// metadata). When set it overrides the deepest-leaf heuristic in
     /// [`RobotModel::default_tcp_link`].
     pub tcp_link: Option<usize>,
+    /// Declared tool-mounting face on this robot (catalog
+    /// `frames.flange_frame`, ISO 9409-1 on arms; a coupling's outward
+    /// face). [`RobotModel::attach_tool`] uses it when `flange` is omitted.
+    pub flange_link: Option<usize>,
+    /// Declared mounting face when this model *is* a tool (catalog
+    /// `frames.mount_frame`). [`RobotModel::attach_tool`] uses it when
+    /// `mount` is omitted, falling back to the tool's root link.
+    pub mount_link: Option<usize>,
 }
 
 impl RobotModel {
@@ -631,6 +650,8 @@ impl RobotModel {
             actuated_joints,
             source,
             tcp_link: None,
+            flange_link: None,
+            mount_link: None,
         })
     }
 
@@ -640,20 +661,47 @@ impl RobotModel {
     /// their source). `offset` is the flange-to-mount transform — a
     /// coupling's thickness, for instance.
     ///
-    /// `mount` must be the tool's root link (a URDF tree cannot hang off a
-    /// mid-chain link without re-rooting). `tcp` optionally names a tool
-    /// link to become the composite's TCP; when omitted, a TCP declared on
-    /// the tool model carries over. `prefix` is prepended to every tool
-    /// link/joint name — required when the two models share a name.
+    /// `flange` defaults to the robot's declared [`flange_link`]
+    /// (catalog manifests declare one) and `mount` to the tool's declared
+    /// [`mount_link`], falling back to its root — so two catalog parts
+    /// attach with no arguments at all. `mount` must resolve to the tool's
+    /// root link (a URDF tree cannot hang off a mid-chain link without
+    /// re-rooting). `tcp` optionally names a tool link to become the
+    /// composite's TCP; when omitted, a TCP declared on the tool model
+    /// carries over. `prefix` is prepended to every tool link/joint name —
+    /// required when the two models share a name.
+    ///
+    /// On the composite, a flange the *tool* declares carries over
+    /// (remapped): mounting a coupling leaves its outward face as the new
+    /// flange, so a whole coupling-then-gripper stack chains without
+    /// naming a single frame.
+    ///
+    /// [`flange_link`]: RobotModel::flange_link
+    /// [`mount_link`]: RobotModel::mount_link
     pub fn attach_tool(
         &self,
         tool: &RobotModel,
-        flange: &str,
-        mount: &str,
+        flange: Option<&str>,
+        mount: Option<&str>,
         offset: Isometry3<f64>,
         tcp: Option<&str>,
         prefix: Option<&str>,
     ) -> Result<RobotModel, ModelError> {
+        let flange = match flange {
+            Some(name) => name.to_string(),
+            None => match self.flange_link {
+                Some(i) => self.links[i].name.clone(),
+                None => return Err(ModelError::NoFlangeDeclared),
+            },
+        };
+        let mount = match mount {
+            Some(name) => name.to_string(),
+            None => {
+                let i = tool.mount_link.unwrap_or(tool.root_link);
+                tool.links[i].name.clone()
+            }
+        };
+        let (flange, mount) = (flange.as_str(), mount.as_str());
         let flange_index = self
             .link_index(flange)
             .ok_or_else(|| ModelError::UnknownFlange(flange.to_string()))?;
@@ -737,6 +785,11 @@ impl RobotModel {
         // carry over; without a tool TCP the deepest-leaf heuristic applies,
         // which lands inside the tool.
         model.tcp_link = tool_tcp.map(|tcp| tcp + link_offset);
+        // A flange the tool declares (a coupling's outward face) becomes the
+        // composite's flange; the base's is occupied. The base's mount face
+        // stays what it was, so pre-assembled tool stacks remain mountable.
+        model.flange_link = tool.flange_link.map(|i| i + link_offset);
+        model.mount_link = self.mount_link;
         Ok(model)
     }
 }
@@ -1088,8 +1141,8 @@ mod tests {
         let combined = arm
             .attach_tool(
                 &tool,
-                "tool",
-                "mount_plate",
+                Some("tool"),
+                Some("mount_plate"),
                 offset,
                 Some("grasp_center"),
                 None,
@@ -1127,8 +1180,8 @@ mod tests {
         let combined = arm
             .attach_tool(
                 &tool,
-                "tool",
-                "mount_plate",
+                Some("tool"),
+                Some("mount_plate"),
                 Isometry3::identity(),
                 None,
                 None,
@@ -1148,8 +1201,8 @@ mod tests {
         let err = arm
             .attach_tool(
                 &clone,
-                "tool",
-                "base_link",
+                Some("tool"),
+                Some("base_link"),
                 Isometry3::identity(),
                 None,
                 None,
@@ -1160,8 +1213,8 @@ mod tests {
         let combined = arm
             .attach_tool(
                 &clone,
-                "tool",
-                "base_link",
+                Some("tool"),
+                Some("base_link"),
                 Isometry3::identity(),
                 None,
                 Some("t2_"),
@@ -1173,25 +1226,79 @@ mod tests {
     }
 
     #[test]
+    fn attach_tool_defaults_chain_through_declared_frames() {
+        let mut arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        arm.flange_link = arm.link_index("tool");
+        // A coupling declares both faces: its robot-side mount and an
+        // onward flange for whatever screws on next.
+        let coupling_urdf = r#"
+        <robot name="coupling">
+          <link name="c_mount"/><link name="c_flange"/>
+          <joint name="c_body" type="fixed">
+            <parent link="c_mount"/><child link="c_flange"/>
+            <origin xyz="0 0 0.02"/>
+          </joint>
+        </robot>"#;
+        let mut coupling = RobotModel::from_urdf_str(coupling_urdf).unwrap();
+        coupling.mount_link = coupling.link_index("c_mount");
+        coupling.flange_link = coupling.link_index("c_flange");
+        let mut tool = RobotModel::from_urdf_str(TOOL).unwrap();
+        tool.mount_link = tool.link_index("mount_plate");
+        tool.tcp_link = tool.link_index("grasp_center");
+
+        // Not a single frame named: the whole stack chains off declarations.
+        let id = Isometry3::identity();
+        let stack = arm
+            .attach_tool(&coupling, None, None, id, None, None)
+            .unwrap()
+            .attach_tool(&tool, None, None, id, None, None)
+            .unwrap();
+        assert_eq!(stack.dof(), 2);
+        assert_eq!(stack.links[stack.default_tcp_link()].name, "grasp_center");
+        // The weld joints prove which faces were picked at each step.
+        assert!(stack.joint_index("tool_to_c_mount").is_some());
+        assert!(stack.joint_index("c_flange_to_mount_plate").is_some());
+        // The gripper declares no onward flange, so the stack ends here.
+        assert_eq!(stack.flange_link, None);
+
+        // A tool with no declared mount falls back to its root link.
+        let plain = RobotModel::from_urdf_str(TOOL).unwrap();
+        let combined = arm.attach_tool(&plain, None, None, id, None, None).unwrap();
+        assert!(combined.joint_index("tool_to_mount_plate").is_some());
+    }
+
+    #[test]
     fn attach_tool_rejects_bad_frames() {
         let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
         let tool = RobotModel::from_urdf_str(TOOL).unwrap();
         let id = Isometry3::identity();
         assert!(matches!(
-            arm.attach_tool(&tool, "nope", "mount_plate", id, None, None),
+            arm.attach_tool(&tool, Some("nope"), Some("mount_plate"), id, None, None),
             Err(ModelError::UnknownFlange(_))
         ));
         assert!(matches!(
-            arm.attach_tool(&tool, "tool", "nope", id, None, None),
+            arm.attach_tool(&tool, Some("tool"), Some("nope"), id, None, None),
             Err(ModelError::UnknownMount(_))
         ));
         assert!(matches!(
-            arm.attach_tool(&tool, "tool", "finger_l", id, None, None),
+            arm.attach_tool(&tool, Some("tool"), Some("finger_l"), id, None, None),
             Err(ModelError::MountNotRoot { .. })
         ));
         assert!(matches!(
-            arm.attach_tool(&tool, "tool", "mount_plate", id, Some("nope"), None),
+            arm.attach_tool(
+                &tool,
+                Some("tool"),
+                Some("mount_plate"),
+                id,
+                Some("nope"),
+                None
+            ),
             Err(ModelError::UnknownTcp(_))
+        ));
+        // No declared flange and no explicit one: refuse rather than guess.
+        assert!(matches!(
+            arm.attach_tool(&tool, None, None, id, None, None),
+            Err(ModelError::NoFlangeDeclared)
         ));
     }
 

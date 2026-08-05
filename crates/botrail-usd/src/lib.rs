@@ -744,11 +744,31 @@ impl Resolver for SearchPathResolver {
         if stripped != asset_path {
             return stripped.to_string();
         }
-        self.inner.create_identifier(asset_path, anchor)
+        let identifier = self.inner.create_identifier(asset_path, anchor);
+        // The inner identifier canonicalizes absolute paths, following
+        // symlinks — see `preserve_link_name`. Rebuild the
+        // pre-canonicalization path (anchoring relative references the way
+        // the inner resolver does) so the link's own name survives into the
+        // identifier; `resolve` applies the same preservation again.
+        let path = Path::new(asset_path);
+        let anchored = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(anchor) = anchor {
+            match AsRef::<Path>::as_ref(anchor).parent() {
+                Some(dir) if !dir.as_os_str().is_empty() => dir.join(path),
+                _ => return identifier,
+            }
+        } else {
+            return identifier;
+        };
+        preserve_link_name(&anchored.to_string_lossy(), ResolvedPath::new(&identifier))
+            .display()
+            .to_string()
     }
 
     fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
-        self.inner.resolve(Self::strip(asset_path))
+        let stripped = Self::strip(asset_path);
+        Some(preserve_link_name(stripped, self.inner.resolve(stripped)?))
     }
 
     fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
@@ -761,6 +781,31 @@ impl Resolver for SearchPathResolver {
 
     fn identity(&self) -> String {
         format!("botrail-search:{}", self.inner.identity())
+    }
+}
+
+/// The default resolver canonicalizes, which follows a symlink all the way
+/// to its target — and a target named differently from the link loses the
+/// link's extension, taking the file-format dispatch with it. The
+/// huggingface_hub cache is the motivating case: `usd/model.usdc` is a
+/// symlink onto an extensionless content-addressed blob. Keep the link's
+/// own file name, anchored to its canonicalized directory.
+fn preserve_link_name(asset_path: &str, resolved: ResolvedPath) -> ResolvedPath {
+    let asset = Path::new(asset_path);
+    let Some(name) = asset.file_name() else {
+        return resolved;
+    };
+    if resolved.file_name() == Some(name) {
+        return resolved;
+    }
+    let relinked = asset
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| parent.canonicalize().ok())
+        .map(|dir| dir.join(name));
+    match relinked {
+        Some(path) if path.exists() => ResolvedPath::new(path),
+        _ => resolved,
     }
 }
 

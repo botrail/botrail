@@ -194,6 +194,26 @@ impl Robot {
         self.inner.links[self.inner.default_tcp_link()].name.clone()
     }
 
+    /// Declared tool-mounting face (catalog `frames.flange_frame`; after
+    /// `attach_tool`, the mounted tool's onward flange if it has one).
+    /// `attach_tool` uses it when `flange` is omitted.
+    #[getter]
+    fn flange_link(&self) -> Option<String> {
+        self.inner
+            .flange_link
+            .map(|i| self.inner.links[i].name.clone())
+    }
+
+    /// Declared mounting face when this model is a tool (catalog
+    /// `frames.mount_frame`). `attach_tool` uses it when `mount` is
+    /// omitted, falling back to the tool's root link.
+    #[getter]
+    fn mount_link(&self) -> Option<String> {
+        self.inner
+            .mount_link
+            .map(|i| self.inner.links[i].name.clone())
+    }
+
     /// Solves inverse kinematics. With `quaternion=None` only the position
     /// is matched. `link` defaults to the TCP link, `seed` to the neutral
     /// configuration. Always returns the best configuration found; check
@@ -220,29 +240,36 @@ impl Robot {
         Ok(IkResult { inner: result })
     }
 
-    /// Welds a tool (end-effector) onto this robot's `flange` link and
-    /// returns the composite robot; neither input is modified. The DOF
-    /// vector becomes this robot's joints followed by the tool's, mimic
-    /// joints included. `offset` places the tool's `mount` link relative to
-    /// the flange (e.g. a coupling's thickness); `mount` must be the tool's
-    /// root link. `tcp` names a tool link to become the composite's
-    /// `tcp_link` — otherwise a TCP declared on the tool carries over,
-    /// falling back to the deepest-leaf heuristic. When both models share a
-    /// link/joint name, pass `prefix` to namespace the tool's names.
+    /// Welds a tool (end-effector) onto this robot's flange and returns the
+    /// composite robot; neither input is modified. The DOF vector becomes
+    /// this robot's joints followed by the tool's, mimic joints included.
+    ///
+    /// `flange` defaults to the robot's declared `flange_link` and `mount`
+    /// to the tool's declared `mount_link` (catalog manifests declare
+    /// both), falling back to the tool's root — so catalog parts attach
+    /// with no arguments, and a coupling's outward face becomes the
+    /// composite's flange for the next `attach_tool` in the stack.
+    /// `offset` places the mount relative to the flange (e.g. a coupling's
+    /// thickness); the mount must resolve to the tool's root link. `tcp`
+    /// names a tool link to become the composite's `tcp_link` — otherwise a
+    /// TCP declared on the tool carries over, falling back to the
+    /// deepest-leaf heuristic. When both models share a link/joint name,
+    /// pass `prefix` to namespace the tool's names.
     ///
     /// ```python
+    /// robot = ur5e.attach_tool(coupling).attach_tool(gripper)  # catalog parts
     /// robot = ur5e.attach_tool(
     ///     gripper, flange="flange", mount="robotiq_arg2f_base_link",
     ///     offset_position=(0, 0, 0.0139), tcp="tcp",
     /// )
     /// ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (tool, flange, mount, offset_position = None, offset_quaternion = None, tcp = None, prefix = None))]
+    #[pyo3(signature = (tool, flange = None, mount = None, offset_position = None, offset_quaternion = None, tcp = None, prefix = None))]
     fn attach_tool(
         &self,
         tool: &Robot,
-        flange: &str,
-        mount: &str,
+        flange: Option<&str>,
+        mount: Option<&str>,
         offset_position: Option<[f64; 3]>,
         offset_quaternion: Option<[f64; 4]>,
         tcp: Option<&str>,

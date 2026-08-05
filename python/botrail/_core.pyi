@@ -49,6 +49,10 @@ class Robot:
     def link_names(self) -> list[str]: ...
     @property
     def tcp_link(self) -> str: ...
+    @property
+    def flange_link(self) -> Optional[str]: ...
+    @property
+    def mount_link(self) -> Optional[str]: ...
     def ik(
         self,
         position: tuple[float, float, float],
@@ -60,8 +64,8 @@ class Robot:
     def attach_tool(
         self,
         tool: "Robot",
-        flange: str,
-        mount: str,
+        flange: Optional[str] = None,
+        mount: Optional[str] = None,
         offset_position: Optional[tuple[float, float, float]] = None,
         offset_quaternion: Optional[tuple[float, float, float, float]] = None,
         tcp: Optional[str] = None,

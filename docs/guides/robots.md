@@ -51,8 +51,11 @@ Downloads land in the standard Hugging Face cache. Packages whose meshes
 cannot be redistributed are `recipe_only`: `from_catalog` raises and points at
 building them locally with botrail-catalog-builder.
 
-A TCP declared by the package manifest (`frames.tcp_default`) becomes the
-model's `tcp_link` automatically — the grasp center, not a fingertip.
+The frames a package manifest declares come along: `frames.tcp_default`
+becomes the model's `tcp_link` (the grasp center, not a fingertip), and
+`flange_frame` / `mount_frame` surface as `robot.flange_link` /
+`robot.mount_link` — which is what lets catalog parts
+[mount without naming a single frame](#mounting-a-tool).
 
 ## What a model knows
 
@@ -96,16 +99,27 @@ tool's, mimic joints included. Neither input changes; robots are immutable.
 
 ```python
 arm = bt.Robot.from_catalog("ur5e")
+coupling = bt.Robot.from_catalog("gripper-coupling")
 gripper = bt.Robot.from_catalog("2f-85")
 
+robot = arm.attach_tool(coupling).attach_tool(gripper)   # frames from the manifests
+robot.dof        # 6 + 1
+robot.tcp_link   # the gripper's declared TCP — IK now targets the grasp center
+```
+
+With catalog parts nothing needs naming: `flange` defaults to the robot's
+declared `flange_link`, `mount` to the tool's declared `mount_link` (else its
+root), and a coupling's *outward* face becomes the composite's flange, so the
+next `attach_tool` in the stack keeps chaining. Models without declared frames
+spell them out:
+
+```python
 robot = arm.attach_tool(
     gripper,
     flange="flange",                       # arm-side link (ISO 9409-1 face)
     mount="robotiq_arg2f_base_link",       # tool-side link — its root
     offset_position=(0, 0, 0.0139),        # e.g. the coupling's thickness
 )
-robot.dof        # 6 + 1
-robot.tcp_link   # the gripper's declared TCP — IK now targets the grasp center
 ```
 
 The composite's TCP comes from `tcp=` if you pass it, else from a TCP the tool

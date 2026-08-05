@@ -1383,6 +1383,33 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         );
     }
 
+    /// huggingface_hub-style cache: the stage file is a symlink onto an
+    /// extensionless content-addressed blob. The resolver canonicalizes,
+    /// so without care the link's extension — and the format dispatch —
+    /// would be lost.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_stage_keeps_its_file_format() {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("botrail-usd-ln-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(dir.join("blobs")).unwrap();
+        std::fs::create_dir_all(dir.join("snap")).unwrap();
+        std::fs::write(dir.join("blobs/0123abcd"), ARM).unwrap();
+        std::os::unix::fs::symlink("../blobs/0123abcd", dir.join("snap/robot.usda")).unwrap();
+
+        let imported = import_robot(
+            &dir.join("snap/robot.usda"),
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(imported.model.dof(), 2, "{:?}", imported.warnings);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The `botrail:mimic` customData encoding, exactly as pxr serializes
     /// `SetCustomDataByKey("botrail:mimic", {...})` — the `:` becomes a
     /// nested namespace dictionary. Authored on a centimetre stage with a

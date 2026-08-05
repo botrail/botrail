@@ -62,6 +62,10 @@ pub enum RobotSourceMsg {
         revision: String,
         #[serde(default)]
         tcp: Option<String>,
+        #[serde(default)]
+        flange: Option<String>,
+        #[serde(default)]
+        mount: Option<String>,
         inner: Box<RobotSourceMsg>,
     },
     /// A tool welded onto a base robot (`Robot.attach_tool`): both part
@@ -94,11 +98,15 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             id,
             revision,
             tcp,
+            flange,
+            mount,
             inner,
         } => RobotSourceMsg::Catalog {
             id: id.clone(),
             revision: revision.clone(),
             tcp: tcp.clone(),
+            flange: flange.clone(),
+            mount: mount.clone(),
             inner: Box::new(robot_source_msg(inner)),
         },
         botrail_model::RobotSource::Composite {
@@ -139,13 +147,22 @@ pub fn model_from_source(
             id,
             revision,
             tcp,
+            flange,
+            mount,
             inner,
         } => {
             // Rebuild from the embedded inner source (no network), then
-            // restore the catalog provenance and manifest TCP on the model.
+            // restore the catalog provenance and manifest frames on the
+            // model.
             let mut model = model_from_source(inner, import_usd)?;
             if let Some(tcp) = tcp {
                 model.tcp_link = model.link_index(tcp);
+            }
+            if let Some(flange) = flange {
+                model.flange_link = model.link_index(flange);
+            }
+            if let Some(mount) = mount {
+                model.mount_link = model.link_index(mount);
             }
             let inner_source = std::mem::replace(
                 &mut model.source,
@@ -155,6 +172,8 @@ pub fn model_from_source(
                 id: id.clone(),
                 revision: revision.clone(),
                 tcp: tcp.clone(),
+                flange: flange.clone(),
+                mount: mount.clone(),
                 inner: Box::new(inner_source),
             };
             Ok(model)
@@ -172,8 +191,8 @@ pub fn model_from_source(
             let tool = model_from_source(tool, import_usd)?;
             base.attach_tool(
                 &tool,
-                flange,
-                mount,
+                Some(flange),
+                Some(mount),
                 offset.into(),
                 tcp.as_deref(),
                 prefix.as_deref(),
