@@ -206,7 +206,7 @@ fn project_to_null_space(jac: DMatrix<f64>, z: &DVector<f64>) -> DVector<f64> {
             // only genuine row-space directions are subtracted.
             if *sigma > 1e-6 {
                 let row = vt.row(i);
-                let coeff = (&row * z)[(0, 0)];
+                let coeff = (row * z)[(0, 0)];
                 out.axpy(-coeff, &row.transpose(), 1.0);
             }
         }
