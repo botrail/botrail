@@ -114,11 +114,14 @@ pub struct Joint {
     /// Transform from the parent link frame to the child link frame at q = 0.
     pub origin: Isometry3<f64>,
     pub axis: Unit<Vector3<f64>>,
-    /// Position limits; `None` for fixed and continuous joints. On a mimic
-    /// joint these are informational: botrail computes the joint's value
-    /// from its source and does not clamp it (a URDF that declares mimic
-    /// limits without applying the multiplier is common enough that
-    /// enforcing them would freeze real grippers).
+    /// Position limits; `None` for fixed and continuous joints, and for
+    /// revolute/prismatic joints whose URDF omitted `<limit>` (spec
+    /// violation, but they exist — xurdf 0.6 surfaces the absence and
+    /// botrail treats them as continuous-like rather than frozen at an
+    /// all-zero limit). On a mimic joint these are informational: botrail
+    /// computes the joint's value from its source and does not clamp it
+    /// (a URDF that declares mimic limits without applying the multiplier
+    /// is common enough that enforcing them would freeze real grippers).
     pub limits: Option<JointLimits>,
     pub parent_link: usize,
     pub child_link: usize,
@@ -530,13 +533,19 @@ impl RobotModel {
             } else {
                 Unit::try_new(j.axis, 1e-9).ok_or_else(|| ModelError::ZeroAxis(j.name.clone()))?
             };
+            // An absent `<limit>` (xurdf 0.6: `limit: Option`) maps to
+            // `None`, i.e. continuous-like — before 0.6 it arrived as an
+            // all-zero limit and silently froze the joint at 0, presenting
+            // as "IK mysteriously never converges".
             let limits = match joint_type {
-                JointType::Revolute | JointType::Prismatic => Some(JointLimits {
-                    lower: j.limit.lower,
-                    upper: j.limit.upper,
-                    velocity: j.limit.velocity,
-                    effort: j.limit.effort,
-                }),
+                JointType::Revolute | JointType::Prismatic => {
+                    j.limit.as_ref().map(|l| JointLimits {
+                        lower: l.lower,
+                        upper: l.upper,
+                        velocity: l.velocity,
+                        effort: l.effort,
+                    })
+                }
                 _ => None,
             };
             let mimic = j
@@ -959,6 +968,43 @@ mod tests {
       </joint>
     </robot>
     "#;
+
+    /// A revolute joint without `<limit>` violates the URDF spec but exists
+    /// in the wild. Through xurdf ≤0.5 it arrived as an all-zero limit and
+    /// the joint froze at 0 without a word; with 0.6's `Option` it must map
+    /// to `limits: None` — continuous-like, movable, ±π sampling bounds.
+    #[test]
+    fn revolute_without_limit_is_unlimited_not_frozen() {
+        let urdf = r#"
+        <robot name="r">
+          <link name="base"/><link name="l1"/><link name="l2"/>
+          <joint name="no_limit" type="revolute">
+            <parent link="base"/><child link="l1"/>
+            <axis xyz="0 0 1"/>
+          </joint>
+          <joint name="sparse_limit" type="revolute">
+            <parent link="l1"/><child link="l2"/>
+            <origin xyz="1 0 0"/><axis xyz="0 0 1"/>
+            <limit lower="-1" upper="1"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        assert_eq!(model.dof(), 2);
+
+        let bare = model.joint_index("no_limit").unwrap();
+        assert!(model.joints[bare].limits.is_none());
+        let (lower, upper) = model.sampling_bounds();
+        assert_eq!(lower[0], -std::f64::consts::PI);
+        assert_eq!(upper[0], std::f64::consts::PI);
+
+        // `<limit>` without effort/velocity now parses (xurdf 0.6 defaults
+        // them to 0); the position bounds survive and the zero velocity is
+        // the downstream fallback's job (`traj_limits`).
+        let sparse = model.joint_index("sparse_limit").unwrap();
+        let l = model.joints[sparse].limits.unwrap();
+        assert_eq!((l.lower, l.upper), (-1.0, 1.0));
+        assert_eq!((l.velocity, l.effort), (0.0, 0.0));
+    }
 
     #[test]
     fn mimic_joints_cost_no_dof_and_follow_their_source() {

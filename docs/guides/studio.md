@@ -77,7 +77,7 @@ selected obstacle. Baking broadcasts the timeline to the dock:
 ## The timeline dock
 
 The bottom dock is the baked cycle as a timing chart: the cycle time
-(*cycle 20.61s* above), one colored band per step, and one lane per signal —
+(*cycle 15.56s* above), one colored band per step, and one lane per signal —
 internal relays, sensors, device running-states. The playback cursor drives
 the viewport; the same scrub bar appears in PLAN during playback. Recordings
 loaded with `play_usd_animation` — including two-robot bakes and Isaac

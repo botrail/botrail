@@ -19,15 +19,15 @@ python examples/dual_cell_demo.py
 ```
 
 ```text
-cycle time: 90.76s
-  near  moving 33.68s of 90.76s
-  far   moving 35.94s of 90.76s
-both arms in motion for 11.3s of it
+cycle time: 83.71s
+  near  moving 24.02s of 83.71s
+  far   moving 33.17s of 83.71s
+both arms in motion for 11.5s of it
 stacked 2 course(s) on each pallet from a pool of 6
 exported to cell_dual.usda — view with: usdview cell_dual.usda
 ```
 
-The third line is what the second arm bought: 11.3 s in which both arms were in
+The third line is what the second arm bought: 11.5 s in which both arms were in
 motion at once — picks overlapped with transfers instead of queueing behind
 them.
 
@@ -132,12 +132,12 @@ python examples/dual_cell_demo.py --clash
 ```
 
 ```text
-the unarbitrated cell happens to run (90.76s), but both arms are over the
-station together for 3.32s.
+the unarbitrated cell happens to run (83.71s), but both arms are over the
+station together for 1.86s.
    Nothing separated them — the transfers merely missed each other.
 
 asked to enter together, they are caught:
-   robots `near` and `far` collide at t = 5.000s (/panda/panda_link5 ×
+   robots `near` and `far` collide at t = 4.990s (/panda/panda_link5 ×
    /panda/panda_link6); add an interlock (zone sensor / robot_done) so one
    waits for the other
 ```

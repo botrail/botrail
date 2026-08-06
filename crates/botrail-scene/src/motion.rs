@@ -403,6 +403,34 @@ mod tests {
         botrail_traj::Limits::uniform(6, 2.0, 4.0)
     }
 
+    /// xurdf 0.6 defaults an omitted `velocity` attribute to 0 (and an
+    /// absent `<limit>` to no limits at all); neither may reach the time
+    /// parameterizer, which rejects non-positive velocity bounds.
+    #[test]
+    fn traj_limits_fall_back_when_velocity_is_unspecified() {
+        let urdf = r#"
+        <robot name="r">
+          <link name="base"/><link name="l1"/><link name="l2"/><link name="l3"/>
+          <joint name="no_velocity" type="revolute">
+            <parent link="base"/><child link="l1"/>
+            <axis xyz="0 0 1"/><limit lower="-1" upper="1"/>
+          </joint>
+          <joint name="no_limit" type="revolute">
+            <parent link="l1"/><child link="l2"/>
+            <origin xyz="1 0 0"/><axis xyz="0 0 1"/>
+          </joint>
+          <joint name="specified" type="revolute">
+            <parent link="l2"/><child link="l3"/>
+            <origin xyz="1 0 0"/><axis xyz="0 0 1"/>
+            <limit lower="-1" upper="1" effort="1" velocity="2"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        let limits = traj_limits(&model);
+        assert_eq!(limits.velocity, vec![1.0, 1.0, 2.0]);
+        assert_eq!(limits.acceleration, vec![2.0, 2.0, 4.0]);
+    }
+
     #[test]
     fn two_segment_motion_concatenates() {
         let scene = scene();

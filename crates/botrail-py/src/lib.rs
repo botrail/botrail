@@ -850,13 +850,15 @@ impl Scene {
         self.hub.attachments()
     }
 
-    /// Bakes a trajectory to a USD animation layer (`.usda`) that plays in
-    /// usdview / Omniverse / Blender: robot link motion as timeSamples,
-    /// obstacles as prims, grasped objects riding along. USD-sourced robots
-    /// reference their original stage (assets copied to a sibling
-    /// `<stem>_assets/` directory); URDF robots are authored from the
-    /// model's visuals. `robot` names the instance the trajectory belongs
-    /// to (required when the scene has several). Returns exporter warnings.
+    /// Bakes a trajectory to a USD animation layer that plays in usdview /
+    /// Omniverse / Blender: robot link motion as timeSamples, obstacles as
+    /// prims, grasped objects riding along. The extension picks the
+    /// serialization — `.usda` text, `.usdc`/`.usd` binary crate (about half
+    /// the size). USD-sourced robots reference their original stage (assets
+    /// copied to a sibling `<stem>_assets/` directory); URDF robots are
+    /// authored from the model's visuals. `robot` names the instance the
+    /// trajectory belongs to (required when the scene has several). Returns
+    /// exporter warnings.
     #[pyo3(signature = (trajectory, path, fps = 60.0, robot = None))]
     fn export_usd(
         &self,
@@ -2346,6 +2348,8 @@ impl SequenceTimeline {
     /// objects riding, releasing, resting — and handed over — exactly as
     /// simulated. A sole robot exports under the historical `Robot` prim;
     /// with several, each lands at `/World/<sanitized instance name>`.
+    /// The extension picks the serialization: `.usda` text, `.usdc`/`.usd`
+    /// binary crate at roughly half the size.
     #[pyo3(signature = (path, fps = 60.0))]
     fn export_usd(&self, path: PathBuf, fps: f64) -> PyResult<Vec<String>> {
         if !(fps.is_finite() && fps > 0.0) {

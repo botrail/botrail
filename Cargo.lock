@@ -987,8 +987,8 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openusd"
-version = "0.5.0"
-source = "git+https://github.com/mxpv/openusd?rev=659917514b462834293094b93d62b5decb7133db#659917514b462834293094b93d62b5decb7133db"
+version = "0.6.0"
+source = "git+https://github.com/neka-nat/openusd?rev=dce5ef95c0d52ecee03cd698865c0294f86caddf#dce5ef95c0d52ecee03cd698865c0294f86caddf"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -1084,9 +1084,9 @@ dependencies = [
 
 [[package]]
 name = "pyisheval"
-version = "0.18.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53debfc24672a6468cbe6913b43d189da9568f0044e42e8761cd7649d21c7cec"
+checksum = "d6b4f0a37aafb4eec4b490a57eaedb854733d958d8d2c65643df74ae8b7ccb8d"
 dependencies = [
  "indexmap",
  "lazy_static",
@@ -1890,9 +1890,9 @@ dependencies = [
 
 [[package]]
 name = "xurdf"
-version = "0.5.3"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "441acc187f2f2627e0e2e458f5bd13ed50f1fa5394bb4d86383de768e0d1497f"
+checksum = "8cdc19e931880a6ef2da9cd5e999a4ffa69facf9e219f41efba5cb74473969ea"
 dependencies = [
  "anyhow",
  "indexmap",

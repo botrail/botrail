@@ -14,20 +14,20 @@ python examples/sequence_demo.py
 ```
 
 ```text
-cycle time: 20.61s
+cycle time: 15.56s
     0.00 –   6.01  feed
     6.01 –   6.01  latch
     6.01 –   6.61  descend
     6.61 –   7.01  close
     7.01 –   7.01  grasp
     7.01 –   7.61  lift
-    7.61 –  14.46  carry
-   14.46 –  15.26  lower
-   15.26 –  15.26  release
-   15.26 –  15.66  open
-   15.66 –  16.46  retreat
-   16.46 –  16.96  settle
-   16.96 –  20.61  home
+    7.61 –  11.35  carry
+   11.35 –  12.15  lower
+   12.15 –  12.15  release
+   12.15 –  12.55  open
+   12.55 –  13.35  retreat
+   13.35 –  13.85  settle
+   13.85 –  15.56  home
 tracked pick: caught the box 150 mm downstream, belt still running
 exported to cell_seq.usda — view with: usdview cell_seq.usda
 ```

@@ -42,6 +42,7 @@ use openusd::sdf::{
 };
 use openusd::usd::{SchemaBase, Stage, TimeCode};
 use openusd::usda::TextWriter;
+use openusd::usdc::CrateWriter;
 use openusd::{gf, tf};
 use thiserror::Error;
 
@@ -126,16 +127,34 @@ pub struct AnimationInput<'a> {
 }
 
 pub struct ExportedAnimation {
-    /// The animation layer, serialized as usda text.
-    pub usda: String,
+    /// The composed animation layer, ready to serialize as usda text or a
+    /// binary usdc crate file.
+    pub data: sdf::Data,
     /// Files to place next to the written layer (absolute source, relative
     /// destination) so the robot reference resolves — empty for URDF robots.
     pub assets: Vec<(PathBuf, PathBuf)>,
     pub warnings: Vec<String>,
 }
 
+impl ExportedAnimation {
+    /// Serializes the layer as usda text, including the singleton-listOp
+    /// bracket fix pxr's text parser insists on. The binary path does not
+    /// need the fix — crate files carry list ops structurally.
+    pub fn to_usda(&self) -> Result<String, UsdExportError> {
+        let text = TextWriter::write_to_string(&self.data)
+            .map_err(|e| UsdExportError::Author(e.to_string()))?;
+        Ok(bracket_singleton_api_schemas(&text))
+    }
+}
+
 /// Exports and writes the layer to `path` (plus referenced robot assets in
 /// a sibling `<stem>_assets/` directory). Returns accumulated warnings.
+///
+/// The extension picks the serialization: `.usda` writes text, `.usdc` and
+/// `.usd` write the binary crate format (the pxr convention for `.usd`).
+/// `.usdz` is rejected — packaging referenced assets into an archive is a
+/// different operation than writing a layer. Unknown extensions fall back
+/// to text with a warning, matching the historical behavior.
 pub fn write_animation(
     path: &Path,
     input: &AnimationInput,
@@ -145,12 +164,35 @@ pub fn write_animation(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "animation".to_string());
-    let exported = export_animation(input, options, &stem)?;
+    let mut exported = export_animation(input, options, &stem)?;
     let io = |e: std::io::Error| UsdExportError::Io(e.to_string());
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
-    std::fs::write(path, &exported.usda).map_err(io)?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("usdc") | Some("usd") => CrateWriter::write_to_file(&exported.data, path)
+            .map_err(|e| UsdExportError::Author(format!("usdc write: {e}")))?,
+        Some("usdz") => {
+            return Err(UsdExportError::Input(
+                "usdz output is not supported (it is an asset package, not a layer); \
+                 write .usda or .usdc"
+                    .into(),
+            ))
+        }
+        Some("usda") => std::fs::write(path, exported.to_usda()?).map_err(io)?,
+        other => {
+            if let Some(other) = other {
+                exported.warnings.push(format!(
+                    "unknown extension `.{other}`: wrote usda text; use .usda, .usdc or .usd"
+                ));
+            }
+            std::fs::write(path, exported.to_usda()?).map_err(io)?;
+        }
+    }
     let base = path.parent().unwrap_or(Path::new(""));
     for (src, rel) in &exported.assets {
         let dest = base.join(rel);
@@ -297,7 +339,7 @@ pub fn export_animation(
     author_objects(&mut layer, input.objects, &codes, &mut warnings)?;
 
     Ok(ExportedAnimation {
-        usda: layer.finish()?,
+        data: layer.finish(),
         assets,
         warnings,
     })
@@ -568,7 +610,9 @@ impl LayerBuilder {
         );
     }
 
-    fn finish(mut self) -> Result<String, UsdExportError> {
+    /// Resolves the accumulated children keys and hands over the layer
+    /// data; serialization (text or crate) is the caller's choice.
+    fn finish(mut self) -> sdf::Data {
         let mut children: Vec<(String, Vec<String>)> = self.prim_children.drain().collect();
         for (parent, names) in children.drain(..) {
             let path = if parent == "/" {
@@ -587,9 +631,7 @@ impl LayerBuilder {
                 .expect("prim spec exists");
             spec.add(ChildrenKey::PropertyChildren, Value::token_vec(names));
         }
-        let text = TextWriter::write_to_string(&self.data)
-            .map_err(|e| UsdExportError::Author(e.to_string()))?;
-        Ok(bracket_singleton_api_schemas(&text))
+        self.data
     }
 }
 
@@ -1956,6 +1998,110 @@ mod tests {
         assert!(usda.contains("faceVertexIndices"));
         assert!(usda.contains("timeSamples"));
         assert!(usda.contains("upAxis = \"Z\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `.usdc` (and `.usd`) must produce a binary crate file that composes
+    /// to the same world transforms and metadata as the text layer — the
+    /// extension picks the serialization, never the content.
+    #[test]
+    fn usdc_output_matches_usda() {
+        let dir = temp_dir("usdc");
+        let urdf = r#"
+        <robot name="r">
+          <link name="base"><visual><geometry><box size="0.2 0.1 0.4"/></geometry></visual></link>
+          <link name="tip"><visual><geometry><sphere radius="0.05"/></geometry></visual></link>
+          <joint name="j" type="revolute">
+            <parent link="base"/><child link="tip"/>
+            <origin xyz="0 0 0.5"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-2" upper="2" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        let times = [0.0, 0.5, 1.0];
+        let configs = [vec![0.0], vec![0.4], vec![0.9]];
+        let link_poses: Vec<Vec<Isometry3<f64>>> = configs
+            .iter()
+            .map(|q| botrail_kin::forward_kinematics(&model, q).unwrap())
+            .collect();
+        let moved = vec![
+            Isometry3::translation(0.1, 0.0, 0.5),
+            Isometry3::translation(0.15, 0.05, 0.55),
+            Isometry3::translation(0.2, 0.1, 0.6),
+        ];
+        let objects = vec![ObjectSpec {
+            name: "crate".into(),
+            geometry: Geometry::Box {
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+            track: PoseTrack::Sampled(moved),
+            color: Some([0.2, 0.5, 0.7]),
+            visible: vec![true, true, false],
+        }];
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: None,
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &times,
+            objects: &objects,
+        };
+
+        for name in ["anim.usda", "anim.usdc", "anim.usd"] {
+            let warnings =
+                write_animation(&dir.join(name), &input, &ExportOptions::default()).unwrap();
+            assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        }
+        // The binary outputs really are crate files, not text in disguise.
+        for name in ["anim.usdc", "anim.usd"] {
+            let head = std::fs::read(dir.join(name)).unwrap();
+            assert_eq!(&head[..8], b"PXR-USDC", "{name} lacks the crate magic");
+        }
+        assert!(matches!(
+            write_animation(&dir.join("anim.usdz"), &input, &ExportOptions::default()),
+            Err(UsdExportError::Input(_))
+        ));
+
+        let open = |name: &str| {
+            Stage::builder()
+                .resolver(SearchPathResolver::new(vec![dir.clone()]))
+                .open(&dir.join(name).display().to_string())
+                .unwrap()
+        };
+        let text = open("anim.usda");
+        let binary = open("anim.usdc");
+        for t in times {
+            let a = composed_worlds(&text, t * 60.0);
+            let b = composed_worlds(&binary, t * 60.0);
+            assert_eq!(
+                a.keys().collect::<std::collections::BTreeSet<_>>(),
+                b.keys().collect::<std::collections::BTreeSet<_>>()
+            );
+            for (path, ma) in &a {
+                let mb = &b[path];
+                assert_close(
+                    mul_point(ma, [0.0; 3]),
+                    mul_point(mb, [0.0; 3]),
+                    1e-12,
+                    &format!("{path} at t={t}"),
+                );
+            }
+        }
+        // Visibility animation survives the binary path.
+        let vis = |code: f64| -> Value {
+            binary
+                .prim("/World/Env/crate")
+                .attribute("visibility")
+                .get_at::<sdf::Value>(TimeCode::new(code))
+                .unwrap()
+                .expect("visibility sample")
+        };
+        assert_eq!(vis(0.0), Value::Token("inherited".into()));
+        assert_eq!(vis(60.0), Value::Token("invisible".into()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

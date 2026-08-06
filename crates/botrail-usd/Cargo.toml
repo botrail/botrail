@@ -15,7 +15,11 @@ nalgebra.workspace = true
 thiserror.workspace = true
 # Pre-1.0 pure-Rust USD implementation: pin an exact rev (crates.io releases
 # lag main significantly; see the spike notes in design/DESIGN.md).
-openusd = { git = "https://github.com/mxpv/openusd", rev = "659917514b462834293094b93d62b5decb7133db", features = ["geom", "physics"] }
+# Temporarily the neka-nat fork: upstream (mxpv/openusd) does not yet have
+# the usdc children-TokenVector fix pxr requires to open exported .usdc
+# (branch fix/usdc-children-token-vector, rebased on upstream main).
+# Repoint to mxpv/openusd once the PR lands.
+openusd = { git = "https://github.com/neka-nat/openusd", rev = "dce5ef95c0d52ecee03cd698865c0294f86caddf", features = ["geom", "physics"] }
 anyhow = "1"
 
 [dev-dependencies]

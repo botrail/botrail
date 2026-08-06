@@ -10,6 +10,7 @@ file.
 ```python
 scene.export_usd(traj, "motion.usda", fps=60)   # one planned trajectory
 tl.export_usd("cycle.usda", fps=60)             # a whole baked cycle
+tl.export_usd("cycle.usdc", fps=60)             # same layer, binary crate file
 ```
 
 Both bake to a USD layer that plays in usdview, Omniverse, or Blender with no
@@ -20,6 +21,12 @@ copied to a sibling `<stem>_assets/` directory); URDF robots are authored from
 the model's visuals. A sole robot exports under the historical `Robot` prim;
 with several, each lands at `/World/<sanitized instance name>` — the
 convention playback relies on. Exporters return their warnings as a list.
+
+The extension picks the serialization: `.usda` writes text (diffable, but
+large — timeSamples dominate), `.usdc` or `.usd` writes the binary crate
+format at roughly half the size, byte-for-byte the same composed result.
+`.usdz` is rejected on purpose: it is an asset *package*, not a layer, and
+packaging the referenced robot assets is a different operation.
 
 The reverse direction — playing recordings back into the studio, including
 Isaac Sim captures — is

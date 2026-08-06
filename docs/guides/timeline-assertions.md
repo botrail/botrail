@@ -79,7 +79,7 @@ tl.object_visible("crate", t)        # False only while stowed in a magazine
 ```
 
 `moves` is the per-robot utilization view — the two-arm tutorial computes
-"both arms in motion for 11.3 s" from exactly this. `object_pose` is how the
+"both arms in motion for 11.5 s" from exactly this. `object_pose` is how the
 tracking tutorial measured its 150 mm of belt travel between latch and grasp.
 
 ## Golden values vs budgets

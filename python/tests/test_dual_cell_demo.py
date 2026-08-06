@@ -28,8 +28,10 @@ pytestmark = pytest.mark.skipif(
 
 # Baked on the pinned dependency set. The tolerance absorbs libm-level drift
 # between machines, not behaviour changes — a replan that adds a detour
-# shifts the cycle by far more than this.
-GOLDEN_CYCLE = 90.76
+# shifts the cycle by far more than this. 2026-08-06: 90.76 → 83.71 when IK
+# gained null-space joint centering; the taught 7-DOF configurations moved
+# off their limits and the transfer plans shortened.
+GOLDEN_CYCLE = 83.71
 CYCLE_BUDGET = 1.0
 
 

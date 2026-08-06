@@ -548,7 +548,10 @@ impl ActiveMove {
 /// Per-tick tracking solve: warm-started from the nominal configuration,
 /// so it only has to absorb one scan period of part motion. No restarts —
 /// a restart could land on another solution branch and teleport the arm
-/// mid-track.
+/// mid-track. Null-space centering is off for the same reason: the track
+/// must reproduce the taught posture carried by the offset, not add its
+/// own self-motion drift on top (a deliberate bias would belong to the
+/// authoring layer, not the per-tick follow).
 const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
     mode: botrail_kin::IkMode::Pose,
     max_iters: 100,
@@ -558,6 +561,7 @@ const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
     orientation_weight: 0.5,
     max_step: 0.5,
     restarts: 0,
+    null_space_gain: 0.0,
 };
 
 /// An active conveyor track: taught poses are carried by `offset`, which is

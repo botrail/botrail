@@ -38,6 +38,14 @@ pub struct IkOptions {
     /// configuration, where a warm-seeded solve jumping to a different
     /// solution branch would teleport the arm.
     pub restarts: usize,
+    /// Gain of the joint-centering secondary objective, applied through an
+    /// exact (SVD-based) projector onto the task null space each iteration.
+    /// Redundant arms drift toward mid-range along their self-motion
+    /// manifold instead of camping on joint limits; on a full-rank 6-DOF
+    /// task the null space is empty and the term vanishes. The projection
+    /// is exact, so the secondary objective cannot disturb the task even
+    /// near singularities. `0` disables.
+    pub null_space_gain: f64,
 }
 
 impl Default for IkOptions {
@@ -51,6 +59,7 @@ impl Default for IkOptions {
             orientation_weight: 0.5,
             max_step: 0.5,
             restarts: 4,
+            null_space_gain: 0.1,
         }
     }
 }
@@ -142,6 +151,67 @@ fn clamp_to_limits(model: &RobotModel, q: &mut [f64]) {
             *qi = qi.clamp(l.lower, l.upper);
         }
     }
+}
+
+/// Normalized pull toward each limited joint's mid-range, in [-1, 1] per
+/// joint; joints without limits (continuous) contribute nothing. `None`
+/// when no joint has limits — there is no center to steer toward.
+fn centering_direction(model: &RobotModel, q: &[f64]) -> Option<DVector<f64>> {
+    let mut z = DVector::zeros(q.len());
+    let mut any = false;
+    for (i, &ji) in model.actuated_joints.iter().enumerate() {
+        if let Some(l) = model.joints[ji].limits {
+            let half = 0.5 * (l.upper - l.lower);
+            if half > 1e-9 {
+                let mid = 0.5 * (l.upper + l.lower);
+                z[i] = ((mid - q[i]) / half).clamp(-1.0, 1.0);
+                any = true;
+            }
+        }
+    }
+    any.then_some(z)
+}
+
+/// The objective the null-space term descends: sum of squared normalized
+/// offsets from mid-range over the limited joints.
+fn centering_measure(model: &RobotModel, q: &[f64]) -> f64 {
+    q.iter()
+        .zip(&model.actuated_joints)
+        .map(|(qi, &ji)| match model.joints[ji].limits {
+            Some(l) => {
+                let half = 0.5 * (l.upper - l.lower);
+                if half > 1e-9 {
+                    let mid = 0.5 * (l.upper + l.lower);
+                    ((qi - mid) / half).powi(2)
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        })
+        .sum()
+}
+
+/// Component of `z` in the null space of `jac`: z minus its projection onto
+/// the row space, built from the right singular vectors. Exact (orthogonal)
+/// projection — unlike the damped pseudo-inverse, nothing leaks into the
+/// task even when singular values approach zero, because near-null
+/// directions are simply *kept* rather than divided by sigma.
+fn project_to_null_space(jac: DMatrix<f64>, z: &DVector<f64>) -> DVector<f64> {
+    let svd = jac.svd(false, true);
+    let mut out = z.clone();
+    if let Some(vt) = svd.v_t {
+        for (i, sigma) in svd.singular_values.iter().enumerate() {
+            // Rows with vanishing sigma span (numerically) the null space;
+            // only genuine row-space directions are subtracted.
+            if *sigma > 1e-6 {
+                let row = vt.row(i);
+                let coeff = (&row * z)[(0, 0)];
+                out.axpy(-coeff, &row.transpose(), 1.0);
+            }
+        }
+    }
+    out
 }
 
 /// xorshift64* mapped to [-1, 1]; deterministic so solves are reproducible.
@@ -241,13 +311,19 @@ fn solve_attempt(
         let converged = pos_error < options.tol_pos
             && (options.mode == IkMode::Position || rot_error < options.tol_rot);
 
-        // Track the best configuration by weighted error.
+        // Track the best configuration: weighted task error decides; among
+        // converged iterates (the task is met either way) the better-centered
+        // one wins — that is what the settling iterations below produce.
         let score = pos_error + options.orientation_weight * rot_error;
-        if best
-            .as_ref()
-            .map(|b| score < b.pos_error + options.orientation_weight * b.rot_error)
-            .unwrap_or(true)
-        {
+        let replace = match &best {
+            None => true,
+            Some(b) if converged && b.converged => {
+                centering_measure(model, &q) < centering_measure(model, &b.q)
+            }
+            Some(b) if converged != b.converged => converged,
+            Some(b) => score < b.pos_error + options.orientation_weight * b.rot_error,
+        };
+        if replace {
             best = Some(IkResult {
                 q: q.clone(),
                 converged,
@@ -256,7 +332,7 @@ fn solve_attempt(
                 iters: iter,
             });
         }
-        if converged || iter == options.max_iters {
+        if iter == options.max_iters || (converged && options.null_space_gain <= 0.0) {
             break;
         }
 
@@ -277,17 +353,37 @@ fn solve_attempt(
         let jjt = &jac * jac.transpose() + DMatrix::identity(task_dim, task_dim) * lambda2;
         let Some(chol) = jjt.cholesky() else { break };
         let mut dq = jac.transpose() * chol.solve(&e);
-        let step = dq.norm();
-        if step < 1e-9 {
-            // Stalled at a singularity (e.g. a fully extended arm asked to
-            // move along its own axis produces dq = 0): kick the
-            // configuration to break the symmetry, then keep iterating.
+        if !converged && dq.norm() < 1e-9 {
+            // The *task* step stalled at a singularity (e.g. a fully
+            // extended arm asked to move along its own axis produces
+            // dq = 0): kick the configuration to break the symmetry, then
+            // keep iterating. Checked before the null-space term so the
+            // secondary objective cannot mask a stalled task.
             for qi in q.iter_mut() {
                 *qi += 0.05 * jitter_unit(rng);
             }
             clamp_to_limits(model, &mut q);
             continue;
         }
+        // Secondary objective: joint centering through the task null space.
+        // The row scaling above (orientation weight) does not change the
+        // row space, so the projector is unaffected by it. Once the task
+        // has converged, iterations continue on this term alone (the task
+        // rows keep the pose pinned) until the centering pull has no
+        // null-space component left — the settling phase that actually
+        // moves a redundant arm toward mid-range.
+        let mut ns_step = 0.0;
+        if options.null_space_gain > 0.0 {
+            if let Some(z) = centering_direction(model, &q) {
+                let ns = project_to_null_space(jac, &z);
+                ns_step = options.null_space_gain * ns.norm();
+                dq.axpy(options.null_space_gain, &ns, 1.0);
+            }
+        }
+        if converged && ns_step < 1e-6 {
+            break;
+        }
+        let step = dq.norm();
         if step > options.max_step {
             dq *= options.max_step / step;
         }
@@ -512,19 +608,101 @@ mod tests {
         let seed = model.neutral_positions();
 
         // The plain descent must genuinely fail here, or this test guards
-        // nothing.
+        // nothing. Null-space centering is disabled because it rescues this
+        // fixture on its own (covered by its dedicated test below).
         let plain = IkOptions {
             restarts: 0,
+            null_space_gain: 0.0,
             ..IkOptions::default()
         };
         let stuck = solve_ik(&model, tip, &target, &seed, &plain).unwrap();
         assert!(!stuck.converged, "fixture no longer pins: {stuck:?}");
 
-        let rescued = solve_ik(&model, tip, &target, &seed, &IkOptions::default()).unwrap();
+        let rescued = solve_ik(
+            &model,
+            tip,
+            &target,
+            &seed,
+            &IkOptions {
+                null_space_gain: 0.0,
+                ..IkOptions::default()
+            },
+        )
+        .unwrap();
         assert!(rescued.converged, "{rescued:?}");
         let reached = forward_kinematics(&model, &rescued.q).unwrap()[tip];
         let (e_pos, e_rot) = pose_error(&reached, &target);
         assert!(e_pos.norm() < 1e-4 && e_rot.norm() < 1e-3);
+    }
+
+    /// On a redundant arm the centering term must (a) not disturb the
+    /// reached pose and (b) leave the joints measurably closer to
+    /// mid-range than the uncentered solve from the same seed.
+    #[test]
+    fn null_space_centers_redundant_joints_without_moving_the_task() {
+        let model = RobotModel::from_urdf_str(LIMIT_PINNED).unwrap();
+        let tip = model.link_index("tip").unwrap();
+        let q_true = [0.3, -0.6, 0.2, -1.8, 0.15, 1.6, 0.5];
+        let target = forward_kinematics(&model, &q_true).unwrap()[tip];
+        // A seed that already converges without help, so the two runs are
+        // comparable descents rather than a rescue story.
+        let seed = [0.2, -0.4, 0.1, -1.5, 0.1, 1.2, 0.3];
+
+        let centering = |q: &[f64]| -> f64 {
+            q.iter()
+                .zip(model.actuated_joint_limits())
+                .map(|(qi, l)| {
+                    let (lo, hi) = l.unwrap();
+                    let mid = 0.5 * (lo + hi);
+                    ((qi - mid) / (0.5 * (hi - lo))).powi(2)
+                })
+                .sum()
+        };
+
+        let plain_opts = IkOptions {
+            restarts: 0,
+            null_space_gain: 0.0,
+            ..IkOptions::default()
+        };
+        let ns_opts = IkOptions {
+            restarts: 0,
+            ..IkOptions::default()
+        };
+        let plain = solve_ik(&model, tip, &target, &seed, &plain_opts).unwrap();
+        let centered = solve_ik(&model, tip, &target, &seed, &ns_opts).unwrap();
+        assert!(plain.converged, "{plain:?}");
+        assert!(centered.converged, "{centered:?}");
+
+        // (a) task untouched: both land on the target to tolerance.
+        let reached = forward_kinematics(&model, &centered.q).unwrap()[tip];
+        let (e_pos, e_rot) = pose_error(&reached, &target);
+        assert!(e_pos.norm() < 1e-4 && e_rot.norm() < 1e-3);
+
+        // (b) secondary objective improved.
+        assert!(
+            centering(&centered.q) < centering(&plain.q),
+            "centering did not improve: {} vs {}",
+            centering(&centered.q),
+            centering(&plain.q)
+        );
+    }
+
+    #[test]
+    fn null_space_solves_are_deterministic() {
+        let model = RobotModel::from_urdf_str(LIMIT_PINNED).unwrap();
+        let tip = model.link_index("tip").unwrap();
+        let target =
+            forward_kinematics(&model, &[0.3, -0.6, 0.2, -1.8, 0.15, 1.6, 0.5]).unwrap()[tip];
+        let seed = model.neutral_positions();
+        let options = IkOptions {
+            restarts: 0,
+            ..IkOptions::default()
+        };
+        let a = solve_ik(&model, tip, &target, &seed, &options).unwrap();
+        let b = solve_ik(&model, tip, &target, &seed, &options).unwrap();
+        assert_eq!(a.q, b.q);
+        assert_eq!(a.iters, b.iters);
+        assert_eq!(a.converged, b.converged);
     }
 
     #[test]
