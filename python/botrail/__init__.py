@@ -12,6 +12,7 @@ from ._core import (
     StudioServer,
     Trajectory,
     __version__,
+    catalog_package,
 )
 from ._launcher import studio
 
@@ -25,6 +26,7 @@ __all__ = [
     "Span",
     "StudioServer",
     "Trajectory",
+    "catalog_package",
     "seq",
     "studio",
     "__version__",

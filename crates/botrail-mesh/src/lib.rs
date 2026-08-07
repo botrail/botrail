@@ -3,10 +3,17 @@
 //! negative indices). Parsers work on bytes, so callers can feed files,
 //! archives, or in-memory assets (wasm) alike.
 //!
-//! Deliberately not a general asset pipeline: no normals, UVs, or
-//! materials — collision geometry only needs positions and triangles.
+//! Deliberately not a general asset pipeline: no normals or UVs — collision
+//! geometry only needs positions and triangles. The one exception is
+//! *diffuse color*: an OBJ that names an `mtllib` carries the colors its
+//! manufacturer authored, and dropping them means every downstream picture
+//! has to invent a palette instead. [`load_path`] resolves it (it is the
+//! only entry point that knows where the file sits); the in-memory parsers
+//! leave [`MeshData::face_colors`] empty.
+//!
 //! DAE/glTF and anything scene-graph-shaped belong to the importer layer.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use thiserror::Error;
@@ -26,14 +33,29 @@ pub enum MeshError {
     Empty,
 }
 
-/// Indexed triangle mesh, positions only.
+/// Indexed triangle mesh: positions, triangles, and — when the source
+/// assigned materials — one diffuse color per triangle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeshData {
     pub vertices: Vec<[f64; 3]>,
     pub indices: Vec<[u32; 3]>,
+    /// Diffuse color per triangle, aligned with `indices`. Empty when the
+    /// source carried no materials. Linear RGB, which is what USD
+    /// `primvars:displayColor` (and three's working space) expect — OBJ
+    /// `Kd` is already linear.
+    pub face_colors: Vec<[f32; 3]>,
 }
 
 impl MeshData {
+    /// Positions and triangles, no material colors.
+    pub fn new(vertices: Vec<[f64; 3]>, indices: Vec<[u32; 3]>) -> MeshData {
+        MeshData {
+            vertices,
+            indices,
+            face_colors: Vec::new(),
+        }
+    }
+
     /// Per-axis scaled copy (URDF `<mesh scale="...">` semantics).
     pub fn scaled(&self, scale: [f64; 3]) -> MeshData {
         MeshData {
@@ -43,6 +65,7 @@ impl MeshData {
                 .map(|v| [v[0] * scale[0], v[1] * scale[1], v[2] * scale[2]])
                 .collect(),
             indices: self.indices.clone(),
+            face_colors: self.face_colors.clone(),
         }
     }
 }
@@ -59,9 +82,36 @@ pub fn load_path(path: &Path) -> Result<MeshData, MeshError> {
     })?;
     match ext.as_str() {
         "stl" => parse_stl(&bytes),
-        "obj" => parse_obj(&String::from_utf8_lossy(&bytes)),
+        "obj" => {
+            let text = String::from_utf8_lossy(&bytes);
+            parse_obj_with_materials(&text, &mtl_palette(path, &text))
+        }
         other => Err(MeshError::UnsupportedFormat(other.to_string())),
     }
+}
+
+/// The `mtllib` beside an OBJ, parsed. Empty when the file names none or
+/// the library cannot be read — a mesh whose material file did not travel
+/// with it still loads, just without colors.
+fn mtl_palette(obj_path: &Path, text: &str) -> HashMap<String, [f32; 3]> {
+    let Some(dir) = obj_path.parent() else {
+        return HashMap::new();
+    };
+    let mut palette = HashMap::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("mtllib") {
+            continue;
+        }
+        // `mtllib` may name several libraries; later ones win on collision,
+        // as they do in the OBJ spec's read order.
+        for name in words {
+            if let Ok(mtl) = std::fs::read(dir.join(name)) {
+                palette.extend(parse_mtl(&String::from_utf8_lossy(&mtl)));
+            }
+        }
+    }
+    palette
 }
 
 // ------------------------------------------------------------------- STL
@@ -98,7 +148,7 @@ fn parse_stl_binary(bytes: &[u8], count: usize) -> Result<MeshData, MeshError> {
     if indices.is_empty() {
         return Err(MeshError::Empty);
     }
-    Ok(MeshData { vertices, indices })
+    Ok(MeshData::new(vertices, indices))
 }
 
 fn parse_stl_ascii(text: &str) -> Result<MeshData, MeshError> {
@@ -134,7 +184,7 @@ fn parse_stl_ascii(text: &str) -> Result<MeshData, MeshError> {
     if indices.is_empty() {
         return Err(MeshError::Empty);
     }
-    Ok(MeshData { vertices, indices })
+    Ok(MeshData::new(vertices, indices))
 }
 
 // ------------------------------------------------------------------- OBJ
@@ -142,13 +192,32 @@ fn parse_stl_ascii(text: &str) -> Result<MeshData, MeshError> {
 /// Parses the OBJ subset that matters for collision geometry: `v` and `f`
 /// statements. Faces may be n-gons (fan-triangulated) and use any of the
 /// `i`, `i/t`, `i//n`, `i/t/n` index forms, including negative (relative)
-/// indices.
+/// indices. Material assignments are ignored; use
+/// [`parse_obj_with_materials`] to keep them.
 pub fn parse_obj(text: &str) -> Result<MeshData, MeshError> {
+    parse_obj_with_materials(text, &Default::default())
+}
+
+/// [`parse_obj`], keeping `usemtl` assignments: every triangle gets the
+/// diffuse color of the material in force when it was declared, looked up
+/// in `palette` (see [`parse_mtl`]). Faces declared under no material — or
+/// under one the palette does not name — get no color, and a mesh where
+/// *nothing* resolves comes back with `face_colors` empty rather than a
+/// run of defaults nobody authored.
+pub fn parse_obj_with_materials(
+    text: &str,
+    palette: &HashMap<String, [f32; 3]>,
+) -> Result<MeshData, MeshError> {
     let mut vertices: Vec<[f64; 3]> = Vec::new();
-    let mut indices = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+    let mut face_colors: Vec<Option<[f32; 3]>> = Vec::new();
+    let mut current: Option<[f32; 3]> = None;
     for (line_no, line) in text.lines().enumerate() {
         let mut words = line.split_whitespace();
         match words.next() {
+            Some("usemtl") => {
+                current = words.next().and_then(|name| palette.get(name)).copied();
+            }
             Some("v") => {
                 let mut read = || -> Result<f64, MeshError> {
                     words.next().and_then(|w| w.parse().ok()).ok_or_else(|| {
@@ -189,6 +258,7 @@ pub fn parse_obj(text: &str) -> Result<MeshData, MeshError> {
                 }
                 for k in 1..face.len() - 1 {
                     indices.push([face[0], face[k], face[k + 1]]);
+                    face_colors.push(current);
                 }
             }
             _ => {}
@@ -197,7 +267,41 @@ pub fn parse_obj(text: &str) -> Result<MeshData, MeshError> {
     if indices.is_empty() {
         return Err(MeshError::Empty);
     }
-    Ok(MeshData { vertices, indices })
+    let mut mesh = MeshData::new(vertices, indices);
+    if face_colors.iter().any(Option::is_some) {
+        // A gap in the middle would misalign every later face, so unmatched
+        // triangles take the neutral rather than being dropped.
+        mesh.face_colors = face_colors
+            .into_iter()
+            .map(|c| c.unwrap_or(NEUTRAL_DIFFUSE))
+            .collect();
+    }
+    Ok(mesh)
+}
+
+/// What a triangle with no resolvable material is colored.
+const NEUTRAL_DIFFUSE: [f32; 3] = [0.6, 0.6, 0.6];
+
+/// Diffuse colors (`Kd`) by material name, from a Wavefront `.mtl`. Values
+/// are taken as linear, which is what the OBJ/MTL pair written from
+/// COLLADA or glTF sources carries.
+pub fn parse_mtl(text: &str) -> HashMap<String, [f32; 3]> {
+    let mut out = HashMap::new();
+    let mut name: Option<String> = None;
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("newmtl") => name = words.next().map(str::to_string),
+            Some("Kd") => {
+                let rgb: Vec<f32> = words.filter_map(|w| w.parse().ok()).collect();
+                if let (Some(n), [r, g, b]) = (name.as_ref(), rgb.as_slice()) {
+                    out.insert(n.clone(), [*r, *g, *b]);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------- test aids
@@ -230,7 +334,7 @@ pub fn box_mesh(size: [f64; 3]) -> MeshData {
         [3, 0, 4],
         [3, 4, 7], // -x
     ];
-    MeshData { vertices, indices }
+    MeshData::new(vertices, indices)
 }
 
 /// Serializes a mesh as binary STL (little-endian), for tests and asset
@@ -265,6 +369,73 @@ pub fn to_stl_binary(mesh: &MeshData) -> Vec<u8> {
         out.extend_from_slice(&[0u8; 2]); // attribute bytes
     }
     out
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    const CUBE_OBJ: &str = "\
+mtllib parts.mtl
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+usemtl yellow
+f 1 2 3
+usemtl grey
+f 1 3 4
+";
+
+    fn palette() -> HashMap<String, [f32; 3]> {
+        parse_mtl(
+            "newmtl yellow\nKd 1.0 1.0 0.0\nKs 0 0 0\nnewmtl grey\nKd 0.5 0.5 0.5\n",
+        )
+    }
+
+    #[test]
+    fn mtl_gives_a_diffuse_per_material() {
+        let p = palette();
+        assert_eq!(p["yellow"], [1.0, 1.0, 0.0]);
+        assert_eq!(p["grey"], [0.5, 0.5, 0.5]);
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
+    fn usemtl_colors_every_triangle_it_covers() {
+        let mesh = parse_obj_with_materials(CUBE_OBJ, &palette()).unwrap();
+        assert_eq!(mesh.indices.len(), 2);
+        assert_eq!(mesh.face_colors, vec![[1.0, 1.0, 0.0], [0.5, 0.5, 0.5]]);
+    }
+
+    #[test]
+    fn an_ngon_carries_its_material_across_the_fan() {
+        // One quad under one material becomes two triangles, both colored.
+        let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nusemtl yellow\nf 1 2 3 4\n";
+        let mesh = parse_obj_with_materials(obj, &palette()).unwrap();
+        assert_eq!(mesh.indices.len(), 2);
+        assert_eq!(mesh.face_colors, vec![[1.0, 1.0, 0.0]; 2]);
+    }
+
+    #[test]
+    fn no_materials_means_no_colors_rather_than_a_default_run() {
+        // Plain parse ignores assignments; an unknown material resolves to
+        // nothing; scaling carries whatever there was.
+        assert!(parse_obj(CUBE_OBJ).unwrap().face_colors.is_empty());
+        let orphan = parse_obj_with_materials(CUBE_OBJ, &Default::default()).unwrap();
+        assert!(orphan.face_colors.is_empty());
+
+        let colored = parse_obj_with_materials(CUBE_OBJ, &palette()).unwrap();
+        assert_eq!(colored.scaled([2.0, 2.0, 2.0]).face_colors, colored.face_colors);
+    }
+
+    #[test]
+    fn faces_before_any_usemtl_take_the_neutral() {
+        // Dropping them would misalign every later face against `indices`.
+        let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nusemtl yellow\nf 1 3 4\n";
+        let mesh = parse_obj_with_materials(obj, &palette()).unwrap();
+        assert_eq!(mesh.face_colors, vec![NEUTRAL_DIFFUSE, [1.0, 1.0, 0.0]]);
+    }
 }
 
 #[cfg(test)]

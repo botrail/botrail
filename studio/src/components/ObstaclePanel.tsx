@@ -24,6 +24,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     geometry: { kind: "box", size: [0.1, 0.1, 0.1] },
     pose: spawnPose(),
     enabled: true,
+    visible: true,
     attached_to: null,
   }),
   sphere: () => ({
@@ -31,6 +32,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     geometry: { kind: "sphere", radius: 0.05 },
     pose: spawnPose(),
     enabled: true,
+    visible: true,
     attached_to: null,
   }),
   cylinder: () => ({
@@ -38,6 +40,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     geometry: { kind: "cylinder", radius: 0.05, length: 0.1 },
     pose: spawnPose(),
     enabled: true,
+    visible: true,
     attached_to: null,
   }),
 };

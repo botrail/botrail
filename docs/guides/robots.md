@@ -15,7 +15,9 @@ robot = bt.Robot.from_usd("franka.usd")
 
 **URDF** — mesh paths resolve relative to the file, and `package://` URIs are
 resolved heuristically, so most real-world URDFs load without a workspace.
-There is also `from_urdf_string(xml)` for generated descriptions.
+Meshes load from STL and OBJ; an OBJ that names an `mtllib` keeps its
+material colors, in the studio and in exported USD alike. There is also
+`from_urdf_string(xml)` for generated descriptions.
 
 **Xacro** — expanded without ROS: properties, macros, includes, and
 conditionals all work. Most real robot descriptions are xacro, and needing a
@@ -43,13 +45,32 @@ robot = bt.Robot.from_catalog("robotiq/2f/2f-85/r1",
 ```
 
 Ids resolve exactly or by any unambiguous shorthand (`2f-85`,
-`robotiq/2f-85`). Every load resolves to a concrete dataset commit and records
-it in the robot's source, so a saved project — and the script the studio
-exports — replays the *same bytes* later; that is the
-[determinism story](../concepts/determinism.md) extended to model acquisition.
+`robotiq/2f-85`). An id ends in a revision (`.../r1`), and when a shorthand
+matches several revisions of one product the newest wins — a revision is the
+same machine re-cut from a better source, so short names follow it forward
+instead of breaking. Different *products* stay ambiguous and raise, listing
+what matched. Name a revision outright to pin it.
+
+Every load resolves to a concrete dataset commit and records the resolved id
+in the robot's source, so a saved project — and the script the studio
+exports — replays the *same bytes* later, on the revision it resolved to;
+that is the [determinism story](../concepts/determinism.md) extended to model
+acquisition.
 Downloads land in the standard Hugging Face cache. Packages whose meshes
 cannot be redistributed are `recipe_only`: `from_catalog` raises and points at
 building them locally with botrail-catalog-builder.
+
+Not every package is a robot. A `workpiece` — a body-in-white, a casting, a
+fixture — is a pile of meshes a cell loads as obstacles, and
+[`catalog_package`][botrail.catalog_package] hands back its directory so the
+cell can reach them without a hand-written cache path that quietly stops
+matching when the dataset moves:
+
+```python
+package = Path(bt.catalog_package("botrail/body/biw-sedan"))
+for piece in sorted((package / "collision").glob("*.stl")):
+    scene.add_mesh(f"body/{piece.stem}", str(piece), (0, 0, 0))
+```
 
 The frames a package manifest declares come along: `frames.tcp_default`
 becomes the model's `tcp_link` (the grasp center, not a fingertip), and

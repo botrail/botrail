@@ -526,6 +526,21 @@ impl LayerBuilder {
     }
 
     fn attr(&mut self, prim: &str, name: &str, type_name: &str, value: AttrValue) {
+        self.attr_meta(prim, name, type_name, value, &[]);
+    }
+
+    /// [`attr`](Self::attr) plus attribute *metadata* — fields on the
+    /// attribute itself rather than sibling properties, which is where USD
+    /// keeps a primvar's `interpolation`. Authored in one pass because
+    /// creating a spec replaces whatever was there.
+    fn attr_meta(
+        &mut self,
+        prim: &str,
+        name: &str,
+        type_name: &str,
+        value: AttrValue,
+        meta: &[(&str, Value)],
+    ) {
         let props = self.prop_children.entry(prim.to_string()).or_default();
         if !props.iter().any(|p| p == name) {
             props.push(name.to_string());
@@ -546,6 +561,9 @@ impl LayerBuilder {
                 spec.add(FieldKey::Default, v);
             }
             AttrValue::Samples(map) => spec.add(FieldKey::TimeSamples, Value::TimeSamples(map)),
+        }
+        for (key, v) in meta {
+            spec.add(*key, v.clone());
         }
     }
 
@@ -824,6 +842,89 @@ pub(crate) fn find_robot_root(
         1 => Ok(candidates.remove(0)),
         _ => Err(UsdExportError::RobotStage(format!(
             "multiple prims in `{}` match this robot's link tree: {}",
+            opened.path,
+            candidates.join(", ")
+        ))),
+    }
+}
+
+/// Link prim names of a baked robot export, in model-link order: the
+/// writer's `sanitize_name` + collision uniquing (`author_urdf_robot`),
+/// replayed so the reader lands on the same prims.
+pub(crate) fn baked_link_names(model: &RobotModel) -> Vec<String> {
+    let mut used = HashMap::new();
+    model
+        .links
+        .iter()
+        .map(|l| unique_child(&mut used, &sanitize_name(&l.name)))
+        .collect()
+}
+
+/// Structural facts of a baked (URDF- or composite-sourced) robot resolved
+/// against a recording: one flat `def Xform` per link under `stage_root`,
+/// named by [`baked_link_names`], carrying world-pose samples. The baked
+/// writer authors no reference arc, no joint prims and no `JointStateAPI`,
+/// and its poses are already link frames in botrail axes — so `k_inv` is
+/// identity and there is no source stage to consult.
+pub(crate) fn baked_robot_stage_info_on(
+    opened: &OpenedStage,
+    stage_root: &str,
+    model: &RobotModel,
+) -> Result<RobotStageInfo, UsdExportError> {
+    let mut links = Vec::with_capacity(model.links.len());
+    for name in baked_link_names(model) {
+        let stage_path = format!("{stage_root}/{name}");
+        if !opened.has_prim(&stage_path) {
+            return Err(UsdExportError::RobotStage(format!(
+                "baked link `{stage_path}` has no prim in `{}` — was this recording exported \
+                 from the same cell?",
+                opened.path
+            )));
+        }
+        links.push(LinkStageInfo {
+            rel_path: name,
+            stage_path,
+            k_inv: Isometry3::identity(),
+            parent: ParentAnchor::Root {
+                offset: Isometry3::identity(),
+            },
+        });
+    }
+    Ok(RobotStageInfo {
+        frame: opened.frame,
+        root_path: stage_root.to_string(),
+        links,
+    })
+}
+
+/// [`find_robot_root`] for baked robots: the unique prim owning a child
+/// prim for every baked link name.
+pub(crate) fn find_baked_robot_root(
+    opened: &OpenedStage,
+    model: &RobotModel,
+) -> Result<String, UsdExportError> {
+    let names = baked_link_names(model);
+    let all_present = |root: &str| {
+        names
+            .iter()
+            .all(|n| opened.prims.contains_key(format!("{root}/{n}").as_str()))
+    };
+    let mut candidates: Vec<String> = opened
+        .prims
+        .keys()
+        .filter(|p| p.as_str() != "/" && all_present(p))
+        .cloned()
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => Err(UsdExportError::RobotStage(format!(
+            "no prim in `{}` carries this robot's baked links (looked for `{}` and its \
+             siblings under one prim)",
+            opened.path, names[model.root_link]
+        ))),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(UsdExportError::RobotStage(format!(
+            "multiple prims in `{}` match this robot's baked links: {}",
             opened.path,
             candidates.join(", ")
         ))),
@@ -1412,6 +1513,31 @@ fn author_geometry(
             layer.xform(prim, pose, None);
         }
     }
+    // A mesh that carried its own materials paints per face — that is the
+    // manufacturer's own coloring, and one flat color over the top would
+    // throw it away. An explicit `color` still wins: it is a choice the
+    // scene made (authored scenery, a highlight), which the mesh cannot
+    // know about.
+    if color.is_none() {
+        if let Geometry::Mesh { path, .. } = geometry {
+            if let Some(colors) = mesh_face_colors(path) {
+                // One color per face: `uniform` is metadata on the primvar,
+                // not a sibling property — without it a reader takes the
+                // array as `constant` and the whole mesh goes one color.
+                layer.attr_meta(
+                    prim,
+                    "primvars:displayColor",
+                    "color3f[]",
+                    AttrValue::Default(Value::Vec3fVec(colors)),
+                    &[(
+                        "interpolation",
+                        Value::Token(tf::Token::from("uniform")),
+                    )],
+                );
+                return Ok(());
+            }
+        }
+    }
     let [r, g, b] = color.unwrap_or(ENV_COLOR);
     layer.attr(
         prim,
@@ -1420,6 +1546,22 @@ fn author_geometry(
         AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(r, g, b)])),
     );
     Ok(())
+}
+
+/// Per-face diffuse of a mesh file, when it carried materials. Re-reads the
+/// file rather than threading colors through every caller; loads are
+/// cached upstream and this runs once per authored prim.
+fn mesh_face_colors(path: &std::path::Path) -> Option<Vec<gf::Vec3f>> {
+    let data = botrail_mesh::load_path(path).ok()?;
+    if data.face_colors.is_empty() {
+        return None;
+    }
+    Some(
+        data.face_colors
+            .iter()
+            .map(|c| gf::vec3f(c[0], c[1], c[2]))
+            .collect(),
+    )
 }
 
 fn unique_child(used: &mut HashMap<String, usize>, name: &str) -> String {
@@ -1847,6 +1989,67 @@ mod tests {
     #[test]
     fn yup_cm_reference_roundtrip() {
         reference_roundtrip(&arm_yup_cm(), "yup");
+    }
+
+    /// An OBJ that names an `mtllib` exports its own colors, one per face,
+    /// so a viewer with no botrail in sight shows the machine as its
+    /// manufacturer painted it. Without the `uniform` interpolation the
+    /// array reads as `constant` and the mesh goes one flat color.
+    #[test]
+    fn obj_material_colors_export_per_face() {
+        let dir = temp_dir("mtl");
+        std::fs::write(
+            dir.join("part.mtl"),
+            "newmtl yellow\nKd 1 1 0\nnewmtl grey\nKd 0.5 0.5 0.5\n",
+        )
+        .unwrap();
+        let obj = dir.join("part.obj");
+        std::fs::write(
+            &obj,
+            "mtllib part.mtl\n\
+             v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n\
+             usemtl yellow\nf 1 2 3\n\
+             usemtl grey\nf 1 3 4\n",
+        )
+        .unwrap();
+        let urdf = format!(
+            r#"<robot name="r">
+              <link name="base_link">
+                <visual><geometry><mesh filename="{}"/></geometry></visual>
+              </link>
+            </robot>"#,
+            obj.display()
+        );
+        let model = RobotModel::from_urdf_str(&urdf).unwrap();
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &[vec![Isometry3::identity()]],
+            joint_samples: None,
+        }];
+        let out = dir.join("anim.usda");
+        write_animation(
+            &out,
+            &AnimationInput {
+                robots: &robots,
+                times: &[0.0],
+                objects: &[],
+            },
+            &ExportOptions::default(),
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&out).unwrap();
+        let color = text
+            .lines()
+            .find(|l| l.contains("primvars:displayColor"))
+            .expect("displayColor authored");
+        assert!(color.contains("(1.0, 1.0, 0.0)"), "{color}");
+        assert!(color.contains("(0.5, 0.5, 0.5)"), "{color}");
+        assert!(
+            text.contains(r#"interpolation = "uniform""#),
+            "per-face colors need uniform interpolation"
+        );
     }
 
     #[test]

@@ -38,23 +38,31 @@ struct IndexEntry {
     usd: Option<String>,
 }
 
-pub fn from_catalog(
+/// The catalog package directory for `query`, downloaded whole.
+///
+/// Not every catalog package is a robot. A body-in-white is a pile of
+/// collision meshes that a cell loads as obstacles, and a fixture is a
+/// mesh plus a frame — both want the package on disk, not a `RobotModel`.
+/// Returning the directory keeps those callers off `huggingface_hub`
+/// internals and, more to the point, off a hand-written snapshot path
+/// that silently stops matching when the dataset moves.
+#[pyfunction]
+#[pyo3(signature = (id, *, revision=None))]
+pub fn catalog_package(py: Python<'_>, id: &str, revision: Option<&str>) -> PyResult<String> {
+    let (snapshot, entry, _sha) = download_package(py, id, revision)?;
+    Ok(snapshot.join(&entry.id).to_string_lossy().into_owned())
+}
+
+/// Resolve `query` to a package and fetch the whole thing, returning the
+/// snapshot root (package paths in the index are repo-relative to it).
+fn download_package(
     py: Python<'_>,
     query: &str,
     revision: Option<&str>,
-    format: Option<&str>,
-) -> PyResult<RobotModel> {
-    match format {
-        None | Some("urdf") | Some("usd") => {}
-        Some(other) => {
-            return Err(err(format!(
-                "unknown format `{other}`; pass \"urdf\", \"usd\", or omit it"
-            )))
-        }
-    }
+) -> PyResult<(PathBuf, IndexEntry, String)> {
     let hub = py.import("huggingface_hub").map_err(|_| {
         err(
-            "Robot.from_catalog needs the optional dependency `huggingface_hub` — install it \
+            "the catalog needs the optional dependency `huggingface_hub` — install it \
              with `pip install botrail[catalog]`"
                 .to_string(),
         )
@@ -91,7 +99,25 @@ pub fn from_catalog(
         .call_method("snapshot_download", (REPO_ID,), Some(&kwargs))
         .map_err(|e| err(format!("catalog download failed for `{}`: {e}", entry.id)))?
         .extract()?;
-    let package_dir = Path::new(&snapshot).join(&entry.id);
+    Ok((PathBuf::from(snapshot), entry, sha))
+}
+
+pub fn from_catalog(
+    py: Python<'_>,
+    query: &str,
+    revision: Option<&str>,
+    format: Option<&str>,
+) -> PyResult<RobotModel> {
+    match format {
+        None | Some("urdf") | Some("usd") => {}
+        Some(other) => {
+            return Err(err(format!(
+                "unknown format `{other}`; pass \"urdf\", \"usd\", or omit it"
+            )))
+        }
+    }
+    let (snapshot, entry, sha) = download_package(py, query, revision)?;
+    let package_dir = snapshot.join(&entry.id);
 
     let manifest = read_manifest(py, &package_dir)?;
 
@@ -114,7 +140,7 @@ pub fn from_catalog(
         )));
     };
     // Index asset paths are repo-relative (`<id>/<rel>`).
-    let model_path = Path::new(&snapshot).join(&rel);
+    let model_path = snapshot.join(&rel);
 
     let mut model = if is_usd {
         let imported =
@@ -229,12 +255,24 @@ fn resolve_entry(
         }
         want.peek().is_none()
     };
-    let matches: Vec<usize> = entries
+    let mut matches: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| is_subsequence(&e.id))
         .map(|(i, _)| i)
         .collect();
+    // Several matches that differ only in the trailing revision segment are
+    // one product, re-cut: `.../r2000ic-165f/r1` and `.../r2` are the same
+    // machine from a better source. Take the newest rather than making
+    // every catalog revision a breaking change for anyone naming the
+    // product by its short name. This does not loosen reproducibility —
+    // the resolved id and the dataset SHA are what projects and generated
+    // scripts record, so a replay stays on the revision it resolved to.
+    if matches.len() > 1 {
+        if let Some(newest) = newest_revision(&entries, &matches) {
+            matches = vec![newest];
+        }
+    }
     match matches.as_slice() {
         [one] => Ok(entries.into_iter().nth(*one).expect("index is valid")),
         [] => Err(err(format!(
@@ -253,6 +291,31 @@ fn resolve_entry(
                 .join(", ")
         ))),
     }
+}
+
+/// The highest-revision entry when `matches` are revisions of one product —
+/// identical ids but for a trailing `r<N>` segment. `None` when they are
+/// genuinely different products (or carry a revision this cannot order),
+/// which stays an ambiguity for the caller to resolve.
+fn newest_revision(entries: &[IndexEntry], matches: &[usize]) -> Option<usize> {
+    let split = |i: usize| -> Option<(&str, u32)> {
+        let id = entries[i].id.as_str();
+        let (product, rev) = id.rsplit_once('/')?;
+        let n = rev.strip_prefix('r')?.parse::<u32>().ok()?;
+        Some((product, n))
+    };
+    let (product, _) = split(matches[0])?;
+    let mut best = (0u32, matches[0]);
+    for &i in matches {
+        let (p, n) = split(i)?;
+        if p != product {
+            return None;
+        }
+        if n > best.0 {
+            best = (n, i);
+        }
+    }
+    Some(best.1)
 }
 
 /// What loading needs from `manifest.yaml`. Parsed with Python's `yaml`

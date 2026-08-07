@@ -11,6 +11,13 @@
 //!    become per-link pose tracks, the constraint-agnostic view of the
 //!    recording (clients replay them with `setLinkTransforms`).
 //!
+//! The writer also has two shapes of robot, and the reader follows: a
+//! USD-sourced robot is a `references` arc plus `over`s, addressed by prim
+//! path (either tier applies); a *baked* robot (URDF or composite source)
+//! is one flat `def Xform` per sanitized link name with world poses and no
+//! joint prims — those robots resolve by that naming and always play as
+//! transforms.
+//!
 //! Sampling walks the recording's own integer time codes (recorders author
 //! per frame), so no interpolation semantics leak in. Each robot may live
 //! at any prim path — `/World/<instance>` in a botrail export, the robot
@@ -22,14 +29,15 @@ use std::path::{Path, PathBuf};
 
 use botrail_kin::forward_kinematics_with_base;
 use botrail_model::{JointType, RobotModel};
-use nalgebra::{Isometry3, Translation3};
+use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 use openusd::schemas::geom::Xformable;
 use openusd::usd::{Prim, SchemaBase, Stage, TimeCode};
 use openusd::{gf, sdf};
 
 use crate::export::{
-    find_robot_root, open_stage_prims, remap_model_path, robot_stage_info_on, sanitize_name,
-    stage_frame_metadata, RobotStageInfo,
+    baked_robot_stage_info_on, find_baked_robot_root, find_robot_root, open_stage_prims,
+    remap_model_path, robot_stage_info_on, sanitize_name, stage_frame_metadata, OpenedStage,
+    RobotStageInfo, UsdExportError,
 };
 use crate::{decompose_matrix, AnyPrim, UsdImportError};
 
@@ -85,11 +93,14 @@ pub struct ImportedRecording {
 struct RobotResolution {
     name: String,
     info: RobotStageInfo,
-    robot_up_fix: nalgebra::UnitQuaternion<f64>,
+    robot_up_fix: UnitQuaternion<f64>,
     /// Range of this robot's links inside the tracked-path table.
     start: usize,
-    stage_root: String,
-    model_root: String,
+    /// `(stage_root, model_root)` when the robot replays against its
+    /// source stage — prim-path naming, `JointStateAPI` eligible. Baked
+    /// robots (URDF or composite sources) carry `None`: flat sanitized
+    /// link names, transform playback only.
+    referenced: Option<(String, String)>,
 }
 
 /// Reads a recording composed at `path` against the given robot models —
@@ -125,62 +136,64 @@ pub fn import_recording(
     let mut resolutions: Vec<RobotResolution> = Vec::with_capacity(robots.len());
     let mut tracked_paths: Vec<String> = Vec::new();
     for (name, model) in robots {
-        let (robot_stage_path, model_root) = match model.source.usd_stage() {
-            Some((path, articulation_root)) => (path.to_path_buf(), articulation_root.to_string()),
-            None => {
-                return Err(UsdImportError::Recording(format!(
-                    "recordings replay USD-sourced robots; `{name}` came from URDF"
-                )))
-            }
-        };
-        let stage_root = match options.robot_roots.iter().find(|(n, _)| n == name) {
-            Some((_, root)) => {
-                if !opened.has_prim(root) {
-                    return Err(UsdImportError::Recording(format!(
-                        "robot root `{root}` (for `{name}`) not found in the recording"
-                    )));
-                }
-                root.clone()
-            }
-            None => {
-                let conventional = format!("/World/{}", sanitize_name(name));
-                if opened.has_prim(&conventional) {
-                    conventional
-                } else if robots.len() == 1 {
-                    find_robot_root(&opened, &model_root, model).map_err(recording)?
-                } else {
-                    return Err(UsdImportError::Recording(format!(
-                        "cannot locate robot `{name}` in the recording (no `{conventional}`); \
-                         pass robot_roots with its prim path"
-                    )));
-                }
-            }
-        };
-        // The recording composes the robot subtree through whatever
-        // corrective transform it likes, so a scaled robot legitimately
-        // shows "non-rigid" here — the chain scale is handled below; drop
-        // that noise.
-        let mut info_warnings = Vec::new();
-        let info =
-            robot_stage_info_on(&opened, &stage_root, &model_root, model, &mut info_warnings)
+        let sole = robots.len() == 1;
+        let (info, robot_up_fix, referenced) = match model.source.usd_stage() {
+            Some((robot_stage_path, articulation_root)) => {
+                let robot_stage_path = robot_stage_path.to_path_buf();
+                let model_root = articulation_root.to_string();
+                let stage_root = resolve_stage_root(&opened, &options, name, sole, || {
+                    find_robot_root(&opened, &model_root, model)
+                })?;
+                // The recording composes the robot subtree through whatever
+                // corrective transform it likes, so a scaled robot
+                // legitimately shows "non-rigid" here — the chain scale is
+                // handled below; drop that noise.
+                let mut info_warnings = Vec::new();
+                let info = robot_stage_info_on(
+                    &opened,
+                    &stage_root,
+                    &model_root,
+                    model,
+                    &mut info_warnings,
+                )
                 .map_err(recording)?;
-        warnings.extend(
-            info_warnings
-                .into_iter()
-                .filter(|w| !w.contains("non-rigid")),
-        );
+                warnings.extend(
+                    info_warnings
+                        .into_iter()
+                        .filter(|w| !w.contains("non-rigid")),
+                );
 
-        // Botrail link axes were fixed at robot-import time by the *robot
-        // stage's* up axis: raw body axes relabel to botrail by its `F`, no
-        // matter how the recording embeds the subtree. Peel it off on the
-        // right.
-        let robot_up_fix = match stage_frame_metadata(&robot_stage_path, &options.search_paths) {
-            Ok(f) => f.up_fix,
-            Err(e) => {
-                warnings.push(format!(
-                    "robot stage unreadable ({e}); assuming its axes match the recording's"
-                ));
-                opened.frame.up_fix
+                // Botrail link axes were fixed at robot-import time by the
+                // *robot stage's* up axis: raw body axes relabel to botrail
+                // by its `F`, no matter how the recording embeds the
+                // subtree. Peel it off on the right.
+                let robot_up_fix =
+                    match stage_frame_metadata(&robot_stage_path, &options.search_paths) {
+                        Ok(f) => f.up_fix,
+                        Err(e) => {
+                            warnings.push(format!(
+                                "robot stage unreadable ({e}); assuming its axes match the \
+                                 recording's"
+                            ));
+                            opened.frame.up_fix
+                        }
+                    };
+                (info, robot_up_fix, Some((stage_root, model_root)))
+            }
+            None => {
+                // Baked robots (URDF or composite sources) have no stage to
+                // replay against: their exporter (`author_urdf_robot`)
+                // wrote one flat prim per link with world-pose samples in
+                // botrail axes, no joint prims, no `JointStateAPI`. Walk
+                // the same naming back; `K` and the robot-stage axis
+                // factor are both identity, and only the transform tier
+                // can apply.
+                let stage_root = resolve_stage_root(&opened, &options, name, sole, || {
+                    find_baked_robot_root(&opened, model)
+                })?;
+                let info =
+                    baked_robot_stage_info_on(&opened, &stage_root, model).map_err(recording)?;
+                (info, UnitQuaternion::identity(), None)
             }
         };
         let start = tracked_paths.len();
@@ -190,8 +203,7 @@ pub fn import_recording(
             info,
             robot_up_fix,
             start,
-            stage_root,
-            model_root,
+            referenced,
         });
     }
 
@@ -304,18 +316,19 @@ pub fn import_recording(
             .collect();
 
         // ---- tier 1: JointStateAPI --------------------------------------
-        let joint_samples = if options.force_transforms {
-            None
-        } else {
-            read_joint_states(
+        // Only referenced robots can carry it; a baked export never
+        // authors joint prims, so those go straight to the transform tier.
+        let joint_samples = match (&res.referenced, options.force_transforms) {
+            (Some((stage_root, model_root)), false) => read_joint_states(
                 stage,
                 model,
                 info,
-                &res.stage_root,
-                &res.model_root,
+                stage_root,
+                model_root,
                 &codes,
                 &mut warnings,
-            )
+            ),
+            _ => None,
         };
         let mode = if joint_samples.is_some() {
             RecordingMode::JointState
@@ -364,6 +377,38 @@ pub fn import_recording(
         object_tracks,
         warnings,
     })
+}
+
+/// Where a robot lives in the recording: an explicit
+/// [`RecordingImportOptions::robot_roots`] entry, else the export
+/// convention `/World/<sanitized name>`, else (sole robot only) the given
+/// structural search.
+fn resolve_stage_root(
+    opened: &OpenedStage,
+    options: &RecordingImportOptions,
+    name: &str,
+    sole: bool,
+    search: impl FnOnce() -> Result<String, UsdExportError>,
+) -> Result<String, UsdImportError> {
+    if let Some((_, root)) = options.robot_roots.iter().find(|(n, _)| n == name) {
+        if !opened.has_prim(root) {
+            return Err(UsdImportError::Recording(format!(
+                "robot root `{root}` (for `{name}`) not found in the recording"
+            )));
+        }
+        return Ok(root.clone());
+    }
+    let conventional = format!("/World/{}", sanitize_name(name));
+    if opened.has_prim(&conventional) {
+        Ok(conventional)
+    } else if sole {
+        search().map_err(|e| UsdImportError::Recording(e.to_string()))
+    } else {
+        Err(UsdImportError::Recording(format!(
+            "cannot locate robot `{name}` in the recording (no `{conventional}`); pass \
+             robot_roots with its prim path"
+        )))
+    }
 }
 
 /// The exporter's `/World/Env` prim path for an obstacle name.
@@ -606,8 +651,35 @@ mod tests {
             },
         )
         .unwrap();
-        let model = imported.model;
+        write_fixture(imported.model, dir)
+    }
 
+    /// The same recording baked from a URDF arm — a robot with no USD
+    /// stage behind it, exported the flat per-link way.
+    fn baked_fixture(tag: &str) -> Fixture {
+        let model = RobotModel::from_urdf_str(TEST_URDF_ARM).unwrap();
+        write_fixture(model, temp_dir(tag))
+    }
+
+    const TEST_URDF_ARM: &str = r#"
+        <robot name="baked_arm">
+          <link name="base_link"/>
+          <link name="upper"/>
+          <link name="tip"/>
+          <joint name="j1" type="revolute">
+            <parent link="base_link"/><child link="upper"/>
+            <origin xyz="0 0 0.2"/><axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="10" velocity="1"/>
+          </joint>
+          <joint name="j2" type="prismatic">
+            <parent link="upper"/><child link="tip"/>
+            <origin xyz="0.1 0 0.1"/><axis xyz="1 0 0"/>
+            <limit lower="-0.5" upper="1.5" effort="10" velocity="1"/>
+          </joint>
+        </robot>
+    "#;
+
+    fn write_fixture(model: RobotModel, dir: PathBuf) -> Fixture {
         let base = Isometry3::from_parts(
             Translation3::new(0.3, -0.2, 0.1),
             UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.4),
@@ -751,6 +823,45 @@ mod tests {
         assert_eq!(rec.robots[0].mode, RecordingMode::Transforms);
         assert!(rec.robots[0].joint_samples.is_none());
         check_link_poses(&fx, &rec, 1e-6, "transforms");
+    }
+
+    #[test]
+    fn baked_roundtrip() {
+        // A URDF-sourced robot has no stage to reference, so its export is
+        // the flat baked shape — and it replays: resolved by the writer's
+        // link naming, transform tier only, poses landing back exactly.
+        let fx = baked_fixture("baked");
+        let rec = import_recording(
+            &fx.anim,
+            &[("Robot".to_string(), &fx.model)],
+            &["box".into(), "table".into()],
+            &RecordingImportOptions::default(),
+        )
+        .unwrap();
+        assert!(rec.warnings.is_empty(), "{:?}", rec.warnings);
+        assert_eq!(rec.robots[0].mode, RecordingMode::Transforms);
+        assert!(rec.robots[0].joint_samples.is_none());
+        check_link_poses(&fx, &rec, 1e-6, "baked");
+        assert_eq!(rec.object_tracks.len(), 1);
+        assert_eq!(rec.object_tracks[0].0, "box");
+    }
+
+    #[test]
+    fn baked_sole_robot_is_found_structurally() {
+        // The cell was rebuilt under another instance name: there is no
+        // `/World/renamed` prim, but a sole robot still resolves by its
+        // baked link naming — the flat-shape mirror of the referenced
+        // path's link-tree search.
+        let fx = baked_fixture("baked-renamed");
+        let rec = import_recording(
+            &fx.anim,
+            &[("renamed".to_string(), &fx.model)],
+            &[],
+            &RecordingImportOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(rec.robots[0].mode, RecordingMode::Transforms);
+        check_link_poses(&fx, &rec, 1e-6, "renamed");
     }
 
     /// Identical twins in one recording: the structural search cannot tell

@@ -90,13 +90,20 @@ def test_play_recording_joint_and_transform_modes(scene: bt.Scene, tmp_path: Pat
     assert forced["duration"] == pytest.approx(res["duration"])
 
 
-def test_play_recording_rejects_urdf_robot(tmp_path: Path) -> None:
+def test_urdf_robots_replay_as_transforms(tmp_path: Path) -> None:
+    """A URDF (or `attach_tool` composite) robot has no stage to reference,
+    so its export bakes per-link world poses — and that replays: the
+    importer resolves the writer's flat link naming and plays the
+    transform tier. There are no joint tracks to recover, and none are
+    needed."""
     scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
     traj = scene.plan([0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
     out = tmp_path / "rec.usda"
-    scene.export_usd(traj, out)
-    with pytest.raises(ValueError, match="USD-sourced"):
-        scene.play_usd_animation(out)
+    assert scene.export_usd(traj, out, fps=30.0) == []
+    res = scene.play_usd_animation(out)
+    assert res["mode"] == "transforms"
+    assert res["warnings"] == []
+    assert res["duration"] == pytest.approx(traj.times[-1], abs=1 / 30 + 1e-6)
 
 
 def test_play_recording_missing_file(scene: bt.Scene, tmp_path: Path) -> None:

@@ -219,14 +219,48 @@ pub struct ObstacleMsg {
     /// Disabled obstacles render but are excluded from collision checking.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Invisible obstacles still collide; they are simply not drawn. Files
+    /// written before this existed have every obstacle visible, which is
+    /// what they meant.
+    #[serde(default = "default_true")]
+    pub visible: bool,
     /// Display colour, linear RGB, from the scene file's
     /// `primvars:displayColor`. Absent means "no authored appearance": the
     /// studio then draws the obstacle as a neutral collision proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
+    /// How the surface takes light. Absent means "no authored appearance",
+    /// same as `color`: the studio picks. Projects written before this
+    /// existed simply have no material, which is the same thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<MaterialMsg>,
     /// Present while the obstacle is attached to (grasped by) a robot link.
     #[serde(default)]
     pub attached_to: Option<AttachmentMsg>,
+}
+
+/// Metalness/roughness, the pair every viewer botrail hands a scene to
+/// already speaks (glTF, USD Preview Surface, three.js).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct MaterialMsg {
+    pub metalness: f32,
+    pub roughness: f32,
+}
+
+impl From<crate::Material> for MaterialMsg {
+    fn from(m: crate::Material) -> Self {
+        MaterialMsg {
+            metalness: m.metalness,
+            roughness: m.roughness,
+        }
+    }
+}
+
+impl From<MaterialMsg> for crate::Material {
+    fn from(m: MaterialMsg) -> Self {
+        crate::Material::new(m.metalness, m.roughness)
+    }
 }
 
 fn default_true() -> bool {
@@ -1650,7 +1684,9 @@ pub fn obstacles_message(
                 geometry: geometry_msg(&o.geometry, &mut mesh_url),
                 pose: PoseMsg::from(&o.pose),
                 enabled: o.enabled,
+                visible: o.visible,
                 color: o.color,
+                material: o.material.map(Into::into),
                 attached_to: scene.attachment(&o.name).map(|a| attachment_msg(scene, a)),
             })
             .collect(),

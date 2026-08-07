@@ -86,12 +86,23 @@ The demo script picks the right cell automatically by sniffing which instance
 prims the recording animates:
 
 ```python
---8<-- "examples/play_record.py:47:54"
+--8<-- "examples/play_record.py:40:53"
 ```
 
 A recording baked before a layout change still plays — the new scenery just
 stays static, and the import says so once per prim rather than flooding the
 console. When the warnings pile up, re-bake.
+
+How the robot plays depends on where it came from. A USD-sourced robot shares
+a stage with its recording, so playback recovers q(t) from the recorded joint
+states (`joint_state` mode). A robot built from URDF or by
+[`attach_tool`][botrail.Robot.attach_tool] — the welding cell's arm-plus-gun,
+say — has no single stage behind it, so its export bakes per-link world poses
+instead, and playback follows those directly (`transforms` mode). Both kinds
+of recording also stand alone: open one in `usdview` and it plays with no
+botrail installed. What playing it into the live cell adds is the studio
+around it — the timeline dock, scrubbing, and the scene's own obstacles
+following their recorded tracks.
 
 ```bash
 python examples/sequence_demo.py          # bake cell_seq.usda

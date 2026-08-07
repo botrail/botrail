@@ -3,7 +3,7 @@ import { Edges, TransformControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
-import type { GeometryMsg, ObstacleMsg, PoseMsg } from "../protocol";
+import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 import { COLLISION_COLOR } from "../three/palette";
@@ -51,7 +51,11 @@ export function ObstacleView() {
   return (
     <>
       {obstacles
-        .filter((o) => !hiddenObstacles.has(o.name) && !stowed.has(o.name))
+        // `o.visible` is the scene's own answer (a collision proxy the
+        // author never meant to draw); the other two are this viewer's.
+        .filter(
+          (o) => o.visible && !hiddenObstacles.has(o.name) && !stowed.has(o.name),
+        )
         .map((o) => (
         <ObstacleNode
           key={o.name}
@@ -261,6 +265,11 @@ function ObstacleNode({
   // obstacle with no authored colour is a bare collision proxy, so it keeps
   // the translucent look that lets you see the robot through it.
   const tint = useMemo(() => authoredColor(obstacle), [obstacle]);
+  // "Styled at all" is what separates scenery from a bare collision proxy —
+  // a material counts as much as a colour. Without this, authoring only a
+  // material leaves the object see-through and casting no shadow, which is
+  // the opposite of what saying "this is brushed steel" meant.
+  const styled = tint !== null || obstacle.material != null;
   const color = colliding ? new THREE.Color(COLLISION_COLOR) : (tint ?? new THREE.Color(NEUTRAL_COLOR));
 
   return (
@@ -269,7 +278,12 @@ function ObstacleNode({
         <ObstacleGeometry
           geometry={obstacle.geometry}
           color={color}
-          solid={tint !== null}
+          // An authored color and a collision highlight both mean
+          // something the mesh's own materials cannot say, so they paint
+          // over it; the bare neutral does not.
+          forceColor={colliding || tint !== null}
+          material={obstacle.material}
+          solid={styled}
           selected={selected}
           onSelect={onSelect}
           onDown={(e) => {
@@ -298,6 +312,8 @@ function ObstacleNode({
 function ObstacleGeometry({
   geometry,
   color,
+  forceColor,
+  material,
   solid,
   selected,
   onSelect,
@@ -305,6 +321,8 @@ function ObstacleGeometry({
 }: {
   geometry: GeometryMsg;
   color: THREE.Color;
+  forceColor: boolean;
+  material?: MaterialMsg | null;
   solid: boolean;
   selected: boolean;
   onSelect: (e: ThreeEvent<MouseEvent>) => void;
@@ -330,7 +348,7 @@ function ObstacleGeometry({
       return (
         <mesh {...pick}>
           <boxGeometry args={geometry.size} />
-          <ObstacleMaterial color={color} solid={solid} />
+          <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
       );
@@ -342,7 +360,7 @@ function ObstacleGeometry({
           <cylinderGeometry
             args={[geometry.radius, geometry.radius, geometry.length, 32]}
           />
-          <ObstacleMaterial color={color} solid={solid} />
+          <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
       );
@@ -350,7 +368,7 @@ function ObstacleGeometry({
       return (
         <mesh {...pick}>
           <sphereGeometry args={[geometry.radius, 32, 24]} />
-          <ObstacleMaterial color={color} solid={solid} />
+          <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
       );
@@ -359,7 +377,11 @@ function ObstacleGeometry({
       if (!geometry.url) return null;
       return (
         <group {...pick}>
-          <MeshVisual geometry={geometry} color={`#${color.getHexString()}`} />
+          <MeshVisual
+            geometry={geometry}
+            color={`#${color.getHexString()}`}
+            forceColor={forceColor}
+          />
         </group>
       );
     default:
@@ -367,12 +389,22 @@ function ObstacleGeometry({
   }
 }
 
-function ObstacleMaterial({ color, solid }: { color: THREE.Color; solid: boolean }) {
+function ObstacleMaterial({
+  color,
+  solid,
+  material,
+}: {
+  color: THREE.Color;
+  solid: boolean;
+  material?: MaterialMsg | null;
+}) {
+  // An authored material says how the surface takes light; without one the
+  // studio picks, and a bare collision proxy stays see-through.
   return (
     <meshStandardMaterial
       color={color}
-      roughness={solid ? 0.8 : 0.7}
-      metalness={0.05}
+      roughness={material ? material.roughness : solid ? 0.8 : 0.7}
+      metalness={material ? material.metalness : 0.05}
       transparent={!solid}
       opacity={solid ? 1 : 0.85}
     />

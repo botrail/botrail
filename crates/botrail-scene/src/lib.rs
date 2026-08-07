@@ -77,10 +77,41 @@ pub struct Obstacle {
     /// Disabled obstacles keep their geometry but are excluded from
     /// collision checking (and therefore from planning validity).
     pub enabled: bool,
+    /// Invisible obstacles still collide; they are simply not drawn. The
+    /// mirror of `enabled`, and what lets a workpiece ship a display mesh
+    /// alongside the convex pieces that actually do the colliding —
+    /// without the pieces sitting on top of the shell.
+    pub visible: bool,
     /// Display colour, linear RGB — the authored `primvars:displayColor` for
     /// imported scenery. `None` leaves the shading to the viewer, which is
     /// what a bare `add_box` gets. Never affects collision or planning.
     pub color: Option<[f32; 3]>,
+    /// How the surface takes light. `None` leaves it to the viewer, same as
+    /// `color`. Never affects collision or planning.
+    pub material: Option<Material>,
+}
+
+/// The two PBR knobs that decide whether a surface reads as bare steel, a
+/// painted panel or a concrete floor. Both are 0..1, and both mean what
+/// they mean in glTF, USD Preview Surface and three.js alike — which is
+/// why these two and not a bigger model: they are the pair every viewer
+/// botrail hands a scene to already understands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Material {
+    /// 0 for dielectrics (paint, concrete, plastic), 1 for bare metal.
+    pub metalness: f32,
+    /// 0 mirror, 1 fully diffuse.
+    pub roughness: f32,
+}
+
+impl Material {
+    /// Clamps both knobs into 0..1, which is what every consumer assumes.
+    pub fn new(metalness: f32, roughness: f32) -> Material {
+        Material {
+            metalness: metalness.clamp(0.0, 1.0),
+            roughness: roughness.clamp(0.0, 1.0),
+        }
+    }
 }
 
 /// One obstacle in an [`Scene::add_obstacles`] batch.
@@ -90,6 +121,7 @@ pub struct ObstacleSpec {
     pub geometry: Geometry,
     pub pose: Isometry3<f64>,
     pub color: Option<[f32; 3]>,
+    pub material: Option<Material>,
 }
 
 /// A named world-frame pose — a mount point / teach reference, typically
@@ -564,7 +596,9 @@ impl Scene {
             geometry,
             pose,
             enabled: true,
+            visible: true,
             color: None,
+            material: None,
         });
         self.obstacle_colliders.push(collider);
         Ok(name)
@@ -588,7 +622,9 @@ impl Scene {
                 geometry: spec.geometry,
                 pose: spec.pose,
                 enabled: true,
+                visible: true,
                 color: spec.color,
+                material: spec.material,
             });
             self.obstacle_colliders.push(collider);
             names.push(name);
@@ -612,7 +648,9 @@ impl Scene {
             geometry,
             pose,
             enabled: true,
+            visible: true,
             color: None,
+            material: None,
         });
         self.obstacle_colliders.push(collider);
         name
@@ -661,6 +699,22 @@ impl Scene {
     ) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].color = color;
+        Ok(())
+    }
+
+    pub fn set_obstacle_visible(&mut self, name: &str, visible: bool) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].visible = visible;
+        Ok(())
+    }
+
+    pub fn set_obstacle_material(
+        &mut self,
+        name: &str,
+        material: Option<Material>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].material = material;
         Ok(())
     }
 
@@ -809,6 +863,16 @@ impl Scene {
                 self.obstacles[i].pose = poses[att.robot][att.link] * att.grasp;
             }
         }
+    }
+
+    /// World-frame axis-aligned bounds of one obstacle, as `(min, max)`.
+    ///
+    /// What a cell needs to seat a workpiece on a fixture without writing
+    /// down a number measured from one revision of the mesh — ask the
+    /// geometry where its underside is and lift it to the pallet.
+    pub fn obstacle_bounds(&self, name: &str) -> Option<([f64; 3], [f64; 3])> {
+        let i = self.obstacles.iter().position(|o| o.name == name)?;
+        self.obstacle_colliders[i].aabb(&self.obstacles[i].pose)
     }
 
     // ------------------------------------------------------------ collision

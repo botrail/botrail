@@ -1061,6 +1061,7 @@ impl RobotBuilder<'_> {
                         })
                         .collect(),
                     indices: data.indices,
+                    face_colors: Vec::new(),
                 };
                 Geometry::Mesh {
                     path: if self.meshes_in_memory {

@@ -9,9 +9,14 @@ type MeshGeometry = Extract<GeometryMsg, { kind: "mesh" }>;
 export function MeshVisual({
   geometry,
   color,
+  forceColor = false,
 }: {
   geometry: MeshGeometry;
   color: string;
+  /** Paint `color` over the mesh's own materials. Set when the color
+   * carries meaning the mesh cannot — a collision highlight, or a color
+   * the scene author chose. */
+  forceColor?: boolean;
 }) {
   const [loaded, setLoaded] = useState<LoadedMesh | null>(null);
 
@@ -26,10 +31,12 @@ export function MeshVisual({
   }, [geometry.url, geometry.ext]);
 
   // OBJ files parse to an Object3D that can only live at one place in the
-  // graph, so clone per instance and stamp our material onto its meshes.
+  // graph, so clone per instance. A mesh that brought its own materials
+  // keeps them; otherwise stamp the link color onto it.
   const objectClone = useMemo(() => {
     if (!loaded || loaded.kind !== "object") return null;
     const clone = loaded.object.clone(true);
+    if (loaded.shaded && !forceColor) return clone;
     const material = new THREE.MeshStandardMaterial({
       color: new THREE.Color(color),
       roughness: 0.85,
@@ -40,7 +47,7 @@ export function MeshVisual({
       if (mesh.isMesh) mesh.material = material;
     });
     return clone;
-  }, [loaded, color]);
+  }, [loaded, color, forceColor]);
 
   if (!loaded) return null;
 

@@ -122,6 +122,66 @@ def test_obstacle_colour_is_optional_and_settable(scene: bt.Scene) -> None:
         scene.obstacle_color("nope")
 
 
+def test_visibility_and_collision_are_separate_switches(scene: bt.Scene) -> None:
+    """`enabled` says whether it collides, `visible` whether it is drawn —
+    and they are independent. That is what lets a workpiece ship a display
+    shell alongside the convex pieces that do the colliding: the shell is
+    drawn and never collides, the pieces collide and are never drawn."""
+    scene.add_box("shell", (0.2, 0.2, 0.2), (0.6, 0.0, 0.1))
+    scene.add_box("proxy", (0.2, 0.2, 0.2), (0.6, 0.0, 0.1))
+    scene.set_obstacle_enabled("shell", False)
+    scene.set_obstacle_visible("proxy", False)
+
+    # Both are still obstacles; neither switch removes anything.
+    assert {"shell", "proxy"} <= set(scene.obstacle_names)
+
+    # Hiding does not stop it colliding: the proxy still guards the volume.
+    scene.set_obstacle_pose("proxy", (0.0, 0.0, 0.0))
+    assert scene.in_collision()
+    scene.set_obstacle_visible("proxy", True)
+    assert scene.in_collision()
+
+    with pytest.raises(ValueError):
+        scene.set_obstacle_visible("nope", False)
+
+
+def test_obstacle_material_is_optional_and_settable(scene: bt.Scene) -> None:
+    """Colour says what a surface is; the material says how it takes light.
+    They are separate — a bare steel panel and a painted one can share a
+    grey and still read differently."""
+    scene.add_box("panel", (0.1, 0.1, 0.1), (0.5, 0.0, 0.1))
+    assert scene.obstacle_material("panel") is None
+
+    scene.set_obstacle_material("panel", metalness=0.85, roughness=0.35)
+    assert scene.obstacle_material("panel") == pytest.approx((0.85, 0.35))
+
+    # Naming one knob leaves the other at the studio's own default rather
+    # than dropping it to zero, which would turn a panel into a mirror.
+    scene.set_obstacle_material("panel", roughness=0.9)
+    metalness, roughness = scene.obstacle_material("panel")
+    assert roughness == pytest.approx(0.9)
+    assert 0.0 < metalness < 0.2
+
+    # Out-of-range values are clamped, not rejected: every consumer assumes
+    # 0..1 and would render something arbitrary otherwise.
+    scene.set_obstacle_material("panel", metalness=4.0, roughness=-1.0)
+    assert scene.obstacle_material("panel") == pytest.approx((1.0, 0.0))
+
+    scene.set_obstacle_material("panel")
+    assert scene.obstacle_material("panel") is None
+
+    with pytest.raises(ValueError):
+        scene.set_obstacle_material("nope", metalness=0.5)
+
+
+def test_material_never_affects_collision(scene: bt.Scene) -> None:
+    scene.add_sphere("bearing", 0.05, (1.0, 0.0, 0.2))
+    before = scene.min_obstacle_distance()
+    scene.set_obstacle_material("bearing", metalness=1.0, roughness=0.05)
+    assert scene.min_obstacle_distance() == before
+    assert scene.check_collisions() == []
+
+
 def test_colour_never_affects_collision(scene: bt.Scene) -> None:
     scene.add_sphere("ball", 0.05, (1.0, 0.0, 0.2), color=(1.0, 0.0, 0.0))
     before = scene.min_obstacle_distance()

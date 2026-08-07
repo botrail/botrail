@@ -18,7 +18,10 @@ botrail installed: link motion as timeSamples, every obstacle as prims,
 grasped objects riding, releasing, resting exactly as simulated. USD-sourced
 robots **reference their original stage** at full visual fidelity (assets are
 copied to a sibling `<stem>_assets/` directory); URDF robots are authored from
-the model's visuals. A sole robot exports under the historical `Robot` prim;
+the model's visuals, and a visual whose OBJ names an `mtllib` keeps its
+authored colors — one `displayColor` per face, so a catalog arm looks like
+the machine rather than like a palette. A sole robot exports under the
+historical `Robot` prim;
 with several, each lands at `/World/<sanitized instance name>` — the
 convention playback relies on. Exporters return their warnings as a list.
 

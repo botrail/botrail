@@ -17,6 +17,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
+        .route("/meshes/{id}/{sibling}", get(mesh_sibling_handler))
         .route("/usd-assets/{robot}/{*rest}", get(asset_handler))
         .route("/api/scene", get(scene_handler))
         .route("/api/project", get(project_get).post(project_post))
@@ -92,6 +93,40 @@ async fn asset_handler(
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),
                 (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// A file beside a registered mesh: an OBJ's `mtllib` (and the textures a
+/// material names). Only the mesh's own directory is reachable, and only
+/// by a plain file name — `{id}` is what grants access, so nothing outside
+/// what the scene already references can be read.
+async fn mesh_sibling_handler(
+    Path((id, sibling)): Path<(usize, String)>,
+    State(hub): State<Arc<SceneHub>>,
+) -> Response {
+    let Some(path) = hub.mesh_path(id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if sibling.is_empty()
+        || sibling.contains('/')
+        || sibling.contains('\\')
+        || sibling.starts_with('.')
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(dir) = path.parent() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(dir.join(&sibling)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CACHE_CONTROL, "max-age=3600"),
             ],
             bytes,
         )

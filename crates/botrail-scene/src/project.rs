@@ -347,7 +347,9 @@ impl Scene {
                     geometry: geometry_msg(&o.geometry, &mut mesh_url),
                     pose: PoseMsg::from(&o.pose),
                     enabled: o.enabled,
+                    visible: o.visible,
                     color: o.color,
+                    material: o.material.map(Into::into),
                     attached_to: self
                         .attachment(&o.name)
                         .map(|a| crate::wire::attachment_msg(self, a)),
@@ -444,8 +446,10 @@ impl Scene {
                     geometry,
                     pose: (&o.pose).into(),
                     color: o.color,
+                    material: o.material.map(Into::into),
                 },
                 o.enabled,
+                o.visible,
             ));
         }
 
@@ -453,14 +457,20 @@ impl Scene {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (spec, enabled) in obstacles {
+        for (spec, enabled, visible) in obstacles {
             let final_name = self
                 .add_obstacle(&spec.name, spec.geometry, spec.pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
             self.set_obstacle_color(&final_name, spec.color)
                 .expect("obstacle was just added");
+            self.set_obstacle_material(&final_name, spec.material)
+                .expect("obstacle was just added");
             if !enabled {
                 self.set_obstacle_enabled(&final_name, false)
+                    .expect("obstacle was just added");
+            }
+            if !visible {
+                self.set_obstacle_visible(&final_name, false)
                     .expect("obstacle was just added");
             }
         }
@@ -696,6 +706,27 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 o.name,
                 py_tuple(scale)
             )),
+        }
+        // Switches and appearance are part of the scene, so a rebuild has
+        // to carry them: a script that comes back in bare grey, with every
+        // collision proxy on show, has not rebuilt the cell.
+        if !o.enabled {
+            out.push_str(&format!("scene.set_obstacle_enabled({:?}, False)\n", o.name));
+        }
+        if !o.visible {
+            out.push_str(&format!("scene.set_obstacle_visible({:?}, False)\n", o.name));
+        }
+        if let Some([r, g, b]) = o.color {
+            out.push_str(&format!(
+                "scene.set_obstacle_color({:?}, ({r}, {g}, {b}))\n",
+                o.name
+            ));
+        }
+        if let Some(m) = o.material {
+            out.push_str(&format!(
+                "scene.set_obstacle_material({:?}, metalness={}, roughness={})\n",
+                o.name, m.metalness, m.roughness
+            ));
         }
     }
     for frame in &project.frames {
@@ -1052,6 +1083,9 @@ mod tests {
             .set_obstacle_color("wall", Some([0.2, 0.4, 0.6]))
             .unwrap();
         scene
+            .set_obstacle_material("wall", Some(crate::Material::new(0.8, 0.3)))
+            .unwrap();
+        scene
             .set_joint_positions(vec![0.1, 0.2, -0.3, 0.0, 0.4, 0.0])
             .unwrap();
         scene
@@ -1095,6 +1129,12 @@ mod tests {
         assert_eq!(reloaded.obstacles().len(), 1);
         assert_eq!(reloaded.obstacles()[0].name, "wall");
         assert_eq!(reloaded.obstacles()[0].color, Some([0.2, 0.4, 0.6]));
+        // Appearance survives the round trip in both channels: a project
+        // that comes back grey and matte has not been reloaded.
+        assert_eq!(
+            reloaded.obstacles()[0].material,
+            Some(crate::Material::new(0.8, 0.3))
+        );
         assert_eq!(reloaded.motions().len(), 1);
         let motion = &reloaded.motions()[0];
         assert_eq!(motion.name, "main");
@@ -1385,6 +1425,10 @@ mod tests {
             "bt.Robot.from_urdf_string(URDF)",
             "base_position=(1.000000, 0.000000, 0.000000)",
             "scene.add_box(\"wall\"",
+            // Appearance is part of the recipe: a rebuild that loses it
+            // is not a rebuild.
+            "scene.set_obstacle_color(\"wall\", (0.2, 0.4, 0.6))",
+            "scene.set_obstacle_material(\"wall\", metalness=0.8, roughness=0.3)",
             "scene.set_joint_positions(",
             "scene.add_segment(\"main\"",
             "kind=\"cartesian_line\"",

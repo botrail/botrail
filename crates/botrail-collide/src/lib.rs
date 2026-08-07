@@ -179,6 +179,29 @@ impl ObstacleCollider {
         }
     }
 
+    /// World-frame axis-aligned bounds at `pose`, as `(min, max)`.
+    ///
+    /// Cheap: the parts are already built, so this reads the shapes rather
+    /// than reloading the mesh. `None` for a collider with no parts.
+    pub fn aabb(&self, pose: &Isometry3<f64>) -> Option<([f64; 3], [f64; 3])> {
+        use parry3d_f64::bounding_volume::BoundingVolume;
+        let world = convert::to_parry_pose(pose);
+        let mut merged: Option<parry3d_f64::bounding_volume::Aabb> = None;
+        for (offset, shape) in &self.parts {
+            let box_ = shape.compute_aabb(&(world * offset));
+            merged = Some(match merged {
+                Some(acc) => acc.merged(&box_),
+                None => box_,
+            });
+        }
+        merged.map(|a| {
+            (
+                [a.mins.x, a.mins.y, a.mins.z],
+                [a.maxs.x, a.maxs.y, a.maxs.z],
+            )
+        })
+    }
+
     /// A solid box (pseudo-sensor zones).
     pub fn cuboid(half_extents: nalgebra::Vector3<f64>) -> Self {
         Self::from_shape(SharedShape::cuboid(

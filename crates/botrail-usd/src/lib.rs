@@ -479,6 +479,7 @@ impl Importer<'_> {
                         })
                         .collect(),
                     indices: data.indices,
+                    face_colors: Vec::new(),
                 };
                 if self.meshes_in_memory {
                     self.out.nodes.push(ImportedNode {
@@ -696,7 +697,7 @@ pub(crate) fn triangulate(
     if indices.is_empty() {
         return Err("no triangles".to_string());
     }
-    Ok(MeshData { vertices, indices })
+    Ok(MeshData::new(vertices, indices))
 }
 
 pub(crate) fn default_mesh_cache_dir() -> PathBuf {

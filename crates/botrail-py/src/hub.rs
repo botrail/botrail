@@ -66,6 +66,10 @@ impl SessionHost for SceneHub {
         (format!("/meshes/{id}"), ext)
     }
 
+    fn has_listeners(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     fn emit(&self, msg: &ServerMessage) {
         // Send errors just mean no client is connected right now.
         let _ = self
@@ -321,8 +325,32 @@ impl SceneHub {
         botrail_session::set_obstacle_color(self, name, color)
     }
 
+    pub fn set_obstacle_visible(&self, name: &str, visible: bool) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_visible(self, name, visible)
+    }
+
+    pub fn set_obstacle_material(
+        &self,
+        name: &str,
+        material: Option<botrail_scene::Material>,
+    ) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_material(self, name, material)
+    }
+
     pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {
         botrail_session::set_obstacle_pose(self, name, pose)
+    }
+
+    /// `(metalness, roughness)` of an obstacle, when one was authored.
+    pub fn obstacle_material(&self, name: &str) -> Result<Option<(f32, f32)>, SceneError> {
+        self.with_scene(|scene| {
+            let obstacle = scene
+                .obstacles()
+                .iter()
+                .find(|o| o.name == name)
+                .ok_or_else(|| SceneError::UnknownObstacle(name.to_string()))?;
+            Ok(obstacle.material.map(|m| (m.metalness, m.roughness)))
+        })
     }
 
     pub fn obstacle_names(&self) -> Vec<String> {
@@ -337,6 +365,10 @@ impl SceneHub {
             let q = o.pose.rotation.coords;
             Some(([t.x, t.y, t.z], [q.x, q.y, q.z, q.w]))
         })
+    }
+
+    pub fn obstacle_bounds(&self, name: &str) -> Option<([f64; 3], [f64; 3])> {
+        self.with_scene(|scene| scene.obstacle_bounds(name))
     }
 
     /// Renames a robot instance; the new name is uniquified against the
@@ -535,6 +567,9 @@ impl SceneHub {
         let objects: Vec<botrail_usd::export::ObjectSpec> = scene
             .obstacles()
             .iter()
+            // A collision proxy is not part of the picture: the export
+            // is what someone opens in usdview, and hidden means hidden.
+            .filter(|o| o.visible)
             .map(|o| {
                 let track = match scene.attachment(&o.name).filter(|a| a.robot == robot) {
                     Some(att) => botrail_usd::export::PoseTrack::Sampled(
@@ -586,8 +621,16 @@ impl SceneHub {
         robot_roots: Vec<(String, String)>,
     ) -> Result<(String, f64, Vec<String>, Vec<String>), String> {
         let scene = self.snapshot();
-        let obstacle_names: Vec<String> =
-            scene.obstacles().iter().map(|o| o.name.clone()).collect();
+        // Only what the scene draws. A recording is the animation of the
+        // visible world — `export_usd` omits invisible obstacles — so
+        // asking for a prim for a hidden collision proxy is asking for a
+        // warning per proxy, and a workpiece ships dozens of them.
+        let obstacle_names: Vec<String> = scene
+            .obstacles()
+            .iter()
+            .filter(|o| o.visible)
+            .map(|o| o.name.clone())
+            .collect();
         let robots: Vec<(String, &botrail_model::RobotModel)> = scene
             .robots()
             .iter()

@@ -345,6 +345,12 @@ fn sensor_watch(
     }
 }
 
+/// What the studio uses for an obstacle with no authored material. Filling
+/// one knob leaves the other here rather than at zero, so naming a
+/// metalness does not silently turn a surface into a mirror.
+const DEFAULT_METALNESS: f32 = 0.05;
+const DEFAULT_ROUGHNESS: f32 = 0.80;
+
 fn scene_err(e: botrail_scene::SceneError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
@@ -706,6 +712,10 @@ impl Scene {
                 geometry: n.geometry,
                 pose: n.pose,
                 color: n.color,
+                // USD import reads displayColor but not shading: a stage
+                // that binds real materials is rendered from the stage
+                // itself, not from these proxies.
+                material: None,
             })
             .collect();
         let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
@@ -759,6 +769,44 @@ impl Scene {
         self.hub.set_obstacle_color(name, color).map_err(scene_err)
     }
 
+    /// Hides or shows an obstacle without touching whether it collides.
+    /// A hidden obstacle is still a real obstacle: this is how a workpiece
+    /// carries a display mesh and its convex collision pieces at once.
+    fn set_obstacle_visible(&self, name: &str, visible: bool) -> PyResult<()> {
+        self.hub
+            .set_obstacle_visible(name, visible)
+            .map_err(scene_err)
+    }
+
+    /// Sets how an obstacle's surface takes light. Passing neither knob
+    /// clears the material, handing the choice back to the viewer.
+    #[pyo3(signature = (name, metalness = None, roughness = None))]
+    fn set_obstacle_material(
+        &self,
+        name: &str,
+        metalness: Option<f32>,
+        roughness: Option<f32>,
+    ) -> PyResult<()> {
+        let material = match (metalness, roughness) {
+            (None, None) => None,
+            // One knob given is still an authored material; the other takes
+            // the studio's own default rather than silently going to zero.
+            (m, r) => Some(botrail_scene::Material::new(
+                m.unwrap_or(DEFAULT_METALNESS),
+                r.unwrap_or(DEFAULT_ROUGHNESS),
+            )),
+        };
+        self.hub
+            .set_obstacle_material(name, material)
+            .map_err(scene_err)
+    }
+
+    /// `(metalness, roughness)`, or `None` when the obstacle has no
+    /// authored material.
+    fn obstacle_material(&self, name: &str) -> PyResult<Option<(f32, f32)>> {
+        self.hub.obstacle_material(name).map_err(scene_err)
+    }
+
     #[pyo3(signature = (name, position, quaternion = None))]
     fn set_obstacle_pose(
         &self,
@@ -780,6 +828,16 @@ impl Scene {
     fn obstacle_pose(&self, name: &str) -> PyResult<([f64; 3], [f64; 4])> {
         self.hub
             .obstacle_pose(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
+    }
+
+    /// World-frame axis-aligned bounds of an obstacle, as `(min, max)`.
+    /// A cell that has to sit a workpiece on a pallet asks the geometry
+    /// where its underside is instead of hard-coding a measured number
+    /// that quietly stops matching when the mesh is rebuilt.
+    fn obstacle_bounds(&self, name: &str) -> PyResult<([f64; 3], [f64; 3])> {
+        self.hub
+            .obstacle_bounds(name)
             .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
     }
 
@@ -2409,6 +2467,9 @@ impl SequenceTimeline {
             .scene
             .obstacles()
             .iter()
+            // A collision proxy is not part of the picture: the export
+            // is what someone opens in usdview, and hidden means hidden.
+            .filter(|o| o.visible)
             .map(|o| {
                 let found = self.inner.objects.iter().find(|t| t.name == o.name);
                 // Stowed frames become animated `visibility` on the prim, so
@@ -2767,6 +2828,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Clearance>()?;
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
+    m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -44,6 +44,20 @@ pub trait SessionHost {
     /// Sends one server message to the connected client(s).
     fn emit(&self, msg: &ServerMessage);
 
+    /// Whether any client is listening.
+    ///
+    /// Broadcasts are not free to *build*: a `state` message runs a full
+    /// min-distance query over every link-obstacle pair, and an
+    /// `obstacles` message clones the list and maps every mesh to a URL.
+    /// A script authoring a cell headlessly — an example, a test, a CI
+    /// bake — pays that on every joint and every obstacle move, for
+    /// nobody. Hosts that can tell say so here and the emit helpers skip
+    /// the work; a client that connects later gets the whole scene from
+    /// [`initial_messages`], so nothing is lost by staying quiet.
+    fn has_listeners(&self) -> bool {
+        true
+    }
+
     /// Wall clock in milliseconds, for planning-time stats.
     fn now_ms(&self) -> f64;
 
@@ -272,6 +286,9 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
 // ---------------------------------------------------------------- state
 
 pub fn emit_state(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::state_message(scene));
     host.emit(&msg);
 }
@@ -280,6 +297,9 @@ pub fn emit_state(host: &impl SessionHost) {
 /// obstacle poses only from `obstacles` broadcasts, so any joint/base
 /// change must rebroadcast the list while something is attached.
 fn emit_obstacles_if_attached(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let attached = host.with_scene(|scene| !scene.attachments().is_empty());
     if attached {
         let msg = host.with_scene(|scene| wire::obstacles_message(scene, |p| host.mesh_url(p)));
@@ -342,6 +362,9 @@ pub fn set_tcp_target_for(
 // ------------------------------------------------------------ obstacles
 
 fn emit_obstacles_and_state(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::obstacles_message(scene, |p| host.mesh_url(p)));
     host.emit(&msg);
     emit_state(host);
@@ -403,6 +426,26 @@ pub fn set_obstacle_color(
     color: Option<[f32; 3]>,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_color(name, color))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+pub fn set_obstacle_visible(
+    host: &impl SessionHost,
+    name: &str,
+    visible: bool,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_visible(name, visible))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+pub fn set_obstacle_material(
+    host: &impl SessionHost,
+    name: &str,
+    material: Option<botrail_scene::Material>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_material(name, material))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -485,6 +528,9 @@ pub fn detach_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneE
 // --------------------------------------------------------------- frames
 
 fn emit_frames(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::frames_message(scene));
     host.emit(&msg);
 }
@@ -502,6 +548,9 @@ pub fn add_frames(host: &impl SessionHost, frames: Vec<(String, Isometry3<f64>)>
 // -------------------------------------------------------------- motions
 
 fn emit_motions(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::motions_message(scene));
     host.emit(&msg);
 }
@@ -535,6 +584,9 @@ pub fn clear_motion(host: &impl SessionHost, motion: &str) -> Result<(), String>
 // ------------------------------------------------------------ sequences
 
 fn emit_sequences(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::sequences_message(scene));
     host.emit(&msg);
 }
@@ -564,6 +616,9 @@ pub fn remove_signal(host: &impl SessionHost, name: &str) -> Result<(), SceneErr
 }
 
 fn emit_sensors(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::sensors_message(scene));
     host.emit(&msg);
 }
@@ -581,6 +636,9 @@ pub fn remove_sensor(host: &impl SessionHost, name: &str) -> Result<(), SceneErr
 }
 
 fn emit_devices(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
     let msg = host.with_scene(|scene| wire::devices_message(scene));
     host.emit(&msg);
 }

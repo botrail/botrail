@@ -15,6 +15,7 @@ import pytest
 import botrail as bt
 
 ARM_ID = "acme/arm/mini/r1"
+ARM_R2 = "acme/arm/mini/r2"
 MAXI_ID = "acme/arm/maxi/r1"
 COUPLING_ID = "acme/coupling/plate/r1"
 LOCKED_ID = "acme/arm/locked/r1"
@@ -99,6 +100,13 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
         {"manifest.yaml": _manifest(ARM_ID, tcp="tool_tip"), "urdf/model.urdf": ARM_URDF},
         {"urdf": "urdf/model.urdf", "usd": None},
     )
+    # A second cut of the same product — a better source, same machine.
+    add(
+        ARM_R2,
+        "public",
+        {"manifest.yaml": _manifest(ARM_R2, tcp="tool_tip"), "urdf/model.urdf": ARM_URDF},
+        {"urdf": "urdf/model.urdf", "usd": None},
+    )
     add(
         MAXI_ID,
         "public",
@@ -175,6 +183,32 @@ def test_short_ids_resolve_by_segment_subsequence(catalog: dict) -> None:
         bt.Robot.from_catalog("nope")
 
 
+def test_a_short_name_takes_the_newest_revision(catalog: dict, tmp_path: Path) -> None:
+    """Revisions are the same product re-cut from a better source, so a
+    short name follows them forward instead of turning every catalog
+    revision into a breaking change. The *resolved* id is what gets
+    recorded, so a replay stays on the revision it resolved to."""
+    scene = bt.Scene(bt.Robot.from_catalog("mini"))
+    project = tmp_path / "cell.botrail"
+    scene.save_project(project)
+    code = bt.Scene.load_project(project).generate_python()
+    assert f'from_catalog("{ARM_R2}"' in code
+    assert ARM_ID not in code
+
+    # Naming a revision outright still pins it.
+    pinned = bt.Scene(bt.Robot.from_catalog(ARM_ID))
+    pinned.save_project(project)
+    assert f'from_catalog("{ARM_ID}"' in bt.Scene.load_project(project).generate_python()
+
+
+def test_distinct_products_stay_ambiguous(catalog: dict) -> None:
+    """The rule is narrow on purpose: only a differing trailing revision
+    collapses. `mini` and `maxi` are different machines, and picking one
+    for the caller would be a guess."""
+    with pytest.raises(ValueError, match="ambiguous"):
+        bt.Robot.from_catalog("acme/arm")
+
+
 def test_usd_only_packages_load_via_the_importer(catalog: dict) -> None:
     robot = bt.Robot.from_catalog("plate")
     assert robot.dof == 0
@@ -195,7 +229,9 @@ def test_missing_dependency_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> 
 def test_projects_and_scripts_replay_the_pinned_catalog(
     catalog: dict, tmp_path: Path
 ) -> None:
-    robot = bt.Robot.from_catalog("mini")
+    # By full id: this is about replaying a pinned catalog, not about how
+    # short names resolve (that is its own test).
+    robot = bt.Robot.from_catalog(ARM_ID)
     scene = bt.Scene(robot)
     scene.set_joint_positions([0.4])
     project = tmp_path / "cell.botrail"

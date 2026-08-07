@@ -6,6 +6,7 @@
 
 export type { PoseMsg } from "./generated/PoseMsg";
 export type { GeometryMsg } from "./generated/GeometryMsg";
+export type { MaterialMsg } from "./generated/MaterialMsg";
 export type { VisualMsg } from "./generated/VisualMsg";
 export type { LinkMsg } from "./generated/LinkMsg";
 export type { JointTypeMsg } from "./generated/JointTypeMsg";

@@ -12,6 +12,12 @@ on the single-arm cell is an error, not a degraded picture:
 which is also the escape hatch when a recording came from somewhere else
 (Isaac Sim, say) and its prims are named differently: pass `robot_roots`.
 
+How the robot plays depends on where it came from. USD-sourced robots
+carry joint tracks (`joint_state` mode); URDF and `attach_tool` composite
+robots have no stage behind them, so their bake is per-link world poses
+and playback follows those (`transforms` mode). Either way the cell has to
+be rebuilt first — the recording stores motion, not geometry.
+
 Run with:  python examples/play_record.py [recording.usda]
 """
 
@@ -26,6 +32,7 @@ import amr_demo  # noqa: E402
 import botrail as bt  # noqa: E402
 import demo  # noqa: E402
 import dual_cell_demo  # noqa: E402
+import weld_station_demo  # noqa: E402
 
 DEFAULT = Path("cell_seq.usda")
 
@@ -72,6 +79,13 @@ def cell_for(recording: Path) -> bt.Scene:
     if {"near", "far"} <= names:
         print(f"{recording}: two-arm cell ({', '.join(sorted(names))})")
         return dual_cell_demo.build_cell()
+    if {"lh_up", "lh_dn", "rh_up", "rh_dn"} <= names:
+        # The weld cell's arms are composites (`attach_tool`: catalog arm
+        # + catalog gun) — no USD stage behind them, so their bake is
+        # per-link transforms and playback follows those directly
+        # (`transforms` mode) instead of joint tracks.
+        print(f"{recording}: weld station ({', '.join(sorted(names))})")
+        return weld_station_demo.build_cell()[0]
     # The AMR carries its own arm and has no cell at all, so check it first:
     # its body prims are named like the AGV's.
     if marks(recording, '"stand_place"'):
@@ -80,6 +94,21 @@ def cell_for(recording: Path) -> bt.Scene:
     if has_vehicle(recording):
         print(f"{recording}: single-arm cell + AGV")
         return agv_cell_demo.build_scene()
+    # Everything left falls through to the single-arm cell, which is safe
+    # for *one* robot however it is named: playback structurally searches
+    # the stage when there is only one to find, so an older bake whose
+    # instance is `Robot` still lands. Two or more unrecognised instances
+    # have no such escape — answering those with a Franka would show a
+    # factory that has nothing to do with the recording, and the mismatch
+    # would surface as `cannot locate robot ...` rather than as "I do not
+    # know this cell". (A binary recording reads as no names at all;
+    # nothing to check, so it still falls through.)
+    if len(names) > 1:
+        raise SystemExit(
+            f"{recording} animates {', '.join(sorted(names))}, which is not a "
+            "cell this script knows how to rebuild. Build that cell yourself "
+            "and call scene.play_usd_animation() on it."
+        )
     print(f"{recording}: single-arm cell")
     return demo.build_scene()
 
@@ -89,8 +118,9 @@ def main() -> None:
     if not recording.exists():
         raise SystemExit(
             f"{recording} not found — bake one first:\n"
-            "  python examples/sequence_demo.py     # -> cell_seq.usda\n"
-            "  python examples/dual_cell_demo.py    # -> cell_dual.usda"
+            "  python examples/sequence_demo.py      # -> cell_seq.usda\n"
+            "  python examples/dual_cell_demo.py     # -> cell_dual.usda\n"
+            "  python examples/weld_station_demo.py  # -> cell_weld.usda"
         )
 
     scene = cell_for(recording)

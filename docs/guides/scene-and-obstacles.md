@@ -40,14 +40,62 @@ scene.obstacle_names
 scene.remove_obstacle("table")
 ```
 
+Colour says what a surface *is*; a material says how it takes light, and the
+two are separate — bare steel and a painted panel can share a grey and still
+look nothing alike:
+
+```python
+scene.set_obstacle_material("panel", metalness=0.85, roughness=0.42)  # bare steel
+scene.set_obstacle_material("cabinet", metalness=0.15, roughness=0.55)  # paint
+scene.set_obstacle_material("panel")                  # back to the viewer's choice
+scene.obstacle_material("panel")                      # (metalness, roughness) | None
+```
+
+Both knobs are the 0–1 pair that glTF, USD Preview Surface and three.js all
+speak, so they mean the same thing wherever the scene ends up. Metal is what
+makes an unpainted body read as *metal* rather than as grey plastic: it
+reflects its surroundings instead of carrying a diffuse colour of its own.
+Appearance never touches collision or planning.
+
 Two switches are worth knowing:
 
 ```python
 scene.set_obstacle_enabled("cleat_3", False)   # out of collision, still rendered
+scene.set_obstacle_visible("proxy_7", False)   # still collides, not rendered
+```
+
+The two are independent, and the pair is what lets a workpiece carry both a
+display mesh and its own collision shape. Convex decomposition fills a body
+shell's door and window apertures — and a welding gun works *through* those
+— so a catalog `workpiece` ships a display shell alongside a set of authored
+convex pieces that keep the openings open. Load the shell with collision off
+and the pieces with rendering off, and the scene both looks right and
+collides right:
+
+```python
+scene.add_mesh("body/shell", "…/visual/biw.obj", (0, 0, 0.78))
+scene.set_obstacle_enabled("body/shell", False)      # looks right
+for piece in pieces:                                  # …collides right
+    scene.add_mesh(f"body/{piece}", f"…/collision/{piece}.stl", (0, 0, 0.78))
+    scene.set_obstacle_visible(f"body/{piece}", False)
 ```
 
 Disabled obstacles keep rendering and keep riding conveyors — they are scenery
 that happens to move. The dual-arm demo's belt cleats work exactly this way.
+
+Seating a workpiece on a fixture wants the mesh's own dimensions, not a number
+measured off it once. [`obstacle_bounds`][botrail.Scene.obstacle_bounds]
+returns the world-frame `(min, max)` of anything already in the scene, so a
+cell can ask where the underside is and lift it onto the pallet:
+
+```python
+low, high = scene.obstacle_bounds("body/floor_pan")
+scene.set_obstacle_pose("body/floor_pan", (0, 0, PALLET_TOP - low[2]))
+```
+
+That keeps the cell correct when the asset is rebuilt — the trap being that a
+hard-coded lift is silently wrong the day the mesh's origin moves, and a
+workpiece a centimetre into its fixture reads as a permanent collision.
 
 ## Named frames
 

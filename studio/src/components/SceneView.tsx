@@ -90,17 +90,32 @@ function LinkGroup({
   return (
     <group position={position} quaternion={quaternion}>
       {link.visuals.map((visual, j) => (
-        <VisualNode key={j} visual={visual} color={color} />
+        // The link color is a way to tell links apart, so a mesh carrying
+        // the manufacturer's own colors keeps them. In collision the color
+        // is the message, and it wins.
+        <VisualNode key={j} visual={visual} color={color} forceColor={colliding} />
       ))}
     </group>
   );
 }
 
-function VisualNode({ visual, color }: { visual: VisualMsg; color: string }) {
+function VisualNode({
+  visual,
+  color,
+  forceColor,
+}: {
+  visual: VisualMsg;
+  color: string;
+  forceColor: boolean;
+}) {
   const { origin } = visual;
   return (
     <group position={origin.position} quaternion={origin.quaternion}>
-      <GeometryMesh geometry={visual.geometry} color={color} />
+      <GeometryMesh
+        geometry={visual.geometry}
+        color={color}
+        forceColor={forceColor}
+      />
     </group>
   );
 }
@@ -108,9 +123,11 @@ function VisualNode({ visual, color }: { visual: VisualMsg; color: string }) {
 function GeometryMesh({
   geometry,
   color,
+  forceColor = false,
 }: {
   geometry: GeometryMsg;
   color: string;
+  forceColor?: boolean;
 }) {
   switch (geometry.kind) {
     case "box":
@@ -139,7 +156,9 @@ function GeometryMesh({
         </mesh>
       );
     case "mesh":
-      return <MeshVisual geometry={geometry} color={color} />;
+      return (
+        <MeshVisual geometry={geometry} color={color} forceColor={forceColor} />
+      );
     default:
       return null;
   }

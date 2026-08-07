@@ -117,25 +117,43 @@ export function Viewport() {
             an IBL is what flattens a scene out. */}
         <IndoorLighting />
         <ambientLight intensity={0.12} />
-        {/* Key light. The shadow camera covers a cell-sized volume; a
-            default-sized one would clip the shadows off at 5 cm. */}
+        {/* Key light. The shadow camera covers a *line*-sized volume, not
+            just an arm's reach: a cell with a conveyor running through it
+            is ten metres end to end, and a tighter frustum cuts the
+            shadows off mid-floor. The map stays at 2k: 4k covers the same
+            span at twice the sharpness and several times the cost, which
+            software renderers (the headless screenshots) will not carry. */}
         <directionalLight
-          position={[3, 3, 6]}
+          position={[6, 5, 9]}
           intensity={1.05}
           castShadow
           shadow-mapSize={[2048, 2048]}
           shadow-bias={-0.0006}
           shadow-normalBias={0.02}
-          shadow-camera-left={-4}
-          shadow-camera-right={4}
-          shadow-camera-top={4}
-          shadow-camera-bottom={-4}
+          shadow-camera-left={-9}
+          shadow-camera-right={9}
+          shadow-camera-top={9}
+          shadow-camera-bottom={-9}
           shadow-camera-near={0.1}
-          shadow-camera-far={20}
+          shadow-camera-far={40}
         />
         {/* Fill from the opposite side so the shadowed faces don't go flat. */}
         <directionalLight position={[-3, -2, 2]} intensity={0.3} />
         <hemisphereLight args={["#8899aa", "#20242c", 0.25]} />
+
+        {/* Something for the cell to stand on. A grid alone reads as graph
+            paper, and a shadow with nothing to land on leaves every object
+            floating; a plain matte floor under it is what turns a diagram
+            into a room. It sits a hair below z = 0 so the grid still draws
+            on top, and it only receives — a floor that cast shadows would
+            shadow itself. Kept to a cell's worth of floor rather than a
+            horizon: every pixel of it costs a shadow lookup, and a plane
+            big enough to fill the view is what makes a soft renderer
+            crawl. Beyond it the grid carries on. */}
+        <mesh position={[0, 0, -0.002]} receiveShadow>
+          <planeGeometry args={[48, 48]} />
+          <meshStandardMaterial color="#1a1d23" roughness={0.94} metalness={0} />
+        </mesh>
 
         {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor). */}
         <Grid
