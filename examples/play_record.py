@@ -86,6 +86,11 @@ def cell_for(recording: Path) -> bt.Scene:
         # (`transforms` mode) instead of joint tracks.
         print(f"{recording}: weld station ({', '.join(sorted(names))})")
         return weld_station_demo.build_cell()[0]
+    if {"st1_lh", "st1_rh", "st2_lh", "st2_rh"} <= names:
+        import weld_line_demo
+
+        print(f"{recording}: weld line ({', '.join(sorted(names))})")
+        return weld_line_demo.build_line()[0]
     # The AMR carries its own arm and has no cell at all, so check it first:
     # its body prims are named like the AGV's.
     if marks(recording, '"stand_place"'):

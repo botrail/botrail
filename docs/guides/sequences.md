@@ -93,3 +93,52 @@ spans, signal waveforms, per-robot joint tracks, object motion. Deterministic
 — same scene in, bit-identical timeline out — and therefore
 [assertable](timeline-assertions.md). Connected studios receive the bake and
 show it in the timeline dock.
+
+## Parallel programs
+
+A line is not one sequence. Each station runs its own cycle and the transfer
+is a program of its own — the PLC picture is one POU per station, and that is
+exactly what runs here:
+
+```python
+tl = scene.simulate_sequences(["station_1", "station_2", "transfer"])
+```
+
+Every scan tick advances *every* program, in list order, over one shared
+world. Determinism survives untouched: the scan order is fixed, so a signal
+written by an earlier program is seen by a later one in the same tick, and
+the bake stays bit-identical. The result is still a single timeline; step
+spans carry `program/step` names.
+
+Programs coordinate the way PLC programs do — through the world, not through
+each other:
+
+* **signals** — a station sets `st1_done`, the transfer waits
+  `bt.seq.all_of(bt.seq.signal("st1_done"), ...)`, and releases the stations
+  by dropping its own `moving` flag;
+* **sensors** — a zone or beam is readable from any program;
+* **`robot_done` / `device_done`** — idle tests work across programs.
+
+Reading is free; *driving* is owned. Every robot, device, and written signal
+must be commanded by at most one of the programs, validated before the first
+tick — two programs ramping one robot is not a scheduling problem to referee
+at runtime, it is an authoring error, the same as two PLC programs writing
+one coil. A deadlock (a gate on a signal nobody sets) surfaces as the timeout
+naming where every unfinished program is stuck.
+
+## Indexed transfer
+
+A transfer line moves in pitches, and a pitch is a *distance*:
+
+```python
+sq.step("index",
+        actions=[bt.seq.advance("line", 5.2)],
+        transition=bt.seq.device_done("line"))
+```
+
+`advance` runs a stopped conveyor for exactly that many metres along its
+velocity direction and stops; the final scan tick moves exactly the
+remainder, so the pitch never picks up a fraction of a scan period. This is
+what retires the `start → elapsed(pitch / v) → stop` pattern and its
+off-by-one-scan arithmetic — a body lands on the station datum to numerical
+precision, every cycle, which is precisely what taught poses need.

@@ -254,6 +254,14 @@ class Scene:
         name: str,
         dt: float = 0.01,
         max_duration: float = 120.0,
+        plan_resolution: Optional[float] = None,
+    ) -> "SequenceTimeline": ...
+    def simulate_sequences(
+        self,
+        names: list[str],
+        dt: float = 0.01,
+        max_duration: float = 120.0,
+        plan_resolution: Optional[float] = None,
     ) -> "SequenceTimeline": ...
     def add_zone_sensor(
         self,

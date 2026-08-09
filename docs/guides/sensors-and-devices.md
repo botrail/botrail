@@ -61,6 +61,13 @@ feed" becomes an assertion.
 Collision-disabled obstacles still ride — that is the trick behind moving
 scenery like belt cleats.
 
+For an indexing line, command the pitch as a distance instead of driving
+start/stop by timer: `bt.seq.advance("belt", 5.2)` runs a *stopped* belt for
+exactly 5.2 m and stops, and `bt.seq.device_done("belt")` is the await. The
+final scan tick moves exactly the remainder, so the pitch is exact no matter
+how the scan period divides it — see
+[Indexed transfer](sequences.md#indexed-transfer).
+
 ## Sources and sinks: endless supply, finite pool
 
 A baked timeline holds a fixed set of named object tracks, so "endless supply"

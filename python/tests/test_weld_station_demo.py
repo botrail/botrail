@@ -59,7 +59,15 @@ pytestmark = pytest.mark.skipif(
 # ±1.5 m, so crossing to the contested spot is now a long swing past where
 # the other arm works — and the waiting pair has to retreat home first.
 # Those four retreats per body are the whole difference.
-GOLDEN_CYCLE = 182.48
+# 2026-08-09 (later): 182.48 → 182.50 moving the transfer onto W1's
+# `advance(distance)` plus a part-present beam at the line head. The beam
+# is not decoration: a source emits its body *after* the belt has advected
+# that scan, so a load and an advance issued together cost the body its
+# first 4 mm and it lands short of datum forever (caught by this file's
+# datum and sweep tests — the dn-attitude tabs drifted into the closing
+# electrodes). Gated on the beam, the body boards before the pitch is
+# commanded and lands to 1e-9 — not one scan short, not one past.
+GOLDEN_CYCLE = 182.50
 CYCLE_BUDGET = 1.0
 
 
@@ -103,7 +111,7 @@ def test_the_body_indexes_onto_the_same_millimetre(baked) -> None:
         for name, want in riders:
             got = timeline.object_pose(name, t_spot)[0]
             assert timeline.object_visible(name, t_spot), name
-            assert got == pytest.approx(want, abs=1e-6), (
+            assert got == pytest.approx(want, abs=1e-9), (
                 f"cycle {body + 1}: {name} landed at {got}, authored at {want}"
             )
 

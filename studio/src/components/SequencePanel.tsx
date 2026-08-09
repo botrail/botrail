@@ -31,7 +31,9 @@ function actionLabel(action: ActionMsg): string {
           ? `speed ${cmd.speed}`
           : cmd.type === "move_to"
             ? `→${cmd.position}`
-            : cmd.type;
+            : cmd.type === "advance"
+              ? `⊳ ${cmd.distance}m`
+              : cmd.type;
       return `⚙ ${action.device} ${verb}`;
     }
   }

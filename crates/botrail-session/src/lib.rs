@@ -662,23 +662,36 @@ pub fn simulate_sequence_and_emit(
     name: &str,
     options: &botrail_scene::rollout::RolloutOptions,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
+    simulate_sequences_and_emit(host, &[name], options)
+}
+
+/// Rolls out several sequences *concurrently* (one scan advances every
+/// program, in list order) and emits the outcome as a `sequence_result`
+/// message — the result is one timeline, so playback and the timing chart
+/// need no notion of "which program" beyond the qualified step names.
+pub fn simulate_sequences_and_emit(
+    host: &impl SessionHost,
+    names: &[&str],
+    options: &botrail_scene::rollout::RolloutOptions,
+) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
+    let name = names.join(" + ");
     let snapshot = host.snapshot();
     let t0 = host.now_ms();
     let result = snapshot
-        .simulate_sequence(name, options)
+        .simulate_sequences(names, options)
         .map_err(|e| e.to_string());
     let ms = host.now_ms() - t0;
     let msg = match &result {
         Ok(timeline) => ServerMessage::SequenceResult {
             ok: true,
-            sequence: name.to_string(),
+            sequence: name.clone(),
             error: None,
             timeline: Some(timeline_msg(&snapshot, timeline)),
             planning_time_ms: Some(ms),
         },
         Err(e) => ServerMessage::SequenceResult {
             ok: false,
-            sequence: name.to_string(),
+            sequence: name.clone(),
             error: Some(e.clone()),
             timeline: None,
             planning_time_ms: None,

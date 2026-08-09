@@ -518,8 +518,18 @@ impl SceneHub {
         name: &str,
         options: &botrail_scene::rollout::RolloutOptions,
     ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        self.simulate_sequences(&[name], options)
+    }
+
+    /// Rolls out several sequences concurrently (one PLC scan advances
+    /// every program, in list order); one timeline comes back.
+    pub fn simulate_sequences(
+        &self,
+        names: &[&str],
+        options: &botrail_scene::rollout::RolloutOptions,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
         let snapshot = self.snapshot();
-        let timeline = botrail_session::simulate_sequence_and_emit(self, name, options)?;
+        let timeline = botrail_session::simulate_sequences_and_emit(self, names, options)?;
         Ok((timeline, snapshot))
     }
 

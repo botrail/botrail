@@ -537,6 +537,11 @@ pub enum DeviceCommandMsg {
     Goto {
         station: String,
     },
+    /// Run a stopped conveyor for exactly `distance` metres, then stop
+    /// (indexed transfer); await with `device_done`.
+    Advance {
+        distance: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1210,6 +1215,9 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 DeviceCommand::Goto { station } => DeviceCommandMsg::Goto {
                     station: station.clone(),
                 },
+                DeviceCommand::Advance(distance) => DeviceCommandMsg::Advance {
+                    distance: *distance,
+                },
             },
         },
     }
@@ -1269,6 +1277,7 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
                 DeviceCommandMsg::Goto { station } => DeviceCommand::Goto {
                     station: station.clone(),
                 },
+                DeviceCommandMsg::Advance { distance } => DeviceCommand::Advance(*distance),
             },
         },
     }

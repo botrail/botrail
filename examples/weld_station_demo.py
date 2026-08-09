@@ -98,13 +98,15 @@ BASE_Y = 2.40
 # drops to a single orientation. At 1.45 every spot has two or three clear
 # approaches and each arm owns its own end of the body.
 BASE_X = 1.45
-BELT_V = 0.40                      # m/s; 0.4 * dt is an exact 4 mm per tick
-# The stop lands on the step *after* the timer fires, so the belt runs one
-# scan less than the timer names: 8.00 s of timer moves the body 3.196 m.
-# One extra scan makes the 3.2 m pitch exact. (An `advance(distance)`
-# device command would retire this arithmetic — design-weld-line.md E2.)
-FEED_IN = 8.01                     # -3.2 m -> station datum, to the tick
-FEED_OUT = 15.0                    # the whole body clears the sink zone
+BELT_V = 0.40                      # m/s
+# Indexed transfer is a *distance*, commanded as one: `advance(pitch)` runs
+# the belt for exactly this many metres and stops on the millimetre. The
+# previous authoring was `start -> elapsed(pitch/v) -> stop`, which loses
+# one scan of travel to the stop landing on the step after the timer — the
+# 8.01-not-8.00 arithmetic this cell used to carry (design-weld-line.md E2,
+# retired by W1's `bt.seq.advance`).
+FEED_IN = 3.2                      # metres: line head -> station datum
+FEED_OUT = 6.0                     # metres: the body clears into the sink
 LINE_IN = -3.2
 SINK_X = 4.10                      # inside the guarding, past the station
 
@@ -458,6 +460,19 @@ def build_cell() -> tuple:
         running=False,
     )
 
+    # Part-present at the line head — the photo-eye every real transfer
+    # gates on. It also closes a scan-order race: a source emits its body
+    # *after* the belt has advected this tick, so a load and an advance
+    # issued in the same scan cost the body its first 4 mm of travel and
+    # it lands one scan short of datum, forever. Gating the feed on the
+    # beam means the body is aboard before the pitch is commanded.
+    scene.add_beam_sensor(
+        "body_at_head",
+        frm=(LINE_IN, -1.2, SKID_TOP + 0.35),
+        to=(LINE_IN, 1.2, SKID_TOP + 0.35),
+        radius=0.03,
+    )
+
     # The contested stretch. Each arm's third spot is past the middle of
     # the seam, in the other's half, so the two guns on a side stand in the
     # same half-metre of it. One zone per arm over that volume: a zone says
@@ -630,10 +645,11 @@ def build_sequence(scene: bt.Scene, poses: dict, riders: list) -> str:
         # Call the next body onto the line and index it into the station.
         sq.step(f"{tag}_load",
                 actions=[bt.seq.start(f"src_{name.rsplit('/', 1)[-1]}")
-                         for name, _ in riders])
-        sq.step(f"{tag}_feed", actions=[bt.seq.start("line")],
-                transition=bt.seq.elapsed(FEED_IN))
-        sq.step(f"{tag}_spot", actions=[bt.seq.stop("line")])
+                         for name, _ in riders],
+                transition=bt.seq.signal("body_at_head", True))
+        sq.step(f"{tag}_feed", actions=[bt.seq.advance("line", FEED_IN)],
+                transition=bt.seq.device_done("line"))
+        sq.step(f"{tag}_spot")
         # All four arms come onto their own half of the seam together.
         sq.step(f"{tag}_enter",
                 actions=[bt.seq.motion(f"{arm}_enter") for arm in ARMS],
@@ -685,9 +701,9 @@ def build_sequence(scene: bt.Scene, poses: dict, riders: list) -> str:
                 transition=bt.seq.all_of(*[bt.seq.robot_done(a) for a in ARMS]))
         # Index out: the body slides into the sink and hands its pieces
         # back to the pool.
-        sq.step(f"{tag}_out", actions=[bt.seq.start("line")],
-                transition=bt.seq.elapsed(FEED_OUT))
-        sq.step(f"{tag}_done", actions=[bt.seq.stop("line")])
+        sq.step(f"{tag}_out", actions=[bt.seq.advance("line", FEED_OUT)],
+                transition=bt.seq.device_done("line"))
+        sq.step(f"{tag}_done")
     return sq.name
 
 

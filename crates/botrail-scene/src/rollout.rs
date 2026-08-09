@@ -45,6 +45,11 @@ pub enum SeqError {
         name: String,
         limit: f64,
     },
+    /// The parallel-program timeout names every stuck cursor: with two or
+    /// more programs, "where is everybody waiting" *is* the deadlock
+    /// diagnosis (a gate watching a signal nobody sets shows up here).
+    #[error("timed out after {limit}s; programs waiting at: {at}")]
+    ProgramsTimeout { at: String, limit: f64 },
     #[error(
         "step {step} (`{name}`): >{limit} instantaneous steps in one scan tick (immediate loop?)"
     )]
@@ -432,13 +437,64 @@ impl Scene {
         name: &str,
         options: &RolloutOptions,
     ) -> Result<SequenceTimeline, SeqError> {
-        let sequence = self
-            .sequence(name)
-            .ok_or_else(|| SeqError::UnknownSequence(name.to_string()))?
-            .clone();
-        self.validate_sequence(&sequence)
-            .map_err(|(step, message)| SeqError::Validation { step, message })?;
-        Rollout::new(self.clone(), sequence, options.clone()).run()
+        self.simulate_sequences(&[name], options)
+    }
+
+    /// Runs several sequences *concurrently* over one shared world — one
+    /// scan-loop tick advances every program, in the order given here.
+    ///
+    /// This is the PLC picture of a line: one POU per station plus a
+    /// transfer POU, each a plain serial SFC, synchronized only through
+    /// signals and sensors. Concurrency changes nothing about determinism:
+    /// programs are scanned in declaration order every tick, so the bake
+    /// stays bit-identical run to run.
+    ///
+    /// Every robot, device, and written signal must be driven by at most
+    /// one of the programs (validated up front). Two programs commanding
+    /// one robot is not a scheduling problem to referee at runtime — it is
+    /// an authoring error, the same as two PLC programs writing one coil.
+    pub fn simulate_sequences(
+        &self,
+        names: &[&str],
+        options: &RolloutOptions,
+    ) -> Result<SequenceTimeline, SeqError> {
+        if names.is_empty() {
+            return Err(SeqError::Validation {
+                step: None,
+                message: "no sequences to simulate".to_string(),
+            });
+        }
+        let mut sequences = Vec::with_capacity(names.len());
+        for name in names {
+            if sequences.iter().any(|s: &Sequence| &s.name == name) {
+                return Err(SeqError::Validation {
+                    step: None,
+                    message: format!("sequence `{name}` is listed twice"),
+                });
+            }
+            let sequence = self
+                .sequence(name)
+                .ok_or_else(|| SeqError::UnknownSequence(name.to_string()))?
+                .clone();
+            self.validate_sequence(&sequence)
+                .map_err(|(step, message)| SeqError::Validation {
+                    step,
+                    message: if names.len() == 1 {
+                        message
+                    } else {
+                        format!("sequence `{name}`: {message}")
+                    },
+                })?;
+            sequences.push(sequence);
+        }
+        if sequences.len() > 1 {
+            self.validate_program_ownership(&sequences)
+                .map_err(|message| SeqError::Validation {
+                    step: None,
+                    message,
+                })?;
+        }
+        Rollout::new(self.clone(), sequences, options.clone()).run()
     }
 }
 
@@ -480,17 +536,43 @@ impl RobotRuntime {
     }
 }
 
+/// One program's scan-loop cursor. Several of these advancing over one
+/// world is what "parallel sequences" means: each station is its own SFC,
+/// the world is shared, and the only coupling is through what the world
+/// carries (signals, sensors, robot/device state).
+struct Program {
+    sequence: Sequence,
+    step: usize,
+    entered_at: f64,
+    /// Absolute end times of the moves started by the active step (`Done`
+    /// waits for all of them).
+    move_ends: Vec<f64>,
+    /// Index into `step_spans` of the active step's span. Programs
+    /// interleave their spans in one list, so "the last one" stopped
+    /// meaning "mine" the moment there were two cursors.
+    open_span: usize,
+}
+
+impl Program {
+    fn finished(&self) -> bool {
+        self.step >= self.sequence.steps.len()
+    }
+}
+
 struct Rollout {
     world: Scene,
-    sequence: Sequence,
+    /// The concurrently-running programs, in the order given to
+    /// `simulate_sequences` — which is the deterministic scan order: every
+    /// tick each program gets one transition scan, first to last, so a
+    /// signal written by an earlier program is seen by a later one in the
+    /// same tick, and the whole bake stays bit-identical.
+    programs: Vec<Program>,
+    /// The program currently being scanned (actions fire, transitions
+    /// evaluate against this cursor).
+    current: usize,
     options: RolloutOptions,
 
     t: f64,
-    step: usize,
-    step_entered_at: f64,
-    /// Absolute end times of the moves started by the active step (`Done`
-    /// waits for all of them).
-    step_move_ends: Vec<f64>,
     /// Per-robot runtimes, in scene order (the deterministic advance order).
     robots: Vec<RobotRuntime>,
     sensors: Vec<SensorRuntime>,
@@ -573,6 +655,10 @@ struct TrackLatch {
     origin: Isometry3<f64>,
     offset: Isometry3<f64>,
     frozen: bool,
+    /// The program that latched the track — mid-track failures surface
+    /// during the world advance, when no program is being scanned, and
+    /// still have to be pinned on the right one.
+    program: usize,
 }
 
 struct SensorRuntime {
@@ -601,6 +687,10 @@ enum DeviceRuntime {
         zone_half: Vector3<f64>,
         velocity: Vector3<f64>,
         running: bool,
+        /// Metres left of a fixed `Advance`; `None` when none is pending.
+        /// While pending the belt runs regardless of `running`, and the
+        /// final tick consumes exactly the remainder.
+        remaining: Option<f64>,
         lane: usize,
     },
     Axis {
@@ -798,7 +888,7 @@ fn build_legs(
 }
 
 impl Rollout {
-    fn new(world: Scene, sequence: Sequence, options: RolloutOptions) -> Self {
+    fn new(world: Scene, sequences: Vec<Sequence>, options: RolloutOptions) -> Self {
         // Signal lanes: internal relays, then sensor inputs, then device
         // outputs — all recorded as edge tracks for the timing chart.
         let mut signals: Vec<BoolTrack> = world
@@ -861,6 +951,7 @@ impl Rollout {
                             zone_half: zone_size / 2.0,
                             velocity: *velocity,
                             running: *running,
+                            remaining: None,
                             lane,
                         }
                     }
@@ -1062,12 +1153,19 @@ impl Rollout {
             .collect();
         Rollout {
             world,
-            sequence,
+            programs: sequences
+                .into_iter()
+                .map(|sequence| Program {
+                    sequence,
+                    step: 0,
+                    entered_at: 0.0,
+                    move_ends: Vec::new(),
+                    open_span: 0,
+                })
+                .collect(),
+            current: 0,
             options,
             t: 0.0,
-            step: 0,
-            step_entered_at: 0.0,
-            step_move_ends: Vec::new(),
             robots,
             sensors,
             devices,
@@ -1077,38 +1175,94 @@ impl Rollout {
         }
     }
 
-    fn step_name(&self, index: usize) -> String {
-        self.sequence
+    /// The step's display name, qualified by its program when several run
+    /// — two stations both have a `feed`, and a timeline (or an error)
+    /// that just says `feed` names neither.
+    fn step_name_in(&self, program: usize, index: usize) -> String {
+        let p = &self.programs[program];
+        let step = p
+            .sequence
             .steps
             .get(index)
             .map(|s| s.name.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.programs.len() == 1 {
+            step
+        } else {
+            format!("{}/{step}", p.sequence.name)
+        }
+    }
+
+    fn cur_step(&self) -> usize {
+        self.programs[self.current].step
+    }
+
+    fn cur_step_name(&self) -> String {
+        self.step_name_in(self.current, self.cur_step())
+    }
+
+    fn finished(&self) -> bool {
+        self.programs.iter().all(Program::finished)
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
         self.update_sensors();
-        self.enter_step()?;
-        // Instantaneous steps may complete before the first tick.
-        self.advance_through_ready_steps()?;
+        // First scan: every program enters its first step (actions fire in
+        // declaration order), then every program chains through whatever
+        // is instantaneously ready — so a signal set by program 1's first
+        // step is already visible to program 2's first transition.
+        for p in 0..self.programs.len() {
+            self.current = p;
+            self.enter_step()?;
+        }
+        for p in 0..self.programs.len() {
+            self.current = p;
+            self.advance_through_ready_steps()?;
+        }
 
         let mut tick = 0u64;
-        while self.step < self.sequence.steps.len() {
+        while !self.finished() {
             tick += 1;
             self.t = tick as f64 * self.options.dt;
             if self.t > self.options.max_duration {
-                return Err(SeqError::Timeout {
-                    step: self.step,
-                    name: self.step_name(self.step),
-                    limit: self.options.max_duration,
-                });
+                return Err(self.timeout());
             }
             // PLC scan: outputs advance the world through this tick, then
-            // inputs are read, then transitions fire.
+            // inputs are read, then transitions fire — for each program in
+            // declaration order.
             self.advance_world()?;
             self.update_sensors();
-            self.advance_through_ready_steps()?;
+            for p in 0..self.programs.len() {
+                self.current = p;
+                self.advance_through_ready_steps()?;
+            }
         }
         Ok(self.finish())
+    }
+
+    /// The timeout error, naming where every unfinished program is stuck —
+    /// with several programs that list is the deadlock diagnosis (A waits
+    /// on a signal B never sets), so it has to name all of them.
+    fn timeout(&self) -> SeqError {
+        let waiting: Vec<usize> = (0..self.programs.len())
+            .filter(|&p| !self.programs[p].finished())
+            .collect();
+        if self.programs.len() == 1 {
+            let step = self.programs[0].step;
+            return SeqError::Timeout {
+                step,
+                name: self.step_name_in(0, step),
+                limit: self.options.max_duration,
+            };
+        }
+        SeqError::ProgramsTimeout {
+            at: waiting
+                .iter()
+                .map(|&p| self.step_name_in(p, self.programs[p].step))
+                .collect::<Vec<_>>()
+                .join(", "),
+            limit: self.options.max_duration,
+        }
     }
 
     /// Advances every robot's joints and every device by one scan period,
@@ -1156,11 +1310,41 @@ impl Rollout {
                     zone_half,
                     velocity,
                     running,
+                    remaining,
+                    lane,
                     ..
                 } => {
-                    if !*running || velocity.norm() < 1e-12 {
+                    let speed = velocity.norm();
+                    // A pending fixed advance runs the belt whatever the
+                    // running flag says; the last tick moves exactly the
+                    // remainder so the pitch never picks up a scan-period
+                    // fraction. Otherwise plain free-running.
+                    let tick_velocity = if let Some(rem) = remaining.take() {
+                        if speed < 1e-12 {
+                            // Speed zeroed mid-advance: nothing can move.
+                            // The command stays pending (device_done stays
+                            // false) rather than dividing by zero here.
+                            *remaining = Some(rem);
+                            None
+                        } else {
+                            let step = (speed * dt).min(rem);
+                            let left = rem - step;
+                            if left > 0.0 {
+                                *remaining = Some(left);
+                            } else {
+                                lane_updates.push((*lane, false));
+                            }
+                            // Scaled so `v * dt` is exactly the (partial) step.
+                            Some(*velocity * (step / (speed * dt)))
+                        }
+                    } else if *running && speed >= 1e-12 {
+                        Some(*velocity)
+                    } else {
+                        None
+                    };
+                    let Some(tick_velocity) = tick_velocity else {
                         continue;
-                    }
+                    };
                     for obstacle in self.world.obstacles() {
                         if attached.iter().any(|a| a == &obstacle.name) {
                             continue;
@@ -1173,8 +1357,8 @@ impl Rollout {
                             && local.z.abs() <= zone_half.z
                         {
                             let mut pose = obstacle.pose;
-                            pose.translation.vector += *velocity * dt;
-                            moved.push((obstacle.name.clone(), pose, *velocity));
+                            pose.translation.vector += tick_velocity * dt;
+                            moved.push((obstacle.name.clone(), pose, tick_velocity));
                         }
                     }
                 }
@@ -1558,6 +1742,9 @@ impl Rollout {
         };
         let (object, link, origin, frozen) =
             (latch.object.clone(), latch.link, latch.origin, latch.frozen);
+        // Failures here happen during the world advance, between program
+        // scans — attribute them to the program that latched the track.
+        self.current = latch.program;
         // A grasped part is carried by the robot itself, so following it
         // would chase its own tail: the offset it had at the grasp stands.
         let offset = if frozen {
@@ -1570,8 +1757,8 @@ impl Rollout {
                 .find(|o| o.name == object)
                 .map(|o| o.pose)
                 .ok_or_else(|| SeqError::Action {
-                    step: self.step,
-                    name: self.step_name(self.step),
+                    step: self.cur_step(),
+                    name: self.cur_step_name(),
                     message: format!("tracked obstacle `{object}` disappeared"),
                 })?;
             let offset = pose * origin.inverse();
@@ -1603,8 +1790,8 @@ impl Rollout {
             .expect("seed has robot DOF");
         if !result.converged {
             return Err(SeqError::Action {
-                step: self.step,
-                name: self.step_name(self.step),
+                step: self.cur_step(),
+                name: self.cur_step_name(),
                 message: format!(
                     "tracking `{object}`: the part ran out of reach at t = {:.2}s \
                      ({:.3} mm / {:.4} rad short after {} iterations)",
@@ -1680,8 +1867,8 @@ impl Rollout {
     /// the part's motion.
     fn latch_track(&mut self, r: usize, object: &str, link: Option<&str>) -> Result<(), SeqError> {
         let err = |message: String| SeqError::Action {
-            step: self.step,
-            name: self.step_name(self.step),
+            step: self.cur_step(),
+            name: self.cur_step_name(),
             message,
         };
         let model = &self.world.robots()[r].model;
@@ -1703,7 +1890,9 @@ impl Rollout {
         let rt = &mut self.robots[r];
         rt.q_nom = rt.q.clone();
         rt.q_nom_prev = rt.q.clone();
+        let program = self.current;
         rt.tracking = Some(TrackLatch {
+            program,
             object: object.to_string(),
             link,
             origin,
@@ -2000,25 +2189,27 @@ impl Rollout {
         }
     }
 
-    /// Fires transitions that hold at the current time, chaining through
-    /// instantaneous steps (bounded per tick).
+    /// Fires transitions that hold at the current time for the current
+    /// program, chaining through instantaneous steps (bounded per tick).
     fn advance_through_ready_steps(&mut self) -> Result<(), SeqError> {
         let mut chain = 0usize;
-        while self.step < self.sequence.steps.len() {
-            let condition = self.sequence.steps[self.step].transition.clone();
+        while !self.programs[self.current].finished() {
+            let p = &self.programs[self.current];
+            let condition = p.sequence.steps[p.step].transition.clone();
             if !self.condition_holds(&condition) {
                 return Ok(());
             }
             self.exit_step();
-            self.step += 1;
-            if self.step == self.sequence.steps.len() {
+            let p = &mut self.programs[self.current];
+            p.step += 1;
+            if p.finished() {
                 return Ok(());
             }
             chain += 1;
             if chain > self.options.immediate_chain_limit {
                 return Err(SeqError::ImmediateLoop {
-                    step: self.step,
-                    name: self.step_name(self.step),
+                    step: self.cur_step(),
+                    name: self.cur_step_name(),
                     limit: self.options.immediate_chain_limit,
                 });
             }
@@ -2030,13 +2221,18 @@ impl Rollout {
     fn condition_holds(&self, condition: &Condition) -> bool {
         match condition {
             Condition::Immediately => true,
-            Condition::Done => self.step_move_ends.iter().all(|end| self.t >= end - 1e-9),
+            Condition::Done => self.programs[self.current]
+                .move_ends
+                .iter()
+                .all(|end| self.t >= end - 1e-9),
             Condition::RobotDone { robot } => self
                 .world
                 .robot_index(robot)
                 .map(|r| self.robots[r].active.is_none())
                 .unwrap_or(true),
-            Condition::Elapsed { seconds } => self.t - self.step_entered_at >= seconds - 1e-9,
+            Condition::Elapsed { seconds } => {
+                self.t - self.programs[self.current].entered_at >= seconds - 1e-9
+            }
             Condition::Signal { name, value } => {
                 let current = self
                     .signals
@@ -2055,10 +2251,13 @@ impl Rollout {
                 } => name == device && (target - position).abs() < 1e-9,
                 // Parked at the commanded station (in-position).
                 DeviceRuntime::Vehicle { name, legs, .. } => name == device && legs.is_empty(),
+                // In-position for a conveyor means "no fixed advance
+                // pending" — the await for `Advance`.
+                DeviceRuntime::Conveyor {
+                    name, remaining, ..
+                } => name == device && remaining.is_none(),
                 // Nothing to be "done" with: these run continuously.
-                DeviceRuntime::Conveyor { .. }
-                | DeviceRuntime::Source { .. }
-                | DeviceRuntime::Sink { .. } => false,
+                DeviceRuntime::Source { .. } | DeviceRuntime::Sink { .. } => false,
             }),
             Condition::All(cs) => cs.iter().all(|c| self.condition_holds(c)),
             Condition::Any(cs) => cs.iter().any(|c| self.condition_holds(c)),
@@ -2066,21 +2265,31 @@ impl Rollout {
     }
 
     fn enter_step(&mut self) -> Result<(), SeqError> {
-        self.step_entered_at = self.t;
-        self.step_move_ends.clear();
+        let name = self.cur_step_name();
+        let program = &mut self.programs[self.current];
+        program.entered_at = self.t;
+        program.move_ends.clear();
+        program.open_span = self.step_spans.len();
         self.step_spans.push(StepSpan {
-            name: self.step_name(self.step),
+            name,
             start: self.t,
             end: self.t,
         });
-        for action in self.sequence.steps[self.step].actions.clone() {
+        let step = self.programs[self.current].step;
+        for action in self.programs[self.current].sequence.steps[step]
+            .actions
+            .clone()
+        {
             self.fire(&action)?;
         }
         Ok(())
     }
 
     fn exit_step(&mut self) {
-        if let Some(span) = self.step_spans.last_mut() {
+        // Close *this program's* span: another program may have opened one
+        // since, so "the last span" stopped being ours.
+        let span = self.programs[self.current].open_span;
+        if let Some(span) = self.step_spans.get_mut(span) {
             span.end = self.t;
         }
         // Hold every robot's last configuration up to the transition
@@ -2098,15 +2307,15 @@ impl Rollout {
         self.world
             .resolve_seq_robot(robot)
             .map_err(|message| SeqError::Action {
-                step: self.step,
-                name: self.step_name(self.step),
+                step: self.cur_step(),
+                name: self.cur_step_name(),
                 message,
             })
     }
 
     fn fire(&mut self, action: &Action) -> Result<(), SeqError> {
-        let step_index = self.step;
-        let step_name = self.step_name(self.step);
+        let step_index = self.cur_step();
+        let step_name = self.cur_step_name();
         let err = move |message: String| SeqError::Action {
             step: step_index,
             name: step_name.clone(),
@@ -2153,8 +2362,8 @@ impl Rollout {
                     .world
                     .plan_motion(motion, &self.options.plan, &limits)
                     .map_err(|e| SeqError::PlanFailed {
-                        step: self.step,
-                        name: self.step_name(self.step),
+                        step: self.cur_step(),
+                        name: self.cur_step_name(),
                         message: e.to_string(),
                     })?;
                 let traj = planned.trajectory;
@@ -2167,7 +2376,7 @@ impl Rollout {
                     );
                 }
                 let end = self.t + traj.duration();
-                self.step_move_ends.push(end);
+                self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
                     name: motion.clone(),
                     start: self.t,
@@ -2205,7 +2414,7 @@ impl Rollout {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
-                self.step_move_ends.push(end);
+                self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
                     name: "ramp".to_string(),
                     start: self.t,
@@ -2374,6 +2583,36 @@ impl Rollout {
                         let norm = velocity.norm();
                         if norm > 1e-12 {
                             *velocity = *velocity / norm * *speed;
+                        }
+                    }
+                    (
+                        DeviceRuntime::Conveyor {
+                            running,
+                            remaining,
+                            lane,
+                            ..
+                        },
+                        DeviceCommand::Advance(distance),
+                    ) => {
+                        // Indexed transfer is a mode, not an overlay: a
+                        // free-running belt has no defined "advance by",
+                        // and a second advance while one is pending is a
+                        // missing device_done in the program.
+                        if *running {
+                            return Err(err(format!(
+                                "conveyor `{device}` is free-running; stop it before a \
+                                 fixed advance"
+                            )));
+                        }
+                        if remaining.is_some() {
+                            return Err(err(format!(
+                                "conveyor `{device}` is still advancing; wait for \
+                                 device_done before the next advance"
+                            )));
+                        }
+                        if *distance > 0.0 {
+                            *remaining = Some(*distance);
+                            lane_update = Some((*lane, true));
                         }
                     }
                     (
@@ -3415,6 +3654,19 @@ mod device_tests {
                 running: true,
             },
         });
+        // A source really has no in-position (a conveyor now does: a
+        // consumed `advance`).
+        scene.upsert_device(Device {
+            name: "feed".into(),
+            kind: DeviceKind::Source {
+                pool: vec![],
+                park: iso(0.0, 0.0, 0.0),
+                pitch: Vector3::zeros(),
+                pose: iso(0.0, 0.0, 0.0),
+                interval: 1.0,
+                running: false,
+            },
+        });
         scene.upsert_sensor(Sensor {
             name: "eye".into(),
             kind: SensorKind::Zone {
@@ -3456,7 +3708,7 @@ mod device_tests {
                 "x",
                 vec![],
                 Condition::DeviceDone {
-                    device: "conv".into(),
+                    device: "feed".into(),
                 },
             )],
             "no in-position",
@@ -5389,5 +5641,487 @@ mod mount_tests {
             .mount_robot(0, "nowhere", Isometry3::identity())
             .unwrap_err();
         assert!(err.to_string().contains("nowhere"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod parallel_program_tests {
+    use super::tests::{joint_motion, sample_scene};
+    use super::*;
+    use crate::seq::{Device, DeviceKind, Step};
+    use botrail_model::Geometry;
+    use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(
+            Translation3::new(x, y, z),
+            UnitQuaternion::identity(),
+        )
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+        }
+    }
+
+    fn ramp(joint: &str, value: f64, duration: f64) -> Action {
+        Action::StartRamp {
+            robot: None,
+            targets: vec![(joint.to_string(), value)],
+            duration,
+        }
+    }
+
+    /// A scene with the 1-DOF arm, a box parked on a belt, and the belt.
+    fn belt_scene(speed: f64) -> Scene {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.0, 2.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(5.0, 2.0, 0.5),
+                zone_size: Vector3::new(20.0, 1.0, 1.0),
+                velocity: Vector3::new(speed, 0.0, 0.0),
+                running: false,
+            },
+        });
+        scene
+    }
+
+    #[test]
+    fn advance_moves_exactly_the_asked_distance() {
+        // 3.2 m at 0.4 m/s is the weld line's pitch: 800 full scans. And
+        // 0.123 m is deliberately *not* a multiple of v·dt — the final
+        // partial tick has to make up the fraction that the old
+        // start/elapsed/stop pattern always lost.
+        for (distance, speed) in [(3.2, 0.4), (0.123, 0.4), (0.05, 1.3)] {
+            let mut scene = belt_scene(speed);
+            scene.upsert_sequence(Sequence {
+                name: "index".into(),
+                steps: vec![
+                    step(
+                        "advance",
+                        vec![Action::Device {
+                            device: "belt".into(),
+                            command: DeviceCommand::Advance(distance),
+                        }],
+                        Condition::DeviceDone {
+                            device: "belt".into(),
+                        },
+                    ),
+                ],
+            });
+            let tl = scene
+                .simulate_sequence("index", &RolloutOptions::default())
+                .unwrap();
+            let no_fk: Vec<Vec<Isometry3<f64>>> = scene
+                .robots()
+                .iter()
+                .map(|r| vec![Isometry3::identity(); r.model.links.len()])
+                .collect();
+            let track = tl.objects.iter().find(|o| o.name == "box").unwrap();
+            let pose = SequenceTimeline::object_pose(track, &no_fk, tl.duration).unwrap();
+            let moved = pose.translation.vector.x;
+            assert!(
+                (moved - distance).abs() < 1e-12,
+                "asked {distance}, moved {moved} (err {:+.3e})",
+                moved - distance
+            );
+            // The belt lane pulses on for the advance and off at the end.
+            let lane = tl.signals.iter().find(|s| s.name == "belt").unwrap();
+            assert_eq!(lane.edges.first().map(|(_, v)| *v), Some(false));
+            assert_eq!(lane.edges.last().map(|(_, v)| *v), Some(false));
+            assert!(lane.edges.iter().any(|(_, v)| *v));
+        }
+    }
+
+    #[test]
+    fn advance_rejects_free_running_and_double_commands() {
+        let mut scene = belt_scene(0.4);
+        scene.upsert_sequence(Sequence {
+            name: "bad_running".into(),
+            steps: vec![step(
+                "go",
+                vec![
+                    Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Start,
+                    },
+                    Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Advance(1.0),
+                    },
+                ],
+                Condition::DeviceDone {
+                    device: "belt".into(),
+                },
+            )],
+        });
+        let err = scene
+            .simulate_sequence("bad_running", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("free-running"), "{err}");
+
+        let mut scene = belt_scene(0.4);
+        scene.upsert_sequence(Sequence {
+            name: "bad_double".into(),
+            steps: vec![step(
+                "go",
+                vec![
+                    Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Advance(1.0),
+                    },
+                    Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Advance(1.0),
+                    },
+                ],
+                Condition::DeviceDone {
+                    device: "belt".into(),
+                },
+            )],
+        });
+        let err = scene
+            .simulate_sequence("bad_double", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("still advancing"), "{err}");
+
+        // Statically: advance on a non-conveyor is a validation error.
+        let mut scene = sample_scene();
+        scene.upsert_device(Device {
+            name: "lift".into(),
+            kind: DeviceKind::LinearAxis {
+                objects: vec![],
+                axis: nalgebra::Unit::new_normalize(Vector3::z()),
+                speed: 0.1,
+                position: 0.0,
+                range: (0.0, 1.0),
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "bad_kind".into(),
+            steps: vec![step(
+                "go",
+                vec![Action::Device {
+                    device: "lift".into(),
+                    command: DeviceCommand::Advance(0.5),
+                }],
+                Condition::Immediately,
+            )],
+        });
+        let err = scene
+            .simulate_sequence("bad_kind", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a conveyor"), "{err}");
+    }
+
+    /// Two programs, one world: the belt program indexes while the robot
+    /// program works, and the whole bake lasts as long as the *slower*
+    /// of the two — which is the entire point of parallel programs.
+    #[test]
+    fn programs_run_concurrently_and_sync_through_signals() {
+        let mut scene = belt_scene(0.4);
+        scene.define_signal("welded", false);
+        scene.upsert_sequence(Sequence {
+            name: "station".into(),
+            steps: vec![
+                step("work", vec![ramp("j", 0.8, 1.0)], Condition::Done),
+                step(
+                    "done",
+                    vec![Action::Set {
+                        signal: "welded".into(),
+                        value: true,
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "transfer".into(),
+            steps: vec![
+                step(
+                    "wait_station",
+                    vec![],
+                    Condition::Signal {
+                        name: "welded".into(),
+                        value: true,
+                    },
+                ),
+                step(
+                    "index",
+                    vec![Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Advance(0.2),
+                    }],
+                    Condition::DeviceDone {
+                        device: "belt".into(),
+                    },
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequences(&["station", "transfer"], &RolloutOptions::default())
+            .unwrap();
+        // Station: 1.0 s of ramp. Transfer: gated on the weld, then 0.5 s
+        // of indexing. Serial would be impossible to even express without
+        // weaving them by hand; parallel comes out at the sum only because
+        // the transfer *waits* — and the step spans prove which is which.
+        let spans: std::collections::HashMap<String, (f64, f64)> = tl
+            .step_spans
+            .iter()
+            .map(|s| (s.name.clone(), (s.start, s.end)))
+            .collect();
+        assert!(spans.contains_key("station/work"), "{spans:?}");
+        assert!(spans.contains_key("transfer/index"), "{spans:?}");
+        let work_end = spans["station/work"].1;
+        let index_start = spans["transfer/index"].0;
+        assert!(
+            (index_start - work_end).abs() < 0.011,
+            "transfer moved at {index_start}, station finished at {work_end}"
+        );
+        assert!((tl.duration - 1.51).abs() < 0.02, "duration {}", tl.duration);
+
+        // And with no dependency, the two programs overlap: total is the
+        // max of the two, not the sum.
+        let mut scene = belt_scene(0.4);
+        scene.upsert_sequence(Sequence {
+            name: "station".into(),
+            steps: vec![step("work", vec![ramp("j", 0.8, 1.0)], Condition::Done)],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "transfer".into(),
+            steps: vec![step(
+                "index",
+                vec![Action::Device {
+                    device: "belt".into(),
+                    command: DeviceCommand::Advance(0.2),
+                }],
+                Condition::DeviceDone {
+                    device: "belt".into(),
+                },
+            )],
+        });
+        let tl = scene
+            .simulate_sequences(&["station", "transfer"], &RolloutOptions::default())
+            .unwrap();
+        assert!(
+            (tl.duration - 1.0).abs() < 0.02,
+            "expected max(1.0, 0.5), got {}",
+            tl.duration
+        );
+    }
+
+    #[test]
+    fn rebaking_parallel_programs_is_bit_identical() {
+        let bake = || {
+            let mut scene = belt_scene(0.4);
+            scene.define_signal("welded", false);
+            scene.upsert_sequence(Sequence {
+                name: "a".into(),
+                steps: vec![
+                    step("work", vec![ramp("j", 0.7, 0.6)], Condition::Done),
+                    step(
+                        "flag",
+                        vec![Action::Set {
+                            signal: "welded".into(),
+                            value: true,
+                        }],
+                        Condition::Immediately,
+                    ),
+                ],
+            });
+            scene.upsert_sequence(Sequence {
+                name: "b".into(),
+                steps: vec![
+                    step(
+                        "wait",
+                        vec![],
+                        Condition::Signal {
+                            name: "welded".into(),
+                            value: true,
+                        },
+                    ),
+                    step(
+                        "index",
+                        vec![Action::Device {
+                            device: "belt".into(),
+                            command: DeviceCommand::Advance(0.3),
+                        }],
+                        Condition::DeviceDone {
+                            device: "belt".into(),
+                        },
+                    ),
+                ],
+            });
+            scene
+                .simulate_sequences(&["a", "b"], &RolloutOptions::default())
+                .unwrap()
+        };
+        let (one, two) = (bake(), bake());
+        assert_eq!(one.duration, two.duration);
+        assert_eq!(
+            one.robots[0].trajectory.positions,
+            two.robots[0].trajectory.positions
+        );
+        let x = |tl: &SequenceTimeline| {
+            tl.signals
+                .iter()
+                .map(|s| s.edges.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(x(&one), x(&two));
+    }
+
+    #[test]
+    fn ownership_is_validated_up_front() {
+        // Robot commanded by two programs.
+        let mut scene = sample_scene();
+        joint_motion(&mut scene, "go", 0.8);
+        scene.upsert_sequence(Sequence {
+            name: "a".into(),
+            steps: vec![step("x", vec![ramp("j", 0.5, 0.2)], Condition::Done)],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "b".into(),
+            steps: vec![step(
+                "y",
+                vec![Action::StartMotion {
+                    motion: "go".into(),
+                }],
+                Condition::Done,
+            )],
+        });
+        let err = scene
+            .simulate_sequences(&["a", "b"], &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("robot `r` is commanded by both `a` and `b`"),
+            "{err}"
+        );
+
+        // Signal written by two programs.
+        let mut scene = sample_scene();
+        scene.define_signal("flag", false);
+        let writer = |name: &str| Sequence {
+            name: name.into(),
+            steps: vec![step(
+                "w",
+                vec![Action::Set {
+                    signal: "flag".into(),
+                    value: true,
+                }],
+                Condition::Immediately,
+            )],
+        };
+        scene.upsert_sequence(writer("a"));
+        scene.upsert_sequence(writer("b"));
+        let err = scene
+            .simulate_sequences(&["a", "b"], &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signal `flag` is commanded by both"), "{err}");
+
+        // Device driven by two programs.
+        let mut scene = belt_scene(0.4);
+        let starter = |name: &str| Sequence {
+            name: name.into(),
+            steps: vec![step(
+                "s",
+                vec![Action::Device {
+                    device: "belt".into(),
+                    command: DeviceCommand::Start,
+                }],
+                Condition::Immediately,
+            )],
+        };
+        scene.upsert_sequence(starter("a"));
+        scene.upsert_sequence(starter("b"));
+        let err = scene
+            .simulate_sequences(&["a", "b"], &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("device `belt` is commanded by both"), "{err}");
+
+        // The same list twice is its own mistake.
+        let mut scene = sample_scene();
+        scene.upsert_sequence(Sequence {
+            name: "a".into(),
+            steps: vec![step("x", vec![], Condition::Immediately)],
+        });
+        let err = scene
+            .simulate_sequences(&["a", "a"], &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("listed twice"), "{err}");
+    }
+
+    #[test]
+    fn timeout_names_every_stuck_program() {
+        let mut scene = sample_scene();
+        scene.define_signal("never", false);
+        scene.define_signal("also_never", false);
+        let stuck = |name: &str, signal: &str| Sequence {
+            name: name.into(),
+            steps: vec![step(
+                "gate",
+                vec![],
+                Condition::Signal {
+                    name: signal.into(),
+                    value: true,
+                },
+            )],
+        };
+        scene.upsert_sequence(stuck("st1", "never"));
+        scene.upsert_sequence(stuck("st2", "also_never"));
+        let err = scene
+            .simulate_sequences(
+                &["st1", "st2"],
+                &RolloutOptions {
+                    max_duration: 0.5,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("st1/gate") && err.contains("st2/gate"),
+            "{err}"
+        );
+
+        // A finished program is not on the list.
+        let mut scene = sample_scene();
+        scene.define_signal("never", false);
+        scene.upsert_sequence(Sequence {
+            name: "quick".into(),
+            steps: vec![step("done", vec![], Condition::Immediately)],
+        });
+        scene.upsert_sequence(stuck("st2", "never"));
+        let err = scene
+            .simulate_sequences(
+                &["quick", "st2"],
+                &RolloutOptions {
+                    max_duration: 0.5,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("st2/gate") && !err.contains("quick"), "{err}");
     }
 }

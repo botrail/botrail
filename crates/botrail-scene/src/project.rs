@@ -1033,6 +1033,9 @@ fn py_action(action: &ActionMsg) -> String {
             crate::wire::DeviceCommandMsg::Goto { station } => {
                 format!("bt.seq.goto({device:?}, {station:?})")
             }
+            crate::wire::DeviceCommandMsg::Advance { distance } => {
+                format!("bt.seq.advance({device:?}, {distance})")
+            }
         },
     }
 }

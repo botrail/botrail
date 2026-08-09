@@ -1366,26 +1366,86 @@ impl Scene {
     /// this scene (motions plan at their step, grasped objects ride along)
     /// and returns the baked timeline. Also broadcasts the result to
     /// connected studio clients for playback.
-    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0))]
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None))]
     fn simulate_sequence(
         &self,
         name: &str,
         dt: f64,
         max_duration: f64,
+        plan_resolution: Option<f64>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
                 "dt must be positive, got {dt}"
             )));
         }
-        let options = botrail_scene::rollout::RolloutOptions {
+        let mut options = botrail_scene::rollout::RolloutOptions {
             dt,
             max_duration,
             ..Default::default()
         };
+        if let Some(resolution) = plan_resolution {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "plan_resolution must be positive, got {resolution}"
+                )));
+            }
+            options.plan.resolution = resolution;
+        }
         let (timeline, scene) = self
             .hub
             .simulate_sequence(name, &options)
+            .map_err(PyValueError::new_err)?;
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene,
+        })
+    }
+
+    /// Rolls out several sequences **concurrently** — the PLC picture of a
+    /// line: one program per station plus a transfer program, each a plain
+    /// serial SFC, synchronized only through signals and sensors. One scan
+    /// tick advances every program in list order, so the bake stays
+    /// bit-identical run to run; the result is a single timeline whose
+    /// step spans carry `program/step` names.
+    ///
+    /// Every robot, device, and written signal must be commanded by at
+    /// most one of the programs — two programs driving one resource is
+    /// rejected up front, like two PLC programs writing one coil.
+    /// `plan_resolution` tightens the planner's edge-validity stride (rad,
+    /// joint-space L2). The default 0.05 samples a big arm's sweep every
+    /// ~10 cm of TCP travel — coarse enough to step across sheet metal, so
+    /// cells full of 12 mm flanges pass 0.005.
+    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None))]
+    fn simulate_sequences(
+        &self,
+        names: Vec<String>,
+        dt: f64,
+        max_duration: f64,
+        plan_resolution: Option<f64>,
+    ) -> PyResult<SequenceTimeline> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration,
+            ..Default::default()
+        };
+        if let Some(resolution) = plan_resolution {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "plan_resolution must be positive, got {resolution}"
+                )));
+            }
+            options.plan.resolution = resolution;
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (timeline, scene) = self
+            .hub
+            .simulate_sequences(&refs, &options)
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,

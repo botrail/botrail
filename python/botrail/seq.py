@@ -138,6 +138,19 @@ def goto(device: str, station: str) -> Action:
     }
 
 
+def advance(device: str, distance: float) -> Action:
+    """Indexed transfer: run a *stopped* conveyor for exactly ``distance``
+    metres along its velocity direction, then stop; await it with
+    ``device_done``. The final scan tick moves exactly the remainder, so
+    the pitch is exact no matter how the scan period divides it — no more
+    ``elapsed(pitch/v)`` plus one tick of slack."""
+    return {
+        "type": "device",
+        "device": device,
+        "command": {"type": "advance", "distance": float(distance)},
+    }
+
+
 # --------------------------------------------------------------- conditions
 
 

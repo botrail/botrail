@@ -259,6 +259,14 @@ pub enum DeviceCommand {
     Goto {
         station: String,
     },
+    /// Indexed transfer: run a *stopped* conveyor for exactly `distance`
+    /// metres along its velocity direction, then stop; await it with
+    /// `DeviceDone`. The scan loop consumes one `v·dt` per tick and the
+    /// final tick moves exactly the remainder, so the pitch is exact no
+    /// matter how the scan period divides it — this is what retires the
+    /// `elapsed(pitch/v + one tick)` arithmetic an indexing line otherwise
+    /// needs (and the silent 1-scan shortfall when it is forgotten).
+    Advance(f64),
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +537,82 @@ impl Scene {
             Action::StartRamp { robot, .. } => self.resolve_seq_robot(robot).map(Some),
             _ => Ok(None),
         }
+    }
+
+    /// Single-owner check for concurrently-running programs: every robot,
+    /// device, and *written* signal may be commanded by at most one of the
+    /// given sequences. Reading is free — conditions (`robot_done`,
+    /// `signal`, `device_done`) are how programs watch each other — but
+    /// two writers on one resource is the arbitration problem PLCs solve
+    /// by not allowing it, and so do we: it is rejected at authoring time
+    /// rather than refereed at runtime.
+    pub(crate) fn validate_program_ownership(
+        &self,
+        sequences: &[Sequence],
+    ) -> Result<(), String> {
+        use std::collections::HashMap;
+        // resource key -> (kind label, display name, owning sequence index)
+        let mut owners: HashMap<(u8, String), usize> = HashMap::new();
+        let mut claim = |kind: u8,
+                         label: &str,
+                         name: String,
+                         program: usize|
+         -> Result<(), String> {
+            match owners.entry((kind, name.clone())) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(program);
+                    Ok(())
+                }
+                std::collections::hash_map::Entry::Occupied(o) if *o.get() == program => Ok(()),
+                std::collections::hash_map::Entry::Occupied(o) => Err(format!(
+                    "{label} `{name}` is commanded by both `{}` and `{}`; every robot, \
+                     device, and written signal belongs to one program (programs watch \
+                     each other through conditions, not by sharing outputs)",
+                    sequences[*o.get()].name, sequences[program].name,
+                )),
+            }
+        };
+        for (index, sequence) in sequences.iter().enumerate() {
+            for step in &sequence.steps {
+                for action in &step.actions {
+                    match action {
+                        Action::StartMotion { motion } => {
+                            // Validation has already established the motion
+                            // exists; its robot is the claimed resource.
+                            if let Some(robot) = self
+                                .motions()
+                                .iter()
+                                .find(|m| &m.name == motion)
+                                .map(|m| m.robot)
+                            {
+                                let name = self.robots()[robot].name.clone();
+                                claim(0, "robot", name, index)?;
+                            }
+                        }
+                        Action::StartRamp { robot, .. }
+                        | Action::Attach { robot, .. }
+                        | Action::Track { robot, .. }
+                        | Action::Untrack { robot } => {
+                            if let Ok(r) = self.resolve_seq_robot(robot) {
+                                let name = self.robots()[r].name.clone();
+                                claim(0, "robot", name, index)?;
+                            }
+                        }
+                        // Detach names an object; the carrying robot is
+                        // whoever attached it, which the same-owner rule
+                        // for Attach already pins to one program.
+                        Action::Detach { .. } => {}
+                        Action::Set { signal, .. } => {
+                            claim(1, "signal", signal.clone(), index)?;
+                        }
+                        Action::Device { device, .. } => {
+                            claim(2, "device", device.clone(), index)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Full authoring-time validation, run before a rollout. `Err` carries
@@ -969,6 +1053,21 @@ impl Scene {
                     (DeviceKind::Conveyor { .. }, DeviceCommand::MoveTo(_)) => Err(format!(
                         "conveyor `{device}` has no position; use start/stop"
                     )),
+                    (DeviceKind::Conveyor { velocity, .. }, DeviceCommand::Advance(d)) => {
+                        if !d.is_finite() || *d < 0.0 {
+                            Err(format!("advance({d}) is not a distance"))
+                        } else if velocity.norm() < 1e-12 {
+                            Err(format!(
+                                "conveyor `{device}` has zero speed; a fixed advance \
+                                 needs a velocity to run at"
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    (_, DeviceCommand::Advance(_)) => Err(format!(
+                        "`{device}` is not a conveyor; advance is the indexed-transfer command"
+                    )),
                     (DeviceKind::Source { .. }, DeviceCommand::Start | DeviceCommand::Stop) => {
                         Ok(())
                     }
@@ -1031,11 +1130,16 @@ impl Scene {
                     .ok_or_else(|| format!("unknown device `{device}`"))?;
                 if !matches!(
                     found.kind,
-                    DeviceKind::LinearAxis { .. } | DeviceKind::Vehicle { .. }
+                    DeviceKind::LinearAxis { .. }
+                        | DeviceKind::Vehicle { .. }
+                        // A conveyor's "in-position" is a fixed advance
+                        // consumed — the await for `Advance`.
+                        | DeviceKind::Conveyor { .. }
                 ) {
                     return Err(format!(
                         "`device_done` waits for a positioning device \
-                         (linear axis or vehicle); `{device}` has no in-position"
+                         (linear axis, vehicle, or an advancing conveyor); \
+                         `{device}` has no in-position"
                     ));
                 }
                 Ok(())
