@@ -141,7 +141,7 @@ pub fn import_recording(
             Some((robot_stage_path, articulation_root)) => {
                 let robot_stage_path = robot_stage_path.to_path_buf();
                 let model_root = articulation_root.to_string();
-                let stage_root = resolve_stage_root(&opened, &options, name, sole, || {
+                let stage_root = resolve_stage_root(&opened, options, name, sole, || {
                     find_robot_root(&opened, &model_root, model)
                 })?;
                 // The recording composes the robot subtree through whatever
@@ -188,7 +188,7 @@ pub fn import_recording(
                 // the same naming back; `K` and the robot-stage axis
                 // factor are both identity, and only the transform tier
                 // can apply.
-                let stage_root = resolve_stage_root(&opened, &options, name, sole, || {
+                let stage_root = resolve_stage_root(&opened, options, name, sole, || {
                     find_baked_robot_root(&opened, model)
                 })?;
                 let info =

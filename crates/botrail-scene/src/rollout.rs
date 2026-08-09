@@ -5532,7 +5532,7 @@ mod mount_tests {
             .base
             .as_ref()
             .expect("a mounted robot has a base track");
-        assert!(base.first().is_some());
+        assert!(!base.is_empty());
 
         // Mid-straight, mid-turn, and after arrival.
         let at = |t: f64| SequenceTimeline::base_pose(track, t).unwrap();
