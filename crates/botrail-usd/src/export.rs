@@ -1529,10 +1529,7 @@ fn author_geometry(
                     "primvars:displayColor",
                     "color3f[]",
                     AttrValue::Default(Value::Vec3fVec(colors)),
-                    &[(
-                        "interpolation",
-                        Value::Token(tf::Token::from("uniform")),
-                    )],
+                    &[("interpolation", Value::Token(tf::Token::from("uniform")))],
                 );
                 return Ok(());
             }

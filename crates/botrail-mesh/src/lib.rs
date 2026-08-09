@@ -388,9 +388,7 @@ f 1 3 4
 ";
 
     fn palette() -> HashMap<String, [f32; 3]> {
-        parse_mtl(
-            "newmtl yellow\nKd 1.0 1.0 0.0\nKs 0 0 0\nnewmtl grey\nKd 0.5 0.5 0.5\n",
-        )
+        parse_mtl("newmtl yellow\nKd 1.0 1.0 0.0\nKs 0 0 0\nnewmtl grey\nKd 0.5 0.5 0.5\n")
     }
 
     #[test]
@@ -426,7 +424,10 @@ f 1 3 4
         assert!(orphan.face_colors.is_empty());
 
         let colored = parse_obj_with_materials(CUBE_OBJ, &palette()).unwrap();
-        assert_eq!(colored.scaled([2.0, 2.0, 2.0]).face_colors, colored.face_colors);
+        assert_eq!(
+            colored.scaled([2.0, 2.0, 2.0]).face_colors,
+            colored.face_colors
+        );
     }
 
     #[test]

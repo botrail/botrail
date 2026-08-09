@@ -546,32 +546,27 @@ impl Scene {
     /// two writers on one resource is the arbitration problem PLCs solve
     /// by not allowing it, and so do we: it is rejected at authoring time
     /// rather than refereed at runtime.
-    pub(crate) fn validate_program_ownership(
-        &self,
-        sequences: &[Sequence],
-    ) -> Result<(), String> {
+    pub(crate) fn validate_program_ownership(&self, sequences: &[Sequence]) -> Result<(), String> {
         use std::collections::HashMap;
         // resource key -> (kind label, display name, owning sequence index)
         let mut owners: HashMap<(u8, String), usize> = HashMap::new();
-        let mut claim = |kind: u8,
-                         label: &str,
-                         name: String,
-                         program: usize|
-         -> Result<(), String> {
-            match owners.entry((kind, name.clone())) {
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(program);
-                    Ok(())
-                }
-                std::collections::hash_map::Entry::Occupied(o) if *o.get() == program => Ok(()),
-                std::collections::hash_map::Entry::Occupied(o) => Err(format!(
-                    "{label} `{name}` is commanded by both `{}` and `{}`; every robot, \
+        let mut claim =
+            |kind: u8, label: &str, name: String, program: usize| -> Result<(), String> {
+                match owners.entry((kind, name.clone())) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(program);
+                        Ok(())
+                    }
+                    std::collections::hash_map::Entry::Occupied(o) if *o.get() == program => Ok(()),
+                    std::collections::hash_map::Entry::Occupied(o) => Err(format!(
+                        "{label} `{name}` is commanded by both `{}` and `{}`; every robot, \
                      device, and written signal belongs to one program (programs watch \
                      each other through conditions, not by sharing outputs)",
-                    sequences[*o.get()].name, sequences[program].name,
-                )),
-            }
-        };
+                        sequences[*o.get()].name,
+                        sequences[program].name,
+                    )),
+                }
+            };
         for (index, sequence) in sequences.iter().enumerate() {
             for step in &sequence.steps {
                 for action in &step.actions {

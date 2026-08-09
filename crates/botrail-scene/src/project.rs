@@ -711,10 +711,16 @@ pub fn generate_python(project: &ProjectFile) -> String {
         // to carry them: a script that comes back in bare grey, with every
         // collision proxy on show, has not rebuilt the cell.
         if !o.enabled {
-            out.push_str(&format!("scene.set_obstacle_enabled({:?}, False)\n", o.name));
+            out.push_str(&format!(
+                "scene.set_obstacle_enabled({:?}, False)\n",
+                o.name
+            ));
         }
         if !o.visible {
-            out.push_str(&format!("scene.set_obstacle_visible({:?}, False)\n", o.name));
+            out.push_str(&format!(
+                "scene.set_obstacle_visible({:?}, False)\n",
+                o.name
+            ));
         }
         if let Some([r, g, b]) = o.color {
             out.push_str(&format!(

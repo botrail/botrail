@@ -5653,10 +5653,7 @@ mod parallel_program_tests {
     use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
     fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
-        Isometry3::from_parts(
-            Translation3::new(x, y, z),
-            UnitQuaternion::identity(),
-        )
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
     }
 
     fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
@@ -5709,18 +5706,16 @@ mod parallel_program_tests {
             let mut scene = belt_scene(speed);
             scene.upsert_sequence(Sequence {
                 name: "index".into(),
-                steps: vec![
-                    step(
-                        "advance",
-                        vec![Action::Device {
-                            device: "belt".into(),
-                            command: DeviceCommand::Advance(distance),
-                        }],
-                        Condition::DeviceDone {
-                            device: "belt".into(),
-                        },
-                    ),
-                ],
+                steps: vec![step(
+                    "advance",
+                    vec![Action::Device {
+                        device: "belt".into(),
+                        command: DeviceCommand::Advance(distance),
+                    }],
+                    Condition::DeviceDone {
+                        device: "belt".into(),
+                    },
+                )],
             });
             let tl = scene
                 .simulate_sequence("index", &RolloutOptions::default())
@@ -5894,7 +5889,11 @@ mod parallel_program_tests {
             (index_start - work_end).abs() < 0.011,
             "transfer moved at {index_start}, station finished at {work_end}"
         );
-        assert!((tl.duration - 1.51).abs() < 0.02, "duration {}", tl.duration);
+        assert!(
+            (tl.duration - 1.51).abs() < 0.02,
+            "duration {}",
+            tl.duration
+        );
 
         // And with no dependency, the two programs overlap: total is the
         // max of the two, not the sum.
