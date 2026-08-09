@@ -6,6 +6,7 @@ Documentation: https://botrail.github.io/botrail/ ·
 Live Demo: https://botrail.github.io/botrail/demo/
 
 ![botrail-demo](assets/botrail_demo.png)
+![botrail-demo-line](assets/botrail_demo_line.png)
 
 `pip install botrail`, a few lines of Python, and you get an interactive 3D
 studio in your browser for building robot cells — robots, obstacles,
