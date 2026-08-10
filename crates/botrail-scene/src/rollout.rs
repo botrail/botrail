@@ -329,10 +329,33 @@ pub struct RobotTrack {
     /// Intervals a motion/ramp drove this robot (timeline robot lanes),
     /// labelled with the motion name (or `ramp`).
     pub moves: Vec<StepSpan>,
+    /// The sparse planned path of every motion/ramp the rollout started on
+    /// this robot, in firing order — what vendor script export lowers to
+    /// move commands (the dense `trajectory` is for playback; controllers
+    /// re-time sparse targets themselves).
+    pub planned: Vec<PlannedMove>,
     /// Where the robot's base was over time — `Some` only for a robot that
     /// rides a vehicle. Spans tile `[0, duration]` in the same vocabulary
     /// the load uses, because it is the same rigid motion.
     pub base: Option<Vec<TrackSpan>>,
+}
+
+/// One motion/ramp as the rollout planned it: which program step fired it
+/// and the sparse joint-space path it committed to.
+#[derive(Debug, Clone)]
+pub struct PlannedMove {
+    /// Owning sequence (programs interleave on one timeline).
+    pub sequence: String,
+    /// Step index within that sequence.
+    pub step: usize,
+    /// Motion name, or `None` for a joint ramp.
+    pub motion: Option<String>,
+    /// Sparse path, both endpoints included (a ramp is one two-waypoint
+    /// joint segment).
+    pub segments: Vec<crate::motion::PlannedSegment>,
+    /// Rest-to-rest duration the rollout used — for a ramp this is the
+    /// authored duration, which is what sets its export speed.
+    pub duration: f64,
 }
 
 /// The baked result of a sequence rollout — what playback, USD export, and
@@ -340,6 +363,9 @@ pub struct RobotTrack {
 #[derive(Debug, Clone)]
 pub struct SequenceTimeline {
     pub duration: f64,
+    /// Names of the sequences this timeline was rolled from, in scan
+    /// order. Script export resolves its default program here.
+    pub sequences: Vec<String>,
     /// One track per robot, in scene order.
     pub robots: Vec<RobotTrack>,
     /// Objects that were grasped at some point (everything else is static).
@@ -560,6 +586,8 @@ struct RobotRuntime {
     velocities: Vec<Vec<f64>>,
     /// Intervals a move drove this robot (the timeline's robot lanes).
     moves: Vec<StepSpan>,
+    /// Sparse planned paths, in firing order (script export).
+    planned: Vec<PlannedMove>,
     /// Base motion, for a robot riding a vehicle.
     base: Option<Vec<TrackSpan>>,
 }
@@ -1187,6 +1215,7 @@ impl Rollout {
                     active: None,
                     tracking: None,
                     moves: Vec::new(),
+                    planned: Vec::new(),
                     base: sr.mount.as_ref().map(|_| Vec::new()),
                 }
             })
@@ -2419,6 +2448,13 @@ impl Rollout {
                     );
                 }
                 let end = self.t + traj.duration();
+                rt.planned.push(PlannedMove {
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                    motion: Some(motion.clone()),
+                    segments: planned.segments,
+                    duration: traj.duration(),
+                });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
                     name: motion.clone(),
@@ -2457,6 +2493,16 @@ impl Rollout {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
+                rt.planned.push(PlannedMove {
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                    motion: None,
+                    segments: vec![crate::motion::PlannedSegment {
+                        kind: crate::motion::SegmentKind::Joint,
+                        waypoints: vec![rt.q_nom.clone(), goal.clone()],
+                    }],
+                    duration: *duration,
+                });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
                     name: "ramp".to_string(),
@@ -2781,6 +2827,7 @@ impl Rollout {
                         velocities: rt.velocities,
                     },
                     moves: rt.moves,
+                    planned: rt.planned,
                     // The cycle usually ends parked: close a travelling span
                     // at its own end and rest there, rather than extending it
                     // to the horn and driving off the timeline.
@@ -2817,6 +2864,11 @@ impl Rollout {
         }
         SequenceTimeline {
             duration,
+            sequences: self
+                .programs
+                .iter()
+                .map(|p| p.sequence.name.clone())
+                .collect(),
             robots,
             objects: self.objects,
             signals: self.signals,

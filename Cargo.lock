@@ -220,6 +220,7 @@ name = "botrail-scene"
 version = "0.4.0"
 dependencies = [
  "botrail-collide",
+ "botrail-export",
  "botrail-kin",
  "botrail-mesh",
  "botrail-model",
@@ -241,6 +242,7 @@ dependencies = [
  "botrail-plan",
  "botrail-scene",
  "botrail-traj",
+ "botrail-usd",
  "nalgebra",
  "serde_json",
 ]

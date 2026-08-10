@@ -530,8 +530,12 @@ fn attached_robot_and_mutual_pairs(
                 {
                     continue;
                 }
-                if parts_intersect(&bp.world[r][i], parts, &bp.att_world[k], &att.collider.parts)
-                {
+                if parts_intersect(
+                    &bp.world[r][i],
+                    parts,
+                    &bp.att_world[k],
+                    &att.collider.parts,
+                ) {
                     pairs.push(CollisionPair {
                         a: ColliderId::Link { robot: r, link: i },
                         b: ColliderId::Attached(k),
@@ -1063,9 +1067,8 @@ mod broadphase_tests {
         let model = arm();
         let (collider, _) = RobotCollider::from_model(&model);
         let acm = Acm::default();
-        let fk = |base: &Isometry3<f64>| -> Vec<Isometry3<f64>> {
-            vec![*base, *base * at(0.3, 0.0)]
-        };
+        let fk =
+            |base: &Isometry3<f64>| -> Vec<Isometry3<f64>> { vec![*base, *base * at(0.3, 0.0)] };
         // Robot 1 close enough that its base link touches robot 0's tip.
         let base0 = at(0.0, 0.0);
         let base1 = at(0.45, 0.0);

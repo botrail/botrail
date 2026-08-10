@@ -457,6 +457,25 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           recordingError: msg.error ?? "recording import failed",
         });
       }
+    } else if (msg.type === "usd_document") {
+      // The baked layer arrives as text; hand it straight to the browser
+      // as a file download. Warnings and refusals surface on the
+      // sequence-error line — that is where the export button lives.
+      if (msg.ok && msg.text) {
+        const blob = new Blob([msg.text], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = msg.name || "cell.usda";
+        a.click();
+        URL.revokeObjectURL(url);
+        set({
+          sequenceError:
+            msg.warnings.length > 0 ? msg.warnings.join("\n") : null,
+        });
+      } else {
+        set({ sequenceError: msg.error ?? "usd export failed" });
+      }
     } else if (msg.type === "motion_result") {
       if (msg.ok && msg.trajectory) {
         // Auto-start the preview through the same shared playback state the

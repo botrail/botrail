@@ -8,11 +8,14 @@
 //! wall clock (Instant vs Date.now), and logging. Everything protocol- or
 //! planning-shaped lives here, once.
 
+pub mod usd;
+
 use std::path::Path;
 
 use botrail_kin::{IkMode, IkOptions, IkResult};
 use botrail_model::Geometry;
 use botrail_scene::motion::{PlannedMotion, Segment};
+use botrail_scene::rollout::SequenceTimeline;
 use botrail_scene::wire::{
     self, ClientMessage, IkStatusMsg, PoseMsg, SceneDescriptionMsg, ServerMessage,
 };
@@ -68,6 +71,17 @@ pub trait SessionHost {
     /// accessible while a plan is in flight.
     fn snapshot(&self) -> Scene {
         self.with_scene(|scene| scene.clone())
+    }
+
+    /// Retains the last successful rollout — the pre-rollout scene
+    /// snapshot plus its timeline — so a later `export_usd` request can
+    /// bake it without re-simulating. Hosts that never export keep the
+    /// no-op default.
+    fn store_baked(&self, _scene: &Scene, _timeline: &SequenceTimeline) {}
+
+    /// The retained rollout, cloned (see [`store_baked`](Self::store_baked)).
+    fn baked(&self) -> Option<(Scene, SequenceTimeline)> {
+        None
     }
 }
 
@@ -265,6 +279,19 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
                 &name,
                 &botrail_scene::rollout::RolloutOptions::default(),
             );
+            Ok(())
+        }
+        ClientMessage::SimulateSequences { names } => {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let _ = simulate_sequences_and_emit(
+                host,
+                &names,
+                &botrail_scene::rollout::RolloutOptions::default(),
+            );
+            Ok(())
+        }
+        ClientMessage::ExportUsd { fps } => {
+            host.emit(&export_usd_document(host, fps));
             Ok(())
         }
         ClientMessage::UpsertSensor { sensor } => {
@@ -698,13 +725,16 @@ pub fn simulate_sequences_and_emit(
         .map_err(|e| e.to_string());
     let ms = host.now_ms() - t0;
     let msg = match &result {
-        Ok(timeline) => ServerMessage::SequenceResult {
-            ok: true,
-            sequence: name.clone(),
-            error: None,
-            timeline: Some(timeline_msg(&snapshot, timeline)),
-            planning_time_ms: Some(ms),
-        },
+        Ok(timeline) => {
+            host.store_baked(&snapshot, timeline);
+            ServerMessage::SequenceResult {
+                ok: true,
+                sequence: name.clone(),
+                error: None,
+                timeline: Some(timeline_msg(&snapshot, timeline)),
+                planning_time_ms: Some(ms),
+            }
+        }
         Err(e) => ServerMessage::SequenceResult {
             ok: false,
             sequence: name.clone(),
@@ -715,6 +745,54 @@ pub fn simulate_sequences_and_emit(
     };
     host.emit(&msg);
     result
+}
+
+/// Bakes the host's retained rollout as a downloadable usda document.
+/// Robot-asset references are flagged rather than resolved: a browser
+/// download is one file, so a layer that references a USD robot's asset
+/// directory only replays next to those assets (Python's `export_usd`
+/// copies them; catalog/URDF robots are self-contained and carry no
+/// warning).
+fn export_usd_document(host: &impl SessionHost, fps: f64) -> ServerMessage {
+    let refused = |error: String| ServerMessage::UsdDocument {
+        ok: false,
+        name: String::new(),
+        text: None,
+        error: Some(error),
+        warnings: Vec::new(),
+    };
+    let Some((scene, timeline)) = host.baked() else {
+        return refused("nothing to export yet — simulate a sequence first".to_string());
+    };
+    let stem = if timeline.sequences.is_empty() {
+        "cell".to_string()
+    } else {
+        timeline.sequences.join("_")
+    };
+    let exported = match usd::bake_timeline(&scene, &timeline, fps, None, None, &stem) {
+        Ok(exported) => exported,
+        Err(e) => return refused(e),
+    };
+    let text = match exported.to_usda() {
+        Ok(text) => text,
+        Err(e) => return refused(e.to_string()),
+    };
+    let mut warnings = exported.warnings;
+    if !exported.assets.is_empty() {
+        warnings.push(format!(
+            "the layer references robot assets ({}_assets/…) the download does not \
+             carry — place it next to a Python `export_usd` output, or use that \
+             export directly, for a portable copy",
+            stem
+        ));
+    }
+    ServerMessage::UsdDocument {
+        ok: true,
+        name: format!("{stem}.usda"),
+        text: Some(text),
+        error: None,
+        warnings,
+    }
 }
 
 /// Samples a baked timeline at ~30Hz for playback: every robot rides its
@@ -1080,6 +1158,7 @@ mod tests {
         scene: RefCell<Scene>,
         out: RefCell<Vec<ServerMessage>>,
         logs: RefCell<Vec<String>>,
+        baked: RefCell<Option<(Scene, SequenceTimeline)>>,
     }
 
     impl TestHost {
@@ -1088,6 +1167,7 @@ mod tests {
                 scene: RefCell::new(scene),
                 out: RefCell::new(Vec::new()),
                 logs: RefCell::new(Vec::new()),
+                baked: RefCell::new(None),
             }
         }
 
@@ -1129,6 +1209,7 @@ mod tests {
                     ServerMessage::Devices { .. } => "devices",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::RecordingResult { .. } => "recording_result",
+                    ServerMessage::UsdDocument { .. } => "usd_document",
                 })
                 .collect()
         }
@@ -1146,6 +1227,12 @@ mod tests {
         }
         fn log(&self, message: &str) {
             self.logs.borrow_mut().push(message.to_string());
+        }
+        fn store_baked(&self, scene: &Scene, timeline: &SequenceTimeline) {
+            *self.baked.borrow_mut() = Some((scene.clone(), timeline.clone()));
+        }
+        fn baked(&self) -> Option<(Scene, SequenceTimeline)> {
+            self.baked.borrow().clone()
         }
     }
 
@@ -1591,6 +1678,133 @@ mod tests {
             panic!("expected sequence_result");
         };
         assert!(!ok && error.as_ref().unwrap().contains("unknown motion"));
+    }
+
+    #[test]
+    fn simulate_sequences_rolls_programs_together() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_segment(
+                    "go",
+                    Segment {
+                        kind: botrail_scene::motion::SegmentKind::Joint,
+                        goal_positions: vec![0.8],
+                        constraints: vec![],
+                    },
+                )
+                .unwrap();
+        });
+        handle_client_message(
+            &host,
+            r#"{"type":"define_signal","name":"go_ahead","initial":false}"#,
+        );
+        // Station program waits for the supervisor's release signal.
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"station","steps":[
+                {"name":"await release","actions":[],
+                 "transition":{"type":"signal","name":"go_ahead","value":true}},
+                {"name":"work","actions":[{"type":"start_motion","motion":"go"}],
+                 "transition":{"type":"done"}}
+            ]}}"#,
+        );
+        // Supervisor program releases after a delay.
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"boss","steps":[
+                {"name":"think","actions":[],
+                 "transition":{"type":"elapsed","seconds":0.3}},
+                {"name":"release","actions":[{"type":"set","signal":"go_ahead","value":true}],
+                 "transition":{"type":"immediately"}}
+            ]}}"#,
+        );
+        host.out.borrow_mut().clear();
+
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequences","names":["station","boss"]}"#,
+        );
+        let out = host.out.borrow();
+        let ServerMessage::SequenceResult {
+            ok,
+            timeline,
+            error,
+            ..
+        } = &out[0]
+        else {
+            panic!("expected sequence_result, got {out:?}");
+        };
+        assert!(ok, "{error:?}");
+        let tl = timeline.as_ref().unwrap();
+        // Program-qualified step spans, and the cross-program gate held
+        // the move until the supervisor's release.
+        assert!(tl.step_spans.iter().any(|s| s.name == "station/work"));
+        assert!(tl.step_spans.iter().any(|s| s.name == "boss/release"));
+        let work = tl
+            .step_spans
+            .iter()
+            .find(|s| s.name == "station/work")
+            .unwrap();
+        assert!(work.start >= 0.3, "work started at {}", work.start);
+    }
+
+    #[test]
+    fn export_usd_bakes_the_retained_rollout() {
+        let host = TestHost::new();
+        // Before any rollout: a refusal, not a crash.
+        handle_client_message(&host, r#"{"type":"export_usd","fps":60.0}"#);
+        {
+            let out = host.out.borrow();
+            let ServerMessage::UsdDocument { ok, error, .. } = &out[0] else {
+                panic!("expected usd_document, got {out:?}");
+            };
+            assert!(!ok && error.as_ref().unwrap().contains("simulate"));
+        }
+        host.out.borrow_mut().clear();
+
+        host.with_scene(|scene| {
+            scene
+                .add_segment(
+                    "go",
+                    Segment {
+                        kind: botrail_scene::motion::SegmentKind::Joint,
+                        goal_positions: vec![0.8],
+                        constraints: vec![],
+                    },
+                )
+                .unwrap();
+        });
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"cycle","steps":[
+                {"name":"run","actions":[{"type":"start_motion","motion":"go"}],
+                 "transition":{"type":"done"}}]}}"#,
+        );
+        handle_client_message(&host, r#"{"type":"simulate_sequence","name":"cycle"}"#);
+        host.out.borrow_mut().clear();
+
+        handle_client_message(&host, r#"{"type":"export_usd","fps":30.0}"#);
+        let out = host.out.borrow();
+        let ServerMessage::UsdDocument {
+            ok,
+            name,
+            text,
+            error,
+            warnings,
+        } = &out[0]
+        else {
+            panic!("expected usd_document, got {out:?}");
+        };
+        assert!(ok, "{error:?}");
+        assert_eq!(name, "cycle.usda");
+        // A URDF robot bakes self-contained: no asset warning, and the
+        // text is a usda layer with the animated robot prim.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let text = text.as_ref().unwrap();
+        assert!(text.starts_with("#usda"), "{}", &text[..40.min(text.len())]);
+        assert!(text.contains("timeSamples"));
+        assert!(text.contains("\"Robot\""));
     }
 
     #[test]

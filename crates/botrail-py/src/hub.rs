@@ -39,6 +39,9 @@ pub struct SceneHub {
     /// clients — the normal flow is "script plays, then the browser opens",
     /// so the original broadcast usually lands before anyone connects.
     last_recording: Mutex<Option<String>>,
+    /// Last successful rollout (pre-rollout snapshot + timeline), baked on
+    /// demand by the studio's USD download.
+    baked: Mutex<Option<(Scene, botrail_scene::rollout::SequenceTimeline)>>,
 }
 
 impl SessionHost for SceneHub {
@@ -85,6 +88,14 @@ impl SessionHost for SceneHub {
     fn log(&self, message: &str) {
         eprintln!("botrail: {message}");
     }
+
+    fn store_baked(&self, scene: &Scene, timeline: &botrail_scene::rollout::SequenceTimeline) {
+        *self.baked.lock().expect("baked mutex poisoned") = Some((scene.clone(), timeline.clone()));
+    }
+
+    fn baked(&self) -> Option<(Scene, botrail_scene::rollout::SequenceTimeline)> {
+        self.baked.lock().expect("baked mutex poisoned").clone()
+    }
 }
 
 impl SceneHub {
@@ -95,6 +106,7 @@ impl SceneHub {
             tx,
             meshes: Mutex::new(Vec::new()),
             last_recording: Mutex::new(None),
+            baked: Mutex::new(None),
         }
     }
 
@@ -499,12 +511,7 @@ impl SceneHub {
         self.with_scene(|scene| scene.sensors().iter().map(|s| s.name.clone()).collect())
     }
 
-    pub fn add_weld_flash(
-        &self,
-        name: &str,
-        signal: &str,
-        robot: &str,
-    ) -> Result<(), SceneError> {
+    pub fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> Result<(), SceneError> {
         botrail_session::add_weld_flash(self, name, signal, robot)
     }
 

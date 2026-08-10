@@ -84,3 +84,100 @@ def test_unknown_dialect_is_rejected(scene: bt.Scene) -> None:
     traj = scene.plan([0.5, 0.0, 0.0, 0.0, 0.0, 0.0], broadcast=False)
     with pytest.raises(ValueError, match="urscript"):
         traj.to_script(dialect="klingon")
+
+
+# ---- sequence → URScript (moves + real I/O from one source) -------------
+
+
+@pytest.fixture()
+def cell_timeline() -> "bt.SequenceTimeline":
+    """A pick cell on the six-axis arm, rolled out: a conveyor feeds a box
+    over a beam, the robot picks with a vacuum coil — every lowerable
+    element in one sequence."""
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene.add_box("part", size=(0.06, 0.06, 0.06), position=(-0.45, 0.35, 0.03))
+    scene.add_conveyor(
+        "conv",
+        zone_position=(-0.1, 0.35, 0.05),
+        zone_size=(0.9, 0.2, 0.14),
+        velocity=(0.2, 0.0, 0.0),
+        running=False,
+    )
+    scene.add_beam_sensor(
+        "part_at_pick",
+        frm=(0.25, 0.25, 0.03),
+        to=(0.25, 0.45, 0.03),
+        watch=["part"],
+    )
+    scene.define_signal("vacuum")
+
+    over_pick = [0.95, 0.85, -1.1, 0.25, 0.0, 0.0]
+    scene.add_segment("to_pick", goal=over_pick)
+    scene.add_segment("home", goal=[0.0] * 6)
+
+    sq = scene.sequence("pick")
+    sq.step(
+        "feed",
+        actions=[bt.seq.start("conv"), bt.seq.motion("to_pick")],
+        transition=bt.seq.all_of(bt.seq.signal("part_at_pick"), bt.seq.done()),
+    )
+    sq.step("halt", actions=[bt.seq.stop("conv")])
+    sq.step("grip", actions=[bt.seq.set_signal("vacuum")], transition=bt.seq.elapsed(0.3))
+    sq.step("hold", actions=[bt.seq.attach("part")])
+    sq.step("return", actions=[bt.seq.motion("home")])
+    return sq.simulate()
+
+
+IO = dict(
+    inputs={"part_at_pick": 2},
+    outputs={"conv": 0, "vacuum": 1},
+)
+
+
+def test_sequence_to_urscript(cell_timeline) -> None:
+    tl = cell_timeline
+    assert tl.sequences == ["pick"]
+
+    with pytest.warns(UserWarning, match="beside the move"):
+        code = tl.to_script(**IO)
+    lines = code.splitlines()
+    assert lines[0] == "def pick():"
+
+    # The program follows the authored step order: conveyor coil on, the
+    # approach moves, the beam wait, coil off, vacuum on, the dwell, the
+    # attach comment, the return moves.
+    on = code.index("set_standard_digital_out(0, True)")
+    wait = code.index("not get_standard_digital_in(2)")
+    off = code.index("set_standard_digital_out(0, False)")
+    vac = code.index("set_standard_digital_out(1, True)")
+    dwell = code.index("sleep(0.3)")
+    grasp = code.index("# attach part")
+    assert on < wait < off < vac < dwell < grasp
+    assert code.count("movej(") >= 3  # move-to-start + both motions
+    # Step names annotate the script.
+    for step in ("feed", "halt", "grip", "hold", "return"):
+        assert f": {step}" in code
+
+
+def test_sequence_script_files_and_warnings(cell_timeline, tmp_path: Path) -> None:
+    tl = cell_timeline
+    path = tmp_path / "pick.script"
+    with pytest.warns(UserWarning, match="beside the move"):
+        # The feed step's beam wait runs beside the approach move in
+        # simulation but after it in the script — flagged, not silent.
+        tl.export_script(path, **IO)
+    assert path.read_text().startswith("def pick():")
+
+    with pytest.warns(UserWarning, match="beside the move"):
+        named = tl.to_script(name="station_1", **IO)
+    assert named.startswith("def station_1():")
+
+
+def test_sequence_script_unmapped_names_raise(cell_timeline) -> None:
+    tl = cell_timeline
+    with pytest.raises(ValueError, match="part_at_pick"):
+        tl.to_script(outputs=IO["outputs"])
+    with pytest.raises(ValueError, match="vacuum"):
+        tl.to_script(inputs=IO["inputs"], outputs={"conv": 0})
+    with pytest.raises(ValueError, match="not part of this rollout"):
+        tl.to_script(sequence="other", **IO)

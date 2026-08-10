@@ -164,7 +164,19 @@ pub fn write_animation(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "animation".to_string());
-    let mut exported = export_animation(input, options, &stem)?;
+    let exported = export_animation(input, options, &stem)?;
+    write_exported(path, exported)
+}
+
+/// Writes an already-composed animation to `path`: serializes by
+/// extension and copies the referenced robot assets next to it (see
+/// [`write_animation`], whose lower half this is — split out so callers
+/// that bake in memory, like the studio's USD download, share one
+/// serialization path).
+pub fn write_exported(
+    path: &Path,
+    mut exported: ExportedAnimation,
+) -> Result<Vec<String>, UsdExportError> {
     let io = |e: std::io::Error| UsdExportError::Io(e.to_string());
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(io)?;

@@ -9,10 +9,12 @@ import { WasmBackend } from "./backend-wasm";
 import { WsBackend } from "./backend-ws";
 import type {
   ClientMessage,
+  DeviceMsg,
   GeometryMsg,
   ObstacleMsg,
   PoseMsg,
   SegmentMsg,
+  SensorMsg,
   SequenceMsg,
   ServerMessage,
 } from "./protocol";
@@ -255,9 +257,31 @@ export function sendSimulateSequence(name: string): void {
   rawSend({ type: "simulate_sequence", name });
 }
 
+/** Roll out several sequences as concurrent programs (scan order = list
+ * order, like the PLC they model). */
+export function sendSimulateSequences(names: string[]): void {
+  rawSend({ type: "simulate_sequences", names });
+}
+
+/** Bake the last simulated timeline as a usda layer; the reply
+ * (`usd_document`) is saved as a browser download. */
+export function sendExportUsd(fps: number): void {
+  rawSend({ type: "export_usd", fps });
+}
+
+/** Add or replace a pseudo-sensor wholesale. */
+export function sendUpsertSensor(sensor: SensorMsg): void {
+  rawSend({ type: "upsert_sensor", sensor });
+}
+
 /** Remove a pseudo-sensor (sent immediately). */
 export function sendRemoveSensor(name: string): void {
   rawSend({ type: "remove_sensor", name });
+}
+
+/** Add or replace an auxiliary device wholesale. */
+export function sendUpsertDevice(device: DeviceMsg): void {
+  rawSend({ type: "upsert_device", device });
 }
 
 /** Remove an auxiliary device (sent immediately). */

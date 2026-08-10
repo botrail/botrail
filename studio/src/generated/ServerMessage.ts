@@ -43,7 +43,15 @@ mode: string | null, warnings: Array<string>,
 /**
  * Playable timeline (no step/signal lanes) when ok.
  */
-timeline: TimelineMsg | null, } | { "type": "motion_result", 
+timeline: TimelineMsg | null, } | { "type": "usd_document", ok: boolean, 
+/**
+ * Suggested file name (`<sequences>.usda`).
+ */
+name: string, 
+/**
+ * The usda layer text when ok.
+ */
+text: string | null, error: string | null, warnings: Array<string>, } | { "type": "motion_result", 
 /**
  * Owning robot instance (plays back on that robot).
  */

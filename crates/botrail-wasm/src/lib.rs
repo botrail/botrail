@@ -105,6 +105,9 @@ struct WasmHost {
     /// built from one. The studio fetches the stage itself for rendering —
     /// wasm only holds the kinematics — so it needs somewhere to fetch from.
     asset_base: Option<String>,
+    /// Last successful rollout, baked on demand by `export_usd` — the
+    /// browser has no Python at hand, so the download *is* the export path.
+    baked: RefCell<Option<(Scene, botrail_scene::rollout::SequenceTimeline)>>,
 }
 
 impl SessionHost for WasmHost {
@@ -130,6 +133,14 @@ impl SessionHost for WasmHost {
     fn log(&self, message: &str) {
         web_log(&format!("botrail-wasm: {message}"));
     }
+
+    fn store_baked(&self, scene: &Scene, timeline: &botrail_scene::rollout::SequenceTimeline) {
+        *self.baked.borrow_mut() = Some((scene.clone(), timeline.clone()));
+    }
+
+    fn baked(&self) -> Option<(Scene, botrail_scene::rollout::SequenceTimeline)> {
+        self.baked.borrow().clone()
+    }
 }
 
 #[wasm_bindgen]
@@ -149,6 +160,7 @@ impl WasmSession {
                 scene: RefCell::new(Scene::new(Arc::new(model))),
                 out: RefCell::new(Vec::new()),
                 asset_base: None,
+                baked: RefCell::new(None),
             },
         })
     }
@@ -208,6 +220,7 @@ impl WasmSession {
                 scene: RefCell::new(scene),
                 out: RefCell::new(Vec::new()),
                 asset_base,
+                baked: RefCell::new(None),
             },
         })
     }

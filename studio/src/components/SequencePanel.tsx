@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 
 import type { ActionMsg, ConditionMsg, SequenceMsg, StepMsg } from "../protocol";
 import { robotByName, useStudioStore } from "../store";
-import { sendSimulateSequence, sendUpsertSequence } from "../ws";
+import {
+  sendSimulateSequence,
+  sendSimulateSequences,
+  sendUpsertSequence,
+} from "../ws";
 
 const SEQUENCE_NAME = "main";
 
@@ -80,6 +84,11 @@ export function SequencePanel() {
     sequences.find((s) => s.name === SEQUENCE_NAME) ??
     sequences[0] ?? { name: SEQUENCE_NAME, steps: [] };
   const [motionChoice, setMotionChoice] = useState("");
+  // Multi-program run set: which sequences the next co-simulation rolls
+  // together (all of them by default — that is the cell). Names absent
+  // from the map count as included, so freshly authored programs join
+  // without a click.
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
   useEffect(() => {
     if (!motions.some((m) => m.name === motionChoice)) {
       setMotionChoice(motions[0]?.name ?? "");
@@ -144,6 +153,13 @@ export function SequencePanel() {
     sendSimulateSequence(sequence.name);
   };
 
+  const included = sequences.filter((s) => !excluded.has(s.name));
+  const onSimulateTogether = () => {
+    if (included.length === 0) return;
+    beginSequenceSim();
+    sendSimulateSequences(included.map((s) => s.name));
+  };
+
   return (
     <section className="panel-section">
       <div className="panel-head">
@@ -154,6 +170,40 @@ export function SequencePanel() {
         )}
       </div>
       <div className="plan-controls">
+        {/* With several programs authored (one per station, PLC style),
+            the cell runs them together — the checkboxes carve out a
+            subset when debugging one station in isolation. */}
+        {sequences.length > 1 && (
+          <div className="seq-programs">
+            {sequences.map((s) => (
+              <label key={s.name} className="seq-program">
+                <input
+                  type="checkbox"
+                  checked={!excluded.has(s.name)}
+                  onChange={(e) => {
+                    const next = new Set(excluded);
+                    if (e.target.checked) {
+                      next.delete(s.name);
+                    } else {
+                      next.add(s.name);
+                    }
+                    setExcluded(next);
+                  }}
+                />
+                {s.name}
+                <span className="seq-cond"> · {s.steps.length} steps</span>
+              </label>
+            ))}
+            <button
+              className="plan-go"
+              onClick={onSimulateTogether}
+              disabled={included.length === 0 || simulating || !connected}
+              title="roll the checked programs concurrently over one world"
+            >
+              Simulate programs ({included.length})
+            </button>
+          </div>
+        )}
         <div className="seg">
           <button onClick={addMotion} disabled={!motionChoice} title="add a motion step">
             + Motion

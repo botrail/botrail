@@ -8,6 +8,7 @@
 pub mod motion;
 pub mod project;
 pub mod rollout;
+pub mod script;
 pub mod seq;
 pub mod verify;
 pub mod wire;

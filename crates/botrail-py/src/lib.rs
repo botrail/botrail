@@ -2524,225 +2524,14 @@ impl SequenceTimeline {
         start: Option<f64>,
         end: Option<f64>,
     ) -> PyResult<Vec<String>> {
-        if !(fps.is_finite() && fps > 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "fps must be positive, got {fps}"
-            )));
-        }
-        let from = start.unwrap_or(0.0).clamp(0.0, self.inner.duration);
-        let to = end.unwrap_or(self.inner.duration).clamp(0.0, self.inner.duration);
-        if to <= from + 1e-9 {
-            return Err(PyValueError::new_err(format!(
-                "export window [{from}, {to}] is empty"
-            )));
-        }
-        // The exported layer always starts at t = 0; a window is a shift,
-        // so a clipped recording plays like a cycle of its own.
-        let duration = to - from;
-        let mut times = Vec::new();
-        let mut k = 0u64;
-        loop {
-            let t = k as f64 / fps;
-            if t >= duration - 1e-9 {
-                break;
-            }
-            times.push(t);
-            k += 1;
-        }
-        times.push(duration);
-        // Sample times in the *timeline's* frame; `times` stays the
-        // exported (zero-based) grid the exporter writes.
-        let sample_at: Vec<f64> = times.iter().map(|t| t + from).collect();
-
-        // Per-robot FK per frame (robot-major for the exporter)...
-        let mut robot_frames: Vec<Vec<Vec<nalgebra::Isometry3<f64>>>> =
-            Vec::with_capacity(self.inner.robots.len());
-        let mut joint_samples: Vec<Vec<Vec<f64>>> = Vec::with_capacity(self.inner.robots.len());
-        for (r, track) in self.inner.robots.iter().enumerate() {
-            let mut frames = Vec::with_capacity(times.len());
-            let mut samples = Vec::with_capacity(times.len());
-            for &t in &sample_at {
-                let q = track.trajectory.sample(t);
-                // A robot riding a vehicle has a base that moves, so FK has
-                // to be taken against the baked base, not the parked scene.
-                let poses = match botrail_scene::rollout::SequenceTimeline::base_pose(track, t) {
-                    Some(base) => botrail_kin::forward_kinematics_with_base(
-                        &self.scene.robots()[r].model,
-                        &q,
-                        &base,
-                    )
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                    None => self
-                        .scene
-                        .fk_for(r, &q)
-                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                };
-                frames.push(poses);
-                samples.push(q);
-            }
-            robot_frames.push(frames);
-            joint_samples.push(samples);
-        }
-        // ...and frame-major for the object tracks (handover-aware: each
-        // span names its carrying robot).
-        let all_frames: Vec<Vec<Vec<nalgebra::Isometry3<f64>>>> = (0..times.len())
-            .map(|k| robot_frames.iter().map(|rf| rf[k].clone()).collect())
-            .collect();
-
-        let objects: Vec<botrail_usd::export::ObjectSpec> = self
-            .scene
-            .obstacles()
-            .iter()
-            // A collision proxy is not part of the picture: the export
-            // is what someone opens in usdview, and hidden means hidden.
-            .filter(|o| o.visible)
-            .map(|o| {
-                let found = self.inner.objects.iter().find(|t| t.name == o.name);
-                // Stowed frames become animated `visibility` on the prim, so
-                // a magazine of stock stays out of the picture in usdview
-                // the same way it does in the studio.
-                let visible: Vec<bool> = found
-                    .map(|track| {
-                        sample_at
-                            .iter()
-                            .map(|&t| {
-                                botrail_scene::rollout::SequenceTimeline::object_visible(track, t)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let visible = if visible.iter().all(|v| *v) {
-                    Vec::new()
-                } else {
-                    visible
-                };
-                let track = match found {
-                    Some(track) => botrail_usd::export::PoseTrack::Sampled(
-                        sample_at
-                            .iter()
-                            .enumerate()
-                            .map(|(k, &t)| {
-                                botrail_scene::rollout::SequenceTimeline::object_pose(
-                                    track,
-                                    &all_frames[k],
-                                    t,
-                                )
-                                .unwrap_or(o.pose)
-                            })
-                            .collect(),
-                    ),
-                    None => botrail_usd::export::PoseTrack::Static(o.pose),
-                };
-                botrail_usd::export::ObjectSpec {
-                    name: o.name.clone(),
-                    geometry: o.geometry.clone(),
-                    track,
-                    color: o.color,
-                    visible,
-                }
-            })
-            .collect();
-        let mut objects = objects;
-
-        // Weld flashes: one small bright prim per current-ON interval,
-        // standing where that weld happened, blinking through animated
-        // visibility — so the arc shows in usdview/Omniverse exactly when
-        // the baked weld-controller signal was on.
-        for flash in self.scene.weld_flashes() {
-            let Some(track) = self.inner.signals.iter().find(|s| s.name == flash.signal)
-            else {
-                continue;
-            };
-            let Some(r) = self.scene.robot_index(&flash.robot) else {
-                continue;
-            };
-            let robot_track = &self.inner.robots[r];
-            let model = &self.scene.robots()[r].model;
-            let tcp = model.default_tcp_link();
-            // Rising/falling edges -> [on, off) intervals.
-            let mut intervals: Vec<(f64, f64)> = Vec::new();
-            let mut on_since: Option<f64> = None;
-            for &(t, value) in &track.edges {
-                match (value, on_since) {
-                    (true, None) => on_since = Some(t),
-                    (false, Some(t0)) => {
-                        intervals.push((t0, t));
-                        on_since = None;
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(t0) = on_since {
-                intervals.push((t0, self.inner.duration));
-            }
-            // Clip to the exported window and rebase onto its clock.
-            let intervals: Vec<(f64, f64)> = intervals
-                .into_iter()
-                .filter(|(a, b)| *b > from && *a < to)
-                .map(|(a, b)| (a.max(from) - from, b.min(to) - from))
-                .collect();
-            for (k, &(t0, t1)) in intervals.iter().enumerate() {
-                let mid = (t0 + t1) / 2.0 + from;
-                let q = robot_track.trajectory.sample(mid);
-                let poses =
-                    match botrail_scene::rollout::SequenceTimeline::base_pose(robot_track, mid) {
-                        Some(base) => botrail_kin::forward_kinematics_with_base(model, &q, &base)
-                            .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                        None => self
-                            .scene
-                            .fk_for(r, &q)
-                            .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                    };
-                let visible: Vec<bool> = times
-                    .iter()
-                    .map(|&t| t >= t0 - 1e-9 && t < t1 - 1e-9)
-                    .collect();
-                if !visible.iter().any(|v| *v) {
-                    continue;
-                }
-                objects.push(botrail_usd::export::ObjectSpec {
-                    name: format!("flashes/{}_{}", flash.name, k + 1),
-                    geometry: botrail_model::Geometry::Sphere { radius: 0.028 },
-                    track: botrail_usd::export::PoseTrack::Static(poses[tcp]),
-                    color: Some([1.0, 0.82, 0.45]),
-                    visible,
-                });
-            }
-        }
-
-        // A sole robot keeps the historical `Robot` prim (byte compat).
-        let single = self.inner.robots.len() == 1;
-        let names: Vec<String> = self
-            .inner
-            .robots
-            .iter()
-            .map(|r| {
-                if single {
-                    "Robot".to_string()
-                } else {
-                    r.name.clone()
-                }
-            })
-            .collect();
-        let robots: Vec<botrail_usd::export::RobotAnimation> = self
-            .inner
-            .robots
-            .iter()
-            .enumerate()
-            .map(|(r, _)| botrail_usd::export::RobotAnimation {
-                name: &names[r],
-                model: &self.scene.robots()[r].model,
-                link_poses: &robot_frames[r],
-                joint_samples: Some(&joint_samples[r]),
-            })
-            .collect();
-        let input = botrail_usd::export::AnimationInput {
-            robots: &robots,
-            times: &times,
-            objects: &objects,
-        };
-        let options = botrail_usd::export::ExportOptions { fps };
-        botrail_usd::export::write_animation(&path, &input, &options)
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "animation".to_string());
+        let exported =
+            botrail_session::usd::bake_timeline(&self.scene, &self.inner, fps, start, end, &stem)
+                .map_err(PyValueError::new_err)?;
+        botrail_usd::export::write_exported(&path, exported)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -2817,6 +2606,125 @@ impl SequenceTimeline {
                      obstacle with collision geometry",
                 )
             })
+    }
+
+    /// Names of the sequences this timeline was rolled from, in scan
+    /// order — the programs `to_script` can export.
+    #[getter]
+    fn sequences(&self) -> Vec<String> {
+        self.inner.sequences.clone()
+    }
+
+    /// Renders one program of this timeline as a vendor robot script —
+    /// the same steps that drove the simulation, with real I/O: `inputs`
+    /// maps signal/device/robot names to digital input ports (level
+    /// waits), `outputs` maps signal/device names to digital output ports
+    /// (coil writes). Timers become sleeps; moves are the rollout's own
+    /// planned sparse paths.
+    ///
+    /// The program is named after the sequence (`name` overrides). The
+    /// sequence must drive exactly one robot — a multi-robot cell exports
+    /// one script per program. Approximations (unmapped device commands,
+    /// waits that ran beside a move in simulation) are raised as Python
+    /// warnings; what cannot be expressed at all (`any_of` waits,
+    /// conveyor tracking) raises `ValueError`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (sequence = None, dialect = "urscript", name = None,
+        inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+    fn to_script(
+        &self,
+        py: Python<'_>,
+        sequence: Option<&str>,
+        dialect: &str,
+        name: Option<&str>,
+        inputs: Option<std::collections::HashMap<String, u32>>,
+        outputs: Option<std::collections::HashMap<String, u32>>,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<String> {
+        let backend = botrail_export::backend(dialect).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown dialect {dialect:?} (available: {})",
+                botrail_export::DIALECTS.join(", ")
+            ))
+        })?;
+        let io = botrail_scene::script::SequenceIo {
+            inputs: inputs.unwrap_or_default(),
+            outputs: outputs.unwrap_or_default(),
+        };
+        let options = botrail_export::ProgramOptions {
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        };
+        let out = botrail_scene::script::sequence_program(
+            &self.scene,
+            &self.inner,
+            sequence,
+            &io,
+            &options,
+        )
+        .map_err(PyValueError::new_err)?;
+        for warning in &out.warnings {
+            let message = std::ffi::CString::new(warning.as_str())
+                .unwrap_or_else(|_| std::ffi::CString::new("sequence export warning").unwrap());
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &message,
+                2,
+            )?;
+        }
+        let mut program = out.program;
+        if let Some(name) = name {
+            program.name = name.to_string();
+        }
+        backend
+            .emit(&program)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes `to_script` output to `path` (see there for the semantics).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
+        inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+    fn export_script(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        sequence: Option<&str>,
+        dialect: &str,
+        name: Option<&str>,
+        inputs: Option<std::collections::HashMap<String, u32>>,
+        outputs: Option<std::collections::HashMap<String, u32>>,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<()> {
+        let script = self.to_script(
+            py,
+            sequence,
+            dialect,
+            name,
+            inputs,
+            outputs,
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        )?;
+        std::fs::write(&path, script)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
     }
 }
 

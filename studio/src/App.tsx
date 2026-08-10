@@ -5,6 +5,7 @@ import { ObstaclePanel } from "./components/ObstaclePanel";
 import { PlanPanel } from "./components/PlanPanel";
 import { RobotPanel } from "./components/RobotPanel";
 import { SceneTreePanel } from "./components/SceneTreePanel";
+import { SensorDevicePanel } from "./components/SensorDevicePanel";
 import { SequencePanel } from "./components/SequencePanel";
 import { TcpPanel } from "./components/TcpPanel";
 import { Viewport } from "./components/Viewport";
@@ -23,6 +24,7 @@ export function App() {
           <MotionPanel />
           <SequencePanel />
           <ObstaclePanel />
+          <SensorDevicePanel />
           <JointPanel />
         </aside>
       </div>

@@ -44,9 +44,14 @@ pub enum ExportError {
     },
 }
 
-/// One move command. Blends are TCP-sphere radii in meters within which
+/// One program command. Blends are TCP-sphere radii in meters within which
 /// the controller may round the corner into the next command; 0 stops
 /// exactly at the target.
+///
+/// The I/O commands speak the least common denominator of industrial
+/// controllers — numbered digital ports plus a level wait — which is what
+/// a sequence's signals, device coils, and sensor contacts lower to. Port
+/// numbering is the vendor's ("standard" digital I/O on UR).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// Joint-interpolated move. `velocity`/`acceleration` bound the
@@ -66,6 +71,17 @@ pub enum Command {
         acceleration: f64,
         blend: f64,
     },
+    /// Write a digital output (an output coil: gripper valve, conveyor
+    /// run contact, weld fire).
+    SetDigitalOut { port: u32, value: bool },
+    /// Block until a digital input reads `value` (a level wait on an
+    /// input contact: part-present beam, in-position feedback).
+    WaitDigitalIn { port: u32, value: bool },
+    /// Pause for a fixed time (an on-delay timer lowered to a wait).
+    Sleep { seconds: f64 },
+    /// Annotation carried into the script as a comment (step names,
+    /// simulation-only actions). Never affects execution.
+    Comment { text: String },
 }
 
 /// A vendor-neutral robot program: named move sequence over a fixed joint
@@ -302,6 +318,7 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Command::MoveJoint { q, .. } | Command::MoveLinear { q, .. } => q,
+                other => panic!("build_program emits only moves, got {other:?}"),
             })
             .collect();
         assert_eq!(targets, vec![&a, &b, &c]);
@@ -324,6 +341,7 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Command::MoveJoint { blend, .. } | Command::MoveLinear { blend, .. } => *blend,
+                other => panic!("build_program emits only moves, got {other:?}"),
             })
             .collect();
         // Intermediates blend, the segment goal stops exactly.

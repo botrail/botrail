@@ -798,6 +798,17 @@ pub enum ServerMessage {
         /// Playable timeline (no step/signal lanes) when ok.
         timeline: Option<TimelineMsg>,
     },
+    /// Response to an `export_usd` request: the last simulated timeline
+    /// baked as a usda layer, for the client to save as a file download.
+    UsdDocument {
+        ok: bool,
+        /// Suggested file name (`<sequences>.usda`).
+        name: String,
+        /// The usda layer text when ok.
+        text: Option<String>,
+        error: Option<String>,
+        warnings: Vec<String>,
+    },
     /// Response to a `plan_motion` request (broadcast to every client).
     MotionResult {
         /// Owning robot instance (plays back on that robot).
@@ -937,6 +948,17 @@ pub enum ClientMessage {
     /// as a `sequence_result`.
     SimulateSequence {
         name: String,
+    },
+    /// Roll out several sequences as concurrently-running programs (one
+    /// shared world, PLC scan order = list order); the result arrives as
+    /// a `sequence_result`.
+    SimulateSequences {
+        names: Vec<String>,
+    },
+    /// Bake the last simulated timeline as a usda layer; the result
+    /// arrives as a `usd_document` (the browser saves it as a download).
+    ExportUsd {
+        fps: f64,
     },
     /// Add or replace a pseudo-sensor.
     UpsertSensor {

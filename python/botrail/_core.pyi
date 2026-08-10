@@ -472,6 +472,35 @@ class SequenceTimeline:
     def step_span(self, name: str) -> Span: ...
     def signal(self, name: str) -> SignalTrack: ...
     def min_clearance(self, dt: float = 0.01) -> Clearance: ...
+    @property
+    def sequences(self) -> list[str]: ...
+    def to_script(
+        self,
+        sequence: Optional[str] = None,
+        dialect: str = "urscript",
+        name: Optional[str] = None,
+        inputs: Optional[dict[str, int]] = None,
+        outputs: Optional[dict[str, int]] = None,
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> str: ...
+    def export_script(
+        self,
+        path: Union[str, Path],
+        sequence: Optional[str] = None,
+        dialect: str = "urscript",
+        name: Optional[str] = None,
+        inputs: Optional[dict[str, int]] = None,
+        outputs: Optional[dict[str, int]] = None,
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> None: ...
 
 class Span:
     @property

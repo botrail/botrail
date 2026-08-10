@@ -611,6 +611,26 @@ select:focus {
   margin-right: 4px;
 }
 
+/* Multi-program run set: one checkbox row per authored program. */
+.seq-programs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #2c3444;
+  background: #161b26;
+}
+
+.seq-program {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #aeb8c8;
+  cursor: pointer;
+}
+
 /* ----------------------------------------------------------- timeline dock */
 
 .timeline-dock {

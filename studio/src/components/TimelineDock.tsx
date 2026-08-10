@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
 import { useStudioStore } from "../store";
+import { sendExportUsd } from "../ws";
 
 const BAND_COLORS = ["#4a6fa5", "#5a8f6a", "#a5824a", "#7a5aa5", "#a55a6f"];
 const ROBOT_LANE_COLOR = "#4a8fa5";
@@ -132,6 +133,17 @@ export function TimelineDock() {
           >
             ⟳
           </button>
+          {/* Sequence timelines only: the server bakes the retained
+              rollout, so a loaded recording has nothing to re-export. */}
+          {!recording && (
+            <button
+              className="timeline-button"
+              onClick={() => sendExportUsd(60)}
+              title="download this cycle as a USD animation (.usda)"
+            >
+              ⤓ usd
+            </button>
+          )}
           <span>{playbackTime.toFixed(2)}s</span>
         </span>
       </div>
