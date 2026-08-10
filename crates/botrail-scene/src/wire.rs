@@ -544,6 +544,16 @@ pub enum DeviceCommandMsg {
     },
 }
 
+/// A weld-flash binding: while `signal` is true, draw an arc flash at
+/// `robot`'s TCP.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct FlashMsg {
+    pub name: String,
+    pub signal: String,
+    pub robot: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SequenceMsg {
@@ -660,6 +670,12 @@ pub struct SignalTrackMsg {
     /// Edge times; `values[i]` holds from `times[i]` on. `times[0] = 0`.
     pub times: Vec<f64>,
     pub values: Vec<bool>,
+    /// Where the lane comes from: `"signal"` (internal relay), `"sensor"`
+    /// (input), or `"device"` (output lane). A line's worth of sources and
+    /// sinks is hundreds of device lanes, and the timing chart needs to
+    /// fold those away by default rather than bury the process signals.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// One robot's playable track on a baked timeline.
@@ -754,6 +770,10 @@ pub enum ServerMessage {
     /// The full device list; resent on every change.
     Devices {
         devices: Vec<DeviceMsg>,
+    },
+    /// The full weld-flash list; resent on every change.
+    Effects {
+        flashes: Vec<FlashMsg>,
     },
     /// Response to a `simulate_sequence` request (broadcast to every client).
     SequenceResult {
@@ -1612,6 +1632,21 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
 pub fn sensors_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Sensors {
         sensors: scene.sensors().iter().map(sensor_msg).collect(),
+    }
+}
+
+/// The full weld-flash list as an `effects` message.
+pub fn effects_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Effects {
+        flashes: scene
+            .weld_flashes()
+            .iter()
+            .map(|f| FlashMsg {
+                name: f.name.clone(),
+                signal: f.signal.clone(),
+                robot: f.robot.clone(),
+            })
+            .collect(),
     }
 }
 

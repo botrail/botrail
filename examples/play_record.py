@@ -18,7 +18,10 @@ robots have no stage behind them, so their bake is per-link world poses
 and playback follows those (`transforms` mode). Either way the cell has to
 be rebuilt first — the recording stores motion, not geometry.
 
-Run with:  python examples/play_record.py [recording.usda]
+Run with:  python examples/play_record.py [recording.usda] [--cell NAME]
+
+A binary `.usdc` keeps its prim names out of reach of the text sniffing
+below, so name its cell explicitly: `--cell line` / `line4` / `weld` / …
 """
 
 import re
@@ -114,21 +117,59 @@ def cell_for(recording: Path) -> bt.Scene:
             "cell this script knows how to rebuild. Build that cell yourself "
             "and call scene.play_usd_animation() on it."
         )
-    print(f"{recording}: single-arm cell")
+    if not names:
+        print(
+            f"{recording}: no robot prims readable (a binary .usdc keeps its "
+            f"names out of reach) — assuming the single-arm cell; pass "
+            f"--cell {'/'.join(sorted(CELLS))} to say otherwise"
+        )
+    else:
+        print(f"{recording}: single-arm cell")
     return demo.build_scene()
 
 
+# Cells this script can rebuild, for `--cell`. A *binary* recording
+# (`.usdc`) carries the same prims as a text one, but the sniffing below
+# reads prim names out of the text — so a binary recording has to be told
+# which cell it belongs to rather than guessed at.
+CELLS = {
+    "single": lambda: demo.build_scene(),
+    "dual": lambda: dual_cell_demo.build_cell(),
+    "weld": lambda: weld_station_demo.build_cell()[0],
+    "line": lambda: _line_cell(2),
+    "line4": lambda: _line_cell(4),
+    "agv": lambda: agv_cell_demo.build_scene(),
+    "amr": lambda: amr_demo.build_scene(),
+}
+
+
+def _line_cell(stations: int):
+    import weld_line_demo
+
+    weld_line_demo.set_stations(stations)
+    return weld_line_demo.build_line()[0]
+
+
 def main() -> None:
-    recording = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    cell = None
+    if "--cell" in sys.argv:
+        cell = sys.argv[sys.argv.index("--cell") + 1]
+        if cell not in CELLS:
+            raise SystemExit(
+                f"--cell takes one of: {', '.join(sorted(CELLS))}"
+            )
+    recording = Path(args[0]) if args else DEFAULT
     if not recording.exists():
         raise SystemExit(
             f"{recording} not found — bake one first:\n"
             "  python examples/sequence_demo.py      # -> cell_seq.usda\n"
             "  python examples/dual_cell_demo.py     # -> cell_dual.usda\n"
-            "  python examples/weld_station_demo.py  # -> cell_weld.usda"
+            "  python examples/weld_station_demo.py  # -> cell_weld.usda\n"
+            "  python examples/weld_line_demo.py     # -> cell_line.usda"
         )
 
-    scene = cell_for(recording)
+    scene = CELLS[cell]() if cell else cell_for(recording)
     server = bt.studio(scene, block=False)  # ブラウザが開く
 
     result = scene.play_usd_animation(recording)

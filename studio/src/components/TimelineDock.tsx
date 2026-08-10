@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
 import { useStudioStore } from "../store";
@@ -12,6 +12,62 @@ const ROBOT_LANE_COLOR = "#4a8fa5";
  * timelines), and one lane per signal. Rendered only when a sequence
  * timeline is loaded.
  */
+/** Fraction of the cycle these move intervals cover, overlaps merged —
+ * the line-balancing number, shown beside each robot lane so the
+ * bottleneck is readable straight off the chart. */
+function utilization(
+  moves: { start: number; end: number }[],
+  duration: number,
+): number {
+  if (duration <= 0) return 0;
+  const spans = [...moves].sort((a, b) => a.start - b.start);
+  let total = 0;
+  let open: { start: number; end: number } | null = null;
+  for (const span of spans) {
+    if (open && span.start <= open.end) {
+      open.end = Math.max(open.end, span.end);
+    } else {
+      if (open) total += open.end - open.start;
+      open = { start: span.start, end: span.end };
+    }
+  }
+  if (open) total += open.end - open.start;
+  return total / duration;
+}
+
+function SignalLane({
+  signal,
+  duration,
+}: {
+  signal: { name: string; times: number[]; values: boolean[] };
+  duration: number;
+}) {
+  const pct = (t: number) => `${(t / duration) * 100}%`;
+  return (
+    <div className="timeline-lane">
+      <span className="timeline-lane-name" title={signal.name}>
+        {signal.name}
+      </span>
+      <div className="timeline-lane-track">
+        {signal.times.map((t0, i) => {
+          const t1 = signal.times[i + 1] ?? duration;
+          if (!signal.values[i]) return null;
+          return (
+            <div
+              key={i}
+              className="timeline-lane-on"
+              style={{
+                left: pct(t0),
+                width: `max(${((t1 - t0) / duration) * 100}%, 2px)`,
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const playback = useStudioStore((s) => s.playback);
@@ -19,7 +75,13 @@ export function TimelineDock() {
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const setPlayback = useStudioStore((s) => s.setPlayback);
   const setPlaying = useStudioStore((s) => s.setPlaying);
+  const playing = useStudioStore((s) => s.playing);
+  const speed = useStudioStore((s) => s.playbackSpeed);
+  const setSpeed = useStudioStore((s) => s.setPlaybackSpeed);
+  const loop = useStudioStore((s) => s.playbackLoop);
+  const setLoop = useStudioStore((s) => s.setPlaybackLoop);
   const barRef = useRef<HTMLDivElement | null>(null);
+  const [showDevices, setShowDevices] = useState(false);
 
   if (!timeline || !playback || timeline.duration <= 0) return null;
   const duration = timeline.duration;
@@ -46,7 +108,32 @@ export function TimelineDock() {
           {recordingLabel ? `● ${recordingLabel} — ` : ""}
           cycle {duration.toFixed(2)}s
         </span>
-        <span>{playbackTime.toFixed(2)}s</span>
+        <span className="timeline-controls">
+          {/* A 60-90 s takt is unwatchable at 1x; speed and loop are how a
+              line cycle actually gets reviewed. */}
+          <button
+            className="timeline-button"
+            onClick={() => setPlaying(!playing)}
+            title={playing ? "pause" : "play"}
+          >
+            {playing ? "❚❚" : "▶"}
+          </button>
+          <button
+            className="timeline-button"
+            onClick={() => setSpeed(speed >= 8 ? 1 : speed * 2)}
+            title="playback speed"
+          >
+            {speed}×
+          </button>
+          <button
+            className={loop ? "timeline-button timeline-button-on" : "timeline-button"}
+            onClick={() => setLoop(!loop)}
+            title="loop"
+          >
+            ⟳
+          </button>
+          <span>{playbackTime.toFixed(2)}s</span>
+        </span>
       </div>
       <div className="timeline-bands" ref={barRef} onClick={seek}>
         {timeline.stepSpans.map((span, i) => (
@@ -70,8 +157,14 @@ export function TimelineDock() {
       {timeline.robots.length > 1 &&
         timeline.robots.map((robot) => (
           <div key={robot.name} className="timeline-lane">
-            <span className="timeline-lane-name" title={robot.name}>
-              {robot.name}
+            <span
+              className="timeline-lane-name"
+              title={`${robot.name} — ${(utilization(robot.moves, duration) * 100).toFixed(0)}% busy`}
+            >
+              {robot.name}{" "}
+              <span className="timeline-lane-util">
+                {(utilization(robot.moves, duration) * 100).toFixed(0)}%
+              </span>
             </span>
             <div className="timeline-lane-track">
               {robot.moves.map((move, i) => (
@@ -89,29 +182,36 @@ export function TimelineDock() {
             </div>
           </div>
         ))}
-      {timeline.signals.map((signal) => (
-        <div key={signal.name} className="timeline-lane">
-          <span className="timeline-lane-name" title={signal.name}>
-            {signal.name}
-          </span>
-          <div className="timeline-lane-track">
-            {signal.times.map((t0, i) => {
-              const t1 = signal.times[i + 1] ?? duration;
-              if (!signal.values[i]) return null;
-              return (
-                <div
-                  key={i}
-                  className="timeline-lane-on"
-                  style={{
-                    left: pct(t0),
-                    width: `max(${((t1 - t0) / duration) * 100}%, 2px)`,
-                  }}
-                />
-              );
-            })}
-          </div>
+      {/* Process lanes (internal signals + sensor inputs) always show;
+          device output lanes fold away by default — a line's worth of
+          sources and sinks is hundreds of them, and unfolded they bury
+          the chart (and the viewport). */}
+      {timeline.signals
+        .filter((signal) => signal.kind !== "device")
+        .map((signal) => (
+          <SignalLane key={signal.name} signal={signal} duration={duration} />
+        ))}
+      {timeline.signals.some((signal) => signal.kind === "device") && (
+        <div className="timeline-lane">
+          <button
+            className="timeline-button"
+            onClick={() => setShowDevices(!showDevices)}
+          >
+            {showDevices ? "▾" : "▸"} devices (
+            {timeline.signals.filter((s) => s.kind === "device").length})
+          </button>
         </div>
-      ))}
+      )}
+      {showDevices &&
+        timeline.signals
+          .filter((signal) => signal.kind === "device")
+          .map((signal) => (
+            <SignalLane
+              key={signal.name}
+              signal={signal}
+              duration={duration}
+            />
+          ))}
     </div>
   );
 }

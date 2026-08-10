@@ -11,7 +11,17 @@ file.
 scene.export_usd(traj, "motion.usda", fps=60)   # one planned trajectory
 tl.export_usd("cycle.usda", fps=60)             # a whole baked cycle
 tl.export_usd("cycle.usdc", fps=60)             # same layer, binary crate file
+tl.export_usd("takt.usdc", fps=24, start=62.3, end=86.9)   # one takt of a line
 ```
+
+`start`/`end` clip the export to a window, and on a line that is the
+difference between shippable and not: a full run is mostly repetition, so
+one steady-state takt carries the whole story. The two-station weld line
+measures 45.9 MB as a whole run at 30 fps and **16.4 MB as one takt at 24
+fps** — see `scripts/export_line_recording.py`, which picks the window
+where the pipeline is fullest. (A binary recording keeps its prim names
+out of reach of text sniffing, so `examples/play_record.py` takes an
+explicit `--cell` for those.)
 
 Both bake to a USD layer that plays in usdview, Omniverse, or Blender with no
 botrail installed: link motion as timeSamples, every obstacle as prims,

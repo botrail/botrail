@@ -78,9 +78,29 @@ tl.object_pose("crate", t)           # where a carried/conveyed part was
 tl.object_visible("crate", t)        # False only while stowed in a magazine
 ```
 
-`moves` is the per-robot utilization view — the two-arm tutorial computes
-"both arms in motion for 11.5 s" from exactly this. `object_pose` is how the
-tracking tutorial measured its 150 mm of belt travel between latch and grasp.
+`object_pose` is how the tracking tutorial measured its 150 mm of belt
+travel between latch and grasp.
+
+## Utilization: the line-balancing number
+
+```python
+tl.utilization("st1_lh")     # 0..1 — fraction of the cycle it moved
+tl.busy_seconds("st1_lh")    # the same in seconds (overlaps merged)
+tl.utilizations()            # {robot: utilization} for the whole cell
+```
+
+On a line this is the number that decides where work should go: the
+bottleneck station is the one whose arms sit highest, and moving a spot off
+it is the edit whose effect on takt you can then measure rather than
+estimate. `examples/line_balance_sweep.py` does exactly that — bakes the
+real line once per weld-schedule split and prints takt, per-station cycle,
+and utilization — and `python/tests/test_line_balance.py` pins the result,
+which is what makes "changing the layout" a regression test. The studio
+shows the same figure beside each robot lane on the timing chart.
+
+A useful invariant to assert alongside the takt: on an indexed line, the
+takt is the transfer plus the slowest station. If that stops holding, the
+cycle time has stopped meaning what you think it means.
 
 ## Golden values vs budgets
 

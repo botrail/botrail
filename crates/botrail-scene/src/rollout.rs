@@ -425,6 +425,46 @@ impl SequenceTimeline {
     pub fn robot_track(&self, name: &str) -> Option<&RobotTrack> {
         self.robots.iter().find(|r| r.name == name)
     }
+
+    /// Seconds `name` spent in motion, with overlapping move intervals
+    /// merged (a robot driven by a motion and a ramp in the same breath
+    /// is busy once, not twice).
+    pub fn busy_seconds(&self, name: &str) -> Option<f64> {
+        let track = self.robot_track(name)?;
+        let mut spans: Vec<(f64, f64)> = track.moves.iter().map(|s| (s.start, s.end)).collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut total = 0.0;
+        let mut open: Option<(f64, f64)> = None;
+        for (start, end) in spans {
+            match open {
+                Some((s, e)) if start <= e + 1e-12 => open = Some((s, e.max(end))),
+                Some((s, e)) => {
+                    total += e - s;
+                    open = Some((start, end));
+                }
+                None => open = Some((start, end)),
+            }
+        }
+        if let Some((s, e)) = open {
+            total += e - s;
+        }
+        Some(total)
+    }
+
+    /// Fraction of the cycle `name` spent moving, 0..1.
+    ///
+    /// The line-balancing number: the bottleneck station is the one whose
+    /// arms sit near 1, and moving a spot off it is the edit whose effect
+    /// on takt this figure predicts. `None` for an unknown instance; 0
+    /// for a zero-length cycle.
+    pub fn utilization(&self, name: &str) -> Option<f64> {
+        let busy = self.busy_seconds(name)?;
+        Some(if self.duration > 0.0 {
+            busy / self.duration
+        } else {
+            0.0
+        })
+    }
 }
 
 impl Scene {
@@ -1847,7 +1887,10 @@ impl Rollout {
                 }
             }
         };
-        for pair in self.world.check_collisions() {
+        // The dedicated cross-robot path: a full scene check also prices
+        // every self-collision and every obstacle contact — all discarded
+        // here — and at line scale that bill *was* the tick.
+        for pair in self.world.check_cross_robot_collisions() {
             if let (Some((ra, link_a)), Some((rb, link_b))) = (side(pair.a), side(pair.b)) {
                 if ra != rb {
                     return Err(SeqError::RobotCollision {

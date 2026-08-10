@@ -17,6 +17,12 @@ dependencies, no GPU.
 
 ![The botrail studio](assets/botrail_demo.png)
 
+![A four-station body-in-white line — eight arms, three bodies in flight,
+one takt](assets/weld_line_hero.gif)
+*Four stations, eight arms, three bodies in flight — one program per
+station plus a transfer program, baked into one deterministic takt
+(`examples/weld_line_demo.py --stations 4`).*
+
 ## What makes it different
 
 A cell in botrail is *text* — Python, a `.botrail` project, or USD. It diffs in

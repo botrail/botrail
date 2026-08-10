@@ -245,6 +245,7 @@ pub struct Scene {
     signals: Vec<seq::SignalDef>,
     sensors: Vec<seq::Sensor>,
     devices: Vec<seq::Device>,
+    weld_flashes: Vec<seq::WeldFlash>,
     frames: Vec<Frame>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
@@ -271,6 +272,7 @@ impl Scene {
             signals: Vec::new(),
             sensors: Vec::new(),
             devices: Vec::new(),
+            weld_flashes: Vec::new(),
             frames: Vec::new(),
             collision_warnings,
         }
@@ -960,6 +962,23 @@ impl Scene {
             }
         }
         pairs
+    }
+
+    /// Only the pairs that span two robots (including the objects they
+    /// carry) at the current configuration — the scan-tick verification's
+    /// question, answered without computing the self-collision and
+    /// obstacle contacts a full [`Scene::check_collisions`] would also
+    /// price. Attached objects report under their obstacle identity, as
+    /// everywhere else.
+    pub fn check_cross_robot_collisions(&self) -> Vec<CollisionPair> {
+        let poses = self.all_link_poses();
+        let (attached, attached_map) = self.attached_query();
+        let pairs = botrail_collide::check_cross_robot(
+            &self.robot_queries(&poses),
+            &self.inter_acm,
+            &attached,
+        );
+        Self::remap_obstacle_ids(pairs, &[], &attached_map)
     }
 
     /// Self-collision (ACM-filtered), robot-vs-robot, robot-vs-obstacle,

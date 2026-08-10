@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   CollisionPairMsg,
+  FlashMsg,
   FrameMsg,
   IkStatusMsg,
   MotionMsg,
@@ -131,7 +132,7 @@ function startPlayback(tracks: PlaybackTracks) {
   };
 }
 
-interface StudioState {
+export interface StudioState {
   /** Robot instances, in server (scene) order. */
   robots: RobotUiState[];
   /** Robot the panels operate on (instance name). */
@@ -158,6 +159,10 @@ interface StudioState {
   playback: PlaybackTracks | null;
   playbackTime: number;
   playing: boolean;
+  /** Playback rate multiplier (1, 2, 4, 8). */
+  playbackSpeed: number;
+  /** Restart from 0 when the end is reached. */
+  playbackLoop: boolean;
   /** Robot name -> link poses shown instead of the live state (playback). */
   overridePoses: Record<string, PoseMsg[]> | null;
   /** Robot name -> joint-space playback override (USD robots, client FK). */
@@ -179,6 +184,8 @@ interface StudioState {
   signalDefs: SignalDefMsg[];
   /** Pseudo-sensors; re-sent in full by the server on every change. */
   sensors: SensorMsg[];
+  /** Weld-flash bindings (signal -> flash at a robot's TCP). */
+  flashes: FlashMsg[];
   /** Auxiliary devices; re-sent in full by the server on every change. */
   devices: DeviceMsg[];
   /** True while a sequence rollout is in flight. */
@@ -233,6 +240,11 @@ interface StudioState {
   /** Scrub/advance playback; the sample becomes the display override. */
   setPlayback: (t: number, sample: PlaybackSample) => void;
   setPlaying: (playing: boolean) => void;
+  /** Playhead only — the driver applies poses imperatively while playing
+   * and syncs the full sample into state on pause/seek/end. */
+  setPlaybackTime: (t: number) => void;
+  setPlaybackSpeed: (speed: number) => void;
+  setPlaybackLoop: (loop: boolean) => void;
   /** Ends playback and returns the display to the live state. */
   stopPlayback: () => void;
   setDroppedStage: (stage: { data: ArrayBuffer; name: string } | null) => void;
@@ -256,6 +268,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   playback: null,
   playbackTime: 0,
   playing: false,
+  playbackSpeed: 1,
+  playbackLoop: false,
   overridePoses: null,
   overrideJoints: null,
   overrideBases: null,
@@ -265,6 +279,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   sequences: [],
   signalDefs: [],
   sensors: [],
+  flashes: [],
   devices: [],
   sequenceSimulating: false,
   sequenceError: null,
@@ -373,6 +388,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       set({ sequences: msg.sequences, signalDefs: msg.signals });
     } else if (msg.type === "sensors") {
       set({ sensors: msg.sensors });
+    } else if (msg.type === "effects") {
+      set({ flashes: msg.flashes });
     } else if (msg.type === "devices") {
       set({ devices: msg.devices });
     } else if (msg.type === "sequence_result") {
@@ -586,6 +603,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       stowedObstacles: sample.stowed,
     }),
   setPlaying: (playing) => set({ playing }),
+  setPlaybackTime: (t) => set({ playbackTime: t }),
+  setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
+  setPlaybackLoop: (loop) => set({ playbackLoop: loop }),
   stopPlayback: () =>
     set({
       playing: false,

@@ -17,6 +17,7 @@ pub mod mesh;
 
 use botrail_model::RobotModel;
 use nalgebra::Isometry3;
+use parry3d_f64::bounding_volume::{Aabb, BoundingVolume};
 use parry3d_f64::math::Pose;
 use parry3d_f64::query;
 use parry3d_f64::shape::SharedShape;
@@ -103,6 +104,9 @@ pub fn build_obstacle_colliders(
 #[derive(Clone)]
 pub struct RobotCollider {
     links: Vec<Parts>,
+    /// Local AABB per link (`None` for geometry-less links), the broad
+    /// phase's raw material.
+    link_aabbs: Vec<Option<Aabb>>,
 }
 
 impl RobotCollider {
@@ -149,7 +153,8 @@ impl RobotCollider {
             links.push(parts);
             warnings.append(&mut link_warnings);
         }
-        (RobotCollider { links }, warnings)
+        let link_aabbs = links.iter().map(parts_local_aabb).collect();
+        (RobotCollider { links, link_aabbs }, warnings)
     }
 
     pub fn link_has_geometry(&self, link: usize) -> bool {
@@ -161,22 +166,24 @@ impl RobotCollider {
 #[derive(Clone)]
 pub struct ObstacleCollider {
     parts: Parts,
+    /// Local AABB over the parts, cached for the broad phase.
+    local_aabb: Option<Aabb>,
 }
 
 impl ObstacleCollider {
     pub fn from_geometry(geometry: &botrail_model::Geometry) -> Result<Self, CollideError> {
         let (offset, shape) = convert::geometry_to_parry(geometry)?;
-        Ok(ObstacleCollider {
-            parts: vec![(offset, shape)],
-        })
+        let parts = vec![(offset, shape)];
+        let local_aabb = parts_local_aabb(&parts);
+        Ok(ObstacleCollider { parts, local_aabb })
     }
 
     /// Wraps an already-built shape (e.g. [`mesh::mesh_to_compound`] on
     /// in-memory mesh data, where no file path exists to load from).
     pub fn from_shape(shape: SharedShape) -> Self {
-        ObstacleCollider {
-            parts: vec![(Pose::identity(), shape)],
-        }
+        let parts = vec![(Pose::identity(), shape)];
+        let local_aabb = parts_local_aabb(&parts);
+        ObstacleCollider { parts, local_aabb }
     }
 
     /// World-frame axis-aligned bounds at `pose`, as `(min, max)`.
@@ -253,6 +260,41 @@ pub fn robot_intersects(
         })
 }
 
+/// Local-frame AABB enclosing every part; `None` when there are none.
+/// Cached at build time — the broad phase transforms it per query instead
+/// of re-measuring shapes.
+fn parts_local_aabb(parts: &Parts) -> Option<Aabb> {
+    let mut merged: Option<Aabb> = None;
+    for (offset, shape) in parts {
+        let aabb = shape.compute_aabb(offset);
+        merged = Some(match merged {
+            Some(m) => m.merged(&aabb),
+            None => aabb,
+        });
+    }
+    merged
+}
+
+/// Broad-phase gate: can these two (possibly absent) boxes touch at all?
+/// Disjoint AABBs prove disjoint shapes, so a `false` here skips the exact
+/// test without changing any result.
+fn boxes_hit(a: &Option<Aabb>, b: &Option<Aabb>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.intersects(b),
+        _ => false,
+    }
+}
+
+/// Lower bound on the distance between shapes inside two AABBs.
+fn boxes_gap(a: &Aabb, b: &Aabb) -> f64 {
+    let mut sq = 0.0;
+    for c in 0..3 {
+        let gap = (b.mins[c] - a.maxs[c]).max(a.mins[c] - b.maxs[c]).max(0.0);
+        sq += gap * gap;
+    }
+    sq.sqrt()
+}
+
 fn parts_intersect(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> bool {
     for (la, sa) in a {
         let wa = *pose_a * *la;
@@ -299,16 +341,75 @@ fn parts_distance(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> Option<
 /// `ColliderId::Obstacle`; attached objects (index → `ColliderId::Attached`)
 /// ride their carrying robot's link and are checked against all robots'
 /// links (minus the carrier's `skip_links`), obstacles, and each other.
+/// The broad-phase working set for one query: world poses and world AABBs
+/// for every link, per-robot merged bounds, and the attached objects'
+/// poses/bounds. Building it is O(links + attached); every section of the
+/// scene check gates on it before running an exact test, which changes no
+/// result — disjoint AABBs prove disjoint shapes — only the bill.
+struct BroadPhase {
+    world: Vec<Vec<Pose>>,
+    link_aabbs: Vec<Vec<Option<Aabb>>>,
+    robot_bounds: Vec<Option<Aabb>>,
+    att_world: Vec<Pose>,
+    att_aabbs: Vec<Option<Aabb>>,
+}
+
+impl BroadPhase {
+    fn new(robots: &[RobotQuery<'_>], attached: &[AttachedCollider]) -> Self {
+        let world: Vec<Vec<Pose>> = robots
+            .iter()
+            .map(|r| r.link_poses.iter().map(to_parry_pose).collect())
+            .collect();
+        let link_aabbs: Vec<Vec<Option<Aabb>>> = robots
+            .iter()
+            .enumerate()
+            .map(|(r, robot)| {
+                robot
+                    .collider
+                    .link_aabbs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, local)| local.map(|a| a.transform_by(&world[r][i])))
+                    .collect()
+            })
+            .collect();
+        let robot_bounds: Vec<Option<Aabb>> = link_aabbs
+            .iter()
+            .map(|links| {
+                links.iter().flatten().fold(None, |acc: Option<Aabb>, a| {
+                    Some(match acc {
+                        Some(m) => m.merged(a),
+                        None => *a,
+                    })
+                })
+            })
+            .collect();
+        let att_world: Vec<Pose> = attached
+            .iter()
+            .map(|a| to_parry_pose(&(robots[a.robot].link_poses[a.link] * a.offset)))
+            .collect();
+        let att_aabbs: Vec<Option<Aabb>> = attached
+            .iter()
+            .zip(&att_world)
+            .map(|(a, pose)| a.collider.local_aabb.map(|b| b.transform_by(pose)))
+            .collect();
+        BroadPhase {
+            world,
+            link_aabbs,
+            robot_bounds,
+            att_world,
+            att_aabbs,
+        }
+    }
+}
+
 pub fn check_scene(
     robots: &[RobotQuery<'_>],
     inter_acm: &InterRobotAcm,
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
 ) -> Vec<CollisionPair> {
-    let world: Vec<Vec<Pose>> = robots
-        .iter()
-        .map(|r| r.link_poses.iter().map(to_parry_pose).collect())
-        .collect();
+    let bp = BroadPhase::new(robots, attached);
     let mut pairs = Vec::new();
     for (r, robot) in robots.iter().enumerate() {
         let links = &robot.collider.links;
@@ -317,10 +418,13 @@ pub fn check_scene(
                 continue;
             }
             for j in (i + 1)..links.len() {
-                if links[j].is_empty() || robot.acm.allows(i, j) {
+                if links[j].is_empty()
+                    || robot.acm.allows(i, j)
+                    || !boxes_hit(&bp.link_aabbs[r][i], &bp.link_aabbs[r][j])
+                {
                     continue;
                 }
-                if parts_intersect(&world[r][i], &links[i], &world[r][j], &links[j]) {
+                if parts_intersect(&bp.world[r][i], &links[i], &bp.world[r][j], &links[j]) {
                     pairs.push(CollisionPair {
                         a: ColliderId::Link { robot: r, link: i },
                         b: ColliderId::Link { robot: r, link: j },
@@ -329,17 +433,67 @@ pub fn check_scene(
             }
         }
     }
+    cross_robot_pairs(robots, inter_acm, &bp, &mut pairs);
+    for (k, (obs_pose, obs)) in obstacles.iter().enumerate() {
+        let op = to_parry_pose(obs_pose);
+        let obs_aabb = obs.local_aabb.map(|a| a.transform_by(&op));
+        for (r, robot) in robots.iter().enumerate() {
+            if !boxes_hit(&bp.robot_bounds[r], &obs_aabb) {
+                continue;
+            }
+            for (i, parts) in robot.collider.links.iter().enumerate() {
+                if parts.is_empty() || !boxes_hit(&bp.link_aabbs[r][i], &obs_aabb) {
+                    continue;
+                }
+                if parts_intersect(&bp.world[r][i], parts, &op, &obs.parts) {
+                    pairs.push(CollisionPair {
+                        a: ColliderId::Link { robot: r, link: i },
+                        b: ColliderId::Obstacle(k),
+                    });
+                }
+            }
+        }
+        for (k2, att) in attached.iter().enumerate() {
+            if !boxes_hit(&bp.att_aabbs[k2], &obs_aabb) {
+                continue;
+            }
+            if parts_intersect(&bp.att_world[k2], &att.collider.parts, &op, &obs.parts) {
+                pairs.push(CollisionPair {
+                    a: ColliderId::Attached(k2),
+                    b: ColliderId::Obstacle(k),
+                });
+            }
+        }
+    }
+    attached_robot_and_mutual_pairs(robots, attached, &bp, false, &mut pairs);
+    pairs
+}
+
+/// The robot-vs-robot section, shared by [`check_scene`] and
+/// [`check_cross_robot`] so the two can never disagree on it.
+fn cross_robot_pairs(
+    robots: &[RobotQuery<'_>],
+    inter_acm: &InterRobotAcm,
+    bp: &BroadPhase,
+    pairs: &mut Vec<CollisionPair>,
+) {
     for r1 in 0..robots.len() {
         for r2 in (r1 + 1)..robots.len() {
+            if !boxes_hit(&bp.robot_bounds[r1], &bp.robot_bounds[r2]) {
+                continue;
+            }
             for (i, parts_i) in robots[r1].collider.links.iter().enumerate() {
                 if parts_i.is_empty() {
                     continue;
                 }
                 for (j, parts_j) in robots[r2].collider.links.iter().enumerate() {
-                    if parts_j.is_empty() || inter_acm.allows((r1, i), (r2, j)) {
+                    if parts_j.is_empty()
+                        || inter_acm.allows((r1, i), (r2, j))
+                        || !boxes_hit(&bp.link_aabbs[r1][i], &bp.link_aabbs[r2][j])
+                    {
                         continue;
                     }
-                    if parts_intersect(&world[r1][i], parts_i, &world[r2][j], parts_j) {
+                    if parts_intersect(&bp.world[r1][i], parts_i, &bp.world[r2][j], parts_j) {
                         pairs.push(CollisionPair {
                             a: ColliderId::Link { robot: r1, link: i },
                             b: ColliderId::Link { robot: r2, link: j },
@@ -349,33 +503,35 @@ pub fn check_scene(
             }
         }
     }
-    for (k, (obs_pose, obs)) in obstacles.iter().enumerate() {
-        let op = to_parry_pose(obs_pose);
-        for (r, robot) in robots.iter().enumerate() {
-            for (i, parts) in robot.collider.links.iter().enumerate() {
-                if parts.is_empty() {
-                    continue;
-                }
-                if parts_intersect(&world[r][i], parts, &op, &obs.parts) {
-                    pairs.push(CollisionPair {
-                        a: ColliderId::Link { robot: r, link: i },
-                        b: ColliderId::Obstacle(k),
-                    });
-                }
-            }
-        }
-    }
-    let att_world: Vec<Pose> = attached
-        .iter()
-        .map(|a| to_parry_pose(&(robots[a.robot].link_poses[a.link] * a.offset)))
-        .collect();
+}
+
+/// Attached-object pairs: vs robot links (all robots, or — `cross_only` —
+/// just the ones that do not carry the object) and vs other attached
+/// objects (all pairs, or just cross-carrier pairs).
+fn attached_robot_and_mutual_pairs(
+    robots: &[RobotQuery<'_>],
+    attached: &[AttachedCollider],
+    bp: &BroadPhase,
+    cross_only: bool,
+    pairs: &mut Vec<CollisionPair>,
+) {
     for (k, att) in attached.iter().enumerate() {
         for (r, robot) in robots.iter().enumerate() {
+            if cross_only && r == att.robot {
+                continue;
+            }
+            if !boxes_hit(&bp.robot_bounds[r], &bp.att_aabbs[k]) {
+                continue;
+            }
             for (i, parts) in robot.collider.links.iter().enumerate() {
-                if parts.is_empty() || (r == att.robot && att.skip_links.contains(&i)) {
+                if parts.is_empty()
+                    || (r == att.robot && att.skip_links.contains(&i))
+                    || !boxes_hit(&bp.link_aabbs[r][i], &bp.att_aabbs[k])
+                {
                     continue;
                 }
-                if parts_intersect(&world[r][i], parts, &att_world[k], &att.collider.parts) {
+                if parts_intersect(&bp.world[r][i], parts, &bp.att_world[k], &att.collider.parts)
+                {
                     pairs.push(CollisionPair {
                         a: ColliderId::Link { robot: r, link: i },
                         b: ColliderId::Attached(k),
@@ -383,21 +539,18 @@ pub fn check_scene(
                 }
             }
         }
-        for (j, (obs_pose, obs)) in obstacles.iter().enumerate() {
-            let op = to_parry_pose(obs_pose);
-            if parts_intersect(&att_world[k], &att.collider.parts, &op, &obs.parts) {
-                pairs.push(CollisionPair {
-                    a: ColliderId::Attached(k),
-                    b: ColliderId::Obstacle(j),
-                });
+        for (k2, other) in attached.iter().enumerate().skip(k + 1) {
+            if cross_only && other.robot == att.robot {
+                continue;
             }
-        }
-        for k2 in (k + 1)..attached.len() {
+            if !boxes_hit(&bp.att_aabbs[k], &bp.att_aabbs[k2]) {
+                continue;
+            }
             if parts_intersect(
-                &att_world[k],
+                &bp.att_world[k],
                 &att.collider.parts,
-                &att_world[k2],
-                &attached[k2].collider.parts,
+                &bp.att_world[k2],
+                &other.collider.parts,
             ) {
                 pairs.push(CollisionPair {
                     a: ColliderId::Attached(k),
@@ -406,6 +559,25 @@ pub fn check_scene(
             }
         }
     }
+}
+
+/// Only what spans two robots: cross-robot link pairs, attached objects
+/// vs *other* robots' links, and attached objects on different carriers.
+///
+/// This is the scan-tick verification's dedicated path. The full
+/// [`check_scene`] computes self-collisions and every obstacle contact too
+/// — which a per-tick check that only reports cross-robot contact used to
+/// compute and throw away, and which dominates the bill the moment the
+/// scene holds a line's worth of bodywork.
+pub fn check_cross_robot(
+    robots: &[RobotQuery<'_>],
+    inter_acm: &InterRobotAcm,
+    attached: &[AttachedCollider],
+) -> Vec<CollisionPair> {
+    let bp = BroadPhase::new(robots, attached);
+    let mut pairs = Vec::new();
+    cross_robot_pairs(robots, inter_acm, &bp, &mut pairs);
+    attached_robot_and_mutual_pairs(robots, attached, &bp, true, &mut pairs);
     pairs
 }
 
@@ -417,31 +589,76 @@ pub fn min_robot_obstacle_distance(
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
 ) -> Option<f64> {
-    let world: Vec<Vec<Pose>> = robots
+    let bp = BroadPhase::new(robots, attached);
+    // Broad phase for a *distance* query: every candidate pair gets an
+    // AABB gap — a sound lower bound on its exact distance — and pairs run
+    // nearest-bound first. As soon as the next bound is at or beyond the
+    // best exact distance so far, everything after it is too (the list is
+    // sorted), and the loop stops. The minimum cannot change: a skipped
+    // pair's distance is >= its bound >= the answer already in hand.
+    enum Side {
+        Link(usize, usize),
+        Attached(usize),
+    }
+    let obs_world: Vec<(Pose, Option<Aabb>)> = obstacles
         .iter()
-        .map(|r| r.link_poses.iter().map(to_parry_pose).collect())
+        .map(|(pose, obs)| {
+            let op = to_parry_pose(pose);
+            let aabb = obs.local_aabb.map(|a| a.transform_by(&op));
+            (op, aabb)
+        })
         .collect();
-    let att_world: Vec<Pose> = attached
-        .iter()
-        .map(|a| to_parry_pose(&(robots[a.robot].link_poses[a.link] * a.offset)))
-        .collect();
-    let mut min: Option<f64> = None;
-    for (obs_pose, obs) in obstacles {
-        let op = to_parry_pose(obs_pose);
+    let mut candidates: Vec<(f64, Side, usize)> = Vec::new();
+    for (k, (_, obs_aabb)) in obs_world.iter().enumerate() {
+        let Some(obs_aabb) = obs_aabb else { continue };
         for (r, robot) in robots.iter().enumerate() {
             for (i, parts) in robot.collider.links.iter().enumerate() {
                 if parts.is_empty() {
                     continue;
                 }
-                if let Some(d) = parts_distance(&world[r][i], parts, &op, &obs.parts) {
-                    min = Some(min.map_or(d, |m| m.min(d)));
+                let Some(link_aabb) = &bp.link_aabbs[r][i] else {
+                    continue;
+                };
+                let bound = boxes_gap(link_aabb, obs_aabb);
+                if bound <= DISTANCE_PREDICTION {
+                    candidates.push((bound, Side::Link(r, i), k));
                 }
             }
         }
-        for (k, att) in attached.iter().enumerate() {
-            if let Some(d) = parts_distance(&att_world[k], &att.collider.parts, &op, &obs.parts) {
-                min = Some(min.map_or(d, |m| m.min(d)));
+        for (a, att_aabb) in bp.att_aabbs.iter().enumerate() {
+            let Some(att_aabb) = att_aabb else { continue };
+            let bound = boxes_gap(att_aabb, obs_aabb);
+            if bound <= DISTANCE_PREDICTION {
+                candidates.push((bound, Side::Attached(a), k));
             }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut min: Option<f64> = None;
+    for (bound, side, k) in candidates {
+        if let Some(best) = min {
+            if bound >= best {
+                break;
+            }
+        }
+        let (op, _) = &obs_world[k];
+        let obs = obstacles[k].1;
+        let d = match side {
+            Side::Link(r, i) => parts_distance(
+                &bp.world[r][i],
+                &robots[r].collider.links[i],
+                op,
+                &obs.parts,
+            ),
+            Side::Attached(a) => parts_distance(
+                &bp.att_world[a],
+                &attached[a].collider.parts,
+                op,
+                &obs.parts,
+            ),
+        };
+        if let Some(d) = d {
+            min = Some(min.map_or(d, |m| m.min(d)));
         }
     }
     min
@@ -801,5 +1018,164 @@ mod tests {
         let (collider, warnings) = RobotCollider::from_model(&model);
         assert_eq!(warnings.len(), 1);
         assert!(!collider.link_has_geometry(0));
+    }
+}
+
+#[cfg(test)]
+mod broadphase_tests {
+    use super::*;
+    use botrail_model::RobotModel;
+    use nalgebra::{Translation3, UnitQuaternion, Vector3};
+
+    /// 2-link arm: revolute Z at z = 0.3, 0.2 m cubes on both links.
+    fn arm() -> RobotModel {
+        RobotModel::from_urdf_str(
+            r#"
+        <robot name="r">
+          <link name="a">
+            <visual><geometry><box size="0.2 0.2 0.2"/></geometry></visual>
+          </link>
+          <link name="b">
+            <visual><geometry><box size="0.2 0.2 0.2"/></geometry></visual>
+          </link>
+          <joint name="j" type="revolute">
+            <parent link="a"/><child link="b"/>
+            <origin xyz="0.3 0 0"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#,
+        )
+        .unwrap()
+    }
+
+    fn at(x: f64, y: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, 0.0), UnitQuaternion::identity())
+    }
+
+    /// The cross-robot fast path returns exactly the cross-robot subset of
+    /// the full scene check — same pairs, same order — on a scene that has
+    /// every contact kind at once: self-adjacent links, two robots
+    /// touching, an obstacle inside a robot, and carried objects touching
+    /// the other robot and each other.
+    #[test]
+    fn cross_path_equals_filtered_full_check() {
+        let model = arm();
+        let (collider, _) = RobotCollider::from_model(&model);
+        let acm = Acm::default();
+        let fk = |base: &Isometry3<f64>| -> Vec<Isometry3<f64>> {
+            vec![*base, *base * at(0.3, 0.0)]
+        };
+        // Robot 1 close enough that its base link touches robot 0's tip.
+        let base0 = at(0.0, 0.0);
+        let base1 = at(0.45, 0.0);
+        let poses0 = fk(&base0);
+        let poses1 = fk(&base1);
+        let robots = vec![
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses0,
+                acm: &acm,
+            },
+            RobotQuery {
+                collider: &collider,
+                link_poses: &poses1,
+                acm: &acm,
+            },
+        ];
+        let inter = InterRobotAcm::default();
+        // An obstacle embedded in robot 0's base and one far away.
+        let near = ObstacleCollider::from_geometry(&botrail_model::Geometry::Box {
+            size: Vector3::new(0.1, 0.1, 0.1),
+        })
+        .unwrap();
+        let far = ObstacleCollider::from_geometry(&botrail_model::Geometry::Box {
+            size: Vector3::new(0.1, 0.1, 0.1),
+        })
+        .unwrap();
+        let obstacles = vec![(at(0.0, 0.05), &near), (at(50.0, 50.0), &far)];
+        // Robot 0 carries a box that overlaps robot 1's base link; robot 1
+        // carries one that overlaps it back.
+        let carried0 = ObstacleCollider::from_geometry(&botrail_model::Geometry::Box {
+            size: Vector3::new(0.2, 0.2, 0.2),
+        })
+        .unwrap();
+        let carried1 = ObstacleCollider::from_geometry(&botrail_model::Geometry::Box {
+            size: Vector3::new(0.2, 0.2, 0.2),
+        })
+        .unwrap();
+        let offset = at(0.15, 0.0);
+        let attached = vec![
+            AttachedCollider {
+                robot: 0,
+                link: 1,
+                offset,
+                collider: &carried0,
+                skip_links: &[1],
+            },
+            AttachedCollider {
+                robot: 1,
+                link: 0,
+                offset: at(-0.1, 0.0),
+                collider: &carried1,
+                skip_links: &[0],
+            },
+        ];
+
+        let full = check_scene(&robots, &inter, &obstacles, &attached);
+        let cross = check_cross_robot(&robots, &inter, &attached);
+
+        let robot_of = |id: &ColliderId| -> Option<usize> {
+            match id {
+                ColliderId::Link { robot, .. } => Some(*robot),
+                ColliderId::Attached(k) => Some(attached[*k].robot),
+                ColliderId::Obstacle(_) => None,
+            }
+        };
+        let expected: Vec<CollisionPair> = full
+            .iter()
+            .filter(|p| match (robot_of(&p.a), robot_of(&p.b)) {
+                (Some(a), Some(b)) => a != b,
+                _ => false,
+            })
+            .copied()
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "the fixture is supposed to produce cross-robot contact"
+        );
+        assert!(
+            full.iter().any(|p| matches!(
+                (p.a, p.b),
+                (ColliderId::Link { .. }, ColliderId::Obstacle(_))
+            )),
+            "the fixture is supposed to produce robot-obstacle contact too"
+        );
+        assert_eq!(cross, expected);
+    }
+
+    /// The far obstacle proves the broad phase prunes without changing the
+    /// distance: the minimum is set by the near box, exactly.
+    #[test]
+    fn distance_survives_the_broad_phase() {
+        let model = arm();
+        let (collider, _) = RobotCollider::from_model(&model);
+        let acm = Acm::default();
+        let poses = vec![at(0.0, 0.0), at(0.3, 0.0)];
+        let robots = vec![RobotQuery {
+            collider: &collider,
+            link_poses: &poses,
+            acm: &acm,
+        }];
+        let near = ObstacleCollider::from_geometry(&botrail_model::Geometry::Box {
+            size: Vector3::new(0.1, 0.1, 0.1),
+        })
+        .unwrap();
+        let far = near.clone();
+        let obstacles = vec![(at(0.0, 0.75), &near), (at(30.0, 0.0), &far)];
+        let d = min_robot_obstacle_distance(&robots, &obstacles, &[]).unwrap();
+        // Gap between the 0.2 cube face (y = 0.1) and the 0.1 cube face
+        // (y = 0.7).
+        assert!((d - 0.6).abs() < 1e-9, "{d}");
     }
 }

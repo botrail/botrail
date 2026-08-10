@@ -1,4 +1,4 @@
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useMemo, useRef } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -12,6 +12,7 @@ import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
+import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
@@ -117,26 +118,14 @@ export function Viewport() {
             an IBL is what flattens a scene out. */}
         <IndoorLighting />
         <ambientLight intensity={0.12} />
-        {/* Key light. The shadow camera covers a *line*-sized volume, not
-            just an arm's reach: a cell with a conveyor running through it
-            is ten metres end to end, and a tighter frustum cuts the
-            shadows off mid-floor. The map stays at 2k: 4k covers the same
-            span at twice the sharpness and several times the cost, which
-            software renderers (the headless screenshots) will not carry. */}
-        <directionalLight
-          position={[6, 5, 9]}
-          intensity={1.05}
-          castShadow
-          shadow-mapSize={[2048, 2048]}
-          shadow-bias={-0.0006}
-          shadow-normalBias={0.02}
-          shadow-camera-left={-9}
-          shadow-camera-right={9}
-          shadow-camera-top={9}
-          shadow-camera-bottom={-9}
-          shadow-camera-near={0.1}
-          shadow-camera-far={40}
-        />
+        {/* Key light. The shadow camera follows the scene's own extent
+            (see ShadowFollow): sized to an arm's cell it cuts a line's
+            shadows off mid-floor, sized to a fixed line it wastes its 2k
+            map on one arm's cell. The map stays at 2k either way: 4k
+            covers the same span at twice the sharpness and several times
+            the cost, which software renderers (the headless screenshots)
+            will not carry. */}
+        <ShadowFollow />
         {/* Fill from the opposite side so the shadowed faces don't go flat. */}
         <directionalLight position={[-3, -2, 2]} intensity={0.3} />
         <hemisphereLight args={["#8899aa", "#20242c", 0.25]} />
@@ -179,6 +168,7 @@ export function Viewport() {
           <GhostRobot />
           <ObstacleView />
           <SensorView />
+          <FlashView />
           <VehiclePathView />
           <TcpGizmo />
           <RobotBaseGizmo />
@@ -190,5 +180,75 @@ export function Viewport() {
       <TimelineDock />
       {!connected && <div className="overlay">connecting…</div>}
     </div>
+  );
+}
+
+/** The key light, with its shadow frustum resized to the scene.
+ *
+ * Obstacles change rarely (authoring), so this recomputes on the obstacle
+ * list rather than per frame: the XY extent of everything in the cell,
+ * padded for the arms, clamped so a lone robot keeps a crisp map and a
+ * 25 m line still lands entirely inside the frustum. */
+function ShadowFollow() {
+  const light = useRef<THREE.DirectionalLight | null>(null);
+  const obstacles = useStudioStore((s) => s.obstacles);
+  const robots = useStudioStore((s) => s.robots);
+
+  const frame = useMemo(() => {
+    let minX = -3;
+    let maxX = 3;
+    let minY = -3;
+    let maxY = 3;
+    for (const o of obstacles) {
+      minX = Math.min(minX, o.pose.position[0]);
+      maxX = Math.max(maxX, o.pose.position[0]);
+      minY = Math.min(minY, o.pose.position[1]);
+      maxY = Math.max(maxY, o.pose.position[1]);
+    }
+    for (const r of robots) {
+      const p = r.basePose?.position;
+      if (!p) continue;
+      minX = Math.min(minX, p[0]);
+      maxX = Math.max(maxX, p[0]);
+      minY = Math.min(minY, p[1]);
+      maxY = Math.max(maxY, p[1]);
+    }
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const half = Math.min(
+      Math.max((Math.max(maxX - minX, maxY - minY) + 6) / 2, 9),
+      26,
+    );
+    return { cx, cy, half };
+  }, [obstacles, robots]);
+
+  useEffect(() => {
+    const l = light.current;
+    if (!l) return;
+    l.position.set(frame.cx + 6, frame.cy + 5, 9 + frame.half * 0.5);
+    l.target.position.set(frame.cx, frame.cy, 0);
+    l.target.updateMatrixWorld();
+    const cam = l.shadow.camera;
+    cam.left = -frame.half;
+    cam.right = frame.half;
+    cam.top = frame.half;
+    cam.bottom = -frame.half;
+    cam.far = 40 + frame.half;
+    cam.updateProjectionMatrix();
+    l.shadow.needsUpdate = true;
+  }, [frame]);
+
+  return (
+    <directionalLight
+      ref={light}
+      position={[6, 5, 9]}
+      intensity={1.05}
+      castShadow
+      shadow-mapSize={[2048, 2048]}
+      shadow-bias={-0.0006}
+      shadow-normalBias={0.02}
+      shadow-camera-near={0.1}
+      shadow-camera-far={40}
+    />
   );
 }

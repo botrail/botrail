@@ -190,6 +190,11 @@ MAT_MATTE = (0.05, 0.92)           # non-metals — markings, trunking
 
 PARK = (LINE_IN - 1.6, 0.0, -1.6)
 
+# Spot-mark obstacle names, filled by `build_cell` — the nuggets the cycle
+# leaves behind. The replay regression asserts exactly what moves, and the
+# marks ride the line too.
+MARKS: list = []
+
 # Static line furniture: what the cell looks like around the robots. Each
 # entry is `(name, size, position, color, collides)` — the guarding and the
 # cabinets are real obstacles the planner has to respect, while markings
@@ -485,6 +490,52 @@ def build_cell() -> tuple:
             size=(0.70, 0.90, 1.30),
             watch_robots=[name],
         )
+
+    # Process presentation, driven the PLC way. The weld-current signals
+    # (one per role — that is who welds together) are set by the weld
+    # steps like a weld controller's "current on" output; each arm's
+    # flash is bound to its role's signal and blinks at its TCP in the
+    # studio and in the USD export. The spot marks are the nuggets: one
+    # small dark pad per (arm, spot), fed onto the tab the moment its
+    # weld releases — the existing source machinery *is* the visibility
+    # mechanism, so the marks appear in usdview exactly as in the studio,
+    # and the tail sink recirculates them with everything else.
+    MARKS.clear()
+    for role in ROLES:
+        scene.define_signal(f"arc_{role}", False)
+    for name in ARMS:
+        scene.add_weld_flash(f"flash_{name}", signal=f"arc_{role_of(name)}",
+                             robot=name)
+    for arm in ARMS:
+        role, s = role_of(arm), side_of(arm)
+        for index, x in enumerate(SPOT_X[role]):
+            pose = (x + ROLE_SIGN[role] * TAB_STANDOFF,
+                    s * (station.flank + TAB_OUT / 2), station.seam_z)
+            # One mark per spot is the whole magazine: it rides out with
+            # its body and the tail sink hands it back for the next one
+            # (the same recirculation as every other rider).
+            prim = f"/World/Line/mark_{arm}_s{index + 1}"
+            scene.add_box(prim, (2 * SHEET + 0.004, 0.055, 0.055), PARK,
+                          color=(0.09, 0.07, 0.06))
+            scene.set_obstacle_material(prim, 0.55, 0.65)
+            scene.set_obstacle_enabled(prim, False)
+            pool = [prim]
+            MARKS.append(prim)
+            scene.add_source(
+                f"src_mark_{arm}_s{index + 1}",
+                pool=pool,
+                park=PARK,
+                pitch=(0.0, 0.0, 0.0),
+                position=pose,
+                interval=0.0,
+                running=False,
+            )
+            scene.add_sink(
+                f"snk_mark_{arm}_s{index + 1}",
+                zone_position=(SINK_X, 0.0, station.seam_z - 0.3),
+                zone_size=(0.6, 2.4, 1.4),
+                source=f"src_mark_{arm}_s{index + 1}",
+            )
     return scene, station, riders
 
 
@@ -620,8 +671,12 @@ def build_sequence(scene: bt.Scene, poses: dict, riders: list) -> str:
     sq = scene.sequence("weld_station")
 
     def weld_pass(tag: str, index: int, arms: list) -> None:
-        """The E5 sugar: five steps per spot, every listed arm in lockstep."""
+        """The E5 sugar: five steps per spot, every listed arm in lockstep.
+        The weld step raises the participating roles' weld-current signals
+        (what the flashes render); the release drops them and feeds the
+        spot marks onto the tabs."""
         spot = f"{tag}_s{index + 1}"
+        roles = sorted({role_of(a) for a in arms})
         for phase, which, duration in (("travel", 0, TRAVEL_T),
                                        ("engage", 1, LIFT_T)):
             sq.step(f"{spot}_{phase}", actions=[
@@ -631,10 +686,14 @@ def build_sequence(scene: bt.Scene, poses: dict, riders: list) -> str:
         sq.step(f"{spot}_squeeze", actions=[
             bt.seq.ramp({GUN: GUN_SQUEEZE}, SQUEEZE_T, robot=arm) for arm in arms
         ])
-        sq.step(f"{spot}_weld", transition=bt.seq.elapsed(WELD_T))
+        sq.step(f"{spot}_weld",
+                actions=[bt.seq.set_signal(f"arc_{role}", True)
+                         for role in roles],
+                transition=bt.seq.elapsed(WELD_T))
         sq.step(f"{spot}_release", actions=[
             bt.seq.ramp({GUN: GUN_OPEN}, SQUEEZE_T, robot=arm) for arm in arms
-        ])
+        ] + [bt.seq.set_signal(f"arc_{role}", False) for role in roles]
+          + [bt.seq.start(f"src_mark_{arm}_s{index + 1}") for arm in arms])
         sq.step(f"{spot}_withdraw", actions=[
             bt.seq.ramp(arm_to(poses[arm][index][0]), LIFT_T, robot=arm)
             for arm in arms

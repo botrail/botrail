@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import * as THREE from "three";
 
+import { linkKey, playbackRig } from "../playbackRig";
 import type { GeometryMsg, LinkMsg, PoseMsg, VisualMsg } from "../protocol";
 import {
   collidingLinkNames,
@@ -62,6 +64,7 @@ function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
       {robot.desc.links.map((link, i) => (
         <LinkGroup
           key={i}
+          robot={name}
           link={link}
           index={i}
           pose={poses[i]}
@@ -73,11 +76,13 @@ function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
 }
 
 function LinkGroup({
+  robot,
   link,
   index,
   pose,
   colliding,
 }: {
+  robot: string;
   link: LinkMsg;
   index: number;
   pose: PoseMsg | undefined;
@@ -86,9 +91,22 @@ function LinkGroup({
   const color = colliding ? COLLISION_COLOR : linkColor(index);
   const position = pose ? pose.position : IDENTITY_POS;
   const quaternion = pose ? pose.quaternion : IDENTITY_QUAT;
+  // Registered so the playback driver can move this link without a React
+  // pass; React remains the source of truth whenever nothing is playing.
+  const register = useCallback(
+    (group: THREE.Group | null) => {
+      const key = linkKey(robot, index);
+      if (group) {
+        playbackRig.links.set(key, group);
+      } else {
+        playbackRig.links.delete(key);
+      }
+    },
+    [robot, index],
+  );
 
   return (
-    <group position={position} quaternion={quaternion}>
+    <group ref={register} position={position} quaternion={quaternion}>
       {link.visuals.map((visual, j) => (
         // The link color is a way to tell links apart, so a mesh carrying
         // the manufacturer's own colors keeps them. In collision the color

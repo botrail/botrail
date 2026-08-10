@@ -28,13 +28,13 @@ engine work exists for:
   station 1 welds body 2, station 2 is welding body 1 — the overlap is the
   whole argument for parallel programs, and `main` prints it.
 
-The stations split the seam by *attitude*: every station-1 spot is welded
-with the electrode entering from -x, every station-2 spot from +x (the
-survey in design-weld-line.md §4.3: a centred arm welds spots on its left
-leaning one way and spots on its right leaning the other). One attitude
-per station means no wrist flip mid-row, and the split is the real-world
-one anyway — a geo station and a respot station own different stretches
-of the same seam.
+Where the seam is cut between stations is the line-balancing knob, and
+`SEAM_SPLITS` is the whole of it. The gun attitude is not part of the
+choice: a spot ahead of a station's datum is reached leaning one way and
+one behind it the other (design-weld-line.md §4.3), so `attitude_of`
+reads it off the offset. A split that leaves a station spots on both
+sides of its datum costs that station a wrist re-orientation mid-row —
+which `examples/line_balance_sweep.py` measures rather than assumes.
 
 Run with:  python examples/weld_line_demo.py [out.usda] [--clash]
 """
@@ -49,22 +49,62 @@ import weld_station_demo as ws
 # stations sit one pitch apart, the head one pitch upstream, the sink two
 # pitches (plus its own reach) downstream.
 PITCH = 5.2
-STATIONS = ("st1", "st2")
-ST_X = {"st1": 0.0, "st2": PITCH}
 HEAD = -PITCH
-TAIL = 2.0 * PITCH
 SIDES = ("lh", "rh")
-ARMS = [f"{st}_{side}" for st in STATIONS for side in SIDES]
 BODIES = 3
+
+# Spot-mark obstacle names, filled by `build_line`.
+MARKS: list = []
+
+# Which stretch of the seam each station owns — the line-balancing knob.
+# The default cuts front/rear so each station stays on one side of its own
+# datum, and therefore in one gun attitude for its whole row.
+SEAM_SPLITS = {
+    2: ((-1.2, -0.6, 0.0), (0.6, 1.2)),
+    4: ((-1.2, -0.6), (0.0,), (0.6,), (1.2,)),
+}
+
+
+def attitude_of(x: float) -> str:
+    """Which gun attitude a spot at body-x `x` is welded in.
+
+    It is not a preference: a station's arm stands at that station's
+    datum, so a spot ahead of the datum is reached leaning one way and a
+    spot behind it the other (design-weld-line.md §4.3). The sign of the
+    offset picks the attitude, which is why a station holding a
+    contiguous stretch on one side of its datum needs only one.
+    """
+    return "dn" if x <= 0.0 else "up"
+
+
+def _layout(count: int) -> tuple:
+    split = SEAM_SPLITS[count]
+    stations = tuple(f"st{k + 1}" for k in range(count))
+    return (
+        stations,
+        {st: k * PITCH for k, st in enumerate(stations)},
+        {st: split[k] for k, st in enumerate(stations)},
+    )
+
+
+STATIONS, ST_X, SPOTS = _layout(2)
+TAIL = len(STATIONS) * PITCH
+ARMS = [f"{st}_{side}" for st in STATIONS for side in SIDES]
 PITCHES = BODIES + len(STATIONS)
 
-# Which stretch of the seam each station owns, and the one attitude it
-# works in. A centred arm welds spots to its *left* with the electrode
-# entering from -x and spots to its right from +x (it leans away from its
-# own base), so splitting the row front/rear lets each station keep a
-# single gun attitude for its whole cycle — no wrist flip between spots.
-SPOTS = {"st1": (-1.2, -0.6, 0.0), "st2": (0.6, 1.2)}
-ROLE = {"st1": "dn", "st2": "up"}          # ws.Q_ROLE / tab-offset sign
+
+def set_stations(count: int) -> None:
+    """Reshapes the module for an N-station line (2 is the default and the
+    golden). The pipeline machinery — lead pitches, transfer gates, sink
+    placement, scenery spans — all derives from these tables, so nothing
+    else has to change."""
+    global STATIONS, ST_X, SPOTS, TAIL, ARMS, PITCHES
+    if count not in SEAM_SPLITS:
+        raise SystemExit(f"--stations takes one of {sorted(SEAM_SPLITS)}")
+    STATIONS, ST_X, SPOTS = _layout(count)
+    TAIL = len(STATIONS) * PITCH
+    ARMS = [f"{st}_{side}" for st in STATIONS for side in SIDES]
+    PITCHES = BODIES + len(STATIONS)
 
 
 def side_of(arm: str) -> float:
@@ -83,8 +123,8 @@ class Line:
         # (suffix, offset from the body origin) for everything that rides.
         self.offsets = [("skid", (0.0, 0.0, ws.SKID_TOP - 0.03))]
         for st in STATIONS:
-            sign = ws.ROLE_SIGN[ROLE[st]]
             for j, x in enumerate(SPOTS[st]):
+                sign = ws.ROLE_SIGN[attitude_of(x)]
                 for side in SIDES:
                     self.offsets.append((
                         f"tab_{st}_{side}{j + 1}",
@@ -295,6 +335,50 @@ def build_line() -> tuple:
     scene.define_signal("moving", False)
     for st in STATIONS:
         scene.define_signal(f"{st}_done", False)
+
+    # Process presentation, PLC style: each station's weld-current signal
+    # is raised by its weld steps (a weld controller's "current on"), each
+    # arm's flash binds to its own station's signal, and the spot marks —
+    # the nuggets — are fed onto the tabs by the release steps through the
+    # ordinary source machinery, so they blink into usdview exactly as
+    # they do in the studio and recirculate with everything else.
+    MARKS.clear()
+    for st in STATIONS:
+        scene.define_signal(f"{st}_arc", False)
+    for name in ARMS:
+        scene.add_weld_flash(f"flash_{name}",
+                             signal=f"{station_of(name)}_arc", robot=name)
+    for arm in ARMS:
+        st, s_ = station_of(arm), side_of(arm)
+        for index, x in enumerate(SPOTS[st]):
+            sign = ws.ROLE_SIGN[attitude_of(x)]
+            pose = (ST_X[st] + x + sign * ws.TAB_STANDOFF,
+                    s_ * (station.flank + ws.TAB_OUT / 2), station.seam_z)
+            # One mark per spot is the whole magazine: it rides out with
+            # its body and the tail sink hands it back for the next one
+            # (the same recirculation as every other rider).
+            prim = f"/World/Line/mark_{arm}_s{index + 1}"
+            scene.add_box(prim, (2 * ws.SHEET + 0.004, 0.055, 0.055),
+                          ws.PARK, color=(0.09, 0.07, 0.06))
+            scene.set_obstacle_material(prim, 0.55, 0.65)
+            scene.set_obstacle_enabled(prim, False)
+            pool = [prim]
+            MARKS.append(prim)
+            scene.add_source(
+                f"src_mark_{arm}_s{index + 1}",
+                pool=pool,
+                park=ws.PARK,
+                pitch=(0.0, 0.0, 0.0),
+                position=pose,
+                interval=0.0,
+                running=False,
+            )
+            scene.add_sink(
+                f"snk_mark_{arm}_s{index + 1}",
+                zone_position=(TAIL, 0.0, 1.2),
+                zone_size=(5.0, 2.4, 2.0),
+                source=f"src_mark_{arm}_s{index + 1}",
+            )
     return scene, line, riders
 
 
@@ -325,11 +409,11 @@ def teach(scene: bt.Scene, line: Line, riders: dict) -> dict:
             scene.set_obstacle_pose(
                 prim, (ST_X[st] + offset[0], offset[1], offset[2]))
         try:
-            quat = ws.Q_ROLE[ROLE[st]]
             for side in SIDES:
                 arm = f"{st}_{side}"
                 spots = []
                 for index in range(len(SPOTS[st])):
+                    quat = ws.Q_ROLE[attitude_of(SPOTS[st][index])]
                     for name in ARMS:
                         scene.set_joint_positions(ws.READY, robot=name)
                     if spots:
@@ -348,7 +432,8 @@ def teach(scene: bt.Scene, line: Line, riders: dict) -> dict:
                         scene.set_joint_positions(ws.READY, robot=name)
                     scene.set_joint_positions(seed, robot=arm)
                     target = (x, y + side_of(arm) * PARK_OUT, z)
-                    return ws.solve(scene, arm, target, quat,
+                    return ws.solve(scene, arm,
+                                    target, ws.Q_ROLE[attitude_of(SPOTS[st][index])],
                                     f"park beside spot {index + 1}")
 
                 park_in = park_beside(0, spots[0][0])
@@ -426,11 +511,15 @@ def build_station_program(scene: bt.Scene, st: str, poses: dict,
                 bt.seq.ramp({ws.GUN: ws.GUN_SQUEEZE}, ws.SQUEEZE_T, robot=arm)
                 for arm in arms
             ])
-            sq.step(f"{spot}_weld", transition=bt.seq.elapsed(ws.WELD_T))
+            sq.step(f"{spot}_weld",
+                    actions=[bt.seq.set_signal(f"{st}_arc", True)],
+                    transition=bt.seq.elapsed(ws.WELD_T))
             sq.step(f"{spot}_release", actions=[
                 bt.seq.ramp({ws.GUN: ws.GUN_OPEN}, ws.SQUEEZE_T, robot=arm)
                 for arm in arms
-            ])
+            ] + [bt.seq.set_signal(f"{st}_arc", False)]
+              + [bt.seq.start(f"src_mark_{arm}_s{index + 1}")
+                 for arm in arms])
             sq.step(f"{spot}_withdraw", actions=[
                 bt.seq.ramp(arm_to(poses[arm]["spots"][index][0]), ws.LIFT_T,
                             robot=arm)
@@ -564,6 +653,10 @@ def sweep_for_contact(scene: bt.Scene, riders: dict, timeline,
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     clash = "--clash" in sys.argv
+    for k, flag in enumerate(sys.argv[1:], start=1):
+        if flag.startswith("--stations"):
+            value = flag.split("=", 1)[1] if "=" in flag else sys.argv[k + 1]
+            set_stations(int(value))
     out = Path(args[0]) if args else Path("cell_line.usda")
 
     scene, line, riders = build_line()
@@ -608,8 +701,9 @@ def main() -> None:
         busy = sum(end - start for start, end in windows[st])
         print(f"  {st} busy {busy:6.2f}s")
     at = {s: (a, b) for s, a, b in timeline.step_spans}
-    takt = at["transfer/p4_landed"][1] - at["transfer/p3_landed"][1]
-    print(f"steady-state takt (pitch 3 -> 4): {takt:.2f}s")
+    takt = (at[f"transfer/p{PITCHES - 1}_landed"][1]
+            - at[f"transfer/p{PITCHES - 2}_landed"][1])
+    print(f"steady-state takt (pitch {PITCHES - 2} -> {PITCHES - 1}): {takt:.2f}s")
 
     offences = sweep_for_contact(scene, riders, timeline)
     if offences:

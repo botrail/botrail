@@ -39,6 +39,7 @@ export type { SensorWatchMsg } from "./generated/SensorWatchMsg";
 export type { DeviceMsg } from "./generated/DeviceMsg";
 export type { DeviceKindMsg } from "./generated/DeviceKindMsg";
 export type { DeviceCommandMsg } from "./generated/DeviceCommandMsg";
+export type { FlashMsg } from "./generated/FlashMsg";
 export type { VehiclePathMsg } from "./generated/VehiclePathMsg";
 export type { VehicleStationMsg } from "./generated/VehicleStationMsg";
 export type { VehicleTrayMsg } from "./generated/VehicleTrayMsg";

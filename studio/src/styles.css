@@ -634,6 +634,37 @@ select:focus {
   color: #7d8798;
 }
 
+.timeline-lane-util {
+  color: #6b7688;
+}
+
+.timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-button {
+  background: #1a202c;
+  color: #aeb8c8;
+  border: 1px solid #2a3242;
+  border-radius: 4px;
+  padding: 0 8px;
+  height: 20px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.timeline-button:hover {
+  border-color: #4a6fa5;
+}
+
+.timeline-button-on {
+  color: #7fb4ff;
+  border-color: #4a6fa5;
+}
+
 .timeline-bands {
   position: relative;
   height: 22px;

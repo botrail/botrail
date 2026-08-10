@@ -8,6 +8,7 @@ import {
 } from "three-usd-robot/helpers";
 
 import type { PoseMsg, RobotDescMsg } from "../protocol";
+import { playbackRig } from "../playbackRig";
 import { collidingLinkNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 
@@ -111,6 +112,25 @@ function UsdRobotInstance({ name }: { name: string }) {
     if (!robot || !basePose) return;
     applyPose(robot, basePose);
   }, [robot, basePose]);
+
+  // Playback fast path: while a timeline plays, the driver hands each
+  // sampled instant to this applier instead of routing it through React.
+  useEffect(() => {
+    if (!robot || !desc) return;
+    playbackRig.usd.set(name, (sample) => {
+      const joints = sample.joints?.[name];
+      if (joints) robot.setJointValues(jointMap(desc, joints));
+      const poses = sample.poses?.[name];
+      if (poses) {
+        robot.setLinkTransforms(linkPoseMap(desc, poses), { space: "world" });
+      }
+      const base = sample.bases?.[name];
+      if (base) applyPose(robot, base);
+    });
+    return () => {
+      playbackRig.usd.delete(name);
+    };
+  }, [robot, desc, name]);
 
   // Collision highlight refers to the live state; suppress while playback
   // drives this robot.

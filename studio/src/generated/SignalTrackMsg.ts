@@ -7,4 +7,11 @@ export type SignalTrackMsg = { name: string,
 /**
  * Edge times; `values[i]` holds from `times[i]` on. `times[0] = 0`.
  */
-times: Array<number>, values: Array<boolean>, };
+times: Array<number>, values: Array<boolean>, 
+/**
+ * Where the lane comes from: `"signal"` (internal relay), `"sensor"`
+ * (input), or `"device"` (output lane). A line's worth of sources and
+ * sinks is hundreds of device lanes, and the timing chart needs to
+ * fold those away by default rather than bury the process signals.
+ */
+kind: string, };

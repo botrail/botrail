@@ -499,6 +499,15 @@ impl SceneHub {
         self.with_scene(|scene| scene.sensors().iter().map(|s| s.name.clone()).collect())
     }
 
+    pub fn add_weld_flash(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+    ) -> Result<(), SceneError> {
+        botrail_session::add_weld_flash(self, name, signal, robot)
+    }
+
     pub fn upsert_device(&self, device: botrail_scene::seq::Device) {
         botrail_session::upsert_device(self, device);
     }

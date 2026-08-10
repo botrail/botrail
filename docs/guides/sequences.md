@@ -142,3 +142,27 @@ remainder, so the pitch never picks up a fraction of a scan period. This is
 what retires the `start → elapsed(pitch / v) → stop` pattern and its
 off-by-one-scan arithmetic — a body lands on the station datum to numerical
 precision, every cycle, which is precisely what taught poses need.
+
+## Process presentation
+
+A weld cell reads better when the weld shows. Two idioms, both driven by
+the baked timeline (never affecting it):
+
+```python
+scene.define_signal("st1_arc", False)          # the weld controller's output
+scene.add_weld_flash("flash_st1_lh", signal="st1_arc", robot="st1_lh")
+```
+
+`add_weld_flash` binds an arc flash to a signal at a robot's TCP: while the
+signal is true during playback, the studio draws an additive flash with a
+point light there (deterministic flicker — the same bake renders the same
+frames), and the USD export places a small emissive prim per current-on
+interval, blinking via animated visibility, so the arc shows in usdview
+too. Author the signal from the sequence that owns the weld — set it on the
+weld step, clear it on the release.
+
+Spot marks need no new machinery at all: a mark is a small dark obstacle
+fed onto the seam by a [source](sensors-and-devices.md#sources-and-sinks-endless-supply-finite-pool)
+started from the release step, and returned by the line's tail sink for the
+next body. One mark per spot is the whole magazine — the recirculation is
+what resets it between cycles.

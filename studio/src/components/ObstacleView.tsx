@@ -3,6 +3,7 @@ import { Edges, TransformControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
+import { playbackRig } from "../playbackRig";
 import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
@@ -212,6 +213,15 @@ function ObstacleNode({
   const [group, setGroup] = useState<THREE.Group | null>(null);
   const draggingRef = useRef(false);
   const { pose, name } = obstacle;
+  // Registered so the playback driver can advect this obstacle (a body
+  // riding the line) without a React pass per frame.
+  useEffect(() => {
+    if (!group) return;
+    playbackRig.obstacles.set(name, group);
+    return () => {
+      playbackRig.obstacles.delete(name);
+    };
+  }, [group, name]);
   // During trajectory playback, attached objects follow their baked track
   // instead of the live scene pose.
   const overridePose = useStudioStore(

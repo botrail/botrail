@@ -236,6 +236,9 @@ pub struct ProjectFile {
     /// Auxiliary devices (absent in older v2 files).
     #[serde(default)]
     pub devices: Vec<DeviceMsg>,
+    /// Weld-flash bindings (absent in older files).
+    #[serde(default)]
+    pub flashes: Vec<crate::wire::FlashMsg>,
 }
 
 fn identity_pose() -> PoseMsg {
@@ -280,6 +283,7 @@ impl ProjectFile {
                     signals: Vec::new(),
                     sensors: Vec::new(),
                     devices: Vec::new(),
+                    flashes: Vec::new(),
                 })
             }
             2 => {
@@ -360,6 +364,15 @@ impl Scene {
             signals: self.signals().iter().map(signal_def_msg).collect(),
             sensors: self.sensors().iter().map(sensor_msg).collect(),
             devices: self.devices().iter().map(device_msg).collect(),
+            flashes: self
+                .weld_flashes()
+                .iter()
+                .map(|f| crate::wire::FlashMsg {
+                    name: f.name.clone(),
+                    signal: f.signal.clone(),
+                    robot: f.robot.clone(),
+                })
+                .collect(),
             frames: self
                 .frames()
                 .iter()
@@ -525,6 +538,17 @@ impl Scene {
                 .map(|f| crate::Frame {
                     name: f.name.clone(),
                     pose: (&f.pose).into(),
+                })
+                .collect(),
+        );
+        self.set_weld_flashes(
+            project
+                .flashes
+                .iter()
+                .map(|f| crate::seq::WeldFlash {
+                    name: f.name.clone(),
+                    signal: f.signal.clone(),
+                    robot: f.robot.clone(),
                 })
                 .collect(),
         );
@@ -946,6 +970,12 @@ pub fn generate_python(project: &ProjectFile) -> String {
             "scene.define_signal({:?}, initial={})\n",
             signal.name,
             if signal.initial { "True" } else { "False" }
+        ));
+    }
+    for flash in &project.flashes {
+        out.push_str(&format!(
+            "scene.add_weld_flash({:?}, signal={:?}, robot={:?})\n",
+            flash.name, flash.signal, flash.robot
         ));
     }
     for sequence in &project.sequences {

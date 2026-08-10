@@ -62,6 +62,19 @@ pub enum SensorWatch {
     All,
 }
 
+/// A weld-current indicator: while `signal` is true, the studio draws an
+/// arc flash at `robot`'s TCP and the USD export blinks an emissive prim
+/// there. Pure presentation — deterministic (it renders a baked signal),
+/// never part of collision or planning. The signal is the PLC-honest
+/// driver: a real weld controller's "current on" output, authored by the
+/// program that owns the weld.
+#[derive(Debug, Clone)]
+pub struct WeldFlash {
+    pub name: String,
+    pub signal: String,
+    pub robot: String,
+}
+
 /// A scripted auxiliary device (PLC output): commanded by
 /// [`Action::Device`], it moves obstacles kinematically each scan tick.
 #[derive(Debug, Clone)]
@@ -476,6 +489,45 @@ impl Scene {
     }
 
     /// Adds or replaces an auxiliary device.
+    /// Declares a weld flash bound to `signal` at `robot`'s TCP. The
+    /// signal must already exist (an internal signal or a sensor input) —
+    /// a flash nobody can drive is an authoring mistake, not a display
+    /// preference. Re-declaring a name replaces it.
+    pub fn add_weld_flash(
+        &mut self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+    ) -> Result<(), SceneError> {
+        if self.robot_index(robot).is_none() {
+            return Err(SceneError::UnknownRobot(robot.to_string()));
+        }
+        if !self.signals.iter().any(|s| s.name == signal)
+            && !self.sensors.iter().any(|s| s.name == signal)
+        {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        let flash = WeldFlash {
+            name: name.to_string(),
+            signal: signal.to_string(),
+            robot: robot.to_string(),
+        };
+        match self.weld_flashes.iter_mut().find(|f| f.name == name) {
+            Some(slot) => *slot = flash,
+            None => self.weld_flashes.push(flash),
+        }
+        Ok(())
+    }
+
+    pub fn weld_flashes(&self) -> &[WeldFlash] {
+        &self.weld_flashes
+    }
+
+    /// Wholesale replacement (project load).
+    pub fn set_weld_flashes(&mut self, flashes: Vec<WeldFlash>) {
+        self.weld_flashes = flashes;
+    }
+
     pub fn upsert_device(&mut self, device: Device) {
         match self.devices.iter_mut().find(|d| d.name == device.name) {
             Some(slot) => *slot = device,

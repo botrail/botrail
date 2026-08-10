@@ -980,6 +980,19 @@ impl Scene {
         self.hub.remove_signal(name).map_err(scene_err)
     }
 
+    /// Binds a weld flash to a signal at a robot's TCP: while the signal
+    /// is true during playback, the studio draws an arc flash there and
+    /// the USD export blinks an emissive prim. Pure presentation, driven
+    /// by the same baked signal a weld controller's "current on" output
+    /// would be — declare the signal first (`define_signal`), author it
+    /// from the sequence that owns the weld.
+    #[pyo3(signature = (name, signal, robot))]
+    fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> PyResult<()> {
+        self.hub
+            .add_weld_flash(name, signal, robot)
+            .map_err(scene_err)
+    }
+
     /// Declared internal signals as `(name, initial)` pairs.
     #[getter]
     fn signals(&self) -> Vec<(String, bool)> {
@@ -2384,6 +2397,36 @@ impl SequenceTimeline {
             .collect())
     }
 
+    /// Seconds a robot spent in motion (overlapping move intervals merged).
+    #[pyo3(signature = (robot = None))]
+    fn busy_seconds(&self, robot: Option<&str>) -> PyResult<f64> {
+        let (_, track) = self.track_for(robot)?;
+        Ok(self.inner.busy_seconds(&track.name).unwrap_or(0.0))
+    }
+
+    /// Fraction of the cycle a robot spent moving, 0..1 — the
+    /// line-balancing number. The bottleneck is whoever sits near 1, and
+    /// this is what predicts where moving a spot lands the takt.
+    #[pyo3(signature = (robot = None))]
+    fn utilization(&self, robot: Option<&str>) -> PyResult<f64> {
+        let (_, track) = self.track_for(robot)?;
+        Ok(self.inner.utilization(&track.name).unwrap_or(0.0))
+    }
+
+    /// `{robot: utilization}` for every robot on the timeline.
+    fn utilizations(&self) -> std::collections::HashMap<String, f64> {
+        self.inner
+            .robots
+            .iter()
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    self.inner.utilization(&r.name).unwrap_or(0.0),
+                )
+            })
+            .collect()
+    }
+
     /// Where a mounted robot's base was at time `t` — `None` for a robot
     /// bolted to the floor, whose base is a scene constant.
     #[pyo3(signature = (t, robot = None))]
@@ -2468,14 +2511,34 @@ impl SequenceTimeline {
     /// with several, each lands at `/World/<sanitized instance name>`.
     /// The extension picks the serialization: `.usda` text, `.usdc`/`.usd`
     /// binary crate at roughly half the size.
-    #[pyo3(signature = (path, fps = 60.0))]
-    fn export_usd(&self, path: PathBuf, fps: f64) -> PyResult<Vec<String>> {
+    ///
+    /// `start`/`end` clip the export to a window of the cycle. A line's
+    /// full run is mostly repetition — one steady-state takt carries the
+    /// whole story at a fraction of the bytes, which is what makes a
+    /// line recording shippable at all.
+    #[pyo3(signature = (path, fps = 60.0, start = None, end = None))]
+    fn export_usd(
+        &self,
+        path: PathBuf,
+        fps: f64,
+        start: Option<f64>,
+        end: Option<f64>,
+    ) -> PyResult<Vec<String>> {
         if !(fps.is_finite() && fps > 0.0) {
             return Err(PyValueError::new_err(format!(
                 "fps must be positive, got {fps}"
             )));
         }
-        let duration = self.inner.duration;
+        let from = start.unwrap_or(0.0).clamp(0.0, self.inner.duration);
+        let to = end.unwrap_or(self.inner.duration).clamp(0.0, self.inner.duration);
+        if to <= from + 1e-9 {
+            return Err(PyValueError::new_err(format!(
+                "export window [{from}, {to}] is empty"
+            )));
+        }
+        // The exported layer always starts at t = 0; a window is a shift,
+        // so a clipped recording plays like a cycle of its own.
+        let duration = to - from;
         let mut times = Vec::new();
         let mut k = 0u64;
         loop {
@@ -2487,6 +2550,9 @@ impl SequenceTimeline {
             k += 1;
         }
         times.push(duration);
+        // Sample times in the *timeline's* frame; `times` stays the
+        // exported (zero-based) grid the exporter writes.
+        let sample_at: Vec<f64> = times.iter().map(|t| t + from).collect();
 
         // Per-robot FK per frame (robot-major for the exporter)...
         let mut robot_frames: Vec<Vec<Vec<nalgebra::Isometry3<f64>>>> =
@@ -2495,7 +2561,7 @@ impl SequenceTimeline {
         for (r, track) in self.inner.robots.iter().enumerate() {
             let mut frames = Vec::with_capacity(times.len());
             let mut samples = Vec::with_capacity(times.len());
-            for &t in &times {
+            for &t in &sample_at {
                 let q = track.trajectory.sample(t);
                 // A robot riding a vehicle has a base that moves, so FK has
                 // to be taken against the baked base, not the parked scene.
@@ -2537,7 +2603,7 @@ impl SequenceTimeline {
                 // the same way it does in the studio.
                 let visible: Vec<bool> = found
                     .map(|track| {
-                        times
+                        sample_at
                             .iter()
                             .map(|&t| {
                                 botrail_scene::rollout::SequenceTimeline::object_visible(track, t)
@@ -2552,7 +2618,7 @@ impl SequenceTimeline {
                 };
                 let track = match found {
                     Some(track) => botrail_usd::export::PoseTrack::Sampled(
-                        times
+                        sample_at
                             .iter()
                             .enumerate()
                             .map(|(k, &t)| {
@@ -2576,6 +2642,73 @@ impl SequenceTimeline {
                 }
             })
             .collect();
+        let mut objects = objects;
+
+        // Weld flashes: one small bright prim per current-ON interval,
+        // standing where that weld happened, blinking through animated
+        // visibility — so the arc shows in usdview/Omniverse exactly when
+        // the baked weld-controller signal was on.
+        for flash in self.scene.weld_flashes() {
+            let Some(track) = self.inner.signals.iter().find(|s| s.name == flash.signal)
+            else {
+                continue;
+            };
+            let Some(r) = self.scene.robot_index(&flash.robot) else {
+                continue;
+            };
+            let robot_track = &self.inner.robots[r];
+            let model = &self.scene.robots()[r].model;
+            let tcp = model.default_tcp_link();
+            // Rising/falling edges -> [on, off) intervals.
+            let mut intervals: Vec<(f64, f64)> = Vec::new();
+            let mut on_since: Option<f64> = None;
+            for &(t, value) in &track.edges {
+                match (value, on_since) {
+                    (true, None) => on_since = Some(t),
+                    (false, Some(t0)) => {
+                        intervals.push((t0, t));
+                        on_since = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(t0) = on_since {
+                intervals.push((t0, self.inner.duration));
+            }
+            // Clip to the exported window and rebase onto its clock.
+            let intervals: Vec<(f64, f64)> = intervals
+                .into_iter()
+                .filter(|(a, b)| *b > from && *a < to)
+                .map(|(a, b)| (a.max(from) - from, b.min(to) - from))
+                .collect();
+            for (k, &(t0, t1)) in intervals.iter().enumerate() {
+                let mid = (t0 + t1) / 2.0 + from;
+                let q = robot_track.trajectory.sample(mid);
+                let poses =
+                    match botrail_scene::rollout::SequenceTimeline::base_pose(robot_track, mid) {
+                        Some(base) => botrail_kin::forward_kinematics_with_base(model, &q, &base)
+                            .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                        None => self
+                            .scene
+                            .fk_for(r, &q)
+                            .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                    };
+                let visible: Vec<bool> = times
+                    .iter()
+                    .map(|&t| t >= t0 - 1e-9 && t < t1 - 1e-9)
+                    .collect();
+                if !visible.iter().any(|v| *v) {
+                    continue;
+                }
+                objects.push(botrail_usd::export::ObjectSpec {
+                    name: format!("flashes/{}_{}", flash.name, k + 1),
+                    geometry: botrail_model::Geometry::Sphere { radius: 0.028 },
+                    track: botrail_usd::export::PoseTrack::Static(poses[tcp]),
+                    color: Some([1.0, 0.82, 0.45]),
+                    visible,
+                });
+            }
+        }
 
         // A sole robot keeps the historical `Robot` prim (byte compat).
         let single = self.inner.robots.len() == 1;

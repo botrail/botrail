@@ -72,7 +72,7 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, frames, state. Mesh visuals are mapped to
+/// sequences, sensors, devices, effects, frames, state. Mesh visuals are mapped to
 /// URLs through the host's [`mesh_url`](SessionHost::mesh_url). This is the
 /// single definition of the handshake — hosts must not hand-roll it.
 pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
@@ -82,7 +82,7 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 }
 
 /// Every scene-content message except `scene_init`, in handshake order:
-/// obstacles, motions, sequences, sensors, devices, frames, state. Re-sent
+/// obstacles, motions, sequences, sensors, devices, effects, frames, state. Re-sent
 /// wholesale after bulk changes (project load), where the robot — and
 /// therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
@@ -93,6 +93,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::sequences_message(scene),
             wire::sensors_message(scene),
             wire::devices_message(scene),
+            wire::effects_message(scene),
             wire::frames_message(scene),
             wire::state_message(scene),
         ]
@@ -644,6 +645,21 @@ fn emit_devices(host: &impl SessionHost) {
 }
 
 /// Adds or replaces an auxiliary device and rebroadcasts the list.
+/// Declares (or replaces) a weld flash and rebroadcasts the effects list.
+pub fn add_weld_flash(
+    host: &impl SessionHost,
+    name: &str,
+    signal: &str,
+    robot: &str,
+) -> Result<(), botrail_scene::SceneError> {
+    host.with_scene(|scene| scene.add_weld_flash(name, signal, robot))?;
+    if host.has_listeners() {
+        let msg = host.with_scene(|scene| wire::effects_message(scene));
+        host.emit(&msg);
+    }
+    Ok(())
+}
+
 pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
     host.with_scene(|scene| scene.upsert_device(device));
     emit_devices(host);
@@ -845,6 +861,13 @@ pub fn timeline_msg(
                 name: s.name.clone(),
                 times: s.edges.iter().map(|(t, _)| *t).collect(),
                 values: s.edges.iter().map(|(_, v)| *v).collect(),
+                kind: if scene.signals().iter().any(|d| d.name == s.name) {
+                    "signal".to_string()
+                } else if scene.sensors().iter().any(|d| d.name == s.name) {
+                    "sensor".to_string()
+                } else {
+                    "device".to_string()
+                },
             })
             .collect(),
     }
@@ -1104,6 +1127,7 @@ mod tests {
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
+                    ServerMessage::Effects { .. } => "effects",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                 })
                 .collect()
@@ -1135,8 +1159,9 @@ mod tests {
         assert!(matches!(msgs[3], ServerMessage::Sequences { .. }));
         assert!(matches!(msgs[4], ServerMessage::Sensors { .. }));
         assert!(matches!(msgs[5], ServerMessage::Devices { .. }));
-        assert!(matches!(msgs[6], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[7], ServerMessage::State { .. }));
+        assert!(matches!(msgs[6], ServerMessage::Effects { .. }));
+        assert!(matches!(msgs[7], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[8], ServerMessage::State { .. }));
     }
 
     #[test]

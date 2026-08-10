@@ -328,14 +328,14 @@ def test_the_recording_replays_into_a_rebuilt_cell(baked, tmp_path: Path) -> Non
     assert res["mode"] == "transforms"
     assert res["warnings"] == []
     assert res["duration"] == pytest.approx(timeline.duration, abs=1 / 30 + 1e-6)
-    # Exactly the freight moves: every rider the cell *draws*, and never
-    # the scenery. The 73 collision pieces are hidden — a recording is the
-    # animation of the visible world, so they are neither exported nor
-    # expected back.
+    # Exactly the freight moves: every rider the cell *draws* plus the
+    # spot marks it leaves behind, and never the scenery. The 73 collision
+    # pieces are hidden — a recording is the animation of the visible
+    # world, so they are neither exported nor expected back.
     drawn = {
         name for name, _ in riders
         if name == demo.SHELL or not name.startswith("/World/Line/body/")
-    }
+    } | set(demo.MARKS)
     moving = set(res["object_tracks"])
     assert moving == drawn
     assert "/World/Cell/Bed" not in moving
