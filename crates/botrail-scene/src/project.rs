@@ -239,6 +239,9 @@ pub struct ProjectFile {
     /// Weld-flash bindings (absent in older files).
     #[serde(default)]
     pub flashes: Vec<crate::wire::FlashMsg>,
+    /// Scenarios — named initial-state deltas (absent in older files).
+    #[serde(default)]
+    pub scenarios: Vec<crate::wire::ScenarioMsg>,
 }
 
 fn identity_pose() -> PoseMsg {
@@ -284,6 +287,7 @@ impl ProjectFile {
                     sensors: Vec::new(),
                     devices: Vec::new(),
                     flashes: Vec::new(),
+                    scenarios: Vec::new(),
                 })
             }
             2 => {
@@ -372,6 +376,11 @@ impl Scene {
                     signal: f.signal.clone(),
                     robot: f.robot.clone(),
                 })
+                .collect(),
+            scenarios: self
+                .scenarios()
+                .iter()
+                .map(crate::wire::scenario_msg)
                 .collect(),
             frames: self
                 .frames()
@@ -521,6 +530,13 @@ impl Scene {
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
+        self.set_scenarios(
+            project
+                .scenarios
+                .iter()
+                .map(crate::wire::scenario_from_msg)
+                .collect(),
+        );
         self.set_signals(
             project
                 .signals
@@ -978,6 +994,44 @@ pub fn generate_python(project: &ProjectFile) -> String {
             flash.name, flash.signal, flash.robot
         ));
     }
+    for scenario in &project.scenarios {
+        let mut kwargs = String::new();
+        if !scenario.signals.is_empty() {
+            let entries: Vec<String> = scenario
+                .signals
+                .iter()
+                .map(|s| format!("{:?}: {}", s.name, if s.value { "True" } else { "False" }))
+                .collect();
+            kwargs.push_str(&format!(", signals={{{}}}", entries.join(", ")));
+        }
+        if !scenario.obstacles.is_empty() {
+            let entries: Vec<String> = scenario
+                .obstacles
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{:?}: ({}, {})",
+                        o.name,
+                        py_tuple(&o.pose.position),
+                        py_tuple(&o.pose.quaternion)
+                    )
+                })
+                .collect();
+            kwargs.push_str(&format!(", obstacles={{{}}}", entries.join(", ")));
+        }
+        if !scenario.joints.is_empty() {
+            let entries: Vec<String> = scenario
+                .joints
+                .iter()
+                .map(|j| format!("{:?}: {}", j.robot, py_list(&j.positions)))
+                .collect();
+            kwargs.push_str(&format!(", joints={{{}}}", entries.join(", ")));
+        }
+        out.push_str(&format!(
+            "scene.add_scenario({:?}{kwargs})\n",
+            scenario.name
+        ));
+    }
     for sequence in &project.sequences {
         out.push('\n');
         out.push_str(&format!("sequence = scene.sequence({:?})\n", sequence.name));
@@ -1103,7 +1157,10 @@ fn py_action(action: &ActionMsg) -> String {
     }
 }
 
-fn py_condition(condition: &ConditionMsg) -> String {
+/// A condition in the authoring vocabulary (`bt.seq.signal("x", True)`)
+/// — the script generator's rendering, reused by the coverage report so
+/// an uncovered arm is named the way it was written.
+pub(crate) fn py_condition(condition: &ConditionMsg) -> String {
     match condition {
         ConditionMsg::Immediately => "bt.seq.immediately()".to_string(),
         ConditionMsg::Done => "bt.seq.done()".to_string(),
@@ -1338,10 +1395,27 @@ mod tests {
             ],
         });
 
+        let robot = scene.robots()[0].name.clone();
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "disarmed".into(),
+                signals: vec![("armed".into(), false)],
+                obstacles: vec![("wall".into(), Isometry3::translation(0.5, 0.0, 0.45))],
+                joints: vec![(robot.clone(), vec![0.1, 0.0, 0.0, 0.0, 0.0, 0.0])],
+            })
+            .unwrap();
+
         let json = scene.to_project().to_json();
         let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
         assert_eq!(reloaded.signals().len(), 1);
         assert!(reloaded.signals()[0].initial);
+        // Scenarios survive the round trip and still apply.
+        assert_eq!(reloaded.scenarios().len(), 1);
+        let mut applied = reloaded.clone();
+        applied.apply_scenario("disarmed").unwrap();
+        assert!(!applied.signals()[0].initial);
+        assert!((applied.obstacles()[0].pose.translation.x - 0.5).abs() < 1e-9);
+        assert!((applied.joint_positions()[0] - 0.1).abs() < 1e-9);
         let seq = reloaded.sequence("cycle").expect("sequence survives");
         assert_eq!(seq.steps.len(), 4);
         assert!(matches!(
@@ -1371,6 +1445,9 @@ mod tests {
             "arm.step(\"disarm\", actions=[bt.seq.set_signal(\"armed\", False)], \
              transition=bt.seq.immediately())",
             "arm = sel.when(bt.seq.falling(\"armed\"))",
+            "scene.add_scenario(\"disarmed\", signals={\"armed\": False}, \
+             obstacles={\"wall\": ((0.500000, 0.000000, 0.450000), \
+             (0.000000, 0.000000, 0.000000, 1.000000))}, joints={",
         ] {
             assert!(code.contains(needle), "missing `{needle}`:\n{code}");
         }

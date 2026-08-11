@@ -93,6 +93,17 @@ export function SequencePanel() {
   // from the map count as included, so freshly authored programs join
   // without a click.
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  // Which world the next simulate runs in: `baseline` (the scene as it
+  // stands) or a named initial-state delta. Falls back when the chosen
+  // scenario is removed.
+  const scenarios = useStudioStore((s) => s.scenarios);
+  const [scenario, setScenario] = useState("baseline");
+  useEffect(() => {
+    if (scenario !== "baseline" && !scenarios.some((s) => s.name === scenario)) {
+      setScenario("baseline");
+    }
+  }, [scenarios, scenario]);
+  const runScenario = scenario === "baseline" ? undefined : scenario;
   useEffect(() => {
     if (!motions.some((m) => m.name === motionChoice)) {
       setMotionChoice(motions[0]?.name ?? "");
@@ -154,14 +165,17 @@ export function SequencePanel() {
 
   const onSimulate = () => {
     beginSequenceSim();
-    sendSimulateSequence(sequence.name);
+    sendSimulateSequence(sequence.name, runScenario);
   };
 
   const included = sequences.filter((s) => !excluded.has(s.name));
   const onSimulateTogether = () => {
     if (included.length === 0) return;
     beginSequenceSim();
-    sendSimulateSequences(included.map((s) => s.name));
+    sendSimulateSequences(
+      included.map((s) => s.name),
+      runScenario,
+    );
   };
 
   return (
@@ -321,6 +335,28 @@ export function SequencePanel() {
           )}
         </div>
 
+        {/* Scenarios: named initial-state deltas, Python-authored (the
+            test-case matrix). The dropdown picks the world the next
+            simulate runs in. */}
+        {scenarios.length > 0 && (
+          <div className="seq-programs">
+            {scenarios.map((s) => (
+              <div key={s.name} className="seq-program" title="scenario (authored from Python)">
+                ⧉ {s.name}
+                <span className="seq-cond">
+                  {" · "}
+                  {[
+                    s.signals?.length ? `${s.signals.length} signal${s.signals.length > 1 ? "s" : ""}` : "",
+                    s.obstacles?.length ? `${s.obstacles.length} obstacle${s.obstacles.length > 1 ? "s" : ""}` : "",
+                    s.joints?.length ? `${s.joints.length} robot${s.joints.length > 1 ? "s" : ""}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(", ")}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="seg">
           <button
             className="plan-go"
@@ -329,6 +365,20 @@ export function SequencePanel() {
           >
             Simulate
           </button>
+          {scenarios.length > 0 && (
+            <select
+              value={scenario}
+              onChange={(e) => setScenario(e.target.value)}
+              title="the world the next simulate runs in"
+            >
+              <option value="baseline">baseline</option>
+              {scenarios.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         {error && <div className="plan-error">{error}</div>}
       </div>

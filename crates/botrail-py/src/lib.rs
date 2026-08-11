@@ -319,6 +319,23 @@ fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isom
         .into()
 }
 
+/// An obstacle pose in a scenario dict: a bare position (upright) or a
+/// `(position, quaternion)` pair.
+#[derive(FromPyObject)]
+enum ScenarioPose {
+    Pair(([f64; 3], [f64; 4])),
+    Position([f64; 3]),
+}
+
+impl ScenarioPose {
+    fn into_iso(self) -> nalgebra::Isometry3<f64> {
+        match self {
+            ScenarioPose::Pair((position, quaternion)) => pose_from(position, Some(quaternion)),
+            ScenarioPose::Position(position) => pose_from(position, None),
+        }
+    }
+}
+
 fn sensor_watch(
     watch: Option<Vec<String>>,
     watch_robot: bool,
@@ -1379,13 +1396,18 @@ impl Scene {
     /// this scene (motions plan at their step, grasped objects ride along)
     /// and returns the baked timeline. Also broadcasts the result to
     /// connected studio clients for playback.
-    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None))]
+    ///
+    /// `scenario` applies a named initial-state delta (`add_scenario`) to
+    /// the snapshot first — the live scene is never touched. `None` and
+    /// `"baseline"` both mean the scene as it stands.
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None))]
     fn simulate_sequence(
         &self,
         name: &str,
         dt: f64,
         max_duration: f64,
         plan_resolution: Option<f64>,
+        scenario: Option<&str>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -1407,7 +1429,7 @@ impl Scene {
         }
         let (timeline, scene) = self
             .hub
-            .simulate_sequence(name, &options)
+            .simulate_sequence(name, scenario, &options)
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
@@ -1429,13 +1451,14 @@ impl Scene {
     /// joint-space L2). The default 0.05 samples a big arm's sweep every
     /// ~10 cm of TCP travel — coarse enough to step across sheet metal, so
     /// cells full of 12 mm flanges pass 0.005.
-    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None))]
+    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None))]
     fn simulate_sequences(
         &self,
         names: Vec<String>,
         dt: f64,
         max_duration: f64,
         plan_resolution: Option<f64>,
+        scenario: Option<&str>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -1458,11 +1481,145 @@ impl Scene {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (timeline, scene) = self
             .hub
-            .simulate_sequences(&refs, &options)
+            .simulate_sequences(&refs, scenario, &options)
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
             scene,
+        })
+    }
+
+    /// Defines (or replaces) a scenario — a named initial-state delta the
+    /// `simulate_*` calls can run under. Deltas only: `signals` overrides
+    /// declared internal-signal initial values, `obstacles` maps names to
+    /// a position or a `(position, quaternion)` pair, `joints` maps robot
+    /// instances to start configurations. `"baseline"` is the reserved
+    /// name of the unmodified scene. Everything is validated when the
+    /// scenario is *applied* (at simulate), so deltas may name things
+    /// authored later.
+    #[pyo3(signature = (name, signals = None, obstacles = None, joints = None))]
+    fn add_scenario(
+        &self,
+        name: &str,
+        signals: Option<&Bound<'_, PyDict>>,
+        obstacles: Option<&Bound<'_, PyDict>>,
+        joints: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let mut scenario = botrail_scene::seq::Scenario {
+            name: name.to_string(),
+            signals: Vec::new(),
+            obstacles: Vec::new(),
+            joints: Vec::new(),
+        };
+        if let Some(signals) = signals {
+            for (key, value) in signals.iter() {
+                scenario
+                    .signals
+                    .push((key.extract::<String>()?, value.extract::<bool>()?));
+            }
+        }
+        if let Some(obstacles) = obstacles {
+            for (key, value) in obstacles.iter() {
+                let pose: ScenarioPose = value.extract()?;
+                scenario
+                    .obstacles
+                    .push((key.extract::<String>()?, pose.into_iso()));
+            }
+        }
+        if let Some(joints) = joints {
+            for (key, value) in joints.iter() {
+                scenario
+                    .joints
+                    .push((key.extract::<String>()?, value.extract::<Vec<f64>>()?));
+            }
+        }
+        self.hub.add_scenario(scenario).map_err(scene_err)
+    }
+
+    fn remove_scenario(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_scenario(name).map_err(scene_err)
+    }
+
+    /// Defined scenario names, in authoring order (`baseline` — the
+    /// unmodified scene — is implicit and never listed).
+    #[getter]
+    fn scenario_names(&self) -> Vec<String> {
+        self.hub.scenario_names()
+    }
+
+    /// Rolls the same sequences under a set of scenarios — the cell's
+    /// test-case matrix in one call. `scenarios=None` runs `baseline`
+    /// plus every defined scenario. A scenario that fails (bad delta,
+    /// plan failure, timeout) is *collected* into the result's `errors`
+    /// rather than aborting the sweep — finding the failing scenario is
+    /// the point. Each run is deterministic, so coverage and cycle times
+    /// off the result are CI-assertable numbers.
+    #[pyo3(signature = (names, scenarios = None, dt = 0.01, max_duration = 120.0,
+        plan_resolution = None))]
+    fn simulate_scenarios(
+        &self,
+        py: Python<'_>,
+        names: Vec<String>,
+        scenarios: Option<Vec<String>>,
+        dt: f64,
+        max_duration: f64,
+        plan_resolution: Option<f64>,
+    ) -> PyResult<ScenarioRuns> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration,
+            ..Default::default()
+        };
+        if let Some(resolution) = plan_resolution {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "plan_resolution must be positive, got {resolution}"
+                )));
+            }
+            options.plan.resolution = resolution;
+        }
+        let set: Vec<String> = match scenarios {
+            Some(list) => {
+                for (i, name) in list.iter().enumerate() {
+                    if list[..i].contains(name) {
+                        return Err(PyValueError::new_err(format!(
+                            "scenario `{name}` is listed twice"
+                        )));
+                    }
+                }
+                list
+            }
+            None => std::iter::once(botrail_scene::seq::BASELINE_SCENARIO.to_string())
+                .chain(self.hub.scenario_names())
+                .collect(),
+        };
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut runs = Vec::new();
+        let mut errors = Vec::new();
+        for scenario in &set {
+            match self.hub.simulate_sequences(&refs, Some(scenario), &options) {
+                Ok((timeline, scene)) => runs.push((
+                    scenario.clone(),
+                    Py::new(
+                        py,
+                        SequenceTimeline {
+                            inner: timeline,
+                            scene,
+                        },
+                    )?,
+                )),
+                Err(e) => errors.push((scenario.clone(), e)),
+            }
+        }
+        Ok(ScenarioRuns {
+            runs,
+            failures: errors,
+            scene: self.hub.authored_snapshot(),
         })
     }
 
@@ -2615,6 +2772,13 @@ impl SequenceTimeline {
         self.inner.sequences.clone()
     }
 
+    /// The scenario this bake ran under; `None` is the unmodified scene
+    /// (`baseline`).
+    #[getter]
+    fn scenario(&self) -> Option<String> {
+        self.inner.scenario.clone()
+    }
+
     /// The path the bake took through branching steps, in resolution
     /// order: `(sequence, step name, arm index)`. Untaken arms have no
     /// spans — this is how a timeline says which way it went.
@@ -2737,6 +2901,274 @@ impl SequenceTimeline {
         )?;
         std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+}
+
+/// A scenario sweep's results: one deterministic timeline per scenario
+/// that completed, per-scenario failures, and branch coverage over the
+/// whole set — the cell's test-case matrix as one object.
+#[pyclass(frozen, module = "botrail._core")]
+struct ScenarioRuns {
+    /// `(scenario, timeline)` in run order (`baseline` first by default).
+    runs: Vec<(String, Py<SequenceTimeline>)>,
+    failures: Vec<(String, String)>,
+    /// Authored-content snapshot (sequences for coverage).
+    scene: botrail_scene::Scene,
+}
+
+#[pymethods]
+impl ScenarioRuns {
+    /// Scenarios that completed, in run order.
+    #[getter]
+    fn names(&self) -> Vec<String> {
+        self.runs.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// `{scenario: error}` for the runs that failed — a bad delta, a plan
+    /// failure, or a timeout, with the rollout's own diagnosis.
+    #[getter]
+    fn errors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (name, error) in &self.failures {
+            out.set_item(name, error)?;
+        }
+        Ok(out)
+    }
+
+    /// `{scenario: cycle time}` for the completed runs.
+    #[getter]
+    fn durations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (name, timeline) in &self.runs {
+            out.set_item(name, timeline.borrow(py).inner.duration)?;
+        }
+        Ok(out)
+    }
+
+    fn __len__(&self) -> usize {
+        self.runs.len()
+    }
+
+    fn __contains__(&self, name: &str) -> bool {
+        self.runs.iter().any(|(n, _)| n == name)
+    }
+
+    fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<Py<SequenceTimeline>> {
+        if let Some((_, timeline)) = self.runs.iter().find(|(n, _)| n == name) {
+            return Ok(timeline.clone_ref(py));
+        }
+        if let Some((_, error)) = self.failures.iter().find(|(n, _)| n == name) {
+            return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                "scenario `{name}` failed: {error}"
+            )));
+        }
+        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "unknown scenario `{name}` (ran: {})",
+            self.names().join(", ")
+        )))
+    }
+
+    /// `(scenario, timeline)` pairs in run order.
+    fn items(&self, py: Python<'_>) -> Vec<(String, Py<SequenceTimeline>)> {
+        self.runs
+            .iter()
+            .map(|(name, timeline)| (name.clone(), timeline.clone_ref(py)))
+            .collect()
+    }
+
+    /// Branch arms *no* run in this set took, as `(sequence, step, arm,
+    /// condition)` rows in authoring order — empty means every authored
+    /// path was exercised. The condition is the arm's guard in the
+    /// authoring vocabulary, so each row says which scenario is missing.
+    fn uncovered_arms(&self, py: Python<'_>) -> PyResult<Vec<(String, String, usize, String)>> {
+        let borrowed: Vec<PyRef<'_, SequenceTimeline>> =
+            self.runs.iter().map(|(_, t)| t.borrow(py)).collect();
+        let timelines: Vec<&botrail_scene::rollout::SequenceTimeline> =
+            borrowed.iter().map(|t| &t.inner).collect();
+        let uncovered = botrail_scene::rollout::arm_coverage(&self.scene, &timelines)
+            .map_err(PyValueError::new_err)?;
+        Ok(uncovered
+            .into_iter()
+            .map(|u| (u.sequence, u.step, u.arm, u.condition))
+            .collect())
+    }
+
+    /// `{scenario: Clearance}` — the tightest robot-to-environment
+    /// approach of every completed run, so the whole matrix (skipped-arm
+    /// paths included, via the scenarios that take them) gets margin
+    /// checked, not just the happy path.
+    #[pyo3(signature = (dt = 0.01))]
+    fn min_clearances<'py>(&self, py: Python<'py>, dt: f64) -> PyResult<Bound<'py, PyDict>> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let out = PyDict::new(py);
+        for (name, timeline) in &self.runs {
+            let timeline = timeline.borrow(py);
+            let clearance = timeline
+                .scene
+                .timeline_min_clearance(&timeline.inner, dt)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .map(|inner| Clearance { inner })
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "nothing to measure: the cell has no enabled environment \
+                         obstacle with collision geometry",
+                    )
+                })?;
+            out.set_item(name, clearance.into_pyobject(py)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Renders one program from the whole sweep as a vendor robot script
+    /// — every branch arm included: the primary run (default: the first,
+    /// i.e. `baseline`) supplies the shared path, and an arm it skipped
+    /// is spliced in from the run that took it. That splice is refused
+    /// when the donor reached the branch at a different configuration
+    /// (the scenario changed the path *before* the branch), and a
+    /// straight-line move right after arms that rejoin apart raises a
+    /// warning — see `SequenceTimeline.to_script` for the I/O wiring and
+    /// the rest of the semantics.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (sequence = None, dialect = "urscript", name = None, primary = None,
+        inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+    fn to_script(
+        &self,
+        py: Python<'_>,
+        sequence: Option<&str>,
+        dialect: &str,
+        name: Option<&str>,
+        primary: Option<&str>,
+        inputs: Option<std::collections::HashMap<String, u32>>,
+        outputs: Option<std::collections::HashMap<String, u32>>,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<String> {
+        if self.runs.is_empty() {
+            return Err(PyValueError::new_err(
+                "no completed runs to export (every scenario failed — see .errors)",
+            ));
+        }
+        let backend = botrail_export::backend(dialect).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown dialect {dialect:?} (available: {})",
+                botrail_export::DIALECTS.join(", ")
+            ))
+        })?;
+        let lead = match primary {
+            Some(primary) => self
+                .runs
+                .iter()
+                .position(|(n, _)| n == primary)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown primary scenario `{primary}` (ran: {})",
+                        self.names().join(", ")
+                    ))
+                })?,
+            None => 0,
+        };
+        let io = botrail_scene::script::SequenceIo {
+            inputs: inputs.unwrap_or_default(),
+            outputs: outputs.unwrap_or_default(),
+        };
+        let options = botrail_export::ProgramOptions {
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        };
+        let borrowed: Vec<PyRef<'_, SequenceTimeline>> =
+            self.runs.iter().map(|(_, t)| t.borrow(py)).collect();
+        let mut ordered: Vec<(&str, &botrail_scene::rollout::SequenceTimeline)> =
+            vec![(self.runs[lead].0.as_str(), &borrowed[lead].inner)];
+        for (i, (scenario, _)) in self.runs.iter().enumerate() {
+            if i != lead {
+                ordered.push((scenario.as_str(), &borrowed[i].inner));
+            }
+        }
+        let out = botrail_scene::script::merged_sequence_program(
+            &self.scene,
+            &ordered,
+            sequence,
+            &io,
+            &options,
+        )
+        .map_err(PyValueError::new_err)?;
+        for warning in &out.warnings {
+            let message = std::ffi::CString::new(warning.as_str())
+                .unwrap_or_else(|_| std::ffi::CString::new("sequence export warning").unwrap());
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &message,
+                2,
+            )?;
+        }
+        let mut program = out.program;
+        if let Some(name) = name {
+            program.name = name.to_string();
+        }
+        backend
+            .emit(&program)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes `to_script` output to `path` (see there for the semantics).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
+        primary = None, inputs = None, outputs = None, speed_scale = 1.0,
+        blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+    fn export_script(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        sequence: Option<&str>,
+        dialect: &str,
+        name: Option<&str>,
+        primary: Option<&str>,
+        inputs: Option<std::collections::HashMap<String, u32>>,
+        outputs: Option<std::collections::HashMap<String, u32>>,
+        speed_scale: f64,
+        blend_radius: f64,
+        tcp_speed: f64,
+        tcp_accel: f64,
+        move_to_start: bool,
+    ) -> PyResult<()> {
+        let script = self.to_script(
+            py,
+            sequence,
+            dialect,
+            name,
+            primary,
+            inputs,
+            outputs,
+            speed_scale,
+            blend_radius,
+            tcp_speed,
+            tcp_accel,
+            move_to_start,
+        )?;
+        std::fs::write(&path, script)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ScenarioRuns({} run{}, {} failure{})",
+            self.runs.len(),
+            if self.runs.len() == 1 { "" } else { "s" },
+            self.failures.len(),
+            if self.failures.len() == 1 { "" } else { "s" },
+        )
     }
 }
 
@@ -2936,6 +3368,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IkResult>()?;
     m.add_class::<Trajectory>()?;
     m.add_class::<SequenceTimeline>()?;
+    m.add_class::<ScenarioRuns>()?;
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;
     m.add_class::<Clearance>()?;

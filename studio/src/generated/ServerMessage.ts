@@ -7,6 +7,7 @@ import type { MotionMsg } from "./MotionMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
 import type { RobotStateMsg } from "./RobotStateMsg";
+import type { ScenarioMsg } from "./ScenarioMsg";
 import type { SceneDescriptionMsg } from "./SceneDescriptionMsg";
 import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
@@ -30,7 +31,11 @@ min_distance: number | null, } | { "type": "plan_result",
 /**
  * Robot instance the plan is for (plays back on that robot).
  */
-robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
+robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "scenarios", scenarios: Array<ScenarioMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "sequence_result", ok: boolean, sequence: string, 
+/**
+ * Scenario the rollout ran under; absent = `baseline`.
+ */
+scenario?: string | null, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
 /**
  * Source layer path (display form).
  */

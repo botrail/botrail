@@ -256,6 +256,7 @@ class Scene:
         dt: float = 0.01,
         max_duration: float = 120.0,
         plan_resolution: Optional[float] = None,
+        scenario: Optional[str] = None,
     ) -> "SequenceTimeline": ...
     def simulate_sequences(
         self,
@@ -263,7 +264,37 @@ class Scene:
         dt: float = 0.01,
         max_duration: float = 120.0,
         plan_resolution: Optional[float] = None,
+        scenario: Optional[str] = None,
     ) -> "SequenceTimeline": ...
+    def add_scenario(
+        self,
+        name: str,
+        signals: Optional[dict[str, bool]] = None,
+        obstacles: Optional[
+            dict[
+                str,
+                Union[
+                    tuple[float, float, float],
+                    tuple[
+                        tuple[float, float, float],
+                        tuple[float, float, float, float],
+                    ],
+                ],
+            ]
+        ] = None,
+        joints: Optional[dict[str, list[float]]] = None,
+    ) -> None: ...
+    def remove_scenario(self, name: str) -> None: ...
+    @property
+    def scenario_names(self) -> list[str]: ...
+    def simulate_scenarios(
+        self,
+        names: list[str],
+        scenarios: Optional[list[str]] = None,
+        dt: float = 0.01,
+        max_duration: float = 120.0,
+        plan_resolution: Optional[float] = None,
+    ) -> "ScenarioRuns": ...
     def add_zone_sensor(
         self,
         name: str,
@@ -475,6 +506,8 @@ class SequenceTimeline:
     @property
     def sequences(self) -> list[str]: ...
     @property
+    def scenario(self) -> Optional[str]: ...
+    @property
     def branches(self) -> list[tuple[str, str, int]]: ...
     def to_script(
         self,
@@ -495,6 +528,49 @@ class SequenceTimeline:
         sequence: Optional[str] = None,
         dialect: str = "urscript",
         name: Optional[str] = None,
+        inputs: Optional[dict[str, int]] = None,
+        outputs: Optional[dict[str, int]] = None,
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> None: ...
+
+class ScenarioRuns:
+    @property
+    def names(self) -> list[str]: ...
+    @property
+    def errors(self) -> dict[str, str]: ...
+    @property
+    def durations(self) -> dict[str, float]: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __getitem__(self, key: str) -> SequenceTimeline: ...
+    def items(self) -> list[tuple[str, SequenceTimeline]]: ...
+    def uncovered_arms(self) -> list[tuple[str, str, int, str]]: ...
+    def min_clearances(self, dt: float = 0.01) -> dict[str, Clearance]: ...
+    def to_script(
+        self,
+        sequence: Optional[str] = None,
+        dialect: str = "urscript",
+        name: Optional[str] = None,
+        primary: Optional[str] = None,
+        inputs: Optional[dict[str, int]] = None,
+        outputs: Optional[dict[str, int]] = None,
+        speed_scale: float = 1.0,
+        blend_radius: float = 0.0,
+        tcp_speed: float = 0.25,
+        tcp_accel: float = 1.2,
+        move_to_start: bool = True,
+    ) -> str: ...
+    def export_script(
+        self,
+        path: Union[str, Path],
+        sequence: Optional[str] = None,
+        dialect: str = "urscript",
+        name: Optional[str] = None,
+        primary: Optional[str] = None,
         inputs: Optional[dict[str, int]] = None,
         outputs: Optional[dict[str, int]] = None,
         speed_scale: float = 1.0,

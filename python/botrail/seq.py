@@ -309,9 +309,13 @@ class SequenceBuilder(_Steps):
     def name(self) -> str:
         return self._name
 
-    def simulate(self, dt: float = 0.01, max_duration: float = 120.0):
-        """Rolls the sequence out (see ``Scene.simulate_sequence``)."""
-        return self._scene.simulate_sequence(self._name, dt=dt, max_duration=max_duration)
+    def simulate(self, dt: float = 0.01, max_duration: float = 120.0, scenario: Optional[str] = None):
+        """Rolls the sequence out (see ``Scene.simulate_sequence``).
+        ``scenario`` runs it under a named initial-state delta
+        (``scene.add_scenario``)."""
+        return self._scene.simulate_sequence(
+            self._name, dt=dt, max_duration=max_duration, scenario=scenario
+        )
 
     def _sync(self) -> None:
         payload = {"name": self._name, "steps": self._steps}

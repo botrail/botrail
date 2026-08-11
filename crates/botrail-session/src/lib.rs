@@ -86,9 +86,10 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, effects, frames, state. Mesh visuals are mapped to
-/// URLs through the host's [`mesh_url`](SessionHost::mesh_url). This is the
-/// single definition of the handshake — hosts must not hand-roll it.
+/// sequences, sensors, devices, scenarios, effects, frames, state. Mesh
+/// visuals are mapped to URLs through the host's
+/// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
+/// the handshake — hosts must not hand-roll it.
 pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     let mut messages = vec![host.with_scene(|scene| scene_init_message(host, scene))];
     messages.extend(refresh_messages(host));
@@ -96,9 +97,9 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 }
 
 /// Every scene-content message except `scene_init`, in handshake order:
-/// obstacles, motions, sequences, sensors, devices, effects, frames, state. Re-sent
-/// wholesale after bulk changes (project load), where the robot — and
-/// therefore `scene_init` — cannot change.
+/// obstacles, motions, sequences, sensors, devices, scenarios, effects,
+/// frames, state. Re-sent wholesale after bulk changes (project load),
+/// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
         vec![
@@ -107,6 +108,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::sequences_message(scene),
             wire::sensors_message(scene),
             wire::devices_message(scene),
+            wire::scenarios_message(scene),
             wire::effects_message(scene),
             wire::frames_message(scene),
             wire::state_message(scene),
@@ -272,23 +274,32 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::RemoveSignal { name } => {
             remove_signal(host, &name).map_err(|e| format!("rejected remove_signal: {e}"))
         }
-        ClientMessage::SimulateSequence { name } => {
+        ClientMessage::SimulateSequence { name, scenario } => {
             // Failure is reported to clients inside the sequence_result.
             let _ = simulate_sequence_and_emit(
                 host,
                 &name,
+                scenario.as_deref(),
                 &botrail_scene::rollout::RolloutOptions::default(),
             );
             Ok(())
         }
-        ClientMessage::SimulateSequences { names } => {
+        ClientMessage::SimulateSequences { names, scenario } => {
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let _ = simulate_sequences_and_emit(
                 host,
                 &names,
+                scenario.as_deref(),
                 &botrail_scene::rollout::RolloutOptions::default(),
             );
             Ok(())
+        }
+        ClientMessage::UpsertScenario { scenario } => {
+            upsert_scenario(host, wire::scenario_from_msg(&scenario))
+                .map_err(|e| format!("rejected upsert_scenario: {e}"))
+        }
+        ClientMessage::RemoveScenario { name } => {
+            remove_scenario(host, &name).map_err(|e| format!("rejected remove_scenario: {e}"))
         }
         ClientMessage::ExportUsd { fps } => {
             host.emit(&export_usd_document(host, fps));
@@ -652,6 +663,29 @@ fn emit_sensors(host: &impl SessionHost) {
 }
 
 /// Adds or replaces a pseudo-sensor and rebroadcasts the list.
+fn emit_scenarios(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::scenarios_message(scene));
+    host.emit(&msg);
+}
+
+pub fn upsert_scenario(
+    host: &impl SessionHost,
+    scenario: botrail_scene::seq::Scenario,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_scenario(scenario))?;
+    emit_scenarios(host);
+    Ok(())
+}
+
+pub fn remove_scenario(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_scenario(name))?;
+    emit_scenarios(host);
+    Ok(())
+}
+
 pub fn upsert_sensor(host: &impl SessionHost, sensor: botrail_scene::seq::Sensor) {
     host.with_scene(|scene| scene.upsert_sensor(sensor));
     emit_sensors(host);
@@ -703,48 +737,68 @@ pub fn remove_device(host: &impl SessionHost, name: &str) -> Result<(), SceneErr
 pub fn simulate_sequence_and_emit(
     host: &impl SessionHost,
     name: &str,
+    scenario: Option<&str>,
     options: &botrail_scene::rollout::RolloutOptions,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
-    simulate_sequences_and_emit(host, &[name], options)
+    simulate_sequences_and_emit(host, &[name], scenario, options)
 }
 
 /// Rolls out several sequences *concurrently* (one scan advances every
 /// program, in list order) and emits the outcome as a `sequence_result`
 /// message — the result is one timeline, so playback and the timing chart
 /// need no notion of "which program" beyond the qualified step names.
+///
+/// `scenario` applies a named initial-state delta to the snapshot before
+/// the rollout — and everything downstream (the broadcast timeline's FK
+/// and object poses, the retained bake the USD download serves) reads
+/// the *applied* snapshot, so a scenario-moved obstacle is where the
+/// scenario put it, everywhere.
 pub fn simulate_sequences_and_emit(
     host: &impl SessionHost,
     names: &[&str],
+    scenario: Option<&str>,
     options: &botrail_scene::rollout::RolloutOptions,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
     let name = names.join(" + ");
-    let snapshot = host.snapshot();
-    let t0 = host.now_ms();
-    let result = snapshot
-        .simulate_sequences(names, options)
+    let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
+    let mut snapshot = host.snapshot();
+    let applied = scenario
+        .map(|s| snapshot.apply_scenario(s).map(|()| s))
+        .transpose()
         .map_err(|e| e.to_string());
-    let ms = host.now_ms() - t0;
+    let result = applied.and_then(|applied| {
+        let t0 = host.now_ms();
+        let mut result = snapshot
+            .simulate_sequences(names, options)
+            .map_err(|e| e.to_string());
+        if let Ok(timeline) = &mut result {
+            timeline.scenario = applied.map(str::to_string);
+        }
+        result.map(|timeline| (timeline, host.now_ms() - t0))
+    });
     let msg = match &result {
-        Ok(timeline) => {
+        Ok((timeline, ms)) => {
             host.store_baked(&snapshot, timeline);
             ServerMessage::SequenceResult {
                 ok: true,
                 sequence: name.clone(),
+                scenario: timeline.scenario.clone(),
                 error: None,
                 timeline: Some(timeline_msg(&snapshot, timeline)),
-                planning_time_ms: Some(ms),
+                planning_time_ms: Some(*ms),
             }
         }
         Err(e) => ServerMessage::SequenceResult {
             ok: false,
             sequence: name.clone(),
+            scenario: scenario.map(str::to_string),
             error: Some(e.clone()),
             timeline: None,
             planning_time_ms: None,
         },
     };
     host.emit(&msg);
-    result
+    result.map(|(timeline, _)| timeline)
 }
 
 /// Bakes the host's retained rollout as a downloadable usda document.
@@ -764,11 +818,15 @@ fn export_usd_document(host: &impl SessionHost, fps: f64) -> ServerMessage {
     let Some((scene, timeline)) = host.baked() else {
         return refused("nothing to export yet — simulate a sequence first".to_string());
     };
-    let stem = if timeline.sequences.is_empty() {
+    let mut stem = if timeline.sequences.is_empty() {
         "cell".to_string()
     } else {
         timeline.sequences.join("_")
     };
+    if let Some(scenario) = &timeline.scenario {
+        stem.push('_');
+        stem.push_str(scenario);
+    }
     let exported = match usd::bake_timeline(&scene, &timeline, fps, None, None, &stem) {
         Ok(exported) => exported,
         Err(e) => return refused(e),
@@ -1207,6 +1265,7 @@ mod tests {
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
+                    ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                     ServerMessage::UsdDocument { .. } => "usd_document",
@@ -1246,9 +1305,10 @@ mod tests {
         assert!(matches!(msgs[3], ServerMessage::Sequences { .. }));
         assert!(matches!(msgs[4], ServerMessage::Sensors { .. }));
         assert!(matches!(msgs[5], ServerMessage::Devices { .. }));
-        assert!(matches!(msgs[6], ServerMessage::Effects { .. }));
-        assert!(matches!(msgs[7], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[8], ServerMessage::State { .. }));
+        assert!(matches!(msgs[6], ServerMessage::Scenarios { .. }));
+        assert!(matches!(msgs[7], ServerMessage::Effects { .. }));
+        assert!(matches!(msgs[8], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[9], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -1747,6 +1807,108 @@ mod tests {
             .find(|s| s.name == "station/work")
             .unwrap();
         assert!(work.start >= 0.3, "work started at {}", work.start);
+    }
+
+    #[test]
+    fn scenarios_broadcast_and_steer_simulation() {
+        let host = TestHost::new();
+        handle_client_message(
+            &host,
+            r#"{"type":"define_signal","name":"go","initial":false}"#,
+        );
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"s","steps":[
+                {"name":"gate","actions":[],"transition":{"type":"immediately"},
+                 "select":[
+                   {"condition":{"type":"signal","name":"go","value":true},
+                    "steps":[{"name":"fast","actions":[],"transition":{"type":"immediately"}}]},
+                   {"condition":{"type":"immediately"},
+                    "steps":[{"name":"slow","actions":[],"transition":{"type":"immediately"}}]}
+                 ]}]}}"#,
+        );
+        host.out.borrow_mut().clear();
+
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_scenario","scenario":{"name":"rush",
+                "signals":[{"name":"go","value":true}]}}"#,
+        );
+        assert_eq!(host.message_types(), ["scenarios"]);
+        // The reserved name is rejected and logged, not applied.
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_scenario","scenario":{"name":"baseline"}}"#,
+        );
+        assert!(host
+            .logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("rejected upsert_scenario")));
+        host.out.borrow_mut().clear();
+
+        // The scenario steers the branch; the result says which world ran.
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequence","name":"s","scenario":"rush"}"#,
+        );
+        {
+            let out = host.out.borrow();
+            let ServerMessage::SequenceResult {
+                ok,
+                scenario,
+                timeline,
+                error,
+                ..
+            } = &out[0]
+            else {
+                panic!("expected sequence_result, got {out:?}");
+            };
+            assert!(ok, "{error:?}");
+            assert_eq!(scenario.as_deref(), Some("rush"));
+            let names: Vec<&str> = timeline
+                .as_ref()
+                .unwrap()
+                .step_spans
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            assert!(names.contains(&"fast") && !names.contains(&"slow"));
+        }
+        host.out.borrow_mut().clear();
+
+        // Without a scenario the live scene decides (and it says so).
+        handle_client_message(&host, r#"{"type":"simulate_sequence","name":"s"}"#);
+        {
+            let out = host.out.borrow();
+            let ServerMessage::SequenceResult {
+                scenario, timeline, ..
+            } = &out[0]
+            else {
+                panic!("expected sequence_result");
+            };
+            assert_eq!(scenario.as_deref(), None);
+            assert!(timeline
+                .as_ref()
+                .unwrap()
+                .step_spans
+                .iter()
+                .any(|s| s.name == "slow"));
+        }
+
+        // The handshake carries the scenario list.
+        let types: Vec<&'static str> = initial_messages(&host)
+            .iter()
+            .map(|m| match m {
+                ServerMessage::Devices { .. } => "devices",
+                ServerMessage::Scenarios { .. } => "scenarios",
+                ServerMessage::Effects { .. } => "effects",
+                _ => "_",
+            })
+            .collect();
+        let devices = types.iter().position(|t| *t == "devices").unwrap();
+        assert_eq!(types[devices + 1], "scenarios");
+        assert_eq!(types[devices + 2], "effects");
     }
 
     #[test]

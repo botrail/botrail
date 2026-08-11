@@ -367,6 +367,10 @@ pub struct SequenceTimeline {
     /// Names of the sequences this timeline was rolled from, in scan
     /// order. Script export resolves its default program here.
     pub sequences: Vec<String>,
+    /// The scenario this bake ran under; `None` is the unmodified scene
+    /// (`baseline`). Self-description for result sets, captions, and
+    /// export naming.
+    pub scenario: Option<String>,
     /// One track per robot, in scene order.
     pub robots: Vec<RobotTrack>,
     /// Objects that were grasped at some point (everything else is static).
@@ -386,8 +390,106 @@ pub struct BranchTaken {
     pub sequence: String,
     /// The branching step's display name.
     pub step: String,
+    /// The branching step's pre-order ordinal within its sequence — the
+    /// same numbering [`crate::seq::enumerate_selects`] assigns, so
+    /// coverage and script-export donor lookup match decisions to
+    /// authored steps mechanically (display names may repeat).
+    pub select: usize,
     /// Index into that step's arms, authored order.
     pub arm: usize,
+}
+
+/// One branch arm that no supplied timeline took — an authored path the
+/// scenario set never exercised, and therefore never verified.
+#[derive(Debug, Clone)]
+pub struct UncoveredArm {
+    pub sequence: String,
+    /// Display name of the branching step.
+    pub step: String,
+    /// Pre-order ordinal of the branching step within its sequence
+    /// (matches [`BranchTaken::select`]).
+    pub select: usize,
+    /// Arm index, authored order.
+    pub arm: usize,
+    /// The arm's guard, in the authoring vocabulary
+    /// (`bt.seq.signal("part_ng", True)`).
+    pub condition: String,
+}
+
+impl std::fmt::Display for UncoveredArm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` step `{}` arm {} (when {})",
+            self.sequence,
+            self.step,
+            self.arm + 1,
+            self.condition
+        )
+    }
+}
+
+/// Branch coverage over a set of baked timelines: every authored arm —
+/// nested ones included — minus the union of what the runs took. An
+/// empty result means every path was exercised; anything else is a path
+/// the scenario set never verified, named in enumeration order the way
+/// it was written. This is what makes "all arms covered" a CI-assertable
+/// number: each timeline is deterministic, so so is the report.
+///
+/// `scene` supplies the authored sequences (scenario deltas never touch
+/// them, so any snapshot — or the live scene — serves). Every timeline
+/// must come from the same rolled sequence set.
+pub fn arm_coverage(
+    scene: &Scene,
+    timelines: &[&SequenceTimeline],
+) -> Result<Vec<UncoveredArm>, String> {
+    let Some(first) = timelines.first() else {
+        return Err("no timelines to measure coverage over".to_string());
+    };
+    for timeline in timelines {
+        if timeline.sequences != first.sequences {
+            return Err(format!(
+                "timelines were rolled from different sequence sets (`{}` vs `{}`) — \
+                 coverage is per set",
+                first.sequences.join(" + "),
+                timeline.sequences.join(" + "),
+            ));
+        }
+    }
+    let covered: std::collections::HashSet<(&str, usize, usize)> = timelines
+        .iter()
+        .flat_map(|timeline| {
+            timeline
+                .branches
+                .iter()
+                .map(|b| (b.sequence.as_str(), b.select, b.arm))
+        })
+        .collect();
+    let mut uncovered = Vec::new();
+    for name in &first.sequences {
+        let sequence = scene
+            .sequence(name)
+            .ok_or_else(|| format!("the scene no longer holds sequence `{name}`"))?;
+        for (ordinal, step) in crate::seq::enumerate_selects(&sequence.steps)
+            .iter()
+            .enumerate()
+        {
+            for (arm, select_arm) in step.select.iter().enumerate() {
+                if !covered.contains(&(name.as_str(), ordinal, arm)) {
+                    uncovered.push(UncoveredArm {
+                        sequence: name.clone(),
+                        step: step.name.clone(),
+                        select: ordinal,
+                        arm,
+                        condition: crate::project::py_condition(&crate::wire::seq_condition_msg(
+                            &select_arm.condition,
+                        )),
+                    });
+                }
+            }
+        }
+    }
+    Ok(uncovered)
 }
 
 impl SequenceTimeline {
@@ -578,6 +680,32 @@ impl Scene {
         }
         Rollout::new(self.clone(), sequences, options.clone()).run()
     }
+
+    /// [`simulate_sequences`](Self::simulate_sequences) under a named
+    /// scenario: the deltas are applied to the rollout's snapshot — the
+    /// live scene is never touched — and the resulting timeline carries
+    /// the scenario name. `None` and `"baseline"` both mean the scene as
+    /// it stands.
+    pub fn simulate_sequences_scenario(
+        &self,
+        names: &[&str],
+        scenario: Option<&str>,
+        options: &RolloutOptions,
+    ) -> Result<SequenceTimeline, SeqError> {
+        let Some(scenario) = scenario.filter(|s| *s != crate::seq::BASELINE_SCENARIO) else {
+            return self.simulate_sequences(names, options);
+        };
+        let mut snapshot = self.clone();
+        snapshot
+            .apply_scenario(scenario)
+            .map_err(|e| SeqError::Validation {
+                step: None,
+                message: e.to_string(),
+            })?;
+        let mut timeline = snapshot.simulate_sequences(names, options)?;
+        timeline.scenario = Some(scenario.to_string());
+        Ok(timeline)
+    }
 }
 
 /// Per-robot scan-loop state: the commanded joints, the in-flight move,
@@ -664,15 +792,18 @@ struct FlatStep {
     name: String,
     actions: Vec<Action>,
     exits: Vec<(Condition, usize)>,
-    /// Whether the exits are branch arms (recorded as decisions on the
-    /// timeline) — a one-armed select still is one.
-    branching: bool,
+    /// `Some(ordinal)` when the exits are branch arms (recorded as
+    /// decisions on the timeline — a one-armed select still is one). The
+    /// ordinal is the select's pre-order number within the sequence,
+    /// identical to [`crate::seq::enumerate_selects`]'s numbering (both
+    /// walk the authored tree pre-order; a test pins the agreement).
+    select: Option<usize>,
 }
 
 fn flatten(steps: &[Step]) -> Vec<FlatStep> {
     /// Emits `steps`, returning the dangling exits — `(flat index, exit
     /// slot)` pairs whose target is the continuation the caller knows.
-    fn emit(steps: &[Step], out: &mut Vec<FlatStep>) -> Vec<(usize, usize)> {
+    fn emit(steps: &[Step], out: &mut Vec<FlatStep>, selects: &mut usize) -> Vec<(usize, usize)> {
         let mut dangling: Vec<(usize, usize)> = Vec::new();
         for step in steps {
             let here = out.len();
@@ -686,10 +817,12 @@ fn flatten(steps: &[Step]) -> Vec<FlatStep> {
                     name: step.name.clone(),
                     actions: step.actions.clone(),
                     exits: vec![(step.transition.clone(), usize::MAX)],
-                    branching: false,
+                    select: None,
                 });
                 dangling.push((here, 0));
             } else {
+                let ordinal = *selects;
+                *selects += 1;
                 out.push(FlatStep {
                     name: step.name.clone(),
                     actions: Vec::new(),
@@ -698,7 +831,7 @@ fn flatten(steps: &[Step]) -> Vec<FlatStep> {
                         .iter()
                         .map(|arm| (arm.condition.clone(), usize::MAX))
                         .collect(),
-                    branching: true,
+                    select: Some(ordinal),
                 });
                 for (j, arm) in step.select.iter().enumerate() {
                     out[here].exits[j].1 = out.len();
@@ -706,7 +839,7 @@ fn flatten(steps: &[Step]) -> Vec<FlatStep> {
                         // An empty arm exits straight to the rejoin.
                         dangling.push((here, j));
                     } else {
-                        let mut tails = emit(&arm.steps, out);
+                        let mut tails = emit(&arm.steps, out, selects);
                         dangling.append(&mut tails);
                     }
                 }
@@ -715,7 +848,8 @@ fn flatten(steps: &[Step]) -> Vec<FlatStep> {
         dangling
     }
     let mut out = Vec::new();
-    let tails = emit(steps, &mut out);
+    let mut selects = 0;
+    let tails = emit(steps, &mut out, &mut selects);
     let end = out.len();
     for (i, slot) in tails {
         out[i].exits[slot].1 = end;
@@ -2418,10 +2552,11 @@ impl Rollout {
                 return Ok(());
             };
             let p = &self.programs[self.current];
-            if p.flat[p.step].branching {
+            if let Some(select) = p.flat[p.step].select {
                 self.branches.push(BranchTaken {
                     sequence: p.sequence.name.clone(),
                     step: p.flat[p.step].name.clone(),
+                    select,
                     arm,
                 });
             }
@@ -3029,6 +3164,7 @@ impl Rollout {
                 .iter()
                 .map(|p| p.sequence.name.clone())
                 .collect(),
+            scenario: None,
             robots,
             objects: self.objects,
             signals: self.signals,
@@ -3442,6 +3578,352 @@ pub(crate) mod tests {
             .map(|b| (b.step.as_str(), b.arm))
             .collect();
         assert_eq!(taken, [("level1", 0), ("level2", 1)]);
+        // Decisions carry the authored pre-order ordinal too.
+        let ordinals: Vec<usize> = tl.branches.iter().map(|b| b.select).collect();
+        assert_eq!(ordinals, [0, 1]);
+    }
+
+    #[test]
+    fn scenario_crud_reserves_baseline() {
+        let mut scene = sample_scene();
+        let scenario = |name: &str| crate::seq::Scenario {
+            name: name.into(),
+            signals: vec![],
+            obstacles: vec![],
+            joints: vec![],
+        };
+        assert!(scene.upsert_scenario(scenario("ng")).is_ok());
+        assert!(scene.upsert_scenario(scenario("ng")).is_ok()); // replace
+        assert_eq!(scene.scenarios().len(), 1);
+        let err = scene.upsert_scenario(scenario("baseline")).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+        scene.remove_scenario("ng").unwrap();
+        assert!(scene.remove_scenario("ng").is_err());
+    }
+
+    #[test]
+    fn apply_scenario_validates_before_touching_anything() {
+        let mut scene = sample_scene();
+        scene.define_signal("flag", false);
+        scene
+            .add_obstacle(
+                "part",
+                botrail_model::Geometry::Sphere { radius: 0.02 },
+                Isometry3::translation(0.1, 0.0, 0.5),
+            )
+            .unwrap();
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "shifted".into(),
+                signals: vec![("flag".into(), true)],
+                obstacles: vec![("part".into(), Isometry3::translation(0.3, 0.0, 0.5))],
+                joints: vec![("r".into(), vec![0.5])],
+            })
+            .unwrap();
+
+        let mut applied = scene.clone();
+        applied.apply_scenario("shifted").unwrap();
+        assert!(applied.signals()[0].initial);
+        assert!((applied.obstacles()[0].pose.translation.x - 0.3).abs() < 1e-12);
+        assert_eq!(applied.joint_positions(), &[0.5]);
+        // The source scene is untouched (apply is for snapshots).
+        assert!(!scene.signals()[0].initial);
+
+        // `baseline` applies nothing; unknown scenarios error.
+        scene.clone().apply_scenario("baseline").unwrap();
+        assert!(matches!(
+            scene.clone().apply_scenario("ghost"),
+            Err(crate::SceneError::UnknownScenario(_))
+        ));
+
+        // Bad deltas are caught before anything is applied.
+        let mut bad = scene.clone();
+        bad.upsert_scenario(crate::seq::Scenario {
+            name: "bad".into(),
+            signals: vec![("flag".into(), true)],
+            obstacles: vec![],
+            joints: vec![("r".into(), vec![0.1, 0.2])], // wrong dof
+        })
+        .unwrap();
+        let err = bad.apply_scenario("bad").unwrap_err();
+        assert!(matches!(err, crate::SceneError::WrongDof { .. }));
+        assert!(
+            !bad.signals()[0].initial,
+            "failed apply must not half-apply"
+        );
+
+        // Unknown signal names name the fix; sensors are not overridable.
+        let mut bad = scene.clone();
+        bad.upsert_scenario(crate::seq::Scenario {
+            name: "bad".into(),
+            signals: vec![("ghost".into(), true)],
+            obstacles: vec![],
+            joints: vec![],
+        })
+        .unwrap();
+        let err = bad.apply_scenario("bad").unwrap_err();
+        assert!(err.to_string().contains("define_signal"), "{err}");
+
+        // Attached obstacles are refused (moving one re-grasps it).
+        let mut held = scene.clone();
+        held.attach_obstacle("part", None, None).unwrap();
+        held.upsert_scenario(crate::seq::Scenario {
+            name: "grab".into(),
+            signals: vec![],
+            obstacles: vec![("part".into(), Isometry3::translation(0.4, 0.0, 0.5))],
+            joints: vec![],
+        })
+        .unwrap();
+        let err = held.apply_scenario("grab").unwrap_err();
+        assert!(err.to_string().contains("attached"), "{err}");
+    }
+
+    #[test]
+    fn scenarios_steer_branches_without_touching_the_live_scene() {
+        let mut scene = sample_scene();
+        scene.define_signal("ok", true);
+        scene.define_signal("ng", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                sel(
+                    "judge",
+                    vec![
+                        (
+                            Condition::Signal {
+                                name: "ok".into(),
+                                value: true,
+                            },
+                            vec![step("pass", vec![], Condition::Immediately)],
+                        ),
+                        (
+                            Condition::Signal {
+                                name: "ng".into(),
+                                value: true,
+                            },
+                            vec![step("reject", vec![], Condition::Immediately)],
+                        ),
+                    ],
+                ),
+                step("rejoin", vec![], Condition::Immediately),
+            ],
+        });
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "ng_part".into(),
+                signals: vec![("ok".into(), false), ("ng".into(), true)],
+                obstacles: vec![],
+                joints: vec![],
+            })
+            .unwrap();
+
+        let options = RolloutOptions::default();
+        let baseline = scene
+            .simulate_sequences_scenario(&["s"], None, &options)
+            .unwrap();
+        assert_eq!(baseline.scenario, None);
+        assert_eq!(baseline.branches[0].arm, 0);
+
+        let named_baseline = scene
+            .simulate_sequences_scenario(&["s"], Some("baseline"), &options)
+            .unwrap();
+        assert_eq!(named_baseline.scenario, None);
+        assert_eq!(named_baseline.branches[0].arm, 0);
+
+        let ng = scene
+            .simulate_sequences_scenario(&["s"], Some("ng_part"), &options)
+            .unwrap();
+        assert_eq!(ng.scenario.as_deref(), Some("ng_part"));
+        assert_eq!(ng.branches[0].arm, 1);
+        assert!(ng.step_spans.iter().any(|s| s.name == "reject"));
+
+        // The live scene still bakes the baseline path afterwards.
+        assert!(scene.signals().iter().any(|s| s.name == "ok" && s.initial));
+        let again = scene
+            .simulate_sequences_scenario(&["s"], None, &options)
+            .unwrap();
+        assert_eq!(again.branches[0].arm, 0);
+
+        let err = scene
+            .simulate_sequences_scenario(&["s"], Some("ghost"), &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown scenario"), "{err}");
+    }
+
+    #[test]
+    fn coverage_names_untaken_arms_until_scenarios_take_them() {
+        let mut scene = sample_scene();
+        for (name, initial) in [("ok", true), ("ng", false), ("fine", true)] {
+            scene.define_signal(name, initial);
+        }
+        let signal = |name: &str, value: bool| Condition::Signal {
+            name: name.into(),
+            value,
+        };
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                sel(
+                    "judge",
+                    vec![
+                        (
+                            signal("ok", true),
+                            vec![sel(
+                                "grade",
+                                vec![
+                                    (signal("fine", true), vec![]),
+                                    (
+                                        signal("fine", false),
+                                        vec![step("rework", vec![], Condition::Immediately)],
+                                    ),
+                                ],
+                            )],
+                        ),
+                        (
+                            signal("ng", true),
+                            vec![step("reject", vec![], Condition::Immediately)],
+                        ),
+                    ],
+                ),
+                step("end", vec![], Condition::Immediately),
+            ],
+        });
+
+        let options = RolloutOptions::default();
+        let base = scene
+            .simulate_sequences_scenario(&["s"], None, &options)
+            .unwrap();
+        // The baseline takes judge/ok then grade/fine; the two other arms
+        // are named in enumeration order, in the authoring vocabulary.
+        let uncovered = arm_coverage(&scene, &[&base]).unwrap();
+        let rows: Vec<(&str, usize, usize)> = uncovered
+            .iter()
+            .map(|u| (u.step.as_str(), u.select, u.arm))
+            .collect();
+        assert_eq!(rows, [("judge", 0, 1), ("grade", 1, 1)]);
+        assert!(
+            uncovered[0]
+                .condition
+                .contains("bt.seq.signal(\"ng\", True)"),
+            "{}",
+            uncovered[0].condition
+        );
+        assert!(
+            uncovered[1].to_string().contains("`grade` arm 2"),
+            "{}",
+            uncovered[1]
+        );
+
+        // Each scenario buys coverage; the full set drains the report.
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "ng_part".into(),
+                signals: vec![("ok".into(), false), ("ng".into(), true)],
+                obstacles: vec![],
+                joints: vec![],
+            })
+            .unwrap();
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "coarse".into(),
+                signals: vec![("fine".into(), false)],
+                obstacles: vec![],
+                joints: vec![],
+            })
+            .unwrap();
+        let ng = scene
+            .simulate_sequences_scenario(&["s"], Some("ng_part"), &options)
+            .unwrap();
+        let after_ng = arm_coverage(&scene, &[&base, &ng]).unwrap();
+        assert_eq!(after_ng.len(), 1);
+        assert_eq!(after_ng[0].step, "grade");
+        let coarse = scene
+            .simulate_sequences_scenario(&["s"], Some("coarse"), &options)
+            .unwrap();
+        assert!(arm_coverage(&scene, &[&base, &ng, &coarse])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn coverage_requires_one_shared_sequence_set() {
+        let mut scene = sample_scene();
+        scene.define_signal("go", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![sel(
+                "gate",
+                vec![
+                    (
+                        Condition::Signal {
+                            name: "go".into(),
+                            value: true,
+                        },
+                        vec![],
+                    ),
+                    (Condition::Immediately, vec![]),
+                ],
+            )],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "boss".into(),
+            steps: vec![sel(
+                "mode",
+                vec![(
+                    Condition::Immediately,
+                    vec![step("fire", vec![set("go", true)], Condition::Immediately)],
+                )],
+            )],
+        });
+        let options = RolloutOptions::default();
+        let pair = scene.simulate_sequences(&["s", "boss"], &options).unwrap();
+        // Cross-program keys: boss's sole arm is covered, s's first is not
+        // (s scans before boss, so `go` is still low at its gate).
+        let uncovered = arm_coverage(&scene, &[&pair]).unwrap();
+        let rows: Vec<(&str, &str, usize)> = uncovered
+            .iter()
+            .map(|u| (u.sequence.as_str(), u.step.as_str(), u.arm))
+            .collect();
+        assert_eq!(rows, [("s", "gate", 0)]);
+
+        assert!(arm_coverage(&scene, &[])
+            .unwrap_err()
+            .contains("no timelines"));
+        let solo = scene.simulate_sequences(&["boss"], &options).unwrap();
+        let err = arm_coverage(&scene, &[&pair, &solo]).unwrap_err();
+        assert!(err.contains("different sequence sets"), "{err}");
+    }
+
+    #[test]
+    fn select_ordinals_match_the_shared_enumeration() {
+        // Two selects nested inside the first arm plus one top-level
+        // sibling: pre-order must number them 0 (outer), 1 (inner),
+        // 2 (sibling) in both the enumeration and the flattening.
+        let inner = sel("inner", vec![(Condition::Immediately, vec![])]);
+        let steps = vec![
+            sel(
+                "outer",
+                vec![
+                    (Condition::Immediately, vec![inner]),
+                    (Condition::Immediately, vec![]),
+                ],
+            ),
+            step("between", vec![], Condition::Immediately),
+            sel("sibling", vec![(Condition::Immediately, vec![])]),
+        ];
+
+        let enumerated: Vec<&str> = crate::seq::enumerate_selects(&steps)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(enumerated, ["outer", "inner", "sibling"]);
+
+        let flat = flatten(&steps);
+        let flat_selects: Vec<(usize, &str)> = flat
+            .iter()
+            .filter_map(|s| s.select.map(|o| (o, s.name.as_str())))
+            .collect();
+        assert_eq!(flat_selects, [(0, "outer"), (1, "inner"), (2, "sibling")]);
     }
 
     #[test]

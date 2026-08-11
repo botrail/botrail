@@ -3,6 +3,7 @@ import type { DeviceMsg } from "./DeviceMsg";
 import type { GeometryMsg } from "./GeometryMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PoseMsg } from "./PoseMsg";
+import type { ScenarioMsg } from "./ScenarioMsg";
 import type { SegmentMsg } from "./SegmentMsg";
 import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
@@ -32,4 +33,4 @@ robot: string | null, goal_positions: Array<number>, } | { "type": "add_segment"
  * Owner when the motion is created (an existing motion keeps its
  * owner); `None` means the first robot.
  */
-robot: string | null, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, } | { "type": "simulate_sequences", names: Array<string>, } | { "type": "export_usd", fps: number, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, };
+robot: string | null, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, scenario?: string | null, } | { "type": "simulate_sequences", names: Array<string>, scenario?: string | null, } | { "type": "export_usd", fps: number, } | { "type": "upsert_scenario", scenario: ScenarioMsg, } | { "type": "remove_scenario", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, };

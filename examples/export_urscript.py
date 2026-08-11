@@ -2,15 +2,20 @@
 compiles to a robot controller program with real I/O.
 
 A conveyor feeds a part over a photoelectric beam; the six-axis arm meets
-it, grips with a vacuum coil, judges it against an in-spec zone, and
-either places it or purges it. `simulate()` bakes the deterministic
-timeline (cycle time, timing chart, USD export); the *same* sequence then
-lowers to URScript — moves from the rollout's own planned paths, the
-part-arrival *edge* as a two-stage digital-input wait, the SFC branch as
-a wait-any plus `if/elif` (the arm this bake skipped is in the program
-too — the controller decides at runtime what the bake decided by state),
-coils as digital-output writes, timers as sleeps. The name → port wiring
-is the only thing the controller needs on top.
+it, grips with a vacuum coil, and an SFC branch on the spec gauge either
+places it or carries it to the reject chute. `simulate()` bakes the
+deterministic timeline (cycle time, timing chart, USD export); the *same*
+sequence lowers to URScript — moves from the rollout's own planned paths,
+the part-arrival *edge* as a two-stage digital-input wait, the branch as
+a wait-any plus `if/elif`, coils as digital-output writes, timers as
+sleeps. The name → port wiring is the only thing the controller needs on
+top.
+
+Both branch arms move the robot, which is where *scenarios* come in: one
+deterministic bake takes one arm, so exporting it alone is refused (the
+other arm was never planned). The scenario sweep bakes the NG world too,
+proves every arm ran (`uncovered_arms() == []`), and merges the runs into
+one program whose arms each carry their own bake's moves.
 
 Run with:  python examples/export_urscript.py [pick_cell.script]
 """
@@ -26,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 
 # The cell's I/O list, as it would appear on the electrical drawing:
 # inputs are contacts the program waits on, outputs are coils it drives.
-INPUTS = {"part_at_pick": 2, "in_spec": 3}  # beam → DI2, spec gauge → DI3
+INPUTS = {"part_at_pick": 2, "spec_ok": 3}  # beam → DI2, spec gauge → DI3
 OUTPUTS = {"conv": 0, "vacuum": 1}  # conveyor run → DO0, vacuum valve → DO1
 
 
@@ -44,25 +49,25 @@ def build_cell() -> bt.Scene:
         velocity=(0.12, 0.0, 0.0),
         running=False,
     )
-    # The beam crosses the belt at the pick point; the spec zone says
-    # whether the picked part sits where a good one should.
+    # The beam crosses the belt at the pick point. The spec gauge's
+    # verdict arrives as an input contact (`spec_ok`, DI3) — good parts
+    # by default; the `ng_part` scenario is the world where it reads low.
     scene.add_beam_sensor(
         "part_at_pick",
         frm=(0.25, 0.25, 0.03),
         to=(0.25, 0.45, 0.03),
         watch=["part"],
     )
-    scene.add_zone_sensor(
-        "in_spec",
-        position=(0.25, 0.35, 0.05),
-        size=(0.2, 0.2, 0.2),
-        watch=["part"],
-    )
+    scene.define_signal("spec_ok", initial=True)
     scene.define_signal("vacuum")
 
     scene.add_segment("to_pick", goal=[0.95, 0.85, -1.1, 0.25, 0.0, 0.0])
     scene.add_segment("place", goal=[-0.9, 0.85, -1.1, 0.25, 0.0, 0.0])
+    scene.add_segment("to_reject", goal=[0.3, 1.15, -1.5, 0.35, 0.0, 0.0])
     scene.add_segment("home", goal=[0.0] * 6)
+
+    # The test-case matrix: the row FAT would call "NG 品を流す".
+    scene.add_scenario("ng_part", signals={"spec_ok": False})
     return scene
 
 
@@ -78,15 +83,16 @@ def author_sequence(scene: bt.Scene) -> bt.seq.SequenceBuilder:
     sq.step("halt", actions=[bt.seq.stop("conv")])
     sq.step("grip", actions=[bt.seq.set_signal("vacuum")], transition=bt.seq.elapsed(0.3))
     sq.step("hold", actions=[bt.seq.attach("part")])
-    # SFC selection: the spec gauge decides. This bake takes the good
-    # path; the reject arm still compiles into the controller program.
+    # SFC selection: the spec gauge decides. Both arms move the robot —
+    # a bake takes one of them, and the scenario sweep covers the other.
     judge = sq.select("judge")
-    judge.when(bt.seq.signal("in_spec")).step(
+    judge.when(bt.seq.signal("spec_ok")).step(
         "place", actions=[bt.seq.motion("place")]
     ).step("release", actions=[bt.seq.set_signal("vacuum", False), bt.seq.detach("part")])
     reject = judge.when(bt.seq.otherwise())
+    reject.step("to chute", actions=[bt.seq.motion("to_reject")])
     reject.step(
-        "purge",
+        "drop",
         actions=[bt.seq.set_signal("vacuum", False), bt.seq.detach("part")],
         transition=bt.seq.elapsed(0.3),
     )
@@ -98,16 +104,26 @@ def main() -> None:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE.parent / "pick_cell.script"
 
     scene = build_cell()
-    sq = author_sequence(scene)
+    author_sequence(scene)
 
-    tl = sq.simulate()
-    print(f"simulated cycle: {tl.duration:.2f}s, steps:")
-    for name, start, end in tl.step_spans:
-        print(f"  {name:<8} {start:6.2f} – {end:6.2f}s")
+    # The whole test-case matrix, one deterministic bake per world.
+    runs = scene.simulate_scenarios(["pick"])
+    for name, tl in runs.items():
+        path = " → ".join(step for step, _, _ in tl.step_spans if "/" not in step)
+        print(f"{name:<9} cycle {tl.duration:6.2f}s  ({path})")
+    assert runs.uncovered_arms() == [], runs.uncovered_arms()
+    print("branch coverage: every arm exercised\n")
 
-    tl.export_script(out, inputs=INPUTS, outputs=OUTPUTS)
-    print(f"\nwrote {out} — the same steps, as a controller program:\n")
-    print(tl.to_script(inputs=INPUTS, outputs=OUTPUTS))
+    # One bake alone cannot compile the branch it skipped:
+    try:
+        runs["baseline"].to_script(inputs=INPUTS, outputs=OUTPUTS)
+    except ValueError as e:
+        print(f"baseline alone: {e}\n")
+
+    # The sweep can — each arm's moves come from the bake that took it.
+    runs.export_script(out, inputs=INPUTS, outputs=OUTPUTS)
+    print(f"wrote {out} — the whole matrix, as one controller program:\n")
+    print(runs.to_script(inputs=INPUTS, outputs=OUTPUTS))
 
 
 if __name__ == "__main__":

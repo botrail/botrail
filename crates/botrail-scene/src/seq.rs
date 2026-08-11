@@ -175,6 +175,32 @@ pub enum DeviceKind {
     },
 }
 
+/// A named initial-state delta — one row of the cell's test-case matrix
+/// (the FAT scenario list, moved ahead of the build). Deltas only, so
+/// the cell stays single-source: one program, different worlds. The
+/// unmodified scene is the reserved scenario `baseline`.
+///
+/// Determinism is untouched: a scenario is applied to a snapshot before
+/// the rollout, and each (scenario, sequence set) pair bakes the same
+/// timeline every time — which is what makes branch coverage and
+/// per-scenario cycle times CI-assertable numbers.
+#[derive(Debug, Clone)]
+pub struct Scenario {
+    pub name: String,
+    /// Internal-signal initial values to override (declared signals only
+    /// — sensors are geometric and follow from the world).
+    pub signals: Vec<(String, bool)>,
+    /// Obstacle poses to override. Attached obstacles are refused:
+    /// moving one re-grasps it, which is a live-editing gesture, not a
+    /// world variation.
+    pub obstacles: Vec<(String, Isometry3<f64>)>,
+    /// `(robot instance, joint positions)` start configurations.
+    pub joints: Vec<(String, Vec<f64>)>,
+}
+
+/// The reserved name for the unmodified scene.
+pub const BASELINE_SCENARIO: &str = "baseline";
+
 /// An authored guide path. Waypoints are floor points (the vehicle frame
 /// stays on the floor plane); stations are the named stops a `Goto` can
 /// target, as waypoint indices — the point-table mental model of a PLC
@@ -331,6 +357,27 @@ pub(crate) fn walk_actions<E>(
         }
     }
     Ok(())
+}
+
+/// Every branching step in `steps`, pre-order (a select first, then its
+/// arms' steps in arm order) — a select's index in this list is its
+/// ordinal, the number `BranchTaken.select` carries. The rollout's
+/// flattening assigns ordinals by the same walk; a test pins the two
+/// against each other.
+pub(crate) fn enumerate_selects(steps: &[Step]) -> Vec<&Step> {
+    fn walk<'a>(steps: &'a [Step], out: &mut Vec<&'a Step>) {
+        for step in steps {
+            if !step.select.is_empty() {
+                out.push(step);
+            }
+            for arm in &step.select {
+                walk(&arm.steps, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(steps, &mut out);
+    out
 }
 
 /// Robot-addressed actions carry `robot: Option<String>` — the instance
@@ -588,6 +635,104 @@ impl Scene {
 
     pub fn set_devices(&mut self, devices: Vec<Device>) {
         self.devices = devices;
+    }
+
+    // ----------------------------------------------------------- scenarios
+
+    pub fn scenarios(&self) -> &[Scenario] {
+        &self.scenarios
+    }
+
+    pub fn scenario(&self, name: &str) -> Option<&Scenario> {
+        self.scenarios.iter().find(|s| s.name == name)
+    }
+
+    /// Adds or replaces a scenario wholesale. `baseline` is the reserved
+    /// name of the unmodified scene and cannot be defined.
+    pub fn upsert_scenario(&mut self, scenario: Scenario) -> Result<(), SceneError> {
+        if scenario.name == BASELINE_SCENARIO {
+            return Err(SceneError::BadScenario(format!(
+                "`{BASELINE_SCENARIO}` is the reserved name of the unmodified scene"
+            )));
+        }
+        match self.scenarios.iter_mut().find(|s| s.name == scenario.name) {
+            Some(slot) => *slot = scenario,
+            None => self.scenarios.push(scenario),
+        }
+        Ok(())
+    }
+
+    pub fn remove_scenario(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.scenarios.len();
+        self.scenarios.retain(|s| s.name != name);
+        if self.scenarios.len() == before {
+            return Err(SceneError::UnknownScenario(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_scenarios(&mut self, scenarios: Vec<Scenario>) {
+        self.scenarios = scenarios;
+    }
+
+    /// Applies a scenario's deltas to this scene — meant for the snapshot
+    /// a rollout is about to run on, never the live scene. `baseline`
+    /// applies nothing. Everything is validated before anything is
+    /// touched, so a failed apply leaves the scene unchanged.
+    pub fn apply_scenario(&mut self, name: &str) -> Result<(), SceneError> {
+        if name == BASELINE_SCENARIO {
+            return Ok(());
+        }
+        let scenario = self
+            .scenario(name)
+            .ok_or_else(|| SceneError::UnknownScenario(name.to_string()))?
+            .clone();
+        for (signal, _) in &scenario.signals {
+            if !self.signals.iter().any(|s| &s.name == signal) {
+                return Err(SceneError::BadScenario(format!(
+                    "scenario `{name}`: unknown signal `{signal}` (declare it with \
+                     define_signal; sensors are geometric and follow from the world)"
+                )));
+            }
+        }
+        for (obstacle, _) in &scenario.obstacles {
+            self.obstacle_index(obstacle).map_err(|_| {
+                SceneError::BadScenario(format!("scenario `{name}`: unknown obstacle `{obstacle}`"))
+            })?;
+            // Moving an attached obstacle re-grasps it — a live-editing
+            // gesture, not a world variation. Refuse rather than surprise.
+            if self.attachments().iter().any(|a| &a.object == obstacle) {
+                return Err(SceneError::BadScenario(format!(
+                    "scenario `{name}`: `{obstacle}` is attached — a scenario \
+                     varies the world's starting state, not a held object \
+                     (detach it, or vary the grasp in the sequence)"
+                )));
+            }
+        }
+        let mut joint_targets = Vec::new();
+        for (robot, positions) in &scenario.joints {
+            let index = self
+                .robot_index(robot)
+                .ok_or_else(|| SceneError::UnknownRobot(robot.clone()))?;
+            let expected = self.robots()[index].model.dof();
+            if positions.len() != expected {
+                return Err(SceneError::WrongDof {
+                    expected,
+                    got: positions.len(),
+                });
+            }
+            joint_targets.push((index, positions.clone()));
+        }
+        for (signal, value) in &scenario.signals {
+            self.define_signal(signal, *value);
+        }
+        for (obstacle, pose) in &scenario.obstacles {
+            self.set_obstacle_pose(obstacle, *pose)?;
+        }
+        for (index, positions) in joint_targets {
+            self.set_joint_positions_for(index, positions)?;
+        }
+        Ok(())
     }
 
     /// Is `name` readable as a signal (internal relay or sensor input)?

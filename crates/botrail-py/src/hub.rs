@@ -511,6 +511,24 @@ impl SceneHub {
         self.with_scene(|scene| scene.sensors().iter().map(|s| s.name.clone()).collect())
     }
 
+    pub fn add_scenario(&self, scenario: botrail_scene::seq::Scenario) -> Result<(), SceneError> {
+        botrail_session::upsert_scenario(self, scenario)
+    }
+
+    pub fn remove_scenario(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_scenario(self, name)
+    }
+
+    pub fn scenario_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.scenarios().iter().map(|s| s.name.clone()).collect())
+    }
+
+    /// An authored-content snapshot (sequence definitions for coverage —
+    /// scenario deltas never touch those, so any snapshot serves).
+    pub fn authored_snapshot(&self) -> Scene {
+        self.with_scene(|scene| scene.clone())
+    }
+
     pub fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> Result<(), SceneError> {
         botrail_session::add_weld_flash(self, name, signal, robot)
     }
@@ -532,20 +550,32 @@ impl SceneHub {
     pub fn simulate_sequence(
         &self,
         name: &str,
+        scenario: Option<&str>,
         options: &botrail_scene::rollout::RolloutOptions,
     ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
-        self.simulate_sequences(&[name], options)
+        self.simulate_sequences(&[name], scenario, options)
     }
 
     /// Rolls out several sequences concurrently (one PLC scan advances
-    /// every program, in list order); one timeline comes back.
+    /// every program, in list order); one timeline comes back. Under a
+    /// scenario, the returned snapshot is the *applied* one — the world
+    /// the timeline actually ran in, which is what its FK, USD export,
+    /// and clearance checks must read.
     pub fn simulate_sequences(
         &self,
         names: &[&str],
+        scenario: Option<&str>,
         options: &botrail_scene::rollout::RolloutOptions,
     ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
-        let snapshot = self.snapshot();
-        let timeline = botrail_session::simulate_sequences_and_emit(self, names, options)?;
+        let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
+        let mut snapshot = self.snapshot();
+        if let Some(scenario) = scenario {
+            snapshot
+                .apply_scenario(scenario)
+                .map_err(|e| e.to_string())?;
+        }
+        let timeline =
+            botrail_session::simulate_sequences_and_emit(self, names, scenario, options)?;
         Ok((timeline, snapshot))
     }
 

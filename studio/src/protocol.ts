@@ -35,6 +35,7 @@ export type { StepSpanMsg } from "./generated/StepSpanMsg";
 export type { SignalTrackMsg } from "./generated/SignalTrackMsg";
 export type { TimelineMsg } from "./generated/TimelineMsg";
 export type { SensorMsg } from "./generated/SensorMsg";
+export type { ScenarioMsg } from "./generated/ScenarioMsg";
 export type { SensorKindMsg } from "./generated/SensorKindMsg";
 export type { SensorWatchMsg } from "./generated/SensorWatchMsg";
 export type { DeviceMsg } from "./generated/DeviceMsg";

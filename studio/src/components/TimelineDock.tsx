@@ -107,6 +107,7 @@ export function TimelineDock() {
       <div className="timeline-head">
         <span>
           {recordingLabel ? `● ${recordingLabel} — ` : ""}
+          {timeline.scenario ? `⧉ ${timeline.scenario} — ` : ""}
           cycle {duration.toFixed(2)}s
         </span>
         <span className="timeline-controls">

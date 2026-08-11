@@ -393,6 +393,44 @@ pub struct SignalDefMsg {
     pub initial: bool,
 }
 
+/// A named initial-state delta — one row of the cell's test-case matrix.
+/// The unmodified scene is the reserved scenario `baseline`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ScenarioMsg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<ScenarioSignalMsg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obstacles: Vec<ScenarioObstacleMsg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joints: Vec<ScenarioJointsMsg>,
+}
+
+/// An internal-signal initial value a scenario overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ScenarioSignalMsg {
+    pub name: String,
+    pub value: bool,
+}
+
+/// An obstacle pose a scenario overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ScenarioObstacleMsg {
+    pub name: String,
+    pub pose: PoseMsg,
+}
+
+/// A robot start configuration a scenario overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ScenarioJointsMsg {
+    pub robot: String,
+    pub positions: Vec<f64>,
+}
+
 /// A pseudo-sensor: geometric test published as a read-only input signal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -789,6 +827,10 @@ pub enum ServerMessage {
     Devices {
         devices: Vec<DeviceMsg>,
     },
+    /// The full scenario list; resent on every change.
+    Scenarios {
+        scenarios: Vec<ScenarioMsg>,
+    },
     /// The full weld-flash list; resent on every change.
     Effects {
         flashes: Vec<FlashMsg>,
@@ -797,6 +839,9 @@ pub enum ServerMessage {
     SequenceResult {
         ok: bool,
         sequence: String,
+        /// Scenario the rollout ran under; absent = `baseline`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<String>,
         error: Option<String>,
         timeline: Option<TimelineMsg>,
         planning_time_ms: Option<f64>,
@@ -963,20 +1008,34 @@ pub enum ClientMessage {
         name: String,
     },
     /// Roll out the sequence against a scene snapshot; the result arrives
-    /// as a `sequence_result`.
+    /// as a `sequence_result`. `scenario` applies a named initial-state
+    /// delta to the snapshot first (`None`/`"baseline"` = the scene as
+    /// it stands).
     SimulateSequence {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<String>,
     },
     /// Roll out several sequences as concurrently-running programs (one
     /// shared world, PLC scan order = list order); the result arrives as
     /// a `sequence_result`.
     SimulateSequences {
         names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<String>,
     },
     /// Bake the last simulated timeline as a usda layer; the result
     /// arrives as a `usd_document` (the browser saves it as a download).
     ExportUsd {
         fps: f64,
+    },
+    /// Add or replace a scenario wholesale.
+    UpsertScenario {
+        scenario: ScenarioMsg,
+    },
+    /// Remove a scenario.
+    RemoveScenario {
+        name: String,
     },
     /// Add or replace a pseudo-sensor.
     UpsertSensor {
@@ -1692,6 +1751,64 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
 pub fn sensors_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Sensors {
         sensors: scene.sensors().iter().map(sensor_msg).collect(),
+    }
+}
+
+pub fn scenario_msg(scenario: &crate::seq::Scenario) -> ScenarioMsg {
+    ScenarioMsg {
+        name: scenario.name.clone(),
+        signals: scenario
+            .signals
+            .iter()
+            .map(|(name, value)| ScenarioSignalMsg {
+                name: name.clone(),
+                value: *value,
+            })
+            .collect(),
+        obstacles: scenario
+            .obstacles
+            .iter()
+            .map(|(name, pose)| ScenarioObstacleMsg {
+                name: name.clone(),
+                pose: PoseMsg::from(pose),
+            })
+            .collect(),
+        joints: scenario
+            .joints
+            .iter()
+            .map(|(robot, positions)| ScenarioJointsMsg {
+                robot: robot.clone(),
+                positions: positions.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub fn scenario_from_msg(msg: &ScenarioMsg) -> crate::seq::Scenario {
+    crate::seq::Scenario {
+        name: msg.name.clone(),
+        signals: msg
+            .signals
+            .iter()
+            .map(|s| (s.name.clone(), s.value))
+            .collect(),
+        obstacles: msg
+            .obstacles
+            .iter()
+            .map(|o| (o.name.clone(), (&o.pose).into()))
+            .collect(),
+        joints: msg
+            .joints
+            .iter()
+            .map(|j| (j.robot.clone(), j.positions.clone()))
+            .collect(),
+    }
+}
+
+/// The full scenario list as a `scenarios` message.
+pub fn scenarios_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Scenarios {
+        scenarios: scene.scenarios().iter().map(scenario_msg).collect(),
     }
 }
 

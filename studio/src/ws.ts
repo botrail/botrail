@@ -252,15 +252,16 @@ export function sendRemoveSequence(name: string): void {
   rawSend({ type: "remove_sequence", name });
 }
 
-/** Roll out the sequence; the result arrives as a `sequence_result`. */
-export function sendSimulateSequence(name: string): void {
-  rawSend({ type: "simulate_sequence", name });
+/** Roll out the sequence; the result arrives as a `sequence_result`.
+ * `scenario` runs it under a named initial-state delta. */
+export function sendSimulateSequence(name: string, scenario?: string): void {
+  rawSend({ type: "simulate_sequence", name, scenario });
 }
 
 /** Roll out several sequences as concurrent programs (scan order = list
  * order, like the PLC they model). */
-export function sendSimulateSequences(names: string[]): void {
-  rawSend({ type: "simulate_sequences", names });
+export function sendSimulateSequences(names: string[], scenario?: string): void {
+  rawSend({ type: "simulate_sequences", names, scenario });
 }
 
 /** Bake the last simulated timeline as a usda layer; the reply

@@ -245,7 +245,7 @@ def test_branches_and_edges_simulate_and_export() -> None:
         "rework", actions=[bt.seq.motion("inspect")]
     )
     tl = scene.simulate_sequences(["qc", "feeder"])
-    with pytest.raises(ValueError, match="never took"):
+    with pytest.raises(ValueError, match="never planned"):
         tl.to_script(
             sequence="qc",
             inputs={"pulse": 0, "part_ok": 1, "part_ng": 2},

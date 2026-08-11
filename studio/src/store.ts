@@ -10,6 +10,7 @@ import type {
   PoseMsg,
   RobotDescMsg,
   DeviceMsg,
+  ScenarioMsg,
   SensorMsg,
   SequenceMsg,
   ServerMessage,
@@ -188,6 +189,8 @@ export interface StudioState {
   flashes: FlashMsg[];
   /** Auxiliary devices; re-sent in full by the server on every change. */
   devices: DeviceMsg[];
+  /** Scenarios (named initial-state deltas); re-sent in full on change. */
+  scenarios: ScenarioMsg[];
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   sequenceError: string | null;
@@ -198,6 +201,8 @@ export interface StudioState {
     /** Per-robot move intervals (motion/ramp bands), in scene order. */
     robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
+    /** Scenario the bake ran under; null = the unmodified scene. */
+    scenario: string | null;
   } | null;
   /** The USD recording behind the current playback, when there is one. */
   recording: { source: string; mode: string; warnings: string[] } | null;
@@ -281,6 +286,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   sensors: [],
   flashes: [],
   devices: [],
+  scenarios: [],
   sequenceSimulating: false,
   sequenceError: null,
   timeline: null,
@@ -340,6 +346,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           signalDefs: [],
           sensors: [],
           devices: [],
+          scenarios: [],
           sequenceSimulating: false,
           sequenceError: null,
           timeline: null,
@@ -392,6 +399,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       set({ flashes: msg.flashes });
     } else if (msg.type === "devices") {
       set({ devices: msg.devices });
+    } else if (msg.type === "scenarios") {
+      set({ scenarios: msg.scenarios });
     } else if (msg.type === "sequence_result") {
       if (msg.ok && msg.timeline) {
         // The baked cycle plays through the shared playback machinery;
@@ -407,6 +416,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: msg.timeline.signals,
+            scenario: msg.scenario ?? null,
           },
           segmentEnds: msg.timeline.step_spans.map((s) => s.end),
           ...startPlayback(tracksFromTimeline(msg.timeline)),
@@ -443,6 +453,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: msg.timeline.signals,
+            scenario: null,
           },
           segmentEnds: [],
           ...startPlayback(tracksFromTimeline(msg.timeline)),

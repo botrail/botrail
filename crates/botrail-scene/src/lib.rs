@@ -51,6 +51,10 @@ pub enum SceneError {
     UnknownDevice(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
+    #[error("unknown scenario `{0}`")]
+    UnknownScenario(String),
+    #[error("{0}")]
+    BadScenario(String),
     #[error("{0}")]
     UnsupportedGeometry(String),
     #[error("{0}")]
@@ -247,6 +251,7 @@ pub struct Scene {
     sensors: Vec<seq::Sensor>,
     devices: Vec<seq::Device>,
     weld_flashes: Vec<seq::WeldFlash>,
+    scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
@@ -274,6 +279,7 @@ impl Scene {
             sensors: Vec::new(),
             devices: Vec::new(),
             weld_flashes: Vec::new(),
+            scenarios: Vec::new(),
             frames: Vec::new(),
             collision_warnings,
         }
