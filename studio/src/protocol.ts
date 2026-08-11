@@ -26,6 +26,7 @@ export type { SegmentMsg } from "./generated/SegmentMsg";
 export type { MotionMsg } from "./generated/MotionMsg";
 export type { SequenceMsg } from "./generated/SequenceMsg";
 export type { StepMsg } from "./generated/StepMsg";
+export type { SelectArmMsg } from "./generated/SelectArmMsg";
 export type { ActionMsg } from "./generated/ActionMsg";
 export type { ConditionMsg } from "./generated/ConditionMsg";
 export type { RampTargetMsg } from "./generated/RampTargetMsg";

@@ -1542,6 +1542,7 @@ mod tests {
                     seq::Condition::RobotDone { robot: "b".into() },
                     seq::Condition::Immediately,
                 ]),
+                select: Vec::new(),
             }],
         });
 

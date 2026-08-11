@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::seq::{
     vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
+    Step,
 };
 use crate::Scene;
 use botrail_collide::ObstacleCollider;
@@ -372,6 +373,21 @@ pub struct SequenceTimeline {
     pub objects: Vec<ObjectTrack>,
     pub signals: Vec<BoolTrack>,
     pub step_spans: Vec<StepSpan>,
+    /// Every selection divergence this rollout resolved, in resolution
+    /// order — the path the bake took. Script export replays these to
+    /// walk the same arms; the spans of untaken arms simply don't exist.
+    pub branches: Vec<BranchTaken>,
+}
+
+/// One resolved selection divergence: which arm `sequence` took at the
+/// named branching step.
+#[derive(Debug, Clone)]
+pub struct BranchTaken {
+    pub sequence: String,
+    /// The branching step's display name.
+    pub step: String,
+    /// Index into that step's arms, authored order.
+    pub arm: usize,
 }
 
 impl SequenceTimeline {
@@ -610,6 +626,9 @@ impl RobotRuntime {
 /// carries (signals, sensors, robot/device state).
 struct Program {
     sequence: Sequence,
+    /// The authored steps compiled to a flat list with explicit exits —
+    /// the cursor below indexes this, not `sequence.steps`.
+    flat: Vec<FlatStep>,
     step: usize,
     entered_at: f64,
     /// Absolute end times of the moves started by the active step (`Done`
@@ -619,12 +638,89 @@ struct Program {
     /// interleave their spans in one list, so "the last one" stopped
     /// meaning "mine" the moment there were two cursors.
     open_span: usize,
+    /// Every signal lane's value as of *this program's* previous scan —
+    /// what its edge conditions compare against. Per program, not global:
+    /// a PLC edge instruction remembers what *it* saw last time it
+    /// executed, so an edge raised later in the same scan by another
+    /// program is still caught on this one's next pass. Seeded from the
+    /// first sensor evaluation (startup state is not a transition).
+    prev_signals: Vec<bool>,
 }
 
 impl Program {
     fn finished(&self) -> bool {
-        self.step >= self.sequence.steps.len()
+        self.step >= self.flat.len()
     }
+}
+
+/// One compiled step: authored steps flattened pre-order (a branching
+/// step, then each arm's steps in arm order), each with explicit exits
+/// `(condition, flat target)`. A linear step has one exit — its
+/// transition, to the following step; a branching step has one per arm.
+/// `flat.len()` is the end-of-program target. Forward-only by
+/// construction (arms rejoin at the step after their branch), which is
+/// what keeps every rollout terminating.
+struct FlatStep {
+    name: String,
+    actions: Vec<Action>,
+    exits: Vec<(Condition, usize)>,
+    /// Whether the exits are branch arms (recorded as decisions on the
+    /// timeline) — a one-armed select still is one.
+    branching: bool,
+}
+
+fn flatten(steps: &[Step]) -> Vec<FlatStep> {
+    /// Emits `steps`, returning the dangling exits — `(flat index, exit
+    /// slot)` pairs whose target is the continuation the caller knows.
+    fn emit(steps: &[Step], out: &mut Vec<FlatStep>) -> Vec<(usize, usize)> {
+        let mut dangling: Vec<(usize, usize)> = Vec::new();
+        for step in steps {
+            let here = out.len();
+            // Everything that fell out of the previous step (its
+            // transition, or a whole branch's arm tails) lands here.
+            for (i, slot) in dangling.drain(..) {
+                out[i].exits[slot].1 = here;
+            }
+            if step.select.is_empty() {
+                out.push(FlatStep {
+                    name: step.name.clone(),
+                    actions: step.actions.clone(),
+                    exits: vec![(step.transition.clone(), usize::MAX)],
+                    branching: false,
+                });
+                dangling.push((here, 0));
+            } else {
+                out.push(FlatStep {
+                    name: step.name.clone(),
+                    actions: Vec::new(),
+                    exits: step
+                        .select
+                        .iter()
+                        .map(|arm| (arm.condition.clone(), usize::MAX))
+                        .collect(),
+                    branching: true,
+                });
+                for (j, arm) in step.select.iter().enumerate() {
+                    out[here].exits[j].1 = out.len();
+                    if arm.steps.is_empty() {
+                        // An empty arm exits straight to the rejoin.
+                        dangling.push((here, j));
+                    } else {
+                        let mut tails = emit(&arm.steps, out);
+                        dangling.append(&mut tails);
+                    }
+                }
+            }
+        }
+        dangling
+    }
+    let mut out = Vec::new();
+    let tails = emit(steps, &mut out);
+    let end = out.len();
+    for (i, slot) in tails {
+        out[i].exits[slot].1 = end;
+    }
+    out
 }
 
 struct Rollout {
@@ -650,6 +746,7 @@ struct Rollout {
     objects: Vec<ObjectTrack>,
     signals: Vec<BoolTrack>,
     step_spans: Vec<StepSpan>,
+    branches: Vec<BranchTaken>,
 }
 
 /// The motion currently driving the joints, sampled per scan tick.
@@ -1225,11 +1322,13 @@ impl Rollout {
             programs: sequences
                 .into_iter()
                 .map(|sequence| Program {
+                    flat: flatten(&sequence.steps),
                     sequence,
                     step: 0,
                     entered_at: 0.0,
                     move_ends: Vec::new(),
                     open_span: 0,
+                    prev_signals: Vec::new(),
                 })
                 .collect(),
             current: 0,
@@ -1241,6 +1340,7 @@ impl Rollout {
             objects,
             signals,
             step_spans: Vec::new(),
+            branches: Vec::new(),
         }
     }
 
@@ -1250,8 +1350,7 @@ impl Rollout {
     fn step_name_in(&self, program: usize, index: usize) -> String {
         let p = &self.programs[program];
         let step = p
-            .sequence
-            .steps
+            .flat
             .get(index)
             .map(|s| s.name.clone())
             .unwrap_or_default();
@@ -1276,6 +1375,13 @@ impl Rollout {
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
         self.update_sensors();
+        // Seed every program's edge memory from the evaluated startup
+        // state: a sensor already tripped at t = 0 is a level, not an
+        // edge. A `set` fired by the first scan below *does* edge — that
+        // is a real transition.
+        for p in 0..self.programs.len() {
+            self.close_scan(p);
+        }
         // First scan: every program enters its first step (actions fire in
         // declaration order), then every program chains through whatever
         // is instantaneously ready — so a signal set by program 1's first
@@ -1287,6 +1393,7 @@ impl Rollout {
         for p in 0..self.programs.len() {
             self.current = p;
             self.advance_through_ready_steps()?;
+            self.close_scan(p);
         }
 
         let mut tick = 0u64;
@@ -1297,13 +1404,15 @@ impl Rollout {
                 return Err(self.timeout());
             }
             // PLC scan: outputs advance the world through this tick, then
-            // inputs are read, then transitions fire — for each program in
-            // declaration order.
+            // inputs are read, then transitions fire — per program in
+            // declaration order, each closing its own edge memory as it
+            // hands over.
             self.advance_world()?;
             self.update_sensors();
             for p in 0..self.programs.len() {
                 self.current = p;
                 self.advance_through_ready_steps()?;
+                self.close_scan(p);
             }
         }
         Ok(self.finish())
@@ -2261,19 +2370,64 @@ impl Rollout {
         }
     }
 
+    fn lane_index(&self, name: &str) -> Option<usize> {
+        self.signals.iter().position(|s| s.name == name)
+    }
+
+    fn lane_value(&self, lane: usize) -> bool {
+        self.signals[lane]
+            .edges
+            .last()
+            .map(|(_, v)| *v)
+            .unwrap_or(false)
+    }
+
+    fn prev_lane_value(&self, lane: usize) -> bool {
+        self.programs[self.current]
+            .prev_signals
+            .get(lane)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Closes a program's scan for its edge conditions: everything it
+    /// compares against next time is the world as it stands right now.
+    fn close_scan(&mut self, program: usize) {
+        let snapshot: Vec<bool> = (0..self.signals.len())
+            .map(|l| self.lane_value(l))
+            .collect();
+        self.programs[program].prev_signals = snapshot;
+    }
+
     /// Fires transitions that hold at the current time for the current
     /// program, chaining through instantaneous steps (bounded per tick).
+    /// A step's exits are tried in authored order (SFC's left-to-right
+    /// priority); the first that holds wins, and on a branching step the
+    /// winning arm is recorded on the timeline.
     fn advance_through_ready_steps(&mut self) -> Result<(), SeqError> {
         let mut chain = 0usize;
         while !self.programs[self.current].finished() {
             let p = &self.programs[self.current];
-            let condition = p.sequence.steps[p.step].transition.clone();
-            if !self.condition_holds(&condition) {
+            let exits = p.flat[p.step].exits.clone();
+            let Some((arm, target)) = exits
+                .iter()
+                .enumerate()
+                .find(|(_, (condition, _))| self.condition_holds(condition))
+                .map(|(j, (_, target))| (j, *target))
+            else {
                 return Ok(());
+            };
+            let p = &self.programs[self.current];
+            if p.flat[p.step].branching {
+                self.branches.push(BranchTaken {
+                    sequence: p.sequence.name.clone(),
+                    step: p.flat[p.step].name.clone(),
+                    arm,
+                });
             }
             self.exit_step();
             let p = &mut self.programs[self.current];
-            p.step += 1;
+            p.step = target;
             if p.finished() {
                 return Ok(());
             }
@@ -2307,13 +2461,22 @@ impl Rollout {
             }
             Condition::Signal { name, value } => {
                 let current = self
-                    .signals
-                    .iter()
-                    .find(|s| &s.name == name)
-                    .map(|s| s.edges.last().map(|(_, v)| *v).unwrap_or(false))
+                    .lane_index(name)
+                    .map(|lane| self.lane_value(lane))
                     .unwrap_or(false);
                 current == *value
             }
+            // Edges compare against this program's own previous scan, so
+            // a transition raised anywhere — before or after this
+            // program's slot in the scan order — is caught exactly once.
+            Condition::Rising { name } => match self.lane_index(name) {
+                Some(lane) => !self.prev_lane_value(lane) && self.lane_value(lane),
+                None => false,
+            },
+            Condition::Falling { name } => match self.lane_index(name) {
+                Some(lane) => self.prev_lane_value(lane) && !self.lane_value(lane),
+                None => false,
+            },
             Condition::DeviceDone { device } => self.devices.iter().any(|d| match d {
                 DeviceRuntime::Axis {
                     name,
@@ -2348,10 +2511,7 @@ impl Rollout {
             end: self.t,
         });
         let step = self.programs[self.current].step;
-        for action in self.programs[self.current].sequence.steps[step]
-            .actions
-            .clone()
-        {
+        for action in self.programs[self.current].flat[step].actions.clone() {
             self.fire(&action)?;
         }
         Ok(())
@@ -2873,6 +3033,7 @@ impl Rollout {
             objects: self.objects,
             signals: self.signals,
             step_spans: self.step_spans,
+            branches: self.branches,
         }
     }
 }
@@ -2926,6 +3087,7 @@ pub(crate) mod tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -2976,6 +3138,402 @@ pub(crate) mod tests {
         assert!((ret.end - tl.duration).abs() < 1e-12);
         // Cycle time covers both motions plus the wait.
         assert!(tl.duration > run.end + 0.5);
+    }
+
+    fn set(signal: &str, value: bool) -> Action {
+        Action::Set {
+            signal: signal.into(),
+            value,
+        }
+    }
+
+    fn sel(name: &str, arms: Vec<(Condition, Vec<Step>)>) -> Step {
+        Step {
+            name: name.to_string(),
+            actions: vec![],
+            transition: Condition::Immediately,
+            select: arms
+                .into_iter()
+                .map(|(condition, steps)| crate::seq::SelectArm { condition, steps })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn edges_fire_on_transitions_not_startup_state() {
+        let mut scene = sample_scene();
+        scene.define_signal("flag", true);
+        // Watchers are declared *before* the writer: the edge is raised
+        // after their slot in the scan order, so per-program edge memory
+        // is what catches it on their next pass.
+        scene.upsert_sequence(Sequence {
+            name: "watch_r".into(),
+            steps: vec![step(
+                "r",
+                vec![],
+                Condition::Rising {
+                    name: "flag".into(),
+                },
+            )],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "watch_f".into(),
+            steps: vec![step(
+                "f",
+                vec![],
+                Condition::Falling {
+                    name: "flag".into(),
+                },
+            )],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "pulse".into(),
+            steps: vec![
+                step("hold", vec![], Condition::Elapsed { seconds: 0.2 }),
+                step("off", vec![set("flag", false)], Condition::Immediately),
+                step("hold2", vec![], Condition::Elapsed { seconds: 0.2 }),
+                step("on", vec![set("flag", true)], Condition::Immediately),
+            ],
+        });
+        let tl = scene
+            .simulate_sequences(&["watch_r", "watch_f", "pulse"], &RolloutOptions::default())
+            .unwrap();
+        let span = |name: &str| {
+            tl.step_spans
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("no span `{name}`"))
+        };
+        // `flag` starts true — the startup level is not an edge, so the
+        // rising watcher waits for the *next* off→on (~0.4s), while the
+        // falling watcher catches the drop (~0.2s). One scan of latency
+        // is inherent (the writer runs after the watchers).
+        let f = span("watch_f/f");
+        let r = span("watch_r/r");
+        assert!(
+            (0.2..=0.23).contains(&f.end),
+            "falling at {} (wanted ~0.21)",
+            f.end
+        );
+        assert!(
+            (0.4..=0.43).contains(&r.end),
+            "rising at {} (wanted ~0.41)",
+            r.end
+        );
+    }
+
+    #[test]
+    fn same_scan_set_edges_for_later_programs() {
+        let mut scene = sample_scene();
+        scene.define_signal("go", false);
+        scene.upsert_sequence(Sequence {
+            name: "boss".into(),
+            steps: vec![step(
+                "release",
+                vec![set("go", true)],
+                Condition::Immediately,
+            )],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "station".into(),
+            steps: vec![step(
+                "await",
+                vec![],
+                Condition::Rising { name: "go".into() },
+            )],
+        });
+        let tl = scene
+            .simulate_sequences(&["boss", "station"], &RolloutOptions::default())
+            .unwrap();
+        // The set fires in the very first scan; the station (scanned
+        // after the boss) sees the edge in that same scan.
+        let await_span = tl
+            .step_spans
+            .iter()
+            .find(|s| s.name == "station/await")
+            .unwrap();
+        assert_eq!(await_span.end, 0.0);
+    }
+
+    #[test]
+    fn select_takes_the_first_true_arm_and_records_it() {
+        let mut scene = sample_scene();
+        for signal in ["ok", "ng", "did_a", "did_b", "joined"] {
+            scene.define_signal(signal, false);
+        }
+        let arms = |scene: &mut Scene, name: &str| {
+            scene.upsert_sequence(Sequence {
+                name: name.into(),
+                steps: vec![
+                    sel(
+                        "judge",
+                        vec![
+                            (
+                                Condition::Signal {
+                                    name: "ok".into(),
+                                    value: true,
+                                },
+                                vec![step(
+                                    "pass",
+                                    vec![set("did_a", true)],
+                                    Condition::Immediately,
+                                )],
+                            ),
+                            (
+                                Condition::Signal {
+                                    name: "ng".into(),
+                                    value: true,
+                                },
+                                vec![step(
+                                    "reject",
+                                    vec![set("did_b", true)],
+                                    Condition::Immediately,
+                                )],
+                            ),
+                        ],
+                    ),
+                    step("rejoin", vec![set("joined", true)], Condition::Immediately),
+                ],
+            });
+        };
+
+        // The world says NG: the second arm runs, the first never bakes.
+        scene.define_signal("ng", true);
+        arms(&mut scene, "s");
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        let names: Vec<&str> = tl.step_spans.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["judge", "reject", "rejoin"]);
+        assert_eq!(tl.branches.len(), 1);
+        assert_eq!(
+            (
+                tl.branches[0].sequence.as_str(),
+                tl.branches[0].step.as_str(),
+                tl.branches[0].arm
+            ),
+            ("s", "judge", 1)
+        );
+        let latched = |name: &str| {
+            tl.signals
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .edges
+                .last()
+                .unwrap()
+                .1
+        };
+        assert!(latched("did_b") && !latched("did_a") && latched("joined"));
+
+        // Both true: authored order is the priority — the first arm wins.
+        scene.define_signal("ok", true);
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(tl.branches[0].arm, 0);
+        assert!(tl.step_spans.iter().any(|s| s.name == "pass"));
+        assert!(!tl.step_spans.iter().any(|s| s.name == "reject"));
+    }
+
+    #[test]
+    fn select_waits_for_an_arm_and_empty_arms_skip() {
+        let mut scene = sample_scene();
+        scene.define_signal("late", false);
+        scene.define_signal("skip", false);
+        scene.upsert_sequence(Sequence {
+            name: "waiter".into(),
+            steps: vec![
+                sel(
+                    "gate",
+                    vec![
+                        (
+                            Condition::Signal {
+                                name: "skip".into(),
+                                value: true,
+                            },
+                            vec![step("never", vec![], Condition::Immediately)],
+                        ),
+                        (
+                            Condition::Signal {
+                                name: "late".into(),
+                                value: true,
+                            },
+                            // An empty arm: straight to the rejoin.
+                            vec![],
+                        ),
+                    ],
+                ),
+                step("after", vec![], Condition::Immediately),
+            ],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "writer".into(),
+            steps: vec![
+                step("hold", vec![], Condition::Elapsed { seconds: 0.3 }),
+                step("go", vec![set("late", true)], Condition::Immediately),
+            ],
+        });
+        let tl = scene
+            .simulate_sequences(&["waiter", "writer"], &RolloutOptions::default())
+            .unwrap();
+        // The branching step itself is the wait: its span shows the 0.3s.
+        let gate = tl
+            .step_spans
+            .iter()
+            .find(|s| s.name == "waiter/gate")
+            .unwrap();
+        assert!((0.3..=0.32).contains(&gate.end), "gate.end = {}", gate.end);
+        assert!(!tl.step_spans.iter().any(|s| s.name == "waiter/never"));
+        let after = tl
+            .step_spans
+            .iter()
+            .find(|s| s.name == "waiter/after")
+            .unwrap();
+        assert_eq!(after.start, gate.end);
+        assert_eq!(tl.branches[0].arm, 1);
+    }
+
+    #[test]
+    fn nested_selects_record_both_decisions() {
+        let mut scene = sample_scene();
+        for signal in ["outer", "inner"] {
+            scene.define_signal(signal, true);
+        }
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![sel(
+                "level1",
+                vec![(
+                    Condition::Signal {
+                        name: "outer".into(),
+                        value: true,
+                    },
+                    vec![sel(
+                        "level2",
+                        vec![
+                            (
+                                Condition::Signal {
+                                    name: "inner".into(),
+                                    value: false,
+                                },
+                                vec![step("no", vec![], Condition::Immediately)],
+                            ),
+                            (
+                                Condition::Signal {
+                                    name: "inner".into(),
+                                    value: true,
+                                },
+                                vec![step("yes", vec![], Condition::Immediately)],
+                            ),
+                        ],
+                    )],
+                )],
+            )],
+        });
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        let names: Vec<&str> = tl.step_spans.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["level1", "level2", "yes"]);
+        let taken: Vec<(&str, usize)> = tl
+            .branches
+            .iter()
+            .map(|b| (b.step.as_str(), b.arm))
+            .collect();
+        assert_eq!(taken, [("level1", 0), ("level2", 1)]);
+    }
+
+    #[test]
+    fn select_authoring_rules_are_validated() {
+        let mut scene = sample_scene();
+        scene.define_signal("x", false);
+        let arm = |steps: Vec<Step>| {
+            (
+                Condition::Signal {
+                    name: "x".into(),
+                    value: true,
+                },
+                steps,
+            )
+        };
+        // Actions on a branching step are refused.
+        let mut bad = sel("b", vec![arm(vec![])]);
+        bad.actions = vec![set("x", true)];
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![bad],
+        });
+        let err = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("fires no actions"), "{err}");
+
+        // A transition of its own is refused too.
+        let mut bad = sel("b", vec![arm(vec![])]);
+        bad.transition = Condition::Elapsed { seconds: 1.0 };
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![bad],
+        });
+        let err = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("arms are its transitions"),
+            "{err}"
+        );
+
+        // Arms must rejoin in the same grasp state.
+        scene
+            .add_obstacle(
+                "part",
+                botrail_model::Geometry::Sphere { radius: 0.02 },
+                Isometry3::translation(0.1, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![sel(
+                "b",
+                vec![
+                    arm(vec![step(
+                        "grab",
+                        vec![Action::Attach {
+                            robot: None,
+                            object: "part".into(),
+                            link: None,
+                            touch_links: None,
+                        }],
+                        Condition::Immediately,
+                    )]),
+                    arm(vec![]),
+                ],
+            )],
+        });
+        let err = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("different grasp/tracking state"),
+            "{err}"
+        );
+
+        // Edges on unknown signals are caught like level tests.
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![step(
+                "w",
+                vec![],
+                Condition::Rising {
+                    name: "ghost".into(),
+                },
+            )],
+        });
+        let err = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown signal"), "{err}");
     }
 
     #[test]
@@ -3384,6 +3942,7 @@ mod device_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -3441,6 +4000,7 @@ mod device_tests {
                 name: "run".into(),
                 actions: vec![],
                 transition: Condition::Elapsed { seconds: 12.0 },
+                select: Vec::new(),
             }],
         });
 
@@ -3525,6 +4085,7 @@ mod device_tests {
                 name: "hold".into(),
                 actions: vec![],
                 transition: Condition::Elapsed { seconds: 1.0 },
+                select: Vec::new(),
             }],
         });
         let tl = scene
@@ -3850,6 +4411,7 @@ mod multi_actor_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -4237,6 +4799,7 @@ mod tracking_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -4683,6 +5246,7 @@ mod vehicle_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -5130,6 +5694,7 @@ mod tray_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -5545,6 +6110,7 @@ mod mount_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -5756,6 +6322,7 @@ mod parallel_program_tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 

@@ -611,6 +611,17 @@ select:focus {
   margin-right: 4px;
 }
 
+/* Branch arms, indented under their branching step. */
+.seq-arm {
+  margin-left: 14px;
+  border-left: 1px solid #2c3444;
+  padding-left: 6px;
+}
+
+.seq-arm-step {
+  margin-left: 14px;
+}
+
 /* Multi-program run set: one checkbox row per authored program. */
 .seq-programs {
   display: flex;

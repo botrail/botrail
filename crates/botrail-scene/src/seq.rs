@@ -296,6 +296,41 @@ pub struct Step {
     pub actions: Vec<Action>,
     /// The step completes (and the next begins) when this holds.
     pub transition: Condition,
+    /// SFC selection divergence: when non-empty, this step is a branching
+    /// step — it carries no actions, its `transition` is unused
+    /// (`Immediately` by convention), and the arms' conditions are its
+    /// outgoing transitions. The first arm whose condition holds wins
+    /// (authored order = priority, SFC's left-to-right rule); its steps
+    /// run and every arm rejoins at the step after this one. Structured
+    /// on purpose: no jump targets means no backward edges, so a rolled
+    /// timeline always terminates and stays a single deterministic path.
+    pub select: Vec<SelectArm>,
+}
+
+/// One arm of a selection divergence: an outgoing transition plus the
+/// steps it guards. Arms may nest further branches; an empty arm is a
+/// skip straight to the rejoin ("already done → carry on").
+#[derive(Debug, Clone)]
+pub struct SelectArm {
+    pub condition: Condition,
+    pub steps: Vec<Step>,
+}
+
+/// Visits every action in `steps`, branch arms included, in authoring
+/// order.
+pub(crate) fn walk_actions<E>(
+    steps: &[Step],
+    f: &mut impl FnMut(&Action) -> Result<(), E>,
+) -> Result<(), E> {
+    for step in steps {
+        for action in &step.actions {
+            f(action)?;
+        }
+        for arm in &step.select {
+            walk_actions(&arm.steps, f)?;
+        }
+    }
+    Ok(())
 }
 
 /// Robot-addressed actions carry `robot: Option<String>` — the instance
@@ -365,6 +400,13 @@ pub enum Condition {
     /// Level test of a signal (sensors join in S4 under the same name
     /// space).
     Signal { name: String, value: bool },
+    /// Rising edge: the signal is on this scan and was off the previous
+    /// one (PLC's `-|P|-`). True for exactly one scan per edge, so any
+    /// number of programs see the same edge in that scan. No edge fires
+    /// at t = 0 — startup state is not a transition.
+    Rising { name: String },
+    /// Falling edge: off this scan, on the previous one (`-|N|-`).
+    Falling { name: String },
     /// A linear axis has reached its commanded position (in-position).
     DeviceDone { device: String },
     /// Series contacts (AND).
@@ -620,44 +662,43 @@ impl Scene {
                 }
             };
         for (index, sequence) in sequences.iter().enumerate() {
-            for step in &sequence.steps {
-                for action in &step.actions {
-                    match action {
-                        Action::StartMotion { motion } => {
-                            // Validation has already established the motion
-                            // exists; its robot is the claimed resource.
-                            if let Some(robot) = self
-                                .motions()
-                                .iter()
-                                .find(|m| &m.name == motion)
-                                .map(|m| m.robot)
-                            {
-                                let name = self.robots()[robot].name.clone();
-                                claim(0, "robot", name, index)?;
-                            }
-                        }
-                        Action::StartRamp { robot, .. }
-                        | Action::Attach { robot, .. }
-                        | Action::Track { robot, .. }
-                        | Action::Untrack { robot } => {
-                            if let Ok(r) = self.resolve_seq_robot(robot) {
-                                let name = self.robots()[r].name.clone();
-                                claim(0, "robot", name, index)?;
-                            }
-                        }
-                        // Detach names an object; the carrying robot is
-                        // whoever attached it, which the same-owner rule
-                        // for Attach already pins to one program.
-                        Action::Detach { .. } => {}
-                        Action::Set { signal, .. } => {
-                            claim(1, "signal", signal.clone(), index)?;
-                        }
-                        Action::Device { device, .. } => {
-                            claim(2, "device", device.clone(), index)?;
+            walk_actions(&sequence.steps, &mut |action| -> Result<(), String> {
+                match action {
+                    Action::StartMotion { motion } => {
+                        // Validation has already established the motion
+                        // exists; its robot is the claimed resource.
+                        if let Some(robot) = self
+                            .motions()
+                            .iter()
+                            .find(|m| &m.name == motion)
+                            .map(|m| m.robot)
+                        {
+                            let name = self.robots()[robot].name.clone();
+                            claim(0, "robot", name, index)?;
                         }
                     }
+                    Action::StartRamp { robot, .. }
+                    | Action::Attach { robot, .. }
+                    | Action::Track { robot, .. }
+                    | Action::Untrack { robot } => {
+                        if let Ok(r) = self.resolve_seq_robot(robot) {
+                            let name = self.robots()[r].name.clone();
+                            claim(0, "robot", name, index)?;
+                        }
+                    }
+                    // Detach names an object; the carrying robot is
+                    // whoever attached it, which the same-owner rule
+                    // for Attach already pins to one program.
+                    Action::Detach { .. } => {}
+                    Action::Set { signal, .. } => {
+                        claim(1, "signal", signal.clone(), index)?;
+                    }
+                    Action::Device { device, .. } => {
+                        claim(2, "device", device.clone(), index)?;
+                    }
                 }
-            }
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -711,19 +752,89 @@ impl Scene {
             }
         }
         // Tracking and grasping are modes the steps switch on and off, so
-        // their rules are checked by walking the (linear) step list once —
-        // per robot for tracking, per object for grasps.
+        // their rules are checked by walking the step list once — per
+        // robot for tracking, per object for grasps. Branch arms fork
+        // that state; every arm must rejoin in the same state or the
+        // steps after the join cannot be validated (or executed) sanely.
         let mut tracked: Vec<Option<(String, Vec<String>)>> = vec![None; self.robots().len()];
         let mut held: std::collections::HashMap<String, usize> = self
             .attachments()
             .iter()
             .map(|a| (a.object.clone(), a.robot))
             .collect();
-        for (i, step) in sequence.steps.iter().enumerate() {
+        self.validate_steps(&sequence.steps, &mut tracked, &mut held)
+    }
+
+    /// The per-step walk of [`validate_sequence`], recursing into branch
+    /// arms. Errors carry the local step index; branch recursion rewraps
+    /// them onto the branching step with the arm named.
+    fn validate_steps(
+        &self,
+        steps: &[Step],
+        tracked: &mut Vec<Option<(String, Vec<String>)>>,
+        held: &mut std::collections::HashMap<String, usize>,
+    ) -> Result<(), (Option<usize>, String)> {
+        for (i, step) in steps.iter().enumerate() {
+            if !step.select.is_empty() {
+                if !step.actions.is_empty() {
+                    return Err((
+                        Some(i),
+                        "a branching step fires no actions — put them in the step \
+                         before, or inside the arms"
+                            .to_string(),
+                    ));
+                }
+                if !matches!(step.transition, Condition::Immediately) {
+                    return Err((
+                        Some(i),
+                        "a branching step's arms are its transitions; leave its own \
+                         transition empty (immediately)"
+                            .to_string(),
+                    ));
+                }
+                let entry_tracked = tracked.clone();
+                let entry_held = held.clone();
+                let mut rejoin: Option<(Vec<_>, std::collections::HashMap<_, _>)> = None;
+                for (j, arm) in step.select.iter().enumerate() {
+                    let wrap =
+                        |m: String| (Some(i), format!("arm {} of `{}`: {m}", j + 1, step.name));
+                    if arm.condition.mentions_done() {
+                        return Err(wrap(
+                            "`done` waits for a motion/ramp, but a branching step \
+                             starts none — await it in the step before"
+                                .to_string(),
+                        ));
+                    }
+                    self.validate_condition(&arm.condition).map_err(&wrap)?;
+                    let mut arm_tracked = entry_tracked.clone();
+                    let mut arm_held = entry_held.clone();
+                    self.validate_steps(&arm.steps, &mut arm_tracked, &mut arm_held)
+                        .map_err(|(_, m)| wrap(m))?;
+                    match &rejoin {
+                        None => rejoin = Some((arm_tracked, arm_held)),
+                        Some((t, h)) if *t == arm_tracked && *h == arm_held => {}
+                        Some(_) => {
+                            return Err((
+                                Some(i),
+                                format!(
+                                    "the arms of `{}` rejoin with different grasp/tracking \
+                                     state — end every arm the same way (release or hand \
+                                     over before rejoining)",
+                                    step.name
+                                ),
+                            ))
+                        }
+                    }
+                }
+                let (t, h) = rejoin.expect("select verified non-empty");
+                *tracked = t;
+                *held = h;
+                continue;
+            }
             for action in &step.actions {
-                self.validate_action(action, &mut held)
+                self.validate_action(action, held)
                     .map_err(|m| (Some(i), m))?;
-                self.validate_tracking(action, &mut tracked)
+                self.validate_tracking(action, tracked)
                     .map_err(|m| (Some(i), m))?;
             }
             // One driver per robot per step: two moves on one arm fight for
@@ -1161,7 +1272,9 @@ impl Scene {
                 }
                 Ok(())
             }
-            Condition::Signal { name, .. } => {
+            Condition::Signal { name, .. }
+            | Condition::Rising { name }
+            | Condition::Falling { name } => {
                 if !self.signal_readable(name) {
                     return Err(format!(
                         "unknown signal `{name}` (declare it with define_signal or add a sensor)"

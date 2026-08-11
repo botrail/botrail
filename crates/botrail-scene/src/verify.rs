@@ -256,6 +256,7 @@ mod tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 

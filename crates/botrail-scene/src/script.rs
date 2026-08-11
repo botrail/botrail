@@ -14,18 +14,25 @@
 //! mid-move in simulation fires after it in the script. The lowering is
 //! therefore *conservative* — every waypoint and I/O write happens in the
 //! same order, but a cycle can run slower than the simulated takt; steps
-//! that lean on that concurrency get a warning. What cannot be expressed
-//! at all (parallel `any_of` waits, conveyor tracking, positioning device
-//! commands) is refused or downgraded to a comment, never silently
-//! dropped.
+//! that lean on that concurrency get a warning.
+//!
+//! Branching steps lower to a wait-any plus an `if/elif` chain over the
+//! arm guards, so the script carries *every* arm — including the ones
+//! this bake skipped. A skipped arm was never simulated, so it must stay
+//! motion-free (its ramps are synthesized from the branch-entry
+//! configuration; a planned motion there is refused). Edges lower to the
+//! classic wait-idle-then-active pair. What cannot be expressed at all
+//! (timers or edges as branch guards, conveyor tracking, positioning
+//! device commands) is refused or downgraded to a comment, never
+//! silently dropped.
 
 use std::collections::HashMap;
 
-use botrail_export::{Command, Program, ProgramOptions};
+use botrail_export::{Command, DigitalTest, Program, ProgramOptions};
 
 use crate::motion::SegmentKind;
-use crate::rollout::{PlannedMove, SequenceTimeline};
-use crate::seq::{Action, Condition, DeviceCommand, Sequence};
+use crate::rollout::{BranchTaken, PlannedMove, SequenceTimeline};
+use crate::seq::{walk_actions, Action, Condition, DeviceCommand, Sequence, Step};
 use crate::Scene;
 
 /// Name → digital port wiring for a sequence export.
@@ -83,177 +90,62 @@ pub fn sequence_program(
         return Err("speed scale, tcp speed, and tcp acceleration must be positive".to_string());
     }
     let fold_min = |xs: &[f64]| xs.iter().copied().fold(f64::INFINITY, f64::min);
-    let joint_velocity = fold_min(&limits.velocity) * options.speed_scale;
-    let joint_acceleration = fold_min(&limits.acceleration) * options.speed_scale;
-    let tcp_velocity = options.tcp_speed * options.speed_scale;
-    let tcp_acceleration = options.tcp_accel * options.speed_scale;
 
-    let mut planned = track
-        .planned
-        .iter()
-        .filter(|p| p.sequence == name)
-        .peekable();
-    let mut commands = Vec::new();
-    let mut warnings = Vec::new();
-
-    if options.move_to_start {
-        if let Some(first) = track
+    let mut lowering = Lowering {
+        io,
+        model,
+        blend_radius: options.blend_radius,
+        joint_velocity: fold_min(&limits.velocity) * options.speed_scale,
+        joint_acceleration: fold_min(&limits.acceleration) * options.speed_scale,
+        tcp_velocity: options.tcp_speed * options.speed_scale,
+        tcp_acceleration: options.tcp_accel * options.speed_scale,
+        planned: track
             .planned
             .iter()
             .filter(|p| p.sequence == name)
-            .find_map(|p| p.segments.first().and_then(|s| s.waypoints.first()))
+            .collect(),
+        planned_next: 0,
+        decisions: timeline
+            .branches
+            .iter()
+            .filter(|b| b.sequence == name)
+            .collect(),
+        decisions_next: 0,
+        warnings: Vec::new(),
+        cur_q: scene.robots()[robot].joint_positions().to_vec(),
+        step_no: 0,
+    };
+
+    let mut commands = Vec::new();
+    if options.move_to_start {
+        if let Some(first) = lowering
+            .planned
+            .first()
+            .and_then(|p| p.segments.first())
+            .and_then(|s| s.waypoints.first())
         {
             commands.push(Command::MoveJoint {
                 q: first.clone(),
-                velocity: joint_velocity,
-                acceleration: joint_acceleration,
+                velocity: lowering.joint_velocity,
+                acceleration: lowering.joint_acceleration,
                 blend: 0.0,
             });
+            lowering.cur_q = first.clone();
         }
     }
 
-    for (index, step) in seq.steps.iter().enumerate() {
-        commands.push(Command::Comment {
-            text: format!("step {}: {}", index + 1, step.name),
-        });
-        let mut started_move = false;
-        for action in &step.actions {
-            match action {
-                Action::StartMotion { motion } => {
-                    let record = next_planned(&mut planned, index, Some(motion))?;
-                    started_move = true;
-                    for segment in &record.segments {
-                        match segment.kind {
-                            SegmentKind::Joint => {
-                                let last = segment.waypoints.len().saturating_sub(1);
-                                for (i, q) in segment.waypoints.iter().enumerate().skip(1) {
-                                    commands.push(Command::MoveJoint {
-                                        q: q.clone(),
-                                        velocity: joint_velocity,
-                                        acceleration: joint_acceleration,
-                                        blend: if i < last { options.blend_radius } else { 0.0 },
-                                    });
-                                }
-                            }
-                            SegmentKind::CartesianLine => {
-                                if segment.waypoints.len() > 1 {
-                                    commands.push(Command::MoveLinear {
-                                        q: segment.waypoints.last().expect("len > 1").clone(),
-                                        velocity: tcp_velocity,
-                                        acceleration: tcp_acceleration,
-                                        blend: 0.0,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                Action::StartRamp { .. } => {
-                    let record = next_planned(&mut planned, index, None)?;
-                    started_move = true;
-                    let waypoints = &record.segments[0].waypoints;
-                    let (from, to) = (&waypoints[0], &waypoints[1]);
-                    let travel = from
-                        .iter()
-                        .zip(to)
-                        .map(|(a, b)| (a - b).abs())
-                        .fold(0.0, f64::max);
-                    if travel < 1e-12 {
-                        // A hold-position ramp is a dwell; keep its time.
-                        if record.duration > 0.0 {
-                            commands.push(Command::Sleep {
-                                seconds: record.duration,
-                            });
-                        }
-                    } else {
-                        // The authored duration sets the pace (that is what
-                        // the simulation ran); the joint limit caps it.
-                        let needed = if record.duration > 0.0 {
-                            travel / record.duration
-                        } else {
-                            f64::INFINITY
-                        };
-                        if needed > joint_velocity + 1e-9 {
-                            warnings.push(format!(
-                                "step {} `{}`: ramp asks {:.3} rad/s but the joint \
-                                 limit allows {:.3}; the controller will run it slower",
-                                index + 1,
-                                step.name,
-                                needed,
-                                joint_velocity,
-                            ));
-                        }
-                        commands.push(Command::MoveJoint {
-                            q: to.clone(),
-                            velocity: needed.min(joint_velocity),
-                            acceleration: joint_acceleration,
-                            blend: 0.0,
-                        });
-                    }
-                }
-                Action::Attach { object, .. } => {
-                    commands.push(Command::Comment {
-                        text: format!(
-                            "attach {object} (simulation grasp — drive the real \
-                             gripper via a mapped output)"
-                        ),
-                    });
-                }
-                Action::Detach { object } => {
-                    commands.push(Command::Comment {
-                        text: format!("detach {object} (simulation release)"),
-                    });
-                }
-                Action::Track { .. } | Action::Untrack { .. } => {
-                    return Err(format!(
-                        "step {} `{}`: conveyor tracking cannot be exported — the \
-                         controller's own tracking function (e.g. UR conveyor \
-                         tracking) has to take that over",
-                        index + 1,
-                        step.name,
-                    ));
-                }
-                Action::Set { signal, value } => {
-                    let port = io.outputs.get(signal).ok_or_else(|| {
-                        format!(
-                            "step {} `{}`: signal `{signal}` has no output port — \
-                             pass outputs={{\"{signal}\": <port>}}",
-                            index + 1,
-                            step.name,
-                        )
-                    })?;
-                    commands.push(Command::SetDigitalOut {
-                        port: *port,
-                        value: *value,
-                    });
-                }
-                Action::Device { device, command } => {
-                    lower_device(
-                        device,
-                        command,
-                        io,
-                        index,
-                        &step.name,
-                        &mut commands,
-                        &mut warnings,
-                    );
-                }
-            }
-        }
-        lower_condition(
-            &step.transition,
-            io,
-            index,
-            &step.name,
-            started_move,
-            &mut commands,
-            &mut warnings,
-        )?;
-    }
-    if planned.peek().is_some() {
+    lowering.lower_steps(&seq.steps, true, &mut commands)?;
+
+    if lowering.planned_next < lowering.planned.len() {
         return Err(format!(
             "timeline holds more planned moves for `{name}` than the sequence \
              fires (was the sequence edited after the rollout?)"
+        ));
+    }
+    if lowering.decisions_next < lowering.decisions.len() {
+        return Err(format!(
+            "timeline holds more branch decisions for `{name}` than the sequence \
+             has branching steps (was the sequence edited after the rollout?)"
         ));
     }
     if !commands
@@ -273,8 +165,289 @@ pub fn sequence_program(
                 .collect(),
             commands,
         },
-        warnings,
+        warnings: lowering.warnings,
     })
+}
+
+/// Rolling lowering state: the planned-move and branch-decision cursors
+/// (consumed in emission order — the same order the rollout fired them),
+/// the joint bounds, and the configuration tracker skipped-arm ramps are
+/// synthesized from.
+struct Lowering<'a> {
+    io: &'a SequenceIo,
+    model: &'a botrail_model::RobotModel,
+    blend_radius: f64,
+    joint_velocity: f64,
+    joint_acceleration: f64,
+    tcp_velocity: f64,
+    tcp_acceleration: f64,
+    planned: Vec<&'a PlannedMove>,
+    planned_next: usize,
+    decisions: Vec<&'a BranchTaken>,
+    decisions_next: usize,
+    warnings: Vec<String>,
+    /// Last commanded configuration along the emission path.
+    cur_q: Vec<f64>,
+    /// Running step number for script comments (emission order, skipped
+    /// arms included — the script contains them all).
+    step_no: usize,
+}
+
+impl<'a> Lowering<'a> {
+    /// Lowers a step list. `taken` says whether this list lies on the
+    /// path the rollout executed — planned records exist only there.
+    fn lower_steps(
+        &mut self,
+        steps: &[Step],
+        taken: bool,
+        out: &mut Vec<Command>,
+    ) -> Result<(), String> {
+        for step in steps {
+            self.step_no += 1;
+            let label = format!("step {} `{}`", self.step_no, step.name);
+            if !step.select.is_empty() {
+                out.push(Command::Comment {
+                    text: format!("step {}: {} (branch)", self.step_no, step.name),
+                });
+                self.lower_select(step, taken, &label, out)?;
+                continue;
+            }
+            out.push(Command::Comment {
+                text: format!("step {}: {}", self.step_no, step.name),
+            });
+            let mut started_move = false;
+            for action in &step.actions {
+                self.lower_action(action, taken, &label, &mut started_move, out)?;
+            }
+            lower_condition(
+                &step.transition,
+                self.io,
+                &label,
+                started_move,
+                out,
+                &mut self.warnings,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A branching step: wait-any over the arm guards, then the taken
+    /// arm's body — with every skipped arm carried too, because the
+    /// controller decides at runtime what the bake decided by state.
+    fn lower_select(
+        &mut self,
+        step: &Step,
+        taken: bool,
+        label: &str,
+        out: &mut Vec<Command>,
+    ) -> Result<(), String> {
+        let taken_arm = if taken {
+            let decision = self
+                .decisions
+                .get(self.decisions_next)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "timeline records no decision for branching {label} (was the \
+                         sequence edited after the rollout?) — re-simulate and export again"
+                    )
+                })?;
+            if decision.step != step.name {
+                return Err(format!(
+                    "timeline decisions do not line up with the sequence ({label} vs \
+                     recorded `{}`) — re-simulate and export again",
+                    decision.step
+                ));
+            }
+            self.decisions_next += 1;
+            Some(decision.arm)
+        } else {
+            None
+        };
+        let entry_q = self.cur_q.clone();
+        let mut rejoin_q = entry_q.clone();
+        let mut arms = Vec::new();
+        for (j, arm) in step.select.iter().enumerate() {
+            let arm_label = format!("{label} arm {}", j + 1);
+            let test = digital_test(&arm.condition, self.io, &arm_label)?.simplified();
+            self.cur_q = entry_q.clone();
+            let mut body = Vec::new();
+            self.lower_steps(&arm.steps, taken_arm == Some(j), &mut body)?;
+            if taken_arm == Some(j) {
+                rejoin_q = self.cur_q.clone();
+            }
+            arms.push(botrail_export::SelectArm { test, body });
+        }
+        self.cur_q = rejoin_q;
+        out.push(Command::Select { arms });
+        Ok(())
+    }
+
+    fn lower_action(
+        &mut self,
+        action: &Action,
+        taken: bool,
+        label: &str,
+        started_move: &mut bool,
+        out: &mut Vec<Command>,
+    ) -> Result<(), String> {
+        match action {
+            Action::StartMotion { motion } => {
+                if !taken {
+                    return Err(format!(
+                        "{label}: motion `{motion}` lies on an arm this rollout never \
+                         took, so it was never planned — keep skipped arms motion-free \
+                         (I/O, ramps), or simulate a scenario that takes them"
+                    ));
+                }
+                let record = self.next_planned(Some(motion), label)?;
+                *started_move = true;
+                for segment in &record.segments {
+                    match segment.kind {
+                        SegmentKind::Joint => {
+                            let last = segment.waypoints.len().saturating_sub(1);
+                            for (i, q) in segment.waypoints.iter().enumerate().skip(1) {
+                                out.push(Command::MoveJoint {
+                                    q: q.clone(),
+                                    velocity: self.joint_velocity,
+                                    acceleration: self.joint_acceleration,
+                                    blend: if i < last { self.blend_radius } else { 0.0 },
+                                });
+                            }
+                        }
+                        SegmentKind::CartesianLine => {
+                            if segment.waypoints.len() > 1 {
+                                out.push(Command::MoveLinear {
+                                    q: segment.waypoints.last().expect("len > 1").clone(),
+                                    velocity: self.tcp_velocity,
+                                    acceleration: self.tcp_acceleration,
+                                    blend: 0.0,
+                                });
+                            }
+                        }
+                    }
+                }
+                if let Some(q) = record.segments.last().and_then(|s| s.waypoints.last()) {
+                    self.cur_q = q.clone();
+                }
+            }
+            Action::StartRamp {
+                targets, duration, ..
+            } => {
+                *started_move = true;
+                let (from, to, duration) = if taken {
+                    let record = self.next_planned(None, label)?;
+                    let waypoints = &record.segments[0].waypoints;
+                    (waypoints[0].clone(), waypoints[1].clone(), record.duration)
+                } else {
+                    // Never simulated, but a ramp's goal is authored data:
+                    // apply the targets to the branch-entry configuration.
+                    let from = self.cur_q.clone();
+                    let mut to = from.clone();
+                    for (joint, value) in targets {
+                        let ji = self
+                            .model
+                            .joint_index(joint)
+                            .ok_or_else(|| format!("{label}: unknown joint `{joint}`"))?;
+                        let qi = self.model.joints[ji]
+                            .q_index
+                            .ok_or_else(|| format!("{label}: joint `{joint}` is not actuated"))?;
+                        to[qi] = *value;
+                    }
+                    (from, to, *duration)
+                };
+                self.cur_q = to.clone();
+                let travel = from
+                    .iter()
+                    .zip(&to)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f64::max);
+                if travel < 1e-12 {
+                    // A hold-position ramp is a dwell; keep its time.
+                    if duration > 0.0 {
+                        out.push(Command::Sleep { seconds: duration });
+                    }
+                } else {
+                    // The authored duration sets the pace (that is what
+                    // the simulation ran); the joint limit caps it.
+                    let needed = if duration > 0.0 {
+                        travel / duration
+                    } else {
+                        f64::INFINITY
+                    };
+                    if needed > self.joint_velocity + 1e-9 {
+                        self.warnings.push(format!(
+                            "{label}: ramp asks {:.3} rad/s but the joint limit allows \
+                             {:.3}; the controller will run it slower",
+                            needed, self.joint_velocity,
+                        ));
+                    }
+                    out.push(Command::MoveJoint {
+                        q: to,
+                        velocity: needed.min(self.joint_velocity),
+                        acceleration: self.joint_acceleration,
+                        blend: 0.0,
+                    });
+                }
+            }
+            Action::Attach { object, .. } => {
+                out.push(Command::Comment {
+                    text: format!(
+                        "attach {object} (simulation grasp — drive the real \
+                         gripper via a mapped output)"
+                    ),
+                });
+            }
+            Action::Detach { object } => {
+                out.push(Command::Comment {
+                    text: format!("detach {object} (simulation release)"),
+                });
+            }
+            Action::Track { .. } | Action::Untrack { .. } => {
+                return Err(format!(
+                    "{label}: conveyor tracking cannot be exported — the \
+                     controller's own tracking function (e.g. UR conveyor \
+                     tracking) has to take that over"
+                ));
+            }
+            Action::Set { signal, value } => {
+                let port = self.io.outputs.get(signal).ok_or_else(|| {
+                    format!(
+                        "{label}: signal `{signal}` has no output port — \
+                         pass outputs={{\"{signal}\": <port>}}"
+                    )
+                })?;
+                out.push(Command::SetDigitalOut {
+                    port: *port,
+                    value: *value,
+                });
+            }
+            Action::Device { device, command } => {
+                lower_device(device, command, self.io, label, out, &mut self.warnings);
+            }
+        }
+        Ok(())
+    }
+
+    fn next_planned(
+        &mut self,
+        motion: Option<&str>,
+        label: &str,
+    ) -> Result<&'a PlannedMove, String> {
+        let record = self
+            .planned
+            .get(self.planned_next)
+            .copied()
+            .filter(|p| p.motion.as_deref() == motion && !p.segments.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "timeline does not match the sequence at {label} (was it edited \
+                     after the rollout?) — re-simulate and export again"
+                )
+            })?;
+        self.planned_next += 1;
+        Ok(record)
+    }
 }
 
 fn resolve_sequence<'a>(
@@ -313,40 +486,39 @@ fn resolve_sequence<'a>(
 
 /// The single robot this sequence drives. Mirrors the ownership walk in
 /// [`Scene::validate_program_ownership`]: motions claim their owner, the
-/// addressed actions claim their resolved robot.
+/// addressed actions claim their resolved robot — branch arms included.
 fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
     let mut driven: Option<usize> = None;
-    for step in &seq.steps {
-        for action in &step.actions {
-            let robot = match action {
-                Action::StartMotion { motion } => scene
-                    .motions()
-                    .iter()
-                    .find(|m| &m.name == motion)
-                    .map(|m| m.robot)
-                    .ok_or_else(|| format!("unknown motion `{motion}`"))?,
-                Action::StartRamp { robot, .. }
-                | Action::Attach { robot, .. }
-                | Action::Track { robot, .. }
-                | Action::Untrack { robot } => scene.resolve_seq_robot(robot)?,
-                _ => continue,
-            };
-            match driven {
-                None => driven = Some(robot),
-                Some(existing) if existing == robot => {}
-                Some(existing) => {
-                    return Err(format!(
-                        "sequence `{}` drives both `{}` and `{}` — a controller \
-                         program is one robot's; split it into per-robot programs \
-                         (simulate_sequences) and export each",
-                        seq.name,
-                        scene.robots()[existing].name,
-                        scene.robots()[robot].name,
-                    ));
-                }
+    walk_actions(&seq.steps, &mut |action| -> Result<(), String> {
+        let robot = match action {
+            Action::StartMotion { motion } => scene
+                .motions()
+                .iter()
+                .find(|m| &m.name == motion)
+                .map(|m| m.robot)
+                .ok_or_else(|| format!("unknown motion `{motion}`"))?,
+            Action::StartRamp { robot, .. }
+            | Action::Attach { robot, .. }
+            | Action::Track { robot, .. }
+            | Action::Untrack { robot } => scene.resolve_seq_robot(robot)?,
+            _ => return Ok(()),
+        };
+        match driven {
+            None => driven = Some(robot),
+            Some(existing) if existing == robot => {}
+            Some(existing) => {
+                return Err(format!(
+                    "sequence `{}` drives both `{}` and `{}` — a controller \
+                     program is one robot's; split it into per-robot programs \
+                     (simulate_sequences) and export each",
+                    seq.name,
+                    scene.robots()[existing].name,
+                    scene.robots()[robot].name,
+                ));
             }
         }
-    }
+        Ok(())
+    })?;
     driven.ok_or_else(|| {
         format!(
             "sequence `{}` drives no robot — nothing to export (device-only \
@@ -356,27 +528,85 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
     })
 }
 
-fn next_planned<'a>(
-    planned: &mut std::iter::Peekable<impl Iterator<Item = &'a PlannedMove>>,
-    step: usize,
-    motion: Option<&str>,
-) -> Result<&'a PlannedMove, String> {
-    let record = planned
-        .next()
-        .filter(|p| p.step == step && p.motion.as_deref() == motion && !p.segments.is_empty());
-    record.ok_or_else(|| {
-        "timeline does not match the sequence (was it edited after the rollout?) — \
-         re-simulate and export again"
-            .to_string()
-    })
+/// A condition as a digital-input snapshot test — what branch guards
+/// (and compound level waits) lower to. Timers and edges have no
+/// snapshot form and are refused with guidance.
+fn digital_test(
+    condition: &Condition,
+    io: &SequenceIo,
+    label: &str,
+) -> Result<DigitalTest, String> {
+    match condition {
+        // A blocking controller has finished every move by the time the
+        // guard is read.
+        Condition::Immediately | Condition::Done => Ok(DigitalTest::Always),
+        Condition::Signal { name, value } => io
+            .inputs
+            .get(name)
+            .map(|port| DigitalTest::Input {
+                port: *port,
+                value: *value,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{label}: signal `{name}` has no input port — pass \
+                     inputs={{\"{name}\": <port>}}"
+                )
+            }),
+        Condition::DeviceDone { device } => io
+            .inputs
+            .get(device)
+            .map(|port| DigitalTest::Input {
+                port: *port,
+                value: true,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{label}: device `{device}` has no in-position input — pass \
+                     inputs={{\"{device}\": <port>}}"
+                )
+            }),
+        Condition::RobotDone { robot } => io
+            .inputs
+            .get(robot)
+            .map(|port| DigitalTest::Input {
+                port: *port,
+                value: true,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{label}: `robot_done({robot})` needs the partner controller's \
+                     idle contact on an input — pass inputs={{\"{robot}\": <port>}}"
+                )
+            }),
+        Condition::All(conditions) => Ok(DigitalTest::AllOf(
+            conditions
+                .iter()
+                .map(|c| digital_test(c, io, label))
+                .collect::<Result<_, _>>()?,
+        )),
+        Condition::Any(conditions) => Ok(DigitalTest::AnyOf(
+            conditions
+                .iter()
+                .map(|c| digital_test(c, io, label))
+                .collect::<Result<_, _>>()?,
+        )),
+        Condition::Elapsed { .. } => Err(format!(
+            "{label}: a timer cannot guard a branch or compound wait in a script \
+             — give it its own step, or latch it into a signal"
+        )),
+        Condition::Rising { .. } | Condition::Falling { .. } => Err(format!(
+            "{label}: an edge cannot guard a branch or compound wait in a script \
+             — latch the edge into a signal first, or wait for it in its own step"
+        )),
+    }
 }
 
 fn lower_device(
     device: &str,
     command: &DeviceCommand,
     io: &SequenceIo,
-    step_index: usize,
-    step_name: &str,
+    label: &str,
     commands: &mut Vec<Command>,
     warnings: &mut Vec<String>,
 ) {
@@ -391,10 +621,8 @@ fn lower_device(
             // An unmapped run coil stays the cell controller's: common
             // when the PLC keeps the conveyor and the robot only handshakes.
             warnings.push(format!(
-                "step {} `{step_name}`: device `{device}` has no output port — \
-                 the {} stays with the cell controller (map it via outputs= to \
-                 drive it from the robot)",
-                step_index + 1,
+                "{label}: device `{device}` has no output port — the {} stays with \
+                 the cell controller (map it via outputs= to drive it from the robot)",
                 if value { "start" } else { "stop" },
             ));
             commands.push(Command::Comment {
@@ -413,9 +641,8 @@ fn lower_device(
                 DeviceCommand::Start | DeviceCommand::Stop => unreachable!("coil handled above"),
             };
             warnings.push(format!(
-                "step {} `{step_name}`: device command `{device}.{describe}` is not \
-                 expressible as a digital output — the cell controller keeps that job",
-                step_index + 1,
+                "{label}: device command `{device}.{describe}` is not expressible \
+                 as a digital output — the cell controller keeps that job",
             ));
             commands.push(Command::Comment {
                 text: format!("device {device}: {describe} (left to the cell controller)"),
@@ -427,8 +654,7 @@ fn lower_device(
 fn lower_condition(
     condition: &Condition,
     io: &SequenceIo,
-    step_index: usize,
-    step_name: &str,
+    label: &str,
     started_move: bool,
     commands: &mut Vec<Command>,
     warnings: &mut Vec<String>,
@@ -438,10 +664,8 @@ fn lower_condition(
     let concurrency_warning = |warnings: &mut Vec<String>, what: &str| {
         if started_move {
             warnings.push(format!(
-                "step {} `{step_name}`: {what} runs beside the move in simulation \
-                 but after it in the script — the cycle can run slower than the \
-                 simulated takt",
-                step_index + 1,
+                "{label}: {what} runs beside the move in simulation but after it \
+                 in the script — the cycle can run slower than the simulated takt",
             ));
         }
     };
@@ -454,9 +678,8 @@ fn lower_condition(
         Condition::Signal { name, value } => {
             let port = io.inputs.get(name).ok_or_else(|| {
                 format!(
-                    "step {} `{step_name}`: signal `{name}` has no input port — \
-                     pass inputs={{\"{name}\": <port>}}",
-                    step_index + 1,
+                    "{label}: signal `{name}` has no input port — pass \
+                     inputs={{\"{name}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the signal wait");
@@ -465,12 +688,40 @@ fn lower_condition(
                 value: *value,
             });
         }
+        // An edge lowers to the classic two-stage interlock: wait for the
+        // idle level, then for the active one — "the *next* transition",
+        // never the state the input happened to arrive in.
+        Condition::Rising { name } | Condition::Falling { name } => {
+            let port = io.inputs.get(name).ok_or_else(|| {
+                format!(
+                    "{label}: signal `{name}` has no input port — pass \
+                     inputs={{\"{name}\": <port>}}"
+                )
+            })?;
+            let rising = matches!(condition, Condition::Rising { .. });
+            concurrency_warning(warnings, "the edge wait");
+            commands.push(Command::Comment {
+                text: format!(
+                    "{} edge of {name}: wait {}, then {}",
+                    if rising { "rising" } else { "falling" },
+                    if rising { "low" } else { "high" },
+                    if rising { "high" } else { "low" },
+                ),
+            });
+            commands.push(Command::WaitDigitalIn {
+                port: *port,
+                value: !rising,
+            });
+            commands.push(Command::WaitDigitalIn {
+                port: *port,
+                value: rising,
+            });
+        }
         Condition::DeviceDone { device } => {
             let port = io.inputs.get(device).ok_or_else(|| {
                 format!(
-                    "step {} `{step_name}`: device `{device}` has no in-position \
-                     input — pass inputs={{\"{device}\": <port>}}",
-                    step_index + 1,
+                    "{label}: device `{device}` has no in-position input — pass \
+                     inputs={{\"{device}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the in-position wait");
@@ -482,10 +733,8 @@ fn lower_condition(
         Condition::RobotDone { robot } => {
             let port = io.inputs.get(robot).ok_or_else(|| {
                 format!(
-                    "step {} `{step_name}`: `robot_done({robot})` needs the partner \
-                     controller's idle contact on an input — pass \
-                     inputs={{\"{robot}\": <port>}}",
-                    step_index + 1,
+                    "{label}: `robot_done({robot})` needs the partner controller's \
+                     idle contact on an input — pass inputs={{\"{robot}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the partner wait");
@@ -494,41 +743,44 @@ fn lower_condition(
                 value: true,
             });
         }
-        Condition::All(conditions) => {
-            for condition in conditions {
-                lower_condition(
-                    condition,
-                    io,
-                    step_index,
-                    step_name,
-                    started_move,
-                    commands,
-                    warnings,
-                )?;
+        // Compound waits: when every member is a digital snapshot test,
+        // the whole thing waits as one boolean expression — simultaneous,
+        // like the scan loop. A mix with timers keeps the sequential
+        // fallback for `all_of` (conservative: each member in turn);
+        // `any_of` has no sequential form and is refused.
+        Condition::All(conditions) => match digital_test(condition, io, label) {
+            Ok(test) => {
+                concurrency_warning(warnings, "the compound wait");
+                push_wait(test, commands);
             }
-        }
+            Err(_) => {
+                for condition in conditions {
+                    lower_condition(condition, io, label, started_move, commands, warnings)?;
+                }
+            }
+        },
         Condition::Any(conditions) => {
             if let [sole] = conditions.as_slice() {
-                lower_condition(
-                    sole,
-                    io,
-                    step_index,
-                    step_name,
-                    started_move,
-                    commands,
-                    warnings,
-                )?;
+                lower_condition(sole, io, label, started_move, commands, warnings)?;
             } else {
-                return Err(format!(
-                    "step {} `{step_name}`: `any_of` cannot be lowered to \
-                     sequential digital waits — restructure the step (watch one \
-                     contact, or let the cell controller arbitrate)",
-                    step_index + 1,
-                ));
+                let test = digital_test(condition, io, label)?;
+                concurrency_warning(warnings, "the compound wait");
+                push_wait(test, commands);
             }
         }
     }
     Ok(())
+}
+
+/// Emits a level wait in its plainest form: vacuous tests vanish, a lone
+/// input keeps the single-contact wait, anything else waits on the
+/// simplified boolean expression.
+fn push_wait(test: DigitalTest, commands: &mut Vec<Command>) {
+    match test.simplified() {
+        DigitalTest::Always => {}
+        DigitalTest::Input { port, value } => commands.push(Command::WaitDigitalIn { port, value }),
+        test => commands.push(Command::WaitTest { test }),
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +797,7 @@ mod tests {
             name: name.to_string(),
             actions,
             transition,
+            select: Vec::new(),
         }
     }
 
@@ -652,8 +905,10 @@ mod tests {
                 Command::MoveLinear { .. } => "movel",
                 Command::SetDigitalOut { .. } => "out",
                 Command::WaitDigitalIn { .. } => "in",
+                Command::WaitTest { .. } => "wait",
                 Command::Sleep { .. } => "sleep",
                 Command::Comment { .. } => "#",
+                Command::Select { .. } => "select",
             })
             .collect();
         // move-to-start, then: wait step, approach move, grip (coil +
@@ -791,7 +1046,8 @@ mod tests {
     }
 
     #[test]
-    fn any_of_is_refused() {
+    fn any_of_lowers_to_a_compound_wait_unless_a_timer_hides_in_it() {
+        // A timer member has no digital snapshot: refused with guidance.
         let mut scene = cell();
         scene.upsert_sequence(Sequence {
             name: "s".into(),
@@ -820,7 +1076,46 @@ mod tests {
             &ProgramOptions::default(),
         )
         .unwrap_err();
-        assert!(err.contains("any_of"), "{err}");
+        assert!(err.contains("timer"), "{err}");
+
+        // Pure digital members wait as one boolean expression.
+        let mut scene = cell();
+        scene.define_signal("abort", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![step(
+                "race",
+                vec![Action::StartMotion {
+                    motion: "go".into(),
+                }],
+                Condition::Any(vec![
+                    Condition::Signal {
+                        name: "abort".into(),
+                        value: true,
+                    },
+                    Condition::Signal {
+                        name: "part_here".into(),
+                        value: true,
+                    },
+                ]),
+            )],
+        });
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        let out = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[("part_here", 0), ("abort", 4)], &[]),
+            &ProgramOptions::default(),
+        )
+        .unwrap();
+        assert!(out
+            .program
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::WaitTest { test: DigitalTest::AnyOf(tests) } if tests.len() == 2)));
     }
 
     #[test]
@@ -873,6 +1168,294 @@ mod tests {
         assert!(out.program.commands.iter().any(
             |c| matches!(c, Command::Comment { text } if text.contains("conv") && text.contains("stop"))
         ));
+    }
+
+    fn arm(condition: Condition, steps: Vec<Step>) -> crate::seq::SelectArm {
+        crate::seq::SelectArm { condition, steps }
+    }
+
+    fn select_step(name: &str, arms: Vec<crate::seq::SelectArm>) -> Step {
+        Step {
+            name: name.to_string(),
+            actions: vec![],
+            transition: Condition::Immediately,
+            select: arms,
+        }
+    }
+
+    fn sig(name: &str) -> Condition {
+        Condition::Signal {
+            name: name.into(),
+            value: true,
+        }
+    }
+
+    #[test]
+    fn branches_lower_to_if_chains_with_skipped_arms_carried() {
+        let mut scene = cell();
+        scene.define_signal("ok", true);
+        scene.define_signal("ng", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "approach",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                select_step(
+                    "judge",
+                    vec![
+                        arm(
+                            sig("ok"),
+                            vec![step(
+                                "place",
+                                vec![Action::StartMotion {
+                                    motion: "back".into(),
+                                }],
+                                Condition::Done,
+                            )],
+                        ),
+                        arm(
+                            sig("ng"),
+                            vec![step(
+                                "purge",
+                                vec![
+                                    Action::StartRamp {
+                                        robot: None,
+                                        targets: vec![("j".into(), 0.3)],
+                                        duration: 0.5,
+                                    },
+                                    Action::Set {
+                                        signal: "vacuum".into(),
+                                        value: false,
+                                    },
+                                ],
+                                Condition::Done,
+                            )],
+                        ),
+                    ],
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(tl.branches.len(), 1);
+        assert_eq!(tl.branches[0].arm, 0);
+
+        let out = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[("ok", 1), ("ng", 2)], &[("vacuum", 3)]),
+            &ProgramOptions::default(),
+        )
+        .unwrap();
+        let select = out
+            .program
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                Command::Select { arms } => Some(arms),
+                _ => None,
+            })
+            .expect("a select command");
+        assert_eq!(select.len(), 2);
+        assert!(matches!(
+            select[0].test,
+            DigitalTest::Input {
+                port: 1,
+                value: true
+            }
+        ));
+        // The taken arm carries its planned motion.
+        assert!(select[0]
+            .body
+            .iter()
+            .any(|c| matches!(c, Command::MoveJoint { .. })));
+        // The skipped arm still exports: its ramp is synthesized from the
+        // branch-entry configuration (0.8 after `go`) to the authored
+        // 0.3, paced by the authored duration.
+        let ramp = select[1]
+            .body
+            .iter()
+            .find_map(|c| match c {
+                Command::MoveJoint { q, velocity, .. } => Some((q.clone(), *velocity)),
+                _ => None,
+            })
+            .expect("synthesized ramp move");
+        assert_eq!(ramp.0, vec![0.3]);
+        assert!((ramp.1 - 0.5 / 0.5).abs() < 1e-9, "v = {}", ramp.1);
+        assert!(select[1].body.iter().any(|c| matches!(
+            c,
+            Command::SetDigitalOut {
+                port: 3,
+                value: false
+            }
+        )));
+    }
+
+    #[test]
+    fn skipped_arm_motions_are_refused() {
+        let mut scene = cell();
+        scene.define_signal("ok", true);
+        scene.define_signal("ng", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "approach",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                select_step(
+                    "judge",
+                    vec![
+                        arm(sig("ok"), vec![]),
+                        arm(
+                            sig("ng"),
+                            vec![step(
+                                "rework",
+                                vec![Action::StartMotion {
+                                    motion: "back".into(),
+                                }],
+                                Condition::Done,
+                            )],
+                        ),
+                    ],
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        let err = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[("ok", 1), ("ng", 2)], &[]),
+            &ProgramOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("never took"), "{err}");
+    }
+
+    #[test]
+    fn edges_lower_to_two_stage_waits_and_cannot_guard_arms() {
+        let mut scene = cell();
+        scene.define_signal("pulse", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "next part",
+                    vec![],
+                    Condition::Rising {
+                        name: "pulse".into(),
+                    },
+                ),
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "pulser".into(),
+            steps: vec![
+                step("hold", vec![], Condition::Elapsed { seconds: 0.1 }),
+                step(
+                    "fire",
+                    vec![Action::Set {
+                        signal: "pulse".into(),
+                        value: true,
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequences(&["s", "pulser"], &RolloutOptions::default())
+            .unwrap();
+        let out = sequence_program(
+            &scene,
+            &tl,
+            Some("s"),
+            &io(&[("pulse", 2)], &[]),
+            &ProgramOptions::default(),
+        )
+        .unwrap();
+        let waits: Vec<(u32, bool)> = out
+            .program
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                Command::WaitDigitalIn { port, value } => Some((*port, *value)),
+                _ => None,
+            })
+            .collect();
+        // Wait low, then high: the *next* rising edge, not the level.
+        assert_eq!(waits, vec![(2, false), (2, true)]);
+
+        // As a branch guard there is no snapshot form: refused (the
+        // rollout itself is fine with it — only the script is not).
+        let mut scene = cell();
+        scene.define_signal("pulse", false);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                select_step(
+                    "gate",
+                    vec![arm(
+                        Condition::Rising {
+                            name: "pulse".into(),
+                        },
+                        vec![],
+                    )],
+                ),
+            ],
+        });
+        scene.upsert_sequence(Sequence {
+            name: "pulser".into(),
+            steps: vec![
+                step("hold", vec![], Condition::Elapsed { seconds: 3.0 }),
+                step(
+                    "fire",
+                    vec![Action::Set {
+                        signal: "pulse".into(),
+                        value: true,
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequences(&["s", "pulser"], &RolloutOptions::default())
+            .unwrap();
+        let err = sequence_program(
+            &scene,
+            &tl,
+            Some("s"),
+            &io(&[("pulse", 2)], &[]),
+            &ProgramOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("latch the edge"), "{err}");
     }
 
     #[test]

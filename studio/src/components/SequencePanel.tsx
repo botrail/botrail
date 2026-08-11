@@ -55,6 +55,10 @@ function conditionLabel(condition: ConditionMsg): string {
       return `${condition.seconds.toFixed(2)}s`;
     case "signal":
       return `${condition.name}=${condition.value ? "1" : "0"}`;
+    case "rising":
+      return `↑${condition.name}`;
+    case "falling":
+      return `↓${condition.name}`;
     case "all":
       return condition.conditions.map(conditionLabel).join(" & ");
     case "any":
@@ -242,39 +246,74 @@ export function SequencePanel() {
 
         <div className="motion-list">
           {sequence.steps.map((step, i) => (
-            <div key={i} className="motion-row">
-              <span className="motion-kind">
-                {i + 1} · {step.name}
-                {step.actions.map((a, k) => (
-                  <span key={k} className="seq-chip">
-                    {actionLabel(a)}
-                  </span>
-                ))}
-              </span>
-              {step.transition.type === "elapsed" ? (
-                <input
-                  className="seq-wait"
-                  type="number"
-                  min={0}
-                  step={0.1}
-                  value={step.transition.seconds}
-                  onChange={(e) => {
-                    const v = parseFloat(e.target.value);
-                    if (Number.isFinite(v) && v >= 0) setWaitSeconds(i, v);
-                  }}
-                />
-              ) : (
-                <span className="seq-cond">{conditionLabel(step.transition)}</span>
-              )}
-              <button
-                className="obstacle-remove"
-                title="Remove step"
-                onClick={() =>
-                  commit(sequence.steps.filter((_, k) => k !== i))
-                }
-              >
-                ×
-              </button>
+            <div key={i}>
+              <div className="motion-row">
+                <span className="motion-kind">
+                  {i + 1} · {step.select?.length ? "◇ " : ""}
+                  {step.name}
+                  {step.actions.map((a, k) => (
+                    <span key={k} className="seq-chip">
+                      {actionLabel(a)}
+                    </span>
+                  ))}
+                </span>
+                {step.select?.length ? (
+                  <span className="seq-cond">{step.select.length} arms</span>
+                ) : step.transition.type === "elapsed" ? (
+                  <input
+                    className="seq-wait"
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={step.transition.seconds}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (Number.isFinite(v) && v >= 0) setWaitSeconds(i, v);
+                    }}
+                  />
+                ) : (
+                  <span className="seq-cond">{conditionLabel(step.transition)}</span>
+                )}
+                <button
+                  className="obstacle-remove"
+                  title="Remove step"
+                  onClick={() =>
+                    commit(sequence.steps.filter((_, k) => k !== i))
+                  }
+                >
+                  ×
+                </button>
+              </div>
+              {/* Branch arms, read-only (Python-authored): the guard and
+                  each arm's steps, indented under the branching step. */}
+              {(step.select ?? []).map((arm, j) => (
+                <div key={j} className="seq-arm">
+                  <div className="motion-row">
+                    <span className="motion-kind seq-cond">
+                      ├ when {conditionLabel(arm.condition)}
+                      {arm.steps.length === 0 && " → skip"}
+                    </span>
+                  </div>
+                  {arm.steps.map((armStep, k) => (
+                    <div key={k} className="motion-row seq-arm-step">
+                      <span className="motion-kind">
+                        {armStep.select?.length ? "◇ " : ""}
+                        {armStep.name}
+                        {armStep.actions.map((a, m) => (
+                          <span key={m} className="seq-chip">
+                            {actionLabel(a)}
+                          </span>
+                        ))}
+                      </span>
+                      <span className="seq-cond">
+                        {armStep.select?.length
+                          ? `${armStep.select.length} arms`
+                          : conditionLabel(armStep.transition)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
             </div>
           ))}
           {sequence.steps.length === 0 && (

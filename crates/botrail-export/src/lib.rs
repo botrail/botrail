@@ -82,6 +82,73 @@ pub enum Command {
     /// Annotation carried into the script as a comment (step names,
     /// simulation-only actions). Never affects execution.
     Comment { text: String },
+    /// Block until a compound digital test holds — a level wait over a
+    /// boolean expression of inputs (`all_of`/`any_of` waits).
+    WaitTest { test: DigitalTest },
+    /// Selection divergence: block until any arm's test holds, then run
+    /// exactly the first arm whose test does (authored order = priority)
+    /// — an SFC branch lowered to `wait-any` + `if/elif`.
+    Select { arms: Vec<SelectArm> },
+}
+
+/// One arm of a [`Command::Select`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectArm {
+    pub test: DigitalTest,
+    pub body: Vec<Command>,
+}
+
+/// A boolean expression over digital inputs — what branch guards lower
+/// to. Kept minimal on purpose: whatever a controller cannot test as a
+/// snapshot of its inputs (timers, edges) is refused upstream rather
+/// than approximated here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DigitalTest {
+    /// A digital input reads `value`.
+    Input {
+        port: u32,
+        value: bool,
+    },
+    /// Always true — the guard was vacuous on a blocking controller
+    /// (e.g. `done` when every move already blocks).
+    Always,
+    AllOf(Vec<DigitalTest>),
+    AnyOf(Vec<DigitalTest>),
+}
+
+impl DigitalTest {
+    /// Boolean identities, so `all_of(x, done)` renders as `x` rather
+    /// than `(x and True)`: `Always` drops out of conjunctions, absorbs
+    /// disjunctions, and one-element groups collapse.
+    pub fn simplified(self) -> DigitalTest {
+        match self {
+            DigitalTest::AllOf(tests) => {
+                let mut tests: Vec<DigitalTest> = tests
+                    .into_iter()
+                    .map(DigitalTest::simplified)
+                    .filter(|t| !matches!(t, DigitalTest::Always))
+                    .collect();
+                match tests.len() {
+                    0 => DigitalTest::Always,
+                    1 => tests.remove(0),
+                    _ => DigitalTest::AllOf(tests),
+                }
+            }
+            DigitalTest::AnyOf(tests) => {
+                let mut tests: Vec<DigitalTest> =
+                    tests.into_iter().map(DigitalTest::simplified).collect();
+                if tests.iter().any(|t| matches!(t, DigitalTest::Always)) {
+                    return DigitalTest::Always;
+                }
+                match tests.len() {
+                    0 => DigitalTest::Always,
+                    1 => tests.remove(0),
+                    _ => DigitalTest::AnyOf(tests),
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// A vendor-neutral robot program: named move sequence over a fixed joint

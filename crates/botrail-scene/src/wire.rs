@@ -569,6 +569,20 @@ pub struct StepMsg {
     pub actions: Vec<ActionMsg>,
     /// The step completes when this condition holds.
     pub transition: ConditionMsg,
+    /// SFC selection divergence: when non-empty this is a branching step
+    /// — no actions, `transition` unused, the arms' conditions are the
+    /// outgoing transitions (first to hold wins, authored order =
+    /// priority) and every arm rejoins at the next step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub select: Vec<SelectArmMsg>,
+}
+
+/// One arm of a branching step: its guard plus the steps it runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SelectArmMsg {
+    pub condition: ConditionMsg,
+    pub steps: Vec<StepMsg>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -645,6 +659,10 @@ pub enum ConditionMsg {
     Elapsed { seconds: f64 },
     /// Level test of a signal.
     Signal { name: String, value: bool },
+    /// Rising edge: on this scan, off the previous one (`-|P|-`).
+    Rising { name: String },
+    /// Falling edge: off this scan, on the previous one (`-|N|-`).
+    Falling { name: String },
     /// A linear axis reached its commanded position.
     DeviceDone { device: String },
     /// Series contacts (AND).
@@ -1337,6 +1355,8 @@ pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
             name: name.clone(),
             value: *value,
         },
+        Condition::Rising { name } => ConditionMsg::Rising { name: name.clone() },
+        Condition::Falling { name } => ConditionMsg::Falling { name: name.clone() },
         Condition::DeviceDone { device } => ConditionMsg::DeviceDone {
             device: device.clone(),
         },
@@ -1361,6 +1381,8 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
             name: name.clone(),
             value: *value,
         },
+        ConditionMsg::Rising { name } => Condition::Rising { name: name.clone() },
+        ConditionMsg::Falling { name } => Condition::Falling { name: name.clone() },
         ConditionMsg::DeviceDone { device } => Condition::DeviceDone {
             device: device.clone(),
         },
@@ -1373,33 +1395,49 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
     }
 }
 
+fn step_msg(step: &Step) -> StepMsg {
+    StepMsg {
+        name: step.name.clone(),
+        actions: step.actions.iter().map(action_msg).collect(),
+        transition: seq_condition_msg(&step.transition),
+        select: step
+            .select
+            .iter()
+            .map(|arm| SelectArmMsg {
+                condition: seq_condition_msg(&arm.condition),
+                steps: arm.steps.iter().map(step_msg).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn step_from_msg(msg: &StepMsg) -> Step {
+    Step {
+        name: msg.name.clone(),
+        actions: msg.actions.iter().map(action_from_msg).collect(),
+        transition: seq_condition_from_msg(&msg.transition),
+        select: msg
+            .select
+            .iter()
+            .map(|arm| crate::seq::SelectArm {
+                condition: seq_condition_from_msg(&arm.condition),
+                steps: arm.steps.iter().map(step_from_msg).collect(),
+            })
+            .collect(),
+    }
+}
+
 pub fn sequence_msg(sequence: &Sequence) -> SequenceMsg {
     SequenceMsg {
         name: sequence.name.clone(),
-        steps: sequence
-            .steps
-            .iter()
-            .map(|s| StepMsg {
-                name: s.name.clone(),
-                actions: s.actions.iter().map(action_msg).collect(),
-                transition: seq_condition_msg(&s.transition),
-            })
-            .collect(),
+        steps: sequence.steps.iter().map(step_msg).collect(),
     }
 }
 
 pub fn sequence_from_msg(msg: &SequenceMsg) -> Sequence {
     Sequence {
         name: msg.name.clone(),
-        steps: msg
-            .steps
-            .iter()
-            .map(|s| Step {
-                name: s.name.clone(),
-                actions: s.actions.iter().map(action_from_msg).collect(),
-                transition: seq_condition_from_msg(&s.transition),
-            })
-            .collect(),
+        steps: msg.steps.iter().map(step_from_msg).collect(),
     }
 }
 

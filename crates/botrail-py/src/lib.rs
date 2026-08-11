@@ -2615,6 +2615,18 @@ impl SequenceTimeline {
         self.inner.sequences.clone()
     }
 
+    /// The path the bake took through branching steps, in resolution
+    /// order: `(sequence, step name, arm index)`. Untaken arms have no
+    /// spans — this is how a timeline says which way it went.
+    #[getter]
+    fn branches(&self) -> Vec<(String, String, usize)> {
+        self.inner
+            .branches
+            .iter()
+            .map(|b| (b.sequence.clone(), b.step.clone(), b.arm))
+            .collect()
+    }
+
     /// Renders one program of this timeline as a vendor robot script —
     /// the same steps that drove the simulation, with real I/O: `inputs`
     /// maps signal/device/robot names to digital input ports (level

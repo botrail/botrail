@@ -181,3 +181,73 @@ def test_sequence_script_unmapped_names_raise(cell_timeline) -> None:
         tl.to_script(inputs=IO["inputs"], outputs={"conv": 0})
     with pytest.raises(ValueError, match="not part of this rollout"):
         tl.to_script(sequence="other", **IO)
+
+
+# ---- SFC branches + edges: authored once, simulated and exported --------
+
+
+def test_branches_and_edges_simulate_and_export() -> None:
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene.define_signal("part_ok", True)  # this scenario: the part passes
+    scene.define_signal("part_ng")
+    scene.define_signal("pulse")  # part-arrival edge, raised by the feeder
+
+    scene.add_segment("inspect", goal=[0.6, 0.5, -0.8, 0.2, 0.0, 0.0])
+    scene.add_segment("place", goal=[0.0] * 6)
+
+    qc = scene.sequence("qc")
+    # Edge, not level: a part already sitting there is not an arrival.
+    qc.step("await part", transition=bt.seq.rising("pulse"))
+    qc.step("inspect", actions=[bt.seq.motion("inspect")])
+    sel = qc.select("judge")
+    sel.when(bt.seq.signal("part_ok")).step(
+        "place", actions=[bt.seq.motion("place")]
+    )
+    ng = sel.when(bt.seq.signal("part_ng"))
+    ng.step(
+        "purge",
+        actions=[bt.seq.set_signal("part_ng", False)],
+        transition=bt.seq.elapsed(0.2),
+    )
+
+    feeder = scene.sequence("feeder")
+    feeder.step("hold", transition=bt.seq.elapsed(0.1))
+    feeder.step("fire", actions=[bt.seq.set_signal("pulse")])
+
+    tl = scene.simulate_sequences(["qc", "feeder"])
+    # The bake records the path: arm 0 (part_ok) — and only its spans exist.
+    assert tl.branches == [("qc", "judge", 0)]
+    names = [name for name, _, _ in tl.step_spans]
+    assert "qc/place" in names and "qc/purge" not in names
+    # The edge held the program past the startup level.
+    await_span = tl.step_span("qc/await part")
+    assert 0.1 <= await_span.end <= 0.13
+
+    code = tl.to_script(
+        sequence="qc",
+        inputs={"pulse": 0, "part_ok": 1, "part_ng": 2},
+        outputs={"part_ng": 3},
+    )
+    # The rising edge is the two-stage interlock: wait low, then high.
+    assert code.index("while (get_standard_digital_in(0)):") < code.index(
+        "while (not get_standard_digital_in(0)):"
+    )
+    # Both arms are in the controller program — the skipped one included.
+    assert "if (get_standard_digital_in(1)):" in code
+    assert "elif (get_standard_digital_in(2)):" in code
+    assert "set_standard_digital_out(3, False)" in code  # skipped arm's coil
+    assert "sleep(0.2)" in code  # and its dwell
+
+    # A skipped arm with a planned motion cannot be exported honestly.
+    sel2 = qc.select("rework gate")
+    sel2.when(bt.seq.signal("part_ok")).step("noop")
+    sel2.when(bt.seq.signal("part_ng")).step(
+        "rework", actions=[bt.seq.motion("inspect")]
+    )
+    tl = scene.simulate_sequences(["qc", "feeder"])
+    with pytest.raises(ValueError, match="never took"):
+        tl.to_script(
+            sequence="qc",
+            inputs={"pulse": 0, "part_ok": 1, "part_ng": 2},
+            outputs={"part_ng": 3},
+        )

@@ -180,9 +180,30 @@ def signal(name: str, value: bool = True) -> Condition:
     return {"type": "signal", "name": name, "value": bool(value)}
 
 
+def rising(name: str) -> Condition:
+    """Rising edge (``-|P|-``): the signal turned on since this program's
+    previous scan — "the *next* part", not one already sitting on the
+    beam. Startup state is not an edge."""
+    return {"type": "rising", "name": name}
+
+
+def falling(name: str) -> Condition:
+    """Falling edge (``-|N|-``): the signal turned off since this
+    program's previous scan."""
+    return {"type": "falling", "name": name}
+
+
 def device_done(device: str) -> Condition:
     """A linear axis has reached its commanded position."""
     return {"type": "device_done", "device": device}
+
+
+def otherwise() -> Condition:
+    """Always-true branch guard — the ``else`` arm of a ``select``. Put it
+    last: arms are tried in order, so it catches whatever the guards
+    before it did not (and the exported script skips the wait entirely,
+    since some arm is always ready)."""
+    return {"type": "immediately"}
 
 
 def all_of(*conditions: Condition) -> Condition:
@@ -198,7 +219,81 @@ def any_of(*conditions: Condition) -> Condition:
 _DRIVERS = ("start_motion", "start_ramp")
 
 
-class SequenceBuilder:
+def _step_dict(name: str, actions: Iterable[Action], transition: Optional[Condition]) -> dict:
+    """One step's wire dict, with the default-transition sugar: a step
+    that starts a motion/ramp awaits it (``done()``); anything else moves
+    on ``immediately()``."""
+    actions = list(actions)
+    if transition is None:
+        drives = any(a.get("type") in _DRIVERS for a in actions)
+        transition = done() if drives else immediately()
+    return {"name": name, "actions": actions, "transition": transition}
+
+
+class _Steps:
+    """Shared step-list editing: the top-level sequence and every branch
+    arm append steps (and further branches) the same way; each edit syncs
+    the whole sequence through the root builder."""
+
+    _root: "SequenceBuilder"
+    _steps: list
+
+    def step(self, name: str, actions: Iterable[Action] = (), transition: Optional[Condition] = None):
+        """Appends one step. Without ``transition``, steps that start a
+        motion/ramp await it (``done()``); others pass ``immediately()``."""
+        self._steps.append(_step_dict(name, actions, transition))
+        self._root._sync()
+        return self
+
+    def select(self, name: str) -> "SelectBuilder":
+        """Appends a branching step (SFC selection divergence) and returns
+        its builder: add arms with ``.when(condition)``, steps inside each
+        arm, and every arm rejoins at whatever this list appends next.
+
+            sel = sq.select("judge")
+            sel.when(bt.seq.signal("part_ok")).step("place", actions=[...])
+            sel.when(bt.seq.signal("part_ng")).step("reject", actions=[...])
+            sq.step("home", actions=[bt.seq.motion("home")])   # the rejoin
+        """
+        step = {
+            "name": name,
+            "actions": [],
+            "transition": immediately(),
+            "select": [],
+        }
+        self._steps.append(step)
+        self._root._sync()
+        return SelectBuilder(self._root, step["select"])
+
+
+class SelectBuilder:
+    """Arms of one branching step (see ``_Steps.select``)."""
+
+    def __init__(self, root: "SequenceBuilder", arms: list):
+        self._root = root
+        self._arms = arms
+
+    def when(self, condition: Condition) -> "ArmBuilder":
+        """Appends an arm guarded by ``condition``. Arms are tried in the
+        order added (SFC's left-to-right priority); the first whose
+        condition holds runs. An arm left empty skips straight to the
+        rejoin."""
+        arm = {"condition": condition, "steps": []}
+        self._arms.append(arm)
+        self._root._sync()
+        return ArmBuilder(self._root, arm["steps"])
+
+
+class ArmBuilder(_Steps):
+    """One arm's step list — the same ``step``/``select`` API as the
+    sequence itself, so arms nest."""
+
+    def __init__(self, root: "SequenceBuilder", steps: list):
+        self._root = root
+        self._steps = steps
+
+
+class SequenceBuilder(_Steps):
     """Accumulates steps for one sequence, mirroring every edit into the
     scene (and any connected studio). Creating a builder for an existing
     sequence name starts it over from zero steps."""
@@ -206,23 +301,13 @@ class SequenceBuilder:
     def __init__(self, scene, name: str):
         self._scene = scene
         self._name = name
-        self._steps: list = []
+        self._root = self
+        self._steps = []
         self._sync()
 
     @property
     def name(self) -> str:
         return self._name
-
-    def step(self, name: str, actions: Iterable[Action] = (), transition: Optional[Condition] = None):
-        """Appends one step. Without ``transition``, steps that start a
-        motion/ramp await it (``done()``); others pass ``immediately()``."""
-        actions = list(actions)
-        if transition is None:
-            drives = any(a.get("type") in _DRIVERS for a in actions)
-            transition = done() if drives else immediately()
-        self._steps.append({"name": name, "actions": actions, "transition": transition})
-        self._sync()
-        return self
 
     def simulate(self, dt: float = 0.01, max_duration: float = 120.0):
         """Rolls the sequence out (see ``Scene.simulate_sequence``)."""

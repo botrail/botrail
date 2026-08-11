@@ -981,19 +981,46 @@ pub fn generate_python(project: &ProjectFile) -> String {
     for sequence in &project.sequences {
         out.push('\n');
         out.push_str(&format!("sequence = scene.sequence({:?})\n", sequence.name));
-        for step in &sequence.steps {
-            let actions: Vec<String> = step.actions.iter().map(py_action).collect();
-            out.push_str(&format!(
-                "sequence.step({:?}, actions=[{}], transition={})\n",
-                step.name,
-                actions.join(", "),
-                py_condition(&step.transition)
-            ));
-        }
+        py_steps(&mut out, "sequence", &sequence.steps, 0);
     }
 
     out.push_str("\nbt.studio(scene)\n");
     out
+}
+
+/// Emits `owner.step(...)` lines, recursing into branch arms with
+/// depth-suffixed `sel`/`arm` variables (rebinding across sequential
+/// branches at one depth is fine — each is finished before the next).
+fn py_steps(out: &mut String, owner: &str, steps: &[crate::wire::StepMsg], depth: usize) {
+    let suffix = |base: &str| {
+        if depth == 0 {
+            base.to_string()
+        } else {
+            format!("{base}{}", depth + 1)
+        }
+    };
+    for step in steps {
+        if step.select.is_empty() {
+            let actions: Vec<String> = step.actions.iter().map(py_action).collect();
+            out.push_str(&format!(
+                "{owner}.step({:?}, actions=[{}], transition={})\n",
+                step.name,
+                actions.join(", "),
+                py_condition(&step.transition)
+            ));
+        } else {
+            let sel = suffix("sel");
+            let arm = suffix("arm");
+            out.push_str(&format!("{sel} = {owner}.select({:?})\n", step.name));
+            for select_arm in &step.select {
+                out.push_str(&format!(
+                    "{arm} = {sel}.when({})\n",
+                    py_condition(&select_arm.condition)
+                ));
+                py_steps(out, &arm, &select_arm.steps, depth + 1);
+            }
+        }
+    }
 }
 
 fn py_action(action: &ActionMsg) -> String {
@@ -1086,6 +1113,8 @@ fn py_condition(condition: &ConditionMsg) -> String {
             "bt.seq.signal({name:?}, {})",
             if *value { "True" } else { "False" }
         ),
+        ConditionMsg::Rising { name } => format!("bt.seq.rising({name:?})"),
+        ConditionMsg::Falling { name } => format!("bt.seq.falling({name:?})"),
         ConditionMsg::DeviceDone { device } => format!("bt.seq.device_done({device:?})"),
         ConditionMsg::All { conditions } => {
             let inner: Vec<String> = conditions.iter().map(py_condition).collect();
@@ -1259,6 +1288,7 @@ mod tests {
                             value: true,
                         },
                     ]),
+                    select: Vec::new(),
                 },
                 crate::seq::Step {
                     name: "wait".into(),
@@ -1267,6 +1297,43 @@ mod tests {
                         value: false,
                     }],
                     transition: crate::seq::Condition::Elapsed { seconds: 0.5 },
+                    select: Vec::new(),
+                },
+                crate::seq::Step {
+                    name: "next part".into(),
+                    actions: vec![],
+                    transition: crate::seq::Condition::Rising {
+                        name: "armed".into(),
+                    },
+                    select: Vec::new(),
+                },
+                crate::seq::Step {
+                    name: "judge".into(),
+                    actions: vec![],
+                    transition: crate::seq::Condition::Immediately,
+                    select: vec![
+                        crate::seq::SelectArm {
+                            condition: crate::seq::Condition::Signal {
+                                name: "armed".into(),
+                                value: true,
+                            },
+                            steps: vec![crate::seq::Step {
+                                name: "disarm".into(),
+                                actions: vec![crate::seq::Action::Set {
+                                    signal: "armed".into(),
+                                    value: false,
+                                }],
+                                transition: crate::seq::Condition::Immediately,
+                                select: Vec::new(),
+                            }],
+                        },
+                        crate::seq::SelectArm {
+                            condition: crate::seq::Condition::Falling {
+                                name: "armed".into(),
+                            },
+                            steps: vec![],
+                        },
+                    ],
                 },
             ],
         });
@@ -1276,11 +1343,19 @@ mod tests {
         assert_eq!(reloaded.signals().len(), 1);
         assert!(reloaded.signals()[0].initial);
         let seq = reloaded.sequence("cycle").expect("sequence survives");
-        assert_eq!(seq.steps.len(), 2);
+        assert_eq!(seq.steps.len(), 4);
         assert!(matches!(
             &seq.steps[0].transition,
             crate::seq::Condition::All(cs) if cs.len() == 2
         ));
+        // Edges and branch arms make the round trip intact.
+        assert!(matches!(
+            &seq.steps[2].transition,
+            crate::seq::Condition::Rising { name } if name == "armed"
+        ));
+        assert_eq!(seq.steps[3].select.len(), 2);
+        assert_eq!(seq.steps[3].select[0].steps.len(), 1);
+        assert!(seq.steps[3].select[1].steps.is_empty());
 
         let code = generate_python(&scene.to_project());
         for needle in [
@@ -1290,6 +1365,12 @@ mod tests {
             "bt.seq.all_of(bt.seq.done(), bt.seq.signal(\"armed\", True))",
             "bt.seq.set_signal(\"armed\", False)",
             "bt.seq.elapsed(0.5)",
+            "bt.seq.rising(\"armed\")",
+            "sel = sequence.select(\"judge\")",
+            "arm = sel.when(bt.seq.signal(\"armed\", True))",
+            "arm.step(\"disarm\", actions=[bt.seq.set_signal(\"armed\", False)], \
+             transition=bt.seq.immediately())",
+            "arm = sel.when(bt.seq.falling(\"armed\"))",
         ] {
             assert!(code.contains(needle), "missing `{needle}`:\n{code}");
         }
