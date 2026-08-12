@@ -48,12 +48,15 @@ function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
 
   // The click handler makes the robot opaque to picking: without it, R3F
   // ignores handler-less meshes and a click on the arm would select
-  // whatever obstacle lies behind it. Clicking a robot focuses its TCP.
+  // whatever obstacle lies behind it. Clicking a robot focuses its TCP
+  // and raises the posing tab.
   return (
     <group
       onClick={(e) => {
         e.stopPropagation();
-        useStudioStore.getState().selectTcp(name);
+        const s = useStudioStore.getState();
+        s.selectTcp(name);
+        s.focusTab("robot");
       }}
       onPointerOver={(e) => {
         e.stopPropagation();

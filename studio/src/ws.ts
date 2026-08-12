@@ -151,11 +151,6 @@ export async function dropUsdScene(
   return false;
 }
 
-/** Plan a robot from its current configuration to `goal` (DOF order). */
-export function sendPlanRequest(robot: string, goal: number[]): void {
-  rawSend({ type: "plan_request", robot, goal_positions: goal });
-}
-
 /** Add an obstacle; the server may rename it and re-broadcasts the full list. */
 export function sendAddObstacle(obstacle: ObstacleMsg): void {
   rawSend({ type: "add_obstacle", obstacle });

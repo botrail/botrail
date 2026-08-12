@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import type {
   DeviceMsg,
@@ -13,12 +13,14 @@ import {
   sendUpsertDevice,
   sendUpsertSensor,
 } from "../ws";
+import { Section } from "./Section";
 
 /**
  * Create/edit forms for the world's I/O fixtures: zone/beam sensors and
  * the two workhorse devices (conveyor, linear axis). The deeper device
  * kinds (source, sink, vehicle) carry pools, paths, and stations — those
- * stay Python-authored and appear here read-only.
+ * stay Python-authored and appear here read-only. The scene tree is the
+ * list; this panel adds and edits the selected fixture.
  *
  * Upserts replace wholesale (the full-list re-send culture), so every
  * field commit sends the whole record; creation picks a fresh name so an
@@ -59,25 +61,9 @@ export function SensorDevicePanel() {
   const sensors = useStudioStore((s) => s.sensors);
   const devices = useStudioStore((s) => s.devices);
   const selection = useStudioStore((s) => s.selection);
+  const selectSensor = useStudioStore((s) => s.selectSensor);
+  const selectDevice = useStudioStore((s) => s.selectDevice);
   const selectedObstacle = selection.type === "obstacle" ? selection.name : null;
-
-  const [editing, setEditing] = useState<
-    { kind: "sensor" | "device"; name: string } | null
-  >(null);
-  // A freshly created fixture is editable before the server echo lands;
-  // `pending` keeps the close-on-deleted effect below from mistaking that
-  // in-flight moment for a deletion.
-  const pendingRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!editing) return;
-    const pool: { name: string }[] =
-      editing.kind === "sensor" ? sensors : devices;
-    if (pool.some((f) => f.name === editing.name)) {
-      pendingRef.current = null;
-    } else if (pendingRef.current !== editing.name) {
-      setEditing(null);
-    }
-  }, [editing, sensors, devices]);
 
   // New sensors watch the selected obstacle when there is one — placing a
   // beam for a specific part is the common gesture — else all objects.
@@ -98,8 +84,7 @@ export function SensorDevicePanel() {
       watch: defaultWatch(),
       mount: null,
     });
-    pendingRef.current = name;
-    setEditing({ kind: "sensor", name });
+    selectSensor(name);
   };
   const addBeam = () => {
     const name = freshName("beam", sensors);
@@ -114,8 +99,7 @@ export function SensorDevicePanel() {
       watch: defaultWatch(),
       mount: null,
     });
-    pendingRef.current = name;
-    setEditing({ kind: "sensor", name });
+    selectSensor(name);
   };
   const addConveyor = () => {
     const name = freshName("conveyor", devices);
@@ -129,8 +113,7 @@ export function SensorDevicePanel() {
         running: true,
       },
     });
-    pendingRef.current = name;
-    setEditing({ kind: "device", name });
+    selectDevice(name);
   };
   const addAxis = () => {
     if (!selectedObstacle) return;
@@ -146,24 +129,20 @@ export function SensorDevicePanel() {
         range: [0, 0.5],
       },
     });
-    pendingRef.current = name;
-    setEditing({ kind: "device", name });
+    selectDevice(name);
   };
 
   const editedSensor =
-    editing?.kind === "sensor"
-      ? (sensors.find((s) => s.name === editing.name) ?? null)
+    selection.type === "sensor"
+      ? (sensors.find((s) => s.name === selection.name) ?? null)
       : null;
   const editedDevice =
-    editing?.kind === "device"
-      ? (devices.find((d) => d.name === editing.name) ?? null)
+    selection.type === "device"
+      ? (devices.find((d) => d.name === selection.name) ?? null)
       : null;
 
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>Sensors & devices</h2>
-      </div>
+    <Section id="sensors" title="Sensors & devices">
       <div className="obstacle-controls">
         <div className="seg">
           <button onClick={addZone} title="area/presence sensor (box test)">
@@ -184,69 +163,19 @@ export function SensorDevicePanel() {
           </button>
         </div>
 
-        <div className="obstacle-list">
-          {sensors.map((s) => (
-            <div
-              key={s.name}
-              className={`obstacle-row${
-                editedSensor?.name === s.name ? " selected" : ""
-              }`}
-              onClick={() => setEditing({ kind: "sensor", name: s.name })}
-            >
-              <span className="obstacle-name">
-                📡 {s.name}
-                <span className="seq-cond">
-                  {" "}
-                  · {s.kind.kind} → {watchLabel(s.watch)}
-                </span>
-              </span>
-              <button
-                className="obstacle-remove"
-                title="Remove sensor"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  sendRemoveSensor(s.name);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          {devices.map((d) => (
-            <div
-              key={d.name}
-              className={`obstacle-row${
-                editedDevice?.name === d.name ? " selected" : ""
-              }`}
-              onClick={() => setEditing({ kind: "device", name: d.name })}
-            >
-              <span className="obstacle-name">
-                ⚙ {d.name}
-                <span className="seq-cond"> · {d.kind.kind}</span>
-              </span>
-              <button
-                className="obstacle-remove"
-                title="Remove device"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  sendRemoveDevice(d.name);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          {sensors.length === 0 && devices.length === 0 && (
-            <div className="empty">no sensors or devices</div>
-          )}
-        </div>
-
-        {editedSensor && (
+        {editedSensor ? (
           <SensorForm sensor={editedSensor} selectedObstacle={selectedObstacle} />
+        ) : editedDevice ? (
+          <DeviceForm device={editedDevice} />
+        ) : (
+          <div className="hint">
+            {sensors.length === 0 && devices.length === 0
+              ? "no sensors or devices"
+              : "select a sensor or device in the scene tree to edit it"}
+          </div>
         )}
-        {editedDevice && <DeviceForm device={editedDevice} />}
       </div>
-    </section>
+    </Section>
   );
 }
 
@@ -263,6 +192,13 @@ function SensorForm({
 
   return (
     <div className="obstacle-form">
+      <div className="inspector-title" title={sensor.name}>
+        📡 {sensor.name}
+        <span className="seq-cond">
+          {" "}
+          · {kind.kind} → {watchLabel(sensor.watch)}
+        </span>
+      </div>
       {kind.kind === "zone" && (
         <>
           <VecFields
@@ -326,6 +262,15 @@ function SensorForm({
           everything
         </button>
       </div>
+      <div className="seg">
+        <button
+          className="danger"
+          title="remove this sensor"
+          onClick={() => sendRemoveSensor(sensor.name)}
+        >
+          Remove
+        </button>
+      </div>
     </div>
   );
 }
@@ -335,9 +280,28 @@ function DeviceForm({ device }: { device: DeviceMsg }) {
     sendUpsertDevice({ ...device, kind });
   const { kind } = device;
 
+  const title = (
+    <div className="inspector-title" title={device.name}>
+      ⚙ {device.name}
+      <span className="seq-cond"> · {kind.kind}</span>
+    </div>
+  );
+  const remove = (
+    <div className="seg">
+      <button
+        className="danger"
+        title="remove this device"
+        onClick={() => sendRemoveDevice(device.name)}
+      >
+        Remove
+      </button>
+    </div>
+  );
+
   if (kind.kind === "conveyor") {
     return (
       <div className="obstacle-form">
+        {title}
         <VecFields
           label="pos"
           value={kind.zone_pose.position}
@@ -364,12 +328,14 @@ function DeviceForm({ device }: { device: DeviceMsg }) {
           />
           running at start
         </label>
+        {remove}
       </div>
     );
   }
   if (kind.kind === "linear_axis") {
     return (
       <div className="obstacle-form">
+        {title}
         <div className="field num-field">
           <span className="field-label">moves</span>
           <span className="obstacle-pos">
@@ -397,12 +363,14 @@ function DeviceForm({ device }: { device: DeviceMsg }) {
           value={kind.range[1]}
           onCommit={(hi) => commit({ ...kind, range: [kind.range[0], hi] })}
         />
+        {remove}
       </div>
     );
   }
   // Source / sink / vehicle: authored in Python, shown read-only here.
   return (
     <div className="obstacle-form">
+      {title}
       <span className="seq-cond">
         {kind.kind} devices are authored from Python (pools, paths, and
         stations do not fit a form)

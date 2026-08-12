@@ -73,6 +73,7 @@ export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const playback = useStudioStore((s) => s.playback);
   const recording = useStudioStore((s) => s.recording);
+  const segmentEnds = useStudioStore((s) => s.segmentEnds);
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const setPlayback = useStudioStore((s) => s.setPlayback);
   const setPlaying = useStudioStore((s) => s.setPlaying);
@@ -84,8 +85,10 @@ export function TimelineDock() {
   const barRef = useRef<HTMLDivElement | null>(null);
   const [showDevices, setShowDevices] = useState(false);
 
-  if (!timeline || !playback || timeline.duration <= 0) return null;
-  const duration = timeline.duration;
+  // The one transport bar: motion/plan previews play here too, they just
+  // have no step bands or signal lanes — only segment tick marks.
+  if (!playback || playback.duration <= 0) return null;
+  const duration = playback.duration;
   const recordingLabel = recording
     ? `${recording.source.split("/").pop()} (${recording.mode})`
     : null;
@@ -107,8 +110,8 @@ export function TimelineDock() {
       <div className="timeline-head">
         <span>
           {recordingLabel ? `● ${recordingLabel} — ` : ""}
-          {timeline.scenario ? `⧉ ${timeline.scenario} — ` : ""}
-          cycle {duration.toFixed(2)}s
+          {timeline?.scenario ? `⧉ ${timeline.scenario} — ` : ""}
+          {timeline ? "cycle" : "preview"} {duration.toFixed(2)}s
         </span>
         <span className="timeline-controls">
           {/* A 60-90 s takt is unwatchable at 1x; speed and loop are how a
@@ -135,8 +138,9 @@ export function TimelineDock() {
             ⟳
           </button>
           {/* Sequence timelines only: the server bakes the retained
-              rollout, so a loaded recording has nothing to re-export. */}
-          {!recording && (
+              rollout, so a motion preview or a loaded recording has
+              nothing to re-export. */}
+          {timeline && !recording && (
             <button
               className="timeline-button"
               onClick={() => sendExportUsd(60)}
@@ -149,7 +153,7 @@ export function TimelineDock() {
         </span>
       </div>
       <div className="timeline-bands" ref={barRef} onClick={seek}>
-        {timeline.stepSpans.map((span, i) => (
+        {(timeline?.stepSpans ?? []).map((span, i) => (
           <div
             key={i}
             className="timeline-band"
@@ -163,11 +167,17 @@ export function TimelineDock() {
             <span className="timeline-band-label">{span.name}</span>
           </div>
         ))}
+        {/* Motion previews: mark the planned segment boundaries. */}
+        {!timeline &&
+          segmentEnds.map((t, i) => (
+            <div key={i} className="timeline-tick" style={{ left: pct(t) }} />
+          ))}
         <div className="timeline-playhead" style={{ left: pct(playbackTime) }} />
       </div>
       {/* Robot lanes: when several robots run, each gets a band lane of its
           move intervals (labelled with the motion name). */}
-      {timeline.robots.length > 1 &&
+      {timeline &&
+        timeline.robots.length > 1 &&
         timeline.robots.map((robot) => (
           <div key={robot.name} className="timeline-lane">
             <span
@@ -199,12 +209,12 @@ export function TimelineDock() {
           device output lanes fold away by default — a line's worth of
           sources and sinks is hundreds of them, and unfolded they bury
           the chart (and the viewport). */}
-      {timeline.signals
+      {(timeline?.signals ?? [])
         .filter((signal) => signal.kind !== "device")
         .map((signal) => (
           <SignalLane key={signal.name} signal={signal} duration={duration} />
         ))}
-      {timeline.signals.some((signal) => signal.kind === "device") && (
+      {timeline?.signals.some((signal) => signal.kind === "device") && (
         <div className="timeline-lane">
           <button
             className="timeline-button"
@@ -216,7 +226,7 @@ export function TimelineDock() {
         </div>
       )}
       {showDevices &&
-        timeline.signals
+        (timeline?.signals ?? [])
           .filter((signal) => signal.kind === "device")
           .map((signal) => (
             <SignalLane

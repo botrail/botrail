@@ -60,8 +60,8 @@ The geometry/planning core stays format-agnostic — and identical in the wasm
 build.
 
 **USD robot links are named by prim path.** Server and browser refer to the
-same link by the same string, so collision highlighting, goal ghosts, and
-recording playback resolve 1:1 with no mapping tables.
+same link by the same string, so collision highlighting and recording
+playback resolve 1:1 with no mapping tables.
 
 ## Deliberately small dependencies
 

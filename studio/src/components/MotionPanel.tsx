@@ -1,13 +1,9 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 
-import { backendSupportsHttp } from "../backend";
-import type { ConstraintMsg, SegmentKindMsg } from "../protocol";
+import type { ConstraintMsg, MotionMsg, SegmentKindMsg } from "../protocol";
 import { robotByName, useStudioStore } from "../store";
-import {
-  sendAddSegment,
-  sendPlanMotion,
-  sendRemoveSegment,
-} from "../ws";
+import { sendAddSegment, sendPlanMotion, sendRemoveSegment } from "../ws";
+import { Section } from "./Section";
 
 // "Upright" keeps the TCP's local +Z within a 30° cone of world +Z.
 const UPRIGHT_CONE: ConstraintMsg = {
@@ -17,23 +13,34 @@ const UPRIGHT_CONE: ConstraintMsg = {
   angle: (Math.PI / 180) * 30,
 };
 
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+/** `main` for the first robot, `main_<robot>` for the rest; when taken,
+ * `motion_2`, `motion_3`, … — whatever is free scene-wide. */
+function freshMotionName(
+  motions: MotionMsg[],
+  robotName: string,
+  firstRobot: string | undefined,
+): string {
+  const taken = new Set(motions.map((m) => m.name));
+  const base = robotName === firstRobot ? "main" : `main_${robotName}`;
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `motion_${i}`;
+    if (!taken.has(candidate)) return candidate;
+  }
 }
 
-/** Waypoint editing, motion planning, and project save/load/export. */
+/**
+ * Every motion in the scene (Python-authored ones included), one of them
+ * the edit target; waypoint editing and planning below. The preview plays
+ * in the timeline dock.
+ */
 export function MotionPanel() {
   const robots = useStudioStore((s) => s.robots);
   const robot = useStudioStore((s) => robotByName(s.robots, s.selectedRobot));
   const connected = useStudioStore((s) => s.connection === "connected");
   const motions = useStudioStore((s) => s.motions);
+  const selectedMotion = useStudioStore((s) => s.selectedMotion);
+  const selectMotion = useStudioStore((s) => s.selectMotion);
   const motionPlanning = useStudioStore((s) => s.motionPlanning);
   const motionError = useStudioStore((s) => s.motionError);
   const motionStats = useStudioStore((s) => s.motionStats);
@@ -42,21 +49,21 @@ export function MotionPanel() {
   const beginMotionPlanning = useStudioStore((s) => s.beginMotionPlanning);
 
   const [upright, setUpright] = useState(false);
-  // Errors from the HTTP save/load/export round-trips (kept out of the store).
-  const [ioError, setIoError] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   if (!robot) return null;
   const robotName = robot.desc.name;
   const firstRobot = robots[0]?.desc.name;
+  const multiRobot = robots.length > 1;
+  const ownerOf = (m: MotionMsg) => m.robot ?? firstRobot;
 
-  // One motion per robot is edited here; adopt the server's first motion
-  // owned by the selected robot if it exists (a motion's `robot: null`
-  // means the first robot).
-  const owned = motions.filter((m) => (m.robot ?? firstRobot) === robotName);
-  const motion = owned[0] ?? null;
-  const motionName =
-    motion?.name ?? (robotName === firstRobot ? "main" : `main_${robotName}`);
+  // The edit target: the picked motion, else the selected robot's first
+  // motion, else the conventional fresh name (created on the first
+  // waypoint — same implicit-create the server does).
+  const owned = motions.filter((m) => ownerOf(m) === robotName);
+  const fallbackName =
+    owned[0]?.name ?? (robotName === firstRobot ? "main" : `main_${robotName}`);
+  const motionName = selectedMotion ?? fallbackName;
+  const motion = motions.find((m) => m.name === motionName) ?? null;
   const segments = motion?.segments ?? [];
 
   const addSegment = (kind: SegmentKindMsg) => {
@@ -73,56 +80,57 @@ export function MotionPanel() {
     sendPlanMotion(motionName);
   };
 
-  const onSave = async () => {
-    try {
-      const res = await fetch("/api/project");
-      if (!res.ok) throw new Error(await res.text());
-      downloadBlob(await res.blob(), "project.botrail");
-      setIoError(null);
-    } catch (e) {
-      setIoError(`save failed: ${String(e)}`);
-    }
-  };
-
-  const onExport = async () => {
-    try {
-      const res = await fetch("/api/export.py");
-      if (!res.ok) throw new Error(await res.text());
-      downloadBlob(await res.blob(), "scene.py");
-      setIoError(null);
-    } catch (e) {
-      setIoError(`export failed: ${String(e)}`);
-    }
-  };
-
-  const onLoadFile = async (file: File) => {
-    try {
-      const text = await file.text();
-      const res = await fetch("/api/project", { method: "POST", body: text });
-      if (!res.ok) {
-        setIoError((await res.text()) || "load failed");
-        return;
-      }
-      // Success re-broadcasts obstacles/motions/state over the websocket.
-      setIoError(null);
-    } catch (e) {
-      setIoError(`load failed: ${String(e)}`);
-    }
-  };
-
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>Motion</h2>
-        {motionPlanning && <span className="badge muted">planning…</span>}
-        {!motionPlanning && motionStats && playback && (
-          <span className="badge ok">
-            {playback.duration.toFixed(2)}s · {segmentEnds.length} seg ·{" "}
-            {motionStats.planningTimeMs.toFixed(0)}ms
-          </span>
-        )}
-      </div>
+    <Section
+      id="motion"
+      title="Motion"
+      badge={
+        <>
+          {motionPlanning && <span className="badge muted">planning…</span>}
+          {!motionPlanning && motionStats && playback && (
+            <span className="badge ok">
+              {playback.duration.toFixed(2)}s · {segmentEnds.length} seg ·{" "}
+              {motionStats.planningTimeMs.toFixed(0)}ms
+            </span>
+          )}
+        </>
+      }
+    >
       <div className="motion-controls">
+        <div className="motion-picker">
+          {motions.map((m) => (
+            <div
+              key={m.name}
+              className={`obstacle-row${m.name === motionName ? " selected" : ""}`}
+              onClick={() => selectMotion(m.name)}
+            >
+              <span className="obstacle-name">
+                {m.name}
+                {multiRobot && <span className="seq-cond"> · {ownerOf(m)}</span>}
+              </span>
+              <span className="seq-cond">{m.segments.length} wp</span>
+            </div>
+          ))}
+          {!motion && (
+            <div className="obstacle-row selected">
+              <span className="obstacle-name">
+                {motionName}
+                {multiRobot && <span className="seq-cond"> · {robotName}</span>}
+              </span>
+              <span className="seq-cond">new</span>
+            </div>
+          )}
+        </div>
+        <button
+          className="motion-new"
+          onClick={() =>
+            selectMotion(freshMotionName(motions, robotName, firstRobot))
+          }
+          title="start another motion (created when its first waypoint lands)"
+        >
+          + new motion
+        </button>
+
         <div className="motion-add">
           <div className="seg">
             <button onClick={() => addSegment("joint")} disabled={!connected}>
@@ -173,29 +181,7 @@ export function MotionPanel() {
           Plan motion
         </button>
         {motionError && <div className="plan-error">{motionError}</div>}
-
-        {backendSupportsHttp() && (
-          <>
-            <div className="seg motion-io">
-              <button onClick={onSave}>Save</button>
-              <button onClick={() => fileRef.current?.click()}>Load</button>
-              <button onClick={onExport}>Export .py</button>
-            </div>
-            {ioError && <div className="plan-error">{ioError}</div>}
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".botrail,application/json"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) onLoadFile(file);
-                e.target.value = "";
-              }}
-            />
-          </>
-        )}
       </div>
-    </section>
+    </Section>
   );
 }

@@ -6,7 +6,6 @@ import type {
   IkStatusMsg,
   MotionMsg,
   ObstacleMsg,
-  PlanStatsMsg,
   PoseMsg,
   RobotDescMsg,
   DeviceMsg,
@@ -28,6 +27,28 @@ import {
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
+export type SidebarTab = "layout" | "motion" | "sequence";
+
+const TAB_KEY = "botrail-studio.tab";
+
+function initialTab(): SidebarTab {
+  try {
+    const v = localStorage.getItem(TAB_KEY);
+    if (v === "layout" || v === "motion" || v === "sequence") return v;
+  } catch {
+    // Private-mode storage failures only cost persistence.
+  }
+  return "layout";
+}
+
+function persistTab(tab: SidebarTab): SidebarTab {
+  try {
+    localStorage.setItem(TAB_KEY, tab);
+  } catch {
+    // Persistence only.
+  }
+  return tab;
+}
 
 
 /**
@@ -50,13 +71,16 @@ export function drillChain(name: string, allNames: string[]): string[] {
   return chain;
 }
 
-/** What the viewport gizmo is currently editing. */
+/** What the viewport gizmo (or the Layout inspector) is currently editing. */
 export type Selection =
   | { type: "tcp"; robot: string }
   | { type: "obstacle"; name: string }
   /** An imported subtree (`/World/Pedestal`), moved as one rigid body. */
   | { type: "group"; path: string }
-  | { type: "robot"; robot: string };
+  | { type: "robot"; robot: string }
+  /** Fixtures have no gizmo; selecting one opens its form. */
+  | { type: "sensor"; name: string }
+  | { type: "device"; name: string };
 
 /** Per-robot UI state: the description plus the live server state. */
 export interface RobotUiState {
@@ -118,6 +142,14 @@ export function collidingObstacleNames(
   return set;
 }
 
+/** Robot-scoped selections (tcp, base) retarget on a robot switch;
+ * object-scoped ones (obstacle, group, sensor, device) persist. */
+function retargetSelection(sel: Selection, robot: string): Selection {
+  if (sel.type === "tcp") return { type: "tcp", robot };
+  if (sel.type === "robot") return { type: "robot", robot };
+  return sel;
+}
+
 /** Playback + first-sample overrides, spread into a store update. */
 function startPlayback(tracks: PlaybackTracks) {
   const sample = samplePlayback(tracks, 0);
@@ -150,12 +182,11 @@ export interface StudioState {
   minDistance: number | null;
   /** Which object the viewport gizmo edits; defaults to the first TCP. */
   selection: Selection;
-  /** Snapshot of a goal configuration on one robot (ghost display). */
-  goal: { robot: string; positions: number[]; linkPoses: PoseMsg[] } | null;
-  /** True while a plan request is in flight. */
-  planning: boolean;
-  planError: string | null;
-  planStats: PlanStatsMsg | null;
+  /** Which sidebar tab is up. */
+  activeTab: SidebarTab;
+  /** Motion the Motion tab edits; null adopts the selected robot's first
+   * motion (or the conventional fresh name when it has none yet). */
+  selectedMotion: string | null;
   /** Last playable result (plan/motion/sequence/recording tracks). */
   playback: PlaybackTracks | null;
   playbackTime: number;
@@ -231,16 +262,26 @@ export interface StudioState {
   selectTcp: (robot?: string) => void;
   selectObstacle: (name: string) => void;
   selectGroup: (path: string) => void;
+  selectSensor: (name: string) => void;
+  selectDevice: (name: string) => void;
+  /** Motion-tab list click; an existing motion also retargets the robot
+   * to its owner, so added waypoints always fit the motion's DOF. */
+  selectMotion: (name: string) => void;
   /** Viewport click: the machine first, a further click drills in. */
   selectFromViewport: (name: string) => void;
   /** Focus a robot's base for placement (also panel-selects it). */
   selectRobot: (robot: string) => void;
   /** Panel robot selector; retargets a robot-scoped gizmo selection. */
   setSelectedRobot: (robot: string) => void;
+  setActiveTab: (tab: SidebarTab) => void;
+  /**
+   * Viewport pick: raise the tab holding the picked thing's tools
+   * (robot → Motion, obstacle → Layout). The Sequence tab is sticky —
+   * picking a part or an arm there is how grasp steps are authored, so
+   * it must not lose its place.
+   */
+  focusTab: (target: "robot" | "obstacle") => void;
   beginSequenceSim: () => void;
-  setGoalFromCurrent: () => void;
-  clearGoal: () => void;
-  beginPlanning: () => void;
   beginMotionPlanning: () => void;
   /** Scrub/advance playback; the sample becomes the display override. */
   setPlayback: (t: number, sample: PlaybackSample) => void;
@@ -266,10 +307,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   collisions: [],
   minDistance: null,
   selection: { type: "tcp", robot: "" },
-  goal: null,
-  planning: false,
-  planError: null,
-  planStats: null,
+  activeTab: initialTab(),
+  selectedMotion: null,
   playback: null,
   playbackTime: 0,
   playing: false,
@@ -329,10 +368,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           collisions: [],
           minDistance: null,
           selection: { type: "tcp", robot: selected ?? "" },
-          goal: null,
-          planning: false,
-          planError: null,
-          planStats: null,
+          selectedMotion: null,
           playback: null,
           playbackTime: 0,
           playing: false,
@@ -371,21 +407,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         };
       });
     } else if (msg.type === "plan_result") {
+      // Python-side `plan_to_pose` against a live session broadcasts its
+      // trajectory here; preview it. Failures surface on the caller's side
+      // (an exception in the notebook), not in the studio.
       if (msg.ok && msg.trajectory) {
-        // Auto-start the preview. The playback is shared with motion
-        // playback, so drop any stale motion badge/markers it left behind.
         set({
-          planning: false,
-          planError: null,
-          planStats: msg.stats,
           ...startPlayback(tracksFromTrajectory(msg.robot, msg.trajectory)),
           segmentEnds: [],
           motionStats: null,
+          motionError: null,
           timeline: null,
           recording: null,
         });
-      } else {
-        set({ planning: false, planError: msg.error ?? "planning failed" });
       }
     } else if (msg.type === "frames") {
       set({ frames: msg.frames });
@@ -394,11 +427,31 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     } else if (msg.type === "sequences") {
       set({ sequences: msg.sequences, signalDefs: msg.signals });
     } else if (msg.type === "sensors") {
-      set({ sensors: msg.sensors });
+      set((s) => {
+        const sel = s.selection;
+        const gone =
+          sel.type === "sensor" && !msg.sensors.some((x) => x.name === sel.name);
+        return {
+          sensors: msg.sensors,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
+        };
+      });
     } else if (msg.type === "effects") {
       set({ flashes: msg.flashes });
     } else if (msg.type === "devices") {
-      set({ devices: msg.devices });
+      set((s) => {
+        const sel = s.selection;
+        const gone =
+          sel.type === "device" && !msg.devices.some((x) => x.name === sel.name);
+        return {
+          devices: msg.devices,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
+        };
+      });
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
     } else if (msg.type === "sequence_result") {
@@ -420,8 +473,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           },
           segmentEnds: msg.timeline.step_spans.map((s) => s.end),
           ...startPlayback(tracksFromTimeline(msg.timeline)),
-          planStats: null,
-          planError: null,
           motionStats: null,
           motionError: null,
           recording: null,
@@ -457,8 +508,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           },
           segmentEnds: [],
           ...startPlayback(tracksFromTimeline(msg.timeline)),
-          planStats: null,
-          planError: null,
           motionStats: null,
           motionError: null,
         });
@@ -489,16 +538,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     } else if (msg.type === "motion_result") {
       if (msg.ok && msg.trajectory) {
-        // Auto-start the preview through the same shared playback state the
-        // plan panel uses; clear its badge/error since we now own the preview.
+        // Auto-start the preview through the shared playback state.
         set({
           motionPlanning: false,
           motionError: null,
           motionStats: { planningTimeMs: msg.planning_time_ms ?? 0 },
           segmentEnds: msg.segment_ends,
           ...startPlayback(tracksFromTrajectory(msg.robot, msg.trajectory)),
-          planStats: null,
-          planError: null,
           timeline: null,
           recording: null,
         });
@@ -567,6 +613,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }),
   selectObstacle: (name) => set({ selection: { type: "obstacle", name } }),
   selectGroup: (path) => set({ selection: { type: "group", path } }),
+  selectSensor: (name) => set({ selection: { type: "sensor", name } }),
+  selectDevice: (name) => set({ selection: { type: "device", name } }),
+  selectMotion: (name) =>
+    set((s) => {
+      const motion = s.motions.find((m) => m.name === name);
+      const owner = motion
+        ? (motion.robot ?? s.robots[0]?.desc.name ?? null)
+        : null;
+      if (owner === null || owner === s.selectedRobot) {
+        return { selectedMotion: name };
+      }
+      return {
+        selectedMotion: name,
+        selectedRobot: owner,
+        selection: retargetSelection(s.selection, owner),
+      };
+    }),
   selectFromViewport: (name) => {
     const { obstacles, selection } = get();
     const chain = drillChain(
@@ -589,38 +652,35 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           ? { type: "obstacle", name }
           : { type: "group", path: next },
     });
+    get().focusTab("obstacle");
   },
   selectRobot: (robot) =>
     set({ selection: { type: "robot", robot }, selectedRobot: robot }),
   setSelectedRobot: (robot) =>
     set((s) => ({
       selectedRobot: robot,
-      selection:
-        s.selection.type === "obstacle"
-          ? s.selection
-          : s.selection.type === "robot"
-            ? { type: "robot", robot }
-            : { type: "tcp", robot },
+      selection: retargetSelection(s.selection, robot),
+      // A motion follows its owner; anything else (another robot's motion,
+      // a not-yet-created name) falls back to the new robot's own.
+      selectedMotion:
+        s.selectedMotion !== null &&
+        s.motions.some(
+          (m) =>
+            m.name === s.selectedMotion &&
+            (m.robot ?? s.robots[0]?.desc.name) === robot,
+        )
+          ? s.selectedMotion
+          : null,
     })),
+  setActiveTab: (tab) => set({ activeTab: persistTab(tab) }),
+  focusTab: (target) =>
+    set((s) =>
+      s.activeTab === "sequence"
+        ? {}
+        : { activeTab: persistTab(target === "robot" ? "motion" : "layout") },
+    ),
 
   beginSequenceSim: () => set({ sequenceSimulating: true, sequenceError: null }),
-  setGoalFromCurrent: () =>
-    set((s) => {
-      const r = robotByName(s.robots, s.selectedRobot);
-      return {
-        goal:
-          r && r.linkPoses.length > 0
-            ? {
-                robot: r.desc.name,
-                positions: r.jointPositions.slice(),
-                linkPoses: r.linkPoses,
-              }
-            : null,
-        planError: null,
-      };
-    }),
-  clearGoal: () => set({ goal: null, planError: null }),
-  beginPlanning: () => set({ planning: true, planError: null }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
   setPlayback: (t, sample) =>

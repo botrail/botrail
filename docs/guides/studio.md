@@ -16,26 +16,39 @@ server.stop()
 
 ![The studio](../assets/studio/overview.png)
 
-The header names the robot and shows the connection dot. The viewport is a
-full orbit camera over the cell, with the TCP gizmo on the end-effector and
-the active TCP link named in the corner badge. Down the right side, the
-panels — top to bottom: **ROBOT**, **SCENE**, **TCP**, **PLAN**, **MOTION**,
-**SEQUENCE**, **OBSTACLES**, **JOINTS**.
+The header names the robot (a dropdown when several share the scene, driving
+every panel), holds the project buttons — **Save** / **Load** are `.botrail`
+[projects](projects.md), **Export .py** is `generate_python()` — and shows
+the connection dot. The viewport is a full orbit camera over the cell, with
+the TCP gizmo on the end-effector and the active TCP link named in the
+corner badge.
+
+The sidebar is three workflow tabs. **LAYOUT** builds the world: robot
+placement, the scene tree, obstacles, sensors & devices. **MOTION** poses
+and teaches the selected robot: TCP, joints, waypoints — the things used
+together. **SEQUENCE** programs the cell and runs it. Sections collapse
+from their headers, and the studio remembers the open tab and the sections
+you keep closed. Picking in the viewport follows along — clicking an arm
+raises MOTION, clicking an obstacle raises LAYOUT — except while SEQUENCE
+is up, since picking a part or an arm there is how grasp steps are
+authored.
 
 ## Placing the robot — ROBOT
 
 The base pose, editable two ways: **Place base** for dragging it, or the
 *place at frame* dropdown to snap it onto any named frame — the studio form of
-`scene.set_robot_base_pose(*scene.frame(...))`. With several robots in the
-scene, the panel's robot selector switches which instance the posing and
-planning panels drive.
+`scene.set_robot_base_pose(*scene.frame(...))`.
 
 ## The cell inventory — SCENE
 
 The scene tree: robots, then the world's obstacles as imported (the counter
-reads e.g. *147 obj · 5 frames*), then sensors and devices. Per obstacle, the
-eye toggles display and the checkbox includes/excludes it from collision
-checking (`set_obstacle_enabled`); sensors and devices carry a remove button.
+reads e.g. *147 obj · 5 frames*), then sensors and devices. The tree is
+*the* list — click an obstacle (here or in the viewport), a sensor, or a
+device and its editor opens in the section below, inspector style.
+Colliding obstacles read red right in the tree. Per obstacle, the eye
+toggles display and the checkbox includes/excludes it from collision
+checking (`set_obstacle_enabled`); removal sits in the editor form (and on
+sensor/device rows).
 
 ## Posing — TCP and JOINTS
 
@@ -45,43 +58,47 @@ work) and switches the gizmo between **Move** and **Rotate**. Dragging solves
 IK continuously; collision turns the offending geometry red as you go. The
 JOINTS panel is the other door into the same state: one slider per joint.
 
-## One-shot planning — PLAN
-
-**Set goal** captures the current pose as the goal (a ghost robot marks it),
-**Plan** solves, and the result plays back on a scrub bar:
-
-![A planned trajectory in the studio](../assets/studio/plan.png)
-
-The green readout is the plan: duration, waypoint count, planning time
-(`2.03s · 2 wp · 147ms` above). Plans made from Python with
-`broadcast=True` land in the same panel.
-
 ## Teaching motions — MOTION
 
-The waypoint-segment editor, mirroring
+The panel lists every motion in the scene — Python-authored ones included —
+with owner and waypoint count. Pick one to edit it (picking another robot's
+motion also switches the robot, so waypoints always fit), or **+ new
+motion** to start another; it is created the moment its first waypoint
+lands. Below sits the waypoint-segment editor, mirroring
 [`add_segment`](motion-planning.md#named-motions-waypoint-segments): pose the
 robot, then **+ Joint** or **+ Line** appends a segment ending at this
 configuration (`upright` adds the orientation-cone constraint that keeps the
-tool vertical). **Plan motion** solves the whole list rest-to-rest. **Save**
-/ **Load** are `.botrail` [projects](projects.md); **Export .py** is
-`generate_python()` — studio work exits as reviewable code.
+tool vertical). **Plan motion** solves the whole list rest-to-rest and plays
+the preview in the timeline dock, with a tick at each segment boundary:
 
-## The process — SEQUENCE
+![A planned motion previewing in the timeline dock](../assets/studio/plan.png)
+
+The green readout is the plan: duration, segment count, planning time. A
+quick A→B check is a one-waypoint motion — pose the goal, **+ Joint**,
+**Plan motion**. Trajectories planned from Python against a live session
+(`plan_to_pose`) preview in the same dock.
+
+## The process — SEQUENCE and RUN
 
 Steps accumulate here the way `sq.step(...)` writes them: add a motion step
 from a named motion, a one-second timer step, a grasp/release step for the
-selected obstacle. Baking broadcasts the timeline to the dock:
+selected obstacle. The **RUN** section below holds everything about the
+next run: with several programs authored (one per station, PLC style), its
+checkboxes pick which roll together; the dropdown picks the world —
+`baseline` or a Python-authored scenario delta (`add_scenario`);
+**Simulate** bakes the cycle and broadcasts the timeline to the dock:
 
 ![A baked sequence with the timeline dock](../assets/studio/sequence.png)
 
 ## The timeline dock
 
-The bottom dock is the baked cycle as a timing chart: the cycle time
-(*cycle 15.56s* above), one colored band per step, and one lane per signal —
-internal relays, sensors, device running-states. The playback cursor drives
-the viewport; the same scrub bar appears in PLAN during playback. Recordings
-loaded with `play_usd_animation` — including two-robot bakes and Isaac
-captures — play through the same dock.
+The bottom dock is the one transport bar: every playback — a motion
+preview, a baked cycle, a loaded recording — plays and scrubs here. For a
+baked sequence it is a timing chart: the cycle time (*cycle 15.56s* above),
+one colored band per step, and one lane per signal — internal relays,
+sensors, device running-states. The playback cursor drives the viewport.
+Recordings loaded with `play_usd_animation` — including two-robot bakes and
+Isaac captures — play through the same dock.
 
 ## Serving details
 

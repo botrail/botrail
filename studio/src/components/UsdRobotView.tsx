@@ -1,11 +1,7 @@
 import { useEffect, useState } from "react";
 import * as THREE from "three";
 import { ThreeUsdRobotLoader, type ThreeUsdRobot } from "three-usd-robot";
-import {
-  createGhostRobot,
-  highlightLink,
-  restoreLinkMaterials,
-} from "three-usd-robot/helpers";
+import { highlightLink, restoreLinkMaterials } from "three-usd-robot/helpers";
 
 import type { PoseMsg, RobotDescMsg } from "../protocol";
 import { playbackRig } from "../playbackRig";
@@ -16,8 +12,8 @@ import { cursorEnter, cursorLeave } from "../three/cursor";
  * Client-side USD robot rendering, one instance per USD-sourced robot: the
  * same stage the server planned against is fetched from `/usd-assets` and
  * posed via three-usd-robot's FK — the wire only carries joint values.
- * Link/joint names are prim paths on both sides, so state, collisions, and
- * goals map 1:1 within each instance; the instance name scopes them.
+ * Link/joint names are prim paths on both sides, so state and collisions
+ * map 1:1 within each instance; the instance name scopes them.
  */
 export function UsdRobotView() {
   const robots = useStudioStore((s) => s.robots);
@@ -38,7 +34,6 @@ function UsdRobotInstance({ name }: { name: string }) {
   );
   const url = state?.desc.usd_asset?.url;
   const [robot, setRobot] = useState<ThreeUsdRobot | null>(null);
-  const [ghost, setGhost] = useState<ThreeUsdRobot | null>(null);
 
   const overrideJoints = useStudioStore(
     (s) => s.overrideJoints?.[name] ?? null,
@@ -47,8 +42,6 @@ function UsdRobotInstance({ name }: { name: string }) {
     (s) => s.overridePoses?.[name] ?? null,
   );
   const collisions = useStudioStore((s) => s.collisions);
-  const goal = useStudioStore((s) => s.goal);
-  const myGoal = goal && goal.robot === name ? goal : null;
 
   // Load once per asset URL. The loader returns a fresh instance per call,
   // so two robots sharing one asset get independent objects.
@@ -149,40 +142,26 @@ function UsdRobotInstance({ name }: { name: string }) {
     }
   }, [robot, desc, collisions, playback, name]);
 
-  // Translucent goal ghost, posed at the captured configuration.
-  useEffect(() => {
-    if (!robot || !desc || !myGoal) {
-      setGhost(null);
-      return;
-    }
-    const g = createGhostRobot(robot, {
-      jointValues: jointMap(desc, myGoal.positions),
-    });
-    if (basePose) applyPose(g, basePose);
-    setGhost(g);
-    return () => setGhost(null);
-  }, [robot, desc, myGoal, basePose]);
-
   if (!robot) return null;
   // The click handler makes the robot opaque to picking: without it, R3F
   // ignores handler-less meshes and a click on the arm would select
-  // whatever obstacle lies behind it. Clicking a robot focuses its TCP.
+  // whatever obstacle lies behind it. Clicking a robot focuses its TCP
+  // and raises the posing tab.
   return (
-    <>
-      <primitive
-        object={robot}
-        onClick={(e: { stopPropagation: () => void }) => {
-          e.stopPropagation();
-          useStudioStore.getState().selectTcp(name);
-        }}
-        onPointerOver={(e: { stopPropagation: () => void }) => {
-          e.stopPropagation();
-          cursorEnter();
-        }}
-        onPointerOut={cursorLeave}
-      />
-      {ghost && <primitive object={ghost} />}
-    </>
+    <primitive
+      object={robot}
+      onClick={(e: { stopPropagation: () => void }) => {
+        e.stopPropagation();
+        const s = useStudioStore.getState();
+        s.selectTcp(name);
+        s.focusTab("robot");
+      }}
+      onPointerOver={(e: { stopPropagation: () => void }) => {
+        e.stopPropagation();
+        cursorEnter();
+      }}
+      onPointerOut={cursorLeave}
+    />
   );
 }
 

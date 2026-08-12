@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import type { JointMsg } from "../protocol";
 import { robotByName, useStudioStore } from "../store";
 import { sendJointPositions } from "../ws";
+import { Section } from "./Section";
 
 const CONTINUOUS_RANGE: [number, number] = [-Math.PI, Math.PI];
 
@@ -46,13 +47,15 @@ export function JointPanel() {
   };
 
   return (
-    <section className="panel-section joints-section">
-      <div className="panel-head">
-        <h2>Joints</h2>
+    <Section
+      id="joints"
+      title="Joints"
+      badge={
         <button onClick={onReset} disabled={dofJoints.length === 0}>
           Reset
         </button>
-      </div>
+      }
+    >
       <div className="joints">
         {dofJoints.map((joint) => {
           const qIndex = joint.q_index as number;
@@ -95,6 +98,6 @@ export function JointPanel() {
           <div className="empty">No actuated joints</div>
         )}
       </div>
-    </section>
+    </Section>
   );
 }

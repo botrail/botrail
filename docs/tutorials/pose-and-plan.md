@@ -87,8 +87,9 @@ object, so poke it from both sides:
 
 * **Drag the TCP gizmo** — IK follows live, with the clearance readout and
   collision highlighting updating as you go.
-* **Plan from the panel** — set a goal, plan, and scrub the trajectory. The
-  same thing from Python:
+* **Teach and plan a motion** — in the Motion tab, pose the robot, **+
+  Joint**, **Plan motion**, and scrub the preview in the timeline dock. The
+  one-shot form from Python (the preview lands in the same dock):
 
     ```python
     traj = scene.plan_to_pose((0.4, 0.1, 0.5))
@@ -97,8 +98,8 @@ object, so poke it from both sides:
 * **Pose from the REPL** — with `bt.studio(scene, block=False)` you keep the
   prompt; `scene.set_tcp_target(...)` moves the browser's robot.
 * **Save what you made** — `scene.save_project("cell.botrail")`, or
-  `scene.generate_python()` for a script that rebuilds the scene (the studio's
-  "Export Python" button does the same).
+  `scene.generate_python()` for a script that rebuilds the scene (the
+  header's **Export .py** button does the same).
 
 ## The complete script
 

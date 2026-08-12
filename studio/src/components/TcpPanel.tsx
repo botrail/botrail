@@ -1,4 +1,5 @@
 import { robotByName, useStudioStore } from "../store";
+import { Section } from "./Section";
 
 /** TCP gizmo controls for the selected robot: link, mode, IK feedback. */
 export function TcpPanel() {
@@ -11,18 +12,20 @@ export function TcpPanel() {
   const ikStatus = robot.ikStatus;
 
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>TCP</h2>
-        {ikStatus &&
-          (ikStatus.converged ? (
-            <span className="badge ok">reachable</span>
-          ) : (
-            <span className="badge bad">
-              unreachable · {(ikStatus.pos_error * 1000).toFixed(0)}mm
-            </span>
-          ))}
-      </div>
+    <Section
+      id="tcp"
+      title="TCP"
+      badge={
+        ikStatus &&
+        (ikStatus.converged ? (
+          <span className="badge ok">reachable</span>
+        ) : (
+          <span className="badge bad">
+            unreachable · {(ikStatus.pos_error * 1000).toFixed(0)}mm
+          </span>
+        ))
+      }
+    >
       <div className="tcp-controls">
         <label className="field">
           <span className="field-label">link</span>
@@ -52,6 +55,6 @@ export function TcpPanel() {
           </button>
         </div>
       </div>
-    </section>
+    </Section>
   );
 }

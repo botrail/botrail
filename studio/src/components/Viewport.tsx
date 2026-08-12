@@ -7,7 +7,6 @@ import { RoomEnvironment } from "three-stdlib";
 import { isWasmMode } from "../backend";
 import { robotByName, useStudioStore } from "../store";
 import { dropUsdScene } from "../ws";
-import { GhostRobot } from "./GhostRobot";
 import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
@@ -76,9 +75,13 @@ export function Viewport() {
       ? `obstacle · ${selection.name}`
       : selection.type === "group"
         ? `group · ${selection.path}`
-        : selection.type === "robot"
-          ? `${scope(selection.robot)}robot base`
-          : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
+        : selection.type === "sensor"
+          ? `sensor · ${selection.name}`
+          : selection.type === "device"
+            ? `device · ${selection.name}`
+            : selection.type === "robot"
+              ? `${scope(selection.robot)}robot base`
+              : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.
@@ -165,7 +168,6 @@ export function Viewport() {
           <SceneView />
           <UsdRobotView />
           <WasmStageView />
-          <GhostRobot />
           <ObstacleView />
           <SensorView />
           <FlashView />

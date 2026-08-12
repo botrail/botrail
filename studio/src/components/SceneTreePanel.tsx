@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 
 import type { FrameMsg, ObstacleMsg } from "../protocol";
-import { useStudioStore } from "../store";
+import { collidingObstacleNames, useStudioStore } from "../store";
 import { sendRemoveDevice, sendRemoveSensor, sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
+import { Section } from "./Section";
 
 /**
  * Robots plus a hierarchy over obstacle/frame names (prim paths from USD
@@ -19,6 +20,9 @@ export function SceneTreePanel() {
   const frames = useStudioStore((s) => s.frames);
   const sensors = useStudioStore((s) => s.sensors);
   const devices = useStudioStore((s) => s.devices);
+  const selection = useStudioStore((s) => s.selection);
+  const selectSensor = useStudioStore((s) => s.selectSensor);
+  const selectDevice = useStudioStore((s) => s.selectDevice);
   if (
     robots.length === 0 &&
     obstacles.length === 0 &&
@@ -29,14 +33,16 @@ export function SceneTreePanel() {
     return null;
   }
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>Scene</h2>
+    <Section
+      id="scene"
+      title="Scene"
+      badge={
         <span className="badge muted">
           {robots.length > 1 ? `${robots.length} robots · ` : ""}
           {obstacles.length} obj · {frames.length} frames
         </span>
-      </div>
+      }
+    >
       <div className="scene-tree">
         {robots.map((r) => {
           const name = r.desc.name;
@@ -69,9 +75,20 @@ export function SceneTreePanel() {
       {(sensors.length > 0 || devices.length > 0) && (
         <div className="scene-tree">
           {sensors.map((s) => (
-            <div key={s.name} className="tree-row">
+            <div
+              key={s.name}
+              className={`tree-row${
+                selection.type === "sensor" && selection.name === s.name
+                  ? " selected"
+                  : ""
+              }`}
+            >
               <span className="tree-twist" />
-              <span className="tree-label" title={`${s.kind.kind} sensor`}>
+              <span
+                className="tree-label"
+                title={`${s.kind.kind} sensor — click to edit`}
+                onClick={() => selectSensor(s.name)}
+              >
                 {"\u{1F4E1} "}
                 {s.name}
               </span>
@@ -85,9 +102,20 @@ export function SceneTreePanel() {
             </div>
           ))}
           {devices.map((d) => (
-            <div key={d.name} className="tree-row">
+            <div
+              key={d.name}
+              className={`tree-row${
+                selection.type === "device" && selection.name === d.name
+                  ? " selected"
+                  : ""
+              }`}
+            >
               <span className="tree-twist" />
-              <span className="tree-label" title={d.kind.kind}>
+              <span
+                className="tree-label"
+                title={`${d.kind.kind} — click to edit`}
+                onClick={() => selectDevice(d.name)}
+              >
                 {"\u{2699} "}
                 {d.name}
               </span>
@@ -102,7 +130,7 @@ export function SceneTreePanel() {
           ))}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 
@@ -145,16 +173,28 @@ function Tree({
   frames: FrameMsg[];
 }) {
   const root = useMemo(() => buildTree(obstacles, frames), [obstacles, frames]);
+  // Colliding obstacles read red straight in the tree — the tree is the
+  // one obstacle list, so this is where the eye goes.
+  const collisions = useStudioStore((s) => s.collisions);
+  const colliding = useMemo(() => collidingObstacleNames(collisions), [collisions]);
   return (
     <div className="scene-tree">
       {[...root.children.values()].map((n) => (
-        <TreeRow key={n.path} node={n} depth={0} />
+        <TreeRow key={n.path} node={n} depth={0} colliding={colliding} />
       ))}
     </div>
   );
 }
 
-function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
+function TreeRow({
+  node,
+  depth,
+  colliding,
+}: {
+  node: TreeNode;
+  depth: number;
+  colliding: Set<string>;
+}) {
   const [open, setOpen] = useState(depth < 2);
   const selection = useStudioStore((s) => s.selection);
   const selectedRobot = useStudioStore((s) => s.selectedRobot);
@@ -188,7 +228,7 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
           <span className="tree-twist" />
         )}
         <span
-          className="tree-label"
+          className={`tree-label${o && colliding.has(o.name) ? " bad" : ""}`}
           onClick={() =>
             isGroup ? selectGroup(node.path) : o && selectObstacle(o.name)
           }
@@ -234,7 +274,9 @@ function TreeRow({ node, depth }: { node: TreeNode; depth: number }) {
         )}
       </div>
       {open &&
-        kids.map((n) => <TreeRow key={n.path} node={n} depth={depth + 1} />)}
+        kids.map((n) => (
+          <TreeRow key={n.path} node={n} depth={depth + 1} colliding={colliding} />
+        ))}
     </div>
   );
 }

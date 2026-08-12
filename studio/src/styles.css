@@ -87,6 +87,21 @@ body {
   box-shadow: 0 0 6px var(--ok);
 }
 
+/* Project I/O lives in the header: it is scene-wide, not per-panel. */
+.header-io {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.header-error {
+  color: var(--bad);
+  font-size: 11px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- body / viewport --- */
 .body {
   flex: 1;
@@ -132,7 +147,7 @@ body {
   pointer-events: none;
 }
 
-/* --- joint panel --- */
+/* --- sidebar --- */
 .panel {
   width: 300px;
   flex: none;
@@ -141,6 +156,44 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
+}
+
+/* Workflow tabs; the bar stays put while the tab content scrolls. */
+.tab-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex: none;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 10px 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  cursor: pointer;
+}
+
+.tab:hover:not(:disabled) {
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+
+.tab.active,
+.tab.active:hover:not(:disabled) {
+  color: var(--text);
+  border-bottom-color: var(--accent);
 }
 
 .panel-section {
@@ -151,17 +204,19 @@ body {
   min-height: 0;
 }
 
-.joints-section {
-  flex: 1;
-  border-bottom: none;
-}
-
 .panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 10px 14px;
   flex: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.panel-head:hover h2 {
+  color: var(--text);
 }
 
 .panel-head h2 {
@@ -173,8 +228,22 @@ body {
   color: var(--muted);
 }
 
+.panel-twist {
+  display: inline-block;
+  width: 14px;
+  color: var(--muted);
+}
+
+.panel-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .joints {
   overflow-y: auto;
+  max-height: 300px;
   padding: 6px 14px 14px;
 }
 
@@ -213,6 +282,12 @@ body {
 .empty {
   color: var(--muted);
   padding: 14px 0;
+}
+
+/* One-line nudge toward the next step (empty states, no selection). */
+.hint {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 input[type="range"] {
@@ -259,6 +334,12 @@ button:disabled {
   font-size: 12px;
   width: 32px;
   flex: none;
+}
+
+.base-readout {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 select {
@@ -323,7 +404,7 @@ select:focus {
   background: var(--panel-2);
 }
 
-/* --- plan panel --- */
+/* --- shared section controls (motion / sequence) --- */
 .plan-controls {
   display: flex;
   flex-direction: column;
@@ -338,58 +419,6 @@ select:focus {
 .plan-error {
   color: var(--bad);
   font-size: 12px;
-}
-
-.plan-hint {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.playback-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.playback-row button {
-  flex: none;
-  width: 34px;
-}
-
-.seek {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-
-.seek input[type="range"] {
-  display: block;
-  width: 100%;
-}
-
-/* Segment boundary markers overlaid on the seek slider (motion playback). */
-.seek-marks {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.seek-mark {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--muted);
-  opacity: 0.7;
-}
-
-.playback-time {
-  flex: none;
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* --- motion panel --- */
@@ -419,6 +448,28 @@ select:focus {
   background: var(--accent);
   border-color: var(--accent);
   color: #0f1115;
+}
+
+/* Which motion is edited (rows share the obstacle-row look). */
+.motion-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.motion-new {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.motion-new:hover:not(:disabled) {
+  color: var(--accent);
 }
 
 .motion-list {
@@ -521,6 +572,21 @@ select:focus {
   border-top: 1px solid var(--border);
 }
 
+/* Name of the thing the form edits — the tree is the list, so the form
+ * must say what it is inspecting. */
+.inspector-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+button.danger:hover:not(:disabled) {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
 .num-field input[type="number"] {
   flex: 1;
   min-width: 0;
@@ -568,6 +634,9 @@ select:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+.tree-label.bad {
+  color: var(--bad);
 }
 .tree-twist {
   width: 16px;
@@ -729,6 +798,17 @@ select:focus {
   bottom: -2px;
   width: 2px;
   background: #e8ecf2;
+  pointer-events: none;
+}
+
+/* Segment boundaries on a motion preview (no step bands to read them from). */
+.timeline-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #3a4356;
   pointer-events: none;
 }
 

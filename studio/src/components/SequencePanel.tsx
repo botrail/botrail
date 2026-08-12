@@ -7,6 +7,7 @@ import {
   sendSimulateSequences,
   sendUpsertSequence,
 } from "../ws";
+import { Section } from "./Section";
 
 const SEQUENCE_NAME = "main";
 
@@ -163,225 +164,224 @@ export function SequencePanel() {
     commit(steps);
   };
 
+  // With several programs authored (one per station, PLC style), the
+  // cell runs them together; the checkboxes carve out a subset when
+  // debugging one station in isolation.
+  const multi = sequences.length > 1;
+  const included = sequences.filter((s) => !excluded.has(s.name));
+  const canSimulate = multi ? included.length > 0 : sequence.steps.length > 0;
   const onSimulate = () => {
     beginSequenceSim();
-    sendSimulateSequence(sequence.name, runScenario);
-  };
-
-  const included = sequences.filter((s) => !excluded.has(s.name));
-  const onSimulateTogether = () => {
-    if (included.length === 0) return;
-    beginSequenceSim();
-    sendSimulateSequences(
-      included.map((s) => s.name),
-      runScenario,
-    );
+    if (multi) {
+      sendSimulateSequences(
+        included.map((s) => s.name),
+        runScenario,
+      );
+    } else {
+      sendSimulateSequence(sequence.name, runScenario);
+    }
   };
 
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>Sequence</h2>
-        {simulating && <span className="badge muted">simulating…</span>}
-        {!simulating && timeline && (
-          <span className="badge ok">cycle {timeline.duration.toFixed(2)}s</span>
-        )}
-      </div>
-      <div className="plan-controls">
-        {/* With several programs authored (one per station, PLC style),
-            the cell runs them together — the checkboxes carve out a
-            subset when debugging one station in isolation. */}
-        {sequences.length > 1 && (
-          <div className="seq-programs">
-            {sequences.map((s) => (
-              <label key={s.name} className="seq-program">
-                <input
-                  type="checkbox"
-                  checked={!excluded.has(s.name)}
-                  onChange={(e) => {
-                    const next = new Set(excluded);
-                    if (e.target.checked) {
-                      next.delete(s.name);
-                    } else {
-                      next.add(s.name);
-                    }
-                    setExcluded(next);
-                  }}
-                />
-                {s.name}
-                <span className="seq-cond"> · {s.steps.length} steps</span>
-              </label>
-            ))}
-            <button
-              className="plan-go"
-              onClick={onSimulateTogether}
-              disabled={included.length === 0 || simulating || !connected}
-              title="roll the checked programs concurrently over one world"
+    <>
+      <Section
+        id="sequence"
+        title="Sequence"
+        badge={
+          sequence.steps.length > 0 && (
+            <span className="badge muted">{sequence.steps.length} steps</span>
+          )
+        }
+      >
+        <div className="plan-controls">
+          <div className="seg">
+            <button onClick={addMotion} disabled={!motionChoice} title="add a motion step">
+              + Motion
+            </button>
+            <select
+              value={motionChoice}
+              onChange={(e) => setMotionChoice(e.target.value)}
+              disabled={motions.length === 0}
             >
-              Simulate programs ({included.length})
+              {motions.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <button onClick={addWait} title="add a 1s timer step">
+              + Wait
             </button>
           </div>
-        )}
-        <div className="seg">
-          <button onClick={addMotion} disabled={!motionChoice} title="add a motion step">
-            + Motion
-          </button>
-          <select
-            value={motionChoice}
-            onChange={(e) => setMotionChoice(e.target.value)}
-            disabled={motions.length === 0}
-          >
-            {motions.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-          <button onClick={addWait} title="add a 1s timer step">
-            + Wait
-          </button>
-        </div>
-        <div className="seg">
-          <button
-            onClick={addGrasp}
-            disabled={!selectedObstacle}
-            title="grasp the selected obstacle with the TCP link"
-          >
-            + Grasp
-          </button>
-          <button
-            onClick={addRelease}
-            disabled={!selectedObstacle}
-            title="release the selected obstacle"
-          >
-            + Release
-          </button>
-        </div>
+          {motions.length === 0 && (
+            <div className="hint">no motions yet — teach one in the Motion tab</div>
+          )}
+          <div className="seg">
+            <button
+              onClick={addGrasp}
+              disabled={!selectedObstacle}
+              title="grasp the selected obstacle with the TCP link"
+            >
+              + Grasp
+            </button>
+            <button
+              onClick={addRelease}
+              disabled={!selectedObstacle}
+              title="release the selected obstacle"
+            >
+              + Release
+            </button>
+          </div>
 
-        <div className="motion-list">
-          {sequence.steps.map((step, i) => (
-            <div key={i}>
-              <div className="motion-row">
-                <span className="motion-kind">
-                  {i + 1} · {step.select?.length ? "◇ " : ""}
-                  {step.name}
-                  {step.actions.map((a, k) => (
-                    <span key={k} className="seq-chip">
-                      {actionLabel(a)}
-                    </span>
-                  ))}
-                </span>
-                {step.select?.length ? (
-                  <span className="seq-cond">{step.select.length} arms</span>
-                ) : step.transition.type === "elapsed" ? (
-                  <input
-                    className="seq-wait"
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={step.transition.seconds}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      if (Number.isFinite(v) && v >= 0) setWaitSeconds(i, v);
-                    }}
-                  />
-                ) : (
-                  <span className="seq-cond">{conditionLabel(step.transition)}</span>
-                )}
-                <button
-                  className="obstacle-remove"
-                  title="Remove step"
-                  onClick={() =>
-                    commit(sequence.steps.filter((_, k) => k !== i))
-                  }
-                >
-                  ×
-                </button>
-              </div>
-              {/* Branch arms, read-only (Python-authored): the guard and
-                  each arm's steps, indented under the branching step. */}
-              {(step.select ?? []).map((arm, j) => (
-                <div key={j} className="seq-arm">
-                  <div className="motion-row">
-                    <span className="motion-kind seq-cond">
-                      ├ when {conditionLabel(arm.condition)}
-                      {arm.steps.length === 0 && " → skip"}
-                    </span>
-                  </div>
-                  {arm.steps.map((armStep, k) => (
-                    <div key={k} className="motion-row seq-arm-step">
-                      <span className="motion-kind">
-                        {armStep.select?.length ? "◇ " : ""}
-                        {armStep.name}
-                        {armStep.actions.map((a, m) => (
-                          <span key={m} className="seq-chip">
-                            {actionLabel(a)}
-                          </span>
-                        ))}
+          <div className="motion-list">
+            {sequence.steps.map((step, i) => (
+              <div key={i}>
+                <div className="motion-row">
+                  <span className="motion-kind">
+                    {i + 1} · {step.select?.length ? "◇ " : ""}
+                    {step.name}
+                    {step.actions.map((a, k) => (
+                      <span key={k} className="seq-chip">
+                        {actionLabel(a)}
                       </span>
-                      <span className="seq-cond">
-                        {armStep.select?.length
-                          ? `${armStep.select.length} arms`
-                          : conditionLabel(armStep.transition)}
+                    ))}
+                  </span>
+                  {step.select?.length ? (
+                    <span className="seq-cond">{step.select.length} arms</span>
+                  ) : step.transition.type === "elapsed" ? (
+                    <input
+                      className="seq-wait"
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={step.transition.seconds}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        if (Number.isFinite(v) && v >= 0) setWaitSeconds(i, v);
+                      }}
+                    />
+                  ) : (
+                    <span className="seq-cond">{conditionLabel(step.transition)}</span>
+                  )}
+                  <button
+                    className="obstacle-remove"
+                    title="Remove step"
+                    onClick={() =>
+                      commit(sequence.steps.filter((_, k) => k !== i))
+                    }
+                  >
+                    ×
+                  </button>
+                </div>
+                {/* Branch arms, read-only (Python-authored): the guard and
+                    each arm's steps, indented under the branching step. */}
+                {(step.select ?? []).map((arm, j) => (
+                  <div key={j} className="seq-arm">
+                    <div className="motion-row">
+                      <span className="motion-kind seq-cond">
+                        ├ when {conditionLabel(arm.condition)}
+                        {arm.steps.length === 0 && " → skip"}
                       </span>
                     </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          ))}
-          {sequence.steps.length === 0 && (
-            <div className="empty">no steps — add motions, waits, grasps</div>
-          )}
-        </div>
-
-        {/* Scenarios: named initial-state deltas, Python-authored (the
-            test-case matrix). The dropdown picks the world the next
-            simulate runs in. */}
-        {scenarios.length > 0 && (
-          <div className="seq-programs">
-            {scenarios.map((s) => (
-              <div key={s.name} className="seq-program" title="scenario (authored from Python)">
-                ⧉ {s.name}
-                <span className="seq-cond">
-                  {" · "}
-                  {[
-                    s.signals?.length ? `${s.signals.length} signal${s.signals.length > 1 ? "s" : ""}` : "",
-                    s.obstacles?.length ? `${s.obstacles.length} obstacle${s.obstacles.length > 1 ? "s" : ""}` : "",
-                    s.joints?.length ? `${s.joints.length} robot${s.joints.length > 1 ? "s" : ""}` : "",
-                  ]
-                    .filter(Boolean)
-                    .join(", ")}
-                </span>
+                    {arm.steps.map((armStep, k) => (
+                      <div key={k} className="motion-row seq-arm-step">
+                        <span className="motion-kind">
+                          {armStep.select?.length ? "◇ " : ""}
+                          {armStep.name}
+                          {armStep.actions.map((a, m) => (
+                            <span key={m} className="seq-chip">
+                              {actionLabel(a)}
+                            </span>
+                          ))}
+                        </span>
+                        <span className="seq-cond">
+                          {armStep.select?.length
+                            ? `${armStep.select.length} arms`
+                            : conditionLabel(armStep.transition)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
               </div>
             ))}
+            {sequence.steps.length === 0 && (
+              <div className="empty">no steps — add motions, waits, grasps</div>
+            )}
           </div>
-        )}
-        <div className="seg">
-          <button
-            className="plan-go"
-            onClick={onSimulate}
-            disabled={sequence.steps.length === 0 || simulating || !connected}
-          >
-            Simulate
-          </button>
+        </div>
+      </Section>
+
+      {/* Everything about the next run in one place: which programs roll
+          together, the world (a Python-authored scenario delta or the
+          baseline scene), and the one Simulate button. */}
+      <Section
+        id="run"
+        title="Run"
+        badge={
+          <>
+            {simulating && <span className="badge muted">simulating…</span>}
+            {!simulating && timeline && (
+              <span className="badge ok">
+                cycle {timeline.duration.toFixed(2)}s
+              </span>
+            )}
+          </>
+        }
+      >
+        <div className="plan-controls">
+          {multi && (
+            <div className="seq-programs">
+              {sequences.map((s) => (
+                <label key={s.name} className="seq-program">
+                  <input
+                    type="checkbox"
+                    checked={!excluded.has(s.name)}
+                    onChange={(e) => {
+                      const next = new Set(excluded);
+                      if (e.target.checked) {
+                        next.delete(s.name);
+                      } else {
+                        next.add(s.name);
+                      }
+                      setExcluded(next);
+                    }}
+                  />
+                  {s.name}
+                  <span className="seq-cond"> · {s.steps.length} steps</span>
+                </label>
+              ))}
+            </div>
+          )}
           {scenarios.length > 0 && (
             <select
               value={scenario}
               onChange={(e) => setScenario(e.target.value)}
-              title="the world the next simulate runs in"
+              title="the world the next simulate runs in (scenarios are authored from Python)"
             >
               <option value="baseline">baseline</option>
               {scenarios.map((s) => (
                 <option key={s.name} value={s.name}>
-                  {s.name}
+                  ⧉ {s.name}
                 </option>
               ))}
             </select>
           )}
+          <button
+            className="plan-go"
+            onClick={onSimulate}
+            disabled={!canSimulate || simulating || !connected}
+            title={
+              multi
+                ? "roll the checked programs concurrently over one world"
+                : undefined
+            }
+          >
+            {multi ? `Simulate (${included.length} programs)` : "Simulate"}
+          </button>
+          {error && <div className="plan-error">{error}</div>}
         </div>
-        {error && <div className="plan-error">{error}</div>}
-      </div>
-    </section>
+      </Section>
+    </>
   );
 }

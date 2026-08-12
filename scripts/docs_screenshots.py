@@ -53,6 +53,9 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(args=CHROMIUM_ARGS)
         page = browser.new_page(viewport=VIEWPORT)
+        # SwiftShader takes ~a minute per capture on a loaded machine; the
+        # default 30 s screenshot timeout flakes.
+        page.set_default_timeout(180_000)
         page.add_init_script(CAMERA_HOOK)
 
         # ---- 1. the demo cell as it opens: viewport, panels, TCP gizmo -----
@@ -65,6 +68,7 @@ def main() -> None:
         print("wrote overview.png")
 
         # ---- 2. a planned trajectory, broadcast to the connected studio ----
+        page.locator(".tab", has_text="Motion").click()
         scene.plan_to_pose((0.45, -0.35, 0.75))
         time.sleep(1.5)
         page.screenshot(path=OUT / "plan.png")
@@ -77,6 +81,7 @@ def main() -> None:
         server = bt.studio(scene, block=False, open_browser=False)
         page.goto(server.url)
         page.wait_for_selector("canvas")
+        page.locator(".tab", has_text="Sequence").click()
         time.sleep(2.0)
         tl = scene.simulate_sequence(name)  # broadcasts the baked timeline
         page.wait_for_selector(".timeline-bands", timeout=20000)
@@ -97,6 +102,7 @@ def main() -> None:
         server = bt.studio(scene, block=False, open_browser=False)
         page.goto(server.url)
         page.wait_for_selector("canvas")
+        page.locator(".tab", has_text="Sequence").click()
         time.sleep(2.0)
         tl = scene.simulate_sequence(name, max_duration=90.0)
         page.wait_for_selector(".timeline-bands", timeout=20000)

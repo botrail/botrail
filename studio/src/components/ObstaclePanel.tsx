@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { GeometryMsg, ObstacleMsg, PoseMsg } from "../protocol";
-import { collidingObstacleNames, robotByName, useStudioStore } from "../store";
+import { robotByName, useStudioStore } from "../store";
 import {
   sendAddObstacle,
   sendAttachObstacle,
@@ -9,6 +9,7 @@ import {
   sendRemoveObstacle,
   sendUpdateObstacleGeometry,
 } from "../ws";
+import { Section } from "./Section";
 
 // New obstacles spawn just in front of the robot base, upright.
 const SPAWN_POSITION: [number, number, number] = [0.3, 0, 0.1];
@@ -45,17 +46,17 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
   }),
 };
 
+/**
+ * Obstacle creation plus the inspector form for the selected one. The
+ * scene tree (and the viewport) is the list — this panel only adds and
+ * edits.
+ */
 export function ObstaclePanel() {
   const obstacles = useStudioStore((s) => s.obstacles);
   const collisions = useStudioStore((s) => s.collisions);
   const minDistance = useStudioStore((s) => s.minDistance);
   const selection = useStudioStore((s) => s.selection);
   const selectObstacle = useStudioStore((s) => s.selectObstacle);
-
-  const collidingObstacles = useMemo(
-    () => collidingObstacleNames(collisions),
-    [collisions],
-  );
 
   const selectedName = selection.type === "obstacle" ? selection.name : null;
   const selected = obstacles.find((o) => o.name === selectedName) ?? null;
@@ -83,14 +84,16 @@ export function ObstaclePanel() {
   };
 
   return (
-    <section className="panel-section">
-      <div className="panel-head">
-        <h2>Obstacles</h2>
+    <Section
+      id="obstacles"
+      title="Obstacles"
+      badge={
         <ClearanceBadge
           minDistance={minDistance}
           colliding={collisions.length > 0}
         />
-      </div>
+      }
+    >
       <div className="obstacle-controls">
         <div className="seg">
           <button onClick={() => add("box")}>+ Box</button>
@@ -98,41 +101,17 @@ export function ObstaclePanel() {
           <button onClick={() => add("cylinder")}>+ Cylinder</button>
         </div>
 
-        <div className="obstacle-list">
-          {obstacles.map((o) => (
-            <div
-              key={o.name}
-              className={`obstacle-row${o.name === selectedName ? " selected" : ""}`}
-              onClick={() => selectObstacle(o.name)}
-            >
-              <span
-                className={`obstacle-name${collidingObstacles.has(o.name) ? " bad" : ""}`}
-              >
-                {o.attached_to && (
-                  <span title={`attached to ${o.attached_to.link}`}>{"\u{1F9F2} "}</span>
-                )}
-                {o.name}
-              </span>
-              <button
-                className="obstacle-remove"
-                title="Remove"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  sendRemoveObstacle(o.name);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          {obstacles.length === 0 && (
-            <div className="empty">No obstacles</div>
-          )}
-        </div>
-
-        {selected && <ObstacleForm obstacle={selected} />}
+        {selected ? (
+          <ObstacleForm obstacle={selected} />
+        ) : (
+          <div className="hint">
+            {obstacles.length === 0
+              ? "no obstacles — add one, or import a stage"
+              : "select an object in the scene tree or viewport to edit it"}
+          </div>
+        )}
       </div>
-    </section>
+    </Section>
   );
 }
 
@@ -168,6 +147,12 @@ function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
 
   return (
     <div className="obstacle-form">
+      <div className="inspector-title" title={name}>
+        {obstacle.attached_to && (
+          <span title={`attached to ${obstacle.attached_to.link}`}>{"\u{1F9F2} "}</span>
+        )}
+        {name}
+      </div>
       {geometry.kind === "box" && (
         <>
           {(["x", "y", "z"] as const).map((axis, i) => (
@@ -235,6 +220,13 @@ function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
             Attach to {tcpLink ? linkLabel(tcpLink) : "TCP"}
           </button>
         )}
+        <button
+          className="danger"
+          title="remove this obstacle from the scene"
+          onClick={() => sendRemoveObstacle(name)}
+        >
+          Remove
+        </button>
       </div>
     </div>
   );
