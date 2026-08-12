@@ -98,8 +98,9 @@ and everyone else reads as a flowchart: one column per program, step
 boxes joined by transition bars with the condition beside each, a ◇ step
 fanning into one lane per arm and rejoining below. After a Simulate the
 chart is the bake's story: steps that ran are outlined, arms the world
-never took are dashed out, and the guard that won is green. Pick another
-scenario in RUN, Simulate again, and the other arm lights up instead.
+never took are dashed out, and the guard that won is green — so a
+[scenario](sequences.md) that flips a verdict shows up as the other arm
+lighting up on the next Simulate.
 
 ![The SFC chart paused on an edge wait](../assets/studio/sfc.png)
 

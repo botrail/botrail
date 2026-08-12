@@ -108,13 +108,13 @@ def main() -> None:
         page.locator(".tab", has_text="Sequence").click()
         time.sleep(2.0)
         page.locator("button", has_text="SFC chart").click()
-        scene.simulate_sequences(["pick", "lamp"], max_duration=60.0)
+        scene.simulate_sequences(["pick", "lamp"], max_duration=120.0)
         page.wait_for_selector(".timeline-bands", timeout=30000)
         # Park the playhead where the chart tells its story: the arm posed
         # over the pick point, the belt feeding, the edge wait live —
         # ↑part_at_pick gray until the part arrives. Clicking the step is
         # the chart's own seek.
-        page.locator(".sfc-box", has_text="await part").click()
+        page.locator(".sfc-box", has_text="await part").first.click()
         page.evaluate("window.__CAM = {pos: [1.9, -1.5, 1.75], look: [0.15, 0.25, 0.6]}")
         time.sleep(1.5)
         page.screenshot(path=OUT / "sfc.png")

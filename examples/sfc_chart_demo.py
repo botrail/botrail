@@ -1,34 +1,43 @@
 """A pick cell you can watch: the studio's SFC chart over a real cell.
 
 The cell is a UR5e with a Robotiq 2F-85 on a coupling (catalog models —
-the first run downloads them), picking 60 mm parts off a running belt.
-The belt is real geometry here, not just a transport zone; the gripper
-really closes on the part before the attach; and both ends of the cycle
-approach the way a cell does — over the target, straight down, release,
-lift clear — so what the viewport shows is what the cycle does.
+the first run downloads them), picking parts off a belt. The belt is real
+geometry, not just a transport zone; the gripper really closes on the
+part before the attach; and each seat is approached the way a cell does
+— over the target, straight down, release, lift clear.
 
-The process is the one the chart is for: feed the belt and pre-position
-in parallel, wait for the part to *arrive* (a rising edge on the beam,
-not a level — a part already sitting on the beam is not an arrival),
-grip, then a ◇ select decides on the spec gauge: a good part is seated on
-the tray, a bad one goes back on the belt and is sent downstream out of
-the cell. A second program (`lamp`) watches the gripper through edge
-conditions, so two columns scan side by side.
+**Two parts run through in order, and the cell decides for itself which
+is which.** They differ only in height, and an over-height beam strung
+across the station is the gauge: the 60 mm part passes under it, the
+80 mm one breaks it. Nothing else marks them — no flag, no scenario.
+
+Each part's block runs the same process: get in position, run the belt,
+wait for the part to *arrive* (a rising edge — a part already sitting on
+the beam is not an arrival), stop, read the gauge, grip, and route. The
+gauge only reads while the part stands on the station, so its verdict is
+latched into a relay and acted on after the pick — the oldest habit in
+ladder logic, and the reason the chart has two ◇ diamonds per part: one
+that measures, one that routes. A second program (`lamp`) watches the
+gripper through edge conditions, so two columns scan side by side.
 
     .venv/bin/python examples/sfc_chart_demo.py
 
 Then, in the browser:
 
-1. Sequence tab -> **SFC chart** — the authored programs, neutral.
-2. **Simulate (2 programs)** — the taken path stays solid, the reject arm
-   dashes out, the winning guard `spec_ok=1` reads green.
+1. Sequence tab -> **SFC chart** — the authored program, neutral.
+2. **Simulate (2 programs)** — the path each part took stays solid and
+   the arms it did not take dash out. The first block marks *ok* and
+   seats its part on the tray; the second marks *ng* and puts its part
+   back on the belt to be sent downstream.
 3. Press play in the dock: a token rides each column, and the live
    condition beside it colors green as it becomes true (`0.50s` counts
    up, edge atoms underline while the signal is high, and the condition
    that released a step glows for a beat after the token hops).
 4. Click any solid step box — the playhead jumps to when it began.
-5. Pick the `ng_part` world in RUN and Simulate again: the other arm
-   lights up, and the part rides away down the belt instead.
+5. Watch the `too_tall` lane in the dock: a long high while the tall part
+   stands on the station (that is the reading the `reject` relay latches)
+   and a blip each time a part is lifted up through the beam afterwards —
+   which is exactly why the verdict is captured rather than re-read.
 """
 
 import botrail as bt
@@ -50,7 +59,13 @@ PICK_X = 0.25
 # where the gripper is taught to descend.
 BEAM_X = PICK_X + PART / 2
 TRAY_TOP = BASE_Z - 0.12
-PICK_Z = BELT_TOP + PART / 2
+PICK_Z = BELT_TOP + PART / 2  # beam height: the middle of a good part
+# One taught pick has to serve parts of both heights, so it grips well
+# down the side of a good part but not so deep that the gripper's body
+# would land on a tall one. Either way the part hangs `HANG` below the
+# tool, so one taught seat height puts either of them down.
+GRIP_Z = BELT_TOP + 0.05
+HANG = GRIP_Z - BELT_TOP
 HOVER = 0.14  # how far above a seat the arm hovers before coming down
 # A carried part is checked as part of the robot, so "resting on" a
 # surface reads as a collision. Seat it a few millimetres clear — the
@@ -61,6 +76,16 @@ TRAY_XY = (0.30, -0.42)
 # Rejects are set back down on the belt downstream of the beam and sent
 # away — the way a line actually purges a bad part.
 PURGE_X = 0.52
+
+# Two parts run through, in order. They differ in height, and that is
+# what the gauge measures: an over-height beam strung across the station
+# above a good part's top and below a bad one's.
+NG_HEIGHT = 0.08
+GAUGE_Z = BELT_TOP + (PART + NG_HEIGHT) / 2
+PARTS = [  # name, height, colour, where it starts on the belt
+    ("part_ok", PART, (0.80, 0.58, 0.24), -0.35),
+    ("part_ng", NG_HEIGHT, (0.72, 0.30, 0.24), -0.65),
+]
 
 DOWN = (1.0, 0.0, 0.0, 0.0)  # tool +Z pointing at the floor
 OPEN, SHUT = 0.0, 0.33  # 2F-85 finger joint: 92 mm and 60 mm across the pads
@@ -117,15 +142,22 @@ def build_cell() -> bt.Scene:
             scene.add_cylinder(leg, 0.02, legs, (x, BELT_Y + side * 0.10, FLOOR_TOP + legs / 2),
                                color=(0.50, 0.52, 0.56))
             scene.set_obstacle_material(leg, metalness=0.8, roughness=0.4)
-    # The sensor's own hardware, so the beam has something to come out of.
-    for side, name in ((-1, "cell/emitter"), (1, "cell/receiver")):
-        scene.add_box(name, size=(0.04, 0.03, 0.07),
-                      position=(BEAM_X, BELT_Y + side * 0.155, PICK_Z), color=(0.85, 0.55, 0.15))
-        scene.set_obstacle_material(name, metalness=0.3, roughness=0.5)
+    # The sensors' own hardware, so the beams come out of something: the
+    # arrival beam at part height, the gauge one part-step higher.
+    for x, z, tag in ((BEAM_X, PICK_Z, "arrive"), (PICK_X, GAUGE_Z, "gauge")):
+        for side, end in ((-1, "emitter"), (1, "receiver")):
+            name = f"cell/{tag}-{end}"
+            scene.add_box(name, size=(0.04, 0.03, 0.07),
+                          position=(x, BELT_Y + side * 0.155, z), color=(0.85, 0.55, 0.15))
+            scene.set_obstacle_material(name, metalness=0.3, roughness=0.5)
 
-    scene.add_box("part", size=(PART, PART, PART),
-                  position=(BELT_X0 + 0.10, BELT_Y, PICK_Z), color=(0.80, 0.58, 0.24))
-    scene.set_obstacle_material("part", metalness=0.2, roughness=0.6)
+    # The two workpieces, waiting their turn on the belt. They are gripped
+    # at the same height, so the taller one is simply held lower down —
+    # one taught pick serves both.
+    for name, height, color, start in PARTS:
+        scene.add_box(name, size=(PART, PART, height),
+                      position=(start, BELT_Y, BELT_TOP + height / 2), color=color)
+        scene.set_obstacle_material(name, metalness=0.2, roughness=0.6)
 
     # A conveyor is a transport zone: it sits above the slab, so it carries
     # the goods and not the structure (the slab's origin is below it).
@@ -138,17 +170,26 @@ def build_cell() -> bt.Scene:
         velocity=(0.12, 0.0, 0.0),
         running=False,
     )
+    names = [name for name, _, _, _ in PARTS]
     scene.add_beam_sensor(
         "part_at_pick",
         frm=(BEAM_X, BELT_Y - 0.14, PICK_Z),
         to=(BEAM_X, BELT_Y + 0.14, PICK_Z),
-        watch=["part"],
+        watch=names,
     )
-    # The spec gauge's verdict is an input contact: good parts by default,
-    # and the `ng_part` scenario is the world where it reads low.
-    scene.define_signal("spec_ok", initial=True)
+    # The gauge: a beam over the station, above a good part and below a
+    # bad one. It only watches the workpieces, so the arm reaching in to
+    # pick does not trip it. Nothing decides quality but this height.
+    scene.add_beam_sensor(
+        "too_tall",
+        frm=(PICK_X, BELT_Y - 0.14, GAUGE_Z),
+        to=(PICK_X, BELT_Y + 0.14, GAUGE_Z),
+        watch=names,
+    )
+    # The gauge only reads while the part is standing on the station, so
+    # the verdict is latched into a relay and acted on after the pick.
+    scene.define_signal("reject")
     scene.define_signal("gripped")
-    scene.add_scenario("ng_part", signals={"spec_ok": False})
     return scene
 
 
@@ -177,44 +218,66 @@ def teach(scene: bt.Scene) -> None:
         scene.add_segment(f"to_{name}", goal=at(position, carried))
         scene.add_segment(f"clear_{name}", goal=at((x, y, z + HOVER), OPEN))
 
-    approach = at((PICK_X, BELT_Y, PICK_Z + HOVER), OPEN)
+    approach = at((PICK_X, BELT_Y, GRIP_Z + HOVER), OPEN)
     scene.add_segment("approach", goal=approach)
-    scene.add_segment("descend", goal=at((PICK_X, BELT_Y, PICK_Z), OPEN))
+    scene.add_segment("descend", goal=at((PICK_X, BELT_Y, GRIP_Z), OPEN))
     scene.add_segment("lift", goal=[*approach[:6], SHUT])
-    seat("tray", (*TRAY_XY, TRAY_TOP + 0.02 + PART / 2 + SEAT_GAP))
-    seat("purge", (PURGE_X, BELT_Y, PICK_Z + SEAT_GAP))
+    seat("tray", (*TRAY_XY, TRAY_TOP + 0.02 + HANG + SEAT_GAP))
+    seat("purge", (PURGE_X, BELT_Y, BELT_TOP + HANG + SEAT_GAP))
     scene.add_segment("home", goal=READY)
     scene.set_joint_positions(READY)
 
 
 def author_pick(scene: bt.Scene) -> None:
-    """The process. Steps are the chart's boxes; transitions its bars."""
+    """The process: one block per part, run back to back. Steps are the
+    chart's boxes; transitions its bars."""
     sq = scene.sequence("pick")
-    sq.step("feed", actions=[bt.seq.start("conv"), bt.seq.motion("approach")])
+    for name, _, _, _ in PARTS:
+        one_part(sq, name)
+
+
+def one_part(sq, part: str) -> None:
+    """Feed, gauge, pick, and route one part."""
+    # Get in position *first*, then run the belt. Feeding while the arm is
+    # still travelling is the classic way to lose an arrival: the part can
+    # cross the beam before the step that watches for it is even active.
+    sq.step("ready", actions=[bt.seq.motion("approach")])
+    sq.step("feed", actions=[bt.seq.start("conv")])
     sq.step("await part", transition=bt.seq.rising("part_at_pick"))
     sq.step("halt", actions=[bt.seq.stop("conv")])
+
+    # The gauge reads only while the part stands on the station, and by the
+    # time the routing decision matters the part is in the gripper — so the
+    # verdict is latched here, into a relay, and read back later. Capturing
+    # a measurement while you can is the oldest habit in ladder logic.
+    gauge = sq.select("gauge")
+    gauge.when(bt.seq.signal("too_tall")).step(
+        "mark ng", actions=[bt.seq.set_signal("reject")]
+    )
+    gauge.when(bt.seq.otherwise()).step(
+        "mark ok", actions=[bt.seq.set_signal("reject", False)]
+    )
+
     sq.step("descend", actions=[bt.seq.motion("descend")])
     sq.step(
         "grip",
         actions=[bt.seq.ramp({"finger_joint": SHUT}, 0.5), bt.seq.set_signal("gripped")],
     )
-    sq.step("hold", actions=[bt.seq.attach("part", touch_links=PADS)])
+    sq.step("hold", actions=[bt.seq.attach(part, touch_links=PADS)])
     sq.step("lift", actions=[bt.seq.motion("lift")])
 
-    # SFC selection: the spec gauge decides. Both arms move the robot — a
-    # bake takes one of them, and the `ng_part` scenario covers the other.
-    # Each seats the part the same way, over different furniture.
+    # SFC selection on the latched verdict: good parts are seated on the
+    # tray, bad ones go back on the belt and are sent downstream.
     judge = sq.select("judge")
-    seat(judge.when(bt.seq.signal("spec_ok")), "tray", "to tray")
+    seat(judge.when(bt.seq.signal("reject", False)), "tray", "to tray", part)
     reject = judge.when(bt.seq.otherwise())
-    seat(reject, "purge", "to belt")
-    # …and send the bad one downstream, out of the cell.
+    seat(reject, "purge", "to belt", part)
     reject.step("purge", actions=[bt.seq.start("conv")])
 
     sq.step("return", actions=[bt.seq.motion("home")])
 
 
-def seat(arm, motion: str, label: str) -> None:
+def seat(arm, motion: str, label: str, part: str) -> None:
     """Put the carried part down like a cell does: over the target, down
     onto it, open, and lift clear before going anywhere else."""
     arm.step(label, actions=[bt.seq.motion(f"over_{motion}")])
@@ -223,7 +286,7 @@ def seat(arm, motion: str, label: str) -> None:
         "release",
         actions=[
             bt.seq.ramp({"finger_joint": OPEN}, 0.4),
-            bt.seq.detach("part"),
+            bt.seq.detach(part),
             bt.seq.set_signal("gripped", False),
         ],
     )
