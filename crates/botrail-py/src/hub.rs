@@ -783,6 +783,7 @@ impl SceneHub {
                         .collect(),
                     step_spans: Vec::new(),
                     signals: Vec::new(),
+                    branches: Vec::new(),
                 };
                 let msg = ServerMessage::RecordingResult {
                     ok: true,

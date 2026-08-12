@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "examples"))
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
+import sfc_chart_demo  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 from sequence_demo import BOX, TOUCH, build_cycle  # noqa: E402
 import agv_cell_demo  # noqa: E402
@@ -96,7 +97,31 @@ def main() -> None:
         print("wrote sequence.png")
         server.stop()
 
-        # ---- 4. the transport cell: guide path, stations, load sensor -----
+        # ---- 4. the SFC chart: the pick cell paused on its edge wait -----
+        scene = sfc_chart_demo.build_cell()
+        sfc_chart_demo.teach(scene)
+        sfc_chart_demo.author_pick(scene)
+        sfc_chart_demo.author_lamp(scene)
+        server = bt.studio(scene, block=False, open_browser=False)
+        page.goto(server.url)
+        page.wait_for_selector("canvas")
+        page.locator(".tab", has_text="Sequence").click()
+        time.sleep(2.0)
+        page.locator("button", has_text="SFC chart").click()
+        scene.simulate_sequences(["pick", "lamp"], max_duration=60.0)
+        page.wait_for_selector(".timeline-bands", timeout=30000)
+        # Park the playhead where the chart tells its story: the arm posed
+        # over the pick point, the belt feeding, the edge wait live —
+        # ↑part_at_pick gray until the part arrives. Clicking the step is
+        # the chart's own seek.
+        page.locator(".sfc-box", has_text="await part").click()
+        page.evaluate("window.__CAM = {pos: [1.9, -1.5, 1.75], look: [0.15, 0.25, 0.6]}")
+        time.sleep(1.5)
+        page.screenshot(path=OUT / "sfc.png")
+        print("wrote sfc.png")
+        server.stop()
+
+        # ---- 5. the transport cell: guide path, stations, load sensor -----
         scene = agv_cell_demo.build_scene()
         name = agv_cell_demo.build_cycle(scene)
         server = bt.studio(scene, block=False, open_browser=False)

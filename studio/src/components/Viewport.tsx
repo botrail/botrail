@@ -15,6 +15,7 @@ import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
+import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
@@ -179,6 +180,7 @@ export function Viewport() {
       </Canvas>
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
+      <SfcOverlay />
       <TimelineDock />
       {!connected && <div className="overlay">connecting…</div>}
     </div>

@@ -843,3 +843,217 @@ button.danger:hover:not(:disabled) {
   background: #5a8f6a;
   border-radius: 2px;
 }
+
+/* --- SFC chart overlay (see components/SfcChart.tsx) --- */
+
+.sfc-overlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  max-width: min(64%, 760px);
+  /* Clear the timeline dock, which owns the bottom of the viewport and
+   * grows with the cell's signal lanes — SfcOverlay measures it and sets
+   * `--sfc-reserve`; the fallback covers the frame before it does. */
+  max-height: calc(100% - var(--sfc-reserve, 160px));
+  display: flex;
+  flex-direction: column;
+  background: rgba(23, 26, 33, 0.94);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sfc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sfc-heading {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.sfc-caption {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sfc-empty {
+  padding: 14px;
+}
+
+.sfc-scroll {
+  overflow: auto;
+  /* `min-height: 0` is what lets a column flex child shrink below its
+   * content and actually scroll; without it a tall chart pushes past the
+   * overlay and lands on top of the dock. */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 12px;
+}
+
+.sfc-program h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.sfc-canvas {
+  position: relative;
+}
+
+.sfc-canvas svg {
+  position: absolute;
+  inset: 0;
+}
+
+.sfc-canvas svg line {
+  stroke: #414a5a;
+  stroke-width: 1.5;
+}
+
+.sfc-canvas svg line.sfc-tick {
+  stroke: #8b94a6;
+  stroke-width: 2.5;
+}
+
+.sfc-canvas svg line.sfc-tick.taken {
+  stroke: var(--ok);
+}
+
+.sfc-canvas svg line.sfc-tick.off {
+  stroke: #414a5a;
+}
+
+.sfc-box {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  padding: 0 7px;
+  background: var(--panel-2);
+  border: 1px solid #3a4150;
+  border-radius: 4px;
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* The step's name is the box's point: it keeps its room and the action
+ * chips are what run off the edge. */
+.sfc-box .sfc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 42px;
+}
+
+.sfc-box .seq-chip {
+  flex: none;
+  font-size: 9px;
+}
+
+/* GRAFCET initial step: double border. */
+.sfc-box.initial {
+  box-shadow: 0 0 0 2px var(--panel-2), 0 0 0 3px #3a4150;
+}
+
+.sfc-box.entered {
+  border-color: var(--accent);
+}
+
+.sfc-box.unreached {
+  opacity: 0.6;
+}
+
+.sfc-box.untaken {
+  opacity: 0.35;
+  border-style: dashed;
+}
+
+.sfc-cond {
+  position: absolute;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: #98a2b3;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sfc-cond.taken {
+  color: var(--ok);
+}
+
+.sfc-cond.off {
+  opacity: 0.4;
+}
+
+/* Baked steps seek the transport on click. */
+.sfc-box.clickable {
+  cursor: pointer;
+}
+
+.sfc-box.clickable:hover {
+  border-color: #6ea8dd;
+}
+
+/* The per-program token: rides the active step, parks (dimmed) on the
+ * last step once the program finishes. */
+.sfc-token {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 0 9px rgba(91, 157, 217, 0.65);
+  pointer-events: none;
+  transition:
+    left 0.12s ease,
+    top 0.12s ease;
+}
+
+.sfc-token.done {
+  border-color: #4a5162;
+  box-shadow: none;
+}
+
+/* Live truth of the active step's exits: satisfied contacts green, open
+ * ones gray; overprints the static label at the same spot. */
+.sfc-live-cond {
+  position: absolute;
+  transform: translateY(-50%);
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(23, 26, 33, 0.96);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sfc-live-cond .hold {
+  color: var(--ok);
+}
+
+.sfc-live-cond .idle {
+  color: #6d7787;
+}
+
+/* Edge atoms carry the signal's level as an underline (the flash itself
+ * is the green hold right after firing). */
+.sfc-live-cond .lv {
+  border-bottom: 1px solid currentColor;
+}
+
+.sfc-live-cond .sep {
+  color: #5a6374;
+}

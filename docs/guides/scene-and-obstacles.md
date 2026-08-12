@@ -83,6 +83,15 @@ for piece in pieces:                                  # …collides right
 Disabled obstacles keep rendering and keep riding conveyors — they are scenery
 that happens to move. The dual-arm demo's belt cleats work exactly this way.
 
+!!! note "z = 0 is the floor"
+
+    The studio draws the shop floor at `z = 0`, so geometry below it is
+    behind the floor and never appears — a cell laid out around a robot
+    base at the origin looks half-missing. Build upward instead: floor at
+    zero, the robot's mounting plane on top of its pedestal
+    (`bt.Scene(robot, base_position=(0, 0, 0.74))`), everything else
+    measured from there.
+
 Seating a workpiece on a fixture wants the mesh's own dimensions, not a number
 measured off it once. [`obstacle_bounds`][botrail.Scene.obstacle_bounds]
 returns the world-frame `(min, max)` of anything already in the scene, so a

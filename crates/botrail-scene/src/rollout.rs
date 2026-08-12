@@ -116,6 +116,13 @@ pub struct StepSpan {
     pub name: String,
     pub start: f64,
     pub end: f64,
+    /// Owning sequence — for a robot move span, the sequence whose step
+    /// started the move. Always the bare name; `name` alone gets the
+    /// `"{sequence}/"` display prefix in multi-program bakes, and step
+    /// names repeat freely, so structural consumers key on these fields.
+    pub sequence: String,
+    /// Flat-step index within `sequence` (the [`flatten`] pre-order).
+    pub step: usize,
 }
 
 /// A boolean signal as a step function: `(time, new_value)` edges,
@@ -2644,6 +2651,8 @@ impl Rollout {
             name,
             start: self.t,
             end: self.t,
+            sequence: program.sequence.name.clone(),
+            step: program.step,
         });
         let step = self.programs[self.current].step;
         for action in self.programs[self.current].flat[step].actions.clone() {
@@ -2755,6 +2764,8 @@ impl Rollout {
                     name: motion.clone(),
                     start: self.t,
                     end,
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
                 });
                 // Joints follow the trajectory tick by tick (advance_world),
                 // so mid-motion sensors see the true robot state.
@@ -2803,6 +2814,8 @@ impl Rollout {
                     name: "ramp".to_string(),
                     start: self.t,
                     end,
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
                 });
                 rt.active = Some(ActiveMove::Ramp {
                     start: self.t,
@@ -3528,6 +3541,122 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(after.start, gate.end);
         assert_eq!(tl.branches[0].arm, 1);
+    }
+
+    #[test]
+    fn spans_and_moves_carry_structural_attribution() {
+        // Display names repeat freely ("wait", three times here) and gain a
+        // "{sequence}/" prefix in multi-program bakes, so structural
+        // consumers (the SFC chart) key on `sequence` + `step` instead.
+        // Pin those fields to the flatten they index.
+        let mut scene = sample_scene();
+        joint_motion(&mut scene, "go", 0.8);
+        scene.define_signal("skip", false);
+        scene.define_signal("late", false);
+        let a_steps = vec![
+            step("wait", vec![], Condition::Elapsed { seconds: 0.1 }),
+            step(
+                "wait",
+                vec![Action::StartMotion {
+                    motion: "go".into(),
+                }],
+                Condition::Done,
+            ),
+            sel(
+                "gate",
+                vec![
+                    (
+                        Condition::Signal {
+                            name: "skip".into(),
+                            value: true,
+                        },
+                        vec![step("never", vec![], Condition::Immediately)],
+                    ),
+                    // The taken arm is empty: no span — only `branches`
+                    // records the decision.
+                    (
+                        Condition::Signal {
+                            name: "late".into(),
+                            value: true,
+                        },
+                        vec![],
+                    ),
+                ],
+            ),
+            step("wait", vec![], Condition::Immediately),
+        ];
+        let b_steps = vec![
+            step("wait", vec![], Condition::Elapsed { seconds: 0.05 }),
+            step("go", vec![set("late", true)], Condition::Immediately),
+        ];
+        scene.upsert_sequence(Sequence {
+            name: "a".into(),
+            steps: a_steps.clone(),
+        });
+        scene.upsert_sequence(Sequence {
+            name: "b".into(),
+            steps: b_steps.clone(),
+        });
+        let tl = scene
+            .simulate_sequences(&["a", "b"], &RolloutOptions::default())
+            .unwrap();
+
+        // Every span's (sequence, step) indexes the owning flatten, and the
+        // display name is that node's name behind the prefix.
+        let flat_a = flatten(&a_steps);
+        let flat_b = flatten(&b_steps);
+        for span in &tl.step_spans {
+            let flat = match span.sequence.as_str() {
+                "a" => &flat_a,
+                "b" => &flat_b,
+                other => panic!("unexpected sequence `{other}`"),
+            };
+            assert_eq!(
+                span.name,
+                format!("{}/{}", span.sequence, flat[span.step].name),
+                "span at {:.2}..{:.2}",
+                span.start,
+                span.end
+            );
+        }
+        // The three duplicate "wait" spans resolve to distinct flat steps.
+        let waits: Vec<usize> = tl
+            .step_spans
+            .iter()
+            .filter(|s| s.sequence == "a" && s.name == "a/wait")
+            .map(|s| s.step)
+            .collect();
+        assert_eq!(waits, [0, 1, 4]);
+        assert!(!tl.step_spans.iter().any(|s| s.name == "a/never"));
+        assert_eq!(
+            (
+                tl.branches[0].sequence.as_str(),
+                tl.branches[0].select,
+                tl.branches[0].arm
+            ),
+            ("a", 0, 1)
+        );
+        // Robot move spans carry the step that started them: the "go"
+        // motion was fired by a's flat step 1.
+        assert_eq!(tl.robots[0].moves.len(), 1);
+        assert_eq!(
+            (
+                tl.robots[0].moves[0].sequence.as_str(),
+                tl.robots[0].moves[0].step
+            ),
+            ("a", 1)
+        );
+
+        // Single-program bakes fill the same fields, names unprefixed.
+        let tl = scene
+            .simulate_sequence("b", &RolloutOptions::default())
+            .unwrap();
+        let attribution: Vec<(&str, &str, usize)> = tl
+            .step_spans
+            .iter()
+            .map(|s| (s.name.as_str(), s.sequence.as_str(), s.step))
+            .collect();
+        assert_eq!(attribution, [("wait", "b", 0), ("go", "b", 1)]);
     }
 
     #[test]

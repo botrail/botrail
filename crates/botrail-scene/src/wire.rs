@@ -716,6 +716,32 @@ pub struct StepSpanMsg {
     pub name: String,
     pub start: f64,
     pub end: f64,
+    /// Owning sequence (for a robot move span: the sequence whose step
+    /// started the move). `name` is a display string — prefixed in
+    /// multi-program bakes and free to repeat — so structural consumers
+    /// (the SFC chart) key on `sequence`/`step` instead. Empty on
+    /// recording timelines, which have no sequence behind them.
+    #[serde(default)]
+    pub sequence: String,
+    /// Flat-step index within `sequence` (rollout's pre-order flatten).
+    #[serde(default)]
+    pub step: usize,
+}
+
+/// One resolved selection divergence: which arm `sequence` took at the
+/// branching step. Untaken arms leave no step spans — and a taken *empty*
+/// arm leaves none either — so this is the only complete record of the
+/// path a bake took.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BranchTakenMsg {
+    pub sequence: String,
+    /// The branching step's display name.
+    pub step: String,
+    /// Pre-order ordinal of the branching step within its sequence.
+    pub select: usize,
+    /// Taken arm index, authored order.
+    pub arm: usize,
 }
 
 /// A boolean signal as a step function (timing-chart lane).
@@ -767,6 +793,9 @@ pub struct TimelineMsg {
     pub objects: Vec<ObjectTrackMsg>,
     pub step_spans: Vec<StepSpanMsg>,
     pub signals: Vec<SignalTrackMsg>,
+    /// Every selection divergence this bake resolved, in resolution order.
+    #[serde(default)]
+    pub branches: Vec<BranchTakenMsg>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2027,6 +2056,43 @@ mod tests {
         assert_eq!(robot["joints"][0]["joint_type"], "revolute");
         assert_eq!(robot["joints"][0]["q_index"], 0);
         assert_eq!(robot["tcp_link"], "tip");
+    }
+
+    #[test]
+    fn timeline_span_attribution_and_branches_roundtrip() {
+        let msg = TimelineMsg {
+            duration: 1.0,
+            robots: vec![],
+            objects: vec![],
+            step_spans: vec![StepSpanMsg {
+                name: "a/wait".into(),
+                start: 0.0,
+                end: 0.5,
+                sequence: "a".into(),
+                step: 3,
+            }],
+            signals: vec![],
+            branches: vec![BranchTakenMsg {
+                sequence: "a".into(),
+                step: "gate".into(),
+                select: 0,
+                arm: 1,
+            }],
+        };
+        let back: TimelineMsg =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(back, msg);
+
+        // Timelines serialized before the attribution fields default clean.
+        let old: TimelineMsg = serde_json::from_str(
+            r#"{"duration":1.0,"robots":[],"objects":[],
+                "step_spans":[{"name":"wait","start":0.0,"end":0.5}],
+                "signals":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.step_spans[0].sequence, "");
+        assert_eq!(old.step_spans[0].step, 0);
+        assert!(old.branches.is_empty());
     }
 
     #[test]

@@ -3,4 +3,16 @@
 /**
  * One step's interval on a baked timeline.
  */
-export type StepSpanMsg = { name: string, start: number, end: number, };
+export type StepSpanMsg = { name: string, start: number, end: number, 
+/**
+ * Owning sequence (for a robot move span: the sequence whose step
+ * started the move). `name` is a display string — prefixed in
+ * multi-program bakes and free to repeat — so structural consumers
+ * (the SFC chart) key on `sequence`/`step` instead. Empty on
+ * recording timelines, which have no sequence behind them.
+ */
+sequence: string, 
+/**
+ * Flat-step index within `sequence` (rollout's pre-order flatten).
+ */
+step: number, };

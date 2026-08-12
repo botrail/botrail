@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
-import type { ActionMsg, ConditionMsg, SequenceMsg, StepMsg } from "../protocol";
+import type { SequenceMsg, StepMsg } from "../protocol";
+import { actionLabel, conditionLabel } from "../seqLabels";
 import { robotByName, useStudioStore } from "../store";
 import {
   sendSimulateSequence,
@@ -10,64 +11,6 @@ import {
 import { Section } from "./Section";
 
 const SEQUENCE_NAME = "main";
-
-/** Compact label for an action chip. */
-function actionLabel(action: ActionMsg): string {
-  const short = (name: string) => name.split("/").filter(Boolean).pop() ?? name;
-  switch (action.type) {
-    case "start_motion":
-      return `▶ ${action.motion}`;
-    case "start_ramp":
-      return `ramp ${action.targets.length}j`;
-    case "attach":
-      return `⊕ ${short(action.object)}`;
-    case "detach":
-      return `⊖ ${short(action.object)}`;
-    case "track":
-      return `⇉ ${short(action.object)}`;
-    case "untrack":
-      return "⇥ untrack";
-    case "set":
-      return `${action.signal}=${action.value ? "1" : "0"}`;
-    case "device": {
-      const cmd = action.command;
-      const verb =
-        cmd.type === "set_speed"
-          ? `speed ${cmd.speed}`
-          : cmd.type === "move_to"
-            ? `→${cmd.position}`
-            : cmd.type === "advance"
-              ? `⊳ ${cmd.distance}m`
-              : cmd.type;
-      return `⚙ ${action.device} ${verb}`;
-    }
-  }
-}
-
-function conditionLabel(condition: ConditionMsg): string {
-  switch (condition.type) {
-    case "immediately":
-      return "→";
-    case "done":
-      return "done";
-    case "robot_done":
-      return `${condition.robot} done`;
-    case "elapsed":
-      return `${condition.seconds.toFixed(2)}s`;
-    case "signal":
-      return `${condition.name}=${condition.value ? "1" : "0"}`;
-    case "rising":
-      return `↑${condition.name}`;
-    case "falling":
-      return `↓${condition.name}`;
-    case "all":
-      return condition.conditions.map(conditionLabel).join(" & ");
-    case "any":
-      return condition.conditions.map(conditionLabel).join(" | ");
-    case "device_done":
-      return `${condition.device} done`;
-  }
-}
 
 /** PLC-style step-sequence editor over the scene's `main` sequence. */
 export function SequencePanel() {
@@ -84,6 +27,8 @@ export function SequencePanel() {
   const timeline = useStudioStore((s) => s.timeline);
   const beginSequenceSim = useStudioStore((s) => s.beginSequenceSim);
   const connected = useStudioStore((s) => s.connection === "connected");
+  const sfcOpen = useStudioStore((s) => s.sfcOpen);
+  const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
 
   const sequence: SequenceMsg =
     sequences.find((s) => s.name === SEQUENCE_NAME) ??
@@ -378,6 +323,13 @@ export function SequencePanel() {
             }
           >
             {multi ? `Simulate (${included.length} programs)` : "Simulate"}
+          </button>
+          <button
+            className={sfcOpen ? "active" : undefined}
+            onClick={() => setSfcOpen(!sfcOpen)}
+            title="the programs as an SFC chart over the viewport"
+          >
+            ◫ SFC chart
           </button>
           {error && <div className="plan-error">{error}</div>}
         </div>

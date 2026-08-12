@@ -971,6 +971,8 @@ pub fn timeline_msg(
                         name: s.name.clone(),
                         start: s.start,
                         end: s.end,
+                        sequence: s.sequence.clone(),
+                        step: s.step,
                     })
                     .collect(),
             }
@@ -988,6 +990,18 @@ pub fn timeline_msg(
                 name: s.name.clone(),
                 start: s.start,
                 end: s.end,
+                sequence: s.sequence.clone(),
+                step: s.step,
+            })
+            .collect(),
+        branches: timeline
+            .branches
+            .iter()
+            .map(|b| wire::BranchTakenMsg {
+                sequence: b.sequence.clone(),
+                step: b.step.clone(),
+                select: b.select,
+                arm: b.arm,
             })
             .collect(),
         signals: timeline

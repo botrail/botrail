@@ -90,6 +90,28 @@ checkboxes pick which roll together; the dropdown picks the world —
 
 ![A baked sequence with the timeline dock](../assets/studio/sequence.png)
 
+## The chart — SFC
+
+**◫ SFC chart** (in RUN, or the `sfc` button on the dock) overlays the
+programs on the viewport in the notation PLC programmers already read —
+and everyone else reads as a flowchart: one column per program, step
+boxes joined by transition bars with the condition beside each, a ◇ step
+fanning into one lane per arm and rejoining below. After a Simulate the
+chart is the bake's story: steps that ran are outlined, arms the world
+never took are dashed out, and the guard that won is green. Pick another
+scenario in RUN, Simulate again, and the other arm lights up instead.
+
+![The SFC chart paused on an edge wait](../assets/studio/sfc.png)
+
+During playback a token rides each program's active step, and the live
+condition beside it answers *why is it waiting*: each contact turns green
+as it becomes true, timers count up (`0.29/5.00s`), and edge conditions
+(`↑part_at_pick`) underline while the signal is high. Just after the
+token hops, the condition that released it keeps glowing at the old spot
+for a beat, so the cause of every transition stays readable at playback
+speed. Clicking any baked step seeks the transport to the moment it
+began; the chart stays up across reloads until closed.
+
 ## The timeline dock
 
 The bottom dock is the one transport bar: every playback — a motion

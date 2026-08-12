@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  BranchTakenMsg,
   CollisionPairMsg,
   FlashMsg,
   FrameMsg,
@@ -24,6 +25,7 @@ import {
   type PlaybackSample,
   type PlaybackTracks,
 } from "./playback";
+import { attributionIssues } from "./sfc";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
@@ -48,6 +50,25 @@ function persistTab(tab: SidebarTab): SidebarTab {
     // Persistence only.
   }
   return tab;
+}
+
+const SFC_KEY = "botrail-studio.sfc";
+
+function initialSfcOpen(): boolean {
+  try {
+    return localStorage.getItem(SFC_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistSfcOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(SFC_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
 }
 
 
@@ -222,6 +243,8 @@ export interface StudioState {
   devices: DeviceMsg[];
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
+  /** The SFC chart overlay over the viewport (persisted). */
+  sfcOpen: boolean;
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   sequenceError: string | null;
@@ -232,6 +255,8 @@ export interface StudioState {
     /** Per-robot move intervals (motion/ramp bands), in scene order. */
     robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
+    /** Which arm each branching step took (recordings have none). */
+    branches: BranchTakenMsg[];
     /** Scenario the bake ran under; null = the unmodified scene. */
     scenario: string | null;
   } | null;
@@ -274,6 +299,7 @@ export interface StudioState {
   /** Panel robot selector; retargets a robot-scoped gizmo selection. */
   setSelectedRobot: (robot: string) => void;
   setActiveTab: (tab: SidebarTab) => void;
+  setSfcOpen: (open: boolean) => void;
   /**
    * Viewport pick: raise the tab holding the picked thing's tools
    * (robot → Motion, obstacle → Layout). The Sequence tab is sticky —
@@ -308,6 +334,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   minDistance: null,
   selection: { type: "tcp", robot: "" },
   activeTab: initialTab(),
+  sfcOpen: initialSfcOpen(),
   selectedMotion: null,
   playback: null,
   playbackTime: 0,
@@ -456,6 +483,15 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       set({ scenarios: msg.scenarios });
     } else if (msg.type === "sequence_result") {
       if (msg.ok && msg.timeline) {
+        // The SFC chart's flatten mirror must agree with the rollout's —
+        // any drift shows up on the first bake, as warnings, not as a
+        // silently wrong chart (see sfc.ts).
+        for (const issue of attributionIssues(get().sequences, {
+          stepSpans: msg.timeline.step_spans,
+          branches: msg.timeline.branches,
+        })) {
+          console.warn(`sfc chart: ${issue}`);
+        }
         // The baked cycle plays through the shared playback machinery;
         // step ends double as the seek-bar tick marks.
         set({
@@ -469,6 +505,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: msg.timeline.signals,
+            branches: msg.timeline.branches,
             scenario: msg.scenario ?? null,
           },
           segmentEnds: msg.timeline.step_spans.map((s) => s.end),
@@ -504,6 +541,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: msg.timeline.signals,
+            branches: msg.timeline.branches,
             scenario: null,
           },
           segmentEnds: [],
@@ -673,6 +711,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : null,
     })),
   setActiveTab: (tab) => set({ activeTab: persistTab(tab) }),
+  setSfcOpen: (open) => set({ sfcOpen: persistSfcOpen(open) }),
   focusTab: (target) =>
     set((s) =>
       s.activeTab === "sequence"

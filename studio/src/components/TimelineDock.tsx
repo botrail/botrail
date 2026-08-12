@@ -82,6 +82,8 @@ export function TimelineDock() {
   const setSpeed = useStudioStore((s) => s.setPlaybackSpeed);
   const loop = useStudioStore((s) => s.playbackLoop);
   const setLoop = useStudioStore((s) => s.setPlaybackLoop);
+  const sfcOpen = useStudioStore((s) => s.sfcOpen);
+  const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
   const barRef = useRef<HTMLDivElement | null>(null);
   const [showDevices, setShowDevices] = useState(false);
 
@@ -137,6 +139,17 @@ export function TimelineDock() {
           >
             ⟳
           </button>
+          {timeline && (
+            <button
+              className={
+                sfcOpen ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setSfcOpen(!sfcOpen)}
+              title="SFC chart of the baked programs"
+            >
+              sfc
+            </button>
+          )}
           {/* Sequence timelines only: the server bakes the retained
               rollout, so a motion preview or a loaded recording has
               nothing to re-export. */}
