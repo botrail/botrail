@@ -111,6 +111,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::scenarios_message(scene),
             wire::effects_message(scene),
             wire::frames_message(scene),
+            wire::toolpaths_message(scene),
             wire::state_message(scene),
         ]
     })
@@ -438,6 +439,58 @@ pub fn remove_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneE
     Ok(())
 }
 
+/// Registers progressive-carve stage obstacles: display-only meshes with
+/// a supplied cheap collider (they register disabled — VHACD on a mesh
+/// nobody collides with would be pure cost), the material that renders
+/// them as finished scenery, and one obstacles/state emission for the
+/// lot. A previous run's stage of the same name is replaced. Returns the
+/// final names.
+pub fn add_carve_stages(
+    host: &impl SessionHost,
+    stages: Vec<(String, Geometry, botrail_scene::ObstacleCollider)>,
+    pose: Isometry3<f64>,
+    material: botrail_scene::Material,
+) -> Vec<String> {
+    let names = host.with_scene(|scene| {
+        stages
+            .into_iter()
+            .map(|(name, geometry, collider)| {
+                let _ = scene.remove_obstacle(&name);
+                let final_name = scene.add_obstacle_with_collider(&name, geometry, pose, collider);
+                let _ = scene.set_obstacle_enabled(&final_name, false);
+                let _ = scene.set_obstacle_material(&final_name, Some(material));
+                final_name
+            })
+            .collect::<Vec<_>>()
+    });
+    emit_obstacles_and_state(host);
+    names
+}
+
+/// Retains a timeline as the session's last bake and (when anyone is
+/// listening) re-broadcasts it as a `sequence_result` — for timelines
+/// assembled outside the simulate path (the progressive-carve
+/// augmentation). The retained pair also feeds the USD download and the
+/// late-join handshake replay.
+pub fn emit_timeline(
+    host: &impl SessionHost,
+    scene: &Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+) {
+    host.store_baked(scene, timeline);
+    if host.has_listeners() {
+        let msg = ServerMessage::SequenceResult {
+            ok: true,
+            sequence: timeline.sequences.join(" + "),
+            scenario: timeline.scenario.clone(),
+            error: None,
+            timeline: Some(timeline_msg(scene, timeline)),
+            planning_time_ms: None,
+        };
+        host.emit(&msg);
+    }
+}
+
 pub fn set_obstacle_pose(
     host: &impl SessionHost,
     name: &str,
@@ -572,6 +625,32 @@ fn emit_frames(host: &impl SessionHost) {
     }
     let msg = host.with_scene(|scene| wire::frames_message(scene));
     host.emit(&msg);
+    // Toolpath overlays are resolved through part frames, so a frame move
+    // re-resolves them.
+    emit_toolpaths(host);
+}
+
+fn emit_toolpaths(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::toolpaths_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces a toolpath and rebroadcasts the overlay list.
+pub fn upsert_toolpath(host: &impl SessionHost, toolpath: botrail_scene::toolpath::Toolpath) {
+    host.with_scene(|scene| scene.add_toolpath(toolpath));
+    emit_toolpaths(host);
+}
+
+/// Removes a toolpath and rebroadcasts; `false` when it was unknown.
+pub fn remove_toolpath(host: &impl SessionHost, name: &str) -> bool {
+    let removed = host.with_scene(|scene| scene.remove_toolpath(name));
+    if removed {
+        emit_toolpaths(host);
+    }
+    removed
 }
 
 /// Adds/updates named world frames and rebroadcasts the frame list.
@@ -721,6 +800,22 @@ pub fn add_weld_flash(
     Ok(())
 }
 
+/// Declares (or replaces) a cut trace and rebroadcasts the effects list.
+pub fn add_cut_trace(
+    host: &impl SessionHost,
+    name: &str,
+    signal: &str,
+    robot: &str,
+    spin_link: Option<&str>,
+) -> Result<(), botrail_scene::SceneError> {
+    host.with_scene(|scene| scene.add_cut_trace(name, signal, robot, spin_link))?;
+    if host.has_listeners() {
+        let msg = host.with_scene(|scene| wire::effects_message(scene));
+        host.emit(&msg);
+    }
+    Ok(())
+}
+
 pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
     host.with_scene(|scene| scene.upsert_device(device));
     emit_devices(host);
@@ -741,6 +836,23 @@ pub fn simulate_sequence_and_emit(
     options: &botrail_scene::rollout::RolloutOptions,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
     simulate_sequences_and_emit(host, &[name], scenario, options)
+}
+
+/// The last successful bake as a `sequence_result` message, for late
+/// joiners: the normal flow is "script bakes, then the browser opens",
+/// and without this replay a studio connecting after a headless
+/// `simulate_sequence` sees a scene with no cycle to play. Mirrors the
+/// recording replay.
+pub fn baked_result_message(host: &impl SessionHost) -> Option<ServerMessage> {
+    let (scene, timeline) = host.baked()?;
+    Some(ServerMessage::SequenceResult {
+        ok: true,
+        sequence: timeline.sequences.join(" + "),
+        scenario: timeline.scenario.clone(),
+        error: None,
+        timeline: Some(timeline_msg(&scene, &timeline)),
+        planning_time_ms: None,
+    })
 }
 
 /// Rolls out several sequences *concurrently* (one scan advances every
@@ -920,6 +1032,13 @@ pub fn timeline_msg(
     for msg in &mut object_tracks {
         if msg.visible.iter().all(|v| *v) {
             msg.visible.clear();
+        }
+        // A track that never moves (a carve stage, a part waiting in its
+        // magazine) collapses to a single pose — the client reads a
+        // one-pose track as constant, and a hundred stages would
+        // otherwise each ship a copy of the whole grid.
+        if msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
+            msg.poses.truncate(1);
         }
     }
 
@@ -1274,6 +1393,7 @@ mod tests {
                     ServerMessage::PlanResult { .. } => "plan_result",
                     ServerMessage::Motions { .. } => "motions",
                     ServerMessage::Frames { .. } => "frames",
+                    ServerMessage::Toolpaths { .. } => "toolpaths",
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
                     ServerMessage::SequenceResult { .. } => "sequence_result",
@@ -1322,7 +1442,8 @@ mod tests {
         assert!(matches!(msgs[6], ServerMessage::Scenarios { .. }));
         assert!(matches!(msgs[7], ServerMessage::Effects { .. }));
         assert!(matches!(msgs[8], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[9], ServerMessage::State { .. }));
+        assert!(matches!(msgs[9], ServerMessage::Toolpaths { .. }));
+        assert!(matches!(msgs[10], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -1332,7 +1453,8 @@ mod tests {
             &host,
             vec![("mount".to_string(), Isometry3::translation(1.0, 0.0, 0.5))],
         );
-        assert_eq!(host.message_types(), ["frames"]);
+        // A frame move re-resolves toolpath overlays, so both lists go out.
+        assert_eq!(host.message_types(), ["frames", "toolpaths"]);
         let out = host.out.borrow();
         let ServerMessage::Frames { frames } = &out[0] else {
             panic!("expected frames");

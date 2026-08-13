@@ -83,9 +83,10 @@ pub struct ImportedRecording {
     pub times: Vec<f64>,
     /// One entry per robot, in input order.
     pub robots: Vec<ImportedRobotRecording>,
-    /// Obstacles that move during the recording: `(name, world pose per
-    /// frame)` in the scene importer's obstacle-pose convention.
-    pub object_tracks: Vec<(String, Vec<Isometry3<f64>>)>,
+    /// Obstacles that move — or blink visibility — during the recording:
+    /// `(name, world pose per frame, shown per frame)` in the scene
+    /// importer's obstacle-pose convention.
+    pub object_tracks: Vec<(String, Vec<Isometry3<f64>>, Vec<bool>)>,
     pub warnings: Vec<String>,
 }
 
@@ -347,9 +348,10 @@ pub fn import_recording(
     }
 
     // Obstacles: geometry convention (vertices were baked at import), and
-    // only the ones that actually move.
+    // only the ones that actually move or blink — a carve stage never
+    // leaves its pose, its whole animation is the visibility window.
     let mut object_tracks = Vec::new();
-    for (offset, (name, _)) in object_paths.iter().enumerate() {
+    for (offset, (name, path)) in object_paths.iter().enumerate() {
         let idx = link_count + offset;
         let track: Vec<Isometry3<f64>> = worlds
             .iter()
@@ -361,13 +363,15 @@ pub fn import_recording(
                 )
             })
             .collect();
+        let visible = read_visibility(stage, path, &codes);
         let rest = track[0];
         let moved = track.iter().any(|p| {
             (p.translation.vector - rest.translation.vector).norm() > 1e-9
                 || p.rotation.angle_to(&rest.rotation) > 1e-9
         });
-        if moved {
-            object_tracks.push((name.clone(), track));
+        let blinks = visible.iter().any(|v| !v);
+        if moved || blinks {
+            object_tracks.push((name.clone(), track, visible));
         }
     }
 
@@ -409,6 +413,49 @@ fn resolve_stage_root(
              robot_roots with its prim path"
         )))
     }
+}
+
+/// Per-frame shown flag from the prim's own `visibility` samples:
+/// `invisible` hides, anything else (or no attribute at all) shows. The
+/// exporter authors the attribute on the leaf prim, so ancestors are not
+/// consulted; token values may widen to strings through the text parser.
+/// Samples may be sparse (first frame + transitions) — USD holds a sample
+/// until the next one, and so does the walk here; reading the authored
+/// list once beats a composed lookup per frame when a hundred carve
+/// stages each blink over thousands of codes.
+fn read_visibility(stage: &Stage, path: &str, codes: &[f64]) -> Vec<bool> {
+    fn shown(v: &sdf::Value) -> bool {
+        match v {
+            sdf::Value::Token(t) => t.as_str() != "invisible",
+            sdf::Value::String(s) => s != "invisible",
+            _ => true,
+        }
+    }
+    let attr_path = sdf::path(path)
+        .ok()
+        .and_then(|p| p.append_property("visibility").ok());
+    let Some(attr_path) = attr_path else {
+        return vec![true; codes.len()];
+    };
+    let attr = stage.attribute(attr_path);
+    let samples = attr.time_samples().ok().flatten().unwrap_or_default();
+    if samples.is_empty() {
+        // No animation: one untimed read (an authored static `invisible`,
+        // or nothing at all) answers for the whole range.
+        let flag = match attr.get_at::<sdf::Value>(None) {
+            Ok(Some(v)) => shown(&v),
+            _ => true,
+        };
+        return vec![flag; codes.len()];
+    }
+    let entries: Vec<(f64, bool)> = samples.iter().map(|(t, v)| (*t, shown(v))).collect();
+    codes
+        .iter()
+        .map(|&code| match entries.partition_point(|(t, _)| *t <= code) {
+            0 => entries[0].1,
+            k => entries[k - 1].1,
+        })
+        .collect()
 }
 
 /// The exporter's `/World/Env` prim path for an obstacle name.
@@ -724,6 +771,17 @@ mod tests {
                 color: None,
                 visible: Vec::new(),
             },
+            // Never moves, only blinks — the carve-stage shape whose whole
+            // animation is its visibility window.
+            ObjectSpec {
+                name: "stage".into(),
+                geometry: Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.01),
+                },
+                track: PoseTrack::Static(Isometry3::translation(0.5, 0.0, 0.02)),
+                color: None,
+                visible: (0..times.len()).map(|k| k >= 12).collect(),
+            },
         ];
 
         let robots = [RobotAnimation {
@@ -736,6 +794,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &objects,
+            curves: &[],
         };
         let anim = dir.join("anim.usda");
         let warnings = write_animation(&anim, &input, &ExportOptions::default()).unwrap();
@@ -782,7 +841,7 @@ mod tests {
         let rec = import_recording(
             &fx.anim,
             &[("Robot".to_string(), &fx.model)],
-            &["box".into(), "table".into()],
+            &["box".into(), "table".into(), "stage".into()],
             &RecordingImportOptions::default(),
         )
         .unwrap();
@@ -798,13 +857,19 @@ mod tests {
         }
         check_link_poses(&fx, &rec, 1e-6, "joint");
 
-        // Only the moving obstacle gets a track, in world coords.
-        assert_eq!(rec.object_tracks.len(), 1);
-        let (name, track) = &rec.object_tracks[0];
+        // The moving obstacle and the blinking one get tracks (the static
+        // always-shown table does not), in world coords.
+        assert_eq!(rec.object_tracks.len(), 2);
+        let (name, track, visible) = &rec.object_tracks[0];
         assert_eq!(name, "box");
+        assert!(visible.iter().all(|v| *v), "box never hides");
         for (f, pose) in track.iter().enumerate() {
             assert_pose_close(pose, &fx.box_track[f], 1e-6, &format!("box frame {f}"));
         }
+        let (name, _, visible) = &rec.object_tracks[1];
+        assert_eq!(name, "stage");
+        let shown: Vec<bool> = (0..rec.times.len()).map(|k| k >= 12).collect();
+        assert_eq!(visible, &shown, "stage visibility window survives");
     }
 
     #[test]
@@ -915,6 +980,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &[],
+            curves: &[],
         };
         let anim = dir.join("cell.usda");
         write_animation(&anim, &input, &ExportOptions::default()).unwrap();

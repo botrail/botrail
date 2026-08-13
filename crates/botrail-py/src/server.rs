@@ -39,6 +39,15 @@ async fn handle_socket(mut socket: WebSocket, hub: Arc<SceneHub>) {
             return;
         }
     }
+    // A cycle baked before this client connected still reaches it — the
+    // normal flow is "script bakes, then the browser opens". After
+    // `state` so the live snapshot never clobbers the playback; before
+    // the recording, which wins when both exist.
+    if let Some(baked) = hub.last_sequence_result_json() {
+        if socket.send(Message::Text(baked.into())).await.is_err() {
+            return;
+        }
+    }
     // A recording played before this client connected still reaches it —
     // after `state` so the live snapshot never clobbers the playback.
     if let Some(recording) = hub.last_recording_json() {

@@ -13,6 +13,8 @@ import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
+import { CutTraceView } from "./CutTraceView";
+import { ToolpathView } from "./ToolpathView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
 import { SfcOverlay } from "./SfcChart";
@@ -173,6 +175,8 @@ export function Viewport() {
           <SensorView />
           <FlashView />
           <VehiclePathView />
+          <ToolpathView />
+          <CutTraceView />
           <TcpGizmo />
           <RobotBaseGizmo />
           <PlaybackDriver />

@@ -5,11 +5,15 @@
 //! protocol. The TypeScript side (`studio/src/generated/`) is generated from
 //! them via ts-rs — run `scripts/gen_protocol.sh` after changing them.
 
+pub mod apt;
+pub mod carve;
+pub mod gcode;
 pub mod motion;
 pub mod project;
 pub mod rollout;
 pub mod script;
 pub mod seq;
+pub mod toolpath;
 pub mod verify;
 pub mod wire;
 
@@ -18,8 +22,11 @@ use std::sync::Arc;
 use motion::{Motion, MotionError, PlannedMotion, Segment};
 
 use botrail_collide::{
-    Acm, ColliderId, CollisionPair, InterRobotAcm, ObstacleCollider, RobotCollider, RobotQuery,
+    Acm, ColliderId, CollisionPair, InterRobotAcm, RobotCollider, RobotQuery,
 };
+// Re-exported: it appears in `Scene::add_obstacle_with_collider`'s public
+// signature, so downstream crates get to name it without a collide dep.
+pub use botrail_collide::ObstacleCollider;
 use botrail_model::{Geometry, RobotModel};
 use nalgebra::Isometry3;
 use thiserror::Error;
@@ -135,6 +142,19 @@ pub struct ObstacleSpec {
 pub struct Frame {
     pub name: String,
     pub pose: Isometry3<f64>,
+}
+
+/// A link-obstacle pair whose contact is process-intended — a milling
+/// cutter in its stock. The pair is excused from collision checking,
+/// planning validity, and the min-distance metric; toolpath *rapids*
+/// deliberately ignore the exemption (while not cutting, all contact is
+/// forbidden — see `toolpath`). Keyed by obstacle name so it survives
+/// the enabled-filtering and obstacle edits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllowedContact {
+    pub robot: usize,
+    pub link: usize,
+    pub obstacle: String,
 }
 
 /// An obstacle rigidly attached to a robot link — a grasped object. While
@@ -253,6 +273,8 @@ pub struct Scene {
     weld_flashes: Vec<seq::WeldFlash>,
     scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
+    toolpaths: Vec<toolpath::Toolpath>,
+    allowed_contacts: Vec<AllowedContact>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
     pub collision_warnings: Vec<String>,
@@ -281,6 +303,8 @@ impl Scene {
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),
+            toolpaths: Vec::new(),
+            allowed_contacts: Vec::new(),
             collision_warnings,
         }
     }
@@ -562,6 +586,16 @@ impl Scene {
 
     pub fn obstacles(&self) -> &[Obstacle] {
         &self.obstacles
+    }
+
+    /// The obstacle and its collider, by name (carving needs the solid
+    /// shapes for containment).
+    pub(crate) fn obstacle_with_collider(
+        &self,
+        name: &str,
+    ) -> Option<(&Obstacle, &ObstacleCollider)> {
+        let index = self.obstacles.iter().position(|o| o.name == name)?;
+        Some((&self.obstacles[index], &self.obstacle_colliders[index]))
     }
 
     fn obstacle_index(&self, name: &str) -> Result<usize, SceneError> {
@@ -988,6 +1022,69 @@ impl Scene {
         Self::remap_obstacle_ids(pairs, &[], &attached_map)
     }
 
+    /// Marks contact between `link` of `robot` and obstacle `obstacle` as
+    /// process-intended (see [`AllowedContact`]). Idempotent.
+    pub fn allow_link_obstacle_contact(
+        &mut self,
+        robot: usize,
+        link: usize,
+        obstacle: &str,
+    ) -> Result<(), SceneError> {
+        self.obstacle_index(obstacle)?;
+        if link >= self.robots[robot].model.links.len() {
+            return Err(SceneError::UnknownLink(format!("link index {link}")));
+        }
+        let entry = AllowedContact {
+            robot,
+            link,
+            obstacle: obstacle.to_string(),
+        };
+        if !self.allowed_contacts.contains(&entry) {
+            self.allowed_contacts.push(entry);
+        }
+        Ok(())
+    }
+
+    /// Removes an allowed-contact entry; `false` when it was not present.
+    pub fn disallow_link_obstacle_contact(
+        &mut self,
+        robot: usize,
+        link: usize,
+        obstacle: &str,
+    ) -> bool {
+        let before = self.allowed_contacts.len();
+        self.allowed_contacts
+            .retain(|c| !(c.robot == robot && c.link == link && c.obstacle == obstacle));
+        self.allowed_contacts.len() != before
+    }
+
+    pub fn allowed_contacts(&self) -> &[AllowedContact] {
+        &self.allowed_contacts
+    }
+
+    pub fn set_allowed_contacts(&mut self, contacts: Vec<AllowedContact>) {
+        self.allowed_contacts = contacts;
+    }
+
+    /// The allowance re-keyed to the *filtered* obstacle indices of the
+    /// current query (`map`: filtered index -> obstacle index).
+    fn contact_allowance(&self, map: &[usize]) -> botrail_collide::ContactAllowance {
+        let mut allowance = botrail_collide::ContactAllowance::default();
+        for contact in &self.allowed_contacts {
+            let Some(orig) = self
+                .obstacles
+                .iter()
+                .position(|o| o.name == contact.obstacle)
+            else {
+                continue;
+            };
+            if let Some(filtered) = map.iter().position(|&m| m == orig) {
+                allowance.allow(contact.robot, contact.link, filtered);
+            }
+        }
+        allowance
+    }
+
     /// Self-collision (ACM-filtered), robot-vs-robot, robot-vs-obstacle,
     /// and attached-object pairs at the current configuration.
     pub fn check_collisions(&self) -> Vec<CollisionPair> {
@@ -999,6 +1096,7 @@ impl Scene {
             &self.inter_acm,
             &query,
             &attached,
+            &self.contact_allowance(&map),
         );
         Self::remap_obstacle_ids(pairs, &map, &attached_map)
     }
@@ -1017,6 +1115,15 @@ impl Scene {
         robot: usize,
         q: &[f64],
     ) -> Result<Vec<CollisionPair>, SceneError> {
+        self.collisions_at_impl(robot, q, true)
+    }
+
+    fn collisions_at_impl(
+        &self,
+        robot: usize,
+        q: &[f64],
+        honor_allowed_contacts: bool,
+    ) -> Result<Vec<CollisionPair>, SceneError> {
         let mut poses = Vec::with_capacity(self.robots.len());
         for r in 0..self.robots.len() {
             poses.push(if r == robot {
@@ -1027,11 +1134,17 @@ impl Scene {
         }
         let (query, map) = self.obstacle_query();
         let (attached, attached_map) = self.attached_query();
+        let allowance = if honor_allowed_contacts {
+            self.contact_allowance(&map)
+        } else {
+            botrail_collide::ContactAllowance::default()
+        };
         let pairs = botrail_collide::check_scene(
             &self.robot_queries(&poses),
             &self.inter_acm,
             &query,
             &attached,
+            &allowance,
         );
         Ok(Self::remap_obstacle_ids(pairs, &map, &attached_map))
     }
@@ -1065,16 +1178,41 @@ impl Scene {
                 .unwrap_or(false)
     }
 
+    /// [`Scene::is_state_valid_for`] with the allowed-contact exemptions
+    /// suspended — every link-obstacle pair counts. Toolpath rapids use
+    /// this: a cutter through the stock while *not* cutting is a crash,
+    /// however allowed the pair is during feed.
+    pub fn is_state_valid_strict_for(&self, robot: usize, q: &[f64]) -> bool {
+        let model = &self.robots[robot].model;
+        if q.len() != model.dof() {
+            return false;
+        }
+        let within = q
+            .iter()
+            .zip(model.actuated_joint_limits())
+            .all(|(v, limits)| match limits {
+                Some((lo, hi)) => *v >= lo - 1e-9 && *v <= hi + 1e-9,
+                None => true,
+            });
+        within
+            && self
+                .collisions_at_impl(robot, q, false)
+                .map(|c| c.is_empty())
+                .unwrap_or(false)
+    }
+
     /// Minimum robot-obstacle distance over every robot (0 when colliding);
     /// `None` without obstacles or collision geometry. Attached objects
     /// count as part of the robot side. Robot-robot clearance is not
     /// included.
     pub fn min_obstacle_distance(&self) -> Option<f64> {
         let poses = self.all_link_poses();
+        let (query, map) = self.obstacle_query();
         botrail_collide::min_robot_obstacle_distance(
             &self.robot_queries(&poses),
-            &self.obstacle_query().0,
+            &query,
             &self.attached_query().0,
+            &self.contact_allowance(&map),
         )
     }
 
@@ -1174,6 +1312,126 @@ impl Scene {
     ) -> Result<PlannedMotion, MotionError> {
         let index = self.motion_index(name)?;
         motion::plan_motion(self, &self.motions[index], plan_options, limits)
+    }
+
+    // ----------------------------------------------------------- toolpaths
+
+    pub fn toolpaths(&self) -> &[toolpath::Toolpath] {
+        &self.toolpaths
+    }
+
+    pub fn toolpath(&self, name: &str) -> Option<&toolpath::Toolpath> {
+        self.toolpaths.iter().find(|t| t.name == name)
+    }
+
+    fn toolpath_index(&self, name: &str) -> Result<usize, toolpath::ToolpathError> {
+        self.toolpaths
+            .iter()
+            .position(|t| t.name == name)
+            .ok_or_else(|| toolpath::ToolpathError::UnknownToolpath(name.to_string()))
+    }
+
+    /// Adds or replaces a toolpath (keyed by name).
+    pub fn add_toolpath(&mut self, tp: toolpath::Toolpath) {
+        match self.toolpaths.iter_mut().find(|t| t.name == tp.name) {
+            Some(existing) => *existing = tp,
+            None => self.toolpaths.push(tp),
+        }
+    }
+
+    pub fn remove_toolpath(&mut self, name: &str) -> bool {
+        let before = self.toolpaths.len();
+        self.toolpaths.retain(|t| t.name != name);
+        self.toolpaths.len() != before
+    }
+
+    pub fn set_toolpaths(&mut self, toolpaths: Vec<toolpath::Toolpath>) {
+        self.toolpaths = toolpaths;
+    }
+
+    /// Bakes toolpath `name` for robot `robot` into one continuous
+    /// trajectory (commanded feed held wherever joint limits allow). `tcp`
+    /// selects the tool link; `None` uses the model's declared TCP.
+    pub fn plan_toolpath(
+        &self,
+        name: &str,
+        robot: usize,
+        tcp: Option<usize>,
+        options: &toolpath::ToolpathOptions,
+    ) -> Result<toolpath::PlannedToolpath, toolpath::ToolpathError> {
+        let index = self.toolpath_index(name)?;
+        let tcp = tcp.unwrap_or_else(|| self.robots[robot].model.default_tcp_link());
+        let limits = motion::traj_limits(&self.robots[robot].model);
+        toolpath::plan_toolpath(self, &self.toolpaths[index], robot, tcp, &limits, options)
+    }
+
+    /// Attempts every sample of toolpath `name` and reports all failures
+    /// (reach / branch jump / collision) without aborting — the pre-teach
+    /// face diagnosis.
+    pub fn check_toolpath(
+        &self,
+        name: &str,
+        robot: usize,
+        tcp: Option<usize>,
+        options: &toolpath::ToolpathOptions,
+    ) -> Result<toolpath::ToolpathReport, toolpath::ToolpathError> {
+        let index = self.toolpath_index(name)?;
+        let tcp = tcp.unwrap_or_else(|| self.robots[robot].model.default_tcp_link());
+        toolpath::check_toolpath(self, &self.toolpaths[index], robot, tcp, options)
+    }
+
+    /// Wraps a single-robot trajectory as a [`rollout::SequenceTimeline`]
+    /// so the existing consumers — playback, USD export, clearance re-scan
+    /// — accept it without a sequence. Other robots hold their current
+    /// configuration; objects are all static. Script export is not the
+    /// audience (the timeline carries no planned moves).
+    pub fn timeline_from_trajectory(
+        &self,
+        robot: usize,
+        trajectory: &botrail_traj::JointTrajectory,
+        label: &str,
+    ) -> rollout::SequenceTimeline {
+        let duration = trajectory.duration();
+        let robots = self
+            .robots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| rollout::RobotTrack {
+                name: r.name.clone(),
+                trajectory: if i == robot {
+                    trajectory.clone()
+                } else {
+                    botrail_traj::JointTrajectory {
+                        times: vec![0.0],
+                        positions: vec![r.joint_positions().to_vec()],
+                        velocities: vec![vec![0.0; r.model.dof()]],
+                    }
+                },
+                moves: if i == robot {
+                    vec![rollout::StepSpan {
+                        name: label.to_string(),
+                        start: 0.0,
+                        end: duration,
+                        sequence: String::new(),
+                        step: 0,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                planned: Vec::new(),
+                base: None,
+            })
+            .collect();
+        rollout::SequenceTimeline {
+            duration,
+            sequences: Vec::new(),
+            scenario: None,
+            robots,
+            objects: Vec::new(),
+            signals: Vec::new(),
+            step_spans: Vec::new(),
+            branches: Vec::new(),
+        }
     }
 }
 

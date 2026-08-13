@@ -95,6 +95,8 @@ pub struct RolloutOptions {
     /// Hard wall-clock cap; exceeded waits are authoring errors.
     pub max_duration: f64,
     pub plan: botrail_plan::PlanOptions,
+    /// Toolpath follow/timing options for [`crate::seq::Action::StartToolpath`].
+    pub toolpath: crate::toolpath::ToolpathOptions,
     /// Instantaneous steps allowed within one scan tick.
     pub immediate_chain_limit: usize,
 }
@@ -105,6 +107,7 @@ impl Default for RolloutOptions {
             dt: 0.01,
             max_duration: 120.0,
             plan: botrail_plan::PlanOptions::default(),
+            toolpath: crate::toolpath::ToolpathOptions::default(),
             immediate_chain_limit: 64,
         }
     }
@@ -364,6 +367,8 @@ pub struct PlannedMove {
     /// Rest-to-rest duration the rollout used — for a ramp this is the
     /// authored duration, which is what sets its export speed.
     pub duration: f64,
+    /// Feed adherence of a toolpath move (`None` for motions and ramps).
+    pub feed_report: Option<crate::toolpath::FeedReport>,
 }
 
 /// The baked result of a sequence rollout — what playback, USD export, and
@@ -2758,6 +2763,7 @@ impl Rollout {
                     motion: Some(motion.clone()),
                     segments: planned.segments,
                     duration: traj.duration(),
+                    feed_report: None,
                 });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
@@ -2769,6 +2775,122 @@ impl Rollout {
                 });
                 // Joints follow the trajectory tick by tick (advance_world),
                 // so mid-motion sensors see the true robot state.
+                rt.active = Some(ActiveMove::Traj {
+                    start: self.t,
+                    traj,
+                });
+            }
+            Action::StartToolpath { robot, toolpath } => {
+                let r = self.action_robot(robot)?;
+                // Same rule as StartMotion: the bake is world-frame, so a
+                // base driving underneath it invalidates every sample.
+                if let Some(mount) = self.world.robots()[r].mount.clone() {
+                    let travelling = self.devices.iter().any(|d| match d {
+                        DeviceRuntime::Vehicle { name, legs, .. } => {
+                            *name == mount.device && !legs.is_empty()
+                        }
+                        _ => false,
+                    });
+                    if travelling {
+                        return Err(err(format!(
+                            "toolpath `{toolpath}` cannot start while `{}` is driving: the \
+                             bake is world-frame, so wait for device_done first",
+                            mount.device
+                        )));
+                    }
+                }
+                // Bake against the world as it stands now.
+                self.world
+                    .set_joint_positions_for(r, self.robots[r].q.clone())
+                    .map_err(|e| err(e.to_string()))?;
+                let limits = crate::motion::traj_limits(&self.world.robots()[r].model);
+                let planned = self
+                    .world
+                    .plan_toolpath(toolpath, r, None, &self.options.toolpath)
+                    .map_err(|e| SeqError::PlanFailed {
+                        step: self.cur_step(),
+                        name: self.cur_step_name(),
+                        message: e.to_string(),
+                    })?;
+                // The follow starts at the path's own first sample; when
+                // the robot stands elsewhere, a collision-free joint-space
+                // approach is planned and prepended — the PLC picture of a
+                // start command ("go do it"), not a teleport.
+                let current = self.robots[r].q.clone();
+                let start = planned.path.first().expect("non-empty path").clone();
+                let apart = current
+                    .iter()
+                    .zip(&start)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f64>()
+                    .sqrt();
+                let mut segments = Vec::with_capacity(planned.path.len());
+                let traj = if apart > 1e-6 {
+                    let (lower, upper) = self.world.robots()[r].model.sampling_bounds();
+                    let space = botrail_plan::JointSpace { lower, upper };
+                    let mut is_valid = |q: &[f64]| self.world.is_state_valid_for(r, q);
+                    let approach_path = botrail_plan::plan(
+                        &space,
+                        &current,
+                        &start,
+                        &mut is_valid,
+                        &self.options.plan,
+                    )
+                    .map_err(|e| SeqError::PlanFailed {
+                        step: self.cur_step(),
+                        name: self.cur_step_name(),
+                        message: format!("approach to toolpath `{toolpath}`: {e}"),
+                    })?;
+                    let approach = botrail_traj::time_parameterize(
+                        &approach_path,
+                        &limits,
+                        &botrail_traj::TimingOptions::default(),
+                    )
+                    .map_err(|e| err(e.to_string()))?;
+                    segments.push(crate::motion::PlannedSegment {
+                        kind: crate::motion::SegmentKind::Joint,
+                        waypoints: approach_path,
+                        tcp_speed: None,
+                    });
+                    crate::motion::concatenate(approach, planned.trajectory.clone())
+                } else {
+                    planned.trajectory.clone()
+                };
+                // Per-sample linear segments carry the commanded speed of
+                // their interval, which is what script export renders.
+                for (pair, sample) in planned.path.windows(2).zip(planned.samples.iter().skip(1))
+                {
+                    segments.push(crate::motion::PlannedSegment {
+                        kind: crate::motion::SegmentKind::CartesianLine,
+                        waypoints: pair.to_vec(),
+                        tcp_speed: sample.feed.or(self.options.toolpath.rapid_speed),
+                    });
+                }
+                let rt = &mut self.robots[r];
+                for i in 0..traj.times.len() {
+                    rt.append_waypoint(
+                        self.t + traj.times[i],
+                        traj.positions[i].clone(),
+                        traj.velocities[i].clone(),
+                    );
+                }
+                let end = self.t + traj.duration();
+                rt.planned.push(PlannedMove {
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                    motion: Some(toolpath.clone()),
+                    segments,
+                    duration: traj.duration(),
+                    feed_report: Some(planned.feed_report.clone()),
+                });
+                self.programs[self.current].move_ends.push(end);
+                rt.moves.push(StepSpan {
+                    name: toolpath.clone(),
+                    start: self.t,
+                    end,
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                });
                 rt.active = Some(ActiveMove::Traj {
                     start: self.t,
                     traj,
@@ -2806,8 +2928,10 @@ impl Rollout {
                     segments: vec![crate::motion::PlannedSegment {
                         kind: crate::motion::SegmentKind::Joint,
                         waypoints: vec![rt.q_nom.clone(), goal.clone()],
+                        tcp_speed: None,
                     }],
                     duration: *duration,
+                    feed_report: None,
                 });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
@@ -3238,6 +3362,96 @@ pub(crate) mod tests {
             transition,
             select: Vec::new(),
         }
+    }
+
+    #[test]
+    fn start_toolpath_approaches_then_holds_the_feed() {
+        use crate::toolpath::{PathTarget, ToolMove, ToolMoveKind, Toolpath};
+        const ARM6: &str = include_str!("../../../examples/simple_arm.urdf");
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
+        ));
+        // Author the path around a flange-down working pose...
+        let work_q = vec![0.0, 0.5, 0.9, std::f64::consts::PI - 1.4, 0.0, 0.0];
+        scene.set_joint_positions(work_q.clone()).unwrap();
+        let tcp = scene.robot().default_tcp_link();
+        let tip = scene.link_poses()[tcp].translation.vector;
+        let target = |x: f64| PathTarget {
+            position: nalgebra::Point3::new(x, tip.y, tip.z),
+            tool_axis: nalgebra::Unit::new_normalize(Vector3::z()),
+            spin: None,
+        };
+        scene.add_toolpath(Toolpath {
+            name: "trim".into(),
+            frame: None,
+            moves: vec![
+                ToolMove {
+                    kind: ToolMoveKind::Rapid,
+                    targets: vec![target(tip.x - 0.03)],
+                },
+                ToolMove {
+                    // 6 cm at 20 mm/s: the cut alone must take ~3 s.
+                    kind: ToolMoveKind::Feed(0.02),
+                    targets: vec![target(tip.x + 0.03)],
+                },
+            ],
+        });
+        // ...then park elsewhere: the fire must plan an approach, not
+        // teleport.
+        let park = vec![0.4, 0.4, 1.0, std::f64::consts::PI - 1.4, 0.0, 0.0];
+        scene.set_joint_positions(park.clone()).unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![step(
+                "cut",
+                vec![Action::StartToolpath {
+                    robot: None,
+                    toolpath: "trim".into(),
+                }],
+                Condition::Done,
+            )],
+        });
+        let tl = scene.simulate_sequence("cycle", &RolloutOptions::default()).unwrap();
+        assert!(tl.duration > 3.0, "cut alone is 3 s, got {}", tl.duration);
+
+        // The bake starts at the park pose (no teleport)...
+        let q0 = tl.robots[0].trajectory.sample(0.0);
+        for (a, b) in q0.iter().zip(&park) {
+            assert!((a - b).abs() < 1e-9, "started away from park");
+        }
+        // ...and the tail of the cycle holds the commanded feed.
+        let model = scene.robot().clone();
+        let fk = |q: &[f64]| {
+            botrail_kin::forward_kinematics(&model, q).unwrap()[tcp]
+                .translation
+                .vector
+        };
+        let t1 = tl.duration - 1.5;
+        let p_a = fk(&tl.robots[0].trajectory.sample(t1));
+        let p_b = fk(&tl.robots[0].trajectory.sample(t1 + 0.5));
+        let speed = (p_b - p_a).norm() / 0.5;
+        assert!(
+            (speed - 0.02).abs() < 0.004,
+            "mid-cut TCP speed {speed}, commanded 0.02"
+        );
+
+        // The planned record carries the approach and the per-sample feed
+        // segments — what script export lowers.
+        let planned = &tl.robots[0].planned[0];
+        assert_eq!(planned.motion.as_deref(), Some("trim"));
+        assert_eq!(planned.segments[0].kind, SegmentKind::Joint);
+        assert!(planned
+            .segments
+            .iter()
+            .any(|s| s.kind == SegmentKind::CartesianLine && s.tcp_speed == Some(0.02)));
+
+        // Deterministic, like every bake.
+        let again = scene.simulate_sequence("cycle", &RolloutOptions::default()).unwrap();
+        assert_eq!(tl.robots[0].trajectory.times, again.robots[0].trajectory.times);
+        assert_eq!(
+            tl.robots[0].trajectory.positions,
+            again.robots[0].trajectory.positions
+        );
     }
 
     #[test]

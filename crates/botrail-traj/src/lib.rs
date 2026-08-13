@@ -22,6 +22,8 @@ pub enum TrajError {
     },
     #[error("velocity/acceleration limits must be positive")]
     NonPositiveLimits,
+    #[error("expected {expected} segment duration floors, got {got}")]
+    WrongFloorCount { expected: usize, got: usize },
 }
 
 /// Per-joint velocity and acceleration bounds (absolute values).
@@ -136,14 +138,27 @@ fn distance(a: &[f64], b: &[f64]) -> f64 {
         .sqrt()
 }
 
-fn densify(path: &[Vec<f64>], max_segment: f64) -> Vec<Vec<f64>> {
+/// Densified copy of `path`, with per-output-segment duration floors
+/// (an input interval's floor is split evenly across its subdivisions) and
+/// the output index of each input waypoint. Zero-length input intervals
+/// collapse — their floor, if any, is dropped with them (a dwell is not
+/// expressible as a duplicated waypoint here).
+fn densify(
+    path: &[Vec<f64>],
+    max_segment: f64,
+    floors: Option<&[f64]>,
+) -> (Vec<Vec<f64>>, Vec<f64>, Vec<usize>) {
     let mut out = vec![path[0].clone()];
-    for w in path.windows(2) {
+    let mut seg_floors = Vec::new();
+    let mut indices = vec![0usize];
+    for (i, w) in path.windows(2).enumerate() {
         let d = distance(&w[0], &w[1]);
         if d < 1e-12 {
+            indices.push(out.len() - 1);
             continue;
         }
         let steps = (d / max_segment).ceil().max(1.0) as usize;
+        let floor = floors.map_or(0.0, |f| f[i] / steps as f64);
         for k in 1..steps {
             let t = k as f64 / steps as f64;
             out.push(
@@ -152,11 +167,14 @@ fn densify(path: &[Vec<f64>], max_segment: f64) -> Vec<Vec<f64>> {
                     .map(|(a, b)| a + (b - a) * t)
                     .collect(),
             );
+            seg_floors.push(floor);
         }
         // Push the exact endpoint (lerp at t=1 would round).
         out.push(w[1].clone());
+        seg_floors.push(floor);
+        indices.push(out.len() - 1);
     }
-    out
+    (out, seg_floors, indices)
 }
 
 /// Assigns times to a joint-space path so that per-joint velocity and
@@ -166,6 +184,45 @@ pub fn time_parameterize(
     limits: &Limits,
     options: &TimingOptions,
 ) -> Result<JointTrajectory, TrajError> {
+    Ok(parameterize_impl(path, limits, None, options)?.trajectory)
+}
+
+/// A timed path plus the mapping back to its input waypoints.
+#[derive(Debug, Clone)]
+pub struct FloorTiming {
+    pub trajectory: JointTrajectory,
+    /// For each input waypoint, its index into `trajectory` waypoints
+    /// (densification inserts points; duplicate inputs collapse).
+    pub waypoint_indices: Vec<usize>,
+}
+
+/// [`time_parameterize`] with a lower bound on each input interval's
+/// duration (seconds; `0.0` = no floor). This is how a Cartesian feed rate
+/// becomes joint timing: the caller computes `chord length / feed` per
+/// interval, and joints only slow the path further where their own
+/// velocity or acceleration bounds demand it — never speed it up.
+pub fn time_parameterize_with_floors(
+    path: &[Vec<f64>],
+    limits: &Limits,
+    min_durations: &[f64],
+    options: &TimingOptions,
+) -> Result<FloorTiming, TrajError> {
+    let expected = path.len().saturating_sub(1);
+    if min_durations.len() != expected {
+        return Err(TrajError::WrongFloorCount {
+            expected,
+            got: min_durations.len(),
+        });
+    }
+    parameterize_impl(path, limits, Some(min_durations), options)
+}
+
+fn parameterize_impl(
+    path: &[Vec<f64>],
+    limits: &Limits,
+    floors: Option<&[f64]>,
+    options: &TimingOptions,
+) -> Result<FloorTiming, TrajError> {
     if path.is_empty() {
         return Err(TrajError::EmptyPath);
     }
@@ -187,17 +244,20 @@ pub fn time_parameterize(
         return Err(TrajError::NonPositiveLimits);
     }
 
-    let points = densify(path, options.max_segment);
+    let (points, seg_floors, waypoint_indices) = densify(path, options.max_segment, floors);
     let n = points.len();
     if n == 1 {
-        return Ok(JointTrajectory {
-            times: vec![0.0],
-            positions: points,
-            velocities: vec![vec![0.0; dof]],
+        return Ok(FloorTiming {
+            trajectory: JointTrajectory {
+                times: vec![0.0],
+                positions: points,
+                velocities: vec![vec![0.0; dof]],
+            },
+            waypoint_indices,
         });
     }
 
-    // 1. Velocity-bound initial durations.
+    // 1. Velocity-bound initial durations, lifted onto the floors.
     let nseg = n - 1;
     let mut dt = vec![0.0f64; nseg];
     for (i, w) in points.windows(2).enumerate() {
@@ -207,7 +267,7 @@ pub fn time_parameterize(
         for j in 0..dof {
             min_dt = min_dt.max((w[1][j] - w[0][j]).abs() / limits.velocity[j]);
         }
-        dt[i] = min_dt;
+        dt[i] = min_dt.max(seg_floors[i]);
     }
 
     // 2. Stretch durations until interface accelerations (with rest-to-rest
@@ -274,10 +334,13 @@ pub fn time_parameterize(
         }
     }
 
-    Ok(JointTrajectory {
-        times,
-        positions: points,
-        velocities,
+    Ok(FloorTiming {
+        trajectory: JointTrajectory {
+            times,
+            positions: points,
+            velocities,
+        },
+        waypoint_indices,
     })
 }
 
@@ -363,6 +426,70 @@ mod tests {
         assert_eq!(times.first(), Some(&0.0));
         assert!((times.last().unwrap() - traj.duration()).abs() < 1e-12);
         assert_eq!(positions.last().unwrap(), &vec![0.4]);
+    }
+
+    #[test]
+    fn floors_hold_when_joints_could_go_faster() {
+        // 0.1 rad with v=1 would take ~0.1s; the 2s floor must win, and the
+        // resulting motion is so gentle the acceleration pass leaves it be.
+        let path = vec![vec![0.0], vec![0.1]];
+        let timed = time_parameterize_with_floors(&path, &limits1(), &[2.0], &TimingOptions::default())
+            .unwrap();
+        assert!((timed.trajectory.duration() - 2.0).abs() < 1e-9);
+        assert_eq!(timed.waypoint_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn joint_limits_stretch_past_an_ambitious_floor() {
+        // A 1-rad move floored at 10ms: the velocity bound (1 rad/s) makes
+        // that impossible, so the joint-based timing must win.
+        let path = vec![vec![0.0], vec![1.0]];
+        let timed =
+            time_parameterize_with_floors(&path, &limits1(), &[0.01], &TimingOptions::default())
+                .unwrap();
+        assert!(timed.trajectory.duration() >= 1.0);
+    }
+
+    #[test]
+    fn floors_survive_densification() {
+        // 0.3 rad splits into two sub-segments at max_segment 0.15; the 1s
+        // floor is shared between them and the total still comes out to 1s.
+        let path = vec![vec![0.0], vec![0.3]];
+        let limits = Limits::uniform(1, 10.0, 10.0);
+        let timed =
+            time_parameterize_with_floors(&path, &limits, &[1.0], &TimingOptions::default())
+                .unwrap();
+        assert!((timed.trajectory.duration() - 1.0).abs() < 1e-9);
+        assert_eq!(timed.trajectory.times.len(), 3);
+        assert_eq!(timed.waypoint_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn zero_floors_match_the_legacy_path_bit_for_bit() {
+        let path = vec![vec![0.0, 0.0], vec![0.5, -0.3], vec![0.5, -0.3], vec![1.0, 0.4]];
+        let limits = Limits::uniform(2, 2.0, 4.0);
+        let legacy = time_parameterize(&path, &limits, &TimingOptions::default()).unwrap();
+        let floored =
+            time_parameterize_with_floors(&path, &limits, &[0.0; 3], &TimingOptions::default())
+                .unwrap();
+        assert_eq!(legacy.times, floored.trajectory.times);
+        assert_eq!(legacy.positions, floored.trajectory.positions);
+        assert_eq!(legacy.velocities, floored.trajectory.velocities);
+        // The duplicated input waypoint collapses onto its twin.
+        assert_eq!(floored.waypoint_indices[1], floored.waypoint_indices[2]);
+    }
+
+    #[test]
+    fn floor_count_mismatch_is_rejected() {
+        assert!(matches!(
+            time_parameterize_with_floors(
+                &[vec![0.0], vec![1.0]],
+                &limits1(),
+                &[0.1, 0.2],
+                &TimingOptions::default()
+            ),
+            Err(TrajError::WrongFloorCount { expected: 1, got: 2 })
+        ));
     }
 
     #[test]

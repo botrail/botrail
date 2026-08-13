@@ -1010,6 +1010,24 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Binds an accumulating cut trace to a signal at a robot's TCP:
+    /// while the signal is true during playback, the studio draws the
+    /// TCP's trail (the cut so far) and spins `spin_link` if given. Pure
+    /// presentation, like `add_weld_flash`; in USD the toolpath curves
+    /// already carry the picture.
+    #[pyo3(signature = (name, signal, robot, spin_link = None))]
+    fn add_cut_trace(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        spin_link: Option<&str>,
+    ) -> PyResult<()> {
+        self.hub
+            .add_cut_trace(name, signal, robot, spin_link)
+            .map_err(scene_err)
+    }
+
     /// Declared internal signals as `(name, initial)` pairs.
     #[getter]
     fn signals(&self) -> Vec<(String, bool)> {
@@ -1392,6 +1410,371 @@ impl Scene {
         self.hub.sequence_names()
     }
 
+    /// Marks contact between `link` (of `robot`) and `obstacle` as
+    /// process-intended — a milling cutter in its stock. The pair stops
+    /// counting as a collision (checking, planning, `min_clearance`);
+    /// toolpath *rapids* deliberately ignore the exemption — while not
+    /// cutting, any contact is a crash.
+    #[pyo3(signature = (link, obstacle, robot = None))]
+    fn allow_link_obstacle_contact(
+        &self,
+        link: &str,
+        obstacle: &str,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let link_index = resolve_link(&model, Some(link))?;
+        self.hub
+            .allow_link_obstacle_contact(index, link_index, obstacle)
+            .map_err(scene_err)
+    }
+
+    /// Removes an allowed-contact entry added by
+    /// `allow_link_obstacle_contact`.
+    #[pyo3(signature = (link, obstacle, robot = None))]
+    fn disallow_link_obstacle_contact(
+        &self,
+        link: &str,
+        obstacle: &str,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let link_index = resolve_link(&model, Some(link))?;
+        if !self
+            .hub
+            .disallow_link_obstacle_contact(index, link_index, obstacle)
+        {
+            return Err(PyValueError::new_err(format!(
+                "no allowed contact for link `{link}` and obstacle `{obstacle}`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Adds or replaces a toolpath (a continuous Cartesian process path,
+    /// see `bt.toolpath`). `toolpath` is the dict built by
+    /// `bt.toolpath.builder()` / `bt.toolpath.from_gcode()` — or its JSON
+    /// string. Targets live in the part frame named by its `frame` key
+    /// (resolved at bake time, so moving the frame re-solves the path).
+    fn add_toolpath(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        toolpath: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let json: String = if let Ok(s) = toolpath.extract::<String>() {
+            s
+        } else {
+            py.import("json")?
+                .call_method1("dumps", (&toolpath,))?
+                .extract()?
+        };
+        let mut msg: botrail_scene::toolpath::ToolpathMsg = serde_json::from_str(&json)
+            .map_err(|e| PyValueError::new_err(format!("invalid toolpath JSON: {e}")))?;
+        msg.name = name.to_string();
+        let tp = botrail_scene::toolpath::toolpath_from_msg(&msg)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.hub.add_toolpath(tp);
+        Ok(())
+    }
+
+    fn remove_toolpath(&self, name: &str) -> PyResult<()> {
+        if !self.hub.remove_toolpath(name) {
+            return Err(PyValueError::new_err(format!("unknown toolpath `{name}`")));
+        }
+        Ok(())
+    }
+
+    #[getter]
+    fn toolpath_names(&self) -> Vec<String> {
+        self.hub.toolpath_names()
+    }
+
+    /// Bakes a toolpath into one continuous trajectory: seed-continuous IK
+    /// along the resampled path (5-DOF axis-aligned where the spin is
+    /// free), collision-checked per sample, then time-parameterized in one
+    /// piece with the commanded feed as a floor — the TCP holds the feed
+    /// and slows only where joint limits force it. `segment_ends` on the
+    /// result marks each move's completion time. The trajectory starts at
+    /// the path's first target; author the approach separately.
+    ///
+    /// `spin` picks how the free rotation about the tool axis is chosen:
+    /// `"greedy"` (seed-continuous, milliseconds) or `"optimize"`
+    /// (Descartes-style global pass over a spin grid — spends spin early
+    /// to stay solvable late; seconds). `axis_tolerance` (rad) permits
+    /// lead/tilt deviation from the authored axis on spin-free samples.
+    #[pyo3(signature = (name, robot = None, tcp_link = None, step_pos = 0.005, step_rot = 0.05, jump_threshold = 0.5, rapid_speed = None, axis_tolerance = 0.0, spin = "greedy"))]
+    #[allow(clippy::too_many_arguments)]
+    fn plan_toolpath(
+        &self,
+        name: &str,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        step_pos: f64,
+        step_rot: f64,
+        jump_threshold: f64,
+        rapid_speed: Option<f64>,
+        axis_tolerance: f64,
+        spin: &str,
+    ) -> PyResult<Trajectory> {
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let tcp = tcp_link.map(|l| resolve_link(&model, Some(l))).transpose()?;
+        let options = botrail_scene::toolpath::ToolpathOptions {
+            step_pos,
+            step_rot,
+            jump_threshold,
+            rapid_speed,
+            axis_tolerance,
+            spin: spin_mode(spin)?,
+        };
+        let planned = self
+            .hub
+            .plan_toolpath(name, index, tcp, &options)
+            .map_err(PyValueError::new_err)?;
+        // Per-sample linear segments carrying their interval's commanded
+        // speed: script export renders the polyline as a blended
+        // movep/movel chain at the feed (`to_script(blend_radius=...)`).
+        let segments = planned
+            .path
+            .windows(2)
+            .zip(planned.samples.iter().skip(1))
+            .map(|(w, sample)| botrail_scene::motion::PlannedSegment {
+                kind: botrail_scene::motion::SegmentKind::CartesianLine,
+                waypoints: w.to_vec(),
+                tcp_speed: sample.feed.or(rapid_speed),
+            })
+            .collect();
+        Ok(Trajectory {
+            inner: planned.trajectory,
+            joint_names: model
+                .actuated_joint_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            segment_ends: planned.move_ends,
+            segments,
+            limits: hub::traj_limits(&model),
+            feed_report: Some(planned.feed_report),
+        })
+    }
+
+    /// Attempts every sample of a toolpath and reports all failures
+    /// (unreachable / IK-branch jump / collision) without aborting — the
+    /// pre-teach "which points can I not reach" face diagnosis.
+    #[pyo3(signature = (name, robot = None, tcp_link = None, step_pos = 0.005, step_rot = 0.05, jump_threshold = 0.5, axis_tolerance = 0.0, spin = "greedy"))]
+    #[allow(clippy::too_many_arguments)]
+    fn check_toolpath(
+        &self,
+        name: &str,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        step_pos: f64,
+        step_rot: f64,
+        jump_threshold: f64,
+        axis_tolerance: f64,
+        spin: &str,
+    ) -> PyResult<ToolpathReport> {
+        let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let tcp = tcp_link.map(|l| resolve_link(&model, Some(l))).transpose()?;
+        let options = botrail_scene::toolpath::ToolpathOptions {
+            step_pos,
+            step_rot,
+            jump_threshold,
+            rapid_speed: None,
+            axis_tolerance,
+            spin: spin_mode(spin)?,
+        };
+        let report = self
+            .hub
+            .check_toolpath(name, index, tcp, &options)
+            .map_err(PyValueError::new_err)?;
+        Ok(ToolpathReport { inner: report })
+    }
+
+    /// Progressive material removal for a baked cycle: carves `stock` in
+    /// `stages` equal time slices (default: one slice per second of
+    /// cycle, capped at 240 — the display lags the tool by at most one
+    /// slice, so this keeps the lag around a second), registers one
+    /// display-only obstacle per changed slice (grouped under
+    /// `{stock}_cut/…` in the scene tree, cheap AABB colliders — they
+    /// never collide), and returns the timeline with the visibility
+    /// windows injected: during playback — studio, USD export, and a
+    /// replayed recording alike — the stock disappears as it is cut
+    /// instead of starting pre-cut. The stock keeps colliding unchanged;
+    /// everything here is presentation.
+    #[pyo3(signature = (timeline, stock, stages = None, voxel_size = 0.001, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01, robot = None, tcp_link = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn animate_carve(
+        &self,
+        timeline: PyRef<'_, SequenceTimeline>,
+        stock: &str,
+        stages: Option<usize>,
+        voxel_size: f64,
+        cutter_radius: f64,
+        cutter_length: f64,
+        dt: f64,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+    ) -> PyResult<SequenceTimeline> {
+        let stages =
+            stages.unwrap_or_else(|| (timeline.inner.duration.ceil() as usize).clamp(1, 240));
+        let (index, _) = timeline.track_for(robot)?;
+        let model = &timeline.scene.robots()[index].model;
+        let tcp = match tcp_link {
+            Some(l) => resolve_link(&std::sync::Arc::clone(model), Some(l))?,
+            None => model.default_tcp_link(),
+        };
+        let options = botrail_scene::carve::CarveOptions {
+            voxel_size,
+            cutter_radius,
+            cutter_length,
+            dt,
+            ..botrail_scene::carve::CarveOptions::default()
+        };
+        let (carve, stage_list) = botrail_scene::carve::carve_stock_staged(
+            &timeline.scene,
+            &timeline.inner,
+            stock,
+            index,
+            tcp,
+            &options,
+            stages,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if stage_list.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "the cycle never cuts `{stock}` — nothing to animate"
+            )));
+        }
+
+        // Stage meshes go to the cache as OBJ + MTL (the format the
+        // studio and the USD export read face colors back from),
+        // content-addressed so re-runs reuse files.
+        let dir = cache_base().join("carve");
+        std::fs::create_dir_all(&dir).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let material = botrail_scene::Material::new(0.75, 0.35);
+        let mut entries: Vec<(
+            String,
+            botrail_model::Geometry,
+            botrail_scene::ObstacleCollider,
+        )> = Vec::with_capacity(stage_list.len());
+        let mut times = Vec::with_capacity(stage_list.len());
+        for (i, stage) in stage_list.iter().enumerate() {
+            let hash = {
+                // FNV-1a over the vertex/index bytes: stable across runs
+                // and Rust versions, which is all a cache name needs.
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                let mut eat = |bytes: &[u8]| {
+                    for b in bytes {
+                        h ^= *b as u64;
+                        h = h.wrapping_mul(0x1000_0000_01b3);
+                    }
+                };
+                for v in &stage.mesh.vertices {
+                    for c in v {
+                        eat(&c.to_le_bytes());
+                    }
+                }
+                for t in &stage.mesh.indices {
+                    for c in t {
+                        eat(&c.to_le_bytes());
+                    }
+                }
+                h
+            };
+            let obj_path = dir.join(format!("{hash:016x}.obj"));
+            let mtl_name = format!("{hash:016x}.mtl");
+            if !obj_path.exists() {
+                let (obj, mtl) = botrail_mesh::to_obj_with_mtl(&stage.mesh, &mtl_name);
+                std::fs::write(&obj_path, obj).map_err(|e| PyIOError::new_err(e.to_string()))?;
+                std::fs::write(dir.join(&mtl_name), mtl)
+                    .map_err(|e| PyIOError::new_err(e.to_string()))?;
+            }
+            // A cheap stand-in collider: the stage registers disabled, so
+            // VHACD on it would be pure cost.
+            let half = {
+                let mut lo = [f64::INFINITY; 3];
+                let mut hi = [f64::NEG_INFINITY; 3];
+                for v in &stage.mesh.vertices {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(v[a]);
+                        hi[a] = hi[a].max(v[a]);
+                    }
+                }
+                nalgebra::Vector3::new(
+                    ((hi[0] - lo[0]) / 2.0).max(1e-6),
+                    ((hi[1] - lo[1]) / 2.0).max(1e-6),
+                    ((hi[2] - lo[2]) / 2.0).max(1e-6),
+                )
+            };
+            entries.push((
+                format!("{stock}_cut/{i:03}"),
+                botrail_model::Geometry::Mesh {
+                    path: obj_path.clone(),
+                    scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                },
+                botrail_scene::ObstacleCollider::cuboid(half),
+            ));
+            times.push(stage.time);
+        }
+
+        // Register on the live scene (one broadcast) and on the
+        // timeline's snapshot — the augmented timeline's own scene must
+        // hold the stages for its USD export to include them.
+        let mut snapshot = timeline.scene.clone();
+        for (name, geometry, collider) in &entries {
+            let _ = snapshot.remove_obstacle(name);
+            let final_name = snapshot.add_obstacle_with_collider(
+                name,
+                geometry.clone(),
+                carve.pose,
+                collider.clone(),
+            );
+            let _ = snapshot.set_obstacle_enabled(&final_name, false);
+            let _ = snapshot.set_obstacle_material(&final_name, Some(material));
+        }
+        let names = self.hub.add_carve_stages(entries, carve.pose, material);
+
+        let augmented = botrail_scene::carve::staged_timeline(
+            &timeline.inner,
+            stock,
+            carve.pose,
+            &names,
+            &times,
+        );
+        self.hub.emit_timeline(&snapshot, &augmented);
+        Ok(SequenceTimeline {
+            inner: augmented,
+            scene: snapshot,
+        })
+    }
+
+    /// Wraps a planned trajectory as a single-robot `SequenceTimeline` so
+    /// the timeline consumers — studio playback, `export_usd`,
+    /// `min_clearance` — accept it without authoring a sequence. Other
+    /// robots hold their current pose; objects stay static. Script export
+    /// is not supported on the result.
+    #[pyo3(signature = (trajectory, robot = None, label = "trajectory"))]
+    fn timeline_from_trajectory(
+        &self,
+        trajectory: PyRef<'_, Trajectory>,
+        robot: Option<&str>,
+        label: &str,
+    ) -> PyResult<SequenceTimeline> {
+        let index = self.resolve_robot(robot)?;
+        let (timeline, scene) = self
+            .hub
+            .timeline_from_trajectory(index, &trajectory.inner, label);
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene,
+        })
+    }
+
     /// Rolls out a sequence with the PLC scan loop against a snapshot of
     /// this scene (motions plan at their step, grasped objects ride along)
     /// and returns the baked timeline. Also broadcasts the result to
@@ -1400,7 +1783,8 @@ impl Scene {
     /// `scenario` applies a named initial-state delta (`add_scenario`) to
     /// the snapshot first — the live scene is never touched. `None` and
     /// `"baseline"` both mean the scene as it stands.
-    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None))]
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None))]
+    #[allow(clippy::too_many_arguments)]
     fn simulate_sequence(
         &self,
         name: &str,
@@ -1408,6 +1792,7 @@ impl Scene {
         max_duration: f64,
         plan_resolution: Option<f64>,
         scenario: Option<&str>,
+        toolpath_spin: Option<&str>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -1426,6 +1811,9 @@ impl Scene {
                 )));
             }
             options.plan.resolution = resolution;
+        }
+        if let Some(mode) = toolpath_spin {
+            options.toolpath.spin = spin_mode(mode)?;
         }
         let (timeline, scene) = self
             .hub
@@ -1451,7 +1839,8 @@ impl Scene {
     /// joint-space L2). The default 0.05 samples a big arm's sweep every
     /// ~10 cm of TCP travel — coarse enough to step across sheet metal, so
     /// cells full of 12 mm flanges pass 0.005.
-    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None))]
+    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None))]
+    #[allow(clippy::too_many_arguments)]
     fn simulate_sequences(
         &self,
         names: Vec<String>,
@@ -1459,6 +1848,7 @@ impl Scene {
         max_duration: f64,
         plan_resolution: Option<f64>,
         scenario: Option<&str>,
+        toolpath_spin: Option<&str>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -1477,6 +1867,9 @@ impl Scene {
                 )));
             }
             options.plan.resolution = resolution;
+        }
+        if let Some(mode) = toolpath_spin {
+            options.toolpath.spin = spin_mode(mode)?;
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (timeline, scene) = self
@@ -1680,6 +2073,7 @@ impl Scene {
             segments: vec![botrail_scene::motion::PlannedSegment {
                 kind: botrail_scene::motion::SegmentKind::Joint,
                 waypoints: path,
+                tcp_speed: None,
             }],
             joint_names: model
                 .actuated_joint_names()
@@ -1687,6 +2081,7 @@ impl Scene {
                 .map(str::to_string)
                 .collect(),
             limits: hub::traj_limits(&model),
+            feed_report: None,
         })
     }
 
@@ -1793,6 +2188,7 @@ impl Scene {
                 .map(str::to_string)
                 .collect(),
             limits: hub::traj_limits(&model),
+            feed_report: None,
         })
     }
 
@@ -2113,6 +2509,8 @@ struct Trajectory {
     segments: Vec<botrail_scene::motion::PlannedSegment>,
     /// Joint limits the trajectory was timed with (drive script speeds).
     limits: botrail_traj::Limits,
+    /// Feed adherence of a toolpath bake (`None` for ordinary plans).
+    feed_report: Option<botrail_scene::toolpath::FeedReport>,
 }
 
 impl Trajectory {
@@ -2144,6 +2542,7 @@ impl Trajectory {
                         botrail_export::PathKind::Linear
                     }
                 },
+                tcp_speed: s.tcp_speed,
                 waypoints: s.waypoints.clone(),
             })
             .collect();
@@ -2180,6 +2579,15 @@ impl Trajectory {
     #[getter]
     fn segment_ends(&self) -> Vec<f64> {
         self.segment_ends.clone()
+    }
+
+    /// Feed adherence of a toolpath bake (`None` for ordinary plans).
+    #[getter]
+    fn feed_report(&self) -> Option<FeedReport> {
+        self.feed_report.as_ref().map(|r| FeedReport {
+            inner: r.clone(),
+            joint_names: self.joint_names.clone(),
+        })
     }
 
     /// Sparse planned path per segment, as `(kind, waypoints)` tuples with
@@ -2635,6 +3043,106 @@ impl SequenceTimeline {
         ))
     }
 
+    /// Carves `stock` with the cutter swept along this cycle: a voxel
+    /// subtraction in the stock's frame, returning the machined part as
+    /// a mesh plus removed/remaining volume. Presentation and numbers —
+    /// the cut can never contradict the plan in a kinematic world.
+    #[pyo3(signature = (stock, robot = None, tcp_link = None, voxel_size = 0.001, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01))]
+    #[allow(clippy::too_many_arguments)]
+    fn carve_stock(
+        &self,
+        stock: &str,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        voxel_size: f64,
+        cutter_radius: f64,
+        cutter_length: f64,
+        dt: f64,
+    ) -> PyResult<StockCarve> {
+        let (index, _) = self.track_for(robot)?;
+        let model = &self.scene.robots()[index].model;
+        let tcp = match tcp_link {
+            Some(l) => resolve_link(&std::sync::Arc::clone(model), Some(l))?,
+            None => model.default_tcp_link(),
+        };
+        let options = botrail_scene::carve::CarveOptions {
+            voxel_size,
+            cutter_radius,
+            cutter_length,
+            dt,
+            ..botrail_scene::carve::CarveOptions::default()
+        };
+        let inner = botrail_scene::carve::carve_stock(
+            &self.scene,
+            &self.inner,
+            stock,
+            index,
+            tcp,
+            &options,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(StockCarve { inner })
+    }
+
+    /// Feed adherence of a toolpath the cycle ran (`StartToolpath`).
+    /// `toolpath=None` means the only one; name it when the cycle cuts
+    /// several.
+    #[pyo3(signature = (toolpath = None))]
+    fn feed_report(&self, toolpath: Option<&str>) -> PyResult<FeedReport> {
+        let mut found: Vec<(&str, usize, &botrail_scene::toolpath::FeedReport)> = Vec::new();
+        for (r, track) in self.inner.robots.iter().enumerate() {
+            for planned in &track.planned {
+                if let (Some(name), Some(report)) = (&planned.motion, &planned.feed_report) {
+                    if toolpath.is_none_or(|t| t == name) {
+                        found.push((name, r, report));
+                    }
+                }
+            }
+        }
+        match (found.len(), toolpath) {
+            (0, Some(name)) => Err(PyValueError::new_err(format!(
+                "the cycle ran no toolpath named `{name}`"
+            ))),
+            (0, None) => Err(PyValueError::new_err(
+                "the cycle ran no toolpath (start one with bt.seq.toolpath)",
+            )),
+            (1, _) => {
+                let (_, r, report) = found[0];
+                Ok(FeedReport {
+                    inner: report.clone(),
+                    joint_names: self.scene.robots()[r]
+                        .model
+                        .actuated_joint_names()
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect(),
+                })
+            }
+            (_, None) => Err(PyValueError::new_err(format!(
+                "the cycle ran {} toolpath moves; name one (candidates: {})",
+                found.len(),
+                found
+                    .iter()
+                    .map(|(n, _, _)| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+            (_, Some(_)) => {
+                // The same toolpath started twice: report the first run.
+                let (_, r, report) = found[0];
+                Ok(FeedReport {
+                    inner: report.clone(),
+                    joint_names: self.scene.robots()[r]
+                        .model
+                        .actuated_joint_names()
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect(),
+                })
+            }
+        }
+    }
+
     /// A robot's cycle joint track as a [`Trajectory`] (CSV/JSON export,
     /// joint access). Step boundaries land in `segment_ends`.
     #[pyo3(signature = (robot = None))]
@@ -2650,6 +3158,7 @@ impl SequenceTimeline {
                 .collect(),
             segment_ends: self.inner.step_spans.iter().map(|s| s.end).collect(),
             segments: Vec::new(),
+            feed_report: None,
             limits: crate::hub::traj_limits(model),
         })
     }
@@ -3361,6 +3870,279 @@ impl Clearance {
     }
 }
 
+fn spin_mode(name: &str) -> PyResult<botrail_scene::toolpath::SpinMode> {
+    match name {
+        "greedy" => Ok(botrail_scene::toolpath::SpinMode::Greedy),
+        "optimize" => Ok(botrail_scene::toolpath::SpinMode::optimize()),
+        other => Err(PyValueError::new_err(format!(
+            "spin must be \"greedy\" or \"optimize\", got {other:?}"
+        ))),
+    }
+}
+
+/// How a bake held the commanded feed: the floors make `length / feed` a
+/// hard lower bound, so joints can only slow a cut — this says where they
+/// did, and which axis owned it.
+#[pyclass(frozen, module = "botrail._core")]
+struct FeedReport {
+    inner: botrail_scene::toolpath::FeedReport,
+    joint_names: Vec<String>,
+}
+
+#[pymethods]
+impl FeedReport {
+    /// Commanded cutting time / achieved; 1.0 = the feed was held
+    /// everywhere.
+    #[getter]
+    fn hold_ratio(&self) -> f64 {
+        self.inner.hold_ratio
+    }
+
+    #[getter]
+    fn commanded_cut_seconds(&self) -> f64 {
+        self.inner.commanded_cut_seconds
+    }
+
+    #[getter]
+    fn achieved_cut_seconds(&self) -> f64 {
+        self.inner.achieved_cut_seconds
+    }
+
+    /// One dict per slow stretch: `{start, end, move, commanded_feed,
+    /// achieved_feed, limiting_joint}` — the joint name is the axis that
+    /// ran closest to its velocity limit there.
+    #[getter]
+    fn slow_spans<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        self.inner
+            .slow_spans
+            .iter()
+            .map(|s| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("start", s.start)?;
+                d.set_item("end", s.end)?;
+                d.set_item("move", s.move_index)?;
+                d.set_item("commanded_feed", s.commanded_feed)?;
+                d.set_item("achieved_feed", s.achieved_feed)?;
+                d.set_item(
+                    "limiting_joint",
+                    self.joint_names
+                        .get(s.limiting_joint)
+                        .cloned()
+                        .unwrap_or_else(|| s.limiting_joint.to_string()),
+                )?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FeedReport(hold {:.1}%, commanded {:.2}s / achieved {:.2}s, {} slow span{})",
+            self.inner.hold_ratio * 100.0,
+            self.inner.commanded_cut_seconds,
+            self.inner.achieved_cut_seconds,
+            self.inner.slow_spans.len(),
+            if self.inner.slow_spans.len() == 1 { "" } else { "s" },
+        )
+    }
+}
+
+/// A carved stock: the machined part as a mesh plus the volume
+/// bookkeeping. Presentation and numbers, not verification — in a
+/// kinematic world the TCP follows the toolpath exactly.
+#[pyclass(frozen, module = "botrail._core")]
+struct StockCarve {
+    inner: botrail_scene::carve::StockCarve,
+}
+
+#[pymethods]
+impl StockCarve {
+    #[getter]
+    fn removed_volume(&self) -> f64 {
+        self.inner.removed_volume
+    }
+
+    #[getter]
+    fn remaining_volume(&self) -> f64 {
+        self.inner.remaining_volume
+    }
+
+    #[getter]
+    fn initial_volume(&self) -> f64 {
+        self.inner.initial_volume
+    }
+
+    #[getter]
+    fn voxel_size(&self) -> f64 {
+        self.inner.voxel_size
+    }
+
+    #[getter]
+    fn triangle_count(&self) -> usize {
+        self.inner.mesh.indices.len()
+    }
+
+    /// World pose to place the mesh at (the stock's pose at carve time).
+    #[getter]
+    fn pose(&self) -> hub::PoseArrays {
+        let t = self.inner.pose.translation;
+        let q = self.inner.pose.rotation.coords;
+        ([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
+    }
+
+    /// Writes the machined-part mesh as binary STL (stock-local
+    /// coordinates; add it to the scene at `pose`). STL carries no
+    /// colors — prefer `save_obj` for the cut-surface finish.
+    fn save_stl(&self, path: std::path::PathBuf) -> PyResult<()> {
+        std::fs::write(&path, botrail_mesh::to_stl_binary(&self.inner.mesh))
+            .map_err(|e| PyIOError::new_err(e.to_string()))
+    }
+
+    /// Writes the machined part as OBJ plus a sibling `.mtl`, carrying
+    /// the surface classing as face colors: the surviving skin in the
+    /// stock color, cutter-made surfaces in the bright machined finish.
+    /// The studio and the USD export both read face colors back from
+    /// this format (add the obstacle *without* a `color=` override).
+    fn save_obj(&self, path: std::path::PathBuf) -> PyResult<()> {
+        let mtl_path = path.with_extension("mtl");
+        let mtl_name = mtl_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or_else(|| PyValueError::new_err("path has no file name"))?;
+        let (obj, mtl) = botrail_mesh::to_obj_with_mtl(&self.inner.mesh, &mtl_name);
+        std::fs::write(&path, obj).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        std::fs::write(&mtl_path, mtl).map_err(|e| PyIOError::new_err(e.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StockCarve(removed {:.2} cm3 of {:.2} cm3, {} tris at {:.1} mm voxels)",
+            self.inner.removed_volume * 1e6,
+            self.inner.initial_volume * 1e6,
+            self.inner.mesh.indices.len(),
+            self.inner.voxel_size * 1e3,
+        )
+    }
+}
+
+/// Face diagnosis of a toolpath: every sample attempted, all failures
+/// collected. Truthy iff clean (`ok`).
+#[pyclass(frozen, module = "botrail._core")]
+struct ToolpathReport {
+    inner: botrail_scene::toolpath::ToolpathReport,
+}
+
+#[pymethods]
+impl ToolpathReport {
+    /// Number of resampled path points attempted.
+    #[getter]
+    fn total_samples(&self) -> usize {
+        self.inner.total_samples
+    }
+
+    /// True when every sample solved, stayed on its IK branch, and was
+    /// collision-free.
+    #[getter]
+    fn ok(&self) -> bool {
+        self.inner.ok()
+    }
+
+    /// One dict per failing sample: `{sample, move, kind, position,
+    /// detail}` with `kind` in `"unreachable" | "config_jump" |
+    /// "collision"` and `position` the world target the sample aimed at.
+    #[getter]
+    fn issues<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        use botrail_scene::toolpath::IssueKind;
+        self.inner
+            .issues
+            .iter()
+            .map(|i| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("sample", i.sample)?;
+                d.set_item("move", i.move_index)?;
+                d.set_item(
+                    "kind",
+                    match i.kind {
+                        IssueKind::Unreachable => "unreachable",
+                        IssueKind::ConfigJump => "config_jump",
+                        IssueKind::Collision => "collision",
+                    },
+                )?;
+                d.set_item(
+                    "position",
+                    (i.position.x, i.position.y, i.position.z),
+                )?;
+                d.set_item("detail", i.detail.clone())?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    fn __bool__(&self) -> bool {
+        self.inner.ok()
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.ok() {
+            format!(
+                "ToolpathReport(ok, {} samples)",
+                self.inner.total_samples
+            )
+        } else {
+            let first = &self.inner.issues[0];
+            format!(
+                "ToolpathReport({} issues / {} samples, first at sample {}: {})",
+                self.inner.issues.len(),
+                self.inner.total_samples,
+                first.sample,
+                first.detail
+            )
+        }
+    }
+}
+
+/// Parses a G-code subset into toolpath-move JSON:
+/// `{"moves": [...], "warnings": [...]}`. `bt.toolpath.from_gcode` wraps
+/// this — call that instead.
+#[pyfunction]
+#[pyo3(signature = (text, chord_tol = 1e-4))]
+fn _parse_gcode_json(text: &str, chord_tol: f64) -> PyResult<String> {
+    let parsed = botrail_scene::gcode::parse_gcode(
+        text,
+        &botrail_scene::gcode::GcodeOptions { chord_tol },
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let msg = botrail_scene::toolpath::toolpath_msg(&botrail_scene::toolpath::Toolpath {
+        name: String::new(),
+        frame: None,
+        moves: parsed.moves,
+    });
+    Ok(serde_json::json!({
+        "moves": msg.moves,
+        "warnings": parsed.warnings,
+    })
+    .to_string())
+}
+
+ /// Parses an APT/CL subset into toolpath-move JSON:
+/// `{"moves": [...], "warnings": [...]}`. `bt.toolpath.from_apt` wraps
+/// this — call that instead.
+#[pyfunction]
+fn _parse_apt_json(text: &str) -> PyResult<String> {
+    let parsed = botrail_scene::apt::parse_apt(text)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let msg = botrail_scene::toolpath::toolpath_msg(&botrail_scene::toolpath::Toolpath {
+        name: String::new(),
+        frame: None,
+        moves: parsed.moves,
+    });
+    Ok(serde_json::json!({
+        "moves": msg.moves,
+        "warnings": parsed.warnings,
+    })
+    .to_string())
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Robot>()?;
@@ -3372,9 +4154,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;
     m.add_class::<Clearance>()?;
+    m.add_class::<ToolpathReport>()?;
+    m.add_class::<FeedReport>()?;
+    m.add_class::<StockCarve>()?;
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;
+    m.add_function(wrap_pyfunction!(_parse_gcode_json, m)?)?;
+    m.add_function(wrap_pyfunction!(_parse_apt_json, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

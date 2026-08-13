@@ -101,6 +101,9 @@ pub struct PlannedSegment {
     /// Waypoints in DOF order, both endpoints included. The first equals
     /// the previous segment's last; the last is the reached goal.
     pub waypoints: Vec<Vec<f64>>,
+    /// Commanded TCP speed for a Cartesian segment (m/s) — a toolpath's
+    /// feed (or rapid cap). `None` keeps the exporter's default.
+    pub tcp_speed: Option<f64>,
 }
 
 /// A planned motion: one concatenated trajectory plus the time at which
@@ -350,6 +353,7 @@ pub fn plan_motion(
         segments.push(PlannedSegment {
             kind: segment.kind,
             waypoints: path,
+            tcp_speed: None,
         });
     }
 
@@ -362,7 +366,7 @@ pub fn plan_motion(
 
 /// Appends `tail` to `head`, shifting its timestamps. The duplicated
 /// boundary waypoint (tail start == head end) is dropped.
-fn concatenate(mut head: JointTrajectory, tail: JointTrajectory) -> JointTrajectory {
+pub(crate) fn concatenate(mut head: JointTrajectory, tail: JointTrajectory) -> JointTrajectory {
     let offset = head.duration();
     let skip = usize::from(
         tail.positions

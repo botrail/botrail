@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!-- A hand-authored router spindle for the machining demo: motor body,
+     collet, and an 8 mm end mill extending out of the flange (+Z of the
+     mount, as tools do). The `tip` link is the TCP; its frame is flipped
+     a half-turn about X so its +Z runs from the cutter tip back toward
+     the tool body — the axis convention `PathTarget.tool_axis` and the
+     5-DOF axis-aligned IK expect. Collision is authored as primitives;
+     in C0 the stock is display-only (a cutter is supposed to touch it),
+     fixtures and clamps stay live. -->
+<robot name="spindle">
+  <link name="spindle_mount">
+    <visual>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.024" length="0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.024" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <link name="collet">
+    <visual>
+      <origin xyz="0 0 0.01"/>
+      <geometry><cylinder radius="0.009" length="0.02"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.01"/>
+      <geometry><cylinder radius="0.009" length="0.02"/></geometry>
+    </collision>
+  </link>
+  <link name="cutter">
+    <visual>
+      <origin xyz="0 0 0.015"/>
+      <geometry><cylinder radius="0.004" length="0.03"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.015"/>
+      <geometry><cylinder radius="0.004" length="0.03"/></geometry>
+    </collision>
+  </link>
+  <link name="tip"/>
+  <joint name="mount_to_collet" type="fixed">
+    <parent link="spindle_mount"/><child link="collet"/>
+    <origin xyz="0 0 0.06"/>
+  </joint>
+  <joint name="collet_to_cutter" type="fixed">
+    <parent link="collet"/><child link="cutter"/>
+    <origin xyz="0 0 0.02"/>
+  </joint>
+  <joint name="cutter_to_tip" type="fixed">
+    <parent link="cutter"/><child link="tip"/>
+    <origin xyz="0 0 0.03" rpy="3.14159265358979 0 0"/>
+  </joint>
+</robot>

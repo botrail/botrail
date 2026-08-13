@@ -4,6 +4,7 @@ import type {
   CollisionPairMsg,
   FlashMsg,
   FrameMsg,
+  ToolpathOverlayMsg,
   IkStatusMsg,
   MotionMsg,
   ObstacleMsg,
@@ -197,6 +198,9 @@ export interface StudioState {
   obstacles: ObstacleMsg[];
   /** Named world frames (mount points); re-sent in full on every change. */
   frames: FrameMsg[];
+  /** Toolpath overlays (world-resolved polylines); re-sent in full on
+   * every toolpath or part-frame change. */
+  toolpaths: ToolpathOverlayMsg[];
   /** Colliding pairs at the current configuration (empty when clear). */
   collisions: CollisionPairMsg[];
   /** Minimum robot-obstacle distance; null without obstacles. */
@@ -330,6 +334,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   gizmoMode: "translate",
   obstacles: [],
   frames: [],
+  toolpaths: [],
   collisions: [],
   minDistance: null,
   selection: { type: "tcp", robot: "" },
@@ -392,6 +397,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           selectedRobot: selected,
           obstacles: [],
           frames: [],
+          toolpaths: [],
           collisions: [],
           minDistance: null,
           selection: { type: "tcp", robot: selected ?? "" },
@@ -449,6 +455,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     } else if (msg.type === "frames") {
       set({ frames: msg.frames });
+    } else if (msg.type === "toolpaths") {
+      set({ toolpaths: msg.toolpaths });
     } else if (msg.type === "motions") {
       set({ motions: msg.motions });
     } else if (msg.type === "sequences") {

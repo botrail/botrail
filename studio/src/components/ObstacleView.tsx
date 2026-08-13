@@ -53,14 +53,17 @@ export function ObstacleView() {
     <>
       {obstacles
         // `o.visible` is the scene's own answer (a collision proxy the
-        // author never meant to draw); the other two are this viewer's.
-        .filter(
-          (o) => o.visible && !hiddenObstacles.has(o.name) && !stowed.has(o.name),
-        )
+        // author never meant to draw); hiding is this viewer's. Stowed
+        // obstacles stay MOUNTED and merely turn invisible: unmounting
+        // would deregister them from the playback rig, and the driver
+        // could never show them again mid-play (a carve stage whose
+        // window arrives, a part leaving its magazine).
+        .filter((o) => o.visible && !hiddenObstacles.has(o.name))
         .map((o) => (
         <ObstacleNode
           key={o.name}
           obstacle={o}
+          stowed={stowed.has(o.name)}
           colliding={collidingObstacles.has(o.name)}
           selected={
             (selection.type === "obstacle" && selection.name === o.name) ||
@@ -196,11 +199,15 @@ function GroupGizmo({ path }: { path: string }) {
 
 function ObstacleNode({
   obstacle,
+  stowed,
   colliding,
   selected,
   gizmo,
 }: {
   obstacle: ObstacleMsg;
+  /** Hidden by the playback tracks at the current playhead. The node stays
+   * mounted (and rig-registered) so the driver can reveal it mid-play. */
+  stowed: boolean;
   colliding: boolean;
   selected: boolean;
   /** Whether this obstacle carries its own move gizmo (a group member does
@@ -259,6 +266,11 @@ function ObstacleNode({
   const DRAG_SLOP_PX = 4;
 
   const onSelect = (e: ThreeEvent<MouseEvent>) => {
+    // The raycaster tests invisible nodes too; a currently-stowed obstacle
+    // must neither select nor swallow the click meant for whatever is
+    // drawn in its place. Live visibility (the driver writes it during
+    // playback), not the React prop, is the truth here.
+    if (group && !group.visible) return;
     e.stopPropagation();
     const from = downAt.current;
     downAt.current = null;
@@ -284,7 +296,7 @@ function ObstacleNode({
 
   return (
     <>
-      <group ref={setGroup}>
+      <group ref={setGroup} visible={!stowed}>
         <ObstacleGeometry
           geometry={obstacle.geometry}
           color={color}
@@ -301,7 +313,7 @@ function ObstacleNode({
           }}
         />
       </group>
-      {gizmo && group && (
+      {gizmo && !stowed && group && (
         <TransformControls
           object={group}
           mode={gizmoMode}

@@ -183,6 +183,10 @@ pub enum PathKind {
 pub struct PathSegment {
     pub kind: PathKind,
     pub waypoints: Vec<Vec<f64>>,
+    /// Commanded TCP speed for a linear segment (m/s) — a toolpath's feed.
+    /// `None` uses [`ProgramOptions::tcp_speed`]. Scaled by `speed_scale`
+    /// like every other rate.
+    pub tcp_speed: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +272,7 @@ pub fn build_program(
             });
         }
     }
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate() {
         match segment.kind {
             PathKind::Joint => {
                 let last = segment.waypoints.len().saturating_sub(1);
@@ -283,11 +287,23 @@ pub fn build_program(
             }
             PathKind::Linear => {
                 if segment.waypoints.len() > 1 {
+                    // A linear segment followed by another linear segment is
+                    // a chain (a toolpath's samples): blend through the
+                    // shared waypoint. The chain's last move — and any
+                    // linear move handing over to a joint move — stops
+                    // exactly, matching the rest-to-rest timing model.
+                    let chained = matches!(
+                        segments.get(index + 1).map(|s| s.kind),
+                        Some(PathKind::Linear)
+                    );
                     commands.push(Command::MoveLinear {
                         q: segment.waypoints.last().expect("len > 1").clone(),
-                        velocity: tcp_velocity,
+                        velocity: segment
+                            .tcp_speed
+                            .map(|s| s * options.speed_scale)
+                            .unwrap_or(tcp_velocity),
                         acceleration: tcp_acceleration,
-                        blend: 0.0,
+                        blend: if chained { options.blend_radius } else { 0.0 },
                     });
                 }
             }
@@ -363,10 +379,12 @@ mod tests {
             PathSegment {
                 kind: PathKind::Joint,
                 waypoints: vec![a.clone(), b.clone()],
+                tcp_speed: None,
             },
             PathSegment {
                 kind: PathKind::Joint,
                 waypoints: vec![b.clone(), c.clone()],
+                tcp_speed: None,
             },
         ];
         let (vel, acc) = limits(2);
@@ -396,6 +414,7 @@ mod tests {
         let segments = vec![PathSegment {
             kind: PathKind::Joint,
             waypoints: vec![vec![0.0], vec![0.3], vec![0.6], vec![1.0]],
+            tcp_speed: None,
         }];
         let options = ProgramOptions {
             blend_radius: 0.05,
@@ -422,6 +441,7 @@ mod tests {
         let segments = vec![PathSegment {
             kind: PathKind::Linear,
             waypoints: follow,
+            tcp_speed: None,
         }];
         let (vel, acc) = limits(2);
         let options = ProgramOptions {
@@ -451,6 +471,7 @@ mod tests {
         let segments = vec![PathSegment {
             kind: PathKind::Joint,
             waypoints: vec![vec![0.0, 0.0], vec![1.0, 1.0]],
+            tcp_speed: None,
         }];
         let options = ProgramOptions {
             speed_scale: 0.5,
@@ -485,6 +506,7 @@ mod tests {
         let joint = |wps: Vec<Vec<f64>>| PathSegment {
             kind: PathKind::Joint,
             waypoints: wps,
+            tcp_speed: None,
         };
         assert!(matches!(
             build_program("p", &names(2), &[], &vel, &acc, &ProgramOptions::default()),

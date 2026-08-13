@@ -118,6 +118,13 @@ impl SceneHub {
             .clone()
     }
 
+    /// The last successful bake as a serialized `sequence_result`, for
+    /// handshakes (late joiners get the cycle a headless script baked).
+    pub fn last_sequence_result_json(&self) -> Option<String> {
+        botrail_session::baked_result_message(self)
+            .map(|msg| serde_json::to_string(&msg).expect("wire types serialize infallibly"))
+    }
+
     /// Filesystem path behind `/meshes/{id}`.
     pub fn mesh_path(&self, id: usize) -> Option<PathBuf> {
         self.meshes
@@ -325,6 +332,23 @@ impl SceneHub {
         botrail_session::remove_obstacle(self, name)
     }
 
+    pub fn add_carve_stages(
+        &self,
+        stages: Vec<(String, Geometry, botrail_scene::ObstacleCollider)>,
+        pose: Isometry3<f64>,
+        material: botrail_scene::Material,
+    ) -> Vec<String> {
+        botrail_session::add_carve_stages(self, stages, pose, material)
+    }
+
+    pub fn emit_timeline(
+        &self,
+        scene: &Scene,
+        timeline: &botrail_scene::rollout::SequenceTimeline,
+    ) {
+        botrail_session::emit_timeline(self, scene, timeline);
+    }
+
     pub fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> Result<(), SceneError> {
         botrail_session::set_obstacle_enabled(self, name, enabled)
     }
@@ -463,6 +487,79 @@ impl SceneHub {
         })
     }
 
+    // ----------------------------------------------------- allowed contacts
+
+    pub fn allow_link_obstacle_contact(
+        &self,
+        robot: usize,
+        link: usize,
+        obstacle: &str,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| scene.allow_link_obstacle_contact(robot, link, obstacle))
+    }
+
+    pub fn disallow_link_obstacle_contact(&self, robot: usize, link: usize, obstacle: &str) -> bool {
+        self.with_scene(|scene| scene.disallow_link_obstacle_contact(robot, link, obstacle))
+    }
+
+    // ------------------------------------------------------------ toolpaths
+
+    pub fn add_toolpath(&self, tp: botrail_scene::toolpath::Toolpath) {
+        botrail_session::upsert_toolpath(self, tp);
+    }
+
+    pub fn remove_toolpath(&self, name: &str) -> bool {
+        botrail_session::remove_toolpath(self, name)
+    }
+
+    pub fn toolpath_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.toolpaths().iter().map(|t| t.name.clone()).collect())
+    }
+
+    pub fn plan_toolpath(
+        &self,
+        name: &str,
+        robot: usize,
+        tcp: Option<usize>,
+        options: &botrail_scene::toolpath::ToolpathOptions,
+    ) -> Result<botrail_scene::toolpath::PlannedToolpath, String> {
+        self.with_scene(|scene| {
+            scene
+                .plan_toolpath(name, robot, tcp, options)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn check_toolpath(
+        &self,
+        name: &str,
+        robot: usize,
+        tcp: Option<usize>,
+        options: &botrail_scene::toolpath::ToolpathOptions,
+    ) -> Result<botrail_scene::toolpath::ToolpathReport, String> {
+        self.with_scene(|scene| {
+            scene
+                .check_toolpath(name, robot, tcp, options)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Wraps a trajectory as a single-robot timeline plus the scene
+    /// snapshot its consumers (USD export, clearance re-scan) need.
+    pub fn timeline_from_trajectory(
+        &self,
+        robot: usize,
+        trajectory: &botrail_traj::JointTrajectory,
+        label: &str,
+    ) -> (botrail_scene::rollout::SequenceTimeline, Scene) {
+        self.with_scene(|scene| {
+            (
+                scene.timeline_from_trajectory(robot, trajectory, label),
+                scene.clone(),
+            )
+        })
+    }
+
     // ------------------------------------------------------------ sequences
 
     /// Adds or replaces a sequence from its wire-format JSON.
@@ -527,6 +624,16 @@ impl SceneHub {
     /// scenario deltas never touch those, so any snapshot serves).
     pub fn authored_snapshot(&self) -> Scene {
         self.with_scene(|scene| scene.clone())
+    }
+
+    pub fn add_cut_trace(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        spin_link: Option<&str>,
+    ) -> Result<(), SceneError> {
+        botrail_session::add_cut_trace(self, name, signal, robot, spin_link)
     }
 
     pub fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> Result<(), SceneError> {
@@ -660,6 +767,7 @@ impl SceneHub {
             robots: &robots,
             times: &times,
             objects: &objects,
+            curves: &[],
         };
         let options = botrail_usd::export::ExportOptions { fps };
         botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())
@@ -716,7 +824,7 @@ impl SceneHub {
                 };
                 let duration = rec.times.last().copied().unwrap_or(0.0);
                 let track_names: Vec<String> =
-                    rec.object_tracks.iter().map(|(n, _)| n.clone()).collect();
+                    rec.object_tracks.iter().map(|(n, ..)| n.clone()).collect();
                 let timeline = wire::TimelineMsg {
                     duration,
                     robots: rec
@@ -773,12 +881,25 @@ impl SceneHub {
                     objects: rec
                         .object_tracks
                         .iter()
-                        .map(|(name, poses)| wire::ObjectTrackMsg {
+                        .map(|(name, poses, visible)| wire::ObjectTrackMsg {
                             name: name.clone(),
-                            poses: poses.iter().map(wire::PoseMsg::from).collect(),
-                            // A recording carries poses only; anything in it
-                            // was on the line when it was baked.
-                            visible: Vec::new(),
+                            poses: {
+                                let mut poses: Vec<wire::PoseMsg> =
+                                    poses.iter().map(wire::PoseMsg::from).collect();
+                                // A blink-only track collapses to its one
+                                // pose, same as the baked-timeline path.
+                                if poses.len() > 1 && poses.iter().all(|p| *p == poses[0]) {
+                                    poses.truncate(1);
+                                }
+                                poses
+                            },
+                            // Carve stages and stowed parts animate by
+                            // visibility; an always-shown track stays lean.
+                            visible: if visible.iter().all(|v| *v) {
+                                Vec::new()
+                            } else {
+                                visible.clone()
+                            },
                         })
                         .collect(),
                     step_spans: Vec::new(),

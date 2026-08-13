@@ -109,7 +109,13 @@ pub fn detect_always_colliding(
             link_poses: &poses,
             acm,
         };
-        for pair in crate::check_scene(&[query], &InterRobotAcm::default(), &[], &[]) {
+        for pair in crate::check_scene(
+            &[query],
+            &InterRobotAcm::default(),
+            &[],
+            &[],
+            &crate::ContactAllowance::default(),
+        ) {
             if let (
                 crate::ColliderId::Link { link: i, .. },
                 crate::ColliderId::Link { link: j, .. },

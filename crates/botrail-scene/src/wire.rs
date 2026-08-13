@@ -183,6 +183,19 @@ pub struct FrameMsg {
     pub pose: PoseMsg,
 }
 
+/// One toolpath's display overlay: world-resolved polylines, split into
+/// cutting (feed) and rapid strokes. The part frame is resolved server
+/// side, so moving the frame re-sends the overlay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ToolpathOverlayMsg {
+    pub name: String,
+    /// Cutting polylines, each a list of `[x, y, z]` (world meters).
+    pub feed: Vec<Vec<[f64; 3]>>,
+    /// Rapid polylines.
+    pub rapid: Vec<Vec<[f64; 3]>>,
+}
+
 /// Outcome of the most recent IK solve, echoed with the resulting state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -330,7 +343,9 @@ pub struct TrajectoryMsg {
 pub struct ObjectTrackMsg {
     /// Obstacle name.
     pub name: String,
-    /// One world pose per trajectory sample.
+    /// One world pose per trajectory sample — or exactly one pose for a
+    /// track that never moves (a carve stage blinking in place), which
+    /// the client reads as constant.
     pub poses: Vec<PoseMsg>,
     /// One flag per sample: false while the object is stowed (waiting in a
     /// magazine, or taken off the line) and should not be drawn. Empty
@@ -590,6 +605,35 @@ pub struct FlashMsg {
     pub name: String,
     pub signal: String,
     pub robot: String,
+    /// Rendering kind; absent in older payloads (= flash).
+    #[serde(default)]
+    pub kind: FlashKindMsg,
+    /// Link spun visually while the signal is on (cut traces).
+    #[serde(default)]
+    pub spin_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum FlashKindMsg {
+    #[default]
+    Flash,
+    Trace,
+}
+
+pub fn flash_kind_msg(kind: crate::seq::FlashKind) -> FlashKindMsg {
+    match kind {
+        crate::seq::FlashKind::Flash => FlashKindMsg::Flash,
+        crate::seq::FlashKind::Trace => FlashKindMsg::Trace,
+    }
+}
+
+pub fn flash_kind_from_msg(kind: FlashKindMsg) -> crate::seq::FlashKind {
+    match kind {
+        FlashKindMsg::Flash => crate::seq::FlashKind::Flash,
+        FlashKindMsg::Trace => crate::seq::FlashKind::Trace,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -639,6 +683,13 @@ pub enum ActionMsg {
     /// Start a named motion (its owning robot drives); await it with the
     /// `done` condition.
     StartMotion { motion: String },
+    /// Start a toolpath (continuous Cartesian process path) on `robot`;
+    /// await with `done`.
+    StartToolpath {
+        #[serde(default)]
+        robot: Option<String>,
+        toolpath: String,
+    },
     /// Linearly ramp joints (gripper open/close); await with `done`.
     StartRamp {
         #[serde(default)]
@@ -821,6 +872,11 @@ pub enum ServerMessage {
     /// The full named-frame list; resent whenever it changes.
     Frames {
         frames: Vec<FrameMsg>,
+    },
+    /// The full toolpath-overlay list; resent whenever a toolpath or a
+    /// part frame changes.
+    Toolpaths {
+        toolpaths: Vec<ToolpathOverlayMsg>,
     },
     State {
         /// One entry per robot, in `SceneDescriptionMsg::robots` order.
@@ -1306,6 +1362,10 @@ pub fn action_msg(action: &Action) -> ActionMsg {
         Action::StartMotion { motion } => ActionMsg::StartMotion {
             motion: motion.clone(),
         },
+        Action::StartToolpath { robot, toolpath } => ActionMsg::StartToolpath {
+            robot: robot.clone(),
+            toolpath: toolpath.clone(),
+        },
         Action::StartRamp {
             robot,
             targets,
@@ -1375,6 +1435,10 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
     match msg {
         ActionMsg::StartMotion { motion } => Action::StartMotion {
             motion: motion.clone(),
+        },
+        ActionMsg::StartToolpath { robot, toolpath } => Action::StartToolpath {
+            robot: robot.clone(),
+            toolpath: toolpath.clone(),
         },
         ActionMsg::StartRamp {
             robot,
@@ -1851,6 +1915,8 @@ pub fn effects_message(scene: &Scene) -> ServerMessage {
                 name: f.name.clone(),
                 signal: f.signal.clone(),
                 robot: f.robot.clone(),
+                kind: flash_kind_msg(f.kind),
+                spin_link: f.spin_link.clone(),
             })
             .collect(),
     }
@@ -1860,6 +1926,24 @@ pub fn effects_message(scene: &Scene) -> ServerMessage {
 pub fn devices_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Devices {
         devices: scene.devices().iter().map(device_msg).collect(),
+    }
+}
+
+/// The full toolpath-overlay list as a `toolpaths` message.
+pub fn toolpaths_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Toolpaths {
+        toolpaths: scene
+            .toolpaths()
+            .iter()
+            .filter_map(|tp| {
+                let (feed, rapid) = crate::toolpath::overlay_polylines(scene, tp)?;
+                Some(ToolpathOverlayMsg {
+                    name: tp.name.clone(),
+                    feed,
+                    rapid,
+                })
+            })
+            .collect(),
     }
 }
 

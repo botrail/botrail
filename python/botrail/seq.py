@@ -30,6 +30,17 @@ def motion(name: str) -> Action:
     return {"type": "start_motion", "motion": name}
 
 
+def toolpath(name: str, robot: Optional[str] = None) -> Action:
+    """Start a toolpath (continuous Cartesian process path — see
+    ``bt.toolpath``): an automatic approach to the path start, then the
+    feed-floored follow. Await it with ``done()``. ``robot`` names the
+    instance (required when the scene has several robots)."""
+    action: Action = {"type": "start_toolpath", "toolpath": name}
+    if robot is not None:
+        action["robot"] = robot
+    return action
+
+
 def ramp(
     targets: Mapping[str, float],
     duration: float,

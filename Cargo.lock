@@ -201,6 +201,7 @@ dependencies = [
  "botrail-collide",
  "botrail-export",
  "botrail-kin",
+ "botrail-mesh",
  "botrail-model",
  "botrail-plan",
  "botrail-scene",

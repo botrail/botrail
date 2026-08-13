@@ -242,6 +242,20 @@ pub struct ProjectFile {
     /// Scenarios — named initial-state deltas (absent in older files).
     #[serde(default)]
     pub scenarios: Vec<crate::wire::ScenarioMsg>,
+    /// Toolpaths — Cartesian process paths (absent in older files).
+    #[serde(default)]
+    pub toolpaths: Vec<crate::toolpath::ToolpathMsg>,
+    /// Process-contact exemptions, by names (absent in older files).
+    #[serde(default)]
+    pub allowed_contacts: Vec<AllowedContactMsg>,
+}
+
+/// One [`crate::AllowedContact`] by names: robot instance, link, obstacle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowedContactMsg {
+    pub robot: String,
+    pub link: String,
+    pub obstacle: String,
 }
 
 fn identity_pose() -> PoseMsg {
@@ -288,6 +302,8 @@ impl ProjectFile {
                     devices: Vec::new(),
                     flashes: Vec::new(),
                     scenarios: Vec::new(),
+                    toolpaths: Vec::new(),
+                    allowed_contacts: Vec::new(),
                 })
             }
             2 => {
@@ -375,12 +391,28 @@ impl Scene {
                     name: f.name.clone(),
                     signal: f.signal.clone(),
                     robot: f.robot.clone(),
+                    kind: crate::wire::flash_kind_msg(f.kind),
+                    spin_link: f.spin_link.clone(),
                 })
                 .collect(),
             scenarios: self
                 .scenarios()
                 .iter()
                 .map(crate::wire::scenario_msg)
+                .collect(),
+            toolpaths: self
+                .toolpaths()
+                .iter()
+                .map(crate::toolpath::toolpath_msg)
+                .collect(),
+            allowed_contacts: self
+                .allowed_contacts()
+                .iter()
+                .map(|c| AllowedContactMsg {
+                    robot: self.robots()[c.robot].name.clone(),
+                    link: self.robots()[c.robot].model.links[c.link].name.clone(),
+                    obstacle: c.obstacle.clone(),
+                })
                 .collect(),
             frames: self
                 .frames()
@@ -527,6 +559,32 @@ impl Scene {
             })?);
         }
         self.set_motions(motions);
+        let mut toolpaths = Vec::with_capacity(project.toolpaths.len());
+        for msg in &project.toolpaths {
+            toolpaths.push(crate::toolpath::toolpath_from_msg(msg).map_err(|e| {
+                ProjectError::Incompatible(format!("toolpath `{}`: {e}", msg.name))
+            })?);
+        }
+        self.set_toolpaths(toolpaths);
+        for msg in &project.allowed_contacts {
+            let robot = self.robot_index(&msg.robot).ok_or_else(|| {
+                ProjectError::Incompatible(format!(
+                    "allowed contact references unknown robot `{}`",
+                    msg.robot
+                ))
+            })?;
+            let link = self.robots()[robot]
+                .model
+                .link_index(&msg.link)
+                .ok_or_else(|| {
+                    ProjectError::Incompatible(format!(
+                        "allowed contact references unknown link `{}`",
+                        msg.link
+                    ))
+                })?;
+            self.allow_link_obstacle_contact(robot, link, &msg.obstacle)
+                .map_err(|e| ProjectError::Incompatible(e.to_string()))?;
+        }
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
@@ -565,6 +623,8 @@ impl Scene {
                     name: f.name.clone(),
                     signal: f.signal.clone(),
                     robot: f.robot.clone(),
+                    kind: crate::wire::flash_kind_from_msg(f.kind),
+                    spin_link: f.spin_link.clone(),
                 })
                 .collect(),
         );
@@ -989,9 +1049,61 @@ pub fn generate_python(project: &ProjectFile) -> String {
         ));
     }
     for flash in &project.flashes {
+        match flash.kind {
+            crate::wire::FlashKindMsg::Flash => out.push_str(&format!(
+                "scene.add_weld_flash({:?}, signal={:?}, robot={:?})\n",
+                flash.name, flash.signal, flash.robot
+            )),
+            crate::wire::FlashKindMsg::Trace => {
+                let spin = match &flash.spin_link {
+                    Some(link) => format!(", spin_link={link:?}"),
+                    None => String::new(),
+                };
+                out.push_str(&format!(
+                    "scene.add_cut_trace({:?}, signal={:?}, robot={:?}{spin})\n",
+                    flash.name, flash.signal, flash.robot
+                ));
+            }
+        }
+    }
+    for tp in &project.toolpaths {
+        out.push('\n');
+        let frame_kwarg = match &tp.frame {
+            Some(f) => format!("frame={f:?}"),
+            None => String::new(),
+        };
+        out.push_str(&format!("_tp = bt.toolpath.builder({frame_kwarg})\n"));
+        for m in &tp.moves {
+            let (targets, feed) = match m {
+                crate::toolpath::ToolMoveMsg::Rapid { targets } => (targets, None),
+                crate::toolpath::ToolMoveMsg::Feed { feed, targets } => (targets, Some(*feed)),
+            };
+            if let Some(f) = feed {
+                out.push_str(&format!("_tp.feed({f})\n"));
+            }
+            let call = if feed.is_some() { "line_to" } else { "rapid_to" };
+            for t in targets {
+                let mut extras = String::new();
+                if t.tool_axis != [0.0, 0.0, 1.0] {
+                    extras.push_str(&format!(", axis={}", py_tuple(&t.tool_axis)));
+                }
+                if let Some(s) = t.spin {
+                    extras.push_str(&format!(", spin={s}"));
+                }
+                out.push_str(&format!("_tp.{call}({}{extras})\n", py_tuple(&t.position)));
+            }
+        }
         out.push_str(&format!(
-            "scene.add_weld_flash({:?}, signal={:?}, robot={:?})\n",
-            flash.name, flash.signal, flash.robot
+            "scene.add_toolpath({:?}, _tp.build())\n",
+            tp.name
+        ));
+    }
+    for contact in &project.allowed_contacts {
+        out.push_str(&format!(
+            "scene.allow_link_obstacle_contact({:?}, {:?}{})\n",
+            contact.link,
+            contact.obstacle,
+            robot_kwarg_for_name(project, &Some(contact.robot.clone()))
         ));
     }
     for scenario in &project.scenarios {
@@ -1086,6 +1198,9 @@ fn py_action(action: &ActionMsg) -> String {
     };
     match action {
         ActionMsg::StartMotion { motion } => format!("bt.seq.motion({motion:?})"),
+        ActionMsg::StartToolpath { robot, toolpath } => {
+            format!("bt.seq.toolpath({toolpath:?}{})", robot_kwarg(robot))
+        }
         ActionMsg::StartRamp {
             robot,
             targets,
@@ -1238,6 +1353,60 @@ mod tests {
             )
             .unwrap();
         scene
+    }
+
+    #[test]
+    fn toolpaths_round_trip_through_project_and_python() {
+        use crate::toolpath::{PathTarget, ToolMove, ToolMoveKind, Toolpath};
+        use nalgebra::{Point3, Unit};
+        let mut scene = sample_scene();
+        scene.add_frame("part", Isometry3::translation(0.3, 0.0, 0.2));
+        scene.add_toolpath(Toolpath {
+            name: "trim".into(),
+            frame: Some("part".into()),
+            moves: vec![
+                ToolMove {
+                    kind: ToolMoveKind::Rapid,
+                    targets: vec![PathTarget {
+                        position: Point3::new(0.0, 0.0, 0.02),
+                        tool_axis: Unit::new_normalize(Vector3::z()),
+                        spin: None,
+                    }],
+                },
+                ToolMove {
+                    kind: ToolMoveKind::Feed(0.015),
+                    targets: vec![PathTarget {
+                        position: Point3::new(0.1, 0.0, 0.0),
+                        tool_axis: Unit::new_normalize(Vector3::new(0.1, 0.0, 1.0)),
+                        spin: Some(0.4),
+                    }],
+                },
+            ],
+        });
+
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.toolpaths().len(), 1);
+        let tp = reloaded.toolpath("trim").unwrap();
+        assert_eq!(tp.frame.as_deref(), Some("part"));
+        assert_eq!(tp.moves.len(), 2);
+        assert!(
+            matches!(tp.moves[1].kind, ToolMoveKind::Feed(f) if (f - 0.015).abs() < 1e-12)
+        );
+        assert_eq!(tp.moves[1].targets[0].spin, Some(0.4));
+        // The generated Python re-authors the toolpath through the builder.
+        let py = generate_python(&reloaded.to_project());
+        assert!(py.contains("bt.toolpath.builder(frame=\"part\")"), "{py}");
+        assert!(py.contains("_tp.feed(0.015)"), "{py}");
+        assert!(py.contains("scene.add_toolpath(\"trim\", _tp.build())"), "{py}");
+        // Older files without the field still load.
+        let mut without: serde_json::Value = serde_json::from_str(&json).unwrap();
+        without.as_object_mut().unwrap().remove("toolpaths");
+        let legacy = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&without).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(legacy.toolpaths().is_empty());
     }
 
     #[test]

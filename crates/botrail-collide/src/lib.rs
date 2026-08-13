@@ -186,6 +186,17 @@ impl ObstacleCollider {
         ObstacleCollider { parts, local_aabb }
     }
 
+    /// Whether the *local-frame* point lies inside any solid part. The
+    /// shape policy makes every part solid (primitives and VHACD hulls),
+    /// so containment is exact for the collision geometry — what the
+    /// stock-carving voxelizer initializes its grid from.
+    pub fn contains_local_point(&self, point: &nalgebra::Point3<f64>) -> bool {
+        let p = parry3d_f64::math::Vector::new(point.x, point.y, point.z);
+        self.parts
+            .iter()
+            .any(|(offset, shape)| shape.contains_point(offset, p))
+    }
+
     /// World-frame axis-aligned bounds at `pose`, as `(min, max)`.
     ///
     /// Cheap: the parts are already built, so this reads the shapes rather
@@ -403,11 +414,36 @@ impl BroadPhase {
     }
 }
 
+/// Allowed link-obstacle contact pairs — the third exemption mechanism
+/// beside the intra-robot [`Acm`] and the [`InterRobotAcm`], for process
+/// contact that is *supposed* to happen (a milling cutter in its stock).
+/// Keyed by the obstacle index as passed to the query, so callers that
+/// filter their obstacle list map names to filtered indices first.
+#[derive(Debug, Default, Clone)]
+pub struct ContactAllowance {
+    pairs: std::collections::HashSet<(usize, usize, usize)>,
+}
+
+impl ContactAllowance {
+    pub fn allow(&mut self, robot: usize, link: usize, obstacle: usize) {
+        self.pairs.insert((robot, link, obstacle));
+    }
+
+    pub fn allows(&self, robot: usize, link: usize, obstacle: usize) -> bool {
+        self.pairs.contains(&(robot, link, obstacle))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
 pub fn check_scene(
     robots: &[RobotQuery<'_>],
     inter_acm: &InterRobotAcm,
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
+    allowance: &ContactAllowance,
 ) -> Vec<CollisionPair> {
     let bp = BroadPhase::new(robots, attached);
     let mut pairs = Vec::new();
@@ -442,7 +478,10 @@ pub fn check_scene(
                 continue;
             }
             for (i, parts) in robot.collider.links.iter().enumerate() {
-                if parts.is_empty() || !boxes_hit(&bp.link_aabbs[r][i], &obs_aabb) {
+                if parts.is_empty()
+                    || allowance.allows(r, i, k)
+                    || !boxes_hit(&bp.link_aabbs[r][i], &obs_aabb)
+                {
                     continue;
                 }
                 if parts_intersect(&bp.world[r][i], parts, &op, &obs.parts) {
@@ -592,6 +631,7 @@ pub fn min_robot_obstacle_distance(
     robots: &[RobotQuery<'_>],
     obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
     attached: &[AttachedCollider],
+    allowance: &ContactAllowance,
 ) -> Option<f64> {
     let bp = BroadPhase::new(robots, attached);
     // Broad phase for a *distance* query: every candidate pair gets an
@@ -617,7 +657,7 @@ pub fn min_robot_obstacle_distance(
         let Some(obs_aabb) = obs_aabb else { continue };
         for (r, robot) in robots.iter().enumerate() {
             for (i, parts) in robot.collider.links.iter().enumerate() {
-                if parts.is_empty() {
+                if parts.is_empty() || allowance.allows(r, i, k) {
                     continue;
                 }
                 let Some(link_aabb) = &bp.link_aabbs[r][i] else {
@@ -739,6 +779,7 @@ mod tests {
             &InterRobotAcm::default(),
             &[],
             &[],
+            &ContactAllowance::default(),
         );
         assert_eq!(
             pairs,
@@ -754,7 +795,7 @@ mod tests {
             &InterRobotAcm::default(),
             &[],
             &[]
-        )
+        , &ContactAllowance::default())
         .is_empty());
     }
 
@@ -779,7 +820,7 @@ mod tests {
             },
         ];
         // Overlaps: (0,b)-(1,a) coincide at z=0.5, (0,c)-(1,b) at z=1.0.
-        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[], &ContactAllowance::default());
         assert_eq!(
             pairs,
             vec![
@@ -797,7 +838,7 @@ mod tests {
         let mut inter = InterRobotAcm::default();
         inter.allow((0, 1), (1, 0));
         inter.allow((1, 1), (0, 2)); // reversed order must normalize
-        assert!(check_scene(&robots, &inter, &[], &[]).is_empty());
+        assert!(check_scene(&robots, &inter, &[], &[], &ContactAllowance::default()).is_empty());
 
         // Far apart: nothing regardless of the inter ACM.
         let far: Vec<Isometry3<f64>> = poses_a.iter().map(|p| iso(5.0, 0.0, 0.0) * p).collect();
@@ -813,7 +854,7 @@ mod tests {
                 acm: &acm,
             },
         ];
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[], &ContactAllowance::default()).is_empty());
     }
 
     #[test]
@@ -825,13 +866,13 @@ mod tests {
         // Ball 0.3m to the side of link a (cube half-extent 0.1): gap 0.15.
         let far = [(iso(0.3, 0.0, 0.0), &ball)];
         let robots = solo(&collider, &poses, &acm);
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &far, &[]).is_empty());
-        let d = min_robot_obstacle_distance(&robots, &far, &[]).unwrap();
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &far, &[], &ContactAllowance::default()).is_empty());
+        let d = min_robot_obstacle_distance(&robots, &far, &[], &ContactAllowance::default()).unwrap();
         assert!((d - 0.15).abs() < 1e-9, "d = {d}");
 
         // Ball overlapping link b (which sits at z = 0.5).
         let hit = [(iso(0.0, 0.0, 0.55), &ball)];
-        let pairs = check_scene(&robots, &InterRobotAcm::default(), &hit, &[]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &hit, &[], &ContactAllowance::default());
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -840,9 +881,48 @@ mod tests {
             }]
         );
         assert_eq!(
-            min_robot_obstacle_distance(&robots, &hit, &[]).unwrap(),
+            min_robot_obstacle_distance(&robots, &hit, &[], &ContactAllowance::default()).unwrap(),
             0.0
         );
+    }
+
+    #[test]
+    fn contact_allowance_excuses_exactly_its_pair() {
+        let (model, collider, acm) = stack();
+        let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        // Two obstacles overlapping link b (index 1): one is process
+        // contact (allowed), the other is a genuine collision.
+        let obs = [
+            (iso(0.0, 0.0, 0.55), &ball),
+            (iso(0.0, 0.05, 0.5), &ball),
+        ];
+        let robots = solo(&collider, &poses, &acm);
+        let mut allowance = ContactAllowance::default();
+        allowance.allow(0, 1, 0);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &obs, &[], &allowance);
+        assert_eq!(
+            pairs,
+            vec![CollisionPair {
+                a: link(0, 1),
+                b: ColliderId::Obstacle(1),
+            }]
+        );
+        // The distance query skips the allowed pair the same way: with the
+        // second ball moved clear, the touching-but-allowed pair no longer
+        // zeroes the metric.
+        let clear = [(iso(0.0, 0.0, 0.55), &ball), (iso(0.4, 0.0, 0.5), &ball)];
+        let d = min_robot_obstacle_distance(&robots, &clear, &[], &allowance).unwrap();
+        assert!(d > 0.1, "allowed contact still zeroed the distance: {d}");
+        // Without the allowance both report.
+        let strict = check_scene(
+            &robots,
+            &InterRobotAcm::default(),
+            &obs,
+            &[],
+            &ContactAllowance::default(),
+        );
+        assert_eq!(strict.len(), 2);
     }
 
     #[test]
@@ -861,7 +941,7 @@ mod tests {
             collider: &held,
             skip_links: &[2],
         };
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[att]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[att], &ContactAllowance::default()).is_empty());
 
         // An obstacle overlapping the held sphere's *world* position
         // (0.3, 0, 1.0) — proves the offset composes with the link pose.
@@ -874,7 +954,7 @@ mod tests {
             collider: &held,
             skip_links: &[2],
         };
-        let pairs = check_scene(&robots, &InterRobotAcm::default(), &env, &[att]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &env, &[att], &ContactAllowance::default());
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -893,7 +973,7 @@ mod tests {
             collider: &held,
             skip_links: &[2],
         };
-        let d = min_robot_obstacle_distance(&robots, &env, &[att]).unwrap();
+        let d = min_robot_obstacle_distance(&robots, &env, &[att], &ContactAllowance::default()).unwrap();
         assert!((d - 0.1).abs() < 1e-9, "d = {d}");
     }
 
@@ -928,7 +1008,7 @@ mod tests {
             skip_links: &[0, 2],
         };
         let pairs: Vec<CollisionPair> =
-            check_scene(&robots, &InterRobotAcm::default(), &[], &[att])
+            check_scene(&robots, &InterRobotAcm::default(), &[], &[att], &ContactAllowance::default())
                 .into_iter()
                 .filter(|p| {
                     matches!(p.a, ColliderId::Attached(_)) || matches!(p.b, ColliderId::Attached(_))
@@ -958,7 +1038,7 @@ mod tests {
             collider: &held,
             skip_links: &[2],
         };
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[overlapping]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &[], &[overlapping], &ContactAllowance::default()).is_empty());
 
         // Same but skip_links empty: the carrier contact must be reported.
         let reported = AttachedCollider {
@@ -968,7 +1048,7 @@ mod tests {
             collider: &held,
             skip_links: &[],
         };
-        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[reported]);
+        let pairs = check_scene(&robots, &InterRobotAcm::default(), &[], &[reported], &ContactAllowance::default());
         assert_eq!(
             pairs,
             vec![CollisionPair {
@@ -998,16 +1078,16 @@ mod tests {
 
         let along_axis = [(iso(0.0, 0.0, 0.45), &ball)];
         assert_eq!(
-            check_scene(&robots, &InterRobotAcm::default(), &along_axis, &[]).len(),
+            check_scene(&robots, &InterRobotAcm::default(), &along_axis, &[], &ContactAllowance::default()).len(),
             1
         );
 
         let off_side = [(iso(0.3, 0.0, 0.0), &ball)];
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &off_side, &[]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &off_side, &[], &ContactAllowance::default()).is_empty());
 
         // Beyond the cap (cylinder ends at z=0.5, ball spans 0.65..0.75).
         let beyond_cap = [(iso(0.0, 0.0, 0.7), &ball)];
-        assert!(check_scene(&robots, &InterRobotAcm::default(), &beyond_cap, &[]).is_empty());
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &beyond_cap, &[], &ContactAllowance::default()).is_empty());
     }
 
     #[test]
@@ -1125,7 +1205,7 @@ mod broadphase_tests {
             },
         ];
 
-        let full = check_scene(&robots, &inter, &obstacles, &attached);
+        let full = check_scene(&robots, &inter, &obstacles, &attached, &ContactAllowance::default());
         let cross = check_cross_robot(&robots, &inter, &attached);
 
         let robot_of = |id: &ColliderId| -> Option<usize> {
@@ -1176,7 +1256,7 @@ mod broadphase_tests {
         .unwrap();
         let far = near.clone();
         let obstacles = vec![(at(0.0, 0.75), &near), (at(30.0, 0.0), &far)];
-        let d = min_robot_obstacle_distance(&robots, &obstacles, &[]).unwrap();
+        let d = min_robot_obstacle_distance(&robots, &obstacles, &[], &ContactAllowance::default()).unwrap();
         // Gap between the 0.2 cube face (y = 0.1) and the 0.1 cube face
         // (y = 0.7).
         assert!((d - 0.6).abs() < 1e-9, "{d}");

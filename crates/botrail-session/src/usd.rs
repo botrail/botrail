@@ -8,8 +8,8 @@
 use botrail_scene::rollout::SequenceTimeline;
 use botrail_scene::Scene;
 use botrail_usd::export::{
-    export_animation, AnimationInput, ExportOptions, ExportedAnimation, ObjectSpec, PoseTrack,
-    RobotAnimation,
+    export_animation, AnimationInput, CurveSpec, ExportOptions, ExportedAnimation, ObjectSpec,
+    PoseTrack, RobotAnimation,
 };
 use nalgebra::Isometry3;
 
@@ -109,16 +109,25 @@ pub fn bake_timeline(
                 visible
             };
             let track = match found {
-                Some(track) => PoseTrack::Sampled(
-                    sample_at
+                Some(track) => {
+                    let sampled: Vec<Isometry3<f64>> = sample_at
                         .iter()
                         .enumerate()
                         .map(|(k, &t)| {
                             SequenceTimeline::object_pose(track, &all_frames[k], t)
                                 .unwrap_or(o.pose)
                         })
-                        .collect(),
-                ),
+                        .collect();
+                    // A track that only blinks visibility never moves; a
+                    // static xform keeps a hundred carve stages from each
+                    // writing the whole frame grid.
+                    match sampled.first() {
+                        Some(first) if sampled.iter().all(|p| p == first) => {
+                            PoseTrack::Static(*first)
+                        }
+                        _ => PoseTrack::Sampled(sampled),
+                    }
+                }
                 None => PoseTrack::Static(o.pose),
             };
             ObjectSpec {
@@ -136,6 +145,11 @@ pub fn bake_timeline(
     // visibility — so the arc shows in usdview/Omniverse exactly when the
     // baked weld-controller signal was on.
     for flash in scene.weld_flashes() {
+        // Cut traces are carried by the toolpath BasisCurves; only arc
+        // flashes become blinking spheres.
+        if flash.kind != botrail_scene::seq::FlashKind::Flash {
+            continue;
+        }
         let Some(track) = timeline.signals.iter().find(|s| s.name == flash.signal) else {
             continue;
         };
@@ -216,11 +230,45 @@ pub fn bake_timeline(
             joint_samples: Some(&joint_samples[r]),
         })
         .collect();
+    let curves = toolpath_curves(scene);
     let input = AnimationInput {
         robots: &robots,
         times: &times,
         objects: &objects,
+        curves: &curves,
     };
     let options = ExportOptions { fps };
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
+}
+
+/// Two `BasisCurves` overlays per toolpath — cutting (feed) polylines in
+/// process orange, rapids in grey — resolved through the part frame at
+/// export time. A toolpath whose frame is missing is skipped: the bake
+/// itself would already have failed on it, and export stays best-effort.
+fn toolpath_curves(scene: &Scene) -> Vec<CurveSpec> {
+    const FEED_COLOR: [f32; 3] = [0.85, 0.33, 0.05];
+    const RAPID_COLOR: [f32; 3] = [0.38, 0.38, 0.42];
+    let mut specs = Vec::new();
+    for tp in scene.toolpaths() {
+        let Some((feed, rapid)) = botrail_scene::toolpath::overlay_polylines(scene, tp) else {
+            continue;
+        };
+        if !feed.is_empty() {
+            specs.push(CurveSpec {
+                name: format!("{}_feed", tp.name),
+                curves: feed,
+                color: FEED_COLOR,
+                width: 0.003,
+            });
+        }
+        if !rapid.is_empty() {
+            specs.push(CurveSpec {
+                name: format!("{}_rapid", tp.name),
+                curves: rapid,
+                color: RAPID_COLOR,
+                width: 0.0015,
+            });
+        }
+    }
+    specs
 }

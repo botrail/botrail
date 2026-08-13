@@ -1,8 +1,9 @@
 import { useRef } from "react";
 import { useFrame } from "@react-three/fiber";
+import * as THREE from "three";
 
 import { samplePlayback, type PlaybackSample } from "../playback";
-import { applySample, playbackRig, signalAt, styleFlash } from "../playbackRig";
+import { applySample, linkKey, playbackRig, signalAt, styleFlash } from "../playbackRig";
 import { useStudioStore, robotByName, type StudioState } from "../store";
 
 /** How often the React-side playhead (timeline cursor, time label) is
@@ -60,6 +61,7 @@ export function PlaybackDriver() {
     const sample = samplePlayback(tracks, t);
     applySample(sample);
     updateFlashes(s, sample, t);
+    updateTraces(s, sample, t, Math.min(delta, 0.25));
     if (
       lastPushed.current < 0 ||
       Math.abs(t - lastPushed.current) >= UI_PERIOD
@@ -94,6 +96,79 @@ function updateFlashes(s: StudioState, sample: PlaybackSample, t: number) {
       continue;
     }
     styleFlash(node, poses[tcpIndex], t);
+  }
+}
+
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+const SPIN_QUAT = new THREE.Quaternion();
+
+/** Appends the TCP position to every cut trace whose signal is on at `t`
+ * (the trail restarts when the playhead jumps backward) and spins the
+ * bound cutter link — a visible strobe, not a model of 18k rpm. */
+function updateTraces(
+  s: StudioState,
+  sample: PlaybackSample,
+  t: number,
+  delta: number,
+) {
+  if (playbackRig.traces.size === 0) return;
+  const signals = s.timeline?.signals ?? [];
+  for (const trace of s.flashes) {
+    if (trace.kind !== "trace") continue;
+    const handle = playbackRig.traces.get(trace.name);
+    if (!handle) continue;
+    if (t < handle.lastT - 0.05) {
+      handle.positions.length = 0;
+      handle.line.visible = false;
+    }
+    handle.lastT = t;
+    const lane = signals.find((sig: { name: string }) => sig.name === trace.signal);
+    const poses = sample.poses?.[trace.robot];
+    const robot = robotByName(s.robots, trace.robot);
+    const tcpName = robot?.desc.tcp_link ?? null;
+    const tcpIndex =
+      tcpName && robot
+        ? robot.desc.links.findIndex((l) => l.name === tcpName)
+        : -1;
+    const on =
+      !!lane && !!poses && tcpIndex >= 0 && signalAt(lane.times, lane.values, t);
+    if (!on || !poses) continue;
+    const p = poses[tcpIndex].position;
+    const n = handle.positions.length;
+    const moved =
+      n < 3 ||
+      (p[0] - handle.positions[n - 3]) ** 2 +
+        (p[1] - handle.positions[n - 2]) ** 2 +
+        (p[2] - handle.positions[n - 1]) ** 2 >
+        1e-7;
+    if (moved) {
+      handle.positions.push(p[0], p[1], p[2]);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(handle.positions.slice(), 3),
+      );
+      handle.line.geometry.dispose();
+      handle.line.geometry = geometry;
+      handle.line.visible = handle.positions.length >= 6;
+    }
+    if (trace.spin_link && robot) {
+      const linkIndex = robot.desc.links.findIndex(
+        (l) => l.name === trace.spin_link,
+      );
+      const link =
+        linkIndex >= 0
+          ? playbackRig.links.get(linkKey(trace.robot, linkIndex))
+          : null;
+      if (link) {
+        // applySample rewrote the link pose this frame; append the
+        // accumulated spin about the link's own Z (the tool axis).
+        handle.spinAngle = (handle.spinAngle + delta * 45) % (Math.PI * 2);
+        link.quaternion.multiply(
+          SPIN_QUAT.setFromAxisAngle(Z_AXIS, handle.spinAngle),
+        );
+      }
+    }
   }
 }
 

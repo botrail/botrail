@@ -12,6 +12,13 @@ pub enum IkMode {
     Position,
     /// Full pose: position + orientation (6 DOF task).
     Pose,
+    /// Position + tool-axis alignment (5 DOF task): the link frame's local
+    /// +Z is driven onto the target frame's +Z; rotation about that axis is
+    /// left free. The task rows span only the plane perpendicular to the
+    /// axis, so the spin direction genuinely lives in the task null space —
+    /// the joint-centering secondary objective places it, which is the whole
+    /// point for axis-symmetric tools (milling cutters, dispensing nozzles).
+    Axis,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +237,37 @@ fn pose_error(current: &Isometry3<f64>, target: &Isometry3<f64>) -> (Vector3<f64
     (e_pos, e_rot)
 }
 
+/// Rotation vector (axis · angle) that carries `a_cur` onto `a_tgt` along
+/// the geodesic. Perpendicular to `a_cur` by construction. The antiparallel
+/// case has no preferred geodesic; a deterministic perpendicular is chosen
+/// so the solver still makes progress instead of stalling on a zero cross
+/// product.
+fn axis_alignment_error(a_cur: &Vector3<f64>, a_tgt: &Vector3<f64>) -> Vector3<f64> {
+    let cross = a_cur.cross(a_tgt);
+    let dot = a_cur.dot(a_tgt).clamp(-1.0, 1.0);
+    let angle = cross.norm().atan2(dot);
+    if angle < 1e-12 {
+        return Vector3::zeros();
+    }
+    let n = if cross.norm() > 1e-9 {
+        cross / cross.norm()
+    } else {
+        perpendicular_to(a_cur)
+    };
+    n * angle
+}
+
+/// A deterministic unit vector perpendicular to `a`, from the world basis
+/// vector least aligned with it.
+fn perpendicular_to(a: &Vector3<f64>) -> Vector3<f64> {
+    let pick = if a.x.abs() < 0.9 {
+        Vector3::x()
+    } else {
+        Vector3::y()
+    };
+    (pick - a * pick.dot(a)).normalize()
+}
+
 /// Solves for a configuration placing `link` at `target`, starting from
 /// `seed`. When the seeded solve does not converge, up to
 /// [`IkOptions::restarts`] deterministically-seeded attempts follow.
@@ -293,6 +331,7 @@ fn solve_attempt(
     let task_dim = match options.mode {
         IkMode::Position => 3,
         IkMode::Pose => 6,
+        IkMode::Axis => 5,
     };
     let lambda2 = options.damping * options.damping;
 
@@ -303,10 +342,17 @@ fn solve_attempt(
     for iter in 0..=options.max_iters {
         let poses = forward_kinematics(model, &q)?;
         let (e_pos, e_rot) = pose_error(&poses[link], target);
+        // In axis mode the rotational task is the geodesic carrying the
+        // link's local +Z onto the target's +Z; spin about it is not error.
+        let a_cur = poses[link].rotation * Vector3::z();
+        let e_rot = match options.mode {
+            IkMode::Axis => axis_alignment_error(&a_cur, &(target.rotation * Vector3::z())),
+            _ => e_rot,
+        };
         let pos_error = e_pos.norm();
         let rot_error = match options.mode {
             IkMode::Position => 0.0,
-            IkMode::Pose => e_rot.norm(),
+            IkMode::Pose | IkMode::Axis => e_rot.norm(),
         };
         let converged = pos_error < options.tol_pos
             && (options.mode == IkMode::Position || rot_error < options.tol_rot);
@@ -339,14 +385,36 @@ fn solve_attempt(
         let jac_full = jacobian(model, &poses, link);
         let mut e = DVector::zeros(task_dim);
         e.fixed_rows_mut::<3>(0).copy_from(&e_pos);
-        let jac = if options.mode == IkMode::Pose {
-            e.fixed_rows_mut::<3>(3)
-                .copy_from(&(options.orientation_weight * e_rot));
-            let mut j = jac_full;
-            j.rows_mut(3, 3).scale_mut(options.orientation_weight);
-            j
-        } else {
-            jac_full.rows(0, 3).into_owned()
+        let jac = match options.mode {
+            IkMode::Pose => {
+                e.fixed_rows_mut::<3>(3)
+                    .copy_from(&(options.orientation_weight * e_rot));
+                let mut j = jac_full;
+                j.rows_mut(3, 3).scale_mut(options.orientation_weight);
+                j
+            }
+            IkMode::Axis => {
+                // Two angular rows spanning the plane perpendicular to the
+                // current axis. The spin direction (angular velocity along
+                // the axis) maps to zero here, so it stays in the null
+                // space for the centering term instead of being pinned by
+                // damping as a full 3-row task would do.
+                let u = perpendicular_to(&a_cur);
+                let v = a_cur.cross(&u);
+                let w = options.orientation_weight;
+                e[3] = w * u.dot(&e_rot);
+                e[4] = w * v.dot(&e_rot);
+                let jw = jac_full.rows(3, 3);
+                let mut j = DMatrix::zeros(5, jac_full.ncols());
+                j.rows_mut(0, 3).copy_from(&jac_full.rows(0, 3));
+                for col in 0..jac_full.ncols() {
+                    let wcol = Vector3::new(jw[(0, col)], jw[(1, col)], jw[(2, col)]);
+                    j[(3, col)] = w * u.dot(&wcol);
+                    j[(4, col)] = w * v.dot(&wcol);
+                }
+                j
+            }
+            IkMode::Position => jac_full.rows(0, 3).into_owned(),
         };
 
         // dq = J^T (J J^T + lambda^2 I)^-1 e
@@ -724,6 +792,104 @@ mod tests {
     #[test]
     fn streaming_solves_never_restart() {
         assert_eq!(IkOptions::streaming().restarts, 0);
+    }
+
+    #[test]
+    fn axis_mode_reaches_position_and_aligns_axis() {
+        let model = six_dof();
+        let tool = model.link_index("tool0").unwrap();
+        let options = IkOptions {
+            mode: IkMode::Axis,
+            ..IkOptions::default()
+        };
+        for q_true in [
+            [0.4, -0.9, 1.2, 0.3, 0.8, -0.5],
+            [-1.2, 0.6, -0.7, 1.0, -1.4, 0.2],
+        ] {
+            let target = forward_kinematics(&model, &q_true).unwrap()[tool];
+            let result =
+                solve_ik(&model, tool, &target, &model.neutral_positions(), &options).unwrap();
+            assert!(
+                result.converged,
+                "axis IK failed for {q_true:?}: pos={}, rot={}",
+                result.pos_error, result.rot_error
+            );
+            let reached = forward_kinematics(&model, &result.q).unwrap()[tool];
+            assert!((reached.translation.vector - target.translation.vector).norm() < 1e-4);
+            let a_reached = reached.rotation * Vector3::z();
+            let a_target = target.rotation * Vector3::z();
+            let angle = a_reached.cross(&a_target).norm().atan2(a_reached.dot(&a_target));
+            assert!(angle < 1e-3, "axis misaligned by {angle}");
+        }
+    }
+
+    #[test]
+    fn axis_mode_ignores_target_spin() {
+        // Two targets differing only by rotation about their own +Z must
+        // produce the same solve — the spin is not part of the task.
+        let model = six_dof();
+        let tool = model.link_index("tool0").unwrap();
+        let base = forward_kinematics(&model, &[0.4, -0.9, 1.2, 0.3, 0.8, -0.5]).unwrap()[tool];
+        let spun = base
+            * Isometry3::from_parts(
+                nalgebra::Translation3::identity(),
+                UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 1.234),
+            );
+        let options = IkOptions {
+            mode: IkMode::Axis,
+            ..IkOptions::default()
+        };
+        let seed = model.neutral_positions();
+        let a = solve_ik(&model, tool, &base, &seed, &options).unwrap();
+        let b = solve_ik(&model, tool, &spun, &seed, &options).unwrap();
+        assert!(a.converged && b.converged);
+        for (qa, qb) in a.q.iter().zip(&b.q) {
+            assert!((qa - qb).abs() < 1e-6, "{:?} vs {:?}", a.q, b.q);
+        }
+    }
+
+    #[test]
+    fn axis_mode_null_space_centers_through_the_spin() {
+        // A 6-DOF arm under a 5-row task keeps a one-dimensional null
+        // space — the spin — which the centering term must exploit.
+        let model = six_dof();
+        let tool = model.link_index("tool0").unwrap();
+        let q_true = [0.4, -0.9, 1.2, 0.3, 0.8, 1.4];
+        let target = forward_kinematics(&model, &q_true).unwrap()[tool];
+        let seed = [0.35, -0.85, 1.15, 0.25, 0.75, 1.35];
+        let plain = IkOptions {
+            mode: IkMode::Axis,
+            restarts: 0,
+            null_space_gain: 0.0,
+            ..IkOptions::default()
+        };
+        let centered = IkOptions {
+            mode: IkMode::Axis,
+            restarts: 0,
+            ..IkOptions::default()
+        };
+        let a = solve_ik(&model, tool, &target, &seed, &plain).unwrap();
+        let b = solve_ik(&model, tool, &target, &seed, &centered).unwrap();
+        assert!(a.converged && b.converged);
+        assert!(
+            centering_measure(&model, &b.q) < centering_measure(&model, &a.q),
+            "spin centering did not improve: {} vs {}",
+            centering_measure(&model, &b.q),
+            centering_measure(&model, &a.q)
+        );
+        // The task itself is untouched by the secondary objective.
+        let reached = forward_kinematics(&model, &b.q).unwrap()[tool];
+        assert!((reached.translation.vector - target.translation.vector).norm() < 1e-4);
+    }
+
+    #[test]
+    fn axis_alignment_error_handles_the_antiparallel_case() {
+        let a = Vector3::z();
+        let e = axis_alignment_error(&a, &(-Vector3::z()));
+        assert!((e.norm() - std::f64::consts::PI).abs() < 1e-9, "{e:?}");
+        assert!(e.dot(&a).abs() < 1e-9, "not perpendicular: {e:?}");
+        // And exact alignment is a zero error, not NaN.
+        assert_eq!(axis_alignment_error(&a, &Vector3::z()), Vector3::zeros());
     }
 
     #[test]

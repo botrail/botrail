@@ -182,7 +182,12 @@ export function sampleObjectPoses(
   const [lo, hi, u] = bracket(objects.times, t);
   const out: Record<string, PoseMsg> = {};
   for (const track of objects.tracks) {
-    out[track.name] = lerpPose(track.poses[lo], track.poses[hi], u);
+    // A single-pose track is a constant: the object never moves, its
+    // whole animation is the visibility flags (a carve stage).
+    out[track.name] =
+      track.poses.length === 1
+        ? track.poses[0]
+        : lerpPose(track.poses[lo], track.poses[hi], u);
   }
   return out;
 }

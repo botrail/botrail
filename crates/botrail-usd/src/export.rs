@@ -117,6 +117,21 @@ pub struct RobotAnimation<'a> {
     pub joint_samples: Option<&'a [Vec<f64>]>,
 }
 
+/// A static polyline bundle authored as one `BasisCurves` prim under
+/// `/World/Toolpaths` — toolpath overlays. Purely visual: not an obstacle,
+/// no collision, no animation.
+pub struct CurveSpec {
+    /// Prim name (sanitized and uniquified on authoring).
+    pub name: String,
+    /// Polylines in world meters; each inner list is one curve. Lists with
+    /// fewer than 2 points are dropped with a warning.
+    pub curves: Vec<Vec<[f64; 3]>>,
+    /// `primvars:displayColor`, linear RGB.
+    pub color: [f32; 3],
+    /// Constant curve width (m).
+    pub width: f32,
+}
+
 pub struct AnimationInput<'a> {
     /// One bundle per robot, in scene order.
     pub robots: &'a [RobotAnimation<'a>],
@@ -124,6 +139,8 @@ pub struct AnimationInput<'a> {
     /// by every robot and sampled object track.
     pub times: &'a [f64],
     pub objects: &'a [ObjectSpec],
+    /// Static toolpath overlays; empty = no `/World/Toolpaths` prim.
+    pub curves: &'a [CurveSpec],
 }
 
 pub struct ExportedAnimation {
@@ -349,12 +366,108 @@ pub fn export_animation(
     }
 
     author_objects(&mut layer, input.objects, &codes, &mut warnings)?;
+    author_curves(&mut layer, input.curves, &mut warnings);
 
     Ok(ExportedAnimation {
         data: layer.finish(),
         assets,
         warnings,
     })
+}
+
+/// Authors each [`CurveSpec`] as a linear `BasisCurves` prim under
+/// `/World/Toolpaths` (created only when there is something to hold).
+fn author_curves(layer: &mut LayerBuilder, curves: &[CurveSpec], warnings: &mut Vec<String>) {
+    if curves.is_empty() {
+        return;
+    }
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for spec in curves {
+        let polylines: Vec<&Vec<[f64; 3]>> =
+            spec.curves.iter().filter(|c| c.len() >= 2).collect();
+        if polylines.is_empty() {
+            warnings.push(format!(
+                "toolpath curve `{}` has no polyline with 2+ points; skipped",
+                spec.name
+            ));
+            continue;
+        }
+        if !layer.has_prim("/World/Toolpaths") {
+            layer.ensure_prim("/World/Toolpaths", Specifier::Def, Some("Xform"));
+        }
+        let prim = format!(
+            "/World/Toolpaths/{}",
+            unique_child(&mut used, &sanitize_name(&spec.name))
+        );
+        layer.ensure_prim(&prim, Specifier::Def, Some("BasisCurves"));
+        let mut counts: Vec<i32> = Vec::with_capacity(polylines.len());
+        let mut points = Vec::new();
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for line in &polylines {
+            counts.push(line.len() as i32);
+            for p in line.iter() {
+                let (x, y, z) = (p[0] as f32, p[1] as f32, p[2] as f32);
+                points.push(gf::vec3f(x, y, z));
+                for (i, v) in [x, y, z].into_iter().enumerate() {
+                    min[i] = min[i].min(v);
+                    max[i] = max[i].max(v);
+                }
+            }
+        }
+        layer.attr(
+            &prim,
+            "type",
+            "token",
+            AttrValue::Uniform(Value::Token(tf::Token::from("linear"))),
+        );
+        layer.attr(
+            &prim,
+            "wrap",
+            "token",
+            AttrValue::Uniform(Value::Token(tf::Token::from("nonperiodic"))),
+        );
+        layer.attr(
+            &prim,
+            "curveVertexCounts",
+            "int[]",
+            AttrValue::Default(Value::IntVec(counts)),
+        );
+        layer.attr(
+            &prim,
+            "points",
+            "point3f[]",
+            AttrValue::Default(Value::Vec3fVec(points)),
+        );
+        // One width for the whole prim: `constant` interpolation is
+        // attribute metadata, same rule as a primvar's.
+        layer.attr_meta(
+            &prim,
+            "widths",
+            "float[]",
+            AttrValue::Default(Value::FloatVec(vec![spec.width])),
+            &[("interpolation", Value::Token(tf::Token::from("constant")))],
+        );
+        layer.attr(
+            &prim,
+            "primvars:displayColor",
+            "color3f[]",
+            AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(
+                spec.color[0],
+                spec.color[1],
+                spec.color[2],
+            )])),
+        );
+        layer.attr(
+            &prim,
+            "extent",
+            "float3[]",
+            AttrValue::Default(Value::Vec3fVec(vec![
+                gf::vec3f(min[0], min[1], min[2]),
+                gf::vec3f(max[0], max[1], max[2]),
+            ])),
+        );
+    }
 }
 
 // ------------------------------------------------------------ conversions
@@ -1620,13 +1733,22 @@ fn author_objects(
         };
         author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
         if !obj.visible.is_empty() {
+            // Sparse: the first frame plus every transition. USD holds a
+            // sample until the next one, so this reads identically to the
+            // dense form — and a hundred blinking carve stages write a
+            // handful of lines each instead of the whole frame grid.
             let samples: sdf::TimeSampleMap = codes
                 .iter()
                 .enumerate()
-                .map(|(k, &code)| {
+                .filter_map(|(k, &code)| {
                     let shown = obj.visible.get(k).copied().unwrap_or(true);
-                    let token = if shown { "inherited" } else { "invisible" };
-                    (code, Value::Token(tf::Token::from(token)))
+                    let prev = k
+                        .checked_sub(1)
+                        .map(|j| obj.visible.get(j).copied().unwrap_or(true));
+                    (prev != Some(shown)).then(|| {
+                        let token = if shown { "inherited" } else { "invisible" };
+                        (code, Value::Token(tf::Token::from(token)))
+                    })
                 })
                 .collect();
             layer.attr(&prim, "visibility", "token", AttrValue::Samples(samples));
@@ -1819,6 +1941,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &[],
+            curves: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -1952,6 +2075,7 @@ mod tests {
                 robots: &robots,
                 times: &times,
                 objects: &[],
+                curves: &[],
             },
             &ExportOptions::default(),
         )
@@ -2043,6 +2167,7 @@ mod tests {
                 robots: &robots,
                 times: &[0.0],
                 objects: &[],
+                curves: &[],
             },
             &ExportOptions::default(),
         )
@@ -2129,6 +2254,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &objects,
+            curves: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -2217,6 +2343,96 @@ mod tests {
     /// to the same world transforms and metadata as the text layer — the
     /// extension picks the serialization, never the content.
     #[test]
+    fn toolpath_curves_author_as_basis_curves() {
+        let dir = temp_dir("curves");
+        let urdf = r#"
+        <robot name="r">
+          <link name="base"><visual><geometry><box size="0.2 0.1 0.4"/></geometry></visual></link>
+          <link name="tip"/>
+          <joint name="j" type="revolute">
+            <parent link="base"/><child link="tip"/>
+            <origin xyz="0 0 0.5"/><axis xyz="0 0 1"/>
+            <limit lower="-2" upper="2" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        let times = [0.0, 0.5];
+        let configs = [vec![0.0], vec![0.4]];
+        let link_poses: Vec<Vec<Isometry3<f64>>> = configs
+            .iter()
+            .map(|q| botrail_kin::forward_kinematics(&model, q).unwrap())
+            .collect();
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: None,
+        }];
+        let curves = vec![
+            CurveSpec {
+                name: "trim feed".into(),
+                curves: vec![
+                    vec![[0.0, 0.0, 0.1], [0.1, 0.0, 0.1], [0.1, 0.1, 0.1]],
+                    vec![[0.2, 0.0, 0.1], [0.3, 0.0, 0.1]],
+                ],
+                color: [0.85, 0.33, 0.05],
+                width: 0.003,
+            },
+            // A one-point polyline cannot be a curve: warned and skipped.
+            CurveSpec {
+                name: "degenerate".into(),
+                curves: vec![vec![[0.0, 0.0, 0.0]]],
+                color: [0.5, 0.5, 0.5],
+                width: 0.001,
+            },
+        ];
+        let warnings = write_animation(
+            &dir.join("anim.usda"),
+            &AnimationInput {
+                robots: &robots,
+                times: &times,
+                objects: &[],
+                curves: &curves,
+            },
+            &ExportOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("degenerate"), "{warnings:?}");
+
+        let text = std::fs::read_to_string(dir.join("anim.usda")).unwrap();
+        assert!(
+            text.contains("def BasisCurves \"trim_feed\""),
+            "no BasisCurves prim:\n{text}"
+        );
+        assert!(!text.contains("degenerate"), "skipped spec leaked in");
+        assert!(text.contains("curveVertexCounts = [3, 2]"), "{text}");
+        assert!(
+            text.contains("uniform token type = \"linear\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("uniform token wrap = \"nonperiodic\""),
+            "{text}"
+        );
+
+        // pxr-grade readability: the stage opens and the prim resolves with
+        // the same reader the recording path uses.
+        let stage = Stage::builder()
+            .resolver(SearchPathResolver::new(vec![dir.clone()]))
+            .open(&dir.join("anim.usda").display().to_string())
+            .unwrap();
+        let prim = stage.prim(sdf::path("/World/Toolpaths/trim_feed").unwrap());
+        let type_name = prim
+            .type_name()
+            .expect("toolpath prim resolves")
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        assert_eq!(type_name, "BasisCurves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn usdc_output_matches_usda() {
         let dir = temp_dir("usdc");
         let urdf = r#"
@@ -2261,6 +2477,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &objects,
+            curves: &[],
         };
 
         for name in ["anim.usda", "anim.usdc", "anim.usd"] {
@@ -2331,6 +2548,7 @@ mod tests {
             robots: &robots,
             times: &[],
             objects: &[],
+            curves: &[],
         };
         assert!(matches!(
             export_animation(&empty, &ExportOptions::default(), "a"),
@@ -2342,6 +2560,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &[],
+            curves: &[],
         };
         assert!(matches!(
             export_animation(&bad_len, &ExportOptions::default(), "a"),
@@ -2352,6 +2571,7 @@ mod tests {
             robots: &[],
             times: &times,
             objects: &[],
+            curves: &[],
         };
         assert!(matches!(
             export_animation(&no_robots, &ExportOptions::default(), "a"),
@@ -2405,6 +2625,7 @@ mod tests {
             robots: &robots,
             times: &times,
             objects: &[],
+            curves: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();

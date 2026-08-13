@@ -13,9 +13,10 @@ import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
 import type { SignalDefMsg } from "./SignalDefMsg";
 import type { TimelineMsg } from "./TimelineMsg";
+import type { ToolpathOverlayMsg } from "./ToolpathOverlayMsg";
 import type { TrajectoryMsg } from "./TrajectoryMsg";
 
-export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "state", 
+export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state", 
 /**
  * One entry per robot, in `SceneDescriptionMsg::robots` order.
  */

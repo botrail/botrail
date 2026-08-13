@@ -469,7 +469,10 @@ impl<'a> Lowering<'a> {
         out: &mut Vec<Command>,
     ) -> Result<(), String> {
         match action {
-            Action::StartMotion { motion } => {
+            Action::StartMotion { motion }
+            | Action::StartToolpath {
+                toolpath: motion, ..
+            } => {
                 *started_move = true;
                 let mut record = None;
                 for &i in active {
@@ -505,13 +508,21 @@ impl<'a> Lowering<'a> {
                                 self.note_move(true);
                                 out.push(Command::MoveLinear {
                                     q: segment.waypoints.last().expect("len > 1").clone(),
-                                    velocity: self.tcp_velocity,
+                                    velocity: segment.tcp_speed.unwrap_or(self.tcp_velocity),
                                     acceleration: self.tcp_acceleration,
-                                    blend: 0.0,
+                                    // Chained toolpath samples blend into
+                                    // each other; the record's final linear
+                                    // move is zeroed below.
+                                    blend: self.blend_radius,
                                 });
                             }
                         }
                     }
+                }
+                // A linear chain must come to rest at its end, not blend
+                // past it into whatever the next step commands.
+                if let Some(Command::MoveLinear { blend, .. }) = out.last_mut() {
+                    *blend = 0.0;
                 }
                 if let Some(q) = record.segments.last().and_then(|s| s.waypoints.last()) {
                     local_q.clone_from(q);
@@ -693,7 +704,8 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
             Action::StartRamp { robot, .. }
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
-            | Action::Untrack { robot } => scene.resolve_seq_robot(robot)?,
+            | Action::Untrack { robot }
+            | Action::StartToolpath { robot, .. } => scene.resolve_seq_robot(robot)?,
             _ => return Ok(()),
         };
         match driven {
@@ -1763,8 +1775,10 @@ mod tests {
                     segments: vec![crate::motion::PlannedSegment {
                         kind: SegmentKind::Joint,
                         waypoints: vec![vec![0.0], vec![ramp_to]],
+                        tcp_speed: None,
                     }],
                     duration: 0.5,
+                    feed_report: None,
                 },
                 PlannedMove {
                     sequence: "s".into(),
@@ -1773,8 +1787,10 @@ mod tests {
                     segments: vec![crate::motion::PlannedSegment {
                         kind: SegmentKind::CartesianLine,
                         waypoints: vec![vec![ramp_to], vec![0.2]],
+                        tcp_speed: None,
                     }],
                     duration: 1.0,
+                    feed_report: None,
                 },
             ],
             base: None,

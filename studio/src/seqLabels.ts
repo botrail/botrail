@@ -6,6 +6,8 @@ export function actionLabel(action: ActionMsg): string {
   switch (action.type) {
     case "start_motion":
       return `▶ ${action.motion}`;
+    case "start_toolpath":
+      return `⟿ ${action.toolpath}`;
     case "start_ramp":
       return `ramp ${action.targets.length}j`;
     case "attach":

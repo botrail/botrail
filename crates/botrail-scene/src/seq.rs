@@ -73,6 +73,21 @@ pub struct WeldFlash {
     pub name: String,
     pub signal: String,
     pub robot: String,
+    pub kind: FlashKind,
+    /// Link spun visually while the signal is on (a cutter); display
+    /// only, never kinematics.
+    pub spin_link: Option<String>,
+}
+
+/// What a signal-bound TCP effect renders as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlashKind {
+    /// Additive arc sprite + light at the TCP (spot welding).
+    #[default]
+    Flash,
+    /// An accumulating cut trace along the TCP, plus the optional
+    /// spinning link (machining).
+    Trace,
 }
 
 /// A scripted auxiliary device (PLC output): commanded by
@@ -430,6 +445,14 @@ pub enum Action {
         device: String,
         command: DeviceCommand,
     },
+    /// Start a toolpath (a continuous Cartesian process path — milling,
+    /// trimming) on `robot`: baked against the world at this moment as an
+    /// automatic joint-space approach to the path start followed by the
+    /// feed-floored follow. Await it with [`Condition::Done`].
+    StartToolpath {
+        robot: Option<String>,
+        toolpath: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -471,7 +494,8 @@ impl Action {
             Action::StartRamp { robot, .. }
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
-            | Action::Untrack { robot } => robot.as_mut(),
+            | Action::Untrack { robot }
+            | Action::StartToolpath { robot, .. } => robot.as_mut(),
             _ => None,
         }
     }
@@ -600,6 +624,46 @@ impl Scene {
             name: name.to_string(),
             signal: signal.to_string(),
             robot: robot.to_string(),
+            kind: FlashKind::Flash,
+            spin_link: None,
+        };
+        match self.weld_flashes.iter_mut().find(|f| f.name == name) {
+            Some(slot) => *slot = flash,
+            None => self.weld_flashes.push(flash),
+        }
+        Ok(())
+    }
+
+    /// Binds an accumulating cut-trace effect to `signal` at `robot`'s
+    /// TCP, optionally spinning `spin_link` while the signal is on. Same
+    /// contract as [`Scene::add_weld_flash`]: presentation only, driven
+    /// by the baked signal, zero effect on the cycle.
+    pub fn add_cut_trace(
+        &mut self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        spin_link: Option<&str>,
+    ) -> Result<(), SceneError> {
+        let Some(r) = self.robot_index(robot) else {
+            return Err(SceneError::UnknownRobot(robot.to_string()));
+        };
+        if !self.signals.iter().any(|s| s.name == signal)
+            && !self.sensors.iter().any(|s| s.name == signal)
+        {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        if let Some(link) = spin_link {
+            if self.robots()[r].model.link_index(link).is_none() {
+                return Err(SceneError::UnknownLink(link.to_string()));
+            }
+        }
+        let flash = WeldFlash {
+            name: name.to_string(),
+            signal: signal.to_string(),
+            robot: robot.to_string(),
+            kind: FlashKind::Trace,
+            spin_link: spin_link.map(str::to_string),
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -773,7 +837,9 @@ impl Scene {
                 .iter()
                 .find(|m| &m.name == motion)
                 .map(|m| m.robot)),
-            Action::StartRamp { robot, .. } => self.resolve_seq_robot(robot).map(Some),
+            Action::StartRamp { robot, .. } | Action::StartToolpath { robot, .. } => {
+                self.resolve_seq_robot(robot).map(Some)
+            }
             _ => Ok(None),
         }
     }
@@ -825,7 +891,8 @@ impl Scene {
                     Action::StartRamp { robot, .. }
                     | Action::Attach { robot, .. }
                     | Action::Track { robot, .. }
-                    | Action::Untrack { robot } => {
+                    | Action::Untrack { robot }
+                    | Action::StartToolpath { robot, .. } => {
                         if let Ok(r) = self.resolve_seq_robot(robot) {
                             let name = self.robots()[r].name.clone();
                             claim(0, "robot", name, index)?;
@@ -1203,6 +1270,18 @@ impl Scene {
                     .ok_or_else(|| format!("unknown motion `{motion}`"))?;
                 if found.segments.is_empty() {
                     return Err(format!("motion `{motion}` has no segments"));
+                }
+                Ok(())
+            }
+            Action::StartToolpath { robot, toolpath } => {
+                self.resolve_seq_robot(robot)?;
+                let found = self
+                    .toolpaths()
+                    .iter()
+                    .find(|t| &t.name == toolpath)
+                    .ok_or_else(|| format!("unknown toolpath `{toolpath}`"))?;
+                if found.target_count() == 0 {
+                    return Err(format!("toolpath `{toolpath}` has no targets"));
                 }
                 Ok(())
             }

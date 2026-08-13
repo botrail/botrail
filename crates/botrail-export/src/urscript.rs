@@ -77,7 +77,11 @@ fn emit_commands(
             } => emit_move(
                 out,
                 &pad,
-                "movel",
+                // A blended linear move is a process-path point: movep
+                // keeps the TCP speed constant *through* the blend, which
+                // is what a feed rate means. An exact-stop linear move
+                // stays movel.
+                if *blend > 0.0 { "movep" } else { "movel" },
                 q,
                 *velocity,
                 *acceleration,
@@ -260,6 +264,7 @@ mod tests {
                     vec![0.3, 0.2, -0.25, 0.1, 0.0, 0.0],
                     vec![0.6, 0.4, -0.5, 0.2, 0.0, 0.0],
                 ],
+                tcp_speed: None,
             },
             PathSegment {
                 kind: PathKind::Linear,
@@ -268,6 +273,7 @@ mod tests {
                     vec![0.575, 0.425, -0.525, 0.2, 0.0, 0.0],
                     vec![0.55, 0.45, -0.55, 0.2, 0.0, 0.0],
                 ],
+                tcp_speed: None,
             },
         ];
         let options = ProgramOptions {

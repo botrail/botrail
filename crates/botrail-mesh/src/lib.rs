@@ -337,6 +337,59 @@ pub fn box_mesh(size: [f64; 3]) -> MeshData {
     MeshData::new(vertices, indices)
 }
 
+/// Serializes a mesh as Wavefront OBJ plus a companion MTL, carrying the
+/// per-face colors as material runs (`usemtl`) — the one format both the
+/// studio loader and the USD exporter read face colors back from (STL
+/// carries none). `mtl_name` is the file name written into `mtllib`;
+/// faces without a color fall back to a neutral grey material.
+pub fn to_obj_with_mtl(mesh: &MeshData, mtl_name: &str) -> (String, String) {
+    let color_of = |face: usize| -> [f32; 3] {
+        mesh.face_colors
+            .get(face)
+            .copied()
+            .unwrap_or([0.7, 0.7, 0.7])
+    };
+    // Distinct colors -> materials, in first-appearance order.
+    let mut colors: Vec<[f32; 3]> = Vec::new();
+    let mut material_of = Vec::with_capacity(mesh.indices.len());
+    for face in 0..mesh.indices.len() {
+        let color = color_of(face);
+        let index = match colors.iter().position(|c| *c == color) {
+            Some(i) => i,
+            None => {
+                colors.push(color);
+                colors.len() - 1
+            }
+        };
+        material_of.push(index);
+    }
+
+    let mut mtl = String::new();
+    for (i, c) in colors.iter().enumerate() {
+        mtl.push_str(&format!("newmtl m{i}\nKd {} {} {}\n", c[0], c[1], c[2]));
+    }
+
+    let mut obj = format!("mtllib {mtl_name}\n");
+    for v in &mesh.vertices {
+        obj.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
+    }
+    let mut current: Option<usize> = None;
+    for (face, tri) in mesh.indices.iter().enumerate() {
+        let material = material_of[face];
+        if current != Some(material) {
+            obj.push_str(&format!("usemtl m{material}\n"));
+            current = Some(material);
+        }
+        obj.push_str(&format!(
+            "f {} {} {}\n",
+            tri[0] + 1,
+            tri[1] + 1,
+            tri[2] + 1
+        ));
+    }
+    (obj, mtl)
+}
+
 /// Serializes a mesh as binary STL (little-endian), for tests and asset
 /// generation.
 pub fn to_stl_binary(mesh: &MeshData) -> Vec<u8> {

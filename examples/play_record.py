@@ -35,6 +35,7 @@ import amr_demo  # noqa: E402
 import botrail as bt  # noqa: E402
 import demo  # noqa: E402
 import dual_cell_demo  # noqa: E402
+import machining_demo  # noqa: E402
 import weld_station_demo  # noqa: E402
 
 DEFAULT = Path("cell_seq.usda")
@@ -102,6 +103,14 @@ def cell_for(recording: Path) -> bt.Scene:
     if has_vehicle(recording):
         print(f"{recording}: single-arm cell + AGV")
         return agv_cell_demo.build_scene()
+    # Only machining bakes carry toolpath overlays (`/World/Toolpaths`).
+    # Like the weld arms, the machining robot is an `attach_tool` composite
+    # (arm + spindle), so its bake is per-link transforms. The replay cell
+    # re-carves the stock so the recording's `plate_cut/NNN` visibility
+    # prims find their obstacles — that is the material melting away.
+    if marks(recording, 'def Xform "Toolpaths"'):
+        print(f"{recording}: machining cell (plate trim + pocket)")
+        return machining_demo.build_replay_cell()
     # Everything left falls through to the single-arm cell, which is safe
     # for *one* robot however it is named: playback structurally searches
     # the stage when there is only one to find, so an older bake whose
@@ -140,6 +149,7 @@ CELLS = {
     "line4": lambda: _line_cell(4),
     "agv": lambda: agv_cell_demo.build_scene(),
     "amr": lambda: amr_demo.build_scene(),
+    "machining": lambda: machining_demo.build_replay_cell(),
 }
 
 
@@ -166,7 +176,8 @@ def main() -> None:
             "  python examples/sequence_demo.py      # -> cell_seq.usda\n"
             "  python examples/dual_cell_demo.py     # -> cell_dual.usda\n"
             "  python examples/weld_station_demo.py  # -> cell_weld.usda\n"
-            "  python examples/weld_line_demo.py     # -> cell_line.usda"
+            "  python examples/weld_line_demo.py     # -> cell_line.usda\n"
+            "  python examples/machining_demo.py     # -> cell_machining.usda"
         )
 
     scene = CELLS[cell]() if cell else cell_for(recording)
