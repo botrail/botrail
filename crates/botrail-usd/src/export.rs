@@ -383,8 +383,7 @@ fn author_curves(layer: &mut LayerBuilder, curves: &[CurveSpec], warnings: &mut 
     }
     let mut used: HashMap<String, usize> = HashMap::new();
     for spec in curves {
-        let polylines: Vec<&Vec<[f64; 3]>> =
-            spec.curves.iter().filter(|c| c.len() >= 2).collect();
+        let polylines: Vec<&Vec<[f64; 3]>> = spec.curves.iter().filter(|c| c.len() >= 2).collect();
         if polylines.is_empty() {
             warnings.push(format!(
                 "toolpath curve `{}` has no polyline with 2+ points; skipped",
@@ -2424,10 +2423,7 @@ mod tests {
         );
         assert!(!text.contains("degenerate"), "skipped spec leaked in");
         assert!(text.contains("curveVertexCounts = [3, 2]"), "{text}");
-        assert!(
-            text.contains("uniform token type = \"linear\""),
-            "{text}"
-        );
+        assert!(text.contains("uniform token type = \"linear\""), "{text}");
         assert!(
             text.contains("uniform token wrap = \"nonperiodic\""),
             "{text}"

@@ -433,8 +433,9 @@ mod tests {
         // 0.1 rad with v=1 would take ~0.1s; the 2s floor must win, and the
         // resulting motion is so gentle the acceleration pass leaves it be.
         let path = vec![vec![0.0], vec![0.1]];
-        let timed = time_parameterize_with_floors(&path, &limits1(), &[2.0], &TimingOptions::default())
-            .unwrap();
+        let timed =
+            time_parameterize_with_floors(&path, &limits1(), &[2.0], &TimingOptions::default())
+                .unwrap();
         assert!((timed.trajectory.duration() - 2.0).abs() < 1e-9);
         assert_eq!(timed.waypoint_indices, vec![0, 1]);
     }
@@ -466,7 +467,12 @@ mod tests {
 
     #[test]
     fn zero_floors_match_the_legacy_path_bit_for_bit() {
-        let path = vec![vec![0.0, 0.0], vec![0.5, -0.3], vec![0.5, -0.3], vec![1.0, 0.4]];
+        let path = vec![
+            vec![0.0, 0.0],
+            vec![0.5, -0.3],
+            vec![0.5, -0.3],
+            vec![1.0, 0.4],
+        ];
         let limits = Limits::uniform(2, 2.0, 4.0);
         let legacy = time_parameterize(&path, &limits, &TimingOptions::default()).unwrap();
         let floored =
@@ -488,7 +494,10 @@ mod tests {
                 &[0.1, 0.2],
                 &TimingOptions::default()
             ),
-            Err(TrajError::WrongFloorCount { expected: 1, got: 2 })
+            Err(TrajError::WrongFloorCount {
+                expected: 1,
+                got: 2
+            })
         ));
     }
 

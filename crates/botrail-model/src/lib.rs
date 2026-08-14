@@ -498,8 +498,7 @@ impl RobotModel {
                     .visuals
                     .iter()
                     .map(|v| {
-                        let mut shape =
-                            convert_shape(&v.origin, &v.geometry, base_dir, options);
+                        let mut shape = convert_shape(&v.origin, &v.geometry, base_dir, options);
                         shape.color = v.material.as_ref().and_then(material_color);
                         shape
                     })

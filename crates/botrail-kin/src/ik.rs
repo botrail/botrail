@@ -818,7 +818,10 @@ mod tests {
             assert!((reached.translation.vector - target.translation.vector).norm() < 1e-4);
             let a_reached = reached.rotation * Vector3::z();
             let a_target = target.rotation * Vector3::z();
-            let angle = a_reached.cross(&a_target).norm().atan2(a_reached.dot(&a_target));
+            let angle = a_reached
+                .cross(&a_target)
+                .norm()
+                .atan2(a_reached.dot(&a_target));
             assert!(angle < 1e-3, "axis misaligned by {angle}");
         }
     }

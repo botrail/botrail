@@ -1458,12 +1458,7 @@ impl Scene {
     /// `bt.toolpath.builder()` / `bt.toolpath.from_gcode()` — or its JSON
     /// string. Targets live in the part frame named by its `frame` key
     /// (resolved at bake time, so moving the frame re-solves the path).
-    fn add_toolpath(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        toolpath: Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn add_toolpath(&self, py: Python<'_>, name: &str, toolpath: Bound<'_, PyAny>) -> PyResult<()> {
         let json: String = if let Ok(s) = toolpath.extract::<String>() {
             s
         } else {
@@ -1521,7 +1516,9 @@ impl Scene {
     ) -> PyResult<Trajectory> {
         let index = self.resolve_robot(robot)?;
         let model = self.hub.robot_model(index);
-        let tcp = tcp_link.map(|l| resolve_link(&model, Some(l))).transpose()?;
+        let tcp = tcp_link
+            .map(|l| resolve_link(&model, Some(l)))
+            .transpose()?;
         let options = botrail_scene::toolpath::ToolpathOptions {
             step_pos,
             step_rot,
@@ -1579,7 +1576,9 @@ impl Scene {
     ) -> PyResult<ToolpathReport> {
         let index = self.resolve_robot(robot)?;
         let model = self.hub.robot_model(index);
-        let tcp = tcp_link.map(|l| resolve_link(&model, Some(l))).transpose()?;
+        let tcp = tcp_link
+            .map(|l| resolve_link(&model, Some(l)))
+            .transpose()?;
         let options = botrail_scene::toolpath::ToolpathOptions {
             step_pos,
             step_rot,
@@ -3942,7 +3941,11 @@ impl FeedReport {
             self.inner.commanded_cut_seconds,
             self.inner.achieved_cut_seconds,
             self.inner.slow_spans.len(),
-            if self.inner.slow_spans.len() == 1 { "" } else { "s" },
+            if self.inner.slow_spans.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
         )
     }
 }
@@ -4068,10 +4071,7 @@ impl ToolpathReport {
                         IssueKind::Collision => "collision",
                     },
                 )?;
-                d.set_item(
-                    "position",
-                    (i.position.x, i.position.y, i.position.z),
-                )?;
+                d.set_item("position", (i.position.x, i.position.y, i.position.z))?;
                 d.set_item("detail", i.detail.clone())?;
                 Ok(d)
             })
@@ -4084,10 +4084,7 @@ impl ToolpathReport {
 
     fn __repr__(&self) -> String {
         if self.inner.ok() {
-            format!(
-                "ToolpathReport(ok, {} samples)",
-                self.inner.total_samples
-            )
+            format!("ToolpathReport(ok, {} samples)", self.inner.total_samples)
         } else {
             let first = &self.inner.issues[0];
             format!(
@@ -4107,11 +4104,9 @@ impl ToolpathReport {
 #[pyfunction]
 #[pyo3(signature = (text, chord_tol = 1e-4))]
 fn _parse_gcode_json(text: &str, chord_tol: f64) -> PyResult<String> {
-    let parsed = botrail_scene::gcode::parse_gcode(
-        text,
-        &botrail_scene::gcode::GcodeOptions { chord_tol },
-    )
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let parsed =
+        botrail_scene::gcode::parse_gcode(text, &botrail_scene::gcode::GcodeOptions { chord_tol })
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let msg = botrail_scene::toolpath::toolpath_msg(&botrail_scene::toolpath::Toolpath {
         name: String::new(),
         frame: None,
@@ -4124,13 +4119,13 @@ fn _parse_gcode_json(text: &str, chord_tol: f64) -> PyResult<String> {
     .to_string())
 }
 
- /// Parses an APT/CL subset into toolpath-move JSON:
+/// Parses an APT/CL subset into toolpath-move JSON:
 /// `{"moves": [...], "warnings": [...]}`. `bt.toolpath.from_apt` wraps
 /// this — call that instead.
 #[pyfunction]
 fn _parse_apt_json(text: &str) -> PyResult<String> {
-    let parsed = botrail_scene::apt::parse_apt(text)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let parsed =
+        botrail_scene::apt::parse_apt(text).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let msg = botrail_scene::toolpath::toolpath_msg(&botrail_scene::toolpath::Toolpath {
         name: String::new(),
         frame: None,

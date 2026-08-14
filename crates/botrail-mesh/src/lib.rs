@@ -380,12 +380,7 @@ pub fn to_obj_with_mtl(mesh: &MeshData, mtl_name: &str) -> (String, String) {
             obj.push_str(&format!("usemtl m{material}\n"));
             current = Some(material);
         }
-        obj.push_str(&format!(
-            "f {} {} {}\n",
-            tri[0] + 1,
-            tri[1] + 1,
-            tri[2] + 1
-        ));
+        obj.push_str(&format!("f {} {} {}\n", tri[0] + 1, tri[1] + 1, tri[2] + 1));
     }
     (obj, mtl)
 }

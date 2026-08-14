@@ -21,9 +21,7 @@ use std::sync::Arc;
 
 use motion::{Motion, MotionError, PlannedMotion, Segment};
 
-use botrail_collide::{
-    Acm, ColliderId, CollisionPair, InterRobotAcm, RobotCollider, RobotQuery,
-};
+use botrail_collide::{Acm, ColliderId, CollisionPair, InterRobotAcm, RobotCollider, RobotQuery};
 // Re-exported: it appears in `Scene::add_obstacle_with_collider`'s public
 // signature, so downstream crates get to name it without a collide dep.
 pub use botrail_collide::ObstacleCollider;

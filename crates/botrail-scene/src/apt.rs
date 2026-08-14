@@ -90,14 +90,12 @@ pub fn parse_apt(text: &str) -> Result<ParsedApt, AptError> {
         return Err(AptError::Malformed { line, record });
     }
 
-    let mut push_target = |kind: ToolMoveKind, target: PathTarget| {
-        match moves.last_mut() {
-            Some(last) if last.kind == kind => last.targets.push(target),
-            _ => moves.push(ToolMove {
-                kind,
-                targets: vec![target],
-            }),
-        }
+    let mut push_target = |kind: ToolMoveKind, target: PathTarget| match moves.last_mut() {
+        Some(last) if last.kind == kind => last.targets.push(target),
+        _ => moves.push(ToolMove {
+            kind,
+            targets: vec![target],
+        }),
     };
 
     'statements: for (line, statement) in statements {
@@ -256,7 +254,10 @@ mod tests {
         let ToolMoveKind::Feed(feed) = parsed.moves[1].kind else {
             panic!("expected feed");
         };
-        assert!((feed - 0.01).abs() < 1e-12, "600mm/min = 10mm/s, got {feed}");
+        assert!(
+            (feed - 0.01).abs() < 1e-12,
+            "600mm/min = 10mm/s, got {feed}"
+        );
         let t = &parsed.moves[1].targets[0];
         assert!((t.position.coords - Vector3::new(0.020, 0.0, 0.0)).norm() < 1e-12);
         let axis = t.tool_axis.into_inner();
@@ -267,9 +268,8 @@ mod tests {
 
     #[test]
     fn continuation_lines_join() {
-        let parsed = parse_apt(
-            "FEDRAT/300\nGOTO/10,0,0, $\n  0,0,1\nGOTO/20,0, $$ trailing comment\n",
-        );
+        let parsed =
+            parse_apt("FEDRAT/300\nGOTO/10,0,0, $\n  0,0,1\nGOTO/20,0, $$ trailing comment\n");
         // The second GOTO lost its z to the comment strip: malformed.
         assert!(parsed.is_err());
         let parsed = parse_apt("FEDRAT/300\nGOTO/10,0,0, $\n  0,0,1\n").unwrap();
@@ -282,10 +282,7 @@ mod tests {
 
     #[test]
     fn rapid_arms_exactly_one_goto() {
-        let parsed = parse_apt(
-            "FEDRAT/600\nRAPID\nGOTO/0,0,10\nGOTO/10,0,0\n",
-        )
-        .unwrap();
+        let parsed = parse_apt("FEDRAT/600\nRAPID\nGOTO/0,0,10\nGOTO/10,0,0\n").unwrap();
         assert!(matches!(parsed.moves[0].kind, ToolMoveKind::Rapid));
         assert!(matches!(parsed.moves[1].kind, ToolMoveKind::Feed(_)));
     }

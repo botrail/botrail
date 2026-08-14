@@ -2858,8 +2858,7 @@ impl Rollout {
                 };
                 // Per-sample linear segments carry the commanded speed of
                 // their interval, which is what script export renders.
-                for (pair, sample) in planned.path.windows(2).zip(planned.samples.iter().skip(1))
-                {
+                for (pair, sample) in planned.path.windows(2).zip(planned.samples.iter().skip(1)) {
                     segments.push(crate::motion::PlannedSegment {
                         kind: crate::motion::SegmentKind::CartesianLine,
                         waypoints: pair.to_vec(),
@@ -3411,7 +3410,9 @@ pub(crate) mod tests {
                 Condition::Done,
             )],
         });
-        let tl = scene.simulate_sequence("cycle", &RolloutOptions::default()).unwrap();
+        let tl = scene
+            .simulate_sequence("cycle", &RolloutOptions::default())
+            .unwrap();
         assert!(tl.duration > 3.0, "cut alone is 3 s, got {}", tl.duration);
 
         // The bake starts at the park pose (no teleport)...
@@ -3446,8 +3447,13 @@ pub(crate) mod tests {
             .any(|s| s.kind == SegmentKind::CartesianLine && s.tcp_speed == Some(0.02)));
 
         // Deterministic, like every bake.
-        let again = scene.simulate_sequence("cycle", &RolloutOptions::default()).unwrap();
-        assert_eq!(tl.robots[0].trajectory.times, again.robots[0].trajectory.times);
+        let again = scene
+            .simulate_sequence("cycle", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(
+            tl.robots[0].trajectory.times,
+            again.robots[0].trajectory.times
+        );
         assert_eq!(
             tl.robots[0].trajectory.positions,
             again.robots[0].trajectory.positions

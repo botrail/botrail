@@ -498,7 +498,12 @@ impl SceneHub {
         self.with_scene(|scene| scene.allow_link_obstacle_contact(robot, link, obstacle))
     }
 
-    pub fn disallow_link_obstacle_contact(&self, robot: usize, link: usize, obstacle: &str) -> bool {
+    pub fn disallow_link_obstacle_contact(
+        &self,
+        robot: usize,
+        link: usize,
+        obstacle: &str,
+    ) -> bool {
         self.with_scene(|scene| scene.disallow_link_obstacle_contact(robot, link, obstacle))
     }
 

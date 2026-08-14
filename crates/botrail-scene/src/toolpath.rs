@@ -120,8 +120,13 @@ fn default_tool_axis() -> [f64; 3] {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolMoveMsg {
-    Rapid { targets: Vec<PathTargetMsg> },
-    Feed { feed: f64, targets: Vec<PathTargetMsg> },
+    Rapid {
+        targets: Vec<PathTargetMsg>,
+    },
+    Feed {
+        feed: f64,
+        targets: Vec<PathTargetMsg>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,11 +366,7 @@ fn spin_reference(axis: &Unit<Vector3<f64>>) -> Unit<Vector3<f64>> {
 
 /// Full target pose from position + axis + spin: local `+Z` along the
 /// axis, local `+X` at `spin` radians from the reference.
-pub fn target_pose(
-    position: &Point3<f64>,
-    axis: &Unit<Vector3<f64>>,
-    spin: f64,
-) -> Isometry3<f64> {
+pub fn target_pose(position: &Point3<f64>, axis: &Unit<Vector3<f64>>, spin: f64) -> Isometry3<f64> {
     let x0 = spin_reference(axis);
     let x = UnitQuaternion::from_axis_angle(axis, spin) * x0.into_inner();
     let z = axis.into_inner();
@@ -378,11 +379,7 @@ pub fn target_pose(
 }
 
 /// Geodesic interpolation between two axis directions.
-fn slerp_axis(
-    from: &Unit<Vector3<f64>>,
-    to: &Unit<Vector3<f64>>,
-    u: f64,
-) -> Unit<Vector3<f64>> {
+fn slerp_axis(from: &Unit<Vector3<f64>>, to: &Unit<Vector3<f64>>, u: f64) -> Unit<Vector3<f64>> {
     match UnitQuaternion::rotation_between(from.as_ref(), to.as_ref()) {
         Some(q) => Unit::new_normalize(q.powf(u) * from.into_inner()),
         None => {
@@ -402,13 +399,15 @@ pub fn resolve_and_sample(
     options: &ToolpathOptions,
 ) -> Result<Vec<ToolpathSample>, ToolpathError> {
     let frame = match &toolpath.frame {
-        Some(name) => scene
-            .frame(name)
-            .map(|f| f.pose)
-            .ok_or_else(|| ToolpathError::UnknownFrame {
-                toolpath: toolpath.name.clone(),
-                frame: name.clone(),
-            })?,
+        Some(name) => {
+            scene
+                .frame(name)
+                .map(|f| f.pose)
+                .ok_or_else(|| ToolpathError::UnknownFrame {
+                    toolpath: toolpath.name.clone(),
+                    frame: name.clone(),
+                })?
+        }
         None => Isometry3::identity(),
     };
     let mut samples: Vec<ToolpathSample> = Vec::new();
@@ -873,10 +872,7 @@ fn follow_optimized(
                     attempts = (1..=FRESH_OFFSETS)
                         .flat_map(|k| {
                             let d = k as f64 * spin_step;
-                            [
-                                (q.clone(), Some(spin + d)),
-                                (q.clone(), Some(spin - d)),
-                            ]
+                            [(q.clone(), Some(spin + d)), (q.clone(), Some(spin - d))]
                         })
                         .collect();
                     continue;
@@ -1160,10 +1156,7 @@ fn feed_report(
     let mut spans: Vec<SlowSpan> = Vec::new();
     let mut open: Option<(SlowSpan, f64)> = None; // (span, length)
     for (i, s) in samples.iter().enumerate().skip(1) {
-        let (t0, t1) = (
-            times[waypoint_indices[i - 1]],
-            times[waypoint_indices[i]],
-        );
+        let (t0, t1) = (times[waypoint_indices[i - 1]], times[waypoint_indices[i]]);
         let (Some(feed), floor) = (s.feed, floors[i - 1]) else {
             // A rapid interval closes any open slow span.
             if let Some((span, _)) = open.take() {
@@ -1194,7 +1187,8 @@ fn feed_report(
                     *length += s.chord;
                     span.achieved_feed = *length / (span.end - span.start);
                     // Keep the worst offender across the span.
-                    let u_new = (path[i][limiting] - path[i - 1][limiting]).abs() / dt
+                    let u_new = (path[i][limiting] - path[i - 1][limiting]).abs()
+                        / dt
                         / limits.velocity[limiting];
                     let u_old = {
                         let j = span.limiting_joint;
@@ -1229,7 +1223,11 @@ fn feed_report(
         spans.push(span);
     }
     FeedReport {
-        hold_ratio: if achieved > 0.0 { commanded / achieved } else { 1.0 },
+        hold_ratio: if achieved > 0.0 {
+            commanded / achieved
+        } else {
+            1.0
+        },
         commanded_cut_seconds: commanded,
         achieved_cut_seconds: achieved,
         slow_spans: spans,
@@ -1279,9 +1277,7 @@ mod tests {
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(feed),
-                    targets: vec![target(Point3::from(
-                        p0.coords + Vector3::new(0.0, dy, 0.0),
-                    ))],
+                    targets: vec![target(Point3::from(p0.coords + Vector3::new(0.0, dy, 0.0)))],
                 },
             ],
         }
@@ -1332,7 +1328,10 @@ mod tests {
             let err = (pose.translation.vector - s.position.coords).norm();
             assert!(err < 1e-4, "TCP off target by {err}");
             let axis = pose.rotation * Vector3::z();
-            let angle = axis.cross(&Vector3::z()).norm().atan2(axis.dot(&Vector3::z()));
+            let angle = axis
+                .cross(&Vector3::z())
+                .norm()
+                .atan2(axis.dot(&Vector3::z()));
             assert!(angle < 1e-3, "tool axis off by {angle}");
         }
     }
@@ -1340,10 +1339,10 @@ mod tests {
     #[test]
     fn part_frame_moves_re_solve_the_path() {
         let (mut scene, p0) = scene();
-        scene.add_frame("part", Isometry3::from_parts(
-            Translation3::from(p0.coords),
-            UnitQuaternion::identity(),
-        ));
+        scene.add_frame(
+            "part",
+            Isometry3::from_parts(Translation3::from(p0.coords), UnitQuaternion::identity()),
+        );
         scene.add_toolpath(Toolpath {
             name: "cut".into(),
             frame: Some("part".into()),
@@ -1363,10 +1362,13 @@ mod tests {
             .unwrap();
         assert!((a.samples[0].position - p0).norm() < 1e-12);
         // Move the fixture 3 cm and re-plan: the whole path follows.
-        scene.add_frame("part", Isometry3::from_parts(
-            Translation3::from(p0.coords + Vector3::new(0.03, 0.0, 0.0)),
-            UnitQuaternion::identity(),
-        ));
+        scene.add_frame(
+            "part",
+            Isometry3::from_parts(
+                Translation3::from(p0.coords + Vector3::new(0.03, 0.0, 0.0)),
+                UnitQuaternion::identity(),
+            ),
+        );
         let b = scene
             .plan_toolpath("cut", 0, None, &ToolpathOptions::default())
             .unwrap();
@@ -1512,7 +1514,9 @@ mod tests {
         // Allow cutter x plate: the same path bakes, and the strict check
         // still sees the contact the allowance hides.
         let cutter = scene.robot().link_index("cutter").unwrap();
-        scene.allow_link_obstacle_contact(0, cutter, "plate").unwrap();
+        scene
+            .allow_link_obstacle_contact(0, cutter, "plate")
+            .unwrap();
         let planned = scene
             .plan_toolpath("cut", 0, None, &ToolpathOptions::default())
             .unwrap();
@@ -1608,9 +1612,7 @@ mod tests {
 
     #[test]
     fn axis_tolerance_admits_a_tilt_the_arm_cannot_make() {
-        let mut scene = Scene::new(Arc::new(
-            RobotModel::from_urdf_str(NO_ROLL_ARM).unwrap(),
-        ));
+        let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(NO_ROLL_ARM).unwrap()));
         let work = vec![0.0, 0.6, 1.0, std::f64::consts::PI - 1.6];
         scene.set_joint_positions(work.clone()).unwrap();
         let tcp = scene.robot().default_tcp_link();
@@ -1641,7 +1643,10 @@ mod tests {
         let exact = scene
             .check_toolpath("tilted", 0, None, &ToolpathOptions::default())
             .unwrap();
-        assert!(!exact.ok(), "the tangential tilt must be unreachable exactly");
+        assert!(
+            !exact.ok(),
+            "the tangential tilt must be unreachable exactly"
+        );
         assert!(exact
             .issues
             .iter()

@@ -1081,7 +1081,11 @@ pub fn generate_python(project: &ProjectFile) -> String {
             if let Some(f) = feed {
                 out.push_str(&format!("_tp.feed({f})\n"));
             }
-            let call = if feed.is_some() { "line_to" } else { "rapid_to" };
+            let call = if feed.is_some() {
+                "line_to"
+            } else {
+                "rapid_to"
+            };
             for t in targets {
                 let mut extras = String::new();
                 if t.tool_axis != [0.0, 0.0, 1.0] {
@@ -1093,10 +1097,7 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 out.push_str(&format!("_tp.{call}({}{extras})\n", py_tuple(&t.position)));
             }
         }
-        out.push_str(&format!(
-            "scene.add_toolpath({:?}, _tp.build())\n",
-            tp.name
-        ));
+        out.push_str(&format!("scene.add_toolpath({:?}, _tp.build())\n", tp.name));
     }
     for contact in &project.allowed_contacts {
         out.push_str(&format!(
@@ -1390,15 +1391,16 @@ mod tests {
         let tp = reloaded.toolpath("trim").unwrap();
         assert_eq!(tp.frame.as_deref(), Some("part"));
         assert_eq!(tp.moves.len(), 2);
-        assert!(
-            matches!(tp.moves[1].kind, ToolMoveKind::Feed(f) if (f - 0.015).abs() < 1e-12)
-        );
+        assert!(matches!(tp.moves[1].kind, ToolMoveKind::Feed(f) if (f - 0.015).abs() < 1e-12));
         assert_eq!(tp.moves[1].targets[0].spin, Some(0.4));
         // The generated Python re-authors the toolpath through the builder.
         let py = generate_python(&reloaded.to_project());
         assert!(py.contains("bt.toolpath.builder(frame=\"part\")"), "{py}");
         assert!(py.contains("_tp.feed(0.015)"), "{py}");
-        assert!(py.contains("scene.add_toolpath(\"trim\", _tp.build())"), "{py}");
+        assert!(
+            py.contains("scene.add_toolpath(\"trim\", _tp.build())"),
+            "{py}"
+        );
         // Older files without the field still load.
         let mut without: serde_json::Value = serde_json::from_str(&json).unwrap();
         without.as_object_mut().unwrap().remove("toolpaths");

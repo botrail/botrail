@@ -32,7 +32,11 @@ pub enum CarveError {
         "voxel size {voxel} m over the stock needs {cells} cells (cap {cap}); \
          use a coarser voxel"
     )]
-    TooFine { voxel: f64, cells: usize, cap: usize },
+    TooFine {
+        voxel: f64,
+        cells: usize,
+        cap: usize,
+    },
     #[error("voxel size must be positive, got {0}")]
     BadVoxel(f64),
     #[error("cutter radius/length must be positive")]
@@ -264,10 +268,7 @@ pub fn carve_stock_staged(
         let poses = scene.fk_for(robot, q).ok()?;
         let world = poses[tcp];
         let local = to_local * world;
-        Some((
-            local.translation.vector,
-            local.rotation * Vector3::z(),
-        ))
+        Some((local.translation.vector, local.rotation * Vector3::z()))
     };
 
     let stages = stages.max(1);
@@ -380,7 +381,11 @@ pub fn staged_timeline(
                 pose,
             });
         }
-        spans.push(TrackSpan::Hold { t0: from, t1: to, pose });
+        spans.push(TrackSpan::Hold {
+            t0: from,
+            t1: to,
+            pose,
+        });
         if to < end {
             spans.push(TrackSpan::Stowed {
                 t0: to,
@@ -471,10 +476,7 @@ fn boundary_mesh(
                             continue;
                         }
                         let mut w = 1;
-                        while i + w < nu
-                            && mask[j * nu + i + w] == class
-                            && !used[j * nu + i + w]
-                        {
+                        while i + w < nu && mask[j * nu + i + w] == class && !used[j * nu + i + w] {
                             w += 1;
                         }
                         let mut h = 1;
@@ -613,12 +615,9 @@ mod tests {
             expected,
             err * 100.0
         );
+        assert!((carve.initial_volume - 0.06 * 0.06 * 0.01).abs() / (0.06 * 0.06 * 0.01) < 0.02);
         assert!(
-            (carve.initial_volume - 0.06 * 0.06 * 0.01).abs() / (0.06 * 0.06 * 0.01) < 0.02
-        );
-        assert!(
-            (carve.initial_volume - carve.removed_volume - carve.remaining_volume).abs()
-                < 1e-12
+            (carve.initial_volume - carve.removed_volume - carve.remaining_volume).abs() < 1e-12
         );
         // The mesh is a closed-ish boundary with real triangles, far fewer
         // than one quad per voxel face (the greedy mesher earns its keep).

@@ -189,7 +189,7 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
     let mut warnings: Vec<String> = Vec::new();
     let mut warned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let warn_once = |warned: &mut std::collections::BTreeSet<String>,
-                         warnings: &mut Vec<String>,
+                     warnings: &mut Vec<String>,
                      key: &str,
                      line: usize| {
         if warned.insert(key.to_string()) {
@@ -254,7 +254,12 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
                     v if code_eq(v, 49.0) => {}
                     v if code_eq(v, 80.0) => {}
                     v if (54..=59).any(|c| code_eq(v, c as f64)) => {
-                        warn_once(&mut warned, &mut warnings, &format!("work offset G{v}"), line);
+                        warn_once(
+                            &mut warned,
+                            &mut warnings,
+                            &format!("work offset G{v}"),
+                            line,
+                        );
                     }
                     v if code_eq(v, 41.0) || code_eq(v, 42.0) => {
                         return Err(GcodeError::Unsupported {
@@ -378,11 +383,9 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
         // Pass 2: execute the motion.
         let kind = match motion {
             Motion::Rapid => ToolMoveKind::Rapid,
-            Motion::Linear | Motion::ArcCw | Motion::ArcCcw => ToolMoveKind::Feed(
-                state
-                    .feed
-                    .ok_or(GcodeError::FeedUndefined { line })?,
-            ),
+            Motion::Linear | Motion::ArcCw | Motion::ArcCcw => {
+                ToolMoveKind::Feed(state.feed.ok_or(GcodeError::FeedUndefined { line })?)
+            }
         };
         let mut targets: Vec<PathTarget> = Vec::new();
         match motion {
@@ -483,7 +486,10 @@ mod tests {
         let ToolMoveKind::Feed(feed) = parsed.moves[1].kind else {
             panic!("expected feed");
         };
-        assert!((feed - 0.005).abs() < 1e-12, "300mm/min = 5mm/s, got {feed}");
+        assert!(
+            (feed - 0.005).abs() < 1e-12,
+            "300mm/min = 5mm/s, got {feed}"
+        );
         let p = positions(&parsed.moves);
         assert_eq!(p[0], vec![[0.010, 0.0, 0.005]]);
         // Modal G1 and modal XZ: three cutting targets.
@@ -493,11 +499,7 @@ mod tests {
 
     #[test]
     fn incremental_mode_accumulates() {
-        let parsed = parse_gcode(
-            "G91\nG0 X10\nG0 X10 Y5\n",
-            &GcodeOptions::default(),
-        )
-        .unwrap();
+        let parsed = parse_gcode("G91\nG0 X10\nG0 X10 Y5\n", &GcodeOptions::default()).unwrap();
         let p = positions(&parsed.moves);
         assert_eq!(p[0], vec![[0.010, 0.0, 0.0], [0.020, 0.005, 0.0]]);
     }
