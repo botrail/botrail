@@ -145,6 +145,13 @@ pub struct Shape {
     /// Transform from the link frame to the shape frame.
     pub origin: Isometry3<f64>,
     pub geometry: Geometry,
+    /// The colour the file gave this visual — URDF `<material><color
+    /// rgba>` or USD `primvars:displayColor` — and `None` when it named
+    /// none, which is what makes a viewer free to shade the link its own
+    /// way. RGB only: alpha is dropped (botrail has no transparency), and
+    /// the numbers pass through unconverted, the same as an obstacle's
+    /// colour. Collision shapes never carry one; they are not drawn.
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone)]
@@ -490,7 +497,12 @@ impl RobotModel {
                 visuals: l
                     .visuals
                     .iter()
-                    .map(|v| convert_shape(&v.origin, &v.geometry, base_dir, options))
+                    .map(|v| {
+                        let mut shape =
+                            convert_shape(&v.origin, &v.geometry, base_dir, options);
+                        shape.color = v.material.as_ref().and_then(material_color);
+                        shape
+                    })
                     .collect(),
                 collisions: l
                     .collisions
@@ -885,7 +897,17 @@ fn convert_shape(
     Shape {
         origin: pose_to_isometry(origin),
         geometry,
+        color: None,
     }
+}
+
+/// A URDF material's RGB, dropping alpha. A material that only names a
+/// texture (no `<color>`) has nothing to give, and the visual stays
+/// uncoloured rather than turning black.
+fn material_color(material: &xurdf::Material) -> Option<[f32; 3]> {
+    material
+        .color
+        .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
 }
 
 #[cfg(test)]
@@ -915,6 +937,56 @@ mod tests {
       </joint>
     </robot>
     "#;
+
+    /// Materials by reference and inline, plus a visual with none and a
+    /// texture-only material — the four shapes a URDF states colour in.
+    const PAINTED: &str = r#"
+    <robot name="painted">
+      <material name="red"><color rgba="0.9 0.1 0.05 1.0"/></material>
+      <material name="skin"><texture filename="skin.png"/></material>
+      <link name="base">
+        <visual>
+          <geometry><box size="0.2 0.2 0.2"/></geometry>
+          <material name="red"/>
+        </visual>
+        <collision><geometry><box size="0.2 0.2 0.2"/></geometry></collision>
+      </link>
+      <link name="arm">
+        <visual>
+          <geometry><sphere radius="0.1"/></geometry>
+          <material name="inline"><color rgba="0.0 0.25 1.0 0.5"/></material>
+        </visual>
+        <visual>
+          <geometry><sphere radius="0.05"/></geometry>
+        </visual>
+        <visual>
+          <geometry><sphere radius="0.02"/></geometry>
+          <material name="skin"/>
+        </visual>
+      </link>
+      <joint name="j" type="revolute">
+        <parent link="base"/><child link="arm"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/>
+      </joint>
+    </robot>
+    "#;
+
+    #[test]
+    fn visual_materials_carry_their_colour() {
+        let model = RobotModel::from_urdf_str(PAINTED).unwrap();
+        let base = &model.links[model.link_index("base").unwrap()];
+        assert_eq!(base.visuals[0].color, Some([0.9, 0.1, 0.05]));
+        // Collision shapes are never drawn, so they never carry one.
+        assert_eq!(base.collisions[0].color, None);
+        let arm = &model.links[model.link_index("arm").unwrap()];
+        // Inline material, alpha dropped: botrail has no transparency.
+        assert_eq!(arm.visuals[0].color, Some([0.0, 0.25, 1.0]));
+        // No material at all, and a texture-only one: both leave the
+        // viewer free to shade the link, rather than turning it black.
+        assert_eq!(arm.visuals[1].color, None);
+        assert_eq!(arm.visuals[2].color, None);
+    }
 
     /// A wrist carrying a two-finger gripper: the tool mount is the wrist
     /// the fingers hang off, not the deepest leaf.

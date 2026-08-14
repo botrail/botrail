@@ -9,7 +9,7 @@ import {
   type RobotUiState,
 } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
-import { COLLISION_COLOR, linkColor } from "../three/palette";
+import { authoredColor, COLLISION_COLOR, linkColor } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
 
 const IDENTITY_POS: [number, number, number] = [0, 0, 0];
@@ -111,9 +111,11 @@ function LinkGroup({
   return (
     <group ref={register} position={position} quaternion={quaternion}>
       {link.visuals.map((visual, j) => (
-        // The link color is a way to tell links apart, so a mesh carrying
-        // the manufacturer's own colors keeps them. In collision the color
-        // is the message, and it wins.
+        // Three shades, most specific first: the collision highlight is
+        // the message and always wins; then the color the robot file
+        // authored for this visual; then the palette, which exists only
+        // to tell links apart. A mesh carrying its own materials keeps
+        // them unless one of the first two speaks.
         <VisualNode key={j} visual={visual} color={color} forceColor={colliding} />
       ))}
     </group>
@@ -130,12 +132,16 @@ function VisualNode({
   forceColor: boolean;
 }) {
   const { origin } = visual;
+  const own = useMemo(
+    () => (visual.color ? authoredColor(visual.color) : null),
+    [visual.color],
+  );
   return (
     <group position={origin.position} quaternion={origin.quaternion}>
       <GeometryMesh
         geometry={visual.geometry}
-        color={color}
-        forceColor={forceColor}
+        color={!forceColor && own ? own : color}
+        forceColor={forceColor || own !== null}
       />
     </group>
   );
@@ -147,7 +153,7 @@ function GeometryMesh({
   forceColor = false,
 }: {
   geometry: GeometryMsg;
-  color: string;
+  color: string | THREE.Color;
   forceColor?: boolean;
 }) {
   switch (geometry.kind) {
@@ -185,6 +191,6 @@ function GeometryMesh({
   }
 }
 
-function StandardMaterial({ color }: { color: string }) {
+function StandardMaterial({ color }: { color: string | THREE.Color }) {
   return <meshStandardMaterial color={color} roughness={0.85} metalness={0.05} />;
 }

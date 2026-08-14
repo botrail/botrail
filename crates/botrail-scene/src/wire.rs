@@ -82,6 +82,12 @@ pub struct VisualMsg {
     /// Link-local transform of this shape.
     pub origin: PoseMsg,
     pub geometry: GeometryMsg,
+    /// The colour the robot file authored for this visual (URDF material
+    /// or USD `displayColor`), linear RGB. Absent — the common case for
+    /// robots that name no materials — leaves the viewer to shade the
+    /// link however it tells links apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1207,6 +1213,7 @@ impl SceneDescriptionMsg {
                             .map(|shape| VisualMsg {
                                 origin: PoseMsg::from(&shape.origin),
                                 geometry: geometry_msg(&shape.geometry, &mut mesh_url),
+                                color: shape.color,
                             })
                             .collect(),
                     })

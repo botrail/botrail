@@ -1493,7 +1493,7 @@ fn author_shape(
         prim,
         &shape.geometry,
         &XformValue::Static(shape.origin),
-        None,
+        shape.color,
         warnings,
     )
 }
@@ -2198,8 +2198,9 @@ mod tests {
         let urdf = format!(
             r#"
         <robot name="r">
+          <material name="paint"><color rgba="0.25 0.5 0.75 1.0"/></material>
           <link name="base link">
-            <visual><geometry><box size="0.2 0.1 0.4"/></geometry></visual>
+            <visual><geometry><box size="0.2 0.1 0.4"/></geometry><material name="paint"/></visual>
             <visual><origin xyz="0 0 0.3"/><geometry><cylinder radius="0.05" length="0.2"/></geometry></visual>
           </link>
           <link name="tip">
@@ -2259,6 +2260,22 @@ mod tests {
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
+
+        // A visual that named a colour carries it into the stage; one
+        // that named none keeps the neutral fallback every gprim gets.
+        let text = std::fs::read_to_string(dir.join("anim.usda")).unwrap();
+        let block = |head: &str| -> String {
+            let rest = text.split(head).nth(1).expect("visual authored");
+            rest[..rest.find('}').unwrap_or(rest.len())].to_string()
+        };
+        let painted = block("def Cube \"Visual_0\"");
+        assert!(
+            painted.contains("primvars:displayColor = [(0.25, 0.5, 0.75)]"),
+            "{painted}"
+        );
+        let bare = block("def Cylinder \"Visual_1\"");
+        assert!(bare.contains("primvars:displayColor"), "{bare}");
+        assert!(!bare.contains("(0.25, 0.5, 0.75)"), "{bare}");
         // Self-contained: no referenced assets.
         assert!(!dir.join("anim_assets").exists());
 

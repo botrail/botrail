@@ -127,6 +127,13 @@ def cell_for(recording: Path) -> bt.Scene:
             "and call scene.play_usd_animation() on it."
         )
     if not names:
+        # Binary: nothing to sniff. The demos all write `cell_<name>.usd*`,
+        # so the filename is the next best evidence — better than assuming
+        # a cell the recording has nothing to do with.
+        stem = STEM_CELLS.get(recording.stem)
+        if stem is not None:
+            print(f"{recording}: binary recording, rebuilt from its name ({stem})")
+            return CELLS[stem]()
         print(
             f"{recording}: no robot prims readable (a binary .usdc keeps its "
             f"names out of reach) — assuming the single-arm cell; pass "
@@ -150,6 +157,18 @@ CELLS = {
     "agv": lambda: agv_cell_demo.build_scene(),
     "amr": lambda: amr_demo.build_scene(),
     "machining": lambda: machining_demo.build_replay_cell(),
+}
+
+# What each demo names its bake, for recordings whose prims cannot be read
+# (binary). Only the unambiguous ones: `cell_line.usda` could be either
+# line length, so it stays a `--cell` decision.
+STEM_CELLS = {
+    "cell_seq": "single",
+    "cell_dual": "dual",
+    "cell_weld": "weld",
+    "cell_agv": "agv",
+    "cell_amr": "amr",
+    "cell_machining": "machining",
 }
 
 
@@ -177,7 +196,7 @@ def main() -> None:
             "  python examples/dual_cell_demo.py     # -> cell_dual.usda\n"
             "  python examples/weld_station_demo.py  # -> cell_weld.usda\n"
             "  python examples/weld_line_demo.py     # -> cell_line.usda\n"
-            "  python examples/machining_demo.py     # -> cell_machining.usda"
+            "  python examples/machining_demo.py     # -> cell_machining.usdc"
         )
 
     scene = CELLS[cell]() if cell else cell_for(recording)

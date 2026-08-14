@@ -335,7 +335,7 @@ pub(crate) fn y_up_to_z_up() -> UnitQuaternion<f64> {
 /// that one gprim; taking its first element would invent a flat colour the
 /// author never asked for and then leak it onto the children, so it is left
 /// to the renderer instead.
-fn display_color(view: &AnyPrim) -> Option<[f32; 3]> {
+pub(crate) fn display_color(view: &AnyPrim) -> Option<[f32; 3]> {
     let values: Vec<gf::Vec3f> = view.display_color_attr().get().ok().flatten()?;
     match values.as_slice() {
         [c] => Some([c.x, c.y, c.z]),

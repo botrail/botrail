@@ -12,7 +12,7 @@ export function MeshVisual({
   forceColor = false,
 }: {
   geometry: MeshGeometry;
-  color: string;
+  color: string | THREE.Color;
   /** Paint `color` over the mesh's own materials. Set when the color
    * carries meaning the mesh cannot — a collision highlight, or a color
    * the scene author chose. */

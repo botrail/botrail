@@ -7,25 +7,17 @@ import { playbackRig } from "../playbackRig";
 import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
-import { COLLISION_COLOR } from "../three/palette";
+import { authoredColor, COLLISION_COLOR } from "../three/palette";
 import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
 
 const NEUTRAL_COLOR = "#9aa3b2";
 const SELECT_EDGE_COLOR = "#cdd4df";
 
-/**
- * The obstacle's own colour, or null when the scene file authored none.
- *
- * `ObstacleMsg.color` carries `primvars:displayColor`, which USD defines in
- * linear space — the same space three works in — so it is handed over as-is
- * rather than through a hex string, which would be read back as sRGB and come
- * out washed out.
- */
-function authoredColor(obstacle: ObstacleMsg): THREE.Color | null {
-  if (!obstacle.color) return null;
-  const [r, g, b] = obstacle.color;
-  return new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+/** The obstacle's own colour (`primvars:displayColor`), or null when the
+ * scene file authored none. */
+function obstacleColor(obstacle: ObstacleMsg): THREE.Color | null {
+  return obstacle.color ? authoredColor(obstacle.color) : null;
 }
 
 /** Names under an imported subtree — `/World/Pedestal` owns everything
@@ -286,7 +278,7 @@ function ObstacleNode({
   // Scenery the author styled is drawn as scenery: solid, and it casts. An
   // obstacle with no authored colour is a bare collision proxy, so it keeps
   // the translucent look that lets you see the robot through it.
-  const tint = useMemo(() => authoredColor(obstacle), [obstacle]);
+  const tint = useMemo(() => obstacleColor(obstacle), [obstacle]);
   // "Styled at all" is what separates scenery from a bare collision proxy —
   // a material counts as much as a colour. Without this, authoring only a
   // material leaves the object see-through and casting no shadow, which is

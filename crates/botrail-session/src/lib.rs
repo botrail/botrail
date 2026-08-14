@@ -1666,6 +1666,7 @@ mod tests {
             geometry: G::Box {
                 size: Vector3::new(0.1, 0.1, 0.1),
             },
+            color: None,
         };
         let links = vec![
             Link {

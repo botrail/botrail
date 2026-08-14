@@ -46,8 +46,8 @@ use openusd::usd::{Prim, SchemaBase, Stage, TimeCode};
 use openusd::{gf, sdf};
 
 use crate::{
-    decompose_matrix, default_mesh_cache_dir, int_vec, triangulate, write_stl_cached, y_up_to_z_up,
-    AnyPrim, SearchPathResolver, UsdImportError,
+    decompose_matrix, default_mesh_cache_dir, display_color, int_vec, triangulate,
+    write_stl_cached, y_up_to_z_up, AnyPrim, SearchPathResolver, UsdImportError,
 };
 
 /// Every `PhysxMimicJointAPI` instance name (one per dof of a joint).
@@ -1014,11 +1014,20 @@ impl RobotBuilder<'_> {
             let (geom_raw, _) = decompose_matrix(&info.world);
             let relative = body_raw.inverse() * geom_raw;
             let origin = self.conjugate(&(correction.inverse() * relative));
-            let shape = Shape { origin, geometry };
+            let mut shape = Shape {
+                origin,
+                geometry,
+                color: None,
+            };
             if info.visible && info.default_purpose {
+                // The gprim's own shade, so a link keeps the colour its
+                // stage gave it once something other than the stage draws
+                // it (the wire, a re-export).
+                shape.color = display_color(&AnyPrim(info.prim.clone()));
                 visuals.push(shape.clone());
             }
             if info.has_collision_api {
+                shape.color = None;
                 collisions.push(shape);
             }
         }
@@ -1332,6 +1341,28 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
     }
 }
 "#;
+
+    /// A stage that shades its links: the constant `displayColor` on a
+    /// gprim is the robot's own appearance and rides into the model, so
+    /// anything that draws from the model — the studio wire, a re-export —
+    /// shows the arm the way its stage does. Collision proxies stay
+    /// uncoloured: they are not part of the picture.
+    #[test]
+    fn link_display_colour_rides_into_the_model() {
+        let usda = ARM
+            .replacen(
+                "        def Cube \"geom\"\n        {\n            double size = 0.1\n        }",
+                "        def Cube \"geom\"\n        {\n            double size = 0.1\n                             color3f[] primvars:displayColor = [(0.9, 0.1, 0.05)]\n        }",
+                1,
+            );
+        let imported = import_arm(&usda);
+        let model = &imported.model;
+        let base = &model.links[model.link_index("/Robot/base").unwrap()];
+        assert_eq!(base.visuals[0].color, Some([0.9, 0.1, 0.05]));
+        // The untouched links said nothing, and stay free to be shaded.
+        let link1 = &model.links[model.link_index("/Robot/link1").unwrap()];
+        assert_eq!(link1.visuals[0].color, None);
+    }
 
     #[test]
     fn mimic_joints_import_as_coupled_dofs() {

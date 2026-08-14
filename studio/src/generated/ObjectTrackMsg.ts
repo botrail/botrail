@@ -11,7 +11,9 @@ export type ObjectTrackMsg = {
  */
 name: string, 
 /**
- * One world pose per trajectory sample.
+ * One world pose per trajectory sample — or exactly one pose for a
+ * track that never moves (a carve stage blinking in place), which
+ * the client reads as constant.
  */
 poses: Array<PoseMsg>, 
 /**

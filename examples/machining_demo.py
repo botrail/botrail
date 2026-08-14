@@ -1,46 +1,63 @@
-"""Robot machining, C1+C2: a trimming cell with a 5-axis rim chamfer.
+"""Robot machining on catalog hardware: MELFA ASSISTA + motor spindle.
 
-The C0 slice of design/design-machining.md proved a toolpath can be baked
-at commanded feed; C1 grew it into a cell (live stock through an allowed
-cutter-plate contact, cuts as sequence steps, URScript movep hand-off).
-C2 adds the parts that make it *practice*:
+A trimming cell with a 5-axis rim chamfer, built from products rather
+than stand-ins — a Mitsubishi Electric RV-5AS-D (`manipulator`) carrying
+a NAKANISHI-class motor spindle (`tool.spindle`), both pulled straight
+from the catalog. The spindle ships the frame convention the 5-DOF solver
+wants (`tip` +Z runs tip -> body) and its cutter as its own link, so the
+contact exemption binds to a real part of the tool.
+
+What the cell shows, following design/design-machining.md:
 
 * **A 5-axis path from APT.** The rim chamfer arrives as CL text
   (`GOTO/x,y,z,i,j,k` — the machine-independent 5-axis format), its tool
   axis leaning 30 deg outward all the way around the plate, hopping the
   toe clamps. The lean direction precesses a full turn per lap.
 
-* **Global spin optimization where greedy dies.** Followed greedily, the
-  wrist walks into a stretch it cannot pass (44 located failures on the
-  base-facing edge). `spin="optimize"` runs a Descartes-style Viterbi
-  pass over spin candidates around the natural solution and solves the
-  same path whole — spending spin early to stay solvable late. The cell's
-  cycle therefore bakes with `toolpath_spin="optimize"`.
+* **Why the cycle bakes with the global spin pass.** The cutter is
+  rotationally symmetric, so the spin of a taught stance is arbitrary —
+  nobody jogs to a *particular* one. Teach this cell's stance half a turn
+  round and per-sample greedy resolution breaks at the very first sample;
+  `spin="optimize"` (a Descartes-style Viterbi pass over spin candidates)
+  is untouched. On this arm's roomy wrist the two agree wherever greedy
+  survives, so the optimizer costs a fraction of a second and buys the
+  cell its independence from how it was taught.
+
+* **Reach, diagnosed rather than guessed.** Pull the fixture 180 mm in
+  toward the base and the chamfer stops solving — `check_toolpath` names
+  the first failing sample and why (the RV-5AS-D's J5 is +-120 deg, so a
+  leaning tool close in runs out of wrist). Push it back out and the same
+  program solves.
 
 * **The feed report.** Floors make `length / feed` a hard lower bound,
   so joints can only slow a cut: `feed_report` says how much was lost
   (hold ratio), where (time spans), and which axis owned each slowdown.
 
-Everything else is C1: clamp -> spin-up -> cuts -> spin-down -> unclamp,
-USD with BasisCurves overlays, URScript with movep chains and digital
-I/O. Move the fixture and re-simulate: nothing was taught in joints.
+The rest is the cell: clamp -> spin-up -> cuts -> spin-down -> unclamp,
+progressive material removal, USD with BasisCurves overlays, URScript
+with movep chains and digital I/O. Move the fixture and re-simulate:
+nothing was taught in joints.
 
 Run with:  python examples/machining_demo.py [--studio]
 """
 
+import math
 from pathlib import Path
 import sys
 
 import botrail as bt
 
-ASSETS = Path(__file__).resolve().parent / "assets"
+# The two catalog products this cell is built from.
+CATALOG_ARM = "mitsubishi_electric/assista/rv-5as-d/r1"
+CATALOG_SPINDLE = "botrail/spindle/spindle-emsf3060/r1"
 
 # Fixture geometry, all in the part frame (meters). The plate top is z=0.
-# Sized to the little demo arm (a ~0.85 m 6-axis): the valid band with the
-# spindle vertical runs x 0.33-0.45 from the base, so the job is a
-# 140 x 100 plate rather than a door panel.
-PLATE = (0.14, 0.10, 0.012)
-CONTOUR_HALF = (0.06, 0.04)  # trim line, 10 mm inside the plate edge
+# Sized to the RV-5AS-D (910 mm reach): the spindle-vertical band covers
+# the whole bench, so the job is a 180 x 120 panel — big enough to fill
+# the arm's stroke, small enough that the cycle stays inside the rollout's
+# default 120 s budget.
+PLATE = (0.18, 0.12, 0.012)
+CONTOUR_HALF = (0.08, 0.05)  # trim line, 10 mm inside the plate edge
 CORNER_R = 0.015
 CUT_DEPTH = -0.002
 RAPID_Z = 0.008
@@ -48,20 +65,22 @@ CUT_FEED = 0.015     # 15 mm/s trim
 PLUNGE_FEED = 0.004  # 4 mm/s entry
 RAPID_CAP = 0.25     # m/s, movel-style rapid cap
 
-# A working configuration with the flange facing the floor (the pitch
-# joints sum to pi), elbow dipped *under* the shoulder line — folding the
-# wrist over the top instead pushes its links into the forearm with the
-# spindle mounted. Found by scanning flange-down configurations for the
-# widest collision-free reach band.
-REF_Q = [0.0, 0.5, 0.9, 1.7415926535897932, 0.0, 0.0]
+# The taught stance: spindle vertical, tip 480 mm out and 288 mm above the
+# base, elbow up. J6 (the spin about the tool axis) is taught at 0 — the
+# tool is symmetric, so the value is arbitrary, but teaching it at a limit
+# (+-200 deg here) leaves greedy resolution a half turn to unwind at the
+# first sample. `main` shows exactly that.
+REF_Q = [0.0, 0.010563, 1.873486, 0.0, 1.257542, 0.0]
 
-FIXTURE_BODIES = ("plate", "table", "clamp_front", "clamp_back")
+FIXTURE_BODIES = ("plate", "bench", "clamp_front", "clamp_back")
 
 
 def build_scene() -> tuple[bt.Scene, str]:
-    arm = bt.Robot.from_urdf(str(Path(__file__).resolve().parent / "simple_arm.urdf"))
-    spindle = bt.Robot.from_urdf(str(ASSETS / "spindle.urdf"))
-    robot = arm.attach_tool(spindle, flange="tool0")
+    arm = bt.Robot.from_catalog(CATALOG_ARM)
+    spindle = bt.Robot.from_catalog(CATALOG_SPINDLE)
+    # The spindle's root *is* its mounting face and its tcp is the cutter
+    # tip, so the flange name is the only thing to say.
+    robot = arm.attach_tool(spindle, flange=arm.flange_link)
     scene = bt.Scene(robot)
     scene.set_joint_positions(REF_Q)
 
@@ -79,10 +98,16 @@ def build_scene() -> tuple[bt.Scene, str]:
     scene.add_box("plate", size=PLATE, position=at(0, 0, -PLATE[2] / 2))
     scene.set_obstacle_color("plate", (0.75, 0.77, 0.80))
     scene.allow_link_obstacle_contact("cutter", "plate")
-    # Table and toe clamps: ordinary collision. The clamps grip the long
-    # edges 3 mm onto the plate, leaving 7 mm to the trim line.
-    scene.add_box("table", size=(0.30, 0.24, 0.06), position=at(0, 0, -PLATE[2] - 0.03))
-    scene.set_obstacle_color("table", (0.35, 0.33, 0.30))
+    # The bench the plate is clamped to, standing on the floor, and the
+    # toe clamps: ordinary collision. The clamps grip the long edges 3 mm
+    # onto the plate, leaving 7 mm to the trim line.
+    bench_h = origin[2] - PLATE[2]
+    scene.add_box(
+        "bench",
+        size=(PLATE[0] + 0.16, PLATE[1] + 0.16, bench_h),
+        position=(origin[0], origin[1], bench_h / 2),
+    )
+    scene.set_obstacle_color("bench", (0.35, 0.33, 0.30))
     for side, sy in (("front", -1.0), ("back", 1.0)):
         scene.add_box(
             f"clamp_{side}",
@@ -128,8 +153,6 @@ def rim_apt(tilt_deg: float = RIM_TILT_DEG, feed_mmpm: float = 900.0,
     ``GOTO`` carries the tool axis as ``i,j,k``, tilted outward by
     ``tilt_deg`` so the lean precesses a full turn around the plate. The
     clamp stretches are hopped with RAPID moves above the clamp tops."""
-    import math
-
     hx, hy = CONTOUR_HALF
     t = math.radians(tilt_deg)
     lines = [
@@ -203,8 +226,8 @@ def pocket_gcode() -> str:
 def build_cell() -> tuple[bt.Scene, str]:
     """The full cell: fixture scene, all three toolpaths, and the
     machining sequence — what `play_record.py` rebuilds to replay
-    `cell_machining.usda` onto. The rim chamfer's spin needs the global
-    optimizer, so simulate with ``toolpath_spin="optimize"``."""
+    `cell_machining.usdc` onto. Bake it with ``toolpath_spin="optimize"``
+    so the cell does not depend on the spin the stance was taught at."""
     scene, tcp_link = build_scene()
     scene.add_toolpath("contour", contour_toolpath())
     scene.add_toolpath("pocket", bt.toolpath.from_gcode(pocket_gcode(), frame="fixture"))
@@ -239,7 +262,7 @@ def build_cell() -> tuple[bt.Scene, str]:
 def build_replay_cell() -> bt.Scene:
     """The cell plus the carve-stage obstacles a recording references.
 
-    `main()` exports `cell_machining.usda` with the progressive-removal
+    `main()` exports `cell_machining.usdc` with the progressive-removal
     prims (`plate_cut/NNN`) animated by visibility; replaying it needs the
     same obstacles in the scene or those prims stay unmatched. Re-baking
     and re-carving is deterministic, so the names line up exactly."""
@@ -277,25 +300,44 @@ def shift_fixture(scene: bt.Scene, dx: float) -> None:
 def main() -> None:
     scene, tcp_link = build_cell()
 
-    # Face diagnosis first: every sample attempted, failures located. The
-    # rim is the C2 case — greedy walks the wrist into the base-facing
-    # edge; the global spin pass solves the same path whole.
-    for name in ("contour", "pocket"):
+    # Face diagnosis first: every sample attempted, failures located.
+    # This arm's wrist has the room for all three paths as taught.
+    for name in ("contour", "pocket", "rim"):
         report = scene.check_toolpath(name)
         print(f"check {name}: {report!r}")
         if not report.ok:
             sys.exit(f"unexpected: {report.issues[:3]}")
-    rim_greedy = scene.check_toolpath("rim")
-    rim_opt = scene.check_toolpath("rim", spin="optimize")
-    print(f"check rim:  greedy {len(rim_greedy.issues)}/{rim_greedy.total_samples} fail "
-          f"(first: {rim_greedy.issues[0]['kind']} at sample {rim_greedy.issues[0]['sample']}) "
-          f"| optimize {'ok' if rim_opt.ok else 'FAIL'}")
-    if not rim_opt.ok:
-        sys.exit(f"unexpected: {rim_opt.issues[:3]}")
+
+    # What the global spin pass is for. The cutter is symmetric, so the
+    # spin of the taught stance is arbitrary — teach the same pose half a
+    # turn round (J6 at its limit rather than at 0) and greedy has to
+    # unwind it at the first sample, which is a configuration jump, which
+    # is a fault. The optimizer picks the spin for the whole path and
+    # never sees the seed's.
+    scene.set_joint_positions(REF_Q[:5] + [REF_Q[5] + math.pi])
+    twisted = scene.check_toolpath("contour")
+    twisted_opt = scene.check_toolpath("contour", spin="optimize")
+    print(f"stance taught a half turn round: greedy {len(twisted.issues)}/"
+          f"{twisted.total_samples} fail ({twisted.issues[0]['detail']}) "
+          f"| optimize {'ok' if twisted_opt.ok else 'FAIL'}")
+    if twisted.ok or not twisted_opt.ok:
+        sys.exit("unexpected: the taught spin no longer decides greedy")
+    scene.set_joint_positions(REF_Q)
+
+    # Reach, diagnosed: 180 mm closer to the base the leaning chamfer runs
+    # out of wrist (J5 is +-120 deg on this arm), and check_toolpath says
+    # so with a sample index instead of a shrug.
+    shift_fixture(scene, -0.18)
+    near = scene.check_toolpath("rim", spin="optimize")
+    kinds = sorted({issue["kind"] for issue in near.issues})
+    print(f"fixture 180mm closer: rim {len(near.issues)}/{near.total_samples} "
+          f"fail {kinds} (first at sample {near.issues[0]['sample']})")
+    shift_fixture(scene, 0.18)
+    if near.ok:
+        sys.exit("unexpected: the near fixture no longer stresses the wrist")
 
     # The cycle: clamp -> spin up -> trim -> pocket -> chamfer -> spin
-    # down -> unclamp. The chamfer needs the optimizer, so the whole bake
-    # runs with it.
+    # down -> unclamp, baked with the spin pass for the reason above.
     tl = scene.simulate_sequence("cycle", toolpath_spin="optimize")
     print(f"cycle {tl.duration:.2f}s (spindle on "
           f"{tl.signal('spindle_run').high_total():.2f}s)")
@@ -344,8 +386,14 @@ def main() -> None:
     # Hand-offs: USD with the toolpaths as BasisCurves, and the whole
     # cycle as URScript — movep chains at the feed, signals as digital
     # outputs.
-    warnings = tl.export_usd("cell_machining.usda")
-    print(f"USD: cell_machining.usda ({'no warnings' if not warnings else warnings})")
+    # Binary: this arm ships real CAD meshes, and their ASCII float
+    # expansion is most of a `.usda` (117 MB against 26 MB here). The
+    # crate file carries the same stage — `play_record` recognises it by
+    # name, since a binary keeps its prim names out of reach.
+    recording = Path("cell_machining.usdc")
+    warnings = tl.export_usd(recording)
+    print(f"USD: {recording} ({recording.stat().st_size / 1e6:.0f} MB, "
+          f"{'no warnings' if not warnings else warnings})")
     script = tl.to_script(
         outputs={"clamped": 0, "spindle_run": 1},
         blend_radius=0.002,

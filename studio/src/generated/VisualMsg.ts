@@ -6,4 +6,11 @@ export type VisualMsg = {
 /**
  * Link-local transform of this shape.
  */
-origin: PoseMsg, geometry: GeometryMsg, };
+origin: PoseMsg, geometry: GeometryMsg, 
+/**
+ * The colour the robot file authored for this visual (URDF material
+ * or USD `displayColor`), linear RGB. Absent — the common case for
+ * robots that name no materials — leaves the viewer to shade the
+ * link however it tells links apart.
+ */
+color?: [number, number, number] | null, };
