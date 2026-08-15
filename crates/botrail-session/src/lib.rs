@@ -451,6 +451,18 @@ pub fn add_carve_stages(
     pose: Isometry3<f64>,
     material: botrail_scene::Material,
 ) -> Vec<String> {
+    add_display_stages(host, stages, pose, material, None)
+}
+
+/// [`add_carve_stages`] for any progressive display (a film building up):
+/// each stage may carry a colour key.
+pub fn add_display_stages(
+    host: &impl SessionHost,
+    stages: Vec<(String, Geometry, botrail_scene::ObstacleCollider)>,
+    pose: Isometry3<f64>,
+    material: botrail_scene::Material,
+    legend: Option<botrail_scene::Legend>,
+) -> Vec<String> {
     let names = host.with_scene(|scene| {
         stages
             .into_iter()
@@ -459,12 +471,44 @@ pub fn add_carve_stages(
                 let final_name = scene.add_obstacle_with_collider(&name, geometry, pose, collider);
                 let _ = scene.set_obstacle_enabled(&final_name, false);
                 let _ = scene.set_obstacle_material(&final_name, Some(material));
+                let _ = scene.set_obstacle_legend(&final_name, legend.clone());
                 final_name
             })
             .collect::<Vec<_>>()
     });
     emit_obstacles_and_state(host);
     names
+}
+
+/// Registers a display-only mesh (a film map, a clearance map): a
+/// disabled obstacle with a cheap collider, a material, and the colour
+/// key its colours are read against, optionally standing in for `hides`
+/// (which is made invisible; its collision is untouched). Replaces any
+/// obstacle of the same name. Returns the final name.
+#[allow(clippy::too_many_arguments)]
+pub fn show_display_mesh(
+    host: &impl SessionHost,
+    name: &str,
+    geometry: Geometry,
+    pose: Isometry3<f64>,
+    collider: botrail_scene::ObstacleCollider,
+    material: botrail_scene::Material,
+    legend: Option<botrail_scene::Legend>,
+    hides: Option<&str>,
+) -> Result<String, SceneError> {
+    let final_name = host.with_scene(|scene| {
+        if let Some(target) = hides {
+            scene.set_obstacle_visible(target, false)?;
+        }
+        let _ = scene.remove_obstacle(name);
+        let final_name = scene.add_obstacle_with_collider(name, geometry, pose, collider);
+        let _ = scene.set_obstacle_enabled(&final_name, false);
+        let _ = scene.set_obstacle_material(&final_name, Some(material));
+        let _ = scene.set_obstacle_legend(&final_name, legend);
+        Ok::<_, SceneError>(final_name)
+    })?;
+    emit_obstacles_and_state(host);
+    Ok(final_name)
 }
 
 /// Retains a timeline as the session's last bake and (when anyone is
@@ -538,6 +582,17 @@ pub fn set_obstacle_material(
     material: Option<botrail_scene::Material>,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_material(name, material))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Attaches or clears an obstacle's colour key and rebroadcasts.
+pub fn set_obstacle_legend(
+    host: &impl SessionHost,
+    name: &str,
+    legend: Option<botrail_scene::Legend>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_legend(name, legend))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -642,6 +697,20 @@ fn emit_toolpaths(host: &impl SessionHost) {
 pub fn upsert_toolpath(host: &impl SessionHost, toolpath: botrail_scene::toolpath::Toolpath) {
     host.with_scene(|scene| scene.add_toolpath(toolpath));
     emit_toolpaths(host);
+}
+
+/// Records a face diagnosis on a toolpath (the marks a `check_*` left)
+/// and rebroadcasts the overlays so the studio draws them. An empty list
+/// clears.
+pub fn set_toolpath_marks(
+    host: &impl SessionHost,
+    name: &str,
+    marks: Vec<botrail_scene::PathMark>,
+) -> Result<(), String> {
+    host.with_scene(|scene| scene.set_toolpath_marks(name, marks))
+        .map_err(|e| e.to_string())?;
+    emit_toolpaths(host);
+    Ok(())
 }
 
 /// Removes a toolpath and rebroadcasts; `false` when it was unknown.
@@ -809,6 +878,23 @@ pub fn add_cut_trace(
     spin_link: Option<&str>,
 ) -> Result<(), botrail_scene::SceneError> {
     host.with_scene(|scene| scene.add_cut_trace(name, signal, robot, spin_link))?;
+    if host.has_listeners() {
+        let msg = host.with_scene(|scene| wire::effects_message(scene));
+        host.emit(&msg);
+    }
+    Ok(())
+}
+
+/// Declares (or replaces) a spray cone and rebroadcasts the effects list.
+pub fn add_spray_cone(
+    host: &impl SessionHost,
+    name: &str,
+    signal: &str,
+    robot: &str,
+    length: f64,
+    radius: f64,
+) -> Result<(), botrail_scene::SceneError> {
+    host.with_scene(|scene| scene.add_spray_cone(name, signal, robot, length, radius))?;
     if host.has_listeners() {
         let msg = host.with_scene(|scene| wire::effects_message(scene));
         host.emit(&msg);

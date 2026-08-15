@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!-- A hand-authored rotary bell applicator for the painting demo: motor
+     housing, shaping-air ring, and the bell cup itself. Standing in for a
+     catalog `tool.applicator` product (design/design-painting.md A1) the
+     way the router spindle stood in before `tool.spindle` existed.
+
+     Frame convention is the toolpath solver's, shared with the spindle:
+     the `tip` link is the TCP at the bell face, and its frame is flipped
+     a half-turn about X so its +Z runs from the tip back toward the tool
+     body — which is what `PathTarget.tool_axis` and the 5-DOF axis-aligned
+     IK expect, and it means paint travels along the TCP's -Z. A bell is
+     rotationally symmetric, so the spin about that axis is genuinely free
+     and the solver gets its full 5-DOF room.
+
+     Everything collides normally: painting is non-contact, so unlike the
+     cutter there is no exemption to arrange. -->
+<robot name="spray_gun">
+  <link name="gun_mount">
+    <visual>
+      <origin xyz="0 0 0.055"/>
+      <geometry><cylinder radius="0.038" length="0.11"/></geometry>
+      <material name="gun_body"><color rgba="0.82 0.83 0.85 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.055"/>
+      <geometry><cylinder radius="0.038" length="0.11"/></geometry>
+    </collision>
+  </link>
+  <link name="shaping_air">
+    <visual>
+      <origin xyz="0 0 0.02"/>
+      <geometry><cylinder radius="0.030" length="0.04"/></geometry>
+      <material name="gun_ring"><color rgba="0.35 0.37 0.40 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.02"/>
+      <geometry><cylinder radius="0.030" length="0.04"/></geometry>
+    </collision>
+  </link>
+  <link name="bell_cup">
+    <visual>
+      <origin xyz="0 0 0.0125"/>
+      <geometry><cylinder radius="0.033" length="0.025"/></geometry>
+      <material name="gun_cup"><color rgba="0.90 0.86 0.55 1"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.0125"/>
+      <geometry><cylinder radius="0.033" length="0.025"/></geometry>
+    </collision>
+  </link>
+  <link name="tip"/>
+  <joint name="mount_to_shaping_air" type="fixed">
+    <parent link="gun_mount"/><child link="shaping_air"/>
+    <origin xyz="0 0 0.11"/>
+  </joint>
+  <joint name="shaping_air_to_bell" type="fixed">
+    <parent link="shaping_air"/><child link="bell_cup"/>
+    <origin xyz="0 0 0.04"/>
+  </joint>
+  <joint name="bell_to_tip" type="fixed">
+    <parent link="bell_cup"/><child link="tip"/>
+    <origin xyz="0 0 0.025" rpy="3.14159265358979 0 0"/>
+  </joint>
+</robot>

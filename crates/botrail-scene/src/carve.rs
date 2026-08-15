@@ -2,7 +2,7 @@
 //! stock obstacle, walked over a baked timeline.
 //!
 //! This is *presentation and bookkeeping*, not verification (see
-//! `design/design-machining.md` §3.9 / §5): in a kinematic world the TCP
+//! `design/design-machining.md` §3.3 S4 / §5): in a kinematic world the TCP
 //! follows the toolpath exactly, so the carve can never contradict the
 //! plan — what it adds is the picture (the machined part as a mesh) and
 //! the numbers (removed / remaining volume). Deterministic by

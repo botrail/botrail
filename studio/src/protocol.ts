@@ -7,6 +7,8 @@
 export type { PoseMsg } from "./generated/PoseMsg";
 export type { GeometryMsg } from "./generated/GeometryMsg";
 export type { MaterialMsg } from "./generated/MaterialMsg";
+export type { LegendMsg } from "./generated/LegendMsg";
+export type { LegendStopMsg } from "./generated/LegendStopMsg";
 export type { VisualMsg } from "./generated/VisualMsg";
 export type { LinkMsg } from "./generated/LinkMsg";
 export type { JointTypeMsg } from "./generated/JointTypeMsg";
@@ -16,6 +18,7 @@ export type { AttachmentMsg } from "./generated/AttachmentMsg";
 export type { ObjectTrackMsg } from "./generated/ObjectTrackMsg";
 export type { FrameMsg } from "./generated/FrameMsg";
 export type { ToolpathOverlayMsg } from "./generated/ToolpathOverlayMsg";
+export type { PathMarkMsg } from "./generated/PathMarkMsg";
 export type { UsdAssetMsg } from "./generated/UsdAssetMsg";
 export type { ColliderRefMsg } from "./generated/ColliderRefMsg";
 export type { CollisionPairMsg } from "./generated/CollisionPairMsg";

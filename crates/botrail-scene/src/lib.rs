@@ -7,6 +7,7 @@
 
 pub mod apt;
 pub mod carve;
+pub mod coat;
 pub mod gcode;
 pub mod motion;
 pub mod project;
@@ -26,7 +27,7 @@ use botrail_collide::{Acm, ColliderId, CollisionPair, InterRobotAcm, RobotCollid
 // signature, so downstream crates get to name it without a collide dep.
 pub use botrail_collide::ObstacleCollider;
 use botrail_model::{Geometry, RobotModel};
-use nalgebra::Isometry3;
+use nalgebra::{Isometry3, Point3};
 use thiserror::Error;
 
 /// Random-configuration samples used to auto-populate the ACM with
@@ -64,6 +65,8 @@ pub enum SceneError {
     UnsupportedGeometry(String),
     #[error("{0}")]
     BadMount(String),
+    #[error("{0}")]
+    BadEffect(String),
 }
 
 /// Rewrites `RobotDone` references inside a (possibly nested) condition.
@@ -99,6 +102,10 @@ pub struct Obstacle {
     /// How the surface takes light. `None` leaves it to the viewer, same as
     /// `color`. Never affects collision or planning.
     pub material: Option<Material>,
+    /// What this obstacle's colours mean, when they mean something (a film
+    /// map's micron ramp). Drawn by the studio as a colour key. Never
+    /// affects collision or planning.
+    pub legend: Option<Legend>,
 }
 
 /// The two PBR knobs that decide whether a surface reads as bare steel, a
@@ -132,6 +139,34 @@ pub struct ObstacleSpec {
     pub pose: Isometry3<f64>,
     pub color: Option<[f32; 3]>,
     pub material: Option<Material>,
+}
+
+/// One point a face diagnosis flagged on a toolpath, for the studio to
+/// draw: where, and what kind of finding (a stable snake_case tag —
+/// `unreachable`, `collision`, `too_far`, ...). Presentation only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathMark {
+    /// World position of the flagged sample.
+    pub position: Point3<f64>,
+    pub kind: String,
+}
+
+/// A colour key for an obstacle whose colours *mean* something — a film
+/// map, a clearance heat map. Drawn by the studio next to the viewport;
+/// never affects collision or planning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Legend {
+    pub title: String,
+    /// Swatches top to bottom. Empty labels draw a swatch with no text,
+    /// so a ramp can label every other step.
+    pub stops: Vec<LegendStop>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegendStop {
+    /// Linear RGB, same convention as obstacle colours.
+    pub color: [f32; 3],
+    pub label: String,
 }
 
 /// A named world-frame pose — a mount point / teach reference, typically
@@ -272,7 +307,16 @@ pub struct Scene {
     scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
     toolpaths: Vec<toolpath::Toolpath>,
+    /// The latest face diagnosis per toolpath — the marks a check left on
+    /// the path for the studio to draw. Presentation state, keyed by
+    /// toolpath name and dropped when the path changes.
+    toolpath_marks: Vec<(String, Vec<PathMark>)>,
     allowed_contacts: Vec<AllowedContact>,
+    /// Spray applicators by name — the calibrated footprints brushes refer
+    /// to. Authoring data, like toolpaths.
+    applicators: Vec<(String, coat::Applicator)>,
+    /// Brushes: named process settings a toolpath's feed moves run with.
+    brushes: Vec<coat::Brush>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
     pub collision_warnings: Vec<String>,
@@ -302,7 +346,10 @@ impl Scene {
             scenarios: Vec::new(),
             frames: Vec::new(),
             toolpaths: Vec::new(),
+            toolpath_marks: Vec::new(),
             allowed_contacts: Vec::new(),
+            applicators: Vec::new(),
+            brushes: Vec::new(),
             collision_warnings,
         }
     }
@@ -588,6 +635,11 @@ impl Scene {
 
     /// The obstacle and its collider, by name (carving needs the solid
     /// shapes for containment).
+    /// The collision colliders, aligned with [`Self::obstacles`].
+    pub(crate) fn obstacle_colliders(&self) -> &[ObstacleCollider] {
+        &self.obstacle_colliders
+    }
+
     pub(crate) fn obstacle_with_collider(
         &self,
         name: &str,
@@ -640,6 +692,7 @@ impl Scene {
             visible: true,
             color: None,
             material: None,
+            legend: None,
         });
         self.obstacle_colliders.push(collider);
         Ok(name)
@@ -666,6 +719,7 @@ impl Scene {
                 visible: true,
                 color: spec.color,
                 material: spec.material,
+                legend: None,
             });
             self.obstacle_colliders.push(collider);
             names.push(name);
@@ -692,6 +746,7 @@ impl Scene {
             visible: true,
             color: None,
             material: None,
+            legend: None,
         });
         self.obstacle_colliders.push(collider);
         name
@@ -756,6 +811,18 @@ impl Scene {
     ) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].material = material;
+        Ok(())
+    }
+
+    /// Attaches (or clears) the colour key an obstacle's colours are read
+    /// against. Presentation only.
+    pub fn set_obstacle_legend(
+        &mut self,
+        name: &str,
+        legend: Option<Legend>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].legend = legend;
         Ok(())
     }
 
@@ -1064,6 +1131,79 @@ impl Scene {
         self.allowed_contacts = contacts;
     }
 
+    // ------------------------------------------------- applicators / brushes
+
+    /// Declares (or replaces) a spray applicator under `name`. Validated
+    /// the way `spray_coat` would validate it, so a bad pattern fails
+    /// here rather than at bake time.
+    pub fn define_applicator(
+        &mut self,
+        name: &str,
+        applicator: coat::Applicator,
+    ) -> Result<(), coat::CoatError> {
+        applicator.validate()?;
+        match self.applicators.iter_mut().find(|(n, _)| n == name) {
+            Some(slot) => slot.1 = applicator,
+            None => self.applicators.push((name.to_string(), applicator)),
+        }
+        Ok(())
+    }
+
+    pub fn applicator(&self, name: &str) -> Option<&coat::Applicator> {
+        self.applicators
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, a)| a)
+    }
+
+    pub fn applicators(&self) -> &[(String, coat::Applicator)] {
+        &self.applicators
+    }
+
+    pub fn remove_applicator(&mut self, name: &str) -> bool {
+        let before = self.applicators.len();
+        self.applicators.retain(|(n, _)| n != name);
+        self.applicators.len() != before
+    }
+
+    /// Declares (or replaces) a brush. Its applicator must already be
+    /// declared.
+    pub fn define_brush(&mut self, brush: coat::Brush) -> Result<(), coat::CoatError> {
+        brush.validate()?;
+        if self.applicator(&brush.applicator).is_none() {
+            return Err(coat::CoatError::UnknownApplicator(brush.applicator.clone()));
+        }
+        match self.brushes.iter_mut().find(|b| b.name == brush.name) {
+            Some(slot) => *slot = brush,
+            None => self.brushes.push(brush),
+        }
+        Ok(())
+    }
+
+    pub fn brush(&self, name: &str) -> Option<&coat::Brush> {
+        self.brushes.iter().find(|b| b.name == name)
+    }
+
+    pub fn brushes(&self) -> &[coat::Brush] {
+        &self.brushes
+    }
+
+    pub fn remove_brush(&mut self, name: &str) -> bool {
+        let before = self.brushes.len();
+        self.brushes.retain(|b| b.name != name);
+        self.brushes.len() != before
+    }
+
+    /// Replaces the whole applicator + brush set (project load).
+    pub fn set_process_settings(
+        &mut self,
+        applicators: Vec<(String, coat::Applicator)>,
+        brushes: Vec<coat::Brush>,
+    ) {
+        self.applicators = applicators;
+        self.brushes = brushes;
+    }
+
     /// The allowance re-keyed to the *filtered* obstacle indices of the
     /// current query (`map`: filtered index -> obstacle index).
     fn contact_allowance(&self, map: &[usize]) -> botrail_collide::ContactAllowance {
@@ -1329,8 +1469,10 @@ impl Scene {
             .ok_or_else(|| toolpath::ToolpathError::UnknownToolpath(name.to_string()))
     }
 
-    /// Adds or replaces a toolpath (keyed by name).
+    /// Adds or replaces a toolpath (keyed by name). Any diagnosis marks
+    /// on a path of that name are dropped: they described the old path.
     pub fn add_toolpath(&mut self, tp: toolpath::Toolpath) {
+        self.toolpath_marks.retain(|(n, _)| *n != tp.name);
         match self.toolpaths.iter_mut().find(|t| t.name == tp.name) {
             Some(existing) => *existing = tp,
             None => self.toolpaths.push(tp),
@@ -1338,13 +1480,41 @@ impl Scene {
     }
 
     pub fn remove_toolpath(&mut self, name: &str) -> bool {
+        self.toolpath_marks.retain(|(n, _)| n != name);
         let before = self.toolpaths.len();
         self.toolpaths.retain(|t| t.name != name);
         self.toolpaths.len() != before
     }
 
     pub fn set_toolpaths(&mut self, toolpaths: Vec<toolpath::Toolpath>) {
+        self.toolpath_marks.clear();
         self.toolpaths = toolpaths;
+    }
+
+    /// The marks the last check left on toolpath `name`, if any.
+    pub fn toolpath_marks(&self, name: &str) -> &[PathMark] {
+        self.toolpath_marks
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| m.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Records a face diagnosis on toolpath `name` — what a `check_*`
+    /// found, as points to draw — replacing any earlier one. An empty
+    /// list clears the marks (a clean check leaves a clean path). Errors
+    /// on an unknown toolpath.
+    pub fn set_toolpath_marks(
+        &mut self,
+        name: &str,
+        marks: Vec<PathMark>,
+    ) -> Result<(), toolpath::ToolpathError> {
+        self.toolpath_index(name)?;
+        self.toolpath_marks.retain(|(n, _)| n != name);
+        if !marks.is_empty() {
+            self.toolpath_marks.push((name.to_string(), marks));
+        }
+        Ok(())
     }
 
     /// Bakes toolpath `name` for robot `robot` into one continuous
@@ -1376,6 +1546,20 @@ impl Scene {
         let index = self.toolpath_index(name)?;
         let tcp = tcp.unwrap_or_else(|| self.robots[robot].model.default_tcp_link());
         toolpath::check_toolpath(self, &self.toolpaths[index], robot, tcp, options)
+    }
+
+    /// Checks toolpath `name` as a spray program against obstacle
+    /// `target`: standoff and incidence at every feed sample, judged
+    /// against `limits`. Geometry only — no robot involved.
+    pub fn check_paint(
+        &self,
+        name: &str,
+        target: &str,
+        limits: &coat::PaintLimits,
+        options: &toolpath::ToolpathOptions,
+    ) -> Result<coat::PaintReport, coat::CoatError> {
+        let index = self.toolpath_index(name)?;
+        coat::check_paint(self, &self.toolpaths[index], target, limits, options)
     }
 
     /// Wraps a single-robot trajectory as a [`rollout::SequenceTimeline`]

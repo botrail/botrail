@@ -200,6 +200,74 @@ pub struct ToolpathOverlayMsg {
     pub feed: Vec<Vec<[f64; 3]>>,
     /// Rapid polylines.
     pub rapid: Vec<Vec<[f64; 3]>>,
+    /// Points the last face check flagged on this path, if any — what
+    /// `check_toolpath` / `check_paint` found, for the studio to draw over
+    /// the strokes. Empty (and absent from older files) means unchecked or
+    /// clean; the two are the same to a viewer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<PathMarkMsg>,
+}
+
+/// One flagged point on a toolpath overlay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PathMarkMsg {
+    /// World position.
+    pub position: [f64; 3],
+    /// Stable snake_case tag of the finding: `unreachable`, `config_jump`,
+    /// `collision` (reach check); `no_target`, `too_far`, `too_close`,
+    /// `oblique` (paint check). The studio colours by tag and falls back
+    /// to a neutral for tags it does not know.
+    pub kind: String,
+}
+
+/// A colour key for an obstacle whose colours mean something.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct LegendMsg {
+    pub title: String,
+    /// Swatches top to bottom; an empty label is a swatch with no text.
+    pub stops: Vec<LegendStopMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct LegendStopMsg {
+    /// Linear RGB, like every colour on the wire.
+    pub color: [f32; 3],
+    pub label: String,
+}
+
+impl From<&crate::Legend> for LegendMsg {
+    fn from(l: &crate::Legend) -> Self {
+        LegendMsg {
+            title: l.title.clone(),
+            stops: l
+                .stops
+                .iter()
+                .map(|s| LegendStopMsg {
+                    color: s.color,
+                    label: s.label.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&LegendMsg> for crate::Legend {
+    fn from(l: &LegendMsg) -> Self {
+        crate::Legend {
+            title: l.title.clone(),
+            stops: l
+                .stops
+                .iter()
+                .map(|s| crate::LegendStop {
+                    color: s.color,
+                    label: s.label.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Outcome of the most recent IK solve, echoed with the resulting state.
@@ -253,6 +321,10 @@ pub struct ObstacleMsg {
     /// existed simply have no material, which is the same thing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialMsg>,
+    /// What the colours mean, when they mean something (a film map's
+    /// micron ramp). Absent for ordinary scenery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<LegendMsg>,
     /// Present while the obstacle is attached to (grasped by) a robot link.
     #[serde(default)]
     pub attached_to: Option<AttachmentMsg>,
@@ -617,6 +689,9 @@ pub struct FlashMsg {
     /// Link spun visually while the signal is on (cut traces).
     #[serde(default)]
     pub spin_link: Option<String>,
+    /// Spray-cone size, `[length, radius]` in meters (spray effects only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cone: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -626,12 +701,14 @@ pub enum FlashKindMsg {
     #[default]
     Flash,
     Trace,
+    Spray,
 }
 
 pub fn flash_kind_msg(kind: crate::seq::FlashKind) -> FlashKindMsg {
     match kind {
         crate::seq::FlashKind::Flash => FlashKindMsg::Flash,
         crate::seq::FlashKind::Trace => FlashKindMsg::Trace,
+        crate::seq::FlashKind::Spray => FlashKindMsg::Spray,
     }
 }
 
@@ -639,6 +716,7 @@ pub fn flash_kind_from_msg(kind: FlashKindMsg) -> crate::seq::FlashKind {
     match kind {
         FlashKindMsg::Flash => crate::seq::FlashKind::Flash,
         FlashKindMsg::Trace => crate::seq::FlashKind::Trace,
+        FlashKindMsg::Spray => crate::seq::FlashKind::Spray,
     }
 }
 
@@ -1924,6 +2002,7 @@ pub fn effects_message(scene: &Scene) -> ServerMessage {
                 robot: f.robot.clone(),
                 kind: flash_kind_msg(f.kind),
                 spin_link: f.spin_link.clone(),
+                cone: f.cone.map(|c| [c.length, c.radius]),
             })
             .collect(),
     }
@@ -1948,6 +2027,14 @@ pub fn toolpaths_message(scene: &Scene) -> ServerMessage {
                     name: tp.name.clone(),
                     feed,
                     rapid,
+                    marks: scene
+                        .toolpath_marks(&tp.name)
+                        .iter()
+                        .map(|m| PathMarkMsg {
+                            position: [m.position.x, m.position.y, m.position.z],
+                            kind: m.kind.clone(),
+                        })
+                        .collect(),
                 })
             })
             .collect(),
@@ -2028,6 +2115,7 @@ pub fn obstacles_message(
                 visible: o.visible,
                 color: o.color,
                 material: o.material.map(Into::into),
+                legend: o.legend.as_ref().map(Into::into),
                 attached_to: scene.attachment(&o.name).map(|a| attachment_msg(scene, a)),
             })
             .collect(),

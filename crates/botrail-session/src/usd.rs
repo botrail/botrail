@@ -140,6 +140,48 @@ pub fn bake_timeline(
         })
         .collect();
 
+    // Spray cones: a pale beam the cone's size, riding the TCP frame by
+    // frame and visible only while the bound signal is on — the jet in
+    // usdview/Omniverse follows what the studio shows.
+    for flash in scene.weld_flashes() {
+        if flash.kind != botrail_scene::seq::FlashKind::Spray {
+            continue;
+        }
+        let Some(cone) = flash.cone else { continue };
+        let Some(track) = timeline.signals.iter().find(|s| s.name == flash.signal) else {
+            continue;
+        };
+        let Some(r) = scene.robot_index(&flash.robot) else {
+            continue;
+        };
+        let tcp = scene.robots()[r].model.default_tcp_link();
+        let visible: Vec<bool> = sample_at.iter().map(|&t| track.value_at(t)).collect();
+        if !visible.iter().any(|v| *v) {
+            continue;
+        }
+        // The exporter's cylinder stands along its local +Z, centred on
+        // its origin; the spray runs along the TCP's -Z from the tip, so
+        // the beam is offset half its length down the spray axis. A
+        // cylinder rather than a cone: the geometry vocabulary the writer
+        // shares with collision has no cone, and a beam reads the same
+        // way at a glance.
+        let offset = Isometry3::translation(0.0, 0.0, -cone.length / 2.0);
+        let sampled: Vec<Isometry3<f64>> = robot_frames[r]
+            .iter()
+            .map(|poses| poses[tcp] * offset)
+            .collect();
+        objects.push(ObjectSpec {
+            name: format!("effects/{}", flash.name),
+            geometry: botrail_model::Geometry::Cylinder {
+                radius: cone.radius * 0.6,
+                length: cone.length,
+            },
+            track: PoseTrack::Sampled(sampled),
+            color: Some([0.62, 0.78, 0.95]),
+            visible,
+        });
+    }
+
     // Weld flashes: one small bright prim per current-ON interval,
     // standing where that weld happened, blinking through animated
     // visibility — so the arc shows in usdview/Omniverse exactly when the

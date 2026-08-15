@@ -453,7 +453,11 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
         // Merge into the previous move when the kind matches.
         match moves.last_mut() {
             Some(last) if last.kind == kind => last.targets.extend(targets),
-            _ => moves.push(ToolMove { kind, targets }),
+            _ => moves.push(ToolMove {
+                kind,
+                targets,
+                brush: None,
+            }),
         }
     }
 

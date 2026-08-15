@@ -341,12 +341,38 @@ impl SceneHub {
         botrail_session::add_carve_stages(self, stages, pose, material)
     }
 
+    pub fn add_display_stages(
+        &self,
+        stages: Vec<(String, Geometry, botrail_scene::ObstacleCollider)>,
+        pose: Isometry3<f64>,
+        material: botrail_scene::Material,
+        legend: Option<botrail_scene::Legend>,
+    ) -> Vec<String> {
+        botrail_session::add_display_stages(self, stages, pose, material, legend)
+    }
+
     pub fn emit_timeline(
         &self,
         scene: &Scene,
         timeline: &botrail_scene::rollout::SequenceTimeline,
     ) {
         botrail_session::emit_timeline(self, scene, timeline);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_display_mesh(
+        &self,
+        name: &str,
+        geometry: Geometry,
+        pose: Isometry3<f64>,
+        collider: botrail_scene::ObstacleCollider,
+        material: botrail_scene::Material,
+        legend: Option<botrail_scene::Legend>,
+        hides: Option<&str>,
+    ) -> Result<String, SceneError> {
+        botrail_session::show_display_mesh(
+            self, name, geometry, pose, collider, material, legend, hides,
+        )
     }
 
     pub fn set_obstacle_enabled(&self, name: &str, enabled: bool) -> Result<(), SceneError> {
@@ -371,6 +397,14 @@ impl SceneHub {
         material: Option<botrail_scene::Material>,
     ) -> Result<(), SceneError> {
         botrail_session::set_obstacle_material(self, name, material)
+    }
+
+    pub fn set_obstacle_legend(
+        &self,
+        name: &str,
+        legend: Option<botrail_scene::Legend>,
+    ) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_legend(self, name, legend)
     }
 
     pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {
@@ -513,8 +547,54 @@ impl SceneHub {
         botrail_session::upsert_toolpath(self, tp);
     }
 
+    // Applicators and brushes are authoring data the studio does not (yet)
+    // draw, so they go straight to the scene: no broadcast.
+    pub fn define_applicator(
+        &self,
+        name: &str,
+        applicator: botrail_scene::coat::Applicator,
+    ) -> Result<(), String> {
+        self.with_scene(|scene| {
+            scene
+                .define_applicator(name, applicator)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn define_brush(&self, brush: botrail_scene::coat::Brush) -> Result<(), String> {
+        self.with_scene(|scene| scene.define_brush(brush).map_err(|e| e.to_string()))
+    }
+
+    pub fn remove_applicator(&self, name: &str) -> bool {
+        self.with_scene(|scene| scene.remove_applicator(name))
+    }
+
+    pub fn remove_brush(&self, name: &str) -> bool {
+        self.with_scene(|scene| scene.remove_brush(name))
+    }
+
+    pub fn applicator_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.applicators().iter().map(|(n, _)| n.clone()).collect())
+    }
+
+    pub fn brush_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.brushes().iter().map(|b| b.name.clone()).collect())
+    }
+
+    pub fn brush(&self, name: &str) -> Option<botrail_scene::coat::Brush> {
+        self.with_scene(|scene| scene.brush(name).cloned())
+    }
+
     pub fn remove_toolpath(&self, name: &str) -> bool {
         botrail_session::remove_toolpath(self, name)
+    }
+
+    pub fn set_toolpath_marks(
+        &self,
+        name: &str,
+        marks: Vec<botrail_scene::PathMark>,
+    ) -> Result<(), String> {
+        botrail_session::set_toolpath_marks(self, name, marks)
     }
 
     pub fn toolpath_names(&self) -> Vec<String> {
@@ -545,6 +625,20 @@ impl SceneHub {
         self.with_scene(|scene| {
             scene
                 .check_toolpath(name, robot, tcp, options)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn check_paint(
+        &self,
+        name: &str,
+        target: &str,
+        limits: &botrail_scene::coat::PaintLimits,
+        options: &botrail_scene::toolpath::ToolpathOptions,
+    ) -> Result<botrail_scene::coat::PaintReport, String> {
+        self.with_scene(|scene| {
+            scene
+                .check_paint(name, target, limits, options)
                 .map_err(|e| e.to_string())
         })
     }
@@ -643,6 +737,17 @@ impl SceneHub {
 
     pub fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> Result<(), SceneError> {
         botrail_session::add_weld_flash(self, name, signal, robot)
+    }
+
+    pub fn add_spray_cone(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        length: f64,
+        radius: f64,
+    ) -> Result<(), SceneError> {
+        botrail_session::add_spray_cone(self, name, signal, robot, length, radius)
     }
 
     pub fn upsert_device(&self, device: botrail_scene::seq::Device) {

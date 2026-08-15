@@ -77,6 +77,9 @@ pub struct WeldFlash {
     /// Link spun visually while the signal is on (a cutter); display
     /// only, never kinematics.
     pub spin_link: Option<String>,
+    /// The spray cone's size for [`FlashKind::Spray`]: length along the
+    /// TCP's -Z (the standoff, roughly) and base radius (the pattern's).
+    pub cone: Option<SprayCone>,
 }
 
 /// What a signal-bound TCP effect renders as.
@@ -88,6 +91,18 @@ pub enum FlashKind {
     /// An accumulating cut trace along the TCP, plus the optional
     /// spinning link (machining).
     Trace,
+    /// A translucent cone from the TCP along its -Z while the signal is
+    /// on (spray painting). Bind it to the effective trigger
+    /// (`SequenceTimeline::with_trigger_signal`) so it follows what
+    /// actually sprayed, not the enable alone.
+    Spray,
+}
+
+/// A spray cone's size, meters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SprayCone {
+    pub length: f64,
+    pub radius: f64,
 }
 
 /// A scripted auxiliary device (PLC output): commanded by
@@ -626,6 +641,7 @@ impl Scene {
             robot: robot.to_string(),
             kind: FlashKind::Flash,
             spin_link: None,
+            cone: None,
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -664,6 +680,48 @@ impl Scene {
             robot: robot.to_string(),
             kind: FlashKind::Trace,
             spin_link: spin_link.map(str::to_string),
+            cone: None,
+        };
+        match self.weld_flashes.iter_mut().find(|f| f.name == name) {
+            Some(slot) => *slot = flash,
+            None => self.weld_flashes.push(flash),
+        }
+        Ok(())
+    }
+
+    /// Binds a spray-cone effect to `signal` at `robot`'s TCP: a
+    /// translucent cone `length` long and `radius` wide at its base,
+    /// pointing along the TCP's -Z (the spray direction) while the signal
+    /// is on. Same contract as [`Scene::add_weld_flash`]: presentation
+    /// only, driven by the baked signal, zero effect on the cycle.
+    pub fn add_spray_cone(
+        &mut self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        length: f64,
+        radius: f64,
+    ) -> Result<(), SceneError> {
+        if self.robot_index(robot).is_none() {
+            return Err(SceneError::UnknownRobot(robot.to_string()));
+        }
+        if !self.signals.iter().any(|s| s.name == signal)
+            && !self.sensors.iter().any(|s| s.name == signal)
+        {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        if !(length > 0.0 && radius > 0.0) {
+            return Err(SceneError::BadEffect(format!(
+                "spray cone `{name}`: length and radius must be positive, got {length} / {radius}"
+            )));
+        }
+        let flash = WeldFlash {
+            name: name.to_string(),
+            signal: signal.to_string(),
+            robot: robot.to_string(),
+            kind: FlashKind::Spray,
+            spin_link: None,
+            cone: Some(SprayCone { length, radius }),
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,

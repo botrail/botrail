@@ -103,6 +103,53 @@ pub fn load_mesh_compound(
     Ok(shape)
 }
 
+/// The mesh file as it is — memory-registered or read from disk, scaled —
+/// for consumers that want the actual surface rather than its convex
+/// decomposition (a standoff probe, a surface tessellation).
+pub fn load_mesh_data(
+    path: &std::path::Path,
+    scale: &Vector3<f64>,
+) -> Result<MeshData, CollideError> {
+    if let Some(mesh) = memory_meshes()
+        .read()
+        .expect("memory mesh registry poisoned")
+        .get(path)
+    {
+        return Ok(mesh.scaled([scale.x, scale.y, scale.z]));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| CollideError::MeshLoad(format!("{}: {e}", path.display())))?;
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mesh = match ext.as_str() {
+        "stl" => botrail_mesh::parse_stl(&bytes),
+        "obj" => botrail_mesh::parse_obj(&String::from_utf8_lossy(&bytes)),
+        other => {
+            return Err(CollideError::MeshLoad(format!(
+                "{}: unsupported mesh format `{other}` (stl/obj)",
+                path.display()
+            )))
+        }
+    }
+    .map_err(|e| CollideError::MeshLoad(format!("{}: {e}", path.display())))?;
+    Ok(mesh.scaled([scale.x, scale.y, scale.z]))
+}
+
+/// The exact surface of a mesh as a parry triangle mesh — for ray probes
+/// that must read the real geometry (a curved panel's true normal), where
+/// the VHACD hulls the collision path uses would report their own facets.
+pub fn mesh_to_trimesh(mesh: &MeshData) -> Result<SharedShape, CollideError> {
+    let vertices = mesh
+        .vertices
+        .iter()
+        .map(|v| parry3d_f64::math::Vector::new(v[0], v[1], v[2]))
+        .collect();
+    SharedShape::trimesh(vertices, mesh.indices.clone())
+        .map_err(|e| CollideError::MeshLoad(format!("triangle mesh: {e:?}")))
+}
+
 /// VHACD hulls as plain point sets — the cacheable/serializable
 /// representation (also crosses the wasm Web Worker boundary).
 pub fn decompose_hulls(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {

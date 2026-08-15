@@ -64,13 +64,22 @@ class ToolpathBuilder:
         self._frame = frame
         self._moves: list[dict] = []
         self._feed: float | None = None
+        self._brush: str | None = None
 
-    def feed(self, feed: float) -> "ToolpathBuilder":
-        """Sets the cutting feed rate (m/s) for subsequent ``line_to`` /
-        ``arc_to`` calls."""
+    def feed(self, feed: float, brush: str | None = None) -> "ToolpathBuilder":
+        """Sets the process feed rate (m/s) for subsequent ``line_to`` /
+        ``arc_to`` calls, and — for a spray program — the *brush* they run
+        with: a named applicator + flow + trigger timing declared with
+        ``scene.define_brush``. Brushes are the program's own trigger, per
+        stroke: once any move in the path names one, a feed move without
+        one runs with the gun off (a turnaround at speed), so pass the
+        brush again on every ``feed()`` that sprays. A path that names no
+        brush sprays every feed move with the applicator handed to
+        ``spray_coat``."""
         if not (feed > 0.0):
             raise ValueError(f"feed must be positive, got {feed}")
         self._feed = float(feed)
+        self._brush = None if brush is None else str(brush)
         return self
 
     def rapid_to(
@@ -86,7 +95,7 @@ class ToolpathBuilder:
         """Straight cutting move at the current feed."""
         if self._feed is None:
             raise ValueError("call feed() before line_to()")
-        self._push("feed", self._feed, [_target(position, axis, spin)])
+        self._push("feed", self._feed, [_target(position, axis, spin)], self._brush)
         return self
 
     def arc_to(
@@ -160,7 +169,7 @@ class ToolpathBuilder:
             if k == steps:
                 p = end
             targets.append(_target(p, None, None))
-        self._push("feed", self._feed, targets)
+        self._push("feed", self._feed, targets, self._brush)
         return self
 
     def build(self) -> Toolpath:
@@ -171,14 +180,27 @@ class ToolpathBuilder:
             data["frame"] = self._frame
         return Toolpath(data)
 
-    def _push(self, kind: str, feed: float | None, targets: list[dict]) -> None:
+    def _push(
+        self,
+        kind: str,
+        feed: float | None,
+        targets: list[dict],
+        brush: str | None = None,
+    ) -> None:
         last = self._moves[-1] if self._moves else None
-        if last is not None and last["type"] == kind and last.get("feed") == feed:
+        if (
+            last is not None
+            and last["type"] == kind
+            and last.get("feed") == feed
+            and last.get("brush") == brush
+        ):
             last["targets"].extend(targets)
             return
         move: dict = {"type": kind, "targets": targets}
         if feed is not None:
             move["feed"] = feed
+        if brush is not None:
+            move["brush"] = brush
         self._moves.append(move)
 
     def _last_position(self) -> list[float] | None:

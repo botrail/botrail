@@ -39,7 +39,7 @@ function flashTexture(): THREE.Texture {
  */
 export function FlashView() {
   const all = useStudioStore((s) => s.flashes);
-  const flashes = useMemo(() => all.filter((f) => f.kind !== "trace"), [all]);
+  const flashes = useMemo(() => all.filter((f) => f.kind === "flash"), [all]);
   const texture = useMemo(flashTexture, []);
 
   // While *paused* on a baked timeline (a seek, or the end), the arcs

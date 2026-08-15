@@ -95,6 +95,7 @@ pub fn parse_apt(text: &str) -> Result<ParsedApt, AptError> {
         _ => moves.push(ToolMove {
             kind,
             targets: vec![target],
+            brush: None,
         }),
     };
 

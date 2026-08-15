@@ -13,4 +13,8 @@ kind: FlashKindMsg,
 /**
  * Link spun visually while the signal is on (cut traces).
  */
-spin_link: string | null, };
+spin_link: string | null, 
+/**
+ * Spray-cone size, `[length, radius]` in meters (spray effects only).
+ */
+cone?: [number, number] | null, };

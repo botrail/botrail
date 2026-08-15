@@ -178,6 +178,22 @@ impl ObstacleCollider {
         Ok(ObstacleCollider { parts, local_aabb })
     }
 
+    /// The obstacle's *exact* surface rather than its collision proxy:
+    /// primitives as themselves (already exact), meshes as the triangle
+    /// mesh in the file instead of its convex decomposition. For ray
+    /// probes that need the true hit distance and normal — a curved
+    /// panel's — where the VHACD hulls would answer with their own facets.
+    /// Not for collision checking: a triangle mesh has no interior.
+    pub fn exact_surface(geometry: &botrail_model::Geometry) -> Result<Self, CollideError> {
+        match geometry {
+            botrail_model::Geometry::Mesh { path, scale } => {
+                let data = mesh::load_mesh_data(path, scale)?;
+                Ok(Self::from_shape(mesh::mesh_to_trimesh(&data)?))
+            }
+            other => Self::from_geometry(other),
+        }
+    }
+
     /// Wraps an already-built shape (e.g. [`mesh::mesh_to_compound`] on
     /// in-memory mesh data, where no file path exists to load from).
     pub fn from_shape(shape: SharedShape) -> Self {
@@ -195,6 +211,57 @@ impl ObstacleCollider {
         self.parts
             .iter()
             .any(|(offset, shape)| shape.contains_point(offset, p))
+    }
+
+    /// Distance from `origin` along `dir` to the first solid part hit,
+    /// both in the collider's *local* frame, or `None` past `max_toi`.
+    /// `dir` need not be normalized; the result is in units of `dir`.
+    ///
+    /// What spray coating needs to answer "does this patch see the gun":
+    /// a shadow test against the target's own body. Rays start outside
+    /// the shape, so the solid-interior convention of the other queries
+    /// does not come into play.
+    pub fn cast_local_ray(
+        &self,
+        origin: &nalgebra::Point3<f64>,
+        dir: &nalgebra::Vector3<f64>,
+        max_toi: f64,
+    ) -> Option<f64> {
+        self.cast_local_ray_with_normal(origin, dir, max_toi)
+            .map(|(toi, _)| toi)
+    }
+
+    /// [`Self::cast_local_ray`] plus the outward surface normal at the
+    /// hit, in the collider's local frame — what a standoff check needs to
+    /// turn a hit into an incidence angle. Convex parts and hulls report a
+    /// clean face normal; a mesh's is the triangle's, so a curved surface
+    /// reads a little faceted at the patch scale.
+    pub fn cast_local_ray_with_normal(
+        &self,
+        origin: &nalgebra::Point3<f64>,
+        dir: &nalgebra::Vector3<f64>,
+        max_toi: f64,
+    ) -> Option<(f64, nalgebra::Vector3<f64>)> {
+        let ray = parry3d_f64::query::Ray::new(
+            parry3d_f64::math::Vector::new(origin.x, origin.y, origin.z),
+            parry3d_f64::math::Vector::new(dir.x, dir.y, dir.z),
+        );
+        self.parts
+            .iter()
+            .filter_map(|(offset, shape)| {
+                shape.cast_ray_and_get_normal(offset, &ray, max_toi, true)
+            })
+            .min_by(|a, b| {
+                a.time_of_impact
+                    .partial_cmp(&b.time_of_impact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|hit| {
+                (
+                    hit.time_of_impact,
+                    nalgebra::Vector3::new(hit.normal.x, hit.normal.y, hit.normal.z),
+                )
+            })
     }
 
     /// World-frame axis-aligned bounds at `pose`, as `(min, max)`.

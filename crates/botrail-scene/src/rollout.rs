@@ -369,6 +369,24 @@ pub struct PlannedMove {
     pub duration: f64,
     /// Feed adherence of a toolpath move (`None` for motions and ramps).
     pub feed_report: Option<crate::toolpath::FeedReport>,
+    /// Timeline intervals during which a toolpath move was in a spraying
+    /// stroke — the program's own process trigger, as opposed to its
+    /// rapids, its gun-off feed moves, and the approach planned in from
+    /// wherever the robot stood. Empty for motions and ramps. What a film
+    /// integrator or a standoff check gates on alongside the PLC's enable
+    /// signal: a gun opened by the sequence at the same time the toolpath
+    /// starts must not spray the part on the way in.
+    pub process_spans: Vec<ProcessSpan>,
+}
+
+/// One stretch of a toolpath move with the process on: which brush the
+/// stroke ran with (`None` in a toolpath that names none — then whatever
+/// applicator the integrator is handed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessSpan {
+    pub start: f64,
+    pub end: f64,
+    pub brush: Option<String>,
 }
 
 /// The baked result of a sequence rollout — what playback, USD export, and
@@ -505,6 +523,39 @@ pub fn arm_coverage(
 }
 
 impl SequenceTimeline {
+    /// The intervals robot `robot`'s toolpath moves spent spraying — the
+    /// program's own process trigger, with the brush each ran — in time
+    /// order, adjacent same-brush spans merged. `None` when the track ran
+    /// no toolpath at all (a hand-built or motion-only timeline has no
+    /// program to say when the process was on, so a consumer treats the
+    /// whole timeline as process time).
+    pub fn process_spans(&self, robot: usize) -> Option<Vec<ProcessSpan>> {
+        let track = self.robots.get(robot)?;
+        if !track.planned.iter().any(|m| m.feed_report.is_some()) {
+            return None;
+        }
+        let mut spans: Vec<ProcessSpan> = track
+            .planned
+            .iter()
+            .flat_map(|m| m.process_spans.iter().cloned())
+            .collect();
+        spans.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut merged: Vec<ProcessSpan> = Vec::with_capacity(spans.len());
+        for span in spans {
+            match merged.last_mut() {
+                Some(last) if span.start <= last.end + 1e-9 && last.brush == span.brush => {
+                    last.end = last.end.max(span.end)
+                }
+                _ => merged.push(span),
+            }
+        }
+        Some(merged)
+    }
+
     /// Whether a tracked object should be drawn at `t`. False only while it
     /// is stowed — waiting in a magazine or taken off the line.
     pub fn object_visible(track: &ObjectTrack, t: f64) -> bool {
@@ -2764,6 +2815,7 @@ impl Rollout {
                     segments: planned.segments,
                     duration: traj.duration(),
                     feed_report: None,
+                    process_spans: Vec::new(),
                 });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
@@ -2874,6 +2926,35 @@ impl Rollout {
                     );
                 }
                 let end = self.t + traj.duration();
+                // Spraying intervals in timeline time: the interval *into*
+                // sample i sprays when its move does (a feed move — with a
+                // brush, in a toolpath that names any); the approach, if
+                // any, shifted everything by its duration. Consecutive
+                // intervals of the same brush merge into one span.
+                let offset = self.t + (traj.duration() - planned.trajectory.duration());
+                let path_def = self.world.toolpath(toolpath).cloned();
+                let mut process_spans: Vec<ProcessSpan> = Vec::new();
+                for (i, sample) in planned.samples.iter().enumerate().skip(1) {
+                    let Some(def) = &path_def else { break };
+                    if !def.move_sprays(sample.move_index) {
+                        continue;
+                    }
+                    let brush = def.moves[sample.move_index].brush.clone();
+                    let (a, b) = (
+                        offset + planned.sample_times[i - 1],
+                        offset + planned.sample_times[i],
+                    );
+                    match process_spans.last_mut() {
+                        Some(last) if (last.end - a).abs() < 1e-9 && last.brush == brush => {
+                            last.end = b
+                        }
+                        _ => process_spans.push(ProcessSpan {
+                            start: a,
+                            end: b,
+                            brush,
+                        }),
+                    }
+                }
                 rt.planned.push(PlannedMove {
                     sequence: self.programs[self.current].sequence.name.clone(),
                     step: step_index,
@@ -2881,6 +2962,7 @@ impl Rollout {
                     segments,
                     duration: traj.duration(),
                     feed_report: Some(planned.feed_report.clone()),
+                    process_spans,
                 });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
@@ -2931,6 +3013,7 @@ impl Rollout {
                     }],
                     duration: *duration,
                     feed_report: None,
+                    process_spans: Vec::new(),
                 });
                 self.programs[self.current].move_ends.push(end);
                 rt.moves.push(StepSpan {
@@ -3387,11 +3470,13 @@ pub(crate) mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(tip.x - 0.03)],
+                    brush: None,
                 },
                 ToolMove {
                     // 6 cm at 20 mm/s: the cut alone must take ~3 s.
                     kind: ToolMoveKind::Feed(0.02),
                     targets: vec![target(tip.x + 0.03)],
+                    brush: None,
                 },
             ],
         });

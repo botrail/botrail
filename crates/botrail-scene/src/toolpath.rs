@@ -1,5 +1,6 @@
-//! Toolpaths: continuous Cartesian process paths (milling, trimming,
-//! deburring) followed at a commanded feed rate.
+//! Toolpaths: continuous Cartesian process paths — milling, trimming,
+//! deburring, and the non-contact ones too (spray coating, dispensing) —
+//! followed at a commanded feed rate.
 //!
 //! A [`Toolpath`] is an authored artifact — an ordered list of moves in a
 //! part frame, each a chain of targets carrying a position, a tool-axis
@@ -11,10 +12,12 @@
 //! commanded feed and slows only where joint limits force it. Unlike
 //! `Motion` segments there is no rest at interior targets.
 //!
-//! What this module does *not* model: cutting physics (forces, deflection,
-//! chatter, tool wear) and CAM correctness (gouge / undercut). The
-//! questions answered are reach, clearance, and time — see
-//! `design/design-machining.md`.
+//! What this module does *not* model: process physics (cutting forces,
+//! deflection, chatter, tool wear) or CAM correctness (gouge / undercut).
+//! The questions answered are reach, clearance, and time — see
+//! `design/design-machining.md`. What a process *leaves behind* is a
+//! separate, offline pass over the baked timeline: [`crate::carve`] for
+//! material removed, [`crate::coat`] for film deposited.
 
 use botrail_model::RobotModel;
 use botrail_traj::JointTrajectory;
@@ -81,6 +84,15 @@ pub struct ToolMove {
     /// Targets visited in order; the interval *into* each target has this
     /// move's kind. The first target of the first move is the path start.
     pub targets: Vec<PathTarget>,
+    /// The process setting a feed move runs with — a *brush* (a named
+    /// applicator + flow + trigger timing, ABB's word) declared on the
+    /// scene. This is the program's own trigger, per stroke: in a
+    /// toolpath that names brushes anywhere, a feed move without one is
+    /// a move with the gun *off* (brush 0), which is how a raster's
+    /// turnarounds run at speed without spraying. A toolpath that names
+    /// none sprays every feed move with whatever applicator the film
+    /// integrator is handed. Meaningless on a rapid.
+    pub brush: Option<String>,
 }
 
 /// A continuous Cartesian process path, authored relative to a part frame.
@@ -97,6 +109,23 @@ pub struct Toolpath {
 impl Toolpath {
     pub fn target_count(&self) -> usize {
         self.moves.iter().map(|m| m.targets.len()).sum()
+    }
+
+    /// Whether any move names a brush — the toolpath triggers per stroke.
+    pub fn uses_brushes(&self) -> bool {
+        self.moves.iter().any(|m| m.brush.is_some())
+    }
+
+    /// Whether the interval into `move_index`'s targets sprays: a feed
+    /// move with a brush, or any feed move when the path names none.
+    pub fn move_sprays(&self, move_index: usize) -> bool {
+        match self.moves.get(move_index) {
+            Some(m) => match m.kind {
+                ToolMoveKind::Rapid => false,
+                ToolMoveKind::Feed(_) => !self.uses_brushes() || m.brush.is_some(),
+            },
+            None => false,
+        }
     }
 }
 
@@ -126,6 +155,10 @@ pub enum ToolMoveMsg {
     Feed {
         feed: f64,
         targets: Vec<PathTargetMsg>,
+        /// Brush name (absent in files written before brushes existed,
+        /// which is the same as none).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brush: Option<String>,
     },
 }
 
@@ -163,6 +196,7 @@ pub fn toolpath_msg(tp: &Toolpath) -> ToolpathMsg {
                 ToolMoveKind::Feed(feed) => ToolMoveMsg::Feed {
                     feed,
                     targets: targets(&m.targets),
+                    brush: m.brush.clone(),
                 },
             })
             .collect(),
@@ -197,8 +231,13 @@ pub fn toolpath_from_msg(msg: &ToolpathMsg) -> Result<Toolpath, ToolpathError> {
             ToolMoveMsg::Rapid { targets } => ToolMove {
                 kind: ToolMoveKind::Rapid,
                 targets: convert(targets)?,
+                brush: None,
             },
-            ToolMoveMsg::Feed { feed, targets } => {
+            ToolMoveMsg::Feed {
+                feed,
+                targets,
+                brush,
+            } => {
                 if *feed <= 0.0 {
                     return Err(ToolpathError::BadFeed {
                         toolpath: msg.name.clone(),
@@ -208,6 +247,7 @@ pub fn toolpath_from_msg(msg: &ToolpathMsg) -> Result<Toolpath, ToolpathError> {
                 ToolMove {
                     kind: ToolMoveKind::Feed(*feed),
                     targets: convert(targets)?,
+                    brush: brush.clone(),
                 }
             }
         };
@@ -543,6 +583,9 @@ pub struct PlannedToolpath {
     /// Solved configuration per sample (same length as `samples`).
     pub path: Vec<Vec<f64>>,
     pub samples: Vec<ToolpathSample>,
+    /// Trajectory time at which each sample is reached (same length as
+    /// `samples`; the time parameterization may add points between them).
+    pub sample_times: Vec<f64>,
     /// Trajectory time at which each [`Toolpath::moves`] entry completes.
     pub move_ends: Vec<f64>,
     /// Total cutting (feed) length (m).
@@ -1129,10 +1172,16 @@ pub fn plan_toolpath(
         &path,
         limits,
     );
+    let sample_times = timed
+        .waypoint_indices
+        .iter()
+        .map(|&k| timed.trajectory.times[k])
+        .collect();
     Ok(PlannedToolpath {
         trajectory: timed.trajectory,
         path,
         samples,
+        sample_times,
         move_ends,
         cut_length,
         rapid_length,
@@ -1274,10 +1323,12 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(p0)],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(feed),
                     targets: vec![target(Point3::from(p0.coords + Vector3::new(0.0, dy, 0.0)))],
+                    brush: None,
                 },
             ],
         }
@@ -1350,10 +1401,12 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(Point3::origin())],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(0.05),
                     targets: vec![target(Point3::new(0.0, 0.08, 0.0))],
+                    brush: None,
                 },
             ],
         });
@@ -1381,6 +1434,7 @@ mod tests {
             moves: vec![ToolMove {
                 kind: ToolMoveKind::Rapid,
                 targets: vec![target(Point3::origin())],
+                brush: None,
             }],
         });
         assert!(matches!(
@@ -1400,10 +1454,12 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(p0)],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(0.5),
                     targets: vec![target(Point3::new(1.5, 0.0, p0.z))],
+                    brush: None,
                 },
             ],
         });
@@ -1439,6 +1495,7 @@ mod tests {
                     tool_axis: up(),
                     spin: Some(0.5),
                 }],
+                brush: None,
             }],
         });
         let planned = scene
@@ -1493,6 +1550,7 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(Point3::new(tip.x - 0.04, tip.y, top + 0.008))],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(0.01),
@@ -1500,6 +1558,7 @@ mod tests {
                         target(Point3::new(tip.x - 0.04, tip.y, top - 0.002)),
                         target(Point3::new(tip.x + 0.04, tip.y, top - 0.002)),
                     ],
+                    brush: None,
                 },
             ],
         };
@@ -1533,10 +1592,12 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(Point3::new(tip.x - 0.04, tip.y, top - 0.002))],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(Point3::new(tip.x + 0.04, tip.y, top - 0.002))],
+                    brush: None,
                 },
             ],
         });
@@ -1638,6 +1699,7 @@ mod tests {
                         spin: None,
                     },
                 ],
+                brush: None,
             }],
         });
         let exact = scene
@@ -1705,6 +1767,7 @@ mod tests {
                 ToolMove {
                     kind: ToolMoveKind::Rapid,
                     targets: vec![target(Point3::new(0.1, 0.2, 0.3))],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(0.01),
@@ -1713,6 +1776,7 @@ mod tests {
                         tool_axis: Unit::new_normalize(Vector3::new(0.0, 1.0, 1.0)),
                         spin: Some(0.25),
                     }],
+                    brush: None,
                 },
             ],
         };
@@ -1732,6 +1796,7 @@ mod tests {
             moves: vec![ToolMoveMsg::Feed {
                 feed: -1.0,
                 targets: vec![],
+                brush: None,
             }],
         };
         assert!(matches!(

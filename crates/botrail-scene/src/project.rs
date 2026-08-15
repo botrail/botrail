@@ -248,6 +248,21 @@ pub struct ProjectFile {
     /// Process-contact exemptions, by names (absent in older files).
     #[serde(default)]
     pub allowed_contacts: Vec<AllowedContactMsg>,
+    /// Spray applicators by name (absent in older files).
+    #[serde(default)]
+    pub applicators: Vec<ApplicatorMsg>,
+    /// Brushes — named process settings toolpath strokes run with (absent
+    /// in older files).
+    #[serde(default)]
+    pub brushes: Vec<crate::coat::Brush>,
+}
+
+/// One named [`crate::coat::Applicator`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicatorMsg {
+    pub name: String,
+    #[serde(flatten)]
+    pub applicator: crate::coat::Applicator,
 }
 
 /// One [`crate::AllowedContact`] by names: robot instance, link, obstacle.
@@ -304,6 +319,8 @@ impl ProjectFile {
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
                     allowed_contacts: Vec::new(),
+                    applicators: Vec::new(),
+                    brushes: Vec::new(),
                 })
             }
             2 => {
@@ -374,6 +391,7 @@ impl Scene {
                     visible: o.visible,
                     color: o.color,
                     material: o.material.map(Into::into),
+                    legend: o.legend.as_ref().map(Into::into),
                     attached_to: self
                         .attachment(&o.name)
                         .map(|a| crate::wire::attachment_msg(self, a)),
@@ -393,6 +411,7 @@ impl Scene {
                     robot: f.robot.clone(),
                     kind: crate::wire::flash_kind_msg(f.kind),
                     spin_link: f.spin_link.clone(),
+                    cone: f.cone.map(|c| [c.length, c.radius]),
                 })
                 .collect(),
             scenarios: self
@@ -414,6 +433,15 @@ impl Scene {
                     obstacle: c.obstacle.clone(),
                 })
                 .collect(),
+            applicators: self
+                .applicators()
+                .iter()
+                .map(|(name, a)| ApplicatorMsg {
+                    name: name.clone(),
+                    applicator: a.clone(),
+                })
+                .collect(),
+            brushes: self.brushes().to_vec(),
             frames: self
                 .frames()
                 .iter()
@@ -504,6 +532,7 @@ impl Scene {
                 },
                 o.enabled,
                 o.visible,
+                o.legend.as_ref().map(Into::into),
             ));
         }
 
@@ -511,13 +540,15 @@ impl Scene {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (spec, enabled, visible) in obstacles {
+        for (spec, enabled, visible, legend) in obstacles {
             let final_name = self
                 .add_obstacle(&spec.name, spec.geometry, spec.pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
             self.set_obstacle_color(&final_name, spec.color)
                 .expect("obstacle was just added");
             self.set_obstacle_material(&final_name, spec.material)
+                .expect("obstacle was just added");
+            self.set_obstacle_legend(&final_name, legend)
                 .expect("obstacle was just added");
             if !enabled {
                 self.set_obstacle_enabled(&final_name, false)
@@ -566,6 +597,29 @@ impl Scene {
             })?);
         }
         self.set_toolpaths(toolpaths);
+        for a in &project.applicators {
+            a.applicator
+                .validate()
+                .map_err(|e| ProjectError::Incompatible(format!("applicator `{}`: {e}", a.name)))?;
+        }
+        for b in &project.brushes {
+            b.validate()
+                .map_err(|e| ProjectError::Incompatible(e.to_string()))?;
+            if !project.applicators.iter().any(|a| a.name == b.applicator) {
+                return Err(ProjectError::Incompatible(format!(
+                    "brush `{}` references unknown applicator `{}`",
+                    b.name, b.applicator
+                )));
+            }
+        }
+        self.set_process_settings(
+            project
+                .applicators
+                .iter()
+                .map(|a| (a.name.clone(), a.applicator.clone()))
+                .collect(),
+            project.brushes.clone(),
+        );
         for msg in &project.allowed_contacts {
             let robot = self.robot_index(&msg.robot).ok_or_else(|| {
                 ProjectError::Incompatible(format!(
@@ -625,6 +679,9 @@ impl Scene {
                     robot: f.robot.clone(),
                     kind: crate::wire::flash_kind_from_msg(f.kind),
                     spin_link: f.spin_link.clone(),
+                    cone: f
+                        .cone
+                        .map(|[length, radius]| crate::seq::SprayCone { length, radius }),
                 })
                 .collect(),
         );
@@ -749,7 +806,12 @@ pub fn generate_python(project: &ProjectFile) -> String {
     let multi = project.robots.len() > 1;
     let mut out = String::new();
     out.push_str("\"\"\"Generated by botrail studio — rebuilds the saved project.\"\"\"\n\n");
-    out.push_str("import botrail as bt\n\n");
+    if project.applicators.is_empty() {
+        out.push_str("import botrail as bt\n\n");
+    } else {
+        // Applicators are emitted as JSON literals (see below).
+        out.push_str("import json\n\nimport botrail as bt\n\n");
+    }
     for (i, robot_msg) in project.robots.iter().enumerate() {
         let var = if i == 0 {
             "robot".to_string()
@@ -1064,7 +1126,36 @@ pub fn generate_python(project: &ProjectFile) -> String {
                     flash.name, flash.signal, flash.robot
                 ));
             }
+            crate::wire::FlashKindMsg::Spray => {
+                let [length, radius] = flash.cone.unwrap_or([0.25, 0.08]);
+                out.push_str(&format!(
+                    "scene.add_spray_cone({:?}, signal={:?}, robot={:?}, length={length}, radius={radius})\n",
+                    flash.name, flash.signal, flash.robot
+                ));
+            }
         }
+    }
+    for a in &project.applicators {
+        // The applicator as the dict `bt.paint.applicator` builds — the
+        // JSON is that dict, so it round-trips as a literal.
+        let json = serde_json::to_string(&a.applicator).unwrap_or_default();
+        out.push_str(&format!(
+            "scene.define_applicator({:?}, json.loads({json:?}))\n",
+            a.name
+        ));
+    }
+    for b in &project.brushes {
+        let mut kwargs = format!("flow={}", b.flow);
+        if b.lead != 0.0 {
+            kwargs.push_str(&format!(", lead={}", b.lead));
+        }
+        if b.lag != 0.0 {
+            kwargs.push_str(&format!(", lag={}", b.lag));
+        }
+        out.push_str(&format!(
+            "scene.define_brush({:?}, applicator={:?}, {kwargs})\n",
+            b.name, b.applicator
+        ));
     }
     for tp in &project.toolpaths {
         out.push('\n');
@@ -1074,12 +1165,19 @@ pub fn generate_python(project: &ProjectFile) -> String {
         };
         out.push_str(&format!("_tp = bt.toolpath.builder({frame_kwarg})\n"));
         for m in &tp.moves {
-            let (targets, feed) = match m {
-                crate::toolpath::ToolMoveMsg::Rapid { targets } => (targets, None),
-                crate::toolpath::ToolMoveMsg::Feed { feed, targets } => (targets, Some(*feed)),
+            let (targets, feed, brush) = match m {
+                crate::toolpath::ToolMoveMsg::Rapid { targets } => (targets, None, None),
+                crate::toolpath::ToolMoveMsg::Feed {
+                    feed,
+                    targets,
+                    brush,
+                } => (targets, Some(*feed), brush.as_deref()),
             };
             if let Some(f) = feed {
-                out.push_str(&format!("_tp.feed({f})\n"));
+                match brush {
+                    Some(b) => out.push_str(&format!("_tp.feed({f}, brush={b:?})\n")),
+                    None => out.push_str(&format!("_tp.feed({f})\n")),
+                }
             }
             let call = if feed.is_some() {
                 "line_to"
@@ -1373,6 +1471,7 @@ mod tests {
                         tool_axis: Unit::new_normalize(Vector3::z()),
                         spin: None,
                     }],
+                    brush: None,
                 },
                 ToolMove {
                     kind: ToolMoveKind::Feed(0.015),
@@ -1381,6 +1480,7 @@ mod tests {
                         tool_axis: Unit::new_normalize(Vector3::new(0.1, 0.0, 1.0)),
                         spin: Some(0.4),
                     }],
+                    brush: None,
                 },
             ],
         });

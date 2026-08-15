@@ -15,6 +15,8 @@ import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
 import { CutTraceView } from "./CutTraceView";
 import { ToolpathView } from "./ToolpathView";
+import { LegendHud } from "./LegendHud";
+import { SprayView } from "./SprayView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
 import { SfcOverlay } from "./SfcChart";
@@ -174,6 +176,7 @@ export function Viewport() {
           <ObstacleView />
           <SensorView />
           <FlashView />
+          <SprayView />
           <VehiclePathView />
           <ToolpathView />
           <CutTraceView />
@@ -185,6 +188,7 @@ export function Viewport() {
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
       <SfcOverlay />
+      <LegendHud />
       <TimelineDock />
       {!connected && <div className="overlay">connecting…</div>}
     </div>

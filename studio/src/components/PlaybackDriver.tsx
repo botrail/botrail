@@ -3,7 +3,14 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
 import { samplePlayback, type PlaybackSample } from "../playback";
-import { applySample, linkKey, playbackRig, signalAt, styleFlash } from "../playbackRig";
+import {
+  applySample,
+  linkKey,
+  playbackRig,
+  signalAt,
+  styleFlash,
+  styleSpray,
+} from "../playbackRig";
 import { useStudioStore, robotByName, type StudioState } from "../store";
 
 /** How often the React-side playhead (timeline cursor, time label) is
@@ -61,6 +68,7 @@ export function PlaybackDriver() {
     const sample = samplePlayback(tracks, t);
     applySample(sample);
     updateFlashes(s, sample, t);
+    updateSprays(s, sample, t);
     updateTraces(s, sample, t, Math.min(delta, 0.25));
     if (
       lastPushed.current < 0 ||
@@ -96,6 +104,33 @@ function updateFlashes(s: StudioState, sample: PlaybackSample, t: number) {
       continue;
     }
     styleFlash(node, poses[tcpIndex], t);
+  }
+}
+
+/** Poses every declared spray cone at time `t`: at the bound robot's TCP,
+ * along its -Z, while the effect's signal is on. */
+function updateSprays(s: StudioState, sample: PlaybackSample, t: number) {
+  if (playbackRig.sprays.size === 0) return;
+  const signals = s.timeline?.signals ?? [];
+  for (const spray of s.flashes) {
+    if (spray.kind !== "spray") continue;
+    const node = playbackRig.sprays.get(spray.name);
+    if (!node) continue;
+    const lane = signals.find((sig: { name: string }) => sig.name === spray.signal);
+    const poses = sample.poses?.[spray.robot];
+    const robot = robotByName(s.robots, spray.robot);
+    const tcpName = robot?.desc.tcp_link ?? null;
+    const tcpIndex =
+      tcpName && robot
+        ? robot.desc.links.findIndex((l) => l.name === tcpName)
+        : -1;
+    const on =
+      !!lane && !!poses && tcpIndex >= 0 && signalAt(lane.times, lane.values, t);
+    if (!on || !poses) {
+      node.visible = false;
+      continue;
+    }
+    styleSpray(node, poses[tcpIndex], t);
   }
 }
 

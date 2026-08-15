@@ -5,7 +5,7 @@ mod hub;
 mod server;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use botrail_model::RobotModel;
@@ -818,6 +818,33 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Attaches a colour key to an obstacle whose colours mean something
+    /// — `stops` is a list of `((r, g, b), label)` swatches top to bottom,
+    /// linear RGB, empty labels allowed — or clears it with `stops=None`.
+    /// The studio draws it beside the viewport while the obstacle is in
+    /// the scene. Presentation only.
+    #[pyo3(signature = (name, title = "", stops = None))]
+    fn set_obstacle_legend(
+        &self,
+        name: &str,
+        title: &str,
+        stops: Option<Vec<LegendStopArg>>,
+    ) -> PyResult<()> {
+        let legend = stops.map(|stops| botrail_scene::Legend {
+            title: title.to_string(),
+            stops: stops
+                .into_iter()
+                .map(|((r, g, b), label)| botrail_scene::LegendStop {
+                    color: [r, g, b],
+                    label,
+                })
+                .collect(),
+        });
+        self.hub
+            .set_obstacle_legend(name, legend)
+            .map_err(scene_err)
+    }
+
     /// `(metalness, roughness)`, or `None` when the obstacle has no
     /// authored material.
     fn obstacle_material(&self, name: &str) -> PyResult<Option<(f32, f32)>> {
@@ -1025,6 +1052,28 @@ impl Scene {
     ) -> PyResult<()> {
         self.hub
             .add_cut_trace(name, signal, robot, spin_link)
+            .map_err(scene_err)
+    }
+
+    /// Binds a spray-cone effect to a signal at a robot's TCP: while the
+    /// signal is true during playback, the studio draws a translucent
+    /// cone `length` long and `radius` wide at its base along the TCP's
+    /// spray direction (its -Z), and USD export carries a beam of the
+    /// same size with animated visibility. Bind it to the effective
+    /// trigger a timeline writes with `with_trigger_signal` so it
+    /// follows what actually sprayed rather than the enable alone. Pure
+    /// presentation, like `add_weld_flash`.
+    #[pyo3(signature = (name, signal, robot, length = 0.25, radius = 0.08))]
+    fn add_spray_cone(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        length: f64,
+        radius: f64,
+    ) -> PyResult<()> {
+        self.hub
+            .add_spray_cone(name, signal, robot, length, radius)
             .map_err(scene_err)
     }
 
@@ -1458,6 +1507,89 @@ impl Scene {
     /// `bt.toolpath.builder()` / `bt.toolpath.from_gcode()` — or its JSON
     /// string. Targets live in the part frame named by its `frame` key
     /// (resolved at bake time, so moving the frame re-solves the path).
+    /// Declares a spray applicator under `name` — the dict
+    /// `bt.paint.applicator(...)` builds — so brushes can refer to it.
+    /// Validated now, not at bake time.
+    fn define_applicator(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        applicator: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let gun = applicator_from_py(py, applicator)?;
+        self.hub
+            .define_applicator(name, gun)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Declares a brush: a named process setting a toolpath's strokes run
+    /// with — `applicator` (a `define_applicator` name) at `flow` times
+    /// its calibrated flow, opened `lead` seconds before each stroke with
+    /// this brush begins and closed `lag` seconds after it ends. The
+    /// program's own trigger, per stroke: pass the brush on
+    /// `ToolpathBuilder.feed(...)` (or `bt.paint.strokes(brush=...)`), and
+    /// the film integrator sprays each stroke with it; feed moves that
+    /// name no brush in such a path run with the gun off.
+    #[pyo3(signature = (name, applicator, flow = 1.0, lead = 0.0, lag = 0.0))]
+    fn define_brush(
+        &self,
+        name: &str,
+        applicator: &str,
+        flow: f64,
+        lead: f64,
+        lag: f64,
+    ) -> PyResult<()> {
+        self.hub
+            .define_brush(botrail_scene::coat::Brush {
+                name: name.to_string(),
+                applicator: applicator.to_string(),
+                flow,
+                lead,
+                lag,
+            })
+            .map_err(PyValueError::new_err)
+    }
+
+    fn remove_applicator(&self, name: &str) -> PyResult<()> {
+        if !self.hub.remove_applicator(name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown applicator `{name}`"
+            )));
+        }
+        Ok(())
+    }
+
+    fn remove_brush(&self, name: &str) -> PyResult<()> {
+        if !self.hub.remove_brush(name) {
+            return Err(PyValueError::new_err(format!("unknown brush `{name}`")));
+        }
+        Ok(())
+    }
+
+    #[getter]
+    fn applicator_names(&self) -> Vec<String> {
+        self.hub.applicator_names()
+    }
+
+    #[getter]
+    fn brush_names(&self) -> Vec<String> {
+        self.hub.brush_names()
+    }
+
+    /// `{"applicator", "flow", "lead", "lag"}` of a declared brush.
+    fn brush<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let b = self
+            .hub
+            .brush(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown brush `{name}`")))?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("applicator", b.applicator)?;
+        d.set_item("flow", b.flow)?;
+        d.set_item("lead", b.lead)?;
+        d.set_item("lag", b.lag)?;
+        Ok(d)
+    }
+
     fn add_toolpath(&self, py: Python<'_>, name: &str, toolpath: Bound<'_, PyAny>) -> PyResult<()> {
         let json: String = if let Ok(s) = toolpath.extract::<String>() {
             s
@@ -1591,7 +1723,96 @@ impl Scene {
             .hub
             .check_toolpath(name, index, tcp, &options)
             .map_err(PyValueError::new_err)?;
+        // The check leaves its marks on the path: the studio draws them
+        // over the strokes, and a clean re-check wipes them.
+        self.hub
+            .set_toolpath_marks(name, reach_marks(&report))
+            .map_err(PyValueError::new_err)?;
         Ok(ToolpathReport { inner: report })
+    }
+
+    /// Checks a toolpath as a spray program against obstacle `target`
+    /// before anything is baked: every feed sample (rapids are not
+    /// spraying) looks along its spray axis — the TCP's `-Z`, against
+    /// the tool axis — and reports standoff and incidence, judged against
+    /// `standoff` (acceptable band, meters) and `max_incidence` (steepest
+    /// acceptable angle, radians). Pure geometry: no robot is involved,
+    /// so this runs before one is chosen. `at` on the issues is meters
+    /// along the path.
+    ///
+    /// Like `check_toolpath`, the findings are drawn on the path in the
+    /// studio until the next check or edit of that path.
+    #[pyo3(signature = (name, target, standoff = None, max_incidence = std::f64::consts::FRAC_PI_4, max_range = None, step_pos = 0.005, step_rot = 0.05))]
+    #[allow(clippy::too_many_arguments)]
+    fn check_paint(
+        &self,
+        name: &str,
+        target: &str,
+        standoff: Option<(f64, f64)>,
+        max_incidence: f64,
+        max_range: Option<f64>,
+        step_pos: f64,
+        step_rot: f64,
+    ) -> PyResult<PaintReport> {
+        let limits = paint_limits(standoff, max_incidence, max_range)?;
+        let options = botrail_scene::toolpath::ToolpathOptions {
+            step_pos,
+            step_rot,
+            ..botrail_scene::toolpath::ToolpathOptions::default()
+        };
+        let report = self
+            .hub
+            .check_paint(name, target, &limits, &options)
+            .map_err(PyValueError::new_err)?;
+        self.hub
+            .set_toolpath_marks(name, paint_marks(&report))
+            .map_err(PyValueError::new_err)?;
+        Ok(PaintReport { inner: report })
+    }
+
+    /// Clears the marks a check left on toolpath `name`.
+    fn clear_toolpath_marks(&self, name: &str) -> PyResult<()> {
+        self.hub
+            .set_toolpath_marks(name, Vec::new())
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Puts a film map in the picture: the coated target's own colour
+    /// gives way to `film`'s heatmap mesh, registered as a display-only
+    /// obstacle named `{target}_film` (disabled for collision, cheap
+    /// collider) with its micron colour key attached, so the studio draws
+    /// the legend beside the viewport. Collision and planning still see
+    /// the original target; everything here is presentation. Returns the
+    /// obstacle name; remove it and re-show the target to undo.
+    #[pyo3(signature = (film, name = None))]
+    fn show_film(&self, film: PyRef<'_, FilmCoat>, name: Option<&str>) -> PyResult<String> {
+        let inner = &film.inner;
+        let owned = format!("{}_film", inner.target);
+        let name = name.unwrap_or(&owned);
+        let dir = cache_base().join("film");
+        let obj_path = write_cached_obj(&dir, &inner.mesh)?;
+        // Panels take light like paint does.
+        let material = botrail_scene::Material::new(0.1, 0.45);
+        let legend = botrail_scene::Legend {
+            title: film_legend_title(inner),
+            stops: film_legend_stops(inner),
+        };
+        let name = self
+            .hub
+            .show_display_mesh(
+                name,
+                botrail_model::Geometry::Mesh {
+                    path: obj_path,
+                    scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                },
+                inner.pose,
+                botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(&inner.mesh)),
+                material,
+                Some(legend),
+                Some(inner.target.as_str()),
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(name)
     }
 
     /// Progressive material removal for a baked cycle: carves `stock` in
@@ -1654,7 +1875,6 @@ impl Scene {
         // studio and the USD export read face colors back from),
         // content-addressed so re-runs reuse files.
         let dir = cache_base().join("carve");
-        std::fs::create_dir_all(&dir).map_err(|e| PyIOError::new_err(e.to_string()))?;
         let material = botrail_scene::Material::new(0.75, 0.35);
         let mut entries: Vec<(
             String,
@@ -1663,60 +1883,16 @@ impl Scene {
         )> = Vec::with_capacity(stage_list.len());
         let mut times = Vec::with_capacity(stage_list.len());
         for (i, stage) in stage_list.iter().enumerate() {
-            let hash = {
-                // FNV-1a over the vertex/index bytes: stable across runs
-                // and Rust versions, which is all a cache name needs.
-                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-                let mut eat = |bytes: &[u8]| {
-                    for b in bytes {
-                        h ^= *b as u64;
-                        h = h.wrapping_mul(0x1000_0000_01b3);
-                    }
-                };
-                for v in &stage.mesh.vertices {
-                    for c in v {
-                        eat(&c.to_le_bytes());
-                    }
-                }
-                for t in &stage.mesh.indices {
-                    for c in t {
-                        eat(&c.to_le_bytes());
-                    }
-                }
-                h
-            };
-            let obj_path = dir.join(format!("{hash:016x}.obj"));
-            let mtl_name = format!("{hash:016x}.mtl");
-            if !obj_path.exists() {
-                let (obj, mtl) = botrail_mesh::to_obj_with_mtl(&stage.mesh, &mtl_name);
-                std::fs::write(&obj_path, obj).map_err(|e| PyIOError::new_err(e.to_string()))?;
-                std::fs::write(dir.join(&mtl_name), mtl)
-                    .map_err(|e| PyIOError::new_err(e.to_string()))?;
-            }
+            let obj_path = write_cached_obj(&dir, &stage.mesh)?;
             // A cheap stand-in collider: the stage registers disabled, so
             // VHACD on it would be pure cost.
-            let half = {
-                let mut lo = [f64::INFINITY; 3];
-                let mut hi = [f64::NEG_INFINITY; 3];
-                for v in &stage.mesh.vertices {
-                    for a in 0..3 {
-                        lo[a] = lo[a].min(v[a]);
-                        hi[a] = hi[a].max(v[a]);
-                    }
-                }
-                nalgebra::Vector3::new(
-                    ((hi[0] - lo[0]) / 2.0).max(1e-6),
-                    ((hi[1] - lo[1]) / 2.0).max(1e-6),
-                    ((hi[2] - lo[2]) / 2.0).max(1e-6),
-                )
-            };
             entries.push((
                 format!("{stock}_cut/{i:03}"),
                 botrail_model::Geometry::Mesh {
-                    path: obj_path.clone(),
+                    path: obj_path,
                     scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
                 },
-                botrail_scene::ObstacleCollider::cuboid(half),
+                botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(&stage.mesh)),
             ));
             times.push(stage.time);
         }
@@ -1745,6 +1921,164 @@ impl Scene {
             &names,
             &times,
         );
+        self.hub.emit_timeline(&snapshot, &augmented);
+        Ok(SequenceTimeline {
+            inner: augmented,
+            scene: snapshot,
+        })
+    }
+
+    /// Progressive film build-up for a baked cycle: re-walks the coat in
+    /// `stages` equal time slices (default: one slice per second of
+    /// cycle, capped at 60 — the display lags the gun by at most one
+    /// slice), registers one display-only obstacle per changed slice
+    /// (grouped under `{target}_film/…`, cheap AABB colliders — they never
+    /// collide) each carrying the film's colour key, and returns the
+    /// timeline with the visibility windows injected: during playback —
+    /// studio, USD export, and a replayed recording alike — the target's
+    /// own colour gives way to the film building up on it. Optionally
+    /// writes the effective spray trigger as signal `trigger_signal`
+    /// (declare it first) for a timing lane and a spray-cone effect. The
+    /// target keeps colliding unchanged; everything here is presentation.
+    ///
+    /// Stages walk at `patch_size` — coarser than a `spray_coat` for the
+    /// numbers, since a mesh per stage is what a viewer has to carry —
+    /// with the same trigger rules (`applicator`, `gate`, brushes) as
+    /// `spray_coat`. Coloured by *amount* by default (a build-up is about
+    /// how much paint is there: the ramp — in `paint_color`, if given —
+    /// runs from a light wash to the full colour at the spec's high edge,
+    /// or the final maximum without one), on the target's own colour;
+    /// `style="spec"` colours every stage against the band instead.
+    #[pyo3(signature = (timeline, target, applicator = None, stages = None, patch_size = 0.01, dt = 0.01, gate = None, spec = None, facing = None, facing_tolerance = std::f64::consts::FRAC_PI_3, occlusion = true, robot = None, tcp_link = None, trigger_signal = None, style = "amount", paint_color = None, substrate = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn animate_paint(
+        &self,
+        py: Python<'_>,
+        timeline: PyRef<'_, SequenceTimeline>,
+        target: &str,
+        applicator: Option<Bound<'_, PyAny>>,
+        stages: Option<usize>,
+        patch_size: f64,
+        dt: f64,
+        gate: Option<String>,
+        spec: Option<(f64, f64)>,
+        facing: Option<[f64; 3]>,
+        facing_tolerance: f64,
+        occlusion: bool,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        trigger_signal: Option<&str>,
+        style: &str,
+        paint_color: Option<[f32; 3]>,
+        substrate: Option<[f32; 3]>,
+    ) -> PyResult<SequenceTimeline> {
+        let stages =
+            stages.unwrap_or_else(|| (timeline.inner.duration.ceil() as usize).clamp(1, 60));
+        let (index, _) = timeline.track_for(robot)?;
+        let model = &timeline.scene.robots()[index].model;
+        let tcp = match tcp_link {
+            Some(l) => resolve_link(&std::sync::Arc::clone(model), Some(l))?,
+            None => model.default_tcp_link(),
+        };
+        let gun = applicator.map(|a| applicator_from_py(py, a)).transpose()?;
+        let options = botrail_scene::coat::CoatOptions {
+            patch_size,
+            dt,
+            gate: gate.clone(),
+            spec,
+            max_incidence: std::f64::consts::FRAC_PI_3,
+            facing: facing.map(nalgebra::Vector3::from),
+            facing_tolerance,
+            occlusion,
+            style: film_style(style)?,
+            paint_color,
+            substrate,
+        };
+        let (film, stage_list) = botrail_scene::coat::spray_coat_staged(
+            &timeline.scene,
+            &timeline.inner,
+            target,
+            index,
+            tcp,
+            gun.as_ref(),
+            &options,
+            stages,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if stage_list.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "the cycle never sprays `{target}` — nothing to animate"
+            )));
+        }
+
+        // Stage meshes go to the cache as OBJ + MTL, content-addressed.
+        // Every stage carries the same colour key; the studio collapses
+        // identical keys into one card.
+        let dir = cache_base().join("film");
+        let material = botrail_scene::Material::new(0.1, 0.45);
+        let legend = botrail_scene::Legend {
+            title: film_legend_title(&film),
+            stops: film_legend_stops(&film),
+        };
+        let mut entries: Vec<(
+            String,
+            botrail_model::Geometry,
+            botrail_scene::ObstacleCollider,
+        )> = Vec::with_capacity(stage_list.len());
+        let mut times = Vec::with_capacity(stage_list.len());
+        for (i, stage) in stage_list.iter().enumerate() {
+            let obj_path = write_cached_obj(&dir, &stage.mesh)?;
+            entries.push((
+                format!("{target}_film/{i:03}"),
+                botrail_model::Geometry::Mesh {
+                    path: obj_path,
+                    scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                },
+                botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(&stage.mesh)),
+            ));
+            times.push(stage.time);
+        }
+
+        // Register on the live scene (one broadcast) and on the
+        // timeline's snapshot — the augmented timeline's own scene must
+        // hold the stages for its USD export to include them.
+        let mut snapshot = timeline.scene.clone();
+        for (name, geometry, collider) in &entries {
+            let _ = snapshot.remove_obstacle(name);
+            let final_name = snapshot.add_obstacle_with_collider(
+                name,
+                geometry.clone(),
+                film.pose,
+                collider.clone(),
+            );
+            let _ = snapshot.set_obstacle_enabled(&final_name, false);
+            let _ = snapshot.set_obstacle_material(&final_name, Some(material));
+            let _ = snapshot.set_obstacle_legend(&final_name, Some(legend.clone()));
+        }
+        let names = self
+            .hub
+            .add_display_stages(entries, film.pose, material, Some(legend));
+
+        let mut augmented = botrail_scene::carve::staged_timeline(
+            &timeline.inner,
+            target,
+            film.pose,
+            &names,
+            &times,
+        );
+        if let Some(name) = trigger_signal {
+            let track = botrail_scene::coat::trigger_track(
+                &timeline.scene,
+                &timeline.inner,
+                index,
+                gate.as_deref(),
+                name,
+                dt,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            augmented.signals.retain(|s| s.name != name);
+            augmented.signals.push(track);
+        }
         self.hub.emit_timeline(&snapshot, &augmented);
         Ok(SequenceTimeline {
             inner: augmented,
@@ -2497,6 +2831,82 @@ fn cache_base() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("botrail-cache"))
 }
 
+/// Writes `mesh` as OBJ + MTL into `dir` under a content-addressed name
+/// (FNV-1a over the vertex/index bytes: stable across runs and Rust
+/// versions, which is all a cache name needs), reusing an existing file.
+/// OBJ + MTL because that is the one format the studio and the USD
+/// export both read face colors back from. Returns the OBJ path.
+fn write_cached_obj(dir: &Path, mesh: &botrail_mesh::MeshData) -> PyResult<PathBuf> {
+    std::fs::create_dir_all(dir).map_err(|e| PyIOError::new_err(e.to_string()))?;
+    let hash = {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        };
+        for v in &mesh.vertices {
+            for c in v {
+                eat(&c.to_le_bytes());
+            }
+        }
+        for t in &mesh.indices {
+            for c in t {
+                eat(&c.to_le_bytes());
+            }
+        }
+        for c in &mesh.face_colors {
+            for ch in c {
+                eat(&ch.to_le_bytes());
+            }
+        }
+        h
+    };
+    let obj_path = dir.join(format!("{hash:016x}.obj"));
+    let mtl_name = format!("{hash:016x}.mtl");
+    if !obj_path.exists() {
+        let (obj, mtl) = botrail_mesh::to_obj_with_mtl(mesh, &mtl_name);
+        std::fs::write(&obj_path, obj).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        std::fs::write(dir.join(&mtl_name), mtl).map_err(|e| PyIOError::new_err(e.to_string()))?;
+    }
+    Ok(obj_path)
+}
+
+/// Half extents of a mesh's local AABB — a stand-in collider for
+/// display-only obstacles that never collide.
+fn mesh_half_extents(mesh: &botrail_mesh::MeshData) -> nalgebra::Vector3<f64> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for v in &mesh.vertices {
+        for a in 0..3 {
+            lo[a] = lo[a].min(v[a]);
+            hi[a] = hi[a].max(v[a]);
+        }
+    }
+    nalgebra::Vector3::new(
+        ((hi[0] - lo[0]) / 2.0).max(1e-6),
+        ((hi[1] - lo[1]) / 2.0).max(1e-6),
+        ((hi[2] - lo[2]) / 2.0).max(1e-6),
+    )
+}
+
+/// The legend's title: what the map is coloured by.
+fn film_legend_title(film: &botrail_scene::coat::FilmCoat) -> String {
+    match film.palette.style {
+        botrail_scene::coat::FilmStyle::Spec => "film vs spec [um]".to_string(),
+        _ => "film [um]".to_string(),
+    }
+}
+
+/// The colour key of a film map, as `Legend` stops.
+fn film_legend_stops(film: &botrail_scene::coat::FilmCoat) -> Vec<botrail_scene::LegendStop> {
+    botrail_scene::coat::film_legend(film)
+        .into_iter()
+        .map(|(color, label)| botrail_scene::LegendStop { color, label })
+        .collect()
+}
+
 /// A planned, time-parameterized joint trajectory.
 #[pyclass(frozen, module = "botrail._core")]
 struct Trajectory {
@@ -3081,6 +3491,206 @@ impl SequenceTimeline {
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(StockCarve { inner })
+    }
+
+    /// Sprays `applicator` along this cycle and reports the film left on
+    /// `target`: a thickness map as a colored mesh plus the numbers a
+    /// paint engineer reads — in-spec area, holidays, paint used.
+    ///
+    /// What sprays comes from the program: a toolpath whose strokes name
+    /// brushes (`scene.define_brush`) sprays each with that brush's
+    /// applicator, flow and trigger timing, and `applicator` may be left
+    /// out; one that names none sprays every feed move with `applicator`
+    /// (the dict `bt.paint.applicator(...)` builds), which is then
+    /// required. The applicator's footprint is *calibrated geometry, not
+    /// fluid dynamics*: no air
+    /// flow, no electrostatics, so the electrostatic wrap around edges is
+    /// not modeled and the absolute micrometers are only as good as the
+    /// pattern fed in. Relative structure — lap streaks, thick corners,
+    /// the film left by a stroke that lost speed — is the robust part,
+    /// because the walk runs on the *baked* trajectory.
+    ///
+    /// Two triggers decide when paint flows, and both must agree: `gate`
+    /// names the PLC's enable signal (without one it is taken as always
+    /// on), and the program's own trigger is the *feed* strokes of the
+    /// toolpath the robot was running — rapids and the approach planned
+    /// in from wherever the robot stood never spray, however the enable
+    /// was authored. A timeline that ran no toolpath has no program to
+    /// say when the process was on, so there the enable alone decides.
+    /// `spec` is the acceptable film band in meters. `style` picks how the
+    /// film map is coloured: `"amount"` (a sequential ramp, light to dark
+    /// — how much paint; in `paint_color` if given, so it looks like the
+    /// coat going on) or `"spec"` (diverging over the band: neutral on
+    /// target, blue thin, red thick — the verdict); `"auto"` is `"spec"`
+    /// when a spec was given. Bare patches wear `substrate`, or the
+    /// target's own colour.
+    ///
+    /// Statistics run over the surface the gun *addressed* — in range and
+    /// within `max_incidence` of square on. A part's back face is not a
+    /// holiday, and neither is the rim of a panel sprayed from above,
+    /// which would otherwise swamp the film map with one grazing band.
+    /// Deposition ignores the limit, so paint stays conserved.
+    ///
+    /// `facing` names the job by the way it faces — a world direction,
+    /// with only patches whose normal lies within `facing_tolerance` of
+    /// it counted (`(0, 0, 1)` for "the top"). Without it the addressed
+    /// set depends on the path: a rim swings into the mask as the gun
+    /// turns around past the edge, so lengthening the overtravel quietly
+    /// changes every denominator. Name the face for numbers that compare
+    /// across programs.
+    #[pyo3(signature = (target, applicator = None, robot = None, tcp_link = None, patch_size = 0.005, dt = 0.01, gate = None, spec = None, max_incidence = std::f64::consts::FRAC_PI_3, facing = None, facing_tolerance = std::f64::consts::FRAC_PI_3, occlusion = true, style = "auto", paint_color = None, substrate = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn spray_coat(
+        &self,
+        py: Python<'_>,
+        target: &str,
+        applicator: Option<Bound<'_, PyAny>>,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        patch_size: f64,
+        dt: f64,
+        gate: Option<String>,
+        spec: Option<(f64, f64)>,
+        max_incidence: f64,
+        facing: Option<[f64; 3]>,
+        facing_tolerance: f64,
+        occlusion: bool,
+        style: &str,
+        paint_color: Option<[f32; 3]>,
+        substrate: Option<[f32; 3]>,
+    ) -> PyResult<FilmCoat> {
+        let gun = applicator.map(|a| applicator_from_py(py, a)).transpose()?;
+        if let Some((lo, hi)) = spec {
+            if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+                return Err(PyValueError::new_err(format!(
+                    "spec must be (low, high) with low < high, got ({lo}, {hi})"
+                )));
+            }
+        }
+        let (index, _) = self.track_for(robot)?;
+        let model = &self.scene.robots()[index].model;
+        let tcp = match tcp_link {
+            Some(l) => resolve_link(&std::sync::Arc::clone(model), Some(l))?,
+            None => model.default_tcp_link(),
+        };
+        let options = botrail_scene::coat::CoatOptions {
+            patch_size,
+            dt,
+            gate,
+            spec,
+            max_incidence,
+            facing: facing.map(nalgebra::Vector3::from),
+            facing_tolerance,
+            occlusion,
+            style: film_style(style)?,
+            paint_color,
+            substrate,
+        };
+        let inner = botrail_scene::coat::spray_coat(
+            &self.scene,
+            &self.inner,
+            target,
+            index,
+            tcp,
+            gun.as_ref(),
+            &options,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(FilmCoat { inner })
+    }
+
+    /// Checks what the robot actually did against the teaching rules of a
+    /// spray program: every `dt` while the gun was spraying — `gate` high
+    /// (or no gate) *and* inside a feed stroke, the same two triggers
+    /// `spray_coat` uses — the TCP's spray axis is cast at `target` and
+    /// the standoff and incidence read off the hit. `standoff` is the
+    /// acceptable band in meters, `max_incidence` the steepest acceptable
+    /// angle in radians. `at` on the issues is timeline seconds.
+    ///
+    /// The baked twin of `Scene.check_paint`: that one checks the
+    /// authored path before any robot is involved; this one includes
+    /// whatever the solver did with the free spin and the tolerance it
+    /// was given.
+    #[pyo3(signature = (target, robot = None, tcp_link = None, gate = None, standoff = None, max_incidence = std::f64::consts::FRAC_PI_4, max_range = None, dt = 0.01))]
+    #[allow(clippy::too_many_arguments)]
+    fn paint_report(
+        &self,
+        target: &str,
+        robot: Option<&str>,
+        tcp_link: Option<&str>,
+        gate: Option<&str>,
+        standoff: Option<(f64, f64)>,
+        max_incidence: f64,
+        max_range: Option<f64>,
+        dt: f64,
+    ) -> PyResult<PaintReport> {
+        let (index, _) = self.track_for(robot)?;
+        let model = &self.scene.robots()[index].model;
+        let tcp = match tcp_link {
+            Some(l) => resolve_link(&std::sync::Arc::clone(model), Some(l))?,
+            None => model.default_tcp_link(),
+        };
+        let limits = paint_limits(standoff, max_incidence, max_range)?;
+        let inner = botrail_scene::coat::timeline_paint_report(
+            &self.scene,
+            &self.inner,
+            target,
+            index,
+            tcp,
+            gate,
+            dt,
+            &limits,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PaintReport { inner })
+    }
+
+    /// The timeline with the effective spray trigger — the enable signal
+    /// AND the program's own (feed strokes, brush lead/lag included) —
+    /// written as signal `name`, replacing any lane of that name. What a
+    /// timing chart shows as "spraying", and what a spray-cone effect
+    /// (`scene.add_spray_cone`) should bind to; declare `name` with
+    /// `scene.define_signal` first so the effect can be bound. Nothing
+    /// else about the timeline changes.
+    #[pyo3(signature = (name = "spraying", gate = None, robot = None, dt = 0.01))]
+    fn with_trigger_signal(
+        &self,
+        name: &str,
+        gate: Option<&str>,
+        robot: Option<&str>,
+        dt: f64,
+    ) -> PyResult<SequenceTimeline> {
+        let (index, _) = self.track_for(robot)?;
+        let track =
+            botrail_scene::coat::trigger_track(&self.scene, &self.inner, index, gate, name, dt)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut inner = self.inner.clone();
+        inner.signals.retain(|s| s.name != name);
+        inner.signals.push(track);
+        Ok(SequenceTimeline {
+            inner,
+            scene: self.scene.clone(),
+        })
+    }
+
+    /// The `(start, end, brush)` intervals a robot's toolpath moves spent
+    /// spraying — the program's own process trigger, as opposed to
+    /// rapids, gun-off moves, and the approach planned in from wherever
+    /// the robot stood; `brush` is `None` in a program that names none.
+    /// Merged, in time order. Empty when the robot ran no toolpath: then
+    /// there is no program to say when the process was on, and
+    /// `spray_coat` / `paint_report` take the whole timeline as process
+    /// time.
+    #[pyo3(signature = (robot = None))]
+    fn process_spans(&self, robot: Option<&str>) -> PyResult<Vec<(f64, f64, Option<String>)>> {
+        let (index, _) = self.track_for(robot)?;
+        Ok(self
+            .inner
+            .process_spans(index)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s.start, s.end, s.brush))
+            .collect())
     }
 
     /// Feed adherence of a toolpath the cycle ran (`StartToolpath`).
@@ -3879,6 +4489,282 @@ fn spin_mode(name: &str) -> PyResult<botrail_scene::toolpath::SpinMode> {
     }
 }
 
+/// A film-map colouring style by name.
+fn film_style(name: &str) -> PyResult<botrail_scene::coat::FilmStyle> {
+    use botrail_scene::coat::FilmStyle;
+    match name {
+        "auto" => Ok(FilmStyle::Auto),
+        "amount" => Ok(FilmStyle::Amount),
+        "spec" => Ok(FilmStyle::Spec),
+        other => Err(PyValueError::new_err(format!(
+            "style must be \"auto\", \"amount\" or \"spec\", got {other:?}"
+        ))),
+    }
+}
+
+/// An applicator as Python passes it: the dict `bt.paint.applicator`
+/// builds, or its JSON.
+fn applicator_from_py(
+    py: Python<'_>,
+    applicator: Bound<'_, PyAny>,
+) -> PyResult<botrail_scene::coat::Applicator> {
+    let json: String = if let Ok(s) = applicator.extract::<String>() {
+        s
+    } else {
+        py.import("json")?
+            .call_method1("dumps", (&applicator,))?
+            .extract()?
+    };
+    serde_json::from_str(&json)
+        .map_err(|e| PyValueError::new_err(format!("invalid applicator: {e}")))
+}
+
+/// The teaching rules of a spray program, validated. `max_range` defaults
+/// to twice the far end of the standoff band (or a meter without one):
+/// looking further than that finds scenery, not the part.
+fn paint_limits(
+    standoff: Option<(f64, f64)>,
+    max_incidence: f64,
+    max_range: Option<f64>,
+) -> PyResult<botrail_scene::coat::PaintLimits> {
+    if let Some((lo, hi)) = standoff {
+        if !(lo.is_finite() && hi.is_finite() && 0.0 <= lo && lo < hi) {
+            return Err(PyValueError::new_err(format!(
+                "standoff must be (low, high) with 0 <= low < high, got ({lo}, {hi})"
+            )));
+        }
+    }
+    if !(max_incidence.is_finite() && max_incidence > 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "max_incidence must be a positive angle in radians, got {max_incidence}"
+        )));
+    }
+    let max_range = max_range.unwrap_or_else(|| standoff.map(|(_, hi)| hi * 2.0).unwrap_or(1.0));
+    if !(max_range.is_finite() && max_range > 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "max_range must be positive, got {max_range}"
+        )));
+    }
+    Ok(botrail_scene::coat::PaintLimits {
+        standoff,
+        max_incidence,
+        max_range,
+    })
+}
+
+/// One legend swatch as Python passes it: `((r, g, b), label)`.
+type LegendStopArg = ((f32, f32, f32), String);
+
+/// Marks a face check leaves on its toolpath for the studio: one point per
+/// flagged sample, tagged by kind.
+fn reach_marks(report: &botrail_scene::toolpath::ToolpathReport) -> Vec<botrail_scene::PathMark> {
+    use botrail_scene::toolpath::IssueKind;
+    report
+        .issues
+        .iter()
+        .map(|i| botrail_scene::PathMark {
+            position: i.position,
+            kind: match i.kind {
+                IssueKind::Unreachable => "unreachable",
+                IssueKind::ConfigJump => "config_jump",
+                IssueKind::Collision => "collision",
+            }
+            .to_string(),
+        })
+        .collect()
+}
+
+fn paint_marks(report: &botrail_scene::coat::PaintReport) -> Vec<botrail_scene::PathMark> {
+    report
+        .issues
+        .iter()
+        .map(|i| botrail_scene::PathMark {
+            position: i.position,
+            kind: i.kind.as_str().to_string(),
+        })
+        .collect()
+}
+
+/// Face diagnosis of a spray program against a target: standoff and
+/// incidence at every spraying sample, judged against the teaching
+/// rules. Truthy iff clean (`ok`). `at` is meters along the path for
+/// `Scene.check_paint`, timeline seconds for `SequenceTimeline.paint_report`.
+#[pyclass(frozen, module = "botrail._core")]
+struct PaintReport {
+    inner: botrail_scene::coat::PaintReport,
+}
+
+#[pymethods]
+impl PaintReport {
+    /// True when the program met the target somewhere and, everywhere it
+    /// did, kept the standoff band and the incidence limit. Off-target
+    /// stretches (`no_target`) do not fail it — a raster's overtravel is
+    /// supposed to run past the part; they are reported for the marks,
+    /// `spans("no_target")`, and `on_target_ratio`.
+    #[getter]
+    fn ok(&self) -> bool {
+        self.inner.ok()
+    }
+
+    /// Probes taken (spraying samples only).
+    #[getter]
+    fn total_samples(&self) -> usize {
+        self.inner.probes.len()
+    }
+
+    /// Probes whose spray axis met the target.
+    #[getter]
+    fn hits(&self) -> usize {
+        self.inner.hits
+    }
+
+    /// Of the probes that met the target, the fraction inside every rule
+    /// — adherence to the teaching rules where they apply.
+    #[getter]
+    fn in_band_ratio(&self) -> f64 {
+        self.inner.in_band_ratio
+    }
+
+    /// Fraction of all probes that met the target at all — how much of
+    /// the spraying was pointed at the part. The rest is overspray, and
+    /// where per-stroke triggering would earn its keep.
+    #[getter]
+    fn on_target_ratio(&self) -> f64 {
+        self.inner.on_target_ratio
+    }
+
+    /// Standoff [m] over the hits (zero without any).
+    #[getter]
+    fn standoff_min(&self) -> f64 {
+        self.inner.standoff_min
+    }
+
+    #[getter]
+    fn standoff_max(&self) -> f64 {
+        self.inner.standoff_max
+    }
+
+    #[getter]
+    fn standoff_mean(&self) -> f64 {
+        self.inner.standoff_mean
+    }
+
+    /// Steepest incidence [rad] seen over the hits.
+    #[getter]
+    fn incidence_max(&self) -> f64 {
+        self.inner.incidence_max
+    }
+
+    /// One dict per flagged sample: `{sample, at, move, kind, position,
+    /// value}` with `kind` in `"no_target" | "too_far" | "too_close" |
+    /// "oblique"`, `position` the world gun-tip position, and `value` the
+    /// offending standoff [m] or incidence [rad].
+    #[getter]
+    fn issues<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        self.inner
+            .issues
+            .iter()
+            .map(|i| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("sample", i.sample)?;
+                d.set_item("at", i.at)?;
+                d.set_item("move", i.move_index)?;
+                d.set_item("kind", i.kind.as_str())?;
+                d.set_item("position", (i.position.x, i.position.y, i.position.z))?;
+                d.set_item("value", i.value)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// One dict per probe: `{at, move, position, standoff, incidence}`
+    /// (`standoff`/`incidence` `None` when the target was missed) — the
+    /// raw material for colouring a path by distance.
+    #[getter]
+    fn probes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        self.inner
+            .probes
+            .iter()
+            .map(|p| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("at", p.at)?;
+                d.set_item("move", p.move_index)?;
+                d.set_item("position", (p.position.x, p.position.y, p.position.z))?;
+                d.set_item("standoff", p.standoff)?;
+                d.set_item("incidence", p.incidence)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Runs of consecutive flagged samples of one kind, as `(at, at)`
+    /// ranges: the stretches of the program to look at.
+    fn spans(&self, kind: &str) -> PyResult<Vec<(f64, f64)>> {
+        use botrail_scene::coat::PaintIssueKind;
+        let kind = match kind {
+            "no_target" => PaintIssueKind::NoTarget,
+            "too_far" => PaintIssueKind::TooFar,
+            "too_close" => PaintIssueKind::TooClose,
+            "oblique" => PaintIssueKind::Oblique,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "kind must be one of no_target/too_far/too_close/oblique, got {other:?}"
+                )))
+            }
+        };
+        Ok(self.inner.spans(kind))
+    }
+
+    fn __bool__(&self) -> bool {
+        self.inner.ok()
+    }
+
+    fn __repr__(&self) -> String {
+        let n = self.inner.probes.len();
+        use botrail_scene::coat::PaintIssueKind::*;
+        let count = |k| self.inner.issues.iter().filter(|i| i.kind == k).count();
+        let off = count(NoTarget);
+        let on = if off > 0 {
+            format!(", {} of {n} off target", off)
+        } else {
+            format!(", {n} samples")
+        };
+        if self.inner.ok() {
+            format!(
+                "PaintReport(ok{on}: standoff {:.0}-{:.0} mm, incidence <= {:.0} deg)",
+                self.inner.standoff_min * 1e3,
+                self.inner.standoff_max * 1e3,
+                self.inner.incidence_max.to_degrees(),
+            )
+        } else if self.inner.hits == 0 {
+            format!("PaintReport(never met the target in {n} samples)")
+        } else {
+            // Distinct samples: one can be both too far and oblique.
+            let flagged = {
+                let mut seen: Vec<usize> = self
+                    .inner
+                    .issues
+                    .iter()
+                    .filter(|i| i.kind != NoTarget)
+                    .map(|i| i.sample)
+                    .collect();
+                seen.dedup();
+                seen.len()
+            };
+            format!(
+                "PaintReport({} of {} on-target samples flagged: {} too far, {} too close, {} oblique{on}; standoff {:.0}-{:.0} mm)",
+                flagged,
+                self.inner.hits,
+                count(TooFar),
+                count(TooClose),
+                count(Oblique),
+                self.inner.standoff_min * 1e3,
+                self.inner.standoff_max * 1e3,
+            )
+        }
+    }
+}
+
 /// How a bake held the commanded feed: the floors make `length / feed` a
 /// hard lower bound, so joints can only slow a cut — this says where they
 /// did, and which axis owned it.
@@ -4028,6 +4914,215 @@ impl StockCarve {
     }
 }
 
+/// The film a cycle sprayed onto one target: a thickness map plus the
+/// numbers. Thicknesses are meters (divide by 1e-6 for microns), volumes
+/// cubic meters (1e6 for cc), areas square meters.
+#[pyclass(frozen, module = "botrail._core")]
+struct FilmCoat {
+    inner: botrail_scene::coat::FilmCoat,
+}
+
+#[pymethods]
+impl FilmCoat {
+    /// Area-weighted mean film [m].
+    #[getter]
+    fn mean(&self) -> f64 {
+        self.inner.mean
+    }
+
+    /// Thinnest patch [m] — zero whenever anything went uncoated.
+    #[getter]
+    fn min(&self) -> f64 {
+        self.inner.min
+    }
+
+    /// Thickest patch [m]. Where runs and sags would start on a real part.
+    #[getter]
+    fn max(&self) -> f64 {
+        self.inner.max
+    }
+
+    /// Area-weighted standard deviation of the film [m] — the number that
+    /// moves when lap overlap changes.
+    #[getter]
+    fn sigma(&self) -> f64 {
+        self.inner.sigma
+    }
+
+    /// Fraction of the target area inside the spec band, or `None` when
+    /// `spray_coat` was called without one. The headline quality number.
+    #[getter]
+    fn in_spec_ratio(&self) -> Option<f64> {
+        self.inner.in_spec_ratio
+    }
+
+    /// Area that never took any paint [m^2] — holidays. Resolution-bound:
+    /// nothing smaller than a patch can be seen.
+    #[getter]
+    fn uncoated_area(&self) -> f64 {
+        self.inner.uncoated_area
+    }
+
+    /// Area below / above the spec band [m^2]; zero without a spec.
+    #[getter]
+    fn thin_area(&self) -> f64 {
+        self.inner.thin_area
+    }
+
+    #[getter]
+    fn thick_area(&self) -> f64 {
+        self.inner.thick_area
+    }
+
+    /// Area the gun worked over [m^2] — in range and facing it at some
+    /// point. Every statistic above is over this, not over the target's
+    /// whole skin: a part's back face is not a holiday.
+    #[getter]
+    fn total_area(&self) -> f64 {
+        self.inner.total_area
+    }
+
+    /// Whole tessellated area of the target [m^2], worked or not.
+    #[getter]
+    fn surface_area(&self) -> f64 {
+        self.inner.surface_area
+    }
+
+    /// Paint delivered while the gun was on [m^3].
+    #[getter]
+    fn sprayed_volume(&self) -> f64 {
+        self.inner.sprayed_volume
+    }
+
+    /// Paint that landed on this target [m^3] — anywhere on it, including
+    /// the grazing faces the incidence mask keeps out of the statistics.
+    /// So this is a shade more than `mean * total_area`.
+    #[getter]
+    fn deposited_volume(&self) -> f64 {
+        self.inner.deposited_volume
+    }
+
+    /// Deposited over sprayed. Below the applicator's nominal transfer
+    /// efficiency by whatever overshot the part or landed elsewhere.
+    #[getter]
+    fn effective_transfer_efficiency(&self) -> f64 {
+        self.inner.effective_transfer_efficiency()
+    }
+
+    #[getter]
+    fn gun_on_time(&self) -> f64 {
+        self.inner.gun_on_time
+    }
+
+    /// Seconds the gun spent closer to the surface than the pattern
+    /// measurement can speak for. Nonzero means the film is under-reported
+    /// there and the standoff wants looking at — not a rounding detail.
+    #[getter]
+    fn too_close_time(&self) -> f64 {
+        self.inner.too_close_time
+    }
+
+    /// Paint that landed on *other* obstacles [m^3], as `{name: volume}`
+    /// — the overspray, and where a masking leak shows: a fixture that
+    /// took paint is a fixture that was not masked. Enabled obstacles
+    /// only. From a ray quadrature of the footprint, so approximate at
+    /// the percent level.
+    fn overspray<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in &self.inner.overspray {
+            d.set_item(name, *v)?;
+        }
+        Ok(d)
+    }
+
+    /// Paint that landed nowhere in the scene [m^3]: past every obstacle,
+    /// plus the atomization loss (`1 - transfer_efficiency`) that never
+    /// reaches any surface. `sprayed - deposited - sum(overspray)`.
+    #[getter]
+    fn lost_volume(&self) -> f64 {
+        self.inner.lost_volume
+    }
+
+    /// Paint sprayed per brush [m^3], `{brush: volume}`; a program
+    /// without brushes reports one entry named `""`.
+    fn sprayed_by_brush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in &self.inner.sprayed_by_brush {
+            d.set_item(name, *v)?;
+        }
+        Ok(d)
+    }
+
+    /// Paint that landed on the target per brush [m^3], `{brush: volume}`.
+    fn deposited_by_brush<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        for (name, v) in &self.inner.deposited_by_brush {
+            d.set_item(name, *v)?;
+        }
+        Ok(d)
+    }
+
+    #[getter]
+    fn patch_count(&self) -> usize {
+        self.inner.patch_count
+    }
+
+    #[getter]
+    fn patch_size(&self) -> f64 {
+        self.inner.patch_size
+    }
+
+    /// Per-patch film [m], aligned with the mesh triangles.
+    #[getter]
+    fn thickness(&self) -> Vec<f64> {
+        self.inner.thickness.clone()
+    }
+
+    /// World pose to place the film map at (the target's pose at coat
+    /// time).
+    #[getter]
+    fn pose(&self) -> hub::PoseArrays {
+        let t = self.inner.pose.translation;
+        let q = self.inner.pose.rotation.coords;
+        ([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
+    }
+
+    /// Writes the film map as OBJ plus a sibling `.mtl`: the thickness
+    /// banded onto a sequential ramp as face colors, bare substrate in a
+    /// dark neutral. The studio and the USD export both read face colors
+    /// back from this format (add the obstacle *without* a `color=`
+    /// override).
+    fn save_obj(&self, path: std::path::PathBuf) -> PyResult<()> {
+        let mtl_path = path.with_extension("mtl");
+        let mtl_name = mtl_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or_else(|| PyValueError::new_err("path has no file name"))?;
+        let (obj, mtl) = botrail_mesh::to_obj_with_mtl(&self.inner.mesh, &mtl_name);
+        std::fs::write(&path, obj).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        std::fs::write(&mtl_path, mtl).map_err(|e| PyIOError::new_err(e.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let spec = match self.inner.in_spec_ratio {
+            Some(r) => format!(", {:.1}% in spec", r * 100.0),
+            None => String::new(),
+        };
+        format!(
+            "FilmCoat({:.1} um mean, {:.1}-{:.1} um{}, {:.1} cc on target, {} patches)",
+            self.inner.mean * 1e6,
+            self.inner.min * 1e6,
+            self.inner.max * 1e6,
+            spec,
+            self.inner.deposited_volume * 1e6,
+            self.inner.patch_count,
+        )
+    }
+}
+
 /// Face diagnosis of a toolpath: every sample attempted, all failures
 /// collected. Truthy iff clean (`ok`).
 #[pyclass(frozen, module = "botrail._core")]
@@ -4152,6 +5247,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ToolpathReport>()?;
     m.add_class::<FeedReport>()?;
     m.add_class::<StockCarve>()?;
+    m.add_class::<FilmCoat>()?;
+    m.add_class::<PaintReport>()?;
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;

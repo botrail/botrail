@@ -1779,6 +1779,7 @@ mod tests {
                     }],
                     duration: 0.5,
                     feed_report: None,
+                    process_spans: Vec::new(),
                 },
                 PlannedMove {
                     sequence: "s".into(),
@@ -1791,6 +1792,7 @@ mod tests {
                     }],
                     duration: 1.0,
                     feed_report: None,
+                    process_spans: Vec::new(),
                 },
             ],
             base: None,
