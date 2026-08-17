@@ -1,11 +1,15 @@
 """botrail: ROS-free robot motion authoring with a web-based 3D studio."""
 
-from . import paint, seq, toolpath
+from . import io, paint, seq, toolpath
 from ._core import (
     Clearance,
     FeedReport,
     FilmCoat,
     IkResult,
+    IoFinding,
+    IoMap,
+    IoPoint,
+    IoReport,
     PaintReport,
     Robot,
     Scene,
@@ -26,6 +30,10 @@ __all__ = [
     "FeedReport",
     "FilmCoat",
     "IkResult",
+    "IoFinding",
+    "IoMap",
+    "IoPoint",
+    "IoReport",
     "PaintReport",
     "Robot",
     "Scene",
@@ -37,6 +45,7 @@ __all__ = [
     "ToolpathReport",
     "Trajectory",
     "catalog_package",
+    "io",
     "paint",
     "seq",
     "studio",

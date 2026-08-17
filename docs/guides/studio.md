@@ -113,15 +113,79 @@ for a beat, so the cause of every transition stays readable at playback
 speed. Clicking any baked step seeks the transport to the moment it
 began; the chart stays up across reloads until closed.
 
+The chart, the I/O table and the topology below are three views of **one
+panel** over the viewport — each is wide, and stacked they hid each other
+— so opening one closes the others, and the panel's tab strip (SFC ·
+I/O · TOPOLOGY) switches between them.
+
+## The I/O table — ⚡ I/O
+
+**⚡ I/O** (in RUN, or the `io` button on the dock) overlays the
+[I/O map](io-map.md) the programs derive: one row per point — direction,
+kind, the rule that produced it, its host, the channel it is bound to
+(`UR.DI2 · %IX0.2` once bound), tag, status, the steps that write and wait
+on it — and, while a bake is loaded, the **live** level of the lane behind
+it at the playhead. The report's findings sit under the table; *unbound*
+filters to what still needs a channel, and the magazine rows (cosmetic)
+stay folded. Clicking a sensor or device row selects it in the scene
+tree. The assignment layer is edited here: the channel cell is a select
+over the channels the point's host (and the stations uplinked to it)
+offer — used ones named and greyed — **auto-assign** gives every unbound
+point the first free compatible channel, and the footer declares and
+undeclares points (role, kind, safety, pair). Nodes are made in Layout:
+the **I/O nodes** inspector adds a PLC / robot controller / remote I/O /
+safety PLC, and for the node selected in the tree edits its robots,
+programs, uplink and model, and its channel table through templates
+(`+ DI×8` … `+ UR standard`, with a base address that counts up). Every
+edit is one message the server validates the way the Python API does, and
+`generate_python` writes it all back as `add_io_node` / `bind_input` /
+`declare_io`.
+
+![The I/O table over the viewport, a fault scenario's stall on the dock](../assets/studio/io.png)
+
+The scene tree lists the I/O nodes (🔌 `UR · robot controller`, with
+bound / declared channel counts); selecting one opens a read-only inspector
+in Layout — kind, programs, robots, uplink, and the channel table with the
+point on each channel. In RUN, choosing a scenario shows what it changes;
+a scenario with **faults** (`bt.io.stuck`, `bt.io.open`) lists them, and a
+run under it that stalls is that scenario's answer, not a broken cell: the
+last good bake stays on the dock and the diagnosis — the step that stopped
+and the forced point — is shown beside it, in the same words
+`simulate_scenarios` collects in `runs.errors`.
+
+## The topology — ⌗ Topology
+
+**⌗ Topology** (in RUN, or `topo` on the dock) draws the electrical
+topology over the viewport: one lane per controller — its programs, the
+stations hanging off it (`RIO1 · PROFINET`), one row per point with its
+channel and address — the field side on the right (sensors, devices,
+robots, field terminals), the wires between them, and the handshake
+signals between controllers as vertical buses in the gutter, one per
+signal, a writer tap (■) and a tap (●) per reader. Implicit hosts
+(`<cell>`, `<robot>`) draw dashed; unbound rows and their wires amber and
+dotted, with a count in the lane header. The layer chips filter the way
+`export_topology(layers=...)` does — *functional* adds program → program
+routes on the left, *io* / *network* / *wiring* / *safety* pick the
+edges — and while a bake plays, every wire with a lane behind it colours
+green / grey with its live level. Clicking a field node selects it in the
+scene tree, a lane header selects the node, and a row lights its lane on
+the dock. The layout is deterministic and never saved: the graph is the
+one `export_topology` writes as DOT / Mermaid, so the figure in a design
+document and this overlay cannot disagree.
+
+![The topology of the weld line, third placement, mid-cycle](../assets/studio/topology.png)
+
 ## The timeline dock
 
 The bottom dock is the one transport bar: every playback — a motion
 preview, a baked cycle, a loaded recording — plays and scrubs here. For a
 baked sequence it is a timing chart: the cycle time (*cycle 15.56s* above),
 one colored band per step, and one lane per signal — internal relays,
-sensors, device running-states. The playback cursor drives the viewport.
-Recordings loaded with `play_usd_animation` — including two-robot bakes and
-Isaac captures — play through the same dock.
+sensors, device running-states — each lane wearing the channel chip of the
+point bound to it, so the chart doubles as the addressed I/O waveform
+sheet. The playback cursor drives the viewport. Recordings loaded with
+`play_usd_animation` — including two-robot bakes and Isaac captures — play
+through the same dock.
 
 ## Serving details
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type { SequenceMsg, StepMsg } from "../protocol";
+import type { ScenarioMsg, SequenceMsg, StepMsg } from "../protocol";
 import { actionLabel, conditionLabel } from "../seqLabels";
 import { robotByName, useStudioStore } from "../store";
 import {
@@ -24,11 +24,24 @@ export function SequencePanel() {
   );
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const error = useStudioStore((s) => s.sequenceError);
+  const errorScenario = useStudioStore((s) => s.sequenceErrorScenario);
   const timeline = useStudioStore((s) => s.timeline);
   const beginSequenceSim = useStudioStore((s) => s.beginSequenceSim);
   const connected = useStudioStore((s) => s.connection === "connected");
   const sfcOpen = useStudioStore((s) => s.sfcOpen);
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
+  const ioOpen = useStudioStore((s) => s.ioOpen);
+  const setIoOpen = useStudioStore((s) => s.setIoOpen);
+  const topoOpen = useStudioStore((s) => s.topoOpen);
+  const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
+  // Primitive selectors: an object-returning selector re-renders on
+  // every store change (and can loop) — see zustand's useShallow note.
+  const ioPointCount = useStudioStore(
+    (s) => s.io.points.filter((p) => p.status !== "cosmetic").length,
+  );
+  const ioErrorCount = useStudioStore(
+    (s) => s.io.findings.filter((f) => f.severity === "error").length,
+  );
 
   const sequence: SequenceMsg =
     sequences.find((s) => s.name === SEQUENCE_NAME) ??
@@ -312,6 +325,14 @@ export function SequencePanel() {
               ))}
             </select>
           )}
+          {/* What the chosen world changes — and, for a fault, which input
+              it pins: a run under it that stalls is the expected result,
+              and the dock's diagnosis names the forced point. */}
+          {runScenario && (
+            <ScenarioSummary
+              scenario={scenarios.find((s) => s.name === runScenario)}
+            />
+          )}
           <button
             className="plan-go"
             onClick={onSimulate}
@@ -324,16 +345,79 @@ export function SequencePanel() {
           >
             {multi ? `Simulate (${included.length} programs)` : "Simulate"}
           </button>
-          <button
-            className={sfcOpen ? "active" : undefined}
-            onClick={() => setSfcOpen(!sfcOpen)}
-            title="the programs as an SFC chart over the viewport"
-          >
-            ◫ SFC chart
-          </button>
-          {error && <div className="plan-error">{error}</div>}
+          <div className="seg">
+            <button
+              className={sfcOpen ? "active" : undefined}
+              onClick={() => setSfcOpen(!sfcOpen)}
+              title="the programs as an SFC chart over the viewport"
+            >
+              ◫ SFC chart
+            </button>
+            <button
+              className={ioOpen ? "active" : undefined}
+              onClick={() => setIoOpen(!ioOpen)}
+              title="the I/O table the programs derive — points, channels, findings, live levels"
+            >
+              ⚡ I/O
+              {ioPointCount > 0 && <span className="seq-cond"> {ioPointCount}</span>}
+              {ioErrorCount > 0 && <span className="badge bad"> {ioErrorCount}</span>}
+            </button>
+            <button
+              className={topoOpen ? "active" : undefined}
+              onClick={() => setTopoOpen(!topoOpen)}
+              title="the electrical topology — controllers, channels, wires, handshakes — over the viewport"
+            >
+              ⌗ Topology
+            </button>
+          </div>
+          {/* A stall under a fault scenario is that scenario's answer, not
+              a broken cell: it reads as a diagnosis, the same words the
+              dock shows, not as an error. */}
+          {error && (
+            <div
+              className={
+                errorScenario &&
+                (scenarios.find((s) => s.name === errorScenario)?.faults ?? []).length > 0
+                  ? "plan-diagnosis"
+                  : "plan-error"
+              }
+            >
+              {errorScenario ? `⧉ ${errorScenario} — ` : ""}
+              {error}
+            </div>
+          )}
         </div>
       </Section>
     </>
   );
 }
+
+/** One line per delta kind of a scenario; faults spelled out, since they
+ * are the rows that change what a run *means* (a stall is the answer). */
+function ScenarioSummary({ scenario }: { scenario: ScenarioMsg | undefined }) {
+  if (!scenario) return null;
+  const parts: string[] = [];
+  const signals = scenario.signals ?? [];
+  const obstacles = scenario.obstacles ?? [];
+  const joints = scenario.joints ?? [];
+  const faults = scenario.faults ?? [];
+  if (signals.length > 0) {
+    parts.push(signals.map((s) => `${s.name}=${s.value ? "1" : "0"}`).join(", "));
+  }
+  if (obstacles.length > 0) parts.push(`${obstacles.length} obstacle pose${obstacles.length > 1 ? "s" : ""}`);
+  if (joints.length > 0) parts.push(`${joints.length} start configuration${joints.length > 1 ? "s" : ""}`);
+  return (
+    <div className="scenario-summary">
+      {parts.length > 0 && <div className="seq-cond">{parts.join(" · ")}</div>}
+      {faults.map((f, i) => (
+        <div key={i} className="scenario-fault" title="forced for the whole run">
+          ⚡ {f.kind === "stuck" ? `stuck ${f.target}=${f.value ? "1" : "0"}` : `open ${f.target}`}
+        </div>
+      ))}
+      {parts.length === 0 && faults.length === 0 && (
+        <div className="seq-cond">no deltas</div>
+      )}
+    </div>
+  );
+}
+

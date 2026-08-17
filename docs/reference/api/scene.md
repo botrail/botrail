@@ -21,3 +21,30 @@ scene.set_robot_base_pose(*scene.frame("env/World/mount"))
 ```
 
 ::: botrail.Scene
+
+## IoPoint
+
+Returned by [`Scene.io_points`][botrail.Scene.io_points]: one derived I/O
+point of the cell (see [The I/O map](../../guides/io-map.md)).
+
+::: botrail.IoPoint
+
+## IoReport
+
+Returned by [`Scene.io_report`][botrail.Scene.io_report]: the findings over
+the derived I/O map, by severity.
+
+::: botrail.IoReport
+
+## IoFinding
+
+One entry of an [`IoReport`][botrail.IoReport].
+
+::: botrail.IoFinding
+
+## IoMap
+
+Returned by [`Scene.io_map`][botrail.Scene.io_map]: the assignment layer as
+authored (nodes, bindings, declarations) — hand it to `to_script(io=...)`.
+
+::: botrail.IoMap

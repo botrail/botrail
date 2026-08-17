@@ -6,6 +6,9 @@ import type {
   FrameMsg,
   ToolpathOverlayMsg,
   IkStatusMsg,
+  IoFindingMsg,
+  IoMap,
+  IoPointMsg,
   MotionMsg,
   ObstacleMsg,
   PoseMsg,
@@ -18,6 +21,7 @@ import type {
   SignalDefMsg,
   SignalTrackMsg,
   StepSpanMsg,
+  TopologyMsg,
 } from "./protocol";
 import {
   samplePlayback,
@@ -72,6 +76,87 @@ function persistSfcOpen(open: boolean): boolean {
   return open;
 }
 
+const IO_KEY = "botrail-studio.io";
+
+function initialIoOpen(): boolean {
+  try {
+    return localStorage.getItem(IO_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistIoOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(IO_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
+const TOPO_KEY = "botrail-studio.topo";
+
+function initialTopoOpen(): boolean {
+  try {
+    return localStorage.getItem(TOPO_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistTopoOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(TOPO_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
+/**
+ * The SFC chart, the I/O table and the topology share the one panel over
+ * the viewport (they overlapped when all three were open, and none of
+ * them was readable), so at most one is open: opening one closes the
+ * others, and the panel's tab strip switches. Older stored flags may say
+ * several were open — the newest feature wins.
+ */
+function initialOverlays(): { sfcOpen: boolean; ioOpen: boolean; topoOpen: boolean } {
+  const topo = initialTopoOpen();
+  const io = !topo && initialIoOpen();
+  const sfc = !topo && !io && initialSfcOpen();
+  return { sfcOpen: sfc, ioOpen: io, topoOpen: topo };
+}
+
+function persistOverlays(o: { sfcOpen: boolean; ioOpen: boolean; topoOpen: boolean }) {
+  persistSfcOpen(o.sfcOpen);
+  persistIoOpen(o.ioOpen);
+  persistTopoOpen(o.topoOpen);
+  return o;
+}
+
+/** The I/O map as the server sends it: the authored assignment layer,
+ * the points derived from the sequences, the report, and the topology
+ * graph. Re-sent in full whenever sequences, sensors, devices or the
+ * layer itself change. */
+export interface IoState {
+  /** The authored layer, with every list present (the wire omits empty
+   * ones) so selectors return stable references. */
+  io: Required<IoMap>;
+  points: IoPointMsg[];
+  findings: IoFindingMsg[];
+  topology: TopologyMsg;
+}
+
+function emptyIo(): IoState {
+  return {
+    io: { nodes: [], bindings: [], decls: [] },
+    points: [],
+    findings: [],
+    topology: { nodes: [], edges: [] },
+  };
+}
+
 
 /**
  * Selection steps for a viewport click on `name`, outermost first, ending
@@ -102,7 +187,9 @@ export type Selection =
   | { type: "robot"; robot: string }
   /** Fixtures have no gizmo; selecting one opens its form. */
   | { type: "sensor"; name: string }
-  | { type: "device"; name: string };
+  | { type: "device"; name: string }
+  /** An I/O node (controller / station); read-only details in Layout. */
+  | { type: "io_node"; name: string };
 
 /** Per-robot UI state: the description plus the live server state. */
 export interface RobotUiState {
@@ -247,11 +334,22 @@ export interface StudioState {
   devices: DeviceMsg[];
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
+  /** The I/O map (see `IoState`); re-sent in full on change. */
+  io: IoState;
   /** The SFC chart overlay over the viewport (persisted). */
   sfcOpen: boolean;
+  /** The I/O table overlay over the viewport (persisted). */
+  ioOpen: boolean;
+  /** The topology diagram overlay over the viewport (persisted). */
+  topoOpen: boolean;
+  /** A signal lane picked in the topology diagram, lit on the dock. */
+  highlightLane: string | null;
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   sequenceError: string | null;
+  /** The scenario the failed run was asked for (`sequenceError` set),
+   * so the diagnosis can say which world did not complete. */
+  sequenceErrorScenario: string | null;
   /** Step bands, robot lanes + signal lanes of the last baked timeline. */
   timeline: {
     duration: number;
@@ -293,6 +391,7 @@ export interface StudioState {
   selectGroup: (path: string) => void;
   selectSensor: (name: string) => void;
   selectDevice: (name: string) => void;
+  selectIoNode: (name: string) => void;
   /** Motion-tab list click; an existing motion also retargets the robot
    * to its owner, so added waypoints always fit the motion's DOF. */
   selectMotion: (name: string) => void;
@@ -304,6 +403,9 @@ export interface StudioState {
   setSelectedRobot: (robot: string) => void;
   setActiveTab: (tab: SidebarTab) => void;
   setSfcOpen: (open: boolean) => void;
+  setIoOpen: (open: boolean) => void;
+  setTopoOpen: (open: boolean) => void;
+  setHighlightLane: (lane: string | null) => void;
   /**
    * Viewport pick: raise the tab holding the picked thing's tools
    * (robot → Motion, obstacle → Layout). The Sequence tab is sticky —
@@ -339,7 +441,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   minDistance: null,
   selection: { type: "tcp", robot: "" },
   activeTab: initialTab(),
-  sfcOpen: initialSfcOpen(),
+  ...initialOverlays(),
   selectedMotion: null,
   playback: null,
   playbackTime: 0,
@@ -358,8 +460,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   flashes: [],
   devices: [],
   scenarios: [],
+  io: emptyIo(),
+  highlightLane: null,
   sequenceSimulating: false,
   sequenceError: null,
+  sequenceErrorScenario: null,
   timeline: null,
   recording: null,
   recordingError: null,
@@ -416,8 +521,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           sensors: [],
           devices: [],
           scenarios: [],
+          io: emptyIo(),
+          highlightLane: null,
           sequenceSimulating: false,
           sequenceError: null,
+          sequenceErrorScenario: null,
           timeline: null,
           motionPlanning: false,
           motionError: null,
@@ -489,6 +597,28 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       });
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
+    } else if (msg.type === "io") {
+      set((s) => {
+        const sel = s.selection;
+        const gone =
+          sel.type === "io_node" &&
+          !(msg.io.nodes ?? []).some((n) => n.name === sel.name);
+        return {
+          io: {
+            io: {
+              nodes: msg.io.nodes ?? [],
+              bindings: msg.io.bindings ?? [],
+              decls: msg.io.decls ?? [],
+            },
+            points: msg.points,
+            findings: msg.findings,
+            topology: msg.topology,
+          },
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
+        };
+      });
     } else if (msg.type === "sequence_result") {
       if (msg.ok && msg.timeline) {
         // The SFC chart's flatten mirror must agree with the rollout's —
@@ -505,6 +635,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         set({
           sequenceSimulating: false,
           sequenceError: null,
+          sequenceErrorScenario: null,
           timeline: {
             duration: msg.timeline.duration,
             stepSpans: msg.timeline.step_spans,
@@ -523,9 +654,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           recording: null,
         });
       } else {
+        // The last good bake stays on the dock; the diagnosis (a stall
+        // under a fault scenario names the step and the forced point)
+        // is shown beside it, not as a broken screen.
         set({
           sequenceSimulating: false,
           sequenceError: msg.error ?? "simulation failed",
+          sequenceErrorScenario: msg.scenario ?? null,
         });
       }
     } else if (msg.type === "recording_result") {
@@ -661,6 +796,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   selectGroup: (path) => set({ selection: { type: "group", path } }),
   selectSensor: (name) => set({ selection: { type: "sensor", name } }),
   selectDevice: (name) => set({ selection: { type: "device", name } }),
+  selectIoNode: (name) => set({ selection: { type: "io_node", name } }),
   selectMotion: (name) =>
     set((s) => {
       const motion = s.motions.find((m) => m.name === name);
@@ -719,7 +855,31 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : null,
     })),
   setActiveTab: (tab) => set({ activeTab: persistTab(tab) }),
-  setSfcOpen: (open) => set({ sfcOpen: persistSfcOpen(open) }),
+  setSfcOpen: (open) =>
+    set((s) =>
+      persistOverlays(
+        open
+          ? { sfcOpen: true, ioOpen: false, topoOpen: false }
+          : { sfcOpen: false, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
+      ),
+    ),
+  setIoOpen: (open) =>
+    set((s) =>
+      persistOverlays(
+        open
+          ? { sfcOpen: false, ioOpen: true, topoOpen: false }
+          : { sfcOpen: s.sfcOpen, ioOpen: false, topoOpen: s.topoOpen },
+      ),
+    ),
+  setTopoOpen: (open) =>
+    set((s) =>
+      persistOverlays(
+        open
+          ? { sfcOpen: false, ioOpen: false, topoOpen: true }
+          : { sfcOpen: s.sfcOpen, ioOpen: s.ioOpen, topoOpen: false },
+      ),
+    ),
+  setHighlightLane: (lane) => set({ highlightLane: lane }),
   focusTab: (target) =>
     set((s) =>
       s.activeTab === "sequence"
@@ -727,7 +887,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         : { activeTab: persistTab(target === "robot" ? "motion" : "layout") },
     ),
 
-  beginSequenceSim: () => set({ sequenceSimulating: true, sequenceError: null }),
+  beginSequenceSim: () =>
+    set({ sequenceSimulating: true, sequenceError: null, sequenceErrorScenario: null }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
   setPlayback: (t, sample) =>

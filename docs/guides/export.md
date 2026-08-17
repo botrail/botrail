@@ -91,6 +91,13 @@ to 0 for a reason — overlapping blends abort some controllers, so raise it
 only after verifying on yours. botrail's own CI harness can replay exported
 scripts against a URSim controller simulator.
 
+A baked *sequence* exports too (`tl.to_script()`), with the sensor
+contacts and coils it uses on numbered digital I/O. The ports come from
+the [I/O map](io-map.md): bind the points on a `robot_controller` node
+(`bt.io.ur_standard()` gives a UR its DI0-7 / DO0-7) and the script picks
+them up; `inputs=` / `outputs=` dicts still override per key, `io=` projects
+a newer assignment onto an older bake.
+
 ## Python
 
 ```python

@@ -699,6 +699,46 @@ impl SceneHub {
         botrail_session::upsert_sensor(self, sensor);
     }
 
+    pub fn upsert_io_node(&self, node: botrail_scene::iomap::IoNode) -> Result<(), SceneError> {
+        botrail_session::upsert_io_node(self, node)
+    }
+
+    pub fn remove_io_node(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_io_node(self, name)
+    }
+
+    pub fn bind_io(&self, binding: botrail_scene::iomap::IoBinding) -> Result<(), SceneError> {
+        botrail_session::bind_io(self, binding)
+    }
+
+    pub fn unbind_io(
+        &self,
+        point: &botrail_scene::iomap::IoPointId,
+        node: Option<&str>,
+    ) -> Result<usize, SceneError> {
+        botrail_session::unbind_io(self, point, node)
+    }
+
+    pub fn declare_io(&self, decl: botrail_scene::iomap::IoDecl) {
+        botrail_session::declare_io(self, decl)
+    }
+
+    pub fn undeclare_io(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::undeclare_io(self, name)
+    }
+
+    pub fn io_map(&self) -> botrail_scene::iomap::IoMap {
+        self.with_scene(|scene| scene.io_map().clone())
+    }
+
+    pub fn auto_assign_io(
+        &self,
+        sequences: Option<&[&str]>,
+        reassign: bool,
+    ) -> Result<botrail_scene::iomap::IoReport, botrail_scene::iomap::IoError> {
+        botrail_session::auto_assign_io(self, sequences, reassign)
+    }
+
     pub fn remove_sensor(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_sensor(self, name)
     }

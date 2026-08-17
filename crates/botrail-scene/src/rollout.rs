@@ -40,17 +40,31 @@ pub enum SeqError {
         name: String,
         message: String,
     },
-    #[error("timed out after {limit}s waiting in step {step} (`{name}`)")]
+    /// `forced` lists the scenario's pinned inputs (`(lane, value)`): a
+    /// run that stalls under a stuck contact or an open wire says so in
+    /// the same sentence as where it stalled.
+    #[error(
+        "timed out after {limit}s waiting in step {step} (`{name}`){}",
+        forced_note(forced)
+    )]
     Timeout {
         step: usize,
         name: String,
         limit: f64,
+        forced: Vec<(String, bool)>,
     },
     /// The parallel-program timeout names every stuck cursor: with two or
     /// more programs, "where is everybody waiting" *is* the deadlock
     /// diagnosis (a gate watching a signal nobody sets shows up here).
-    #[error("timed out after {limit}s; programs waiting at: {at}")]
-    ProgramsTimeout { at: String, limit: f64 },
+    #[error(
+        "timed out after {limit}s; programs waiting at: {at}{}",
+        forced_note(forced)
+    )]
+    ProgramsTimeout {
+        at: String,
+        limit: f64,
+        forced: Vec<(String, bool)>,
+    },
     #[error(
         "step {step} (`{name}`): >{limit} instantaneous steps in one scan tick (immediate loop?)"
     )]
@@ -86,6 +100,18 @@ pub enum SeqError {
         body: String,
         obstacle: String,
     },
+}
+
+/// ` — forced: a=false, b=true` for a timeout under faults, empty otherwise.
+fn forced_note(forced: &[(String, bool)]) -> String {
+    if forced.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = forced
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    format!(" — forced: {}", list.join(", "))
 }
 
 #[derive(Debug, Clone)]
@@ -128,12 +154,38 @@ pub struct StepSpan {
     pub step: usize,
 }
 
+/// Where a signal lane comes from. Set where the lane is built (the
+/// rollout, or a post-bake synthesis) so consumers — the studio's timing
+/// chart folds device lanes away, the I/O map classifies inputs — never
+/// have to guess it back from the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneKind {
+    /// An internal relay (`define_signal`), or a lane synthesized after
+    /// the bake under a signal's name.
+    Signal,
+    /// A sensor's read-only input.
+    Sensor,
+    /// A device's running / moving output.
+    Device,
+}
+
+impl LaneKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LaneKind::Signal => "signal",
+            LaneKind::Sensor => "sensor",
+            LaneKind::Device => "device",
+        }
+    }
+}
+
 /// A boolean signal as a step function: `(time, new_value)` edges,
 /// starting with `(0, initial)`.
 #[derive(Debug, Clone)]
 pub struct BoolTrack {
     pub name: String,
     pub edges: Vec<(f64, bool)>,
+    pub kind: LaneKind,
 }
 
 impl BoolTrack {
@@ -637,25 +689,8 @@ impl SequenceTimeline {
     /// merged (a robot driven by a motion and a ramp in the same breath
     /// is busy once, not twice).
     pub fn busy_seconds(&self, name: &str) -> Option<f64> {
-        let track = self.robot_track(name)?;
-        let mut spans: Vec<(f64, f64)> = track.moves.iter().map(|s| (s.start, s.end)).collect();
-        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut total = 0.0;
-        let mut open: Option<(f64, f64)> = None;
-        for (start, end) in spans {
-            match open {
-                Some((s, e)) if start <= e + 1e-12 => open = Some((s, e.max(end))),
-                Some((s, e)) => {
-                    total += e - s;
-                    open = Some((start, end));
-                }
-                None => open = Some((start, end)),
-            }
-        }
-        if let Some((s, e)) = open {
-            total += e - s;
-        }
-        Some(total)
+        let spans = crate::handshake::robot_busy(self, name)?;
+        Some(spans.iter().map(|(s, e)| e - s).sum())
     }
 
     /// Fraction of the cycle `name` spent moving, 0..1.
@@ -938,6 +973,10 @@ struct Rollout {
     robots: Vec<RobotRuntime>,
     sensors: Vec<SensorRuntime>,
     devices: Vec<DeviceRuntime>,
+    /// Lanes the scenario's faults pin, `(lane, value)` in scenario
+    /// order. A pinned lane is seeded with its value and every later
+    /// write to it — sensor geometry, a program's `set` — is dropped.
+    forced: Vec<(usize, bool)>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -1259,6 +1298,7 @@ impl Rollout {
             .map(|s| BoolTrack {
                 name: s.name.clone(),
                 edges: vec![(0.0, s.initial)],
+                kind: LaneKind::Signal,
             })
             .collect();
         let sensors: Vec<SensorRuntime> = world
@@ -1278,6 +1318,7 @@ impl Rollout {
                 signals.push(BoolTrack {
                     name: sensor.name.clone(),
                     edges: vec![(0.0, false)],
+                    kind: LaneKind::Sensor,
                 });
                 SensorRuntime {
                     collider,
@@ -1306,6 +1347,7 @@ impl Rollout {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, *running)],
+                            kind: LaneKind::Device,
                         });
                         DeviceRuntime::Conveyor {
                             name: device.name.clone(),
@@ -1327,6 +1369,7 @@ impl Rollout {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, false)],
+                            kind: LaneKind::Device,
                         });
                         DeviceRuntime::Axis {
                             name: device.name.clone(),
@@ -1349,6 +1392,7 @@ impl Rollout {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, *running)],
+                            kind: LaneKind::Device,
                         });
                         // Seeded from the world: a member sitting on its
                         // parking slot is waiting, anything else is already
@@ -1388,6 +1432,7 @@ impl Rollout {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, false)],
+                            kind: LaneKind::Device,
                         });
                         DeviceRuntime::Sink {
                             name: device.name.clone(),
@@ -1414,6 +1459,7 @@ impl Rollout {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, false)],
+                            kind: LaneKind::Device,
                         });
                         // Validation vetted the station; a missing one only
                         // happens on unvalidated direct use, and parks at 0.
@@ -1514,6 +1560,24 @@ impl Rollout {
                 }
             })
             .collect();
+        // Faults: the scenario resolved them to `(lane name, value)`; the
+        // lane is seeded with the forced value (a pinned input is a level
+        // from t = 0, not an edge at t = 0) and stays there — `set_lane`
+        // drops writes to it. Anchored injection would activate entries
+        // mid-run here; v1 pins from the first scan.
+        let forced: Vec<(usize, bool)> = world
+            .forced_inputs()
+            .iter()
+            .filter_map(|(name, value)| {
+                signals
+                    .iter()
+                    .position(|s| &s.name == name)
+                    .map(|lane| (lane, *value))
+            })
+            .collect();
+        for (lane, value) in &forced {
+            signals[*lane].edges = vec![(0.0, *value)];
+        }
         Rollout {
             world,
             programs: sequences
@@ -1534,6 +1598,7 @@ impl Rollout {
             robots,
             sensors,
             devices,
+            forced,
             objects,
             signals,
             step_spans: Vec::new(),
@@ -1622,12 +1687,18 @@ impl Rollout {
         let waiting: Vec<usize> = (0..self.programs.len())
             .filter(|&p| !self.programs[p].finished())
             .collect();
+        let forced: Vec<(String, bool)> = self
+            .forced
+            .iter()
+            .map(|(lane, value)| (self.signals[*lane].name.clone(), *value))
+            .collect();
         if self.programs.len() == 1 {
             let step = self.programs[0].step;
             return SeqError::Timeout {
                 step,
                 name: self.step_name_in(0, step),
                 limit: self.options.max_duration,
+                forced,
             };
         }
         SeqError::ProgramsTimeout {
@@ -1637,6 +1708,7 @@ impl Rollout {
                 .collect::<Vec<_>>()
                 .join(", "),
             limit: self.options.max_duration,
+            forced,
         }
     }
 
@@ -2558,8 +2630,14 @@ impl Rollout {
         }
     }
 
-    /// Records an edge on a signal lane when the value changes.
+    /// Records an edge on a signal lane when the value changes. Every
+    /// write goes through here — sensor evaluation, a program's `set`, a
+    /// device's running state — so a lane a fault pins is guarded in one
+    /// place: the write is dropped and the lane keeps its forced level.
     fn set_lane(&mut self, lane: usize, t: f64, value: bool) {
+        if self.forced.iter().any(|(l, _)| *l == lane) {
+            return;
+        }
         let track = &mut self.signals[lane];
         let current = track.edges.last().map(|(_, v)| *v).unwrap_or(false);
         if current != value {
@@ -3129,15 +3207,10 @@ impl Rollout {
             }
             Action::Set { signal, value } => {
                 let t = self.t;
-                let track = self
-                    .signals
-                    .iter_mut()
-                    .find(|s| &s.name == signal)
+                let lane = self
+                    .lane_index(signal)
                     .ok_or_else(|| err(format!("unknown signal `{signal}`")))?;
-                let current = track.edges.last().map(|(_, v)| *v).unwrap_or(false);
-                if current != *value {
-                    track.edges.push((t, *value));
-                }
+                self.set_lane(lane, t, *value);
             }
             Action::Device { device, command } => {
                 let t = self.t;
@@ -4025,6 +4098,7 @@ pub(crate) mod tests {
             signals: vec![],
             obstacles: vec![],
             joints: vec![],
+            faults: vec![],
         };
         assert!(scene.upsert_scenario(scenario("ng")).is_ok());
         assert!(scene.upsert_scenario(scenario("ng")).is_ok()); // replace
@@ -4052,6 +4126,7 @@ pub(crate) mod tests {
                 signals: vec![("flag".into(), true)],
                 obstacles: vec![("part".into(), Isometry3::translation(0.3, 0.0, 0.5))],
                 joints: vec![("r".into(), vec![0.5])],
+                faults: vec![],
             })
             .unwrap();
 
@@ -4077,6 +4152,7 @@ pub(crate) mod tests {
             signals: vec![("flag".into(), true)],
             obstacles: vec![],
             joints: vec![("r".into(), vec![0.1, 0.2])], // wrong dof
+            faults: vec![],
         })
         .unwrap();
         let err = bad.apply_scenario("bad").unwrap_err();
@@ -4093,6 +4169,7 @@ pub(crate) mod tests {
             signals: vec![("ghost".into(), true)],
             obstacles: vec![],
             joints: vec![],
+            faults: vec![],
         })
         .unwrap();
         let err = bad.apply_scenario("bad").unwrap_err();
@@ -4106,10 +4183,243 @@ pub(crate) mod tests {
             signals: vec![],
             obstacles: vec![("part".into(), Isometry3::translation(0.4, 0.0, 0.5))],
             joints: vec![],
+            faults: vec![],
         })
         .unwrap();
         let err = held.apply_scenario("grab").unwrap_err();
         assert!(err.to_string().contains("attached"), "{err}");
+    }
+
+    /// The fourth delta: a fault pins an input lane for the run — the
+    /// sensor's geometry is ignored, a program's `set` is dropped, an open
+    /// wire reads with the binding's polarity, and the timeout names the
+    /// force. A scenario without faults bakes bit-identically to baseline.
+    #[test]
+    fn faults_pin_inputs_and_name_themselves_in_timeouts() {
+        use crate::seq::{Fault, FaultKind, Sensor, SensorKind, SensorWatch};
+        let mut scene = sample_scene();
+        // A part sits in the eye's zone: the eye is ON from t = 0.
+        scene
+            .add_obstacle(
+                "part",
+                botrail_model::Geometry::Sphere { radius: 0.02 },
+                Isometry3::translation(0.3, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_sensor(Sensor {
+            name: "eye".into(),
+            kind: SensorKind::Zone {
+                pose: Isometry3::translation(0.3, 0.0, 0.5),
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+            watch: SensorWatch::AllObjects,
+            mount: None,
+        });
+        scene.define_signal("flag", false);
+        joint_motion(&mut scene, "go", 0.5);
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![
+                step(
+                    "await part",
+                    vec![],
+                    Condition::Signal {
+                        name: "eye".into(),
+                        value: true,
+                    },
+                ),
+                step(
+                    "raise",
+                    vec![Action::Set {
+                        signal: "flag".into(),
+                        value: true,
+                    }],
+                    Condition::Signal {
+                        name: "flag".into(),
+                        value: true,
+                    },
+                ),
+                step(
+                    "go",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let fault = |name: &str, target: &str, kind: FaultKind| crate::seq::Scenario {
+            name: name.into(),
+            signals: vec![],
+            obstacles: vec![],
+            joints: vec![],
+            faults: vec![Fault {
+                target: target.into(),
+                kind,
+            }],
+        };
+        scene
+            .upsert_scenario(fault("eye_stuck", "eye", FaultKind::StuckAt(false)))
+            .unwrap();
+        scene
+            .upsert_scenario(fault("eye_open", "eye", FaultKind::Open))
+            .unwrap();
+        scene
+            .upsert_scenario(fault("flag_stuck", "flag", FaultKind::StuckAt(false)))
+            .unwrap();
+        scene
+            .upsert_scenario(fault("flag_open", "flag", FaultKind::Open))
+            .unwrap();
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "clean".into(),
+                signals: vec![],
+                obstacles: vec![],
+                joints: vec![],
+                faults: vec![],
+            })
+            .unwrap();
+        let options = RolloutOptions {
+            max_duration: 5.0,
+            ..RolloutOptions::default()
+        };
+        let base = scene.simulate_sequence("s", &options).unwrap();
+        assert!(base.duration > 0.0);
+
+        // A stuck-low eye ignores the part sitting in it: the program
+        // never leaves `await part`, and the timeout says why.
+        let err = scene
+            .simulate_sequences_scenario(&["s"], Some("eye_stuck"), &options)
+            .unwrap_err();
+        assert!(
+            matches!(&err, SeqError::Timeout { name, forced, .. } if name == "await part" && forced == &[("eye".to_string(), false)]),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string()
+                == "timed out after 5s waiting in step 0 (`await part`) — forced: eye=false",
+            "{err}"
+        );
+        // Open, unbound: reads low too.
+        let err = scene
+            .simulate_sequences_scenario(&["s"], Some("eye_open"), &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("forced: eye=false"), "{err}");
+
+        // A stuck internal signal drops the program's own `set`: it waits
+        // for its own flag forever, and the lane records no edge at all.
+        let err = scene
+            .simulate_sequences_scenario(&["s"], Some("flag_stuck"), &options)
+            .unwrap_err();
+        assert!(
+            matches!(&err, SeqError::Timeout { name, .. } if name == "raise"),
+            "{err:?}"
+        );
+        // A relay written and read by one program has no wire to open.
+        let err = scene
+            .simulate_sequences_scenario(&["s"], Some("flag_open"), &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("no input wire to open"), "{err}");
+
+        // Open follows the binding's polarity: wire the eye NC on a
+        // declared controller and the open wire reads *true* — the part
+        // "is there" for the program, which then runs through.
+        let mut wired = scene.clone();
+        wired
+            .upsert_io_node(crate::iomap::IoNode {
+                name: "UR".into(),
+                kind: crate::iomap::IoNodeKind::RobotController {
+                    robots: vec![wired.robots()[0].name.clone()],
+                },
+                programs: vec![],
+                uplink: None,
+                channels: vec![crate::iomap::IoChannel {
+                    id: "DI0".into(),
+                    kind: crate::iomap::ChannelKind::Di,
+                    port: Some(0),
+                    address: None,
+                    electrical: None,
+                }],
+                place: None,
+                model: None,
+            })
+            .unwrap();
+        wired
+            .bind_io(crate::iomap::IoBinding {
+                point: crate::iomap::IoPointId::parse("eye", crate::iomap::IoDirection::Input),
+                node: "UR".into(),
+                channel: "DI0".into(),
+                tag: None,
+                field: None,
+                invert: true,
+                contact: Some(crate::iomap::Contact::Nc),
+                safety: false,
+                device: None,
+                note: None,
+                auto: false,
+            })
+            .unwrap();
+        // Take the part away: geometry says OFF, the open NC wire says ON.
+        wired.remove_obstacle("part").unwrap();
+        assert!(matches!(
+            wired.simulate_sequence("s", &options),
+            Err(SeqError::Timeout { .. })
+        ));
+        let tl = wired
+            .simulate_sequences_scenario(&["s"], Some("eye_open"), &options)
+            .unwrap();
+        let eye = tl.signals.iter().find(|s| s.name == "eye").unwrap();
+        assert_eq!(eye.edges, vec![(0.0, true)], "a pinned level, not an edge");
+        assert_eq!(tl.scenario.as_deref(), Some("eye_open"));
+
+        // No faults: bit-identical to baseline, and the live scene never
+        // carries a force.
+        let clean = scene
+            .simulate_sequences_scenario(&["s"], Some("clean"), &options)
+            .unwrap();
+        assert_eq!(clean.duration, base.duration);
+        assert_eq!(
+            clean.robots[0].trajectory.positions,
+            base.robots[0].trajectory.positions
+        );
+        assert!(clean
+            .signals
+            .iter()
+            .zip(&base.signals)
+            .all(|(a, b)| a.name == b.name && a.edges == b.edges));
+        assert!(scene.forced_inputs().is_empty());
+
+        // Validation: a device lane, a robot, an unknown name, a duplicate.
+        let bad = |target: &str, kind: FaultKind| {
+            let mut s = scene.clone();
+            s.upsert_scenario(fault("bad", target, kind)).unwrap();
+            s.apply_scenario("bad").unwrap_err().to_string()
+        };
+        assert!(bad("ghost", FaultKind::Open).contains("not a sensor or an internal signal"));
+        let mut twice = scene.clone();
+        twice
+            .upsert_scenario(crate::seq::Scenario {
+                name: "twice".into(),
+                signals: vec![],
+                obstacles: vec![],
+                joints: vec![],
+                faults: vec![
+                    Fault {
+                        target: "eye".into(),
+                        kind: FaultKind::StuckAt(true),
+                    },
+                    Fault {
+                        target: "eye".into(),
+                        kind: FaultKind::Open,
+                    },
+                ],
+            })
+            .unwrap();
+        assert!(twice
+            .apply_scenario("twice")
+            .unwrap_err()
+            .to_string()
+            .contains("forced twice"));
     }
 
     #[test]
@@ -4148,6 +4458,7 @@ pub(crate) mod tests {
                 signals: vec![("ok".into(), false), ("ng".into(), true)],
                 obstacles: vec![],
                 joints: vec![],
+                faults: vec![],
             })
             .unwrap();
 
@@ -4255,6 +4566,7 @@ pub(crate) mod tests {
                 signals: vec![("ok".into(), false), ("ng".into(), true)],
                 obstacles: vec![],
                 joints: vec![],
+                faults: vec![],
             })
             .unwrap();
         scene
@@ -4263,6 +4575,7 @@ pub(crate) mod tests {
                 signals: vec![("fine".into(), false)],
                 obstacles: vec![],
                 joints: vec![],
+                faults: vec![],
             })
             .unwrap();
         let ng = scene

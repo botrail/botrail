@@ -56,7 +56,13 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
-  - pymdownx.superfences
+  # Mermaid fences render client-side (Material ships the loader); the I/O
+  # map guide embeds `scene.io_topology()` output verbatim.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
@@ -121,6 +127,7 @@ nav:
       - Vehicles and AMRs: guides/vehicles-and-amr.md
       - Attach and tracking: guides/attach-and-tracking.md
       - Timeline assertions: guides/timeline-assertions.md
+      - The I/O map: guides/io-map.md
       - Spray painting: guides/painting.md
       - Export: guides/export.md
       - Projects: guides/projects.md

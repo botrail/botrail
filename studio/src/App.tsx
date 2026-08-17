@@ -1,4 +1,5 @@
 import { Header } from "./components/Header";
+import { IoNodePanel } from "./components/IoNodePanel";
 import { JointPanel } from "./components/JointPanel";
 import { MotionPanel } from "./components/MotionPanel";
 import { ObstaclePanel } from "./components/ObstaclePanel";
@@ -49,6 +50,7 @@ export function App() {
               <SceneTreePanel />
               <ObstaclePanel />
               <SensorDevicePanel />
+              <IoNodePanel />
             </>
           )}
           {activeTab === "motion" && (

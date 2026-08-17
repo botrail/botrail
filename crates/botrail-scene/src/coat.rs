@@ -1865,6 +1865,7 @@ pub fn trigger_track(
     Ok(crate::rollout::BoolTrack {
         name: name.to_string(),
         edges,
+        kind: crate::rollout::LaneKind::Signal,
     })
 }
 
@@ -2759,6 +2760,7 @@ mod tests {
         timeline.signals.push(BoolTrack {
             name: "gun".into(),
             edges: vec![(0.0, true), (1.0, false)],
+            kind: crate::rollout::LaneKind::Signal,
         });
         let tcp = scene.robot().default_tcp_link();
         let film = spray_coat(
@@ -3129,6 +3131,7 @@ mod standoff_tests {
         timeline.signals.push(crate::rollout::BoolTrack {
             name: "gun".into(),
             edges: vec![(0.0, true), (0.5, false)],
+            kind: crate::rollout::LaneKind::Signal,
         });
         let limits = PaintLimits {
             standoff: Some((0.20, 0.30)),

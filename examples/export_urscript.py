@@ -9,7 +9,10 @@ sequence lowers to URScript — moves from the rollout's own planned paths,
 the part-arrival *edge* as a two-stage digital-input wait, the branch as
 a wait-any plus `if/elif`, coils as digital-output writes, timers as
 sleeps. The name → port wiring is the only thing the controller needs on
-top.
+top — and it lives on the scene as the cell's I/O map: a robot-controller
+node with its standard I/O, and one binding per point the derived I/O
+list (`scene.io_points()`) says the cell needs. The same map writes the
+I/O list for the electrical drawing (`scene.export_io_list`).
 
 Both branch arms move the robot, which is where *scenarios* come in: one
 deterministic bake takes one arm, so exporting it alone is refused (the
@@ -31,8 +34,24 @@ HERE = Path(__file__).resolve().parent
 
 # The cell's I/O list, as it would appear on the electrical drawing:
 # inputs are contacts the program waits on, outputs are coils it drives.
+# `wire_cell` puts it on the scene (the form the project keeps and the
+# script export reads); the dicts are the same wiring as `to_script`'s
+# explicit `inputs=` / `outputs=` arguments, kept here for comparison.
 INPUTS = {"part_at_pick": 2, "spec_ok": 3}  # beam → DI2, spec gauge → DI3
 OUTPUTS = {"conv": 0, "vacuum": 1}  # conveyor run → DO0, vacuum valve → DO1
+
+
+def wire_cell(scene: bt.Scene) -> None:
+    """The robot controller is the cell master: its standard digital I/O
+    takes the beam, the spec gauge, the conveyor drive and the vacuum
+    valve. `scene.io_points()` derives which points exist; these lines
+    say which channel each one lands on."""
+    scene.add_io_node("UR", kind="robot_controller", robots=["simple_arm"],
+                      channels=bt.io.ur_standard())
+    scene.bind_input("part_at_pick", "UR", "DI2", field="BEAM1")   # photoelectric beam
+    scene.bind_input("spec_ok", "UR", "DI3", field="GAUGE")        # spec gauge verdict
+    scene.bind_output("conv", "UR", "DO0", field="VFD1")           # conveyor drive run
+    scene.bind_output("vacuum", "UR", "DO1", field="YV1")           # vacuum valve
 
 
 def build_cell() -> bt.Scene:
@@ -105,25 +124,44 @@ def main() -> None:
 
     scene = build_cell()
     author_sequence(scene)
+    wire_cell(scene)
+    # Every derived point has a channel, nothing clashes: the I/O list is
+    # ready for the drawing.
+    report = scene.io_report()
+    assert report.ok, report
+    io_csv = out.with_name("pick_cell_io.csv")
+    scene.export_io_list(io_csv)
+    print(f"wrote {io_csv} — the I/O list:\n{scene.io_list('md')}")
+
+    # The row FAT calls "beam broken" is a scenario too: a stuck sensor
+    # is a forced input, not a different program. That row cannot
+    # complete — the sweep collects the stall, with the forced point in
+    # the diagnosis, next to the rows that did.
+    scene.add_scenario("beam_stuck", faults=[bt.io.stuck("part_at_pick", False)])
 
     # The whole test-case matrix, one deterministic bake per world.
-    runs = scene.simulate_scenarios(["pick"])
+    runs = scene.simulate_scenarios(["pick"], max_duration=30.0)
     for name, tl in runs.items():
         path = " → ".join(step for step, _, _ in tl.step_spans if "/" not in step)
-        print(f"{name:<9} cycle {tl.duration:6.2f}s  ({path})")
+        print(f"{name:<10} cycle {tl.duration:6.2f}s  ({path})")
+    for name, error in runs.errors.items():
+        print(f"{name:<10} FAILED: {error}")
+    assert set(runs.errors) == {"beam_stuck"}, runs.errors
     assert runs.uncovered_arms() == [], runs.uncovered_arms()
     print("branch coverage: every arm exercised\n")
 
     # One bake alone cannot compile the branch it skipped:
     try:
-        runs["baseline"].to_script(inputs=INPUTS, outputs=OUTPUTS)
+        runs["baseline"].to_script()
     except ValueError as e:
         print(f"baseline alone: {e}\n")
 
     # The sweep can — each arm's moves come from the bake that took it.
-    runs.export_script(out, inputs=INPUTS, outputs=OUTPUTS)
+    # The ports come from the bindings on the UR node; passing the dicts
+    # explicitly (`inputs=INPUTS, outputs=OUTPUTS`) gives the same script.
+    runs.export_script(out)
     print(f"wrote {out} — the whole matrix, as one controller program:\n")
-    print(runs.to_script(inputs=INPUTS, outputs=OUTPUTS))
+    print(runs.to_script())
 
 
 if __name__ == "__main__":

@@ -498,6 +498,29 @@ pub struct ScenarioMsg {
     pub obstacles: Vec<ScenarioObstacleMsg>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joints: Vec<ScenarioJointsMsg>,
+    /// Inputs forced for the whole run (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faults: Vec<FaultMsg>,
+}
+
+/// A forced input of a scenario: a contact stuck at a value, or an open
+/// wire (input level low — the functional value follows the binding's
+/// polarity).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FaultMsg {
+    Stuck {
+        target: String,
+        value: bool,
+    },
+    Open {
+        target: String,
+    },
+    /// An I/O node dropped off: every input wired on it opens.
+    NodeDown {
+        target: String,
+    },
 }
 
 /// An internal-signal initial value a scenario overrides.
@@ -1004,6 +1027,18 @@ pub enum ServerMessage {
     Effects {
         flashes: Vec<FlashMsg>,
     },
+    /// The I/O map: the assignment layer as authored plus the points and
+    /// findings derived from it over every sequence. Resent whenever the
+    /// map, the sequences, the sensors or the devices change.
+    Io {
+        io: crate::iomap::IoMap,
+        points: Vec<IoPointMsg>,
+        findings: Vec<IoFindingMsg>,
+        /// The electrical topology (hosts, stations, programs, field
+        /// devices and the wires between them) — the same graph
+        /// `export_topology` writes, cosmetic rows left out.
+        topology: TopologyMsg,
+    },
     /// Response to a `simulate_sequence` request (broadcast to every client).
     SequenceResult {
         ok: bool,
@@ -1219,6 +1254,35 @@ pub enum ClientMessage {
     },
     RemoveDevice {
         name: String,
+    },
+    /// I/O map edits (the assignment layer — nodes, bindings,
+    /// declarations). Each is validated the way the Python API is and
+    /// rebroadcasts the `io` message.
+    UpsertIoNode {
+        node: crate::iomap::IoNode,
+    },
+    RemoveIoNode {
+        name: String,
+    },
+    BindIo {
+        binding: crate::iomap::IoBinding,
+    },
+    /// Drops the binding of `point` on `node` — on every node when absent.
+    UnbindIo {
+        point: crate::iomap::IoPointId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+    },
+    DeclareIo {
+        decl: crate::iomap::IoDecl,
+    },
+    UndeclareIo {
+        name: String,
+    },
+    /// Gives every unbound point a channel (`Scene::auto_assign_io`).
+    AutoAssignIo {
+        #[serde(default)]
+        reassign: bool,
     },
 }
 
@@ -1959,6 +2023,22 @@ pub fn scenario_msg(scenario: &crate::seq::Scenario) -> ScenarioMsg {
                 positions: positions.clone(),
             })
             .collect(),
+        faults: scenario
+            .faults
+            .iter()
+            .map(|f| match f.kind {
+                crate::seq::FaultKind::StuckAt(value) => FaultMsg::Stuck {
+                    target: f.target.clone(),
+                    value,
+                },
+                crate::seq::FaultKind::Open => FaultMsg::Open {
+                    target: f.target.clone(),
+                },
+                crate::seq::FaultKind::NodeDown => FaultMsg::NodeDown {
+                    target: f.target.clone(),
+                },
+            })
+            .collect(),
     }
 }
 
@@ -1980,6 +2060,24 @@ pub fn scenario_from_msg(msg: &ScenarioMsg) -> crate::seq::Scenario {
             .iter()
             .map(|j| (j.robot.clone(), j.positions.clone()))
             .collect(),
+        faults: msg
+            .faults
+            .iter()
+            .map(|f| match f {
+                FaultMsg::Stuck { target, value } => crate::seq::Fault {
+                    target: target.clone(),
+                    kind: crate::seq::FaultKind::StuckAt(*value),
+                },
+                FaultMsg::Open { target } => crate::seq::Fault {
+                    target: target.clone(),
+                    kind: crate::seq::FaultKind::Open,
+                },
+                FaultMsg::NodeDown { target } => crate::seq::Fault {
+                    target: target.clone(),
+                    kind: crate::seq::FaultKind::NodeDown,
+                },
+            })
+            .collect(),
     }
 }
 
@@ -1991,6 +2089,260 @@ pub fn scenarios_message(scene: &Scene) -> ServerMessage {
 }
 
 /// The full weld-flash list as an `effects` message.
+/// One derived I/O point (see `crate::iomap::IoPoint`), flattened for
+/// the studio's table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct IoPointMsg {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<String>,
+    /// `name` or `name.aspect`.
+    pub label: String,
+    /// `"input"` / `"output"`.
+    pub direction: String,
+    /// `"DI"`, `"DO"`, `"Word"`, ...
+    pub kind: String,
+    /// The derivation rule: `"sensor"`, `"signal:handshake"`, ...
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub safety: bool,
+    /// `(sequence, flat step index, step name)` triples.
+    pub writers: Vec<StepRefMsg>,
+    pub readers: Vec<StepRefMsg>,
+    /// `"bound"`, `"unbound"`, `"internal"`, `"cosmetic"`, `"constant"`.
+    pub status: String,
+    /// The binding behind a bound point (`node`, `channel`, `address`,
+    /// `tag`), when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StepRefMsg {
+    pub sequence: String,
+    pub index: usize,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct IoFindingMsg {
+    /// `"error"` / `"warning"` / `"info"`.
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub at: Vec<StepRefMsg>,
+}
+
+/// The topology graph (see `crate::iomap::Topology`), flattened for the
+/// studio: kinds as strings, the edge's point / channel facts as optional
+/// fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TopologyMsg {
+    pub nodes: Vec<TopoNodeMsg>,
+    pub edges: Vec<TopoEdgeMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TopoNodeMsg {
+    /// `host:PLC1`, `prog:transfer`, `sensor:eye`, `device:belt`, ...
+    pub id: String,
+    /// `"host"`, `"station"`, `"program"`, `"sensor"`, `"device"`,
+    /// `"robot"`, `"field"`, `"declared"`.
+    pub kind: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A host that no node declares (`<cell>`, `<robot>`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implicit: bool,
+    /// The declared node's kind (`"plc"`, `"remote io"`, ...) for hosts
+    /// and stations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TopoEdgeMsg {
+    pub from: String,
+    pub to: String,
+    /// `"uplink"`, `"io"`, `"handshake"`, `"functional"`.
+    pub kind: String,
+    pub label: String,
+    /// The signal lane behind the edge (live colouring), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub safety: bool,
+    /// `io` edges: the point label and its channel, when bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// `uplink` edges: the bus label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<String>,
+    /// `handshake` / `functional` edges: the signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+}
+
+pub fn topology_msg(t: &crate::iomap::Topology) -> TopologyMsg {
+    use crate::iomap::{TopoEdgeKind, TopoNodeKind};
+    TopologyMsg {
+        nodes: t
+            .nodes
+            .iter()
+            .map(|n| TopoNodeMsg {
+                id: n.id.clone(),
+                kind: n.kind.as_str().to_string(),
+                label: n.label.clone(),
+                host: n.host.clone(),
+                implicit: matches!(n.kind, TopoNodeKind::Host { implicit: true, .. }),
+                node_kind: match &n.kind {
+                    TopoNodeKind::Host { kind, .. } | TopoNodeKind::Station { kind } => {
+                        Some(kind.clone())
+                    }
+                    _ => None,
+                },
+            })
+            .collect(),
+        edges: t
+            .edges
+            .iter()
+            .map(|e| {
+                let mut m = TopoEdgeMsg {
+                    from: e.from.clone(),
+                    to: e.to.clone(),
+                    kind: e.kind.as_str().to_string(),
+                    label: e.label.clone(),
+                    lane: e.lane.clone(),
+                    safety: e.safety,
+                    point: None,
+                    node: None,
+                    channel: None,
+                    address: None,
+                    bus: None,
+                    signal: None,
+                };
+                match &e.kind {
+                    TopoEdgeKind::Uplink { bus } => m.bus = bus.clone(),
+                    TopoEdgeKind::Io {
+                        point,
+                        node,
+                        channel,
+                        address,
+                    } => {
+                        m.point = Some(point.label());
+                        m.node = node.clone();
+                        m.channel = channel.clone();
+                        m.address = address.clone();
+                    }
+                    TopoEdgeKind::Handshake { signal } | TopoEdgeKind::Functional { signal } => {
+                        m.signal = Some(signal.clone())
+                    }
+                }
+                m
+            })
+            .collect(),
+    }
+}
+
+fn step_ref_msg(s: &crate::iomap::StepRef) -> StepRefMsg {
+    StepRefMsg {
+        sequence: s.sequence.clone(),
+        index: s.index,
+        name: s.name.clone(),
+    }
+}
+
+/// The I/O map message: the authored layer plus the derivation over every
+/// sequence. A scene whose sequences cannot be walked (an ambiguous robot
+/// reference, an unknown motion) still gets the layer, with the reason as
+/// an error finding and no points.
+pub fn io_message(scene: &Scene) -> ServerMessage {
+    use crate::iomap::{derive, PointStatus};
+    let io = scene.io_map().clone();
+    match derive(scene, None) {
+        Ok(d) => ServerMessage::Io {
+            points: d
+                .points
+                .iter()
+                .map(|p| {
+                    let binding = match p.status {
+                        PointStatus::Bound(i) => io.bindings.get(i),
+                        _ => None,
+                    };
+                    let channel = binding.and_then(|b| {
+                        io.node(&b.node)
+                            .and_then(|n| n.channels.iter().find(|c| c.id == b.channel))
+                    });
+                    IoPointMsg {
+                        name: p.id.name.clone(),
+                        aspect: p.id.aspect.map(|a| a.as_str().to_string()),
+                        label: p.label(),
+                        direction: p.id.direction.as_str().to_string(),
+                        kind: p.kind.as_str().to_string(),
+                        source: p.source.as_str().to_string(),
+                        host: p.host.clone(),
+                        safety: p.safety,
+                        writers: p.writers.iter().map(step_ref_msg).collect(),
+                        readers: p.readers.iter().map(step_ref_msg).collect(),
+                        status: p.status.as_str().to_string(),
+                        node: binding.map(|b| b.node.clone()),
+                        channel: binding.map(|b| b.channel.clone()),
+                        address: channel.and_then(|c| c.address.clone()),
+                        tag: binding.and_then(|b| b.tag.clone()),
+                    }
+                })
+                .collect(),
+            findings: d
+                .report
+                .findings
+                .iter()
+                .map(|f| IoFindingMsg {
+                    severity: f.severity.as_str().to_string(),
+                    code: f.code.as_str().to_string(),
+                    message: f.message.clone(),
+                    at: f.at.iter().map(step_ref_msg).collect(),
+                })
+                .collect(),
+            topology: topology_msg(&crate::iomap::topology(scene, &d, false)),
+            io,
+        },
+        Err(e) => ServerMessage::Io {
+            io,
+            points: Vec::new(),
+            findings: vec![IoFindingMsg {
+                severity: "error".into(),
+                code: "unknown_ref".into(),
+                message: format!("the I/O map cannot be derived: {e}"),
+                at: Vec::new(),
+            }],
+            topology: TopologyMsg {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
+        },
+    }
+}
+
 pub fn effects_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Effects {
         flashes: scene
@@ -2534,6 +2886,111 @@ mod tests {
         assert_eq!(link, "tip");
         let iso: nalgebra::Isometry3<f64> = (&pose).into();
         assert!((iso.translation.z - 0.3).abs() < 1e-12);
+    }
+
+    /// The I/O message carries the layer, the derived points with their
+    /// channels, the report, and the topology graph — and a scenario with
+    /// faults says so on the wire.
+    #[test]
+    fn io_message_carries_points_findings_topology_and_faults_serialize() {
+        let mut scene = crate::iomap::tests::pick_cell();
+        scene
+            .upsert_io_node(crate::iomap::tests::node(
+                "UR",
+                crate::iomap::IoNodeKind::RobotController {
+                    robots: vec![scene.robots()[0].name.clone()],
+                },
+                &[],
+                crate::iomap::tests::ur_channels(),
+            ))
+            .unwrap();
+        scene.auto_assign_io(None, false).unwrap();
+        let ServerMessage::Io {
+            io,
+            points,
+            findings,
+            topology,
+        } = io_message(&scene)
+        else {
+            panic!("io message");
+        };
+        assert_eq!(io.nodes.len(), 1);
+        let part = points.iter().find(|p| p.label == "part_at_pick").unwrap();
+        assert_eq!(
+            (part.node.as_deref(), part.channel.as_deref()),
+            (Some("UR"), Some("DI0"))
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(topology
+            .nodes
+            .iter()
+            .any(|n| n.id == "host:UR" && n.kind == "host" && !n.implicit));
+        assert!(topology.edges.iter().any(|e| e.kind == "io"
+            && e.point.as_deref() == Some("conv")
+            && e.channel.as_deref() == Some("DO0")));
+        let json = serde_json::to_string(&io_message(&scene)).unwrap();
+        assert!(
+            json.contains("\"type\":\"io\"") && json.contains("\"topology\":{"),
+            "{json}"
+        );
+        // The studio's graph is the exporters' graph: same nodes and edges
+        // as `export_topology` writes (one builder in iomap.rs), so the
+        // figure in a design document and the overlay cannot disagree.
+        let d = crate::iomap::derive(&scene, None).unwrap();
+        let t = crate::iomap::topology(&scene, &d, false);
+        assert_eq!(topology.nodes.len(), t.nodes.len());
+        assert_eq!(topology.edges.len(), t.edges.len());
+        let mmd = crate::iomap::render_mermaid(&t, &[]);
+        for n in &topology.nodes {
+            let id: String =
+                n.id.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+            assert!(mmd.contains(&id), "{id} missing from\n{mmd}");
+        }
+
+        // A scenario's faults ride the scenarios message, tagged by kind.
+        scene
+            .upsert_scenario(crate::seq::Scenario {
+                name: "beam_stuck".into(),
+                signals: vec![],
+                obstacles: vec![],
+                joints: vec![],
+                faults: vec![
+                    crate::seq::Fault {
+                        target: "part_at_pick".into(),
+                        kind: crate::seq::FaultKind::StuckAt(false),
+                    },
+                    crate::seq::Fault {
+                        target: "spec_ok".into(),
+                        kind: crate::seq::FaultKind::Open,
+                    },
+                ],
+            })
+            .unwrap();
+        let json = serde_json::to_string(&scenarios_message(&scene)).unwrap();
+        assert!(
+            json.contains(
+                "\"faults\":[{\"kind\":\"stuck\",\"target\":\"part_at_pick\",\"value\":false},{\"kind\":\"open\",\"target\":\"spec_ok\"}]"
+            ),
+            "{json}"
+        );
+        // ... and back through the client message.
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"upsert_scenario","scenario":{"name":"x","faults":[{"kind":"open","target":"eye"}]}}"#,
+        )
+        .unwrap();
+        let ClientMessage::UpsertScenario { scenario } = msg else {
+            panic!("wrong variant");
+        };
+        let back = scenario_from_msg(&scenario);
+        assert_eq!(
+            back.faults,
+            vec![crate::seq::Fault {
+                target: "eye".into(),
+                kind: crate::seq::FaultKind::Open
+            }]
+        );
     }
 
     #[test]

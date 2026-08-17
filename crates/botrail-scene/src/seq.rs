@@ -226,6 +226,52 @@ pub struct Scenario {
     pub obstacles: Vec<(String, Isometry3<f64>)>,
     /// `(robot instance, joint positions)` start configurations.
     pub joints: Vec<(String, Vec<f64>)>,
+    /// Inputs forced for the whole run — the fourth delta. Where
+    /// `signals` sets an initial value the programs then overwrite, a
+    /// fault pins a sensor or an internal signal to one value from t = 0
+    /// on: the sensor's geometry is ignored, a program's `set` on the
+    /// signal is dropped. The wire that broke, moved into the test matrix.
+    pub faults: Vec<Fault>,
+}
+
+/// One forced input of a scenario: a stuck contact or a broken wire.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fault {
+    /// A sensor name or an internal-signal name — something with an input
+    /// lane. Device run lanes are outputs and cannot be forced; the DIs a
+    /// `device_done` / `robot_done` wait reads have no lane of their own.
+    pub target: String,
+    pub kind: FaultKind,
+}
+
+/// How an input is forced. Both hold from the first scan to the end of the
+/// run; injection at a step or an edge is a later, anchored form — a
+/// scenario never carries an absolute time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FaultKind {
+    /// The contact is stuck at this value.
+    StuckAt(bool),
+    /// The wire is open: the input level is low, so the *functional*
+    /// value is whatever the point's binding makes of a low level —
+    /// `false` on a normally-open wiring, `true` on an inverted one, and
+    /// `false` when nothing is bound. Whether the cell fails safe under a
+    /// broken wire is exactly what this shows. Only inputs can be opened.
+    Open,
+    /// The target is an I/O node (a controller or a station) that dropped
+    /// off: every input wired on it — and on the stations uplinked to it
+    /// — reads as an open wire. The communication loss of the I/O map,
+    /// resolved through the bindings at simulate time.
+    NodeDown,
+}
+
+impl FaultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FaultKind::StuckAt(_) => "stuck",
+            FaultKind::Open => "open",
+            FaultKind::NodeDown => "node_down",
+        }
+    }
 }
 
 /// The reserved name for the unmodified scene.
@@ -831,6 +877,7 @@ impl Scene {
                 )));
             }
         }
+        let forced = self.resolve_faults(name, &scenario.faults)?;
         let mut joint_targets = Vec::new();
         for (robot, positions) in &scenario.joints {
             let index = self
@@ -854,7 +901,133 @@ impl Scene {
         for (index, positions) in joint_targets {
             self.set_joint_positions_for(index, positions)?;
         }
+        self.forced_inputs = forced;
         Ok(())
+    }
+
+    /// Checks a scenario's faults against the scene and resolves each to
+    /// the value its lane is pinned to. A target must be a sensor or an
+    /// internal signal (things with an input lane); `Open` needs an input
+    /// *wire* — a sensor, or a signal some program reads without also
+    /// writing it on the same controller — and takes the polarity of the
+    /// point's binding (`invert`), `false` unbound.
+    fn resolve_faults(
+        &self,
+        scenario: &str,
+        faults: &[Fault],
+    ) -> Result<Vec<(String, bool)>, SceneError> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        let mut derivation: Option<crate::iomap::IoDerivation> = None;
+        for fault in faults {
+            let target = fault.target.as_str();
+            if fault.kind == FaultKind::NodeDown {
+                // The node and everything hanging off it: each input lane
+                // bound there opens with its own wire's polarity.
+                if self.io.node(target).is_none() {
+                    return Err(SceneError::BadScenario(format!(
+                        "scenario `{scenario}`: `{target}` is not an I/O node (add_io_node) — node_down takes a controller or a station"
+                    )));
+                }
+                let mut opened = 0usize;
+                for b in &self.io.bindings {
+                    if b.point.direction != crate::iomap::IoDirection::Input
+                        || b.point.aspect.is_some()
+                        || !self.io.reach(&b.node).iter().any(|r| r == target)
+                    {
+                        continue;
+                    }
+                    let name = b.point.name.as_str();
+                    let has_lane = self.sensors.iter().any(|s| s.name == name)
+                        || self.signals.iter().any(|s| s.name == name);
+                    if !has_lane {
+                        continue; // robot done / device done: no lane to force
+                    }
+                    if out.iter().any(|(t, _)| t == name) {
+                        return Err(SceneError::BadScenario(format!(
+                            "scenario `{scenario}`: `{name}` is forced twice (node_down `{target}` opens it too)"
+                        )));
+                    }
+                    out.push((name.to_string(), b.invert));
+                    opened += 1;
+                }
+                if opened == 0 {
+                    return Err(SceneError::BadScenario(format!(
+                        "scenario `{scenario}`: node_down `{target}` opens nothing — no sensor or signal input is bound on it (or its stations)"
+                    )));
+                }
+                continue;
+            }
+            let is_sensor = self.sensors.iter().any(|s| s.name == target);
+            let is_signal = self.signals.iter().any(|s| s.name == target);
+            if !(is_sensor || is_signal) {
+                let hint = if self.devices.iter().any(|d| d.name == target) {
+                    "a device's running lane is an output; a fault forces an input"
+                } else if self.robots.iter().any(|r| r.name == target) {
+                    "a robot has no input lane; force the signal its program waits on"
+                } else {
+                    "a fault forces a sensor or an internal signal (define_signal)"
+                };
+                return Err(SceneError::BadScenario(format!(
+                    "scenario `{scenario}`: fault target `{target}` is not a sensor or an internal signal — {hint}"
+                )));
+            }
+            if out.iter().any(|(t, _)| t == target) {
+                return Err(SceneError::BadScenario(format!(
+                    "scenario `{scenario}`: `{target}` is forced twice"
+                )));
+            }
+            let value = match fault.kind {
+                FaultKind::StuckAt(value) => value,
+                FaultKind::NodeDown => unreachable!("handled above"),
+                FaultKind::Open => {
+                    if is_signal {
+                        // Read-only and handshake inputs have a wire to
+                        // open; a relay written and read on one controller
+                        // (or only written) has none.
+                        let d = match &derivation {
+                            Some(d) => d,
+                            None => {
+                                derivation =
+                                    Some(crate::iomap::derive(self, None).map_err(|e| {
+                                        SceneError::BadScenario(format!(
+                                            "scenario `{scenario}`: {e}"
+                                        ))
+                                    })?);
+                                derivation.as_ref().unwrap()
+                            }
+                        };
+                        let has_input = d.points.iter().any(|p| {
+                            p.id.name == target
+                                && p.id.aspect.is_none()
+                                && p.id.direction == crate::iomap::IoDirection::Input
+                        });
+                        if !has_input {
+                            return Err(SceneError::BadScenario(format!(
+                                "scenario `{scenario}`: `{target}` has no input wire to open — it is written and read on one controller (or only written); force it with stuck(...) instead"
+                            )));
+                        }
+                    }
+                    self.io
+                        .bindings
+                        .iter()
+                        .find(|b| {
+                            b.point.name == target
+                                && b.point.aspect.is_none()
+                                && b.point.direction == crate::iomap::IoDirection::Input
+                        })
+                        .is_some_and(|b| b.invert)
+                }
+            };
+            out.push((target.to_string(), value));
+        }
+        Ok(out)
+    }
+
+    /// The inputs the applied scenario pins, `(lane name, value)` — set by
+    /// [`apply_scenario`](Self::apply_scenario) on the snapshot a rollout
+    /// runs on, empty on a live scene. Not authored, not saved.
+    pub fn forced_inputs(&self) -> &[(String, bool)] {
+        &self.forced_inputs
     }
 
     /// Is `name` readable as a signal (internal relay or sensor input)?

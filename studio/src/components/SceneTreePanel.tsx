@@ -2,7 +2,13 @@ import { useMemo, useState } from "react";
 
 import type { FrameMsg, ObstacleMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
-import { sendRemoveDevice, sendRemoveSensor, sendRobotBasePose, sendSetObstacleEnabled } from "../ws";
+import {
+  sendRemoveDevice,
+  sendRemoveIoNode,
+  sendRemoveSensor,
+  sendRobotBasePose,
+  sendSetObstacleEnabled,
+} from "../ws";
 import { Section } from "./Section";
 
 /**
@@ -23,12 +29,16 @@ export function SceneTreePanel() {
   const selection = useStudioStore((s) => s.selection);
   const selectSensor = useStudioStore((s) => s.selectSensor);
   const selectDevice = useStudioStore((s) => s.selectDevice);
+  const ioNodes = useStudioStore((s) => s.io.io.nodes);
+  const ioPoints = useStudioStore((s) => s.io.points);
+  const selectIoNode = useStudioStore((s) => s.selectIoNode);
   if (
     robots.length === 0 &&
     obstacles.length === 0 &&
     frames.length === 0 &&
     sensors.length === 0 &&
-    devices.length === 0
+    devices.length === 0 &&
+    ioNodes.length === 0
   ) {
     return null;
   }
@@ -130,8 +140,66 @@ export function SceneTreePanel() {
           ))}
         </div>
       )}
+      {/* I/O nodes — controllers and stations of the assignment layer,
+          authored from Python. Read-only here: selecting one shows its
+          channels and what is bound to them in the Layout inspector. */}
+      {ioNodes.length > 0 && (
+        <div className="scene-tree">
+          {ioNodes.map((n) => {
+            const bound = ioPoints.filter((p) => p.node === n.name).length;
+            const kind = ioNodeKindLabel(n.kind.kind);
+            return (
+              <div
+                key={n.name}
+                className={`tree-row${
+                  selection.type === "io_node" && selection.name === n.name
+                    ? " selected"
+                    : ""
+                }`}
+              >
+                <span className="tree-twist" />
+                <span
+                  className="tree-label"
+                  title={`${kind}${n.uplink ? ` — uplink ${n.uplink.parent}` : ""} — click for details`}
+                  onClick={() => selectIoNode(n.name)}
+                >
+                  {"\u{1F50C} "}
+                  {n.name}
+                  <span className="seq-cond"> · {kind}</span>
+                </span>
+                <span className="seq-cond" title="bound points / channels">
+                  {bound}/{(n.channels ?? []).length}
+                </span>
+                <button
+                  className="tree-toggle"
+                  title="remove I/O node"
+                  onClick={() => sendRemoveIoNode(n.name)}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Section>
   );
+}
+
+/** `plc` → "PLC", `remote_io` → "remote I/O", ... */
+export function ioNodeKindLabel(kind: string): string {
+  switch (kind) {
+    case "plc":
+      return "PLC";
+    case "safety_plc":
+      return "safety PLC";
+    case "remote_io":
+      return "remote I/O";
+    case "robot_controller":
+      return "robot controller";
+    default:
+      return kind;
+  }
 }
 
 interface TreeNode {

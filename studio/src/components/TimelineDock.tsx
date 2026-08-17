@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
 import { useStudioStore } from "../store";
 import { sendExportUsd } from "../ws";
+import { chipsForLane } from "./IoOverlay";
 
 const BAND_COLORS = ["#4a6fa5", "#5a8f6a", "#a5824a", "#7a5aa5", "#a55a6f"];
 const ROBOT_LANE_COLOR = "#4a8fa5";
@@ -39,16 +40,36 @@ function utilization(
 function SignalLane({
   signal,
   duration,
+  chips,
+  hot,
 }: {
   signal: { name: string; times: number[]; values: boolean[] };
   duration: number;
+  /** The channels the lane's points are bound to (`UR.DI2 · %IX0.2`):
+   * with them the chart reads as the FAT I/O waveform sheet. */
+  chips: string[];
+  /** Picked in the topology diagram. */
+  hot: boolean;
 }) {
   const pct = (t: number) => `${(t / duration) * 100}%`;
   return (
-    <div className="timeline-lane">
-      <span className="timeline-lane-name" title={signal.name}>
+    <div className={`timeline-lane${hot ? " timeline-lane-hot" : ""}`}>
+      <span
+        className="timeline-lane-name"
+        title={chips.length > 0 ? `${signal.name} — ${chips.join(", ")}` : signal.name}
+      >
         {signal.name}
       </span>
+      {chips.length > 0 && (
+        <span className="timeline-lane-chips" title={chips.join(", ")}>
+          {chips.slice(0, 2).map((c) => (
+            <span key={c} className="io-chip">
+              {c}
+            </span>
+          ))}
+          {chips.length > 2 && <span className="io-chip">+{chips.length - 2}</span>}
+        </span>
+      )}
       <div className="timeline-lane-track">
         {signal.times.map((t0, i) => {
           const t1 = signal.times[i + 1] ?? duration;
@@ -84,8 +105,24 @@ export function TimelineDock() {
   const setLoop = useStudioStore((s) => s.setPlaybackLoop);
   const sfcOpen = useStudioStore((s) => s.sfcOpen);
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
+  const ioOpen = useStudioStore((s) => s.ioOpen);
+  const setIoOpen = useStudioStore((s) => s.setIoOpen);
+  const topoOpen = useStudioStore((s) => s.topoOpen);
+  const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
+  const highlightLane = useStudioStore((s) => s.highlightLane);
+  const ioPoints = useStudioStore((s) => s.io.points);
+  const sequenceError = useStudioStore((s) => s.sequenceError);
+  const sequenceErrorScenario = useStudioStore((s) => s.sequenceErrorScenario);
   const barRef = useRef<HTMLDivElement | null>(null);
   const [showDevices, setShowDevices] = useState(false);
+  // Lane name -> channel chips, from the I/O map's bound points.
+  const chips = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const lane of timeline?.signals ?? []) {
+      m.set(lane.name, chipsForLane(ioPoints, lane.name));
+    }
+    return m;
+  }, [ioPoints, timeline]);
 
   // The one transport bar: motion/plan previews play here too, they just
   // have no step bands or signal lanes — only segment tick marks.
@@ -150,6 +187,28 @@ export function TimelineDock() {
               sfc
             </button>
           )}
+          {timeline && (
+            <button
+              className={
+                ioOpen ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setIoOpen(!ioOpen)}
+              title="the I/O table — points, channels, live levels"
+            >
+              io
+            </button>
+          )}
+          {timeline && (
+            <button
+              className={
+                topoOpen ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setTopoOpen(!topoOpen)}
+              title="the electrical topology — controllers, channels, wires, handshakes"
+            >
+              topo
+            </button>
+          )}
           {/* Sequence timelines only: the server bakes the retained
               rollout, so a motion preview or a loaded recording has
               nothing to re-export. */}
@@ -165,6 +224,15 @@ export function TimelineDock() {
           <span>{playbackTime.toFixed(2)}s</span>
         </span>
       </div>
+      {/* A run that did not complete leaves the last bake on the dock and
+          says why here — under a fault scenario the diagnosis names the
+          stalled step and the forced point, which is the result. */}
+      {sequenceError && (
+        <div className="timeline-diagnosis" title={sequenceError}>
+          ⚠ {sequenceErrorScenario ? `⧉ ${sequenceErrorScenario} — ` : ""}
+          {sequenceError}
+        </div>
+      )}
       <div className="timeline-bands" ref={barRef} onClick={seek}>
         {(timeline?.stepSpans ?? []).map((span, i) => (
           <div
@@ -225,7 +293,13 @@ export function TimelineDock() {
       {(timeline?.signals ?? [])
         .filter((signal) => signal.kind !== "device")
         .map((signal) => (
-          <SignalLane key={signal.name} signal={signal} duration={duration} />
+          <SignalLane
+            key={signal.name}
+            signal={signal}
+            duration={duration}
+            chips={chips.get(signal.name) ?? []}
+            hot={highlightLane === signal.name}
+          />
         ))}
       {timeline?.signals.some((signal) => signal.kind === "device") && (
         <div className="timeline-lane">
@@ -246,6 +320,8 @@ export function TimelineDock() {
               key={signal.name}
               signal={signal}
               duration={duration}
+              chips={chips.get(signal.name) ?? []}
+              hot={highlightLane === signal.name}
             />
           ))}
     </div>

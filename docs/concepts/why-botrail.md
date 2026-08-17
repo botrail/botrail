@@ -70,8 +70,15 @@ physics, and honesty about that is what makes the numbers trustworthy.
   frozen; there is no cooperative planning. Execution-time interference is
   caught by tick checking, and separation is authored with interlocks — the
   way a PLC cell actually does it.
-* **PLC vocabulary, not PLC connectivity.** Steps, signals, and scan cycles
-  are the mental model; there is no OPC-UA link to real hardware.
+* **PLC vocabulary, not PLC connectivity** — but the I/O list is a
+  deliverable. Steps, signals, and scan cycles are the mental model; there
+  is no OPC-UA link to real hardware. What the cell needs electrically is
+  derived from those programs ([the I/O map](../guides/io-map.md): points,
+  assignments, handshake wires, a broken-wire scenario), and the exported
+  robot script uses the same DI/DO numbers — the consistency is checked, the
+  electrical behaviour is not simulated. Safety goes as far as labels,
+  two-channel pairs, point counts and forced-input scenarios; no
+  performance level is claimed.
 * **USD in, not CAD in.** STEP/JT conversion is an upstream job for other
   tools.
 

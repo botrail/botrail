@@ -19,6 +19,8 @@ import { LegendHud } from "./LegendHud";
 import { SprayView } from "./SprayView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
+import { IoOverlay } from "./IoOverlay";
+import { IoTopologyOverlay } from "./IoTopologyOverlay";
 import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
@@ -84,9 +86,11 @@ export function Viewport() {
           ? `sensor · ${selection.name}`
           : selection.type === "device"
             ? `device · ${selection.name}`
-            : selection.type === "robot"
-              ? `${scope(selection.robot)}robot base`
-              : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
+            : selection.type === "io_node"
+              ? `I/O node · ${selection.name}`
+              : selection.type === "robot"
+                ? `${scope(selection.robot)}robot base`
+                : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.
@@ -188,6 +192,8 @@ export function Viewport() {
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
       <SfcOverlay />
+      <IoOverlay />
+      <IoTopologyOverlay />
       <LegendHud />
       <TimelineDock />
       {!connected && <div className="overlay">connecting…</div>}

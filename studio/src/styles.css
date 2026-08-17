@@ -421,6 +421,12 @@ select:focus {
   font-size: 12px;
 }
 
+/* A run that stopped where a fault scenario said it would. */
+.plan-diagnosis {
+  color: #e0b04c;
+  font-size: 12px;
+}
+
 /* --- motion panel --- */
 .motion-controls {
   display: flex;
@@ -1110,4 +1116,490 @@ button.danger:hover:not(:disabled) {
 
 .sfc-live-cond .sep {
   color: #5a6374;
+}
+
+/* --- I/O table overlay + chips (see components/IoOverlay.tsx) --- */
+
+.io-overlay {
+  /* The table is wide; give it more room than the SFC chart takes. */
+  max-width: min(78%, 1100px);
+}
+
+.io-scroll {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 8px 10px 10px;
+}
+
+.io-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.io-table {
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.io-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(23, 26, 33, 0.98);
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.io-table td {
+  padding: 2px 8px 2px 0;
+  border-bottom: 1px solid #1f242e;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.io-row.io-clickable {
+  cursor: pointer;
+}
+
+.io-row.io-clickable:hover td {
+  background: rgba(77, 163, 255, 0.08);
+}
+
+.io-row.io-cosmetic td,
+.io-row.io-internal td {
+  color: var(--muted);
+}
+
+.io-point {
+  font-weight: 600;
+}
+
+.io-muted {
+  color: var(--muted);
+}
+
+.io-safety {
+  color: #e0b04c;
+}
+
+.io-status-unbound {
+  color: #e0b04c;
+}
+
+.io-status-bound {
+  color: var(--ok);
+}
+
+.io-live {
+  text-align: center;
+}
+
+.io-on {
+  color: var(--ok);
+}
+
+.io-off {
+  color: #414a5a;
+}
+
+/* The channel chip: `UR.DI2 · %IX0.2` — on the table and beside a
+ * timeline lane, so the chart doubles as the addressed I/O sheet. */
+.io-chip {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #23304a;
+  color: #9fc0ee;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.timeline-lane-chips {
+  display: inline-flex;
+  gap: 4px;
+  max-width: 220px;
+  overflow: hidden;
+}
+
+.timeline-diagnosis {
+  margin: 0 0 4px;
+  color: #e0b04c;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.io-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.io-finding {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.io-code {
+  color: #9fc0ee;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.io-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- I/O node inspector (Layout tab) --- */
+
+.io-node-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.io-node-facts .seq-cond {
+  display: inline-block;
+  width: 64px;
+}
+
+.io-node-table td,
+.io-node-table th {
+  font-size: 11px;
+}
+
+/* --- scenario summary under the world selector --- */
+
+.scenario-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 2px;
+}
+
+.scenario-fault {
+  color: #e0b04c;
+  font-size: 11px;
+}
+
+/* --- topology overlay (see components/IoTopologyOverlay.tsx) --- */
+
+.topo-overlay {
+  max-width: min(78%, 1100px);
+}
+
+.topo-scroll {
+  padding: 8px 10px 10px;
+}
+
+.topo-layers {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.topo-svg {
+  display: block;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.topo-svg text {
+  fill: #aeb8c8;
+  user-select: none;
+}
+
+.topo-block-frame {
+  fill: rgba(28, 33, 44, 0.9);
+  stroke: #3a4356;
+  stroke-width: 1;
+}
+
+.topo-block.implicit .topo-block-frame {
+  stroke-dasharray: 4 3;
+}
+
+.topo-host {
+  font-weight: 700;
+  font-size: 11px;
+  fill: #d6dae2;
+}
+
+.topo-host-kind,
+.topo-station-text {
+  fill: #7d8798;
+}
+
+.topo-block-head.clickable,
+.topo-station,
+.topo-field.clickable,
+.topo-row.clickable,
+.topo-bus,
+.topo-wire.clickable {
+  cursor: pointer;
+}
+
+.topo-badge {
+  fill: #e0b04c;
+}
+
+.topo-station-box {
+  fill: #1a202c;
+  stroke: #414a5a;
+}
+
+.topo-uplink {
+  stroke: #414a5a;
+  stroke-width: 1;
+}
+
+.topo-prog rect {
+  fill: #23304a;
+}
+
+.topo-prog text {
+  fill: #9fc0ee;
+}
+
+.topo-chan {
+  fill: #9fc0ee;
+}
+
+.topo-chan.missing {
+  fill: #e0b04c;
+}
+
+.topo-row.topo-unbound .topo-point {
+  fill: #e0b04c;
+}
+
+.topo-row-hot {
+  fill: rgba(127, 180, 255, 0.14);
+}
+
+.topo-port {
+  fill: #414a5a;
+}
+
+.topo-port.on {
+  fill: var(--ok);
+}
+
+.topo-port.off {
+  fill: #2c3444;
+}
+
+.topo-wire path,
+.topo-wire line {
+  fill: none;
+  stroke: #6b7688;
+  stroke-width: 1.4;
+}
+
+.topo-wire.on path,
+.topo-wire.on line {
+  stroke: var(--ok);
+}
+
+.topo-wire.off path,
+.topo-wire.off line {
+  stroke: #414a5a;
+}
+
+.topo-wire.hot path,
+.topo-wire.hot line {
+  stroke: #7fb4ff;
+  stroke-width: 2.2;
+}
+
+.topo-wire.unbound path {
+  stroke-dasharray: 3 3;
+}
+
+.topo-wire.safety path,
+.topo-wire.safety line {
+  stroke-dasharray: 6 2;
+}
+
+.topo-bus line {
+  stroke-width: 2;
+}
+
+.topo-tap {
+  fill: #aeb8c8;
+  stroke: none;
+}
+
+.topo-wire.on .topo-tap {
+  fill: var(--ok);
+}
+
+.topo-fn path {
+  stroke-dasharray: 2 3;
+  stroke: #7a5aa5;
+}
+
+.topo-fn circle {
+  fill: #7a5aa5;
+}
+
+.topo-field rect {
+  fill: #1a202c;
+  stroke: #414a5a;
+}
+
+.topo-field-sensor rect {
+  stroke: #5a8f6a;
+}
+
+.topo-field-device rect {
+  stroke: #a5824a;
+}
+
+.topo-field-robot rect {
+  stroke: #4a8fa5;
+}
+
+.topo-field-declared rect {
+  stroke: #7a5aa5;
+}
+
+.timeline-lane-hot .timeline-lane-name,
+.timeline-lane-hot .timeline-lane-chips .io-chip {
+  color: #7fb4ff;
+}
+
+.timeline-lane-hot .timeline-lane-track {
+  outline: 1px solid #4a6fa5;
+}
+
+/* --- I/O editing controls (overlay footer, node inspector) --- */
+
+.io-input {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.io-input-short {
+  width: 110px;
+}
+
+.io-select {
+  background: var(--panel-2);
+  color: #9fc0ee;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0 2px;
+  max-width: 200px;
+}
+
+.io-select.io-select-unbound {
+  color: #e0b04c;
+  border-color: #5a4a2c;
+}
+
+.io-decls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.io-decl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #23304a;
+  color: #c9b3f0;
+}
+
+.io-decl-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.io-decl-form select {
+  font-size: 11px;
+}
+
+.io-node-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.io-checks {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.io-templates {
+  padding-top: 4px;
+}
+
+/* --- the analysis panel's tab strip (SFC / I/O / TOPOLOGY share one panel) --- */
+
+.overlay-tabs {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.overlay-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0 6px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.overlay-tab:hover {
+  color: var(--text);
+}
+
+.overlay-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  cursor: default;
 }

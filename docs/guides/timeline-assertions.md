@@ -47,6 +47,54 @@ assert tl.signal("belt").high_spans() == [(0.0, tl.step_span("feed").end)]
 assert tl.signal("carrying").high_total() < 10.0
 ```
 
+## Handshakes, response times and faults
+
+A handshake between two controllers is a signal one program writes and
+another waits on; the bake has both ends, so its timing is a plain
+assertion. The pattern is "the reader moves within *n* scans of the edge":
+
+```python
+tl = scene.simulate_sequences(["st1", "st2", "transfer"])
+done = tl.signal("st1_done").rising_edges()
+gate = tl.step_span("transfer/p2_gate")
+assert done[0] <= gate.end <= done[0] + 0.02        # released within two scans
+```
+
+For a robot the controller side has no lane; the timeline synthesizes it:
+
+```python
+busy = tl.robot_busy("st1_lh")                       # [(start, end), ...] merged moves
+starts = [t for _, t, _ in tl.moves("st1_lh")]
+assert busy[0][0] == starts[0]                       # busy rises with the first start
+assert all(b - a > 0 for a, b in busy)
+```
+
+Two contacts that must never be on together (an interlock) is an
+intersection test on their high spans:
+
+```python
+def overlap(a, b):
+    return [(max(s1, s2), min(e1, e2)) for s1, e1 in a for s2, e2 in b if max(s1, s2) < min(e1, e2)]
+
+assert overlap(tl.signal("near_in_zone").high_spans(), tl.signal("far_in_zone").high_spans()) == []
+```
+
+And a fault scenario (see [the I/O map](io-map.md#faults-the-fourth-delta))
+turns "what if the wire breaks" into a row of the same table:
+
+```python
+scene.add_scenario("beam_open", faults=[bt.io.open("body_at_head")])
+runs = scene.simulate_scenarios(["st1", "st2", "transfer"])
+assert "forced: body_at_head=false" in runs.errors["beam_open"]     # it stops, and says why
+assert "transfer/p1_load" in runs.errors["beam_open"]                # ... at the step that reads it
+```
+
+The safe-side assertion is the one *without* an error: an inverted E-stop
+wire that still runs is a wiring finding, and the run shows it —
+`assert "estop_open" in runs.errors` is the check that the healthy contact
+is wired to fail low. `tl.export_handshake_spec(path)` writes the whole
+interface as a Markdown sheet, per scenario.
+
 ## Clearance
 
 ```python

@@ -40,10 +40,45 @@ use crate::Scene;
 /// Keys are the names the sequence already uses: signal names (sensors and
 /// internal flags), device names, and — for `robot_done` waits — robot
 /// instance names. `inputs` feed level waits, `outputs` feed coil writes.
+/// Each port carries its wire polarity: an inverted input is tested
+/// against the opposite level, an inverted output written the opposite
+/// way (the sequence's meaning is untouched — `invert` is how the wire is
+/// built). Projected from the scene's I/O map
+/// ([`crate::iomap::sequence_io`]) or handed over as plain dicts.
 #[derive(Debug, Clone, Default)]
 pub struct SequenceIo {
-    pub inputs: HashMap<String, u32>,
-    pub outputs: HashMap<String, u32>,
+    pub inputs: HashMap<String, IoPort>,
+    pub outputs: HashMap<String, IoPort>,
+    /// The robot the program runs on. Set by the lowering itself; a
+    /// `robot_done` wait on this robot is the idle test a blocking
+    /// controller has already passed, so it lowers to nothing.
+    pub self_robot: Option<String>,
+}
+
+pub use crate::iomap::IoPort;
+
+impl SequenceIo {
+    /// Plain `name → port` maps, no inversion (the historical dict form).
+    pub fn from_ports(inputs: HashMap<String, u32>, outputs: HashMap<String, u32>) -> Self {
+        let lift = |m: HashMap<String, u32>| {
+            m.into_iter()
+                .map(|(k, port)| {
+                    (
+                        k,
+                        IoPort {
+                            port,
+                            invert: false,
+                        },
+                    )
+                })
+                .collect()
+        };
+        SequenceIo {
+            inputs: lift(inputs),
+            outputs: lift(outputs),
+            self_robot: None,
+        }
+    }
 }
 
 /// A lowered program plus everything the lowering had to approximate.
@@ -116,6 +151,11 @@ pub fn merged_sequence_program(
     })?;
     let robot = driven_robot(scene, seq)?;
     let robot_name = scene.robots()[robot].name.clone();
+    let io = SequenceIo {
+        self_robot: Some(robot_name.clone()),
+        ..io.clone()
+    };
+    let io = &io;
 
     let model = &scene.robots()[robot].model;
     let limits = crate::motion::traj_limits(model);
@@ -622,12 +662,13 @@ impl<'a> Lowering<'a> {
                 let port = self.io.outputs.get(signal).ok_or_else(|| {
                     format!(
                         "{label}: signal `{signal}` has no output port — \
-                         pass outputs={{\"{signal}\": <port>}}"
+                         bind it on the robot controller node (bind_output) or pass \
+                         outputs={{\"{signal}\": <port>}}"
                     )
                 })?;
                 out.push(Command::SetDigitalOut {
-                    port: *port,
-                    value: *value,
+                    port: port.port,
+                    value: *value ^ port.invert,
                 });
             }
             Action::Device { device, command } => {
@@ -733,6 +774,22 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
     })
 }
 
+/// The robot a rolled sequence drives — what the Python bindings need to
+/// pick the robot-controller node whose bindings project onto the
+/// script's I/O ports. Same resolution as the lowering itself.
+pub fn driven_robot_name(
+    scene: &Scene,
+    timeline: &SequenceTimeline,
+    sequence: Option<&str>,
+) -> Result<String, String> {
+    let name = resolve_sequence(timeline, sequence)?;
+    let seq = scene
+        .sequence(name)
+        .ok_or_else(|| format!("the timeline's scene snapshot holds no sequence `{name}`"))?;
+    let robot = driven_robot(scene, seq)?;
+    Ok(scene.robots()[robot].name.clone())
+}
+
 /// A condition as a digital-input snapshot test — what branch guards
 /// (and compound level waits) lower to. Timers and edges have no
 /// snapshot form and are refused with guidance.
@@ -749,39 +806,45 @@ fn digital_test(
             .inputs
             .get(name)
             .map(|port| DigitalTest::Input {
-                port: *port,
-                value: *value,
+                port: port.port,
+                value: *value ^ port.invert,
             })
             .ok_or_else(|| {
                 format!(
-                    "{label}: signal `{name}` has no input port — pass \
-                     inputs={{\"{name}\": <port>}}"
+                    "{label}: signal `{name}` has no input port — bind it on the robot \
+                     controller node (bind_input) or pass inputs={{\"{name}\": <port>}}"
                 )
             }),
         Condition::DeviceDone { device } => io
             .inputs
             .get(device)
             .map(|port| DigitalTest::Input {
-                port: *port,
-                value: true,
+                port: port.port,
+                value: !port.invert,
             })
             .ok_or_else(|| {
                 format!(
-                    "{label}: device `{device}` has no in-position input — pass \
-                     inputs={{\"{device}\": <port>}}"
+                    "{label}: device `{device}` has no in-position input — bind it \
+                     (bind_input) or pass inputs={{\"{device}\": <port>}}"
                 )
             }),
+        // The program's own robot is idle by the time a blocking
+        // controller reads the guard — like `Done`.
+        Condition::RobotDone { robot } if io.self_robot.as_deref() == Some(robot.as_str()) => {
+            Ok(DigitalTest::Always)
+        }
         Condition::RobotDone { robot } => io
             .inputs
             .get(robot)
             .map(|port| DigitalTest::Input {
-                port: *port,
-                value: true,
+                port: port.port,
+                value: !port.invert,
             })
             .ok_or_else(|| {
                 format!(
                     "{label}: `robot_done({robot})` needs the partner controller's \
-                     idle contact on an input — pass inputs={{\"{robot}\": <port>}}"
+                     idle contact on an input — bind `{robot}.done` (bind_input) or pass \
+                     inputs={{\"{robot}\": <port>}}"
                 )
             }),
         Condition::All(conditions) => Ok(DigitalTest::AllOf(
@@ -821,7 +884,10 @@ fn lower_device(
         _ => None,
     };
     match (coil, io.outputs.get(device)) {
-        (Some(value), Some(port)) => commands.push(Command::SetDigitalOut { port: *port, value }),
+        (Some(value), Some(port)) => commands.push(Command::SetDigitalOut {
+            port: port.port,
+            value: value ^ port.invert,
+        }),
         (Some(value), None) => {
             // An unmapped run coil stays the cell controller's: common
             // when the PLC keeps the conveyor and the robot only handshakes.
@@ -883,14 +949,14 @@ fn lower_condition(
         Condition::Signal { name, value } => {
             let port = io.inputs.get(name).ok_or_else(|| {
                 format!(
-                    "{label}: signal `{name}` has no input port — pass \
-                     inputs={{\"{name}\": <port>}}"
+                    "{label}: signal `{name}` has no input port — bind it on the robot \
+                     controller node (bind_input) or pass inputs={{\"{name}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the signal wait");
             commands.push(Command::WaitDigitalIn {
-                port: *port,
-                value: *value,
+                port: port.port,
+                value: *value ^ port.invert,
             });
         }
         // An edge lowers to the classic two-stage interlock: wait for the
@@ -899,8 +965,8 @@ fn lower_condition(
         Condition::Rising { name } | Condition::Falling { name } => {
             let port = io.inputs.get(name).ok_or_else(|| {
                 format!(
-                    "{label}: signal `{name}` has no input port — pass \
-                     inputs={{\"{name}\": <port>}}"
+                    "{label}: signal `{name}` has no input port — bind it on the robot \
+                     controller node (bind_input) or pass inputs={{\"{name}\": <port>}}"
                 )
             })?;
             let rising = matches!(condition, Condition::Rising { .. });
@@ -914,38 +980,42 @@ fn lower_condition(
                 ),
             });
             commands.push(Command::WaitDigitalIn {
-                port: *port,
-                value: !rising,
+                port: port.port,
+                value: !rising ^ port.invert,
             });
             commands.push(Command::WaitDigitalIn {
-                port: *port,
-                value: rising,
+                port: port.port,
+                value: rising ^ port.invert,
             });
         }
         Condition::DeviceDone { device } => {
             let port = io.inputs.get(device).ok_or_else(|| {
                 format!(
-                    "{label}: device `{device}` has no in-position input — pass \
-                     inputs={{\"{device}\": <port>}}"
+                    "{label}: device `{device}` has no in-position input — bind it \
+                     (bind_input) or pass inputs={{\"{device}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the in-position wait");
             commands.push(Command::WaitDigitalIn {
-                port: *port,
-                value: true,
+                port: port.port,
+                value: !port.invert,
             });
         }
+        // The program's own robot: a blocking controller is idle here by
+        // construction — nothing to wait on (same as `Done`).
+        Condition::RobotDone { robot } if io.self_robot.as_deref() == Some(robot.as_str()) => {}
         Condition::RobotDone { robot } => {
             let port = io.inputs.get(robot).ok_or_else(|| {
                 format!(
                     "{label}: `robot_done({robot})` needs the partner controller's \
-                     idle contact on an input — pass inputs={{\"{robot}\": <port>}}"
+                     idle contact on an input — bind `{robot}.done` (bind_input) or pass \
+                     inputs={{\"{robot}\": <port>}}"
                 )
             })?;
             concurrency_warning(warnings, "the partner wait");
             commands.push(Command::WaitDigitalIn {
-                port: *port,
-                value: true,
+                port: port.port,
+                value: !port.invert,
             });
         }
         // Compound waits: when every member is a digital snapshot test,
@@ -1007,10 +1077,10 @@ mod tests {
     }
 
     fn io(inputs: &[(&str, u32)], outputs: &[(&str, u32)]) -> SequenceIo {
-        SequenceIo {
-            inputs: inputs.iter().map(|(n, p)| (n.to_string(), *p)).collect(),
-            outputs: outputs.iter().map(|(n, p)| (n.to_string(), *p)).collect(),
-        }
+        SequenceIo::from_ports(
+            inputs.iter().map(|(n, p)| (n.to_string(), *p)).collect(),
+            outputs.iter().map(|(n, p)| (n.to_string(), *p)).collect(),
+        )
     }
 
     /// A one-robot cell whose sequence exercises every lowerable element:
@@ -1562,6 +1632,7 @@ mod tests {
                 signals: vec![("ok".into(), false), ("ng".into(), true)],
                 obstacles: vec![],
                 joints: vec![],
+                faults: vec![],
             })
             .unwrap();
         let options = RolloutOptions::default();
@@ -1677,6 +1748,7 @@ mod tests {
                 signals: vec![("ok".into(), false), ("ng".into(), true)],
                 obstacles: vec![],
                 joints: vec![("r".into(), vec![0.5])],
+                faults: vec![],
             })
             .unwrap();
         let options = RolloutOptions::default();

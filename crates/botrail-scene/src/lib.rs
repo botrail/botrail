@@ -9,6 +9,8 @@ pub mod apt;
 pub mod carve;
 pub mod coat;
 pub mod gcode;
+pub mod handshake;
+pub mod iomap;
 pub mod motion;
 pub mod project;
 pub mod rollout;
@@ -67,6 +69,16 @@ pub enum SceneError {
     BadMount(String),
     #[error("{0}")]
     BadEffect(String),
+    #[error("unknown I/O node `{0}`")]
+    UnknownIoNode(String),
+    #[error("unknown channel `{1}` on I/O node `{0}`")]
+    UnknownIoChannel(String, String),
+    #[error("no binding for `{0}`")]
+    UnknownIoBinding(String),
+    #[error("no I/O declaration for `{0}`")]
+    UnknownIoDecl(String),
+    #[error("{0}")]
+    BadIo(String),
 }
 
 /// Rewrites `RobotDone` references inside a (possibly nested) condition.
@@ -79,6 +91,26 @@ fn rename_in_condition(condition: &mut seq::Condition, old: &str, new: &str) {
             }
         }
         _ => {}
+    }
+}
+
+/// Renames a robot through a step list — actions, transitions, and the
+/// arms of every branching step, recursively (an earlier version stopped
+/// at the top level and left select arms pointing at the old name).
+fn rename_in_steps(steps: &mut [seq::Step], old: &str, new: &str) {
+    for step in steps {
+        for action in &mut step.actions {
+            if let Some(name) = action.robot_mut() {
+                if name == old {
+                    *name = new.to_string();
+                }
+            }
+        }
+        rename_in_condition(&mut step.transition, old, new);
+        for arm in &mut step.select {
+            rename_in_condition(&mut arm.condition, old, new);
+            rename_in_steps(&mut arm.steps, old, new);
+        }
     }
 }
 
@@ -317,6 +349,14 @@ pub struct Scene {
     applicators: Vec<(String, coat::Applicator)>,
     /// Brushes: named process settings a toolpath's feed moves run with.
     brushes: Vec<coat::Brush>,
+    /// The assignment layer of the I/O map: controller nodes, point →
+    /// channel bindings, declarations. Everything else about I/O is
+    /// derived from the sequences (see [`iomap`]).
+    io: iomap::IoMap,
+    /// Inputs a scenario's faults pin for the run — filled by
+    /// `apply_scenario` on a rollout snapshot, read by the rollout. Never
+    /// authored, never saved: the live scene's list is empty.
+    forced_inputs: Vec<(String, bool)>,
     /// Link shapes that could not be used for collision (e.g. unreadable
     /// mesh files). Surface these to the user once.
     pub collision_warnings: Vec<String>,
@@ -350,6 +390,8 @@ impl Scene {
             allowed_contacts: Vec::new(),
             applicators: Vec::new(),
             brushes: Vec::new(),
+            io: iomap::IoMap::default(),
+            forced_inputs: Vec::new(),
             collision_warnings,
         }
     }
@@ -439,13 +481,32 @@ impl Scene {
             }
         }
         for sequence in &mut self.sequences {
-            for step in &mut sequence.steps {
-                for action in &mut step.actions {
-                    if let Some(name) = action.robot_mut() {
-                        swap(name);
-                    }
-                }
-                rename_in_condition(&mut step.transition, &old, &candidate);
+            rename_in_steps(&mut sequence.steps, &old, &candidate);
+        }
+        // Everything else authored by robot name: weld flashes, scenario
+        // start configurations, and the I/O map's controller nodes and
+        // handshake bindings.
+        for flash in &mut self.weld_flashes {
+            swap(&mut flash.robot);
+        }
+        for scenario in &mut self.scenarios {
+            for (robot, _) in &mut scenario.joints {
+                swap(robot);
+            }
+        }
+        for node in &mut self.io.nodes {
+            if let iomap::IoNodeKind::RobotController { robots } = &mut node.kind {
+                robots.iter_mut().for_each(swap);
+            }
+        }
+        for binding in &mut self.io.bindings {
+            if binding.point.aspect.is_some_and(|a| {
+                matches!(
+                    a,
+                    iomap::Aspect::Start | iomap::Aspect::Done | iomap::Aspect::Program
+                )
+            }) {
+                swap(&mut binding.point.name);
             }
         }
         candidate
@@ -2020,6 +2081,94 @@ mod tests {
             scene.rename_robot(1, scene.robots()[0].name.clone().as_str()),
             format!("{}_2", scene.robots()[0].name)
         );
+    }
+
+    #[test]
+    fn rename_follows_select_arms_flashes_scenarios_and_the_io_map() {
+        let mut scene = sample_scene();
+        let model = scene.robot().clone();
+        scene.add_robot(model, Some("b"), iso(1.0, 0.0, 0.0));
+        // A branching step whose arm addresses `b`, a flash on `b`, a
+        // scenario start pose for `b`, a controller node listing `b`, and
+        // a handshake binding for `b`.
+        scene.upsert_sequence(seq::Sequence {
+            name: "cell".into(),
+            steps: vec![seq::Step {
+                name: "judge".into(),
+                actions: Vec::new(),
+                transition: seq::Condition::Immediately,
+                select: vec![seq::SelectArm {
+                    condition: seq::Condition::RobotDone { robot: "b".into() },
+                    steps: vec![seq::Step {
+                        name: "park".into(),
+                        actions: vec![seq::Action::Untrack {
+                            robot: Some("b".into()),
+                        }],
+                        transition: seq::Condition::Immediately,
+                        select: Vec::new(),
+                    }],
+                }],
+            }],
+        });
+        scene.define_signal("arc", false);
+        scene.add_weld_flash("flash", "arc", "b").expect("flash");
+        scene
+            .upsert_scenario(seq::Scenario {
+                name: "alt".into(),
+                signals: Vec::new(),
+                obstacles: Vec::new(),
+                joints: vec![("b".into(), vec![0.5])],
+                faults: vec![],
+            })
+            .expect("scenario");
+        scene
+            .upsert_io_node(iomap::IoNode {
+                name: "RC".into(),
+                kind: iomap::IoNodeKind::RobotController {
+                    robots: vec!["b".into()],
+                },
+                programs: Vec::new(),
+                uplink: None,
+                channels: vec![iomap::IoChannel {
+                    id: "DI0".into(),
+                    kind: iomap::ChannelKind::Di,
+                    port: Some(0),
+                    address: None,
+                    electrical: None,
+                }],
+                place: None,
+                model: None,
+            })
+            .expect("node");
+        scene
+            .bind_io(iomap::IoBinding {
+                point: iomap::IoPointId::parse("b.done", iomap::IoDirection::Input),
+                node: "RC".into(),
+                channel: "DI0".into(),
+                tag: None,
+                field: None,
+                invert: false,
+                contact: None,
+                safety: false,
+                device: None,
+                note: None,
+                auto: false,
+            })
+            .expect("binding");
+
+        assert_eq!(scene.rename_robot(1, "far"), "far");
+        let arm = &scene.sequences()[0].steps[0].select[0];
+        assert!(matches!(&arm.condition, seq::Condition::RobotDone { robot } if robot == "far"));
+        assert!(
+            matches!(&arm.steps[0].actions[0], seq::Action::Untrack { robot } if robot.as_deref() == Some("far"))
+        );
+        assert_eq!(scene.weld_flashes()[0].robot, "far");
+        assert_eq!(scene.scenarios()[0].joints[0].0, "far");
+        match &scene.io_map().nodes[0].kind {
+            iomap::IoNodeKind::RobotController { robots } => assert_eq!(robots, &["far"]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(scene.io_map().bindings[0].point.name, "far");
     }
 
     #[test]

@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 
+import { useDockReserve } from "../dockReserve";
 import { samplePlayback } from "../playback";
 import type {
   BranchTakenMsg,
@@ -20,6 +21,7 @@ import {
 } from "../sfc";
 import { actionLabel, conditionLabel } from "../seqLabels";
 import { useStudioStore } from "../store";
+import { OverlayTabs } from "./OverlayTabs";
 
 /**
  * The cell's programs as SFC/GRAFCET charts, overlaid on the viewport:
@@ -446,25 +448,9 @@ export function SfcOverlay() {
   const setOpen = useStudioStore((s) => s.setSfcOpen);
   const sequences = useStudioStore((s) => s.sequences);
   const timeline = useStudioStore((s) => s.timeline);
-  // The dock's height is the cell's business — one lane per signal — so
-  // the room to leave for it is measured, not assumed.
   const docked = useStudioStore((s) => s.playback !== null);
   const [panel, setPanel] = useState<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!panel) return;
-    const dock = document.querySelector(".timeline-dock");
-    if (!dock) {
-      panel.style.removeProperty("--sfc-reserve");
-      return;
-    }
-    const fit = () => {
-      panel.style.setProperty("--sfc-reserve", `${dock.clientHeight + 34}px`);
-    };
-    fit();
-    const observer = new ResizeObserver(fit);
-    observer.observe(dock);
-    return () => observer.disconnect();
-  }, [panel, docked]);
+  useDockReserve(panel, docked);
   const programs = useMemo(
     () => sequences.filter((s) => s.steps.length > 0),
     [sequences],
@@ -473,7 +459,7 @@ export function SfcOverlay() {
   return (
     <div className="sfc-overlay" ref={setPanel}>
       <div className="sfc-head">
-        <span className="sfc-heading">SFC</span>
+        <OverlayTabs active="sfc" />
         <span className="sfc-caption">
           {timeline
             ? `${timeline.scenario ? `⧉ ${timeline.scenario} — ` : ""}cycle ${timeline.duration.toFixed(2)}s`

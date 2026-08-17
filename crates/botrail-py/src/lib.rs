@@ -448,6 +448,73 @@ impl Scene {
         self.hub.robot_index(robot).map_err(PyValueError::new_err)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn bind_point(
+        &self,
+        direction: botrail_scene::iomap::IoDirection,
+        name: &str,
+        node: &str,
+        channel: &str,
+        tag: Option<String>,
+        field: Option<String>,
+        invert: bool,
+        contact: Option<&str>,
+        safety: bool,
+        voltage: Option<f64>,
+        logic: Option<&str>,
+        note: Option<String>,
+    ) -> PyResult<()> {
+        use botrail_scene::iomap::{Contact, Electrical, IoBinding, IoPointId, Logic};
+        let contact =
+            match contact {
+                None => None,
+                Some(c) => Some(Contact::parse(c).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown contact {c:?} (no, nc)"))
+                })?),
+            };
+        let logic =
+            match logic {
+                None => None,
+                Some(l) => Some(Logic::parse(l).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown logic {l:?} (pnp, npn)"))
+                })?),
+            };
+        let device = if voltage.is_some() || logic.is_some() {
+            Some(Electrical { voltage, logic })
+        } else {
+            None
+        };
+        self.hub
+            .bind_io(IoBinding {
+                point: IoPointId::parse(name, direction),
+                node: node.to_string(),
+                channel: channel.to_string(),
+                tag,
+                field,
+                invert,
+                contact,
+                safety,
+                device,
+                note,
+                auto: false,
+            })
+            .map_err(scene_err)
+    }
+
+    /// Derives the I/O map over the authored snapshot (state-free: nothing
+    /// is stored on the scene).
+    fn derive_io(
+        &self,
+        sequences: Option<Vec<String>>,
+    ) -> PyResult<botrail_scene::iomap::IoDerivation> {
+        let scene = self.hub.authored_snapshot();
+        let names: Option<Vec<&str>> = sequences
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        botrail_scene::iomap::derive(&scene, names.as_deref())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Applies an `add_*` call's optional `color=`, passing the obstacle's
     /// final name through. A `None` colour is left alone so the obstacle
     /// keeps the viewer's neutral shading.
@@ -1432,6 +1499,365 @@ impl Scene {
         self.hub.device_names()
     }
 
+    /// The cell's I/O points, *derived* from how the sequences use the
+    /// scene's names (nothing to author): sensors are inputs, coils and
+    /// device commands are outputs, signals read or written across
+    /// controllers are handshake wires, robots driven from another host
+    /// get start/done points. `sequences` picks the program set (default:
+    /// every sequence — pass what you would pass to `simulate_sequences`
+    /// when alternative programs coexist). See docs/guides/io-map.md.
+    #[pyo3(signature = (sequences = None))]
+    fn io_points(&self, sequences: Option<Vec<String>>) -> PyResult<Vec<IoPoint>> {
+        let d = self.derive_io(sequences)?;
+        Ok(d.points.into_iter().map(|p| IoPoint { inner: p }).collect())
+    }
+
+    /// Lint findings over the derived I/O map: name clashes, unreferenced
+    /// definitions, numeric (word/analog) points, programs on the
+    /// implicit cell host. `assert scene.io_report().errors() == []` is
+    /// the CI form.
+    #[pyo3(signature = (sequences = None))]
+    fn io_report(&self, sequences: Option<Vec<String>>) -> PyResult<IoReport> {
+        let d = self.derive_io(sequences)?;
+        Ok(IoReport { inner: d.report })
+    }
+
+    /// The I/O list as text: `format` is `"csv"`, `"md"` (Markdown table)
+    /// or `"json"` (raw fields, step indices included).
+    #[pyo3(signature = (format = "csv", sequences = None))]
+    fn io_list(&self, format: &str, sequences: Option<Vec<String>>) -> PyResult<String> {
+        let d = self.derive_io(sequences)?;
+        render_io(&d, format)
+    }
+
+    /// Writes the I/O list to `path`; the format follows the extension
+    /// (`.csv`, `.md`, `.json`).
+    #[pyo3(signature = (path, sequences = None))]
+    fn export_io_list(&self, path: PathBuf, sequences: Option<Vec<String>>) -> PyResult<()> {
+        let format = match path.extension().and_then(|e| e.to_str()) {
+            Some("csv") => "csv",
+            Some("md") | Some("markdown") => "md",
+            Some("json") => "json",
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "export_io_list: unknown extension {:?} — use .csv, .md or .json",
+                    other.unwrap_or("")
+                )))
+            }
+        };
+        let d = self.derive_io(sequences)?;
+        let text = render_io(&d, format)?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    /// Declares a controller / I/O node of the cell's assignment layer:
+    /// `kind` is `"plc"`, `"safety_plc"`, `"remote_io"`,
+    /// `"robot_controller"` (with `robots=[...]`) or `"other"`.
+    /// `programs` lists the sequences this node runs (unlisted programs
+    /// are placed implicitly — see the I/O map guide); `uplink` is the
+    /// parent node (`"PLC1"` or `("PLC1", "PROFINET")`) whose I/O a remote
+    /// station or safety module belongs to; `channels` are the dicts the
+    /// `bt.io` templates build (`bt.io.di8(base="%IX0.0") + bt.io.do8(...)`
+    /// or `bt.io.ur_standard()`).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, kind = "plc", robots = None, programs = None, uplink = None,
+        channels = None, place = None, model = None, label = None))]
+    fn add_io_node(
+        &self,
+        name: &str,
+        kind: &str,
+        robots: Option<Vec<String>>,
+        programs: Option<Vec<String>>,
+        uplink: Option<Bound<'_, PyAny>>,
+        channels: Option<Vec<Bound<'_, PyAny>>>,
+        place: Option<String>,
+        model: Option<String>,
+        label: Option<String>,
+    ) -> PyResult<()> {
+        use botrail_scene::iomap::{IoNode, IoNodeKind, Uplink};
+        let kind = match kind {
+            "plc" => IoNodeKind::Plc,
+            "safety_plc" => IoNodeKind::SafetyPlc,
+            "remote_io" => IoNodeKind::RemoteIo,
+            "robot_controller" => IoNodeKind::RobotController {
+                robots: robots.clone().unwrap_or_default(),
+            },
+            "other" => IoNodeKind::Other {
+                label: label.clone().unwrap_or_else(|| "other".to_string()),
+            },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown I/O node kind {other:?} (plc, safety_plc, remote_io, robot_controller, other)"
+                )))
+            }
+        };
+        if kind.as_str() != "robot_controller" && robots.as_ref().is_some_and(|r| !r.is_empty()) {
+            return Err(PyValueError::new_err(
+                "robots= only applies to kind=\"robot_controller\"",
+            ));
+        }
+        if let IoNodeKind::RobotController { robots } = &kind {
+            if robots.is_empty() {
+                return Err(PyValueError::new_err(
+                    "a robot_controller node needs robots=[...] — the arms it drives",
+                ));
+            }
+        }
+        let uplink = match uplink {
+            None => None,
+            Some(obj) => Some(if let Ok(parent) = obj.extract::<String>() {
+                Uplink { parent, bus: None }
+            } else if let Ok((parent, bus)) = obj.extract::<(String, String)>() {
+                Uplink {
+                    parent,
+                    bus: Some(bus),
+                }
+            } else {
+                return Err(PyValueError::new_err(
+                    "uplink= is a node name or a (node, bus) pair",
+                ));
+            }),
+        };
+        let channels = channels
+            .unwrap_or_default()
+            .iter()
+            .map(channel_from_py)
+            .collect::<PyResult<Vec<_>>>()?;
+        self.hub
+            .upsert_io_node(IoNode {
+                name: name.to_string(),
+                kind,
+                programs: programs.unwrap_or_default(),
+                uplink,
+                channels,
+                place,
+                model,
+            })
+            .map_err(scene_err)
+    }
+
+    /// Removes a node and every binding on it.
+    fn remove_io_node(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_io_node(name).map_err(scene_err)
+    }
+
+    /// Wires an input point (`"beam_pick"`, `"line"` for a device's
+    /// in-position input, `"far.done"` for a robot's done contact) to a
+    /// channel of `node`. `invert=True` flips the wire level (NC wiring);
+    /// `contact` (`"no"` / `"nc"`), `field` (the device on the far end),
+    /// `voltage` / `logic` (`"pnp"` / `"npn"`) and `note` document it.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, node, channel, tag = None, field = None, invert = false, contact = None,
+        safety = false, voltage = None, logic = None, note = None))]
+    fn bind_input(
+        &self,
+        name: &str,
+        node: &str,
+        channel: &str,
+        tag: Option<String>,
+        field: Option<String>,
+        invert: bool,
+        contact: Option<&str>,
+        safety: bool,
+        voltage: Option<f64>,
+        logic: Option<&str>,
+        note: Option<String>,
+    ) -> PyResult<()> {
+        self.bind_point(
+            botrail_scene::iomap::IoDirection::Input,
+            name,
+            node,
+            channel,
+            tag,
+            field,
+            invert,
+            contact,
+            safety,
+            voltage,
+            logic,
+            note,
+        )
+    }
+
+    /// Wires an output point (`"conv"` for a run coil, `"vacuum"` for a
+    /// coil, `"line.index"` for an indexed-transfer start, `"far.start"`
+    /// for a robot start) to a channel of `node`. Same keywords as
+    /// `bind_input`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, node, channel, tag = None, field = None, invert = false, contact = None,
+        safety = false, voltage = None, logic = None, note = None))]
+    fn bind_output(
+        &self,
+        name: &str,
+        node: &str,
+        channel: &str,
+        tag: Option<String>,
+        field: Option<String>,
+        invert: bool,
+        contact: Option<&str>,
+        safety: bool,
+        voltage: Option<f64>,
+        logic: Option<&str>,
+        note: Option<String>,
+    ) -> PyResult<()> {
+        self.bind_point(
+            botrail_scene::iomap::IoDirection::Output,
+            name,
+            node,
+            channel,
+            tag,
+            field,
+            invert,
+            contact,
+            safety,
+            voltage,
+            logic,
+            note,
+        )
+    }
+
+    /// Drops the binding of an input point — on `node`, or everywhere.
+    #[pyo3(signature = (name, node = None))]
+    fn unbind_input(&self, name: &str, node: Option<&str>) -> PyResult<usize> {
+        let point =
+            botrail_scene::iomap::IoPointId::parse(name, botrail_scene::iomap::IoDirection::Input);
+        self.hub.unbind_io(&point, node).map_err(scene_err)
+    }
+
+    /// Drops the binding of an output point — on `node`, or everywhere.
+    #[pyo3(signature = (name, node = None))]
+    fn unbind_output(&self, name: &str, node: Option<&str>) -> PyResult<usize> {
+        let point =
+            botrail_scene::iomap::IoPointId::parse(name, botrail_scene::iomap::IoDirection::Output);
+        self.hub.unbind_io(&point, node).map_err(scene_err)
+    }
+
+    /// An exception to the derivation, or an unmodelled point. `role` is
+    /// `"input"` (an external contact whatever the sequences do),
+    /// `"output"` (a coil — also promotes a magazine to a real feeder),
+    /// `"internal"` (a relay, no I/O) or `"exclude"` (off the table). A
+    /// name the scene does not have becomes a new declared point when
+    /// `role` is input or output. `kind` overrides the channel type
+    /// (`"safe_di"`, ...), `safety` marks the safety class, `pair` names
+    /// the other channel of a two-channel safety input.
+    #[pyo3(signature = (name, role = None, kind = None, safety = false, pair = None, note = None))]
+    fn declare_io(
+        &self,
+        name: &str,
+        role: Option<&str>,
+        kind: Option<&str>,
+        safety: bool,
+        pair: Option<String>,
+        note: Option<String>,
+    ) -> PyResult<()> {
+        use botrail_scene::iomap::{ChannelKind, DeclRole, IoDecl};
+        let role = match role {
+            None => None,
+            Some(r) => Some(DeclRole::parse(r).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown role {r:?} (input, output, internal, exclude)"
+                ))
+            })?),
+        };
+        let kind = match kind {
+            None => None,
+            Some(k) => Some(ChannelKind::parse(k).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown channel kind {k:?} (di, do, ai, ao, safe_di, safe_do, word)"
+                ))
+            })?),
+        };
+        self.hub.declare_io(IoDecl {
+            name: name.to_string(),
+            role,
+            kind,
+            safety,
+            pair,
+            note,
+        });
+        Ok(())
+    }
+
+    fn undeclare_io(&self, name: &str) -> PyResult<()> {
+        self.hub.undeclare_io(name).map_err(scene_err)
+    }
+
+    /// The assignment layer as authored — nodes, bindings, declarations.
+    /// Pass it to `to_script(io=...)` to project a newer assignment onto
+    /// a timeline baked earlier.
+    fn io_map(&self) -> IoMap {
+        IoMap {
+            inner: self.hub.io_map(),
+        }
+    }
+
+    /// Gives every unbound point a channel, deterministically: points in
+    /// table order, channels in declaration order, on the point's host
+    /// and the stations uplinked to it, first free channel of a compatible
+    /// family (safety points prefer safety channels). Existing bindings
+    /// are kept; `reassign=True` first drops the bindings an earlier run
+    /// placed (hand bindings keep their channels). Points on an
+    /// implicit host (`<cell>`, `<robot>`) are not placed — declare the
+    /// node that runs their program. Returns the report afterwards.
+    #[pyo3(signature = (sequences = None, reassign = false))]
+    fn auto_assign_io(&self, sequences: Option<Vec<String>>, reassign: bool) -> PyResult<IoReport> {
+        let names: Option<Vec<&str>> = sequences
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        let report = self
+            .hub
+            .auto_assign_io(names.as_deref(), reassign)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(IoReport { inner: report })
+    }
+
+    /// The electrical topology as text: `format` is `"mermaid"` (a
+    /// `flowchart LR` for Markdown), `"dot"` (Graphviz) or `"json"`.
+    /// `layers` filters the edges — any of `"functional"`, `"io"`,
+    /// `"network"`, `"wiring"`, `"safety"` (default: everything).
+    /// Magazines stay out unless `include_cosmetic=True`.
+    #[pyo3(signature = (format = "mermaid", sequences = None, layers = None, include_cosmetic = false))]
+    fn io_topology(
+        &self,
+        format: &str,
+        sequences: Option<Vec<String>>,
+        layers: Option<Vec<String>>,
+        include_cosmetic: bool,
+    ) -> PyResult<String> {
+        let d = self.derive_io(sequences)?;
+        let scene = self.hub.authored_snapshot();
+        let layers = parse_layers(layers)?;
+        let t = botrail_scene::iomap::topology(&scene, &d, include_cosmetic);
+        render_topology(&t, &layers, format)
+    }
+
+    /// Writes `io_topology` to `path`; the format follows the extension
+    /// (`.mmd` / `.md` Mermaid, `.dot` / `.gv` Graphviz, `.json`).
+    #[pyo3(signature = (path, sequences = None, layers = None, include_cosmetic = false))]
+    fn export_topology(
+        &self,
+        path: PathBuf,
+        sequences: Option<Vec<String>>,
+        layers: Option<Vec<String>>,
+        include_cosmetic: bool,
+    ) -> PyResult<()> {
+        let format = match path.extension().and_then(|e| e.to_str()) {
+            Some("mmd") | Some("md") | Some("mermaid") => "mermaid",
+            Some("dot") | Some("gv") => "dot",
+            Some("json") => "json",
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "export_topology: unknown extension {:?} — use .mmd, .dot or .json",
+                    other.unwrap_or("")
+                )))
+            }
+        };
+        let text = self.io_topology(format, sequences, layers, include_cosmetic)?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
     /// Starts (or replaces) a PLC-style sequence and returns a builder:
     /// `scene.sequence("pick").step("run", actions=[bt.seq.motion("go")])`.
     fn sequence(slf: Py<Self>, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
@@ -2219,24 +2645,62 @@ impl Scene {
     /// `simulate_*` calls can run under. Deltas only: `signals` overrides
     /// declared internal-signal initial values, `obstacles` maps names to
     /// a position or a `(position, quaternion)` pair, `joints` maps robot
-    /// instances to start configurations. `"baseline"` is the reserved
-    /// name of the unmodified scene. Everything is validated when the
-    /// scenario is *applied* (at simulate), so deltas may name things
+    /// instances to start configurations, and `faults` pins inputs for
+    /// the whole run — `bt.io.stuck("part_at_pick", False)` ignores the
+    /// sensor's geometry (or a program's `set` on an internal signal),
+    /// `bt.io.open("part_at_pick")` is a broken wire (input level low, so
+    /// the value follows the binding's `invert`). `"baseline"` is the
+    /// reserved name of the unmodified scene. Everything is validated when
+    /// the scenario is *applied* (at simulate), so deltas may name things
     /// authored later.
-    #[pyo3(signature = (name, signals = None, obstacles = None, joints = None))]
+    #[pyo3(signature = (name, signals = None, obstacles = None, joints = None, faults = None))]
     fn add_scenario(
         &self,
         name: &str,
         signals: Option<&Bound<'_, PyDict>>,
         obstacles: Option<&Bound<'_, PyDict>>,
         joints: Option<&Bound<'_, PyDict>>,
+        faults: Option<Vec<Bound<'_, PyAny>>>,
     ) -> PyResult<()> {
         let mut scenario = botrail_scene::seq::Scenario {
             name: name.to_string(),
             signals: Vec::new(),
             obstacles: Vec::new(),
             joints: Vec::new(),
+            faults: Vec::new(),
         };
+        for fault in faults.unwrap_or_default() {
+            let dict = fault.downcast::<PyDict>().map_err(|_| {
+                PyValueError::new_err(
+                    "faults are bt.io.stuck(name, value) / bt.io.open(name) entries",
+                )
+            })?;
+            let target: String = dict
+                .get_item("target")?
+                .ok_or_else(|| PyValueError::new_err("a fault needs a `target`"))?
+                .extract()?;
+            let kind: String = dict
+                .get_item("kind")?
+                .ok_or_else(|| PyValueError::new_err("a fault needs a `kind`"))?
+                .extract()?;
+            let kind = match kind.as_str() {
+                "stuck" => botrail_scene::seq::FaultKind::StuckAt(
+                    dict.get_item("value")?
+                        .ok_or_else(|| PyValueError::new_err("a stuck fault needs a `value`"))?
+                        .extract::<bool>()?,
+                ),
+                "open" => botrail_scene::seq::FaultKind::Open,
+                "node_down" => botrail_scene::seq::FaultKind::NodeDown,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown fault kind {other:?} (stuck, open, node_down)"
+                    )))
+                }
+            };
+            scenario
+                .faults
+                .push(botrail_scene::seq::Fault { target, kind });
+        }
         if let Some(signals) = signals {
             for (key, value) in signals.iter() {
                 scenario
@@ -3925,7 +4389,7 @@ impl SequenceTimeline {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
     fn to_script(
         &self,
         py: Python<'_>,
@@ -3939,6 +4403,8 @@ impl SequenceTimeline {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        node: Option<&str>,
+        io: Option<PyRef<'_, IoMap>>,
     ) -> PyResult<String> {
         let backend = botrail_export::backend(dialect).ok_or_else(|| {
             PyValueError::new_err(format!(
@@ -3946,10 +4412,15 @@ impl SequenceTimeline {
                 botrail_export::DIALECTS.join(", ")
             ))
         })?;
-        let io = botrail_scene::script::SequenceIo {
-            inputs: inputs.unwrap_or_default(),
-            outputs: outputs.unwrap_or_default(),
-        };
+        let io = project_io(
+            &self.scene,
+            &self.inner,
+            sequence,
+            node,
+            io.as_deref(),
+            inputs,
+            outputs,
+        )?;
         let options = botrail_export::ProgramOptions {
             speed_scale,
             blend_radius,
@@ -3984,11 +4455,53 @@ impl SequenceTimeline {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Intervals a robot was driven by a motion, ramp or toolpath,
+    /// merged where they touch — the "busy" contact a robot controller
+    /// would show a PLC, synthesized from the bake (a robot has no signal
+    /// lane). Robot defaults to the scene's first.
+    #[pyo3(signature = (robot = None))]
+    fn robot_busy(&self, robot: Option<&str>) -> PyResult<Vec<(f64, f64)>> {
+        let (_, track) = self.track_for(robot)?;
+        Ok(botrail_scene::handshake::robot_busy(&self.inner, &track.name).unwrap_or_default())
+    }
+
+    /// The handshake specification of this bake as Markdown: every line
+    /// between controllers — handshake signals, robot start / done /
+    /// program handshakes, device command and in-position lines — with
+    /// direction, both ends (node and channel when bound), the steps that
+    /// write and wait on it, and its waveform (high spans, or the robot's
+    /// start pulses and busy spans). The draft of the robot ⇔ PLC
+    /// interface sheet, per scenario. `io=` projects a newer assignment
+    /// onto a bake made before the wiring.
+    #[pyo3(signature = (io = None))]
+    fn handshake_spec(&self, io: Option<PyRef<'_, IoMap>>) -> PyResult<String> {
+        let owned;
+        let scene = match io {
+            Some(io) => {
+                let mut s = self.scene.clone();
+                s.set_io_map(io.inner.clone()).map_err(scene_err)?;
+                owned = s;
+                &owned
+            }
+            None => &self.scene,
+        };
+        botrail_scene::handshake::render_handshake_spec(scene, &self.inner)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes `handshake_spec()` to `path` (Markdown).
+    #[pyo3(signature = (path, io = None))]
+    fn export_handshake_spec(&self, path: PathBuf, io: Option<PyRef<'_, IoMap>>) -> PyResult<()> {
+        let text = self.handshake_spec(io)?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
     /// Writes `to_script` output to `path` (see there for the semantics).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
     fn export_script(
         &self,
         py: Python<'_>,
@@ -4003,6 +4516,8 @@ impl SequenceTimeline {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        node: Option<&str>,
+        io: Option<PyRef<'_, IoMap>>,
     ) -> PyResult<()> {
         let script = self.to_script(
             py,
@@ -4016,6 +4531,8 @@ impl SequenceTimeline {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            node,
+            io,
         )?;
         std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
@@ -4153,7 +4670,7 @@ impl ScenarioRuns {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None, primary = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
     fn to_script(
         &self,
         py: Python<'_>,
@@ -4168,6 +4685,8 @@ impl ScenarioRuns {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        node: Option<&str>,
+        io: Option<PyRef<'_, IoMap>>,
     ) -> PyResult<String> {
         if self.runs.is_empty() {
             return Err(PyValueError::new_err(
@@ -4193,10 +4712,17 @@ impl ScenarioRuns {
                 })?,
             None => 0,
         };
-        let io = botrail_scene::script::SequenceIo {
-            inputs: inputs.unwrap_or_default(),
-            outputs: outputs.unwrap_or_default(),
-        };
+        let borrowed: Vec<PyRef<'_, SequenceTimeline>> =
+            self.runs.iter().map(|(_, t)| t.borrow(py)).collect();
+        let io = project_io(
+            &self.scene,
+            &borrowed[lead].inner,
+            sequence,
+            node,
+            io.as_deref(),
+            inputs,
+            outputs,
+        )?;
         let options = botrail_export::ProgramOptions {
             speed_scale,
             blend_radius,
@@ -4204,8 +4730,6 @@ impl ScenarioRuns {
             tcp_accel,
             move_to_start,
         };
-        let borrowed: Vec<PyRef<'_, SequenceTimeline>> =
-            self.runs.iter().map(|(_, t)| t.borrow(py)).collect();
         let mut ordered: Vec<(&str, &botrail_scene::rollout::SequenceTimeline)> =
             vec![(self.runs[lead].0.as_str(), &borrowed[lead].inner)];
         for (i, (scenario, _)) in self.runs.iter().enumerate() {
@@ -4244,7 +4768,8 @@ impl ScenarioRuns {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         primary = None, inputs = None, outputs = None, speed_scale = 1.0,
-        blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true))]
+        blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true,
+        node = None, io = None))]
     fn export_script(
         &self,
         py: Python<'_>,
@@ -4260,6 +4785,8 @@ impl ScenarioRuns {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        node: Option<&str>,
+        io: Option<PyRef<'_, IoMap>>,
     ) -> PyResult<()> {
         let script = self.to_script(
             py,
@@ -4274,6 +4801,8 @@ impl ScenarioRuns {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            node,
+            io,
         )?;
         std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
@@ -4349,6 +4878,14 @@ impl SignalTrack {
         self.inner.name.clone()
     }
 
+    /// Where the lane comes from: `"signal"` (internal relay, or a lane
+    /// synthesized under a signal's name), `"sensor"` (input) or
+    /// `"device"` (running / moving output).
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.as_str().to_string()
+    }
+
     /// `(time, new value)` edges, starting with `(0, initial)`.
     #[getter]
     fn edges(&self) -> Vec<(f64, bool)> {
@@ -4421,6 +4958,447 @@ impl SignalTrack {
 /// converts like its `distance`, so `assert tl.min_clearance() >= 0.005`
 /// reads directly — and its repr names the time (and touching pair) when
 /// the assertion fires.
+/// A channel dict — flat (`{"id", "kind", "port", "address", "voltage",
+/// "logic"}`, what `bt.io` templates build) or the serialized form with a
+/// nested `electrical`.
+fn channel_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::iomap::IoChannel> {
+    use botrail_scene::iomap::{ChannelKind, Electrical, IoChannel, Logic};
+    let dict = obj.downcast::<PyDict>().map_err(|_| {
+        PyValueError::new_err("channels= is a list of dicts (see bt.io.di8 / bt.io.ur_standard)")
+    })?;
+    let get = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> { dict.get_item(key) };
+    let id: String = get("id")?
+        .ok_or_else(|| PyValueError::new_err("channel dict needs an \"id\""))?
+        .extract()?;
+    let kind_s: String = get("kind")?
+        .ok_or_else(|| PyValueError::new_err(format!("channel {id:?} needs a \"kind\"")))?
+        .extract()?;
+    let kind = ChannelKind::parse(&kind_s).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "channel {id:?}: unknown kind {kind_s:?} (di, do, ai, ao, safe_di, safe_do, word)"
+        ))
+    })?;
+    let port: Option<u32> = match get("port")? {
+        Some(v) if !v.is_none() => Some(v.extract()?),
+        _ => None,
+    };
+    let address: Option<String> = match get("address")? {
+        Some(v) if !v.is_none() => Some(v.extract()?),
+        _ => None,
+    };
+    let (mut voltage, mut logic): (Option<f64>, Option<Logic>) = (None, None);
+    if let Some(e) = get("electrical")? {
+        if let Ok(e) = e.downcast::<PyDict>() {
+            if let Some(v) = e.get_item("voltage")? {
+                if !v.is_none() {
+                    voltage = Some(v.extract()?);
+                }
+            }
+            if let Some(l) = e.get_item("logic")? {
+                if !l.is_none() {
+                    let l: String = l.extract()?;
+                    logic = Logic::parse(&l);
+                }
+            }
+        }
+    }
+    if let Some(v) = get("voltage")? {
+        if !v.is_none() {
+            voltage = Some(v.extract()?);
+        }
+    }
+    if let Some(l) = get("logic")? {
+        if !l.is_none() {
+            let l: String = l.extract()?;
+            logic = Some(Logic::parse(&l).ok_or_else(|| {
+                PyValueError::new_err(format!("channel {id:?}: unknown logic {l:?} (pnp, npn)"))
+            })?);
+        }
+    }
+    let electrical = if voltage.is_some() || logic.is_some() {
+        Some(Electrical { voltage, logic })
+    } else {
+        None
+    };
+    Ok(IoChannel {
+        id,
+        kind,
+        port,
+        address,
+        electrical,
+    })
+}
+
+/// The assignment layer of a scene's I/O map (see `Scene.io_map`).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct IoMap {
+    inner: botrail_scene::iomap::IoMap,
+}
+
+#[pymethods]
+impl IoMap {
+    /// Node names, in declaration order.
+    #[getter]
+    fn nodes(&self) -> Vec<String> {
+        self.inner.nodes.iter().map(|n| n.name.clone()).collect()
+    }
+
+    /// `(label, direction, node, channel)` per binding.
+    #[getter]
+    fn bindings(&self) -> Vec<(String, String, String, String)> {
+        self.inner
+            .bindings
+            .iter()
+            .map(|b| {
+                (
+                    b.point.label(),
+                    b.point.direction.as_str().to_string(),
+                    b.node.clone(),
+                    b.channel.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Declared names.
+    #[getter]
+    fn decls(&self) -> Vec<String> {
+        self.inner.decls.iter().map(|d| d.name.clone()).collect()
+    }
+
+    /// The layer as JSON — the same form the `.botrail` project stores.
+    fn to_json(&self) -> String {
+        serde_json::to_string_pretty(&self.inner).unwrap_or_default()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IoMap({} nodes, {} bindings, {} decls)",
+            self.inner.nodes.len(),
+            self.inner.bindings.len(),
+            self.inner.decls.len()
+        )
+    }
+}
+
+/// The wiring a script export uses: explicit `inputs=` / `outputs=` dicts
+/// win, the rest is projected from the bindings on the robot-controller
+/// node (`node`, or the declared node driving the sequence's robot) —
+/// against `io` when a newer assignment layer is handed over, else the
+/// timeline's snapshot.
+#[allow(clippy::too_many_arguments)]
+fn project_io(
+    scene: &botrail_scene::Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+    sequence: Option<&str>,
+    node: Option<&str>,
+    io: Option<&IoMap>,
+    inputs: Option<std::collections::HashMap<String, u32>>,
+    outputs: Option<std::collections::HashMap<String, u32>>,
+) -> PyResult<botrail_scene::script::SequenceIo> {
+    let mut wired = botrail_scene::script::SequenceIo::from_ports(
+        inputs.unwrap_or_default(),
+        outputs.unwrap_or_default(),
+    );
+    let owned;
+    let scene = match io {
+        Some(io) => {
+            let mut s = scene.clone();
+            s.set_io_map(io.inner.clone()).map_err(scene_err)?;
+            owned = s;
+            &owned
+        }
+        None => scene,
+    };
+    let node = match node {
+        Some(n) => {
+            if scene.io_map().node(n).is_none() {
+                return Err(PyValueError::new_err(format!("unknown I/O node `{n}`")));
+            }
+            Some(n.to_string())
+        }
+        None => {
+            let robot = botrail_scene::script::driven_robot_name(scene, timeline, sequence)
+                .map_err(PyValueError::new_err)?;
+            scene
+                .io_map()
+                .robot_controller(&robot)
+                .map(|n| n.name.clone())
+        }
+    };
+    if let Some(node) = node {
+        let names: Vec<&str> = timeline.sequences.iter().map(String::as_str).collect();
+        let d = botrail_scene::iomap::derive(scene, Some(&names))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (inputs, outputs) = botrail_scene::iomap::sequence_io(&d, scene.io_map(), &node)
+            .map_err(PyValueError::new_err)?;
+        for (k, v) in inputs {
+            wired.inputs.entry(k).or_insert(v);
+        }
+        for (k, v) in outputs {
+            wired.outputs.entry(k).or_insert(v);
+        }
+    }
+    Ok(wired)
+}
+
+fn parse_layers(layers: Option<Vec<String>>) -> PyResult<Vec<botrail_scene::iomap::TopoLayer>> {
+    layers
+        .unwrap_or_default()
+        .iter()
+        .map(|l| {
+            botrail_scene::iomap::TopoLayer::parse(l).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown topology layer {l:?} (functional, io, network, wiring, safety)"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn render_topology(
+    t: &botrail_scene::iomap::Topology,
+    layers: &[botrail_scene::iomap::TopoLayer],
+    format: &str,
+) -> PyResult<String> {
+    use botrail_scene::iomap::{render_dot, render_mermaid, render_topology_json};
+    match format {
+        "mermaid" | "mmd" => Ok(render_mermaid(t, layers)),
+        "dot" | "graphviz" => Ok(render_dot(t, layers)),
+        "json" => Ok(render_topology_json(t, layers)),
+        other => Err(PyValueError::new_err(format!(
+            "unknown topology format {other:?} (mermaid, dot, json)"
+        ))),
+    }
+}
+
+fn render_io(d: &botrail_scene::iomap::IoDerivation, format: &str) -> PyResult<String> {
+    use botrail_scene::iomap::{render_csv, render_json, render_markdown};
+    match format {
+        "csv" => Ok(render_csv(d)),
+        "md" | "markdown" => Ok(render_markdown(d)),
+        "json" => Ok(render_json(d)),
+        other => Err(PyValueError::new_err(format!(
+            "unknown I/O list format {other:?} (csv, md, json)"
+        ))),
+    }
+}
+
+fn step_ref_tuple(s: &botrail_scene::iomap::StepRef) -> (String, usize, String) {
+    (s.sequence.clone(), s.index, s.name.clone())
+}
+
+/// One derived I/O point of the cell (see `Scene.io_points`).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct IoPoint {
+    inner: botrail_scene::iomap::IoPoint,
+}
+
+#[pymethods]
+impl IoPoint {
+    /// The scene name the point belongs to (signal, sensor, device, robot).
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.id.name.clone()
+    }
+
+    /// The facet for device commands and robot handshakes (`"index"`,
+    /// `"dispatch"`, `"station"`, `"position"`, `"speed"`, `"start"`,
+    /// `"done"`, `"program"`), or None.
+    #[getter]
+    fn aspect(&self) -> Option<String> {
+        self.inner.id.aspect.map(|a| a.as_str().to_string())
+    }
+
+    /// `name` or `name.aspect` — the label the tables use.
+    #[getter]
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+
+    /// `"input"` or `"output"`, from the host's side.
+    #[getter]
+    fn direction(&self) -> String {
+        self.inner.id.direction.as_str().to_string()
+    }
+
+    /// Channel type: `"DI"`, `"DO"`, `"Word"`, `"AO"`, ...
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.as_str().to_string()
+    }
+
+    /// The derivation rule that produced it: `"sensor"`,
+    /// `"signal:handshake"`, `"signal:internal"`, `"signal:write-only"`,
+    /// `"signal:read-only"`, `"device:run"`, `"device:done"`,
+    /// `"device:command"`, `"device:cosmetic"`, `"robot:start"`,
+    /// `"robot:done"`, `"robot:program"`.
+    #[getter]
+    fn source(&self) -> String {
+        self.inner.source.as_str().to_string()
+    }
+
+    /// The controller that owns the point: `"<cell>"`, `"<robot name>"`
+    /// (implicit placement) or a declared node; None when nothing pins it.
+    #[getter]
+    fn host(&self) -> Option<String> {
+        self.inner.host.clone()
+    }
+
+    #[getter]
+    fn safety(&self) -> bool {
+        self.inner.safety
+    }
+
+    /// `(sequence, flat step index, step name)` of the steps that write
+    /// the point (coil writes, device commands, robot starts).
+    #[getter]
+    fn writers(&self) -> Vec<(String, usize, String)> {
+        self.inner.writers.iter().map(step_ref_tuple).collect()
+    }
+
+    /// `(sequence, flat step index, step name)` of the steps that read it.
+    #[getter]
+    fn readers(&self) -> Vec<(String, usize, String)> {
+        self.inner.readers.iter().map(step_ref_tuple).collect()
+    }
+
+    /// `"unbound"`, `"internal"` (a relay, no I/O), `"cosmetic"`
+    /// (magazine), `"constant"` (a coil that is on from t = 0 and never
+    /// commanded).
+    #[getter]
+    fn status(&self) -> String {
+        self.inner.status.as_str().to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IoPoint({} {} {} {} host={} {})",
+            self.inner.label(),
+            self.inner.id.direction.as_str(),
+            self.inner.kind.as_str(),
+            self.inner.source.as_str(),
+            self.inner.host.as_deref().unwrap_or("-"),
+            self.inner.status.as_str(),
+        )
+    }
+}
+
+/// One lint finding of the I/O map.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct IoFinding {
+    inner: botrail_scene::iomap::IoFinding,
+}
+
+#[pymethods]
+impl IoFinding {
+    /// `"error"`, `"warning"` or `"info"`.
+    #[getter]
+    fn severity(&self) -> String {
+        self.inner.severity.as_str().to_string()
+    }
+
+    /// The finding code (`"name_clash"`, `"unreferenced"`,
+    /// `"word_unexpressible"`, `"implicit_host"`, ...).
+    #[getter]
+    fn code(&self) -> String {
+        self.inner.code.as_str().to_string()
+    }
+
+    #[getter]
+    fn message(&self) -> String {
+        self.inner.message.clone()
+    }
+
+    /// The steps the finding is attributed to, as `(sequence, flat step
+    /// index, step name)`.
+    #[getter]
+    fn at(&self) -> Vec<(String, usize, String)> {
+        self.inner.at.iter().map(step_ref_tuple).collect()
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("IoFinding({})", self.inner)
+    }
+}
+
+/// The findings of `Scene.io_report()`.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct IoReport {
+    inner: botrail_scene::iomap::IoReport,
+}
+
+#[pymethods]
+impl IoReport {
+    /// Every finding, most severe first.
+    #[getter]
+    fn findings(&self) -> Vec<IoFinding> {
+        let mut all: Vec<IoFinding> = self
+            .inner
+            .findings
+            .iter()
+            .map(|f| IoFinding { inner: f.clone() })
+            .collect();
+        all.sort_by_key(|f| f.inner.severity);
+        all
+    }
+
+    fn errors(&self) -> Vec<IoFinding> {
+        self.inner
+            .errors()
+            .into_iter()
+            .map(|f| IoFinding { inner: f.clone() })
+            .collect()
+    }
+
+    fn warnings(&self) -> Vec<IoFinding> {
+        self.inner
+            .warnings()
+            .into_iter()
+            .map(|f| IoFinding { inner: f.clone() })
+            .collect()
+    }
+
+    fn infos(&self) -> Vec<IoFinding> {
+        self.inner
+            .infos()
+            .into_iter()
+            .map(|f| IoFinding { inner: f.clone() })
+            .collect()
+    }
+
+    /// True when there are no errors.
+    #[getter]
+    fn ok(&self) -> bool {
+        self.inner.errors().is_empty()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.findings.len()
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IoReport({} errors, {} warnings, {} infos)",
+            self.inner.errors().len(),
+            self.inner.warnings().len(),
+            self.inner.infos().len()
+        )
+    }
+}
+
 #[pyclass(frozen, module = "botrail._core")]
 #[derive(Clone)]
 struct Clearance {
@@ -5244,6 +6222,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;
     m.add_class::<Clearance>()?;
+    m.add_class::<IoPoint>()?;
+    m.add_class::<IoFinding>()?;
+    m.add_class::<IoReport>()?;
+    m.add_class::<IoMap>()?;
     m.add_class::<ToolpathReport>()?;
     m.add_class::<FeedReport>()?;
     m.add_class::<StockCarve>()?;

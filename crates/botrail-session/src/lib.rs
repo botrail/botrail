@@ -112,6 +112,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::effects_message(scene),
             wire::frames_message(scene),
             wire::toolpaths_message(scene),
+            wire::io_message(scene),
             wire::state_message(scene),
         ]
     })
@@ -320,6 +321,28 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::RemoveDevice { name } => {
             remove_device(host, &name).map_err(|e| format!("rejected remove_device: {e}"))
         }
+        ClientMessage::UpsertIoNode { node } => {
+            upsert_io_node(host, node).map_err(|e| format!("rejected upsert_io_node: {e}"))
+        }
+        ClientMessage::RemoveIoNode { name } => {
+            remove_io_node(host, &name).map_err(|e| format!("rejected remove_io_node: {e}"))
+        }
+        ClientMessage::BindIo { binding } => {
+            bind_io(host, binding).map_err(|e| format!("rejected bind_io: {e}"))
+        }
+        ClientMessage::UnbindIo { point, node } => unbind_io(host, &point, node.as_deref())
+            .map(|_| ())
+            .map_err(|e| format!("rejected unbind_io: {e}")),
+        ClientMessage::DeclareIo { decl } => {
+            declare_io(host, decl);
+            Ok(())
+        }
+        ClientMessage::UndeclareIo { name } => {
+            undeclare_io(host, &name).map_err(|e| format!("rejected undeclare_io: {e}"))
+        }
+        ClientMessage::AutoAssignIo { reassign } => auto_assign_io(host, None, reassign)
+            .map(|_| ())
+            .map_err(|e| format!("rejected auto_assign_io: {e}")),
     }
 }
 
@@ -776,6 +799,82 @@ fn emit_sequences(host: &impl SessionHost) {
     }
     let msg = host.with_scene(|scene| wire::sequences_message(scene));
     host.emit(&msg);
+    emit_io(host);
+}
+
+/// Rebroadcasts the I/O map (assignment layer + derivation). Called after
+/// any edit the derivation reads: sequences, signals, sensors, devices,
+/// and the map itself.
+fn emit_io(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::io_message(scene));
+    host.emit(&msg);
+}
+
+pub fn upsert_io_node(
+    host: &impl SessionHost,
+    node: botrail_scene::iomap::IoNode,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_io_node(node))?;
+    emit_io(host);
+    Ok(())
+}
+
+pub fn remove_io_node(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_io_node(name))?;
+    emit_io(host);
+    Ok(())
+}
+
+pub fn bind_io(
+    host: &impl SessionHost,
+    binding: botrail_scene::iomap::IoBinding,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.bind_io(binding))?;
+    emit_io(host);
+    Ok(())
+}
+
+pub fn unbind_io(
+    host: &impl SessionHost,
+    point: &botrail_scene::iomap::IoPointId,
+    node: Option<&str>,
+) -> Result<usize, SceneError> {
+    let n = host.with_scene(|scene| scene.unbind_io(point, node))?;
+    emit_io(host);
+    Ok(n)
+}
+
+pub fn declare_io(host: &impl SessionHost, decl: botrail_scene::iomap::IoDecl) {
+    host.with_scene(|scene| scene.declare_io(decl));
+    emit_io(host);
+}
+
+pub fn undeclare_io(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.undeclare_io(name))?;
+    emit_io(host);
+    Ok(())
+}
+
+pub fn set_io_map(
+    host: &impl SessionHost,
+    io: botrail_scene::iomap::IoMap,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_io_map(io))?;
+    emit_io(host);
+    Ok(())
+}
+
+pub fn auto_assign_io(
+    host: &impl SessionHost,
+    sequences: Option<&[&str]>,
+    reassign: bool,
+) -> Result<botrail_scene::iomap::IoReport, botrail_scene::iomap::IoError> {
+    let report = host.with_scene(|scene| scene.auto_assign_io(sequences, reassign))?;
+    emit_io(host);
+    Ok(report)
 }
 
 /// Adds or replaces a sequence wholesale and rebroadcasts the list.
@@ -808,6 +907,7 @@ fn emit_sensors(host: &impl SessionHost) {
     }
     let msg = host.with_scene(|scene| wire::sensors_message(scene));
     host.emit(&msg);
+    emit_io(host);
 }
 
 /// Adds or replaces a pseudo-sensor and rebroadcasts the list.
@@ -851,6 +951,7 @@ fn emit_devices(host: &impl SessionHost) {
     }
     let msg = host.with_scene(|scene| wire::devices_message(scene));
     host.emit(&msg);
+    emit_io(host);
 }
 
 /// Adds or replaces an auxiliary device and rebroadcasts the list.
@@ -1216,13 +1317,7 @@ pub fn timeline_msg(
                 name: s.name.clone(),
                 times: s.edges.iter().map(|(t, _)| *t).collect(),
                 values: s.edges.iter().map(|(_, v)| *v).collect(),
-                kind: if scene.signals().iter().any(|d| d.name == s.name) {
-                    "signal".to_string()
-                } else if scene.sensors().iter().any(|d| d.name == s.name) {
-                    "sensor".to_string()
-                } else {
-                    "device".to_string()
-                },
+                kind: s.kind.as_str().to_string(),
             })
             .collect(),
     }
@@ -1487,6 +1582,7 @@ mod tests {
                     ServerMessage::Devices { .. } => "devices",
                     ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
+                    ServerMessage::Io { .. } => "io",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                     ServerMessage::UsdDocument { .. } => "usd_document",
                 })
@@ -1529,7 +1625,8 @@ mod tests {
         assert!(matches!(msgs[7], ServerMessage::Effects { .. }));
         assert!(matches!(msgs[8], ServerMessage::Frames { .. }));
         assert!(matches!(msgs[9], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[10], ServerMessage::State { .. }));
+        assert!(matches!(msgs[10], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[11], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -1908,7 +2005,8 @@ mod tests {
                  "transition":{"type":"elapsed","seconds":0.2}}
             ]}}"#,
         );
-        assert_eq!(host.message_types(), ["sequences", "sequences"]);
+        // Every sequence / signal edit re-derives the I/O map behind it.
+        assert_eq!(host.message_types(), ["sequences", "io", "sequences", "io"]);
         host.out.borrow_mut().clear();
 
         handle_client_message(&host, r#"{"type":"simulate_sequence","name":"pick"}"#);
@@ -2030,6 +2128,108 @@ mod tests {
             .find(|s| s.name == "station/work")
             .unwrap();
         assert!(work.start >= 0.3, "work started at {}", work.start);
+    }
+
+    /// The I/O map edits the studio sends: each applies through the same
+    /// validation the Python API uses and rebroadcasts the `io` message;
+    /// a bad one is logged, not applied.
+    #[test]
+    fn io_map_edits_via_client_messages() {
+        let host = TestHost::new();
+        handle_client_message(
+            &host,
+            r#"{"type":"define_signal","name":"vacuum","initial":false}"#,
+        );
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"pick","steps":[
+                {"name":"grip","actions":[{"type":"set","signal":"vacuum","value":true}],
+                 "transition":{"type":"elapsed","seconds":0.1}}]}}"#,
+        );
+        host.out.borrow_mut().clear();
+        // A robot controller for the scene's robot with two channels.
+        let robot = host.with_scene(|s| s.robots()[0].name.clone());
+        handle_client_message(
+            &host,
+            &format!(
+                r#"{{"type":"upsert_io_node","node":{{"name":"UR","kind":{{"kind":"robot_controller","robots":["{robot}"]}},
+                    "programs":["pick"],
+                    "channels":[{{"id":"DO0","kind":"do","port":0}},{{"id":"DO1","kind":"do","port":1}}]}}}}"#
+            ),
+        );
+        assert_eq!(host.message_types(), ["io"]);
+        let (nodes, unbound) = match &host.out.borrow()[0] {
+            ServerMessage::Io { io, points, .. } => (
+                io.nodes.len(),
+                points.iter().filter(|p| p.status == "unbound").count(),
+            ),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((nodes, unbound), (1, 1));
+        host.out.borrow_mut().clear();
+        // Bind, then auto-assign has nothing left; unbind; a bad channel is refused.
+        handle_client_message(
+            &host,
+            r#"{"type":"bind_io","binding":{"point":{"name":"vacuum","direction":"output"},"node":"UR","channel":"DO1","field":"YV1"}}"#,
+        );
+        assert_eq!(host.message_types(), ["io"]);
+        match &host.out.borrow()[0] {
+            ServerMessage::Io { points, .. } => {
+                let p = points.iter().find(|p| p.label == "vacuum").unwrap();
+                assert_eq!(
+                    (p.status.as_str(), p.channel.as_deref()),
+                    ("bound", Some("DO1"))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        host.out.borrow_mut().clear();
+        handle_client_message(
+            &host,
+            r#"{"type":"bind_io","binding":{"point":{"name":"vacuum","direction":"output"},"node":"UR","channel":"DO9"}}"#,
+        );
+        assert!(host.out.borrow().is_empty());
+        assert!(host
+            .logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("rejected bind_io")));
+        handle_client_message(
+            &host,
+            r#"{"type":"unbind_io","point":{"name":"vacuum","direction":"output"}}"#,
+        );
+        handle_client_message(&host, r#"{"type":"auto_assign_io"}"#);
+        assert_eq!(host.message_types(), ["io", "io"]);
+        {
+            let out = host.out.borrow();
+            match out.last().unwrap() {
+                ServerMessage::Io { points, .. } => {
+                    let p = points.iter().find(|p| p.label == "vacuum").unwrap();
+                    assert_eq!(
+                        p.channel.as_deref(),
+                        Some("DO0"),
+                        "auto-assign takes the first free channel"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        host.out.borrow_mut().clear();
+        // Declarations, then the node goes (bindings cascade).
+        handle_client_message(
+            &host,
+            r#"{"type":"declare_io","decl":{"name":"estop_ok","role":"input","safety":true}}"#,
+        );
+        handle_client_message(&host, r#"{"type":"undeclare_io","name":"estop_ok"}"#);
+        handle_client_message(&host, r#"{"type":"remove_io_node","name":"UR"}"#);
+        assert_eq!(host.message_types(), ["io", "io", "io"]);
+        let out = host.out.borrow();
+        match out.last().unwrap() {
+            ServerMessage::Io { io, .. } => {
+                assert!(io.nodes.is_empty() && io.bindings.is_empty() && io.decls.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

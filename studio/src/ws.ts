@@ -11,6 +11,10 @@ import type {
   ClientMessage,
   DeviceMsg,
   GeometryMsg,
+  IoBinding,
+  IoDecl,
+  IoNode,
+  IoPointId,
   ObstacleMsg,
   PoseMsg,
   SegmentMsg,
@@ -283,4 +287,38 @@ export function sendUpsertDevice(device: DeviceMsg): void {
 /** Remove an auxiliary device (sent immediately). */
 export function sendRemoveDevice(name: string): void {
   rawSend({ type: "remove_device", name });
+}
+
+// ---- I/O map edits: the assignment layer (nodes, bindings, declarations).
+// Validated server-side the way the Python API is; the `io` message comes
+// back in full.
+
+export function sendUpsertIoNode(node: IoNode): void {
+  rawSend({ type: "upsert_io_node", node });
+}
+
+export function sendRemoveIoNode(name: string): void {
+  rawSend({ type: "remove_io_node", name });
+}
+
+export function sendBindIo(binding: IoBinding): void {
+  rawSend({ type: "bind_io", binding });
+}
+
+/** Drops `point`'s binding on `node` — on every node when omitted. */
+export function sendUnbindIo(point: IoPointId, node?: string): void {
+  rawSend({ type: "unbind_io", point, node: node ?? null });
+}
+
+export function sendDeclareIo(decl: IoDecl): void {
+  rawSend({ type: "declare_io", decl });
+}
+
+export function sendUndeclareIo(name: string): void {
+  rawSend({ type: "undeclare_io", name });
+}
+
+/** Gives every unbound point a channel (`Scene.auto_assign_io`). */
+export function sendAutoAssignIo(reassign = false): void {
+  rawSend({ type: "auto_assign_io", reassign });
 }
