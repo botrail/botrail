@@ -44,6 +44,7 @@ pub fn robot_host(robot: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum IoDirection {
     Input,
     Output,
@@ -64,6 +65,7 @@ impl IoDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Aspect {
     /// Indexed-transfer start (`Advance`).
     Index,
@@ -118,6 +120,7 @@ impl Aspect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ChannelKind {
     Di,
     Do,
@@ -179,6 +182,7 @@ impl ChannelKind {
 /// `(name, aspect, direction)` — with the host, the identity of a point.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoPointId {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -555,6 +559,7 @@ impl std::error::Error for IoError {}
 /// The controller box a program runs on and the channels it owns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoNode {
     pub name: String,
     pub kind: IoNodeKind,
@@ -582,6 +587,7 @@ pub struct IoNode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum IoNodeKind {
     Plc,
     SafetyPlc,
@@ -617,6 +623,7 @@ impl IoNodeKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Uplink {
     pub parent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -625,6 +632,7 @@ pub struct Uplink {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoChannel {
     /// Node-unique id, `"DI2"`.
     pub id: String,
@@ -645,6 +653,7 @@ pub struct IoChannel {
 /// compare when both sides state them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Electrical {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voltage: Option<f64>,
@@ -657,6 +666,7 @@ pub struct Electrical {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Logic {
     Pnp,
     Npn,
@@ -684,6 +694,7 @@ impl Logic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Contact {
     No,
     Nc,
@@ -709,6 +720,7 @@ impl Contact {
 /// fanning out to two controllers is two bindings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoBinding {
     pub point: IoPointId,
     pub node: String,
@@ -743,6 +755,7 @@ pub struct IoBinding {
 /// An exception to the derivation, or an unmodelled point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoDecl {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -761,6 +774,7 @@ pub struct IoDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum DeclRole {
     /// An external input, whatever the sequences do with the name.
     Input,
@@ -797,6 +811,7 @@ impl DeclRole {
 /// derived from it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IoMap {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<IoNode>,
@@ -887,6 +902,7 @@ impl Scene {
             check_io_binding(&io, binding)?;
         }
         self.io = io;
+        self.prune_parts();
         Ok(())
     }
 
@@ -948,6 +964,7 @@ impl Scene {
             return Err(crate::SceneError::UnknownIoNode(name.to_string()));
         }
         self.io.bindings.retain(|b| b.node != name);
+        self.prune_parts();
         Ok(())
     }
 

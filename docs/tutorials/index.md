@@ -14,8 +14,9 @@ primitive-geometry arm straight from the checkout, with no downloads at all.
 | [Pick from a moving belt](sequence-cell.md) | Conveyor tracking, guarded ramps, grasping, a full PLC sequence | Franka |
 | [Verify the cell in CI](verify-in-ci.md) | Turning a bake into a pytest regression suite | none |
 | [Two arms, one belt](two-robots.md) | Multiple robots, zone interlocks, tick-checked arm-vs-arm collision | Franka |
-| [Parameter sweeps](parameter-sweep.md) | The cell as a function of its layout; reading the numbers that move | none |
+| [Parameter sweeps](parameter-sweep.md) | The cell as a function of its layout: `bt.sweep` tables it, `bt.optimize` searches it | none |
 | [Export and replay USD](replay-usd.md) | Baking animations for usdview/Omniverse/Blender, and playing them back | Franka |
+| [Hand over the cell](hand-over.md) | The whole document set — layout sheet, BOM, I/O list, program, USD, report — from one script | none |
 
 If you haven't yet, do the [Getting started](../getting-started/installation.md)
 pages first — they introduce the vocabulary (scenes, motions, sequences,

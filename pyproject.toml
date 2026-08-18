@@ -25,6 +25,11 @@ classifiers = [
 # botrail/botrail-catalog; the base wheel stays dependency-free.
 catalog = ["huggingface_hub>=0.24"]
 
+[project.scripts]
+# `botrail check | simulate | export | schema | studio` — the cell without a
+# line of Python (agents' loops and CI jobs share it).
+botrail = "botrail._cli:main"
+
 [project.urls]
 Repository = "https://github.com/botrail/botrail"
 

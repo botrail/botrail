@@ -81,6 +81,7 @@ pub enum CoatError {
 /// axis, `u` across the fan and `w` along it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Pattern {
     /// Elliptic dual-beta — the literature's standard fit for a flat-fan
     /// air gun: thick down the middle, thin at the edges, and the extent
@@ -217,6 +218,7 @@ impl Pattern {
 /// Analog process values live here, in the authoring, because signals are
 /// bool: the PLC enables the gun, the program picks the brush.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Brush {
     pub name: String,
     /// A [`Scene::applicator`] name.
@@ -265,6 +267,7 @@ impl Brush {
 /// A spray applicator: where its footprint was measured, what shape it
 /// has, and how much paint it delivers.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Applicator {
     /// Distance the pattern was measured at [m]. The whole model is a
     /// projection of that plane, so this is the number the authored

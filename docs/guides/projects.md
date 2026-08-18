@@ -1,7 +1,8 @@
 # Projects
 
 A `.botrail` file is the whole cell in one artifact: robots, joint state,
-obstacles, frames, motions, sequences, signals, sensors, and devices.
+obstacles, frames, motions, sequences, signals, sensors, devices, scenarios,
+the I/O map, and the [parts](parts-and-bom.md) pinned to all of them.
 
 ```python
 scene.save_project("cell.botrail")

@@ -4,7 +4,9 @@ The cell is authored once as a function of its parameters; every variant
 is then baked deterministically and compared by the numbers that matter
 (cycle time, sensor timing, clearance). This is the loop behind layout
 studies and cycle-time regression: change the environment, re-simulate,
-read the diff — no re-teaching.
+read the diff — no re-teaching. `bt.sweep` runs the grid and tables it;
+`bt.optimize` searches it for the best feasible point — deterministically,
+without a random number anywhere.
 
 Runs from a checkout with no downloads (primitive-geometry arm):
 
@@ -45,27 +47,67 @@ def build_cell(velocity: float = 0.25, lane_y: float = 0.6) -> bt.Scene:
     return scene
 
 
+def metrics(tl: bt.SequenceTimeline) -> dict:
+    """The three numbers under study, read off one bake."""
+    return {
+        "cycle": tl.duration,
+        "feed": tl.step_span("feed").duration,
+        "clearance": float(tl.min_clearance()),
+    }
+
+
 def bake(velocity: float = 0.25, lane_y: float = 0.6):
-    tl = build_cell(velocity, lane_y).simulate_sequence("cycle")
-    return tl.duration, tl.step_span("feed").duration, float(tl.min_clearance())
+    """One variant as `(cycle, feed, clearance)` — the same numbers a
+    sweep row holds, for a test that wants them by hand."""
+    m = metrics(build_cell(velocity, lane_y).simulate_sequence("cycle"))
+    return m["cycle"], m["feed"], m["clearance"]
 
 
 def main() -> None:
     print("== belt speed sweep (lane_y = 0.60 m) ==")
-    print(f"{'belt m/s':>9} | {'cycle s':>8} | {'feed s':>7} | {'clearance m':>11}")
-    base_cycle = None
-    for v in (0.10, 0.15, 0.20, 0.25, 0.30, 0.35):
-        cycle, feed, clearance = bake(velocity=v)
-        base_cycle = base_cycle if base_cycle is not None else cycle
-        print(f"{v:9.2f} | {cycle:8.2f} | {feed:7.2f} | {clearance:11.3f}")
+    speed = bt.sweep(
+        build_cell,
+        grid={"velocity": [0.10, 0.15, 0.20, 0.25, 0.30, 0.35], "lane_y": [0.6]},
+        metrics=metrics,
+        sequence="cycle",
+    )
+    print(speed.to_markdown())
     print("-> only the feed wait moves; the motion part of the cycle is fixed\n")
 
     print("== conveyor lane sweep (belt = 0.25 m/s) ==")
-    print(f"{'lane_y m':>9} | {'cycle s':>8} | {'feed s':>7} | {'clearance m':>11}")
-    for y in (0.70, 0.60, 0.50, 0.40, 0.35):
-        cycle, feed, clearance = bake(lane_y=y)
-        print(f"{y:9.2f} | {cycle:8.2f} | {feed:7.2f} | {clearance:11.3f}")
-    print("-> the cycle barely moves, the safety margin is what shrinks")
+    lane = bt.sweep(
+        build_cell,
+        grid={"velocity": [0.25], "lane_y": [0.70, 0.60, 0.50, 0.40, 0.35]},
+        metrics=metrics,
+        sequence="cycle",
+    )
+    print(lane.to_markdown())
+    print("-> the cycle barely moves, the safety margin is what shrinks\n")
+
+    print("== both at once: cycle time over the grid ==")
+    both = bt.sweep(
+        build_cell,
+        grid={"velocity": [0.15, 0.25, 0.35], "lane_y": [0.7, 0.5, 0.35]},
+        metrics=metrics,
+        sequence="cycle",
+    )
+    print(both.pivot("lane_y", "velocity", "cycle"))
+    print("(clearance over the same grid)")
+    print(both.pivot("lane_y", "velocity", "clearance"))
+
+    print("== the question a layout meeting asks: fastest cycle with 0.4 m of clearance ==")
+    best = bt.optimize(
+        build_cell,
+        space={"velocity": (0.10, 0.40, 0.05), "lane_y": (0.30, 0.70, 0.05)},
+        objective="cycle",
+        constraints={"clearance": (">=", 0.4)},
+        metrics=metrics,
+        sequence="cycle",
+        method="descent",
+    )
+    print(f"{best.params} -> cycle {best.row['cycle']:.2f} s, clearance {best.row['clearance']:.2f} m "
+          f"({len(best.evaluated)} bakes, coordinate descent; the full grid is 63)")
+
     print("\nEvery row above is a deterministic bake: re-running this script")
     print("prints the same numbers, which is what makes them assertable in CI")
     print("(see python/tests/test_cell_regression.py).")

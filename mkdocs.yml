@@ -116,6 +116,7 @@ nav:
       - Two arms, one belt: tutorials/two-robots.md
       - Parameter sweeps: tutorials/parameter-sweep.md
       - Export and replay USD: tutorials/replay-usd.md
+      - Hand over the cell: tutorials/hand-over.md
   - Guides:
       - Robots: guides/robots.md
       - Scene and obstacles: guides/scene-and-obstacles.md
@@ -128,6 +129,11 @@ nav:
       - Attach and tracking: guides/attach-and-tracking.md
       - Timeline assertions: guides/timeline-assertions.md
       - The I/O map: guides/io-map.md
+      - Parts and the BOM: guides/parts-and-bom.md
+      - Layout sheet and cell report: guides/layout-and-report.md
+      - Standard parts and CAD geometry: guides/standard-parts.md
+      - Working with agents and automation: guides/agents.md
+      - Offline commissioning (PLCopen XML, trace diff): guides/offline-commissioning.md
       - Spray painting: guides/painting.md
       - Export: guides/export.md
       - Projects: guides/projects.md
@@ -137,11 +143,15 @@ nav:
       - Why botrail: concepts/why-botrail.md
       - Determinism: concepts/determinism.md
       - Architecture: concepts/architecture.md
+  - The botrail command: reference/cli.md
   - API reference:
       - Robot: reference/api/robot.md
       - Scene: reference/api/scene.md
       - Trajectory: reference/api/trajectory.md
       - Timeline: reference/api/timeline.md
       - Sequences (bt.seq): reference/api/seq.md
+      - Standard parts (bt.parts): reference/api/parts.md
+      - Traces (bt.trace): reference/api/trace.md
+      - Parameter studies (bt.sweep / bt.optimize): reference/api/study.md
       - Studio: reference/api/studio.md
   - Contributing: contributing.md

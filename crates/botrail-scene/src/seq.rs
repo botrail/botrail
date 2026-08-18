@@ -651,11 +651,13 @@ impl Scene {
         if self.sensors.len() == before {
             return Err(SceneError::UnknownSensor(name.to_string()));
         }
+        self.prune_parts();
         Ok(())
     }
 
     pub fn set_sensors(&mut self, sensors: Vec<Sensor>) {
         self.sensors = sensors;
+        self.prune_parts();
     }
 
     pub fn devices(&self) -> &[Device] {
@@ -798,11 +800,13 @@ impl Scene {
         if self.devices.len() == before {
             return Err(SceneError::UnknownDevice(name.to_string()));
         }
+        self.prune_parts();
         Ok(())
     }
 
     pub fn set_devices(&mut self, devices: Vec<Device>) {
         self.devices = devices;
+        self.prune_parts();
     }
 
     // ----------------------------------------------------------- scenarios

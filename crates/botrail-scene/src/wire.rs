@@ -25,6 +25,7 @@ use botrail_model::{Geometry, JointType};
 /// Position + quaternion (x, y, z, w), in meters / world frame unless noted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PoseMsg {
     pub position: [f64; 3],
     pub quaternion: [f64; 4],
@@ -56,6 +57,7 @@ impl From<&PoseMsg> for Isometry3<f64> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GeometryMsg {
     Box {
         size: [f64; 3],
@@ -184,6 +186,7 @@ pub struct SceneDescriptionMsg {
 /// A named world-frame pose (mount point / teach reference).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FrameMsg {
     pub name: String,
     pub pose: PoseMsg,
@@ -224,6 +227,7 @@ pub struct PathMarkMsg {
 /// A colour key for an obstacle whose colours mean something.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LegendMsg {
     pub title: String,
     /// Swatches top to bottom; an empty label is a swatch with no text.
@@ -232,6 +236,7 @@ pub struct LegendMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LegendStopMsg {
     /// Linear RGB, like every colour on the wire.
     pub color: [f32; 3],
@@ -298,6 +303,7 @@ pub struct RobotStateMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ObstacleMsg {
     pub name: String,
     pub geometry: GeometryMsg,
@@ -334,6 +340,7 @@ pub struct ObstacleMsg {
 /// already speaks (glTF, USD Preview Surface, three.js).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MaterialMsg {
     pub metalness: f32,
     pub roughness: f32,
@@ -361,6 +368,7 @@ fn default_true() -> bool {
 /// Attachment state of a grasped obstacle (see `ObstacleMsg::attached_to`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AttachmentMsg {
     /// Carrying robot instance name; `None` means the first robot.
     #[serde(default)]
@@ -436,6 +444,7 @@ pub struct ObjectTrackMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ConstraintMsg {
     OrientationCone {
         axis_local: [f64; 3],
@@ -452,6 +461,7 @@ pub enum ConstraintMsg {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SegmentKindMsg {
     Joint,
     CartesianLine,
@@ -459,6 +469,7 @@ pub enum SegmentKindMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SegmentMsg {
     pub kind: SegmentKindMsg,
     /// Goal configuration in DOF order.
@@ -468,6 +479,7 @@ pub struct SegmentMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MotionMsg {
     pub name: String,
     /// Owning robot instance name; `None` means the first robot.
@@ -481,6 +493,7 @@ pub struct MotionMsg {
 /// A user-defined internal signal (PLC internal relay).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SignalDefMsg {
     pub name: String,
     pub initial: bool,
@@ -490,6 +503,7 @@ pub struct SignalDefMsg {
 /// The unmodified scene is the reserved scenario `baseline`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScenarioMsg {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -509,6 +523,7 @@ pub struct ScenarioMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FaultMsg {
     Stuck {
         target: String,
@@ -526,6 +541,7 @@ pub enum FaultMsg {
 /// An internal-signal initial value a scenario overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScenarioSignalMsg {
     pub name: String,
     pub value: bool,
@@ -534,6 +550,7 @@ pub struct ScenarioSignalMsg {
 /// An obstacle pose a scenario overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScenarioObstacleMsg {
     pub name: String,
     pub pose: PoseMsg,
@@ -542,6 +559,7 @@ pub struct ScenarioObstacleMsg {
 /// A robot start configuration a scenario overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScenarioJointsMsg {
     pub robot: String,
     pub positions: Vec<f64>,
@@ -550,6 +568,7 @@ pub struct ScenarioJointsMsg {
 /// A pseudo-sensor: geometric test published as a read-only input signal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SensorMsg {
     pub name: String,
     pub kind: SensorKindMsg,
@@ -563,6 +582,7 @@ pub struct SensorMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SensorKindMsg {
     /// Presence/area sensor: ON while a watched body overlaps the box.
     Zone { pose: PoseMsg, size: [f64; 3] },
@@ -577,6 +597,7 @@ pub enum SensorKindMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SensorWatchMsg {
     Objects {
         names: Vec<String>,
@@ -594,6 +615,7 @@ pub enum SensorWatchMsg {
 /// A scripted auxiliary device commanded from sequences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceMsg {
     pub name: String,
     pub kind: DeviceKindMsg,
@@ -602,6 +624,7 @@ pub struct DeviceMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum DeviceKindMsg {
     /// Advects unattached obstacles whose origin lies inside the zone.
     Conveyor {
@@ -654,6 +677,7 @@ pub enum DeviceKindMsg {
 /// stops (as waypoint indices).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VehiclePathMsg {
     pub waypoints: Vec<[f64; 2]>,
     pub stations: Vec<VehicleStationMsg>,
@@ -663,6 +687,7 @@ pub struct VehiclePathMsg {
 /// A vehicle's load deck, in the vehicle frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VehicleTrayMsg {
     pub pose: PoseMsg,
     pub size: [f64; 3],
@@ -670,6 +695,7 @@ pub struct VehicleTrayMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VehicleStationMsg {
     pub name: String,
     pub index: usize,
@@ -678,6 +704,7 @@ pub struct VehicleStationMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum DeviceCommandMsg {
     Start,
     Stop,
@@ -702,6 +729,7 @@ pub enum DeviceCommandMsg {
 /// `robot`'s TCP.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FlashMsg {
     pub name: String,
     pub signal: String,
@@ -720,6 +748,7 @@ pub struct FlashMsg {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum FlashKindMsg {
     #[default]
     Flash,
@@ -745,6 +774,7 @@ pub fn flash_kind_from_msg(kind: FlashKindMsg) -> crate::seq::FlashKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SequenceMsg {
     pub name: String,
     pub steps: Vec<StepMsg>,
@@ -752,6 +782,7 @@ pub struct SequenceMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StepMsg {
     pub name: String,
     /// Entry actions, fired when the step becomes active.
@@ -769,6 +800,7 @@ pub struct StepMsg {
 /// One arm of a branching step: its guard plus the steps it runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SelectArmMsg {
     pub condition: ConditionMsg,
     pub steps: Vec<StepMsg>,
@@ -776,6 +808,7 @@ pub struct SelectArmMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RampTargetMsg {
     pub joint: String,
     pub value: f64,
@@ -786,6 +819,7 @@ pub struct RampTargetMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ActionMsg {
     /// Start a named motion (its owning robot drives); await it with the
     /// `done` condition.
@@ -843,6 +877,7 @@ pub enum ActionMsg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ConditionMsg {
     /// Always true — fire the actions and move on.
     Immediately,
@@ -1026,6 +1061,12 @@ pub enum ServerMessage {
     /// The full weld-flash list; resent on every change.
     Effects {
         flashes: Vec<FlashMsg>,
+    },
+    /// The part pinnings (what each resident *is* commercially); resent
+    /// on every change and after any resident removal that pruned one.
+    /// Display only in the studio — a badge on the scene tree.
+    Parts {
+        parts: Vec<crate::part::PartEntry>,
     },
     /// The I/O map: the assignment layer as authored plus the points and
     /// findings derived from it over every sequence. Resent whenever the
@@ -2364,6 +2405,13 @@ pub fn effects_message(scene: &Scene) -> ServerMessage {
 pub fn devices_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Devices {
         devices: scene.devices().iter().map(device_msg).collect(),
+    }
+}
+
+/// The full part-pinning list as a `parts` message.
+pub fn parts_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Parts {
+        parts: scene.parts().to_vec(),
     }
 }
 

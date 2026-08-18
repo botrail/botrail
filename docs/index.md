@@ -90,8 +90,10 @@ layout edit becomes a failing test instead of a shop-floor surprise.
 
 -   :material-export: __Open deliverables__
 
-    USD animation, CSV/JSON, robot programs (URScript), and Python code
-    generation. Isaac Sim recordings play back through the same pipeline.
+    USD animation, CSV/JSON, robot programs (URScript), Python code
+    generation — and the engineering documents: I/O list, bill of
+    materials, layout sheet (SVG/DXF), cell report, all derived from the
+    same script. Isaac Sim recordings play back through the same pipeline.
 
 -   :material-web: __Runs in the browser__
 

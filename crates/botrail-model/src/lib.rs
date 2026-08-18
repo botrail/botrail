@@ -192,6 +192,11 @@ pub enum RobotSource {
         /// Mounting face declared by the manifest (`frames.mount_frame`),
         /// reapplied on rebuild.
         mount: Option<String>,
+        /// What the package *is* commercially (maker, product name,
+        /// category, headline specs) — the manifest's identity fields, kept
+        /// so a bill of materials can name the machine without re-reading
+        /// the catalog. Empty when the manifest carried none.
+        meta: CatalogMeta,
         /// The fetched file's own source (URDF XML / USD reference), so
         /// projects rebuild without touching the network.
         inner: Box<RobotSource>,
@@ -212,6 +217,24 @@ pub enum RobotSource {
         /// Prefix applied to every tool link/joint name in the composite.
         prefix: Option<String>,
     },
+}
+
+/// The identity a catalog manifest declares for a package — who makes
+/// it, what it is called, which category it files under, and the numeric
+/// headline specs (`mass_kg`, `reach_mm`, `payload_kg`, ...). Carried on
+/// [`RobotSource::Catalog`] purely so downstream consumers (a bill of
+/// materials) can describe the machine; nothing kinematic reads it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CatalogMeta {
+    /// `manufacturer.name` in the manifest.
+    pub manufacturer: Option<String>,
+    /// The manifest's `name` — the product as its maker calls it.
+    pub product: Option<String>,
+    /// The manifest's `category` (`manipulator`, `gripper.parallel`, ...).
+    pub category: Option<String>,
+    /// Numeric `specs.*` entries, in manifest order (non-numeric specs
+    /// such as `controller` lists are dropped).
+    pub specs: Vec<(String, f64)>,
 }
 
 impl RobotSource {

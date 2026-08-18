@@ -9,6 +9,9 @@ structured like a real cell — *planned* transfer moves between stations,
 *guarded* ramp moves (no collision check) for the approach/retreat through
 contact, an internal `carrying` signal, and timer steps. Everything bakes
 into one deterministic timeline (cycle time printed), then exports to USD.
+The same scene also yields the cell's bill of materials: the conveyor, the
+photo-eye and the pedestal are *identified* (`scene.set_part`) and the
+parts list is derived, never typed.
 
 Run with:  python examples/sequence_demo.py [out.usda]
 """
@@ -137,10 +140,28 @@ def build_cycle(scene: bt.Scene) -> str:
     return sq.name
 
 
+def identify_parts(scene: bt.Scene) -> None:
+    """Pins what the cell's equipment *is* — the identity the BOM is
+    derived from. A robot loaded from the catalog would arrive identified
+    (maker, product, specs come off the manifest); this one is NVIDIA's
+    Isaac USD, so it is named here. The scenery of the factory stage is
+    geometry until a part is pinned to it: the pedestal (a whole USD
+    subtree) and the pallet become parts, and the conveyor and its
+    photo-eye get their model numbers. Free attributes (`mass_kg`) are
+    summed by `bom.total()`. Nothing else in the demo changes."""
+    scene.set_part("panda", manufacturer="Franka Robotics", model="Panda", mass_kg=18)
+    scene.set_part("conv", manufacturer="MISUMI", model="GVL-1200-300", mass_kg=48)
+    scene.set_part("beam_pick", manufacturer="KEYENCE", model="PZ-G61N", category="sensor.photoelectric")
+    scene.set_part("/World/Pedestal", model="PD-500", category="structure.pedestal",
+                   description="robot pedestal, 4 anchors", mass_kg=120)
+    scene.set_part("/World/Pallet", model="EPAL 1", category="pallet", mass_kg=25)
+
+
 def main() -> None:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("cell_seq.usda")
     scene = build_scene()
     name = build_cycle(scene)
+    identify_parts(scene)
 
     timeline = scene.simulate_sequence(name)
     print(f"cycle time: {timeline.duration:.2f}s")
@@ -158,6 +179,14 @@ def main() -> None:
     for w in warnings:
         print(f"warning: {w}")
     print(f"exported to {out} — view with: usdview {out}")
+
+    # The bill of materials falls out of the same scene: equipment lines
+    # (robot, conveyor, sensor) plus the scenery that was pinned as parts.
+    bom = scene.bom()
+    bom_path = out.with_name(out.stem + "_bom.csv")
+    bom.save(bom_path)
+    print(f"\n{bom.to_markdown()}")
+    print(f"BOM: {len(bom)} lines, {len(bom.unidentified())} still unidentified — written to {bom_path}")
 
 
 if __name__ == "__main__":

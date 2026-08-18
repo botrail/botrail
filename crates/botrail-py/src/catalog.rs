@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use botrail_model::{RobotModel, RobotSource};
+use botrail_model::{CatalogMeta, RobotModel, RobotSource};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict};
@@ -193,6 +193,7 @@ pub fn from_catalog(
         tcp: tcp.map(link_name),
         flange: flange.map(link_name),
         mount: mount.map(link_name),
+        meta: manifest.meta,
         inner: Box::new(inner),
     };
     Ok(model)
@@ -325,6 +326,9 @@ struct ManifestBits {
     tcp_default: Option<String>,
     flange_frame: Option<String>,
     mount_frame: Option<String>,
+    /// Maker / product / category / numeric specs — what a bill of
+    /// materials names the package by.
+    meta: CatalogMeta,
 }
 
 fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
@@ -341,10 +345,46 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             .and_then(|v| v.extract::<Option<String>>().ok())
             .flatten()
     };
+    let text_at = |keys: &[&str]| -> Option<String> {
+        let mut node = manifest.clone();
+        for key in keys {
+            node = node.get_item(*key).ok()?;
+        }
+        node.extract::<Option<String>>().ok().flatten()
+    };
+    // Numeric specs only, in manifest order: `dof`, `payload_kg`,
+    // `reach_mm`, `mass_kg`, ... Lists and strings (`controller`,
+    // `ip_rating`) are not BOM attributes and are dropped here.
+    let mut specs = Vec::new();
+    if let Ok(dict) = manifest.get_item("specs") {
+        if let Ok(items) = dict.call_method0("items") {
+            if let Ok(iter) = items.try_iter() {
+                for item in iter.flatten() {
+                    let Ok((key, value)) = item.extract::<(String, Bound<'_, PyAny>)>() else {
+                        continue;
+                    };
+                    // Booleans are ints in Python; keep them out of the
+                    // numeric column set.
+                    if value.is_instance_of::<pyo3::types::PyBool>() {
+                        continue;
+                    }
+                    if let Ok(number) = value.extract::<f64>() {
+                        specs.push((key, number));
+                    }
+                }
+            }
+        }
+    }
     Ok(ManifestBits {
         tcp_default: frame("tcp_default"),
         flange_frame: frame("flange_frame"),
         mount_frame: frame("mount_frame"),
+        meta: CatalogMeta {
+            manufacturer: text_at(&["manufacturer", "name"]),
+            product: text_at(&["name"]),
+            category: text_at(&["category"]),
+            specs,
+        },
     })
 }
 

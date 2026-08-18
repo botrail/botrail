@@ -45,6 +45,7 @@ pub enum ProjectError {
 /// Where a project robot comes from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RobotSourceMsg {
     /// URDF XML (xacro already expanded), embedded verbatim.
     Urdf { xml: String },
@@ -66,6 +67,17 @@ pub enum RobotSourceMsg {
         flange: Option<String>,
         #[serde(default)]
         mount: Option<String>,
+        /// Manifest identity (maker, product name, category, numeric
+        /// specs) — what the BOM names the package by. Absent in files
+        /// written before parts existed; those lines then show the id only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        manufacturer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        product: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        specs: Vec<(String, f64)>,
         inner: Box<RobotSourceMsg>,
     },
     /// A tool welded onto a base robot (`Robot.attach_tool`): both part
@@ -100,6 +112,7 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             tcp,
             flange,
             mount,
+            meta,
             inner,
         } => RobotSourceMsg::Catalog {
             id: id.clone(),
@@ -107,6 +120,10 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             tcp: tcp.clone(),
             flange: flange.clone(),
             mount: mount.clone(),
+            manufacturer: meta.manufacturer.clone(),
+            product: meta.product.clone(),
+            category: meta.category.clone(),
+            specs: meta.specs.clone(),
             inner: Box::new(robot_source_msg(inner)),
         },
         botrail_model::RobotSource::Composite {
@@ -149,6 +166,10 @@ pub fn model_from_source(
             tcp,
             flange,
             mount,
+            manufacturer,
+            product,
+            category,
+            specs,
             inner,
         } => {
             // Rebuild from the embedded inner source (no network), then
@@ -174,6 +195,12 @@ pub fn model_from_source(
                 tcp: tcp.clone(),
                 flange: flange.clone(),
                 mount: mount.clone(),
+                meta: botrail_model::CatalogMeta {
+                    manufacturer: manufacturer.clone(),
+                    product: product.clone(),
+                    category: category.clone(),
+                    specs: specs.clone(),
+                },
                 inner: Box::new(inner_source),
             };
             Ok(model)
@@ -204,6 +231,7 @@ pub fn model_from_source(
 
 /// One robot in a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectRobotMsg {
     /// Scene-unique instance name; `None` (older files) falls back to the
     /// model name.
@@ -215,8 +243,15 @@ pub struct ProjectRobotMsg {
     pub joint_positions: Vec<f64>,
 }
 
+/// A `.botrail` project: one robot cell as text — robots and their
+/// placement, obstacles, frames, motions, sequences, signals, sensors,
+/// devices, scenarios, toolpaths, the I/O map and the parts pinned to all
+/// of them. Every list is additive: a field a file does not carry is
+/// empty. `version` is 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectFile {
+    /// Project file format version (currently 2).
     pub version: u32,
     pub robots: Vec<ProjectRobotMsg>,
     pub obstacles: Vec<ObstacleMsg>,
@@ -260,10 +295,15 @@ pub struct ProjectFile {
     /// themselves are derived, never stored.
     #[serde(default)]
     pub io: crate::iomap::IoMap,
+    /// Part identity pinned to residents and groups (absent in older
+    /// files). The BOM itself is derived, never stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<crate::part::PartEntry>,
 }
 
 /// One named [`crate::coat::Applicator`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApplicatorMsg {
     pub name: String,
     #[serde(flatten)]
@@ -272,6 +312,7 @@ pub struct ApplicatorMsg {
 
 /// One [`crate::AllowedContact`] by names: robot instance, link, obstacle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AllowedContactMsg {
     pub robot: String,
     pub link: String,
@@ -327,6 +368,7 @@ impl ProjectFile {
                     applicators: Vec::new(),
                     brushes: Vec::new(),
                     io: crate::iomap::IoMap::default(),
+                    parts: Vec::new(),
                 })
             }
             2 => {
@@ -345,6 +387,26 @@ impl ProjectFile {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("project serializes infallibly")
+    }
+
+    /// The JSON Schema (draft 2020-12) of the `.botrail` file, generated
+    /// from these very types — the contract an agent or an editor writes
+    /// projects against. Doc comments become descriptions.
+    #[cfg(feature = "schema")]
+    pub fn json_schema() -> String {
+        let mut schema = schemars::schema_for!(ProjectFile);
+        let obj = schema.ensure_object();
+        obj.insert(
+            "title".to_string(),
+            serde_json::Value::String("botrail project (.botrail)".to_string()),
+        );
+        obj.insert(
+            "$id".to_string(),
+            serde_json::Value::String(
+                "https://botrail.github.io/botrail/schema/project.schema.json".to_string(),
+            ),
+        );
+        serde_json::to_string_pretty(&schema).expect("schema serializes")
     }
 }
 
@@ -449,6 +511,7 @@ impl Scene {
                 .collect(),
             brushes: self.brushes().to_vec(),
             io: self.io_map().clone(),
+            parts: self.parts().to_vec(),
             frames: self
                 .frames()
                 .iter()
@@ -694,6 +757,9 @@ impl Scene {
         );
         self.set_io_map(project.io.clone())
             .map_err(|e| ProjectError::Incompatible(format!("I/O map: {e}")))?;
+        // Parts last: they pin to everything above by name.
+        self.set_parts(project.parts.clone())
+            .map_err(|e| ProjectError::Incompatible(format!("parts: {e}")))?;
         Ok(())
     }
 }
@@ -1279,10 +1345,75 @@ pub fn generate_python(project: &ProjectFile) -> String {
         py_steps(&mut out, "sequence", &sequence.steps, 0);
     }
     py_io_map(&mut out, &project.io);
+    py_parts(&mut out, &project.parts);
 
     out.push_str("\nbt.studio(scene)\n");
     out
 }
+
+/// Emits the part pinnings as `scene.set_part(...)` calls — after every
+/// resident, since each pins to one by name. The kind is always spelled
+/// out so the rebuild does not depend on name-space resolution.
+fn py_parts(out: &mut String, parts: &[crate::part::PartEntry]) {
+    use crate::part::PartAttr;
+    if parts.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for entry in parts {
+        let part = &entry.part;
+        let mut kwargs = format!("kind={:?}", entry.kind.as_str());
+        if let Some(catalog) = &part.catalog {
+            kwargs.push_str(&format!(", catalog={:?}", catalog.display()));
+        }
+        if let Some(v) = &part.manufacturer {
+            kwargs.push_str(&format!(", manufacturer={v:?}"));
+        }
+        if let Some(v) = &part.model {
+            kwargs.push_str(&format!(", model={v:?}"));
+        }
+        if let Some(v) = &part.category {
+            kwargs.push_str(&format!(", category={v:?}"));
+        }
+        if let Some(v) = &part.description {
+            kwargs.push_str(&format!(", description={v:?}"));
+        }
+        if part.qty != 1 {
+            kwargs.push_str(&format!(", qty={}", part.qty));
+        }
+        for (key, value) in &part.attributes {
+            let literal = match value {
+                PartAttr::Number(n) => format!("{n}"),
+                PartAttr::Text(t) => format!("{t:?}"),
+            };
+            // Attribute keys that are not identifiers go through the
+            // `attributes=` dict; plain ones read as keywords.
+            let is_ident = !key.is_empty()
+                && key.chars().enumerate().all(|(i, c)| {
+                    c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                });
+            if is_ident && !PART_KEYWORDS.contains(&key.as_str()) {
+                kwargs.push_str(&format!(", {key}={literal}"));
+            } else {
+                kwargs.push_str(&format!(", attributes={{{key:?}: {literal}}}"));
+            }
+        }
+        out.push_str(&format!("scene.set_part({:?}, {kwargs})\n", entry.target));
+    }
+}
+
+/// Keyword names `set_part` reserves; an attribute spelled like one goes
+/// through the `attributes=` dict instead.
+const PART_KEYWORDS: &[&str] = &[
+    "kind",
+    "catalog",
+    "manufacturer",
+    "model",
+    "category",
+    "description",
+    "qty",
+    "attributes",
+];
 
 /// Emits the I/O map's assignment layer: nodes (channels as a JSON
 /// literal — the dicts `bt.io` templates build), then bindings, then
@@ -1759,6 +1890,149 @@ mod tests {
         .err()
         .expect("must fail");
         assert!(err.to_string().contains("I/O map"), "{err}");
+    }
+
+    #[test]
+    fn parts_round_trip_through_project_and_python() {
+        use crate::part::{CatalogRef, Part, PartAttr, PartTargetKind};
+        let mut scene = sample_scene();
+        // A pinned robot with a free-form attribute and a description.
+        let mut robot_part = Part {
+            manufacturer: Some("FANUC".into()),
+            model: Some("M-20iD/25".into()),
+            description: Some("handling arm".into()),
+            ..Part::default()
+        };
+        robot_part
+            .attributes
+            .insert("mass_kg".into(), PartAttr::Number(250.0));
+        robot_part
+            .attributes
+            .insert("finish".into(), PartAttr::Text("RAL 1021".into()));
+        scene.set_part("simple_arm", None, robot_part).unwrap();
+        // A catalog-referenced obstacle group with a quantity, and an
+        // attribute whose key collides with a keyword.
+        scene
+            .add_obstacle(
+                "fence/panel_0",
+                Geometry::Box {
+                    size: Vector3::new(1.0, 0.05, 2.0),
+                },
+                Isometry3::identity(),
+            )
+            .unwrap();
+        let mut fence = Part {
+            catalog: Some(CatalogRef::parse("botrail/fence-panel@abc123")),
+            category: Some("structure.fence".into()),
+            qty: 12,
+            ..Part::default()
+        };
+        fence
+            .attributes
+            .insert("model".into(), PartAttr::Text("shadowed".into()));
+        assert_eq!(
+            scene.set_part("fence", None, fence).unwrap(),
+            PartTargetKind::Group
+        );
+
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.parts(), scene.parts());
+        assert_eq!(reloaded.bom(), scene.bom());
+
+        let py = generate_python(&reloaded.to_project());
+        assert!(
+            py.contains(
+                "scene.set_part(\"simple_arm\", kind=\"robot\", manufacturer=\"FANUC\", model=\"M-20iD/25\", description=\"handling arm\", finish=\"RAL 1021\", mass_kg=250)"
+            ),
+            "{py}"
+        );
+        assert!(
+            py.contains(
+                "scene.set_part(\"fence\", kind=\"group\", catalog=\"botrail/fence-panel@abc123\", category=\"structure.fence\", qty=12, attributes={\"model\": \"shadowed\"})"
+            ),
+            "{py}"
+        );
+        // Older files without the field still load, empty.
+        let mut without: serde_json::Value = serde_json::from_str(&json).unwrap();
+        without.as_object_mut().unwrap().remove("parts");
+        let legacy = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&without).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(legacy.parts().is_empty());
+        // A part pinned to something the file does not have is refused.
+        let mut broken: serde_json::Value = serde_json::from_str(&json).unwrap();
+        broken["parts"][0]["target"] = serde_json::Value::String("nope".into());
+        let err = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&broken).unwrap()).unwrap(),
+        )
+        .err()
+        .expect("must fail");
+        assert!(err.to_string().contains("parts"), "{err}");
+    }
+
+    #[test]
+    fn catalog_meta_survives_the_project() {
+        // A catalog robot's identity rides on the provenance record; the
+        // project must carry it so a reloaded cell's BOM still names the
+        // machine (no network on load).
+        let mut model = RobotModel::from_urdf_str(ARM).unwrap();
+        let inner = std::mem::replace(
+            &mut model.source,
+            botrail_model::RobotSource::UrdfXml(String::new()),
+        );
+        model.source = botrail_model::RobotSource::Catalog {
+            id: "franka/fr/fr3/r1".into(),
+            revision: "deadbeef".into(),
+            tcp: None,
+            flange: None,
+            mount: None,
+            meta: botrail_model::CatalogMeta {
+                manufacturer: Some("Franka Robotics".into()),
+                product: Some("FR3".into()),
+                category: Some("manipulator".into()),
+                specs: vec![("payload_kg".into(), 3.0), ("reach_mm".into(), 855.0)],
+            },
+            inner: Box::new(inner),
+        };
+        let scene = Scene::new(Arc::new(model));
+        let bom = scene.bom();
+        assert_eq!(bom.rows[0].manufacturer.as_deref(), Some("Franka Robotics"));
+        assert_eq!(bom.rows[0].model.as_deref(), Some("FR3"));
+        assert_eq!(bom.rows[0].category, "manipulator");
+        assert_eq!(
+            bom.rows[0].catalog.as_ref().map(|c| c.display()),
+            Some("franka/fr/fr3/r1@deadbeef".to_string())
+        );
+        assert_eq!(bom.total("reach_mm"), Some(855.0));
+
+        let json = scene.to_project().to_json();
+        assert!(
+            json.contains("\"manufacturer\": \"Franka Robotics\""),
+            "{json}"
+        );
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.bom(), bom);
+        // Files written before the identity fields existed still load;
+        // the line then carries the id and revision only.
+        let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for key in ["manufacturer", "product", "category", "specs"] {
+            old["robots"][0]["source"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+        }
+        let legacy = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&old).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let row = &legacy.bom().rows[0];
+        assert!(row.manufacturer.is_none());
+        assert_eq!(
+            row.catalog.as_ref().map(|c| c.id.clone()),
+            Some("franka/fr/fr3/r1".to_string())
+        );
     }
 
     #[test]

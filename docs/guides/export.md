@@ -3,7 +3,11 @@
 Deliverables leave botrail in open formats: USD for anyone with a viewer,
 CSV/JSON for your own pipeline, vendor robot programs for the controller, and
 Python for the next author. Nothing round-trips through a proprietary project
-file.
+file. The engineering documents a cell hands over come out of the same
+script — the [I/O list](io-map.md), the [bill of materials](parts-and-bom.md),
+the [layout sheet and the cell report](layout-and-report.md) are *derived*
+from the scene, so they cannot disagree with it or with each other. The
+[Hand over the cell](../tutorials/hand-over.md) tutorial writes the whole set.
 
 ## USD animation
 
@@ -90,6 +94,11 @@ format — exporting a 4-DOF arm is a clean error), and `blend_radius` defaults
 to 0 for a reason — overlapping blends abort some controllers, so raise it
 only after verifying on yours. botrail's own CI harness can replay exported
 scripts against a URSim controller simulator.
+
+The control logic itself goes to the PLC IDE as PLCopen XML
+(`scene.export_plcopen("cell.plcopen.xml")` — see
+[Offline commissioning](offline-commissioning.md)), and the controller's
+log comes back through `tl.diff(trace)`.
 
 A baked *sequence* exports too (`tl.to_script()`), with the sensor
 contacts and coils it uses on numbered digital I/O. The ports come from

@@ -35,7 +35,10 @@ takes:
   change that costs a second fails a test.* No other cell tool supports that
   workflow; it is botrail's core claim.
 * Deliverables are **open**: USD animation, CSV/JSON, vendor robot programs,
-  generated Python.
+  generated Python — and the engineering documents a cell hands over: the
+  I/O list, the bill of materials, the cell report. All of them are
+  *derived* from the same script, so they cannot disagree with each other
+  or with the simulation that verified the cell.
 
 ## Where it stands next to Isaac Sim
 
@@ -70,17 +73,23 @@ physics, and honesty about that is what makes the numbers trustworthy.
   frozen; there is no cooperative planning. Execution-time interference is
   caught by tick checking, and separation is authored with interlocks — the
   way a PLC cell actually does it.
-* **PLC vocabulary, not PLC connectivity** — but the I/O list is a
-  deliverable. Steps, signals, and scan cycles are the mental model; there
-  is no OPC-UA link to real hardware. What the cell needs electrically is
-  derived from those programs ([the I/O map](../guides/io-map.md): points,
-  assignments, handshake wires, a broken-wire scenario), and the exported
-  robot script uses the same DI/DO numbers — the consistency is checked, the
-  electrical behaviour is not simulated. Safety goes as far as labels,
+* **PLC vocabulary, not PLC connectivity** — but the I/O list and the
+  logic are deliverables. Steps, signals, and scan cycles are the mental
+  model; there is no OPC-UA link to real hardware. What the cell needs
+  electrically is derived from those programs ([the I/O map](../guides/io-map.md):
+  points, assignments, handshake wires, a broken-wire scenario), the
+  sequences leave as [PLCopen XML](../guides/offline-commissioning.md) for
+  the PLC IDE, the exported robot script uses the same DI/DO numbers, and
+  the controller's log comes back for a diff against the bake — the
+  consistency is checked, the electrical behaviour is not simulated. Safety goes as far as labels,
   two-channel pairs, point counts and forced-input scenarios; no
   performance level is claimed.
 * **USD in, not CAD in.** STEP/JT conversion is an upstream job for other
-  tools.
+  tools. botrail does not model shapes: it imports them (USD, meshes) and
+  generates only standard structures (fences, tables) from primitives.
+* **No CAD, no structural, electrical or pneumatic solving.** Parts carry
+  identity and attributes (maker, model, catalog reference, mass); botrail
+  counts and checks, it does not size a frame, a supply or a valve.
 
 If those trade-offs match your problem — and for cycle-time and layout
 verification they usually do — the rest of the documentation shows the

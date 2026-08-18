@@ -60,12 +60,23 @@ def _manifest(
     tcp: str | None = None,
     mount: str | None = None,
     distribution: str = "public",
+    identity: bool = False,
 ) -> str:
     frames = f"  tcp_default: {tcp}\n" if tcp else ""
     if mount:
         frames += f"  mount_frame: {mount}\n"
+    # The identity block a real manifest carries (maker, product name,
+    # category, specs) — what the BOM names the machine by. Mixed spec
+    # types on purpose: only numbers become BOM attributes.
+    ident = (
+        "name: Mini Arm\nmanufacturer:\n  name: ACME Robotics\n  country: JP\n"
+        "category: manipulator\nspecs:\n  dof: 1\n  payload_kg: 3.5\n  reach_mm: 300\n"
+        "  controller: [MC-1]\n  ip_rating: IP54\n"
+        if identity
+        else ""
+    )
     return (
-        f"schema_version: '0.1'\nid: {pid}\ndistribution: {distribution}\n"
+        f"schema_version: '0.1'\nid: {pid}\ndistribution: {distribution}\n{ident}"
         f"frames:\n  flange_frame: link1\n{frames}"
     )
 
@@ -97,7 +108,10 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     add(
         ARM_ID,
         "public",
-        {"manifest.yaml": _manifest(ARM_ID, tcp="tool_tip"), "urdf/model.urdf": ARM_URDF},
+        {
+            "manifest.yaml": _manifest(ARM_ID, tcp="tool_tip", identity=True),
+            "urdf/model.urdf": ARM_URDF,
+        },
         {"urdf": "urdf/model.urdf", "usd": None},
     )
     # A second cut of the same product — a better source, same machine.
@@ -283,3 +297,48 @@ def test_manifest_frames_enable_argument_free_mounting(
     reloaded = bt.Scene.load_project(project)
     assert reloaded.robot.dof == 1
     assert "/Plate/body" in reloaded.robot.link_names
+
+
+def test_catalog_identity_reaches_the_bom_and_survives_the_project(
+    catalog: dict, tmp_path: Path
+) -> None:
+    """A catalog robot is an identified BOM line without any authoring:
+    maker, product, category, catalog id@revision and the numeric specs
+    come off the manifest. A tool welded on is its own line. The identity
+    is persisted, so a reloaded project (no network) still names it."""
+    arm = bt.Robot.from_catalog(ARM_ID)
+    coupling = bt.Robot.from_catalog(COUPLING_ID)
+    scene = bt.Scene(arm.attach_tool(coupling))
+    bom = scene.bom()
+    assert len(bom) == 2
+    robot, tool = bom.rows
+    assert robot["names"] == ["mini"]
+    assert robot["manufacturer"] == "ACME Robotics"
+    assert robot["model"] == "Mini Arm"
+    assert robot["category"] == "manipulator"
+    assert robot["catalog"] == f"{ARM_ID}@{SHA}"
+    # Numeric specs only — the controller list and IP rating are not
+    # attributes.
+    assert robot["attributes"] == {"dof": 1.0, "payload_kg": 3.5, "reach_mm": 300.0}
+    # The coupling's manifest carries no identity: the line still shows
+    # the package, unidentified only in the maker/model sense.
+    assert tool["names"] == ["mini/tool"]
+    assert tool["category"] == "tool"
+    assert tool["catalog"] == f"{COUPLING_ID}@{SHA}"
+    assert bom.total("payload_kg") == 3.5
+
+    # A pinned part on the robot overlays the derived identity.
+    scene.set_part("mini", description="handling arm", price=1_500_000)
+    row = scene.bom().rows[0]
+    assert row["manufacturer"] == "ACME Robotics"
+    assert row["description"] == "handling arm"
+    assert scene.bom().total("price") == 1_500_000
+
+    project = tmp_path / "cell.botrail"
+    scene.save_project(project)
+    reloaded = bt.Scene.load_project(project)
+    assert reloaded.bom().rows == scene.bom().rows
+    assert 'scene.set_part("mini", kind="robot", description="handling arm", price=1500000)' in (
+        reloaded.generate_python()
+    )
+

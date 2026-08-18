@@ -1,0 +1,3008 @@
+{
+  "$id": "https://botrail.github.io/botrail/schema/project.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "botrail project (.botrail)",
+  "description": "A `.botrail` project: one robot cell as text — robots and their\nplacement, obstacles, frames, motions, sequences, signals, sensors,\ndevices, scenarios, toolpaths, the I/O map and the parts pinned to all\nof them. Every list is additive: a field a file does not carry is\nempty. `version` is 2.",
+  "type": "object",
+  "properties": {
+    "allowed_contacts": {
+      "description": "Process-contact exemptions, by names (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AllowedContactMsg"
+      }
+    },
+    "applicators": {
+      "description": "Spray applicators by name (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ApplicatorMsg"
+      }
+    },
+    "brushes": {
+      "description": "Brushes — named process settings toolpath strokes run with (absent\nin older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Brush"
+      }
+    },
+    "devices": {
+      "description": "Auxiliary devices (absent in older v2 files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DeviceMsg"
+      }
+    },
+    "flashes": {
+      "description": "Weld-flash bindings (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FlashMsg"
+      }
+    },
+    "frames": {
+      "description": "Named world frames (absent in older v2 files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FrameMsg"
+      }
+    },
+    "io": {
+      "description": "The I/O map's assignment layer — controller nodes, point → channel\nbindings, declarations (absent in older files). The points\nthemselves are derived, never stored.",
+      "$ref": "#/$defs/IoMap",
+      "default": {}
+    },
+    "motions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MotionMsg"
+      }
+    },
+    "obstacles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ObstacleMsg"
+      }
+    },
+    "parts": {
+      "description": "Part identity pinned to residents and groups (absent in older\nfiles). The BOM itself is derived, never stored.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PartEntry"
+      }
+    },
+    "robots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProjectRobotMsg"
+      }
+    },
+    "scenarios": {
+      "description": "Scenarios — named initial-state deltas (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScenarioMsg"
+      }
+    },
+    "sensors": {
+      "description": "Pseudo-sensors (absent in older v2 files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SensorMsg"
+      }
+    },
+    "sequences": {
+      "description": "PLC-style sequences (absent in older v2 files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SequenceMsg"
+      }
+    },
+    "signals": {
+      "description": "Internal signal declarations (absent in older v2 files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SignalDefMsg"
+      }
+    },
+    "toolpaths": {
+      "description": "Toolpaths — Cartesian process paths (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ToolpathMsg"
+      }
+    },
+    "version": {
+      "description": "Project file format version (currently 2).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "version",
+    "robots",
+    "obstacles",
+    "motions"
+  ],
+  "$defs": {
+    "ActionMsg": {
+      "description": "Robot-addressed actions carry `robot` — the instance name, or `None`\nfor the scene's sole robot (ambiguous, and rejected, with several).",
+      "oneOf": [
+        {
+          "description": "Start a named motion (its owning robot drives); await it with the\n`done` condition.",
+          "type": "object",
+          "properties": {
+            "motion": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "start_motion"
+            }
+          },
+          "required": [
+            "type",
+            "motion"
+          ]
+        },
+        {
+          "description": "Start a toolpath (continuous Cartesian process path) on `robot`;\nawait with `done`.",
+          "type": "object",
+          "properties": {
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "toolpath": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "start_toolpath"
+            }
+          },
+          "required": [
+            "type",
+            "toolpath"
+          ]
+        },
+        {
+          "description": "Linearly ramp joints (gripper open/close); await with `done`.",
+          "type": "object",
+          "properties": {
+            "duration": {
+              "type": "number",
+              "format": "double"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "targets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RampTargetMsg"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "start_ramp"
+            }
+          },
+          "required": [
+            "type",
+            "targets",
+            "duration"
+          ]
+        },
+        {
+          "description": "Grasp an obstacle at its current relative pose (instantaneous).",
+          "type": "object",
+          "properties": {
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "object": {
+              "type": "string"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "touch_links": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "default": null,
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "attach"
+            }
+          },
+          "required": [
+            "type",
+            "object"
+          ]
+        },
+        {
+          "description": "Release an obstacle where it is (instantaneous; the carrier is\nlooked up from the attachment).",
+          "type": "object",
+          "properties": {
+            "object": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "detach"
+            }
+          },
+          "required": [
+            "type",
+            "object"
+          ]
+        },
+        {
+          "description": "Latch onto a moving part: taught poses ride its motion until the\ntrack is released (conveyor tracking).",
+          "type": "object",
+          "properties": {
+            "link": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "object": {
+              "type": "string"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "track"
+            }
+          },
+          "required": [
+            "type",
+            "object"
+          ]
+        },
+        {
+          "description": "Stop following the tracked part (instantaneous).",
+          "type": "object",
+          "properties": {
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "untrack"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Write an internal signal.",
+          "type": "object",
+          "properties": {
+            "signal": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "set"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "value"
+          ]
+        },
+        {
+          "description": "Command an auxiliary device (output coil).",
+          "type": "object",
+          "properties": {
+            "command": {
+              "$ref": "#/$defs/DeviceCommandMsg"
+            },
+            "device": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "device"
+            }
+          },
+          "required": [
+            "type",
+            "device",
+            "command"
+          ]
+        }
+      ]
+    },
+    "AllowedContactMsg": {
+      "description": "One [`crate::AllowedContact`] by names: robot instance, link, obstacle.",
+      "type": "object",
+      "properties": {
+        "link": {
+          "type": "string"
+        },
+        "obstacle": {
+          "type": "string"
+        },
+        "robot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "robot",
+        "link",
+        "obstacle"
+      ]
+    },
+    "ApplicatorMsg": {
+      "description": "One named [`crate::coat::Applicator`].",
+      "type": "object",
+      "properties": {
+        "flow": {
+          "description": "Paint delivered at the nozzle [m^3/s].",
+          "type": "number",
+          "format": "double"
+        },
+        "max_range": {
+          "description": "Nothing lands past this axial distance [m].",
+          "type": "number",
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pattern": {
+          "$ref": "#/$defs/Pattern"
+        },
+        "standoff": {
+          "description": "Distance the pattern was measured at [m]. The whole model is a\nprojection of that plane, so this is the number the authored\nstandoff should match.",
+          "type": "number",
+          "format": "double"
+        },
+        "transfer_efficiency": {
+          "description": "Fraction of `flow` that reaches the reference plane. The rest is\noverspray before the paint ever gets to the part.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "standoff",
+        "pattern",
+        "flow",
+        "transfer_efficiency",
+        "max_range"
+      ]
+    },
+    "Aspect": {
+      "description": "The second facet a device or robot point carries when one name owns\nseveral wires: a device's numeric commands and a robot's handshake.\nRendered as `name.aspect`.",
+      "oneOf": [
+        {
+          "description": "Indexed-transfer start (`Advance`).",
+          "type": "string",
+          "const": "index"
+        },
+        {
+          "description": "Vehicle dispatch (`Goto`).",
+          "type": "string",
+          "const": "dispatch"
+        },
+        {
+          "description": "Vehicle station select (`Goto`, word).",
+          "type": "string",
+          "const": "station"
+        },
+        {
+          "description": "Axis position command (`MoveTo`, word).",
+          "type": "string",
+          "const": "position"
+        },
+        {
+          "description": "Speed command (`SetSpeed`, analog).",
+          "type": "string",
+          "const": "speed"
+        },
+        {
+          "description": "Robot start (motion / ramp / toolpath from another host).",
+          "type": "string",
+          "const": "start"
+        },
+        {
+          "description": "Robot done / idle contact.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "Robot program-number word.",
+          "type": "string",
+          "const": "program"
+        }
+      ]
+    },
+    "AttachmentMsg": {
+      "description": "Attachment state of a grasped obstacle (see `ObstacleMsg::attached_to`).",
+      "type": "object",
+      "properties": {
+        "grasp": {
+          "description": "Fixed relative pose: `link ← object`.",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "link": {
+          "description": "Carrying link name.",
+          "type": "string"
+        },
+        "robot": {
+          "description": "Carrying robot instance name; `None` means the first robot.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "touch_links": {
+          "description": "Links allowed to touch the object (carrying link, gripper fingers).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "link",
+        "grasp",
+        "touch_links"
+      ]
+    },
+    "Brush": {
+      "description": "A process setting a stroke runs with — ABB's *brush*: which applicator,\nat what fraction of its flow, and how the trigger is timed around the\nstroke. Named on the scene, referenced from a toolpath's feed moves.\nAnalog process values live here, in the authoring, because signals are\nbool: the PLC enables the gun, the program picks the brush.",
+      "type": "object",
+      "properties": {
+        "applicator": {
+          "description": "A [`Scene::applicator`] name.",
+          "type": "string"
+        },
+        "flow": {
+          "description": "Multiplier on the applicator's flow. `1.0` is the flow it was\ncalibrated at; a primer at half flow is `0.5`.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "lag": {
+          "description": "Seconds it keeps flowing after the stroke ends.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "lead": {
+          "description": "Seconds the paint starts flowing *before* a stroke with this brush\nbegins — the programmed lead that compensates the fluid system's\ndelay, and coats the run-in. Zero is \"opens exactly at the\nstroke's first point\".",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "applicator"
+      ]
+    },
+    "CatalogRef": {
+      "description": "A catalog package reference: the id as resolved plus, when known, the\ndataset revision it was fetched at. `revision: None` is a hand-written\nreference that has not been pinned (a part named by its catalog id\nwithout going through `Robot.from_catalog`).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "ChannelKind": {
+      "description": "The channel type a point needs. Only `Di`/`Do` take part in the bake\nand the URScript lowering; `Word`/`Ao` are table vocabulary — the\nnumeric commands a bool coil cannot carry.",
+      "type": "string",
+      "enum": [
+        "di",
+        "do",
+        "ai",
+        "ao",
+        "safe_di",
+        "safe_do",
+        "word"
+      ]
+    },
+    "ConditionMsg": {
+      "oneOf": [
+        {
+          "description": "Always true — fire the actions and move on.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "immediately"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Every motion/ramp started by this step has finished.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "done"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "The named robot has no motion/ramp in flight (interlock building\nblock).",
+          "type": "object",
+          "properties": {
+            "robot": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "robot_done"
+            }
+          },
+          "required": [
+            "type",
+            "robot"
+          ]
+        },
+        {
+          "description": "On-delay timer from step entry (TON).",
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "elapsed"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ]
+        },
+        {
+          "description": "Level test of a signal.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "signal"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "value"
+          ]
+        },
+        {
+          "description": "Rising edge: on this scan, off the previous one (`-|P|-`).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "rising"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "Falling edge: off this scan, on the previous one (`-|N|-`).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "falling"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "A linear axis reached its commanded position.",
+          "type": "object",
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "device_done"
+            }
+          },
+          "required": [
+            "type",
+            "device"
+          ]
+        },
+        {
+          "description": "Series contacts (AND).",
+          "type": "object",
+          "properties": {
+            "conditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConditionMsg"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "required": [
+            "type",
+            "conditions"
+          ]
+        },
+        {
+          "description": "Parallel contacts (OR).",
+          "type": "object",
+          "properties": {
+            "conditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ConditionMsg"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "required": [
+            "type",
+            "conditions"
+          ]
+        }
+      ]
+    },
+    "ConstraintMsg": {
+      "description": "A TCP path constraint (see `motion::Constraint`).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "angle": {
+              "description": "Half-angle of the cone (rad).",
+              "type": "number",
+              "format": "double"
+            },
+            "axis_local": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "axis_world": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": {
+              "type": "string",
+              "const": "orientation_cone"
+            }
+          },
+          "required": [
+            "type",
+            "axis_local",
+            "axis_world",
+            "angle"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "min": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "type": {
+              "type": "string",
+              "const": "position_box"
+            }
+          },
+          "required": [
+            "type",
+            "min",
+            "max"
+          ]
+        }
+      ]
+    },
+    "Contact": {
+      "description": "Contact type of the field device — documentation for the connection\ntable. Independent of `invert`: an E-stop button is an NC contact whose\nhealthy state reads high, so `estop_ok` needs no inversion.",
+      "type": "string",
+      "enum": [
+        "no",
+        "nc"
+      ]
+    },
+    "DeclRole": {
+      "oneOf": [
+        {
+          "description": "An external input, whatever the sequences do with the name.",
+          "type": "string",
+          "const": "input"
+        },
+        {
+          "description": "An output coil, whatever the sequences do with the name.",
+          "type": "string",
+          "const": "output"
+        },
+        {
+          "description": "A relay: no I/O even if only read (a constant flag).",
+          "type": "string",
+          "const": "internal"
+        },
+        {
+          "description": "Not on the table at all.",
+          "type": "string",
+          "const": "exclude"
+        }
+      ]
+    },
+    "DeviceCommandMsg": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "start"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stop"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "speed": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "set_speed"
+            }
+          },
+          "required": [
+            "type",
+            "speed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "position": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "move_to"
+            }
+          },
+          "required": [
+            "type",
+            "position"
+          ]
+        },
+        {
+          "description": "Send a vehicle to a named station; await with `device_done`.",
+          "type": "object",
+          "properties": {
+            "station": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "goto"
+            }
+          },
+          "required": [
+            "type",
+            "station"
+          ]
+        },
+        {
+          "description": "Run a stopped conveyor for exactly `distance` metres, then stop\n(indexed transfer); await with `device_done`.",
+          "type": "object",
+          "properties": {
+            "distance": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "advance"
+            }
+          },
+          "required": [
+            "type",
+            "distance"
+          ]
+        }
+      ]
+    },
+    "DeviceKindMsg": {
+      "oneOf": [
+        {
+          "description": "Advects unattached obstacles whose origin lies inside the zone.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "conveyor"
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "velocity": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "zone_pose": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "zone_size": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "zone_pose",
+            "zone_size",
+            "velocity",
+            "running"
+          ]
+        },
+        {
+          "description": "Moves the listed obstacles along `axis` within `range`.",
+          "type": "object",
+          "properties": {
+            "axis": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "kind": {
+              "type": "string",
+              "const": "linear_axis"
+            },
+            "objects": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "position": {
+              "type": "number",
+              "format": "double"
+            },
+            "range": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "speed": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "objects",
+            "axis",
+            "speed",
+            "position",
+            "range"
+          ]
+        },
+        {
+          "description": "Feeds parked carriers onto the line every `interval` seconds.",
+          "type": "object",
+          "properties": {
+            "interval": {
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "source"
+            },
+            "park": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "pitch": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "pool": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pose": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "running": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "pool",
+            "park",
+            "pitch",
+            "pose",
+            "interval",
+            "running"
+          ]
+        },
+        {
+          "description": "Returns carriers that reach its zone to `source`'s magazine.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sink"
+            },
+            "source": {
+              "type": "string"
+            },
+            "zone_pose": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "zone_size": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "zone_pose",
+            "zone_size",
+            "source"
+          ]
+        },
+        {
+          "description": "A guided transport vehicle: drives station to station along an\nauthored path, carrying its body obstacles rigidly.",
+          "type": "object",
+          "properties": {
+            "allow_reverse": {
+              "description": "May it drive a leg backwards instead of turning around for it?",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "vehicle"
+            },
+            "path": {
+              "$ref": "#/$defs/VehiclePathMsg"
+            },
+            "speed": {
+              "type": "number",
+              "format": "double"
+            },
+            "start": {
+              "type": "string"
+            },
+            "tray": {
+              "description": "Load deck in the vehicle frame: pose plus full size.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VehicleTrayMsg"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "turn_speed": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "body",
+            "speed",
+            "turn_speed",
+            "start"
+          ]
+        }
+      ]
+    },
+    "DeviceMsg": {
+      "description": "A scripted auxiliary device commanded from sequences.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DeviceKindMsg"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ]
+    },
+    "Electrical": {
+      "description": "Electrical facts about a channel or a field device: what a lint can\ncompare when both sides state them.",
+      "type": "object",
+      "properties": {
+        "logic": {
+          "description": "The sensor output type a channel accepts / a device provides. Not\n\"sink\"/\"source\": those words swap meaning between vendors.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Logic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "voltage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "FaultMsg": {
+      "description": "A forced input of a scenario: a contact stuck at a value, or an open\nwire (input level low — the functional value follows the binding's\npolarity).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stuck"
+            },
+            "target": {
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "open"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "target"
+          ]
+        },
+        {
+          "description": "An I/O node dropped off: every input wired on it opens.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "node_down"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "target"
+          ]
+        }
+      ]
+    },
+    "FlashKindMsg": {
+      "type": "string",
+      "enum": [
+        "flash",
+        "trace",
+        "spray"
+      ]
+    },
+    "FlashMsg": {
+      "description": "A weld-flash binding: while `signal` is true, draw an arc flash at\n`robot`'s TCP.",
+      "type": "object",
+      "properties": {
+        "cone": {
+          "description": "Spray-cone size, `[length, radius]` in meters (spray effects only).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "kind": {
+          "description": "Rendering kind; absent in older payloads (= flash).",
+          "$ref": "#/$defs/FlashKindMsg",
+          "default": "flash"
+        },
+        "name": {
+          "type": "string"
+        },
+        "robot": {
+          "type": "string"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "spin_link": {
+          "description": "Link spun visually while the signal is on (cut traces).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "signal",
+        "robot"
+      ]
+    },
+    "FrameMsg": {
+      "description": "A named world-frame pose (mount point / teach reference).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "pose": {
+          "$ref": "#/$defs/PoseMsg"
+        }
+      },
+      "required": [
+        "name",
+        "pose"
+      ]
+    },
+    "GeometryMsg": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "box"
+            },
+            "size": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "size"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cylinder"
+            },
+            "length": {
+              "type": "number",
+              "format": "double"
+            },
+            "radius": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "radius",
+            "length"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sphere"
+            },
+            "radius": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "radius"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ext": {
+              "description": "Lower-case file extension so the client can pick a loader.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "mesh"
+            },
+            "scale": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "url": {
+              "description": "URL the studio can fetch the mesh from (e.g. `/meshes/0`).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "ext",
+            "scale"
+          ]
+        }
+      ]
+    },
+    "IoBinding": {
+      "description": "One point wired to one channel. `(point, node)` is the key: a signal\nfanning out to two controllers is two bindings.",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "description": "Placed by `auto_assign_io` rather than by hand. Hand bindings are\nnever moved; `auto_assign_io(reassign)` drops only these.",
+          "type": "boolean"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "contact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Contact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "device": {
+          "description": "The field device's electrical facts (voltage, output type).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Electrical"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "field": {
+          "description": "The field device on the far end (`\"BEAM1\"`, `\"-B1\"`, `\"YV1\"`) —\nthe connection table's other column.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invert": {
+          "description": "Logical inversion between the cell's value and the wire level.\nProjection only: the URScript lowering inverts its tests and\nwrites; the bake is untouched.",
+          "type": "boolean"
+        },
+        "node": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "point": {
+          "$ref": "#/$defs/IoPointId"
+        },
+        "safety": {
+          "type": "boolean"
+        },
+        "tag": {
+          "description": "PLC tag / symbol.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "point",
+        "node",
+        "channel"
+      ]
+    },
+    "IoChannel": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "PLC address as the controller spells it (`\"%IX0.2\"`, `\"X02\"`) —\na string; dialects live in the Python templates.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "electrical": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Electrical"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Node-unique id, `\"DI2\"`.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChannelKind"
+        },
+        "port": {
+          "description": "The vendor's standard-I/O number, when the channel is one — what\nthe URScript lowering writes (`set_standard_digital_out(port, …)`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "IoDecl": {
+      "description": "An exception to the derivation, or an unmodelled point.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pair": {
+          "description": "The other channel of a two-channel safety input.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeclRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safety": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "IoDirection": {
+      "description": "Which way a point faces, from the host's point of view.",
+      "type": "string",
+      "enum": [
+        "input",
+        "output"
+      ]
+    },
+    "IoMap": {
+      "description": "The assignment layer of a scene: nodes, bindings, declarations. Stored\non the scene and in the project; everything else in this module is\nderived from it.",
+      "type": "object",
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IoBinding"
+          }
+        },
+        "decls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IoDecl"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IoNode"
+          }
+        }
+      }
+    },
+    "IoNode": {
+      "description": "The controller box a program runs on and the channels it owns.",
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IoChannel"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/IoNodeKind"
+        },
+        "model": {
+          "description": "Part number / model (optional, a table column).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "place": {
+          "description": "A frame or obstacle name marking where the box stands (optional,\ndisplay only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "programs": {
+          "description": "Sequences this node executes (`Plc` / `RobotController` only).\nPrograms listed nowhere are placed implicitly (one robot driven →\nthat robot's controller, none or several → `<cell>`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "uplink": {
+          "description": "The controller this node's I/O belongs to (a remote I/O station or\na safety module hangs off a PLC). Beyond that ownership, a label:\nno bus semantics.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uplink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ]
+    },
+    "IoNodeKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plc"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "safety_plc"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "remote_io"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A robot controller, possibly driving several arms (a two-arm\nstation on one cabinet).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "robot_controller"
+            },
+            "robots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "robots"
+          ]
+        },
+        {
+          "description": "Anything else — documentation only, cannot host programs or take\nbindings.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "other"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "label"
+          ]
+        }
+      ]
+    },
+    "IoPointId": {
+      "description": "`(name, aspect, direction)` — with the host, the identity of a point.",
+      "type": "object",
+      "properties": {
+        "aspect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Aspect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "direction": {
+          "$ref": "#/$defs/IoDirection"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "direction"
+      ]
+    },
+    "LegendMsg": {
+      "description": "A colour key for an obstacle whose colours mean something.",
+      "type": "object",
+      "properties": {
+        "stops": {
+          "description": "Swatches top to bottom; an empty label is a swatch with no text.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegendStopMsg"
+          }
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "stops"
+      ]
+    },
+    "LegendStopMsg": {
+      "type": "object",
+      "properties": {
+        "color": {
+          "description": "Linear RGB, like every colour on the wire.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "color",
+        "label"
+      ]
+    },
+    "Logic": {
+      "type": "string",
+      "enum": [
+        "pnp",
+        "npn"
+      ]
+    },
+    "MaterialMsg": {
+      "description": "Metalness/roughness, the pair every viewer botrail hands a scene to\nalready speaks (glTF, USD Preview Surface, three.js).",
+      "type": "object",
+      "properties": {
+        "metalness": {
+          "type": "number",
+          "format": "float"
+        },
+        "roughness": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "metalness",
+        "roughness"
+      ]
+    },
+    "MotionMsg": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "robot": {
+          "description": "Owning robot instance name; `None` means the first robot.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SegmentMsg"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "segments"
+      ]
+    },
+    "ObstacleMsg": {
+      "type": "object",
+      "properties": {
+        "attached_to": {
+          "description": "Present while the obstacle is attached to (grasped by) a robot link.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttachmentMsg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "color": {
+          "description": "Display colour, linear RGB, from the scene file's\n`primvars:displayColor`. Absent means \"no authored appearance\": the\nstudio then draws the obstacle as a neutral collision proxy.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "enabled": {
+          "description": "Disabled obstacles render but are excluded from collision checking.",
+          "type": "boolean",
+          "default": true
+        },
+        "geometry": {
+          "$ref": "#/$defs/GeometryMsg"
+        },
+        "legend": {
+          "description": "What the colours mean, when they mean something (a film map's\nmicron ramp). Absent for ordinary scenery.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LegendMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "material": {
+          "description": "How the surface takes light. Absent means \"no authored appearance\",\nsame as `color`: the studio picks. Projects written before this\nexisted simply have no material, which is the same thing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaterialMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pose": {
+          "description": "World pose.",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "visible": {
+          "description": "Invisible obstacles still collide; they are simply not drawn. Files\nwritten before this existed have every obstacle visible, which is\nwhat they meant.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "name",
+        "geometry",
+        "pose"
+      ]
+    },
+    "Part": {
+      "description": "What a resident *is*: identity and count, nothing else. Every field is\noptional so a part can be as thin as `model=\"GVL-1200\"` and still land\non the BOM; the catalog reference is what `Robot.from_catalog` fills\nin by itself.",
+      "type": "object",
+      "properties": {
+        "attributes": {
+          "description": "Free attributes, summed by [`Bom::total`] when numeric. botrail\nnever validates them.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PartAttr"
+          }
+        },
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "description": "BOM category (`conveyor`, `sensor.photoelectric`, `structure.fence`,\n...). Overrides the category the resident's kind implies.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manufacturer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model / part number.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qty": {
+          "description": "How many of them this target stands for. One resident is one part\nby default; a group generated as twelve fence panels says 12.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      }
+    },
+    "PartAttr": {
+      "description": "A free part attribute: a number (summable — `mass_kg`, `power_w`, a\nprice) or a text (`ip_rating`, a note). Untagged on the wire, so a\nproject file reads `{\"mass_kg\": 45, \"finish\": \"RAL 7035\"}`.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "PartEntry": {
+      "description": "One authored part pinning: `part` describes the resident (or group)\n`target` of kind `kind`.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PartTargetKind"
+        },
+        "part": {
+          "$ref": "#/$defs/Part"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "kind",
+        "part"
+      ]
+    },
+    "PartTargetKind": {
+      "description": "Which kind of resident a part entry is pinned to. Kinds have separate\nname spaces (a conveyor device and its belt slab may both be `belt`),\nso the kind is part of the key.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "robot",
+            "obstacle",
+            "sensor",
+            "device",
+            "io_node"
+          ]
+        },
+        {
+          "description": "Every obstacle under `<target>/` — an imported subtree, a generated\nassembly. Counted as one line.",
+          "type": "string",
+          "const": "group"
+        }
+      ]
+    },
+    "PathTargetMsg": {
+      "description": "Serialized form (project files, Python boundary). Positions and axes in\nthe part frame; `spin` optional.",
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "spin": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "tool_axis": {
+          "type": "array",
+          "default": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "required": [
+        "position"
+      ]
+    },
+    "Pattern": {
+      "description": "The footprint an applicator lays on its reference plane, as a *shape*:\nthe integrator normalizes whatever this returns so it integrates to\none over the plane, and [`Applicator::flow`] supplies the magnitude.\nCoordinates are meters on the reference plane, origin on the spray\naxis, `u` across the fan and `w` along it.",
+      "oneOf": [
+        {
+          "description": "Elliptic dual-beta — the literature's standard fit for a flat-fan\nair gun: thick down the middle, thin at the edges, and the extent\nalong `w` narrows toward the ends of the fan. `beta = 1` is a flat\ntop hat, larger is more peaked.",
+          "type": "object",
+          "properties": {
+            "beta_across": {
+              "type": "number",
+              "format": "double"
+            },
+            "beta_along": {
+              "type": "number",
+              "format": "double"
+            },
+            "height": {
+              "description": "Full fan height along (`w` extent at mid-fan) [m].",
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "dual_beta"
+            },
+            "width": {
+              "description": "Full fan width across (`u` extent) [m].",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "kind",
+            "width",
+            "height",
+            "beta_across",
+            "beta_along"
+          ]
+        },
+        {
+          "description": "Axisymmetric cone — a rotary bell or a round nozzle. `beta = 1` is\na flat disc, 2 is parabolic.",
+          "type": "object",
+          "properties": {
+            "beta": {
+              "type": "number",
+              "format": "double"
+            },
+            "diameter": {
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "round"
+            }
+          },
+          "required": [
+            "kind",
+            "diameter",
+            "beta"
+          ]
+        },
+        {
+          "description": "A measured static-pattern profile, sampled radially: what a shop\nactually has after spraying a coupon for a fixed time at a fixed\ndistance. `radii` ascending from 0, `weight` the film measured\nthere (any unit — only the shape survives normalization).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "measured"
+            },
+            "radii": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "weight": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "radii",
+            "weight"
+          ]
+        }
+      ]
+    },
+    "PoseMsg": {
+      "description": "Position + quaternion (x, y, z, w), in meters / world frame unless noted.",
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "quaternion": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 4,
+          "minItems": 4
+        }
+      },
+      "required": [
+        "position",
+        "quaternion"
+      ]
+    },
+    "ProjectRobotMsg": {
+      "description": "One robot in a project.",
+      "type": "object",
+      "properties": {
+        "base_pose": {
+          "description": "World pose of the robot's root link.",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "joint_positions": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "name": {
+          "description": "Scene-unique instance name; `None` (older files) falls back to the\nmodel name.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "$ref": "#/$defs/RobotSourceMsg"
+        }
+      },
+      "required": [
+        "source",
+        "base_pose",
+        "joint_positions"
+      ]
+    },
+    "RampTargetMsg": {
+      "type": "object",
+      "properties": {
+        "joint": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "joint",
+        "value"
+      ]
+    },
+    "RobotSourceMsg": {
+      "description": "Where a project robot comes from.",
+      "oneOf": [
+        {
+          "description": "URDF XML (xacro already expanded), embedded verbatim.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "urdf"
+            },
+            "xml": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "xml"
+          ]
+        },
+        {
+          "description": "USD stage reference (local path until asset bundling lands). The\napplication layer re-imports it via botrail-usd on load.",
+          "type": "object",
+          "properties": {
+            "articulation_root": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "usd"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "articulation_root"
+          ]
+        },
+        {
+          "description": "A catalog package (`Robot.from_catalog`): id + pinned revision for\nprovenance and script export, plus the fetched inner source so\nloading needs no network.",
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "flange": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "id": {
+              "type": "string"
+            },
+            "inner": {
+              "$ref": "#/$defs/RobotSourceMsg"
+            },
+            "kind": {
+              "type": "string",
+              "const": "catalog"
+            },
+            "manufacturer": {
+              "description": "Manifest identity (maker, product name, category, numeric\nspecs) — what the BOM names the package by. Absent in files\nwritten before parts existed; those lines then show the id only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mount": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "product": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "type": "string"
+            },
+            "specs": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number",
+                    "format": "double"
+                  }
+                ]
+              }
+            },
+            "tcp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "revision",
+            "inner"
+          ]
+        },
+        {
+          "description": "A tool welded onto a base robot (`Robot.attach_tool`): both part\nsources plus the weld parameters, so loading re-runs the attach.",
+          "type": "object",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/RobotSourceMsg"
+            },
+            "flange": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "composite"
+            },
+            "mount": {
+              "type": "string"
+            },
+            "offset": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "tcp": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "tool": {
+              "$ref": "#/$defs/RobotSourceMsg"
+            }
+          },
+          "required": [
+            "kind",
+            "base",
+            "tool",
+            "flange",
+            "mount",
+            "offset"
+          ]
+        }
+      ]
+    },
+    "ScenarioJointsMsg": {
+      "description": "A robot start configuration a scenario overrides.",
+      "type": "object",
+      "properties": {
+        "positions": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "robot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "robot",
+        "positions"
+      ]
+    },
+    "ScenarioMsg": {
+      "description": "A named initial-state delta — one row of the cell's test-case matrix.\nThe unmodified scene is the reserved scenario `baseline`.",
+      "type": "object",
+      "properties": {
+        "faults": {
+          "description": "Inputs forced for the whole run (absent in older files).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FaultMsg"
+          }
+        },
+        "joints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioJointsMsg"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "obstacles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioObstacleMsg"
+          }
+        },
+        "signals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioSignalMsg"
+          }
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ScenarioObstacleMsg": {
+      "description": "An obstacle pose a scenario overrides.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "pose": {
+          "$ref": "#/$defs/PoseMsg"
+        }
+      },
+      "required": [
+        "name",
+        "pose"
+      ]
+    },
+    "ScenarioSignalMsg": {
+      "description": "An internal-signal initial value a scenario overrides.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "SegmentKindMsg": {
+      "type": "string",
+      "enum": [
+        "joint",
+        "cartesian_line"
+      ]
+    },
+    "SegmentMsg": {
+      "type": "object",
+      "properties": {
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConstraintMsg"
+          }
+        },
+        "goal_positions": {
+          "description": "Goal configuration in DOF order.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/SegmentKindMsg"
+        }
+      },
+      "required": [
+        "kind",
+        "goal_positions",
+        "constraints"
+      ]
+    },
+    "SelectArmMsg": {
+      "description": "One arm of a branching step: its guard plus the steps it runs.",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/ConditionMsg"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StepMsg"
+          }
+        }
+      },
+      "required": [
+        "condition",
+        "steps"
+      ]
+    },
+    "SensorKindMsg": {
+      "oneOf": [
+        {
+          "description": "Presence/area sensor: ON while a watched body overlaps the box.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "zone"
+            },
+            "pose": {
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "size": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "pose",
+            "size"
+          ]
+        },
+        {
+          "description": "Photoelectric beam: ON while the segment is interrupted.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "kind": {
+              "type": "string",
+              "const": "beam"
+            },
+            "radius": {
+              "type": "number",
+              "format": "double"
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "from",
+            "to",
+            "radius"
+          ]
+        }
+      ]
+    },
+    "SensorMsg": {
+      "description": "A pseudo-sensor: geometric test published as a read-only input signal.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SensorKindMsg"
+        },
+        "mount": {
+          "description": "Vehicle this sensor rides on; its geometry is then read in that\nvehicle's frame. `None` (the usual case) is a floor fixture.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "watch": {
+          "$ref": "#/$defs/SensorWatchMsg"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "watch"
+      ]
+    },
+    "SensorWatchMsg": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "objects"
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "names"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "all_objects"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Any robot's links trip it.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "robot"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Only the named robot instances' links trip it.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "robots"
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "names"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "SequenceMsg": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StepMsg"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "steps"
+      ]
+    },
+    "SignalDefMsg": {
+      "description": "A user-defined internal signal (PLC internal relay).",
+      "type": "object",
+      "properties": {
+        "initial": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "initial"
+      ]
+    },
+    "StepMsg": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "description": "Entry actions, fired when the step becomes active.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActionMsg"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "select": {
+          "description": "SFC selection divergence: when non-empty this is a branching step\n— no actions, `transition` unused, the arms' conditions are the\noutgoing transitions (first to hold wins, authored order =\npriority) and every arm rejoins at the next step.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectArmMsg"
+          }
+        },
+        "transition": {
+          "description": "The step completes when this condition holds.",
+          "$ref": "#/$defs/ConditionMsg"
+        }
+      },
+      "required": [
+        "name",
+        "actions",
+        "transition"
+      ]
+    },
+    "ToolMoveMsg": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "targets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PathTargetMsg"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "rapid"
+            }
+          },
+          "required": [
+            "type",
+            "targets"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "brush": {
+              "description": "Brush name (absent in files written before brushes existed,\nwhich is the same as none).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "feed": {
+              "type": "number",
+              "format": "double"
+            },
+            "targets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PathTargetMsg"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "feed"
+            }
+          },
+          "required": [
+            "type",
+            "feed",
+            "targets"
+          ]
+        }
+      ]
+    },
+    "ToolpathMsg": {
+      "type": "object",
+      "properties": {
+        "frame": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolMoveMsg"
+          }
+        },
+        "name": {
+          "description": "Defaults to empty: the Python boundary passes the name separately\n(`scene.add_toolpath(name, tp)`) and overrides this field.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "required": [
+        "moves"
+      ]
+    },
+    "Uplink": {
+      "type": "object",
+      "properties": {
+        "bus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parent"
+      ]
+    },
+    "VehiclePathMsg": {
+      "description": "An authored vehicle guide path: floor waypoints plus named station\nstops (as waypoint indices).",
+      "type": "object",
+      "properties": {
+        "ring": {
+          "type": "boolean"
+        },
+        "stations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VehicleStationMsg"
+          }
+        },
+        "waypoints": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      },
+      "required": [
+        "waypoints",
+        "stations",
+        "ring"
+      ]
+    },
+    "VehicleStationMsg": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "index"
+      ]
+    },
+    "VehicleTrayMsg": {
+      "description": "A vehicle's load deck, in the vehicle frame.",
+      "type": "object",
+      "properties": {
+        "pose": {
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "size": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "required": [
+        "pose",
+        "size"
+      ]
+    }
+  }
+}

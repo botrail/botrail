@@ -11,8 +11,12 @@ pub mod coat;
 pub mod gcode;
 pub mod handshake;
 pub mod iomap;
+pub mod layout;
 pub mod motion;
+pub mod part;
+pub mod plcopen;
 pub mod project;
+pub mod report;
 pub mod rollout;
 pub mod script;
 pub mod seq;
@@ -79,6 +83,10 @@ pub enum SceneError {
     UnknownIoDecl(String),
     #[error("{0}")]
     BadIo(String),
+    #[error("{0}")]
+    BadPart(String),
+    #[error("unknown frame `{0}`")]
+    UnknownFrame(String),
 }
 
 /// Rewrites `RobotDone` references inside a (possibly nested) condition.
@@ -353,6 +361,10 @@ pub struct Scene {
     /// channel bindings, declarations. Everything else about I/O is
     /// derived from the sequences (see [`iomap`]).
     io: iomap::IoMap,
+    /// Part identity pinned to residents and groups by name — what each
+    /// thing *is* commercially. Authoring data the BOM is derived from
+    /// (see [`part`]); never read by collision, planning or the rollout.
+    parts: Vec<part::PartEntry>,
     /// Inputs a scenario's faults pin for the run — filled by
     /// `apply_scenario` on a rollout snapshot, read by the rollout. Never
     /// authored, never saved: the live scene's list is empty.
@@ -391,6 +403,7 @@ impl Scene {
             applicators: Vec::new(),
             brushes: Vec::new(),
             io: iomap::IoMap::default(),
+            parts: Vec::new(),
             forced_inputs: Vec::new(),
             collision_warnings,
         }
@@ -509,6 +522,7 @@ impl Scene {
                 swap(&mut binding.point.name);
             }
         }
+        self.rename_part_target(part::PartTargetKind::Robot, &old, &candidate);
         candidate
     }
 
@@ -818,6 +832,7 @@ impl Scene {
         self.obstacles.remove(index);
         self.obstacle_colliders.remove(index);
         self.attachments.retain(|a| a.object != name);
+        self.prune_parts();
         Ok(())
     }
 
@@ -1496,6 +1511,18 @@ impl Scene {
 
     pub fn set_motions(&mut self, motions: Vec<Motion>) {
         self.motions = motions;
+    }
+
+    /// Removes a named frame. Toolpaths that reference it keep their
+    /// authored reference and simply fail to resolve until it comes back
+    /// (the same as loading a project whose frame is missing).
+    pub fn remove_frame(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.frames.len();
+        self.frames.retain(|f| f.name != name);
+        if self.frames.len() == before {
+            return Err(SceneError::UnknownFrame(name.to_string()));
+        }
+        Ok(())
     }
 
     pub fn set_frames(&mut self, frames: Vec<Frame>) {

@@ -86,7 +86,8 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, scenarios, effects, frames, state. Mesh
+/// sequences, sensors, devices, scenarios, effects, frames, toolpaths,
+/// io, parts, state. Mesh
 /// visuals are mapped to URLs through the host's
 /// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
 /// the handshake — hosts must not hand-roll it.
@@ -98,7 +99,8 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// Every scene-content message except `scene_init`, in handshake order:
 /// obstacles, motions, sequences, sensors, devices, scenarios, effects,
-/// frames, state. Re-sent wholesale after bulk changes (project load),
+/// frames, toolpaths, io, parts, state. Re-sent wholesale after bulk
+/// changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
@@ -113,6 +115,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::frames_message(scene),
             wire::toolpaths_message(scene),
             wire::io_message(scene),
+            wire::parts_message(scene),
             wire::state_message(scene),
         ]
     })
@@ -457,8 +460,13 @@ pub fn add_obstacles(
 }
 
 pub fn remove_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    let pinned = host.with_scene(|scene| !scene.parts().is_empty());
     host.with_scene(|scene| scene.remove_obstacle(name))?;
     emit_obstacles_and_state(host);
+    // A removed obstacle may have been the last member of a pinned group.
+    if pinned {
+        emit_parts(host);
+    }
     Ok(())
 }
 
@@ -755,6 +763,15 @@ pub fn add_frames(host: &impl SessionHost, frames: Vec<(String, Isometry3<f64>)>
     emit_frames(host);
 }
 
+/// Removes a named frame and rebroadcasts the frame list (and the toolpath
+/// overlays, which may have referenced it).
+pub fn remove_frame(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_frame(name))?;
+    emit_frames(host);
+    emit_toolpaths(host);
+    Ok(())
+}
+
 // -------------------------------------------------------------- motions
 
 fn emit_motions(host: &impl SessionHost) {
@@ -825,6 +842,7 @@ pub fn upsert_io_node(
 pub fn remove_io_node(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_io_node(name))?;
     emit_io(host);
+    emit_parts(host);
     Ok(())
 }
 
@@ -864,6 +882,7 @@ pub fn set_io_map(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_io_map(io))?;
     emit_io(host);
+    emit_parts(host);
     Ok(())
 }
 
@@ -942,6 +961,7 @@ pub fn upsert_sensor(host: &impl SessionHost, sensor: botrail_scene::seq::Sensor
 pub fn remove_sensor(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_sensor(name))?;
     emit_sensors(host);
+    emit_parts(host);
     Ok(())
 }
 
@@ -1011,6 +1031,35 @@ pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device
 pub fn remove_device(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_device(name))?;
     emit_devices(host);
+    emit_parts(host);
+    Ok(())
+}
+
+fn emit_parts(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::parts_message(scene));
+    host.emit(&msg);
+}
+
+/// Pins a part to a resident or group and rebroadcasts the pinning list.
+/// Returns the kind the target resolved to.
+pub fn set_part(
+    host: &impl SessionHost,
+    target: &str,
+    kind: Option<botrail_scene::part::PartTargetKind>,
+    part: botrail_scene::part::Part,
+) -> Result<botrail_scene::part::PartTargetKind, SceneError> {
+    let kind = host.with_scene(|scene| scene.set_part(target, kind, part))?;
+    emit_parts(host);
+    Ok(kind)
+}
+
+/// Unpins the part on `target` and rebroadcasts.
+pub fn remove_part(host: &impl SessionHost, target: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_part(target))?;
+    emit_parts(host);
     Ok(())
 }
 
@@ -1583,6 +1632,7 @@ mod tests {
                     ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::Io { .. } => "io",
+                    ServerMessage::Parts { .. } => "parts",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                     ServerMessage::UsdDocument { .. } => "usd_document",
                 })
@@ -1626,7 +1676,8 @@ mod tests {
         assert!(matches!(msgs[8], ServerMessage::Frames { .. }));
         assert!(matches!(msgs[9], ServerMessage::Toolpaths { .. }));
         assert!(matches!(msgs[10], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[11], ServerMessage::State { .. }));
+        assert!(matches!(msgs[11], ServerMessage::Parts { .. }));
+        assert!(matches!(msgs[12], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -2222,9 +2273,15 @@ mod tests {
         );
         handle_client_message(&host, r#"{"type":"undeclare_io","name":"estop_ok"}"#);
         handle_client_message(&host, r#"{"type":"remove_io_node","name":"UR"}"#);
-        assert_eq!(host.message_types(), ["io", "io", "io"]);
+        // Removing a node may unpin a part, so the pinning list follows.
+        assert_eq!(host.message_types(), ["io", "io", "io", "parts"]);
         let out = host.out.borrow();
-        match out.last().unwrap() {
+        let last_io = out
+            .iter()
+            .rev()
+            .find(|m| matches!(m, ServerMessage::Io { .. }))
+            .unwrap();
+        match last_io {
             ServerMessage::Io { io, .. } => {
                 assert!(io.nodes.is_empty() && io.bindings.is_empty() && io.decls.is_empty());
             }

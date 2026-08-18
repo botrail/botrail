@@ -48,3 +48,18 @@ Returned by [`Scene.io_map`][botrail.Scene.io_map]: the assignment layer as
 authored (nodes, bindings, declarations) — hand it to `to_script(io=...)`.
 
 ::: botrail.IoMap
+
+## Bom
+
+Returned by [`Scene.bom`][botrail.Scene.bom]: the bill of materials derived
+from the scene's parts (see [Parts and the BOM](../../guides/parts-and-bom.md)).
+
+::: botrail.Bom
+
+## CellReport
+
+Returned by [`Scene.cell_report`][botrail.Scene.cell_report]: cycles, I/O,
+scenarios, BOM totals, footprint and deliverable digests in one page (see
+[Layout sheet and cell report](../../guides/layout-and-report.md)).
+
+::: botrail.CellReport

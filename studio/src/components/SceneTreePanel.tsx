@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import type { FrameMsg, ObstacleMsg } from "../protocol";
+import type { FrameMsg, ObstacleMsg, PartEntry } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import {
   sendRemoveDevice,
@@ -32,6 +32,8 @@ export function SceneTreePanel() {
   const ioNodes = useStudioStore((s) => s.io.io.nodes);
   const ioPoints = useStudioStore((s) => s.io.points);
   const selectIoNode = useStudioStore((s) => s.selectIoNode);
+  const parts = useStudioStore((s) => s.parts);
+  const partIndex = useMemo(() => indexParts(parts), [parts]);
   if (
     robots.length === 0 &&
     obstacles.length === 0 &&
@@ -70,6 +72,7 @@ export function SceneTreePanel() {
                 {"\u{1F916} "}
                 {name}
               </span>
+              <PartBadge entry={partIndex.get(`robot:${name}`)} />
               <button
                 className="tree-toggle"
                 title="place robot base"
@@ -81,7 +84,7 @@ export function SceneTreePanel() {
           );
         })}
       </div>
-      <Tree obstacles={obstacles} frames={frames} />
+      <Tree obstacles={obstacles} frames={frames} partIndex={partIndex} />
       {(sensors.length > 0 || devices.length > 0) && (
         <div className="scene-tree">
           {sensors.map((s) => (
@@ -102,6 +105,7 @@ export function SceneTreePanel() {
                 {"\u{1F4E1} "}
                 {s.name}
               </span>
+              <PartBadge entry={partIndex.get(`sensor:${s.name}`)} />
               <button
                 className="tree-toggle"
                 title="remove sensor"
@@ -129,6 +133,7 @@ export function SceneTreePanel() {
                 {"\u{2699} "}
                 {d.name}
               </span>
+              <PartBadge entry={partIndex.get(`device:${d.name}`)} />
               <button
                 className="tree-toggle"
                 title="remove device"
@@ -167,6 +172,7 @@ export function SceneTreePanel() {
                   {n.name}
                   <span className="seq-cond"> · {kind}</span>
                 </span>
+                <PartBadge entry={partIndex.get(`io_node:${n.name}`)} />
                 <span className="seq-cond" title="bound points / channels">
                   {bound}/{(n.channels ?? []).length}
                 </span>
@@ -200,6 +206,41 @@ export function ioNodeKindLabel(kind: string): string {
     default:
       return kind;
   }
+}
+
+/** `kind:target` → the pinned part, for O(1) lookups while rendering. */
+function indexParts(parts: PartEntry[]): Map<string, PartEntry> {
+  const index = new Map<string, PartEntry>();
+  for (const p of parts) index.set(`${p.kind}:${p.target}`, p);
+  return index;
+}
+
+/** The short label a part reads as on the tree: model, else catalog id,
+ * else maker, else category. */
+export function partLabel(entry: PartEntry): string {
+  const p = entry.part;
+  return p.model ?? p.catalog?.id ?? p.manufacturer ?? p.category ?? "part";
+}
+
+/** The full identity for the tooltip. */
+export function partTitle(entry: PartEntry): string {
+  const p = entry.part;
+  const bits = [p.manufacturer, p.model].filter(Boolean).join(" ");
+  const cat = p.catalog ? `${p.catalog.id}${p.catalog.revision ? `@${p.catalog.revision}` : ""}` : "";
+  const qty = p.qty !== 1 ? ` ×${p.qty}` : "";
+  const head = [bits, cat && `(${cat})`].filter(Boolean).join(" ") || "part";
+  return `${head}${qty}${p.description ? ` — ${p.description}` : ""}`;
+}
+
+/** The model badge a pinned resident wears on the scene tree. Display
+ * only — parts are authored from Python (`scene.set_part`). */
+function PartBadge({ entry }: { entry: PartEntry | undefined }) {
+  if (!entry) return null;
+  return (
+    <span className="badge muted part-badge" title={partTitle(entry)}>
+      {partLabel(entry)}
+    </span>
+  );
 }
 
 interface TreeNode {
@@ -236,9 +277,11 @@ function buildTree(obstacles: ObstacleMsg[], frames: FrameMsg[]): TreeNode {
 function Tree({
   obstacles,
   frames,
+  partIndex,
 }: {
   obstacles: ObstacleMsg[];
   frames: FrameMsg[];
+  partIndex: Map<string, PartEntry>;
 }) {
   const root = useMemo(() => buildTree(obstacles, frames), [obstacles, frames]);
   // Colliding obstacles read red straight in the tree — the tree is the
@@ -248,7 +291,7 @@ function Tree({
   return (
     <div className="scene-tree">
       {[...root.children.values()].map((n) => (
-        <TreeRow key={n.path} node={n} depth={0} colliding={colliding} />
+        <TreeRow key={n.path} node={n} depth={0} colliding={colliding} partIndex={partIndex} />
       ))}
     </div>
   );
@@ -258,10 +301,12 @@ function TreeRow({
   node,
   depth,
   colliding,
+  partIndex,
 }: {
   node: TreeNode;
   depth: number;
   colliding: Set<string>;
+  partIndex: Map<string, PartEntry>;
 }) {
   const [open, setOpen] = useState(depth < 2);
   const selection = useStudioStore((s) => s.selection);
@@ -281,6 +326,14 @@ function TreeRow({
     ? selection.type === "group" && selection.path === node.path
     : o && selection.type === "obstacle" && selection.name === o.name;
   const hidden = o ? hiddenObstacles.has(o.name) : false;
+  // A part pinned to this prim, or to the group it heads (`<path>/…`).
+  // Group targets are name prefixes: USD prim paths keep the tree's
+  // leading slash, `add_box("fence/p0")` names do not — try both.
+  const bare = node.path.replace(/^\//, "");
+  const part =
+    (isGroup
+      ? (partIndex.get(`group:${node.path}`) ?? partIndex.get(`group:${bare}`))
+      : undefined) ?? (o ? partIndex.get(`obstacle:${o.name}`) : undefined);
 
   return (
     <div>
@@ -304,6 +357,7 @@ function TreeRow({
         >
           {node.label}
         </span>
+        <PartBadge entry={part} />
         {o && (
           <>
             {o.attached_to && (
@@ -343,7 +397,13 @@ function TreeRow({
       </div>
       {open &&
         kids.map((n) => (
-          <TreeRow key={n.path} node={n} depth={depth + 1} colliding={colliding} />
+          <TreeRow
+            key={n.path}
+            node={n}
+            depth={depth + 1}
+            colliding={colliding}
+            partIndex={partIndex}
+          />
         ))}
     </div>
   );

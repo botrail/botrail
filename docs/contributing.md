@@ -57,7 +57,11 @@ cd studio && pnpm dev
 
 The Rust types in `crates/botrail-scene/src/wire.rs` are the source of truth for
 the protocol. After changing them, regenerate the committed TypeScript side with
-`./scripts/gen_protocol.sh`.
+`./scripts/gen_protocol.sh`. The `.botrail` JSON Schema is generated from the
+same types (`crates/botrail-scene/src/project.rs`, feature `schema`); after
+changing anything a project file carries, refresh the committed copy with
+`python -c "import botrail as bt; open('docs/assets/project.schema.json','w').write(bt.project_schema())"`
+— a test compares the two.
 
 ## Repository layout
 

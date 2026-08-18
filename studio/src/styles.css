@@ -644,6 +644,18 @@ button.danger:hover:not(:disabled) {
 .tree-label.bad {
   color: var(--bad);
 }
+/* The model badge a pinned part wears (scene.set_part): a compact tag
+   that yields to the label and never wraps. */
+.tree-row .part-badge {
+  max-width: 9em;
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+}
 .tree-twist {
   width: 16px;
   background: none;

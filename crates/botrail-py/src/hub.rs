@@ -261,6 +261,10 @@ impl SceneHub {
         botrail_session::add_frames(self, frames);
     }
 
+    pub fn remove_frame(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_frame(self, name)
+    }
+
     pub fn frames(&self) -> Vec<(String, PoseArrays)> {
         self.with_scene(|scene| {
             scene
@@ -729,6 +733,33 @@ impl SceneHub {
 
     pub fn io_map(&self) -> botrail_scene::iomap::IoMap {
         self.with_scene(|scene| scene.io_map().clone())
+    }
+
+    // ------------------------------------------------------------- parts
+
+    pub fn set_part(
+        &self,
+        target: &str,
+        kind: Option<botrail_scene::part::PartTargetKind>,
+        part: botrail_scene::part::Part,
+    ) -> Result<botrail_scene::part::PartTargetKind, SceneError> {
+        botrail_session::set_part(self, target, kind, part)
+    }
+
+    pub fn remove_part(&self, target: &str) -> Result<(), SceneError> {
+        botrail_session::remove_part(self, target)
+    }
+
+    pub fn part(&self, target: &str) -> Option<botrail_scene::part::PartEntry> {
+        self.with_scene(|scene| scene.part(target).cloned())
+    }
+
+    pub fn parts(&self) -> Vec<botrail_scene::part::PartEntry> {
+        self.with_scene(|scene| scene.parts().to_vec())
+    }
+
+    pub fn bom(&self) -> botrail_scene::part::Bom {
+        self.with_scene(|scene| scene.bom())
     }
 
     pub fn auto_assign_io(

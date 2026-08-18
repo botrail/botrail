@@ -1,6 +1,7 @@
 ![botrail-logo](assets/botrail-logo.svg)
 
 **Beyond motion planning. Build robot cells as code.**
+*One source of truth from layout to I/O list — verified deterministically on every change.*
 
 Documentation: https://botrail.github.io/botrail/ ·
 Live Demo: https://botrail.github.io/botrail/demo/
@@ -41,6 +42,12 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
 - **Open deliverables** — USD animation (plays in usdview / Omniverse /
   Blender), CSV/JSON, robot programs (URScript), Python code generation —
   and Isaac Sim recordings play back through the same pipeline.
+- **Engineering documents, derived** — bill of materials, plan-view layout
+  sheet (SVG / DXF), I/O list and controller topology, and a cell report
+  (cycle times, clearance, I/O counts, scenario matrix, footprint, file
+  digests) all come out of the same script as the simulation, so a layout
+  edit changes exactly the documents it touches — and never lets them
+  disagree.
 - **Interactive posing** — draggable TCP gizmo with live IK, joint sliders.
 - **Collision checking** — primitives and STL/OBJ meshes (cached VHACD convex
   decomposition), live highlighting, clearance readout.
@@ -66,6 +73,9 @@ python examples/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
                                   # without it
 python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
                                   # vs cycle time and clearance (no downloads)
+python examples/cell_deliverables_demo.py  # the whole document set from one
+                                  # script: layout SVG/DXF, BOM, I/O list, robot
+                                  # program, USD, cell report (no downloads)
 python examples/play_record.py \
        cell_dual.usda             # replay a baked USD in the studio (any of
                                   # the recordings above; omit for cell_seq)
@@ -149,8 +159,44 @@ Move the beam sensor 0.25 m downstream and the cycle grows by exactly
 surprise. This repository runs such a cell in its own CI
 ([python/tests/test_cell_regression.py](python/tests/test_cell_regression.py)),
 and [examples/sweep_demo.py](examples/sweep_demo.py) runs the same loop as a
-parameter study (belt speed moves the cycle; lane position eats the
-clearance).
+parameter study — `bt.sweep` bakes the cell over a grid and tables it (belt
+speed moves the cycle; lane position eats the clearance), `bt.optimize`
+searches the grid for the fastest cycle that keeps its clearance — with no
+random number anywhere.
+
+## Hand over the cell
+
+The documents a cell is delivered as come out of the same script — none of
+them is typed in beside the model:
+
+```python
+scene.set_part("belt", manufacturer="MISUMI", model="GVL-1200")   # what things *are*
+scene.export_bom("bom.csv")               # bill of materials, merged and counted
+scene.export_layout("layout.dxf")         # plan-view sheet for the 2D CAD (.svg for the review)
+scene.export_io_list("io.csv")            # I/O list for the electrical drawing
+tl.export_script("cell.script")           # the robot program, with the same DI/DO numbers
+
+report = scene.cell_report({"cycle": tl}, deliverables=["bom.csv", "layout.dxf", "io.csv"])
+report.save("cell_report.md")             # cycle time, clearance, I/O, BOM totals,
+                                          # footprint — and the SHA-256 of each file
+```
+
+Because they are derived, they cannot disagree with each other or with the
+bake, and a layout edit changes exactly the documents it touches:
+[examples/cell_deliverables_demo.py](examples/cell_deliverables_demo.py)
+writes the whole set, and
+[python/tests/test_deliverables.py](python/tests/test_deliverables.py) pins
+which files a moved sensor or an added fence panel changes — by name.
+
+The same loop runs without writing Python — the entry an agent's iteration
+and a CI job share:
+
+```bash
+botrail check cell.py                                  # load, lint, count → JSON (exit 1 on errors)
+botrail simulate cell.py --scenarios --report r.json   # bake the matrix → the cell report
+botrail export cell.py --out deliverables/ --all       # the whole document set, hashed into the report
+botrail schema > project.schema.json                   # the .botrail JSON Schema, from the Rust types
+```
 
 ## Development
 

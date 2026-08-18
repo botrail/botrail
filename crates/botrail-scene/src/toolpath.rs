@@ -134,6 +134,7 @@ impl Toolpath {
 /// Serialized form (project files, Python boundary). Positions and axes in
 /// the part frame; `spin` optional.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PathTargetMsg {
     pub position: [f64; 3],
     #[serde(default = "default_tool_axis")]
@@ -148,6 +149,7 @@ fn default_tool_axis() -> [f64; 3] {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ToolMoveMsg {
     Rapid {
         targets: Vec<PathTargetMsg>,
@@ -163,6 +165,7 @@ pub enum ToolMoveMsg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ToolpathMsg {
     /// Defaults to empty: the Python boundary passes the name separately
     /// (`scene.add_toolpath(name, tp)`) and overrides this field.

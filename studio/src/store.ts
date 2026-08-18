@@ -11,6 +11,7 @@ import type {
   IoPointMsg,
   MotionMsg,
   ObstacleMsg,
+  PartEntry,
   PoseMsg,
   RobotDescMsg,
   DeviceMsg,
@@ -334,6 +335,10 @@ export interface StudioState {
   devices: DeviceMsg[];
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
+  /** Part identity pinned to residents and groups (what each thing *is*
+   * commercially); re-sent in full on change. Display only: the scene
+   * tree shows a model badge. */
+  parts: PartEntry[];
   /** The I/O map (see `IoState`); re-sent in full on change. */
   io: IoState;
   /** The SFC chart overlay over the viewport (persisted). */
@@ -460,6 +465,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   flashes: [],
   devices: [],
   scenarios: [],
+  parts: [],
   io: emptyIo(),
   highlightLane: null,
   sequenceSimulating: false,
@@ -521,6 +527,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           sensors: [],
           devices: [],
           scenarios: [],
+          parts: [],
           io: emptyIo(),
           highlightLane: null,
           sequenceSimulating: false,
@@ -597,6 +604,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       });
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
+    } else if (msg.type === "parts") {
+      set({ parts: msg.parts });
     } else if (msg.type === "io") {
       set((s) => {
         const sel = s.selection;

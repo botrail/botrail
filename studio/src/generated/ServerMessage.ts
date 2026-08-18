@@ -8,6 +8,7 @@ import type { IoMap } from "./IoMap";
 import type { IoPointMsg } from "./IoPointMsg";
 import type { MotionMsg } from "./MotionMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
+import type { PartEntry } from "./PartEntry";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
 import type { RobotStateMsg } from "./RobotStateMsg";
 import type { ScenarioMsg } from "./ScenarioMsg";
@@ -36,7 +37,7 @@ min_distance: number | null, } | { "type": "plan_result",
 /**
  * Robot instance the plan is for (plays back on that robot).
  */
-robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "scenarios", scenarios: Array<ScenarioMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "io", io: IoMap, points: Array<IoPointMsg>, findings: Array<IoFindingMsg>, 
+robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "scenarios", scenarios: Array<ScenarioMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "parts", parts: Array<PartEntry>, } | { "type": "io", io: IoMap, points: Array<IoPointMsg>, findings: Array<IoFindingMsg>, 
 /**
  * The electrical topology (hosts, stations, programs, field
  * devices and the wires between them) — the same graph

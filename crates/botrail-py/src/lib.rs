@@ -372,6 +372,115 @@ fn scene_err(e: botrail_scene::SceneError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// A part attribute from a Python value: int/float → number (bools are
+/// refused — they are ints in Python and would sum), str → text.
+fn part_attr(key: &str, value: &Bound<'_, PyAny>) -> PyResult<botrail_scene::part::PartAttr> {
+    use botrail_scene::part::PartAttr;
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyValueError::new_err(format!(
+            "set_part: attribute {key:?} is a bool — attributes are numbers or text"
+        )));
+    }
+    if let Ok(number) = value.extract::<f64>() {
+        return Ok(PartAttr::Number(number));
+    }
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(PartAttr::Text(text));
+    }
+    Err(PyValueError::new_err(format!(
+        "set_part: attribute {key:?} must be a number or a string"
+    )))
+}
+
+fn part_attr_object(py: Python<'_>, value: &botrail_scene::part::PartAttr) -> PyObject {
+    use botrail_scene::part::PartAttr;
+    match value {
+        PartAttr::Number(n) => n.into_pyobject(py).expect("float").into_any().unbind(),
+        PartAttr::Text(t) => t.into_pyobject(py).expect("str").into_any().unbind(),
+    }
+}
+
+fn part_dict<'py>(
+    py: Python<'py>,
+    part: &botrail_scene::part::Part,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("catalog", part.catalog.as_ref().map(|c| c.display()))?;
+    d.set_item("manufacturer", part.manufacturer.clone())?;
+    d.set_item("model", part.model.clone())?;
+    d.set_item("category", part.category.clone())?;
+    d.set_item("description", part.description.clone())?;
+    d.set_item("qty", part.qty)?;
+    let attributes = PyDict::new(py);
+    for (key, value) in &part.attributes {
+        attributes.set_item(key, part_attr_object(py, value))?;
+    }
+    d.set_item("attributes", attributes)?;
+    Ok(d)
+}
+
+fn part_entry_dict(py: Python<'_>, entry: &botrail_scene::part::PartEntry) -> PyResult<PyObject> {
+    let d = part_dict(py, &entry.part)?;
+    d.set_item("target", entry.target.clone())?;
+    d.set_item("kind", entry.kind.as_str())?;
+    Ok(d.into_any().unbind())
+}
+
+/// A serde_json value as the matching Python object (dicts, lists,
+/// numbers, strings, bools, None) — how report sections come back.
+fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+    use pyo3::types::{PyList, PyString};
+    Ok(match value {
+        serde_json::Value::Null => py.None(),
+        serde_json::Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into_pyobject(py)?.into_any().unbind()
+            } else if let Some(u) = n.as_u64() {
+                u.into_pyobject(py)?.into_any().unbind()
+            } else {
+                n.as_f64()
+                    .unwrap_or(f64::NAN)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()
+            }
+        }
+        serde_json::Value::String(s) => PyString::new(py, s).into_any().unbind(),
+        serde_json::Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(json_to_py(py, item)?)?;
+            }
+            list.into_any().unbind()
+        }
+        serde_json::Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (k, v) in map {
+                dict.set_item(k, json_to_py(py, v)?)?;
+            }
+            dict.into_any().unbind()
+        }
+    })
+}
+
+fn bom_row_dict(py: Python<'_>, row: &botrail_scene::part::BomRow) -> PyResult<PyObject> {
+    let d = PyDict::new(py);
+    d.set_item("category", row.category.clone())?;
+    d.set_item("names", row.names.clone())?;
+    d.set_item("manufacturer", row.manufacturer.clone())?;
+    d.set_item("model", row.model.clone())?;
+    d.set_item("catalog", row.catalog.as_ref().map(|c| c.display()))?;
+    d.set_item("qty", row.qty)?;
+    d.set_item("description", row.description.clone())?;
+    let attributes = PyDict::new(py);
+    for (key, value) in &row.attributes {
+        attributes.set_item(key, part_attr_object(py, value))?;
+    }
+    d.set_item("attributes", attributes)?;
+    Ok(d.into_any().unbind())
+}
+
 fn ik_target(
     position: [f64; 3],
     quaternion: Option<[f64; 4]>,
@@ -817,6 +926,11 @@ impl Scene {
     #[pyo3(signature = (name, position, quaternion = None))]
     fn add_frame(&self, name: &str, position: [f64; 3], quaternion: Option<[f64; 4]>) {
         self.hub.add_frame(name, pose_from(position, quaternion));
+    }
+
+    /// Removes a named frame.
+    fn remove_frame(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_frame(name).map_err(scene_err)
     }
 
     /// All named frames as `{name: (position, quaternion_xyzw)}`.
@@ -1640,6 +1754,422 @@ impl Scene {
     /// Removes a node and every binding on it.
     fn remove_io_node(&self, name: &str) -> PyResult<()> {
         self.hub.remove_io_node(name).map_err(scene_err)
+    }
+
+    // ------------------------------------------------------------- parts
+
+    /// Pins a part — what the thing *is* commercially — to a resident or
+    /// group by name: a robot, a device, a sensor, an I/O node, an
+    /// obstacle, or an obstacle group (everything under `name/` — an
+    /// imported subtree, a generated fence). Identity is optional and
+    /// free-form: `catalog` (`"id"` or `"id@revision"` or `(id,
+    /// revision)`), `manufacturer`, `model`, `category` (`"conveyor"`,
+    /// `"structure.fence"`, ...), `description`, `qty` (how many the
+    /// target stands for), and any further keywords or `attributes={...}`
+    /// as free attributes (numbers are summed by `bom().total(key)`,
+    /// text is carried). Pass `kind=` (`"robot"`, `"device"`, `"sensor"`,
+    /// `"io_node"`, `"obstacle"`, `"group"`) when a name lives in several
+    /// name spaces. Re-pinning replaces. Returns the kind resolved. The
+    /// BOM (`bom()`) is derived from these plus the catalog identity of
+    /// robots and tools.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, *, kind = None, catalog = None, manufacturer = None, model = None,
+        category = None, description = None, qty = 1, attributes = None, **extra))]
+    fn set_part(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+        catalog: Option<Bound<'_, PyAny>>,
+        manufacturer: Option<String>,
+        model: Option<String>,
+        category: Option<String>,
+        description: Option<String>,
+        qty: u32,
+        attributes: Option<Bound<'_, PyDict>>,
+        extra: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        use botrail_scene::part::{CatalogRef, Part, PartTargetKind};
+        let kind = match kind {
+            None => None,
+            Some(text) => Some(PartTargetKind::parse(text).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "set_part: unknown kind {text:?} — use \"robot\", \"device\", \"sensor\", \
+                     \"io_node\", \"obstacle\" or \"group\""
+                ))
+            })?),
+        };
+        let catalog = match catalog {
+            None => None,
+            Some(value) => Some(if let Ok(text) = value.extract::<String>() {
+                CatalogRef::parse(&text)
+            } else if let Ok((id, revision)) = value.extract::<(String, Option<String>)>() {
+                CatalogRef { id, revision }
+            } else {
+                return Err(PyValueError::new_err(
+                    "set_part: catalog must be \"id\", \"id@revision\" or (id, revision)",
+                ));
+            }),
+        };
+        let mut part = Part {
+            catalog,
+            manufacturer,
+            model,
+            category,
+            description,
+            qty,
+            attributes: BTreeMap::new(),
+        };
+        for dict in [attributes, extra].into_iter().flatten() {
+            for (key, value) in dict.iter() {
+                let key: String = key.extract().map_err(|_| {
+                    PyValueError::new_err("set_part: attribute names must be strings")
+                })?;
+                part.attributes
+                    .insert(key.clone(), part_attr(&key, &value)?);
+            }
+        }
+        self.hub
+            .set_part(name, kind, part)
+            .map(|k| k.as_str().to_string())
+            .map_err(scene_err)
+    }
+
+    /// Unpins the part on `name`.
+    fn remove_part(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_part(name).map_err(scene_err)
+    }
+
+    /// The part pinned to `name` as a dict (`target`, `kind`, `catalog`,
+    /// `manufacturer`, `model`, `category`, `description`, `qty`,
+    /// `attributes`), or `None`.
+    fn part(&self, py: Python<'_>, name: &str) -> PyResult<Option<PyObject>> {
+        self.hub
+            .part(name)
+            .map(|entry| part_entry_dict(py, &entry))
+            .transpose()
+    }
+
+    /// Every pinned part, in authoring order (see `part()` for the shape).
+    fn parts(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        self.hub
+            .parts()
+            .iter()
+            .map(|entry| part_entry_dict(py, entry))
+            .collect()
+    }
+
+    /// The bill of materials derived from the scene: robots and their
+    /// tools (catalog identity when loaded from the catalog), conveyors /
+    /// axes / vehicles, sensors and I/O nodes — each listed whether or
+    /// not it has been identified — plus every obstacle or group a part
+    /// was pinned to. Identical products merge into one row with the
+    /// quantity summed.
+    fn bom(&self) -> Bom {
+        Bom {
+            inner: self.hub.bom(),
+        }
+    }
+
+    /// Writes the BOM to `path`; the format follows the extension
+    /// (`.csv`, `.md`, `.json`) unless `format` says otherwise.
+    #[pyo3(signature = (path, format = None))]
+    fn export_bom(&self, path: PathBuf, format: Option<&str>) -> PyResult<()> {
+        self.bom().save(path, format)
+    }
+
+    // ------------------------------------------------------- PLCopen XML
+
+    /// The sequences as PLCopen XML (IEC 61131-10, TC6 v2.01): one SFC
+    /// program per sequence (`sequences=` a subset; default all), steps
+    /// with their entry actions and transitions, `select` as a selection
+    /// divergence, and the cycle jump at the end (`cycle=False` parks the
+    /// program in a final step). Conditions are ST expressions; device
+    /// coils and commands write the I/O map's variables (declared once as
+    /// resource globals, with `AT` addresses from PLC-side bindings);
+    /// robot commands call stub function blocks the control engineer
+    /// replaces — or the start / done handshake where the map says the
+    /// robot is driven from another host. Opens in Beremiz / OpenPLC
+    /// Editor. Deterministic (fixed timestamps).
+    #[pyo3(signature = (sequences = None, *, name = "cell", cycle = true, task_interval_ms = 10))]
+    fn plcopen(
+        &self,
+        sequences: Option<Vec<String>>,
+        name: &str,
+        cycle: bool,
+        task_interval_ms: u32,
+    ) -> PyResult<String> {
+        let options = botrail_scene::plcopen::PlcopenOptions {
+            sequences,
+            name: name.to_string(),
+            task_interval_ms,
+            cycle,
+        };
+        botrail_scene::plcopen::render_plcopen(&self.hub.authored_snapshot(), &options)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes `plcopen()` to `path` (`.xml`).
+    #[pyo3(signature = (path, sequences = None, *, name = "cell", cycle = true, task_interval_ms = 10))]
+    fn export_plcopen(
+        &self,
+        path: PathBuf,
+        sequences: Option<Vec<String>>,
+        name: &str,
+        cycle: bool,
+        task_interval_ms: u32,
+    ) -> PyResult<()> {
+        let text = self.plcopen(sequences, name, cycle, task_interval_ms)?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    // ------------------------------------------------------ layout sheet
+
+    /// The plan-view layout sheet as text: `format` is `"svg"` (a
+    /// self-contained drawing, `scale` pixels per metre), `"dxf"` (a
+    /// minimal R12 file for 2D CAD, in `units` — `"mm"` or `"m"`) or
+    /// `"json"` (the drawn items in world metres). The sheet is derived
+    /// from the scene: every visible obstacle as its footprint (convex
+    /// hulls of primitives, bounding boxes of meshes), robots as base marks
+    /// with the catalog reach as a dashed circle, conveyor / sink zones,
+    /// axis travel and vehicle routes, sensor zones and beams, named
+    /// frames, labels (pinned parts first, then named groups), a metre
+    /// grid and the overall dimensions. Anything whose top sits at or
+    /// below `ground_z` is floor: drawn faint, left out of the extents.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (format = "svg", *, scale = 100.0, units = "mm", ground_z = 0.02,
+        frames = true, labels = true, reach = true, grid = Some(1.0), title = None))]
+    fn layout(
+        &self,
+        format: &str,
+        scale: f64,
+        units: &str,
+        ground_z: f64,
+        frames: bool,
+        labels: bool,
+        reach: bool,
+        grid: Option<f64>,
+        title: Option<String>,
+    ) -> PyResult<String> {
+        if !matches!(units, "mm" | "m") {
+            return Err(PyValueError::new_err(format!(
+                "layout: units must be \"mm\" or \"m\", got {units:?}"
+            )));
+        }
+        let options = botrail_scene::layout::LayoutOptions {
+            ground_z,
+            frames,
+            labels,
+            reach,
+            grid,
+            title: title.unwrap_or_default(),
+        };
+        let sheet = self.hub.authored_snapshot().layout(&options);
+        match format {
+            "svg" => Ok(sheet.to_svg(scale)),
+            "dxf" => Ok(sheet.to_dxf(units)),
+            "json" => Ok(sheet.to_json()),
+            other => Err(PyValueError::new_err(format!(
+                "layout: unknown format {other:?} — use \"svg\", \"dxf\" or \"json\""
+            ))),
+        }
+    }
+
+    /// Writes the layout sheet to `path`; the format follows the extension
+    /// (`.svg`, `.dxf`, `.json`) unless `format` says otherwise. The other
+    /// keywords are `layout()`'s.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (path, format = None, *, scale = 100.0, units = "mm", ground_z = 0.02,
+        frames = true, labels = true, reach = true, grid = Some(1.0), title = None))]
+    fn export_layout(
+        &self,
+        path: PathBuf,
+        format: Option<&str>,
+        scale: f64,
+        units: &str,
+        ground_z: f64,
+        frames: bool,
+        labels: bool,
+        reach: bool,
+        grid: Option<f64>,
+        title: Option<String>,
+    ) -> PyResult<()> {
+        let format = match format {
+            Some(f) => f.to_string(),
+            None => match path.extension().and_then(|e| e.to_str()) {
+                Some("svg") => "svg".to_string(),
+                Some("dxf") => "dxf".to_string(),
+                Some("json") => "json".to_string(),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "export_layout: unknown extension {:?} — use .svg, .dxf or .json (or pass format=)",
+                        other.unwrap_or("")
+                    )))
+                }
+            },
+        };
+        let text = self.layout(
+            &format, scale, units, ground_z, frames, labels, reach, grid, title,
+        )?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    /// The plan-view extent of the equipment as a dict — `min`, `max`
+    /// (x, y in metres), `width`, `depth`, `area` (m²), `height` (tallest
+    /// non-ground item). Ground is anything whose top is at or below
+    /// `ground_z`.
+    #[pyo3(signature = (ground_z = 0.02))]
+    fn footprint(&self, py: Python<'_>, ground_z: f64) -> PyResult<PyObject> {
+        let fp = self.hub.authored_snapshot().footprint(ground_z);
+        let d = PyDict::new(py);
+        d.set_item("min", fp.min)?;
+        d.set_item("max", fp.max)?;
+        d.set_item("width", fp.width())?;
+        d.set_item("depth", fp.depth())?;
+        d.set_item("area", fp.area())?;
+        d.set_item("height", fp.height)?;
+        Ok(d.into_any().unbind())
+    }
+
+    // ------------------------------------------------------- cell report
+
+    /// Gathers the cell report: robots, the cycles you pass (`timelines`
+    /// — a `SequenceTimeline`, a list, or a `{name: timeline}` dict; each
+    /// with its step spans, robot utilization and, unless
+    /// `clearance_dt=None`, the tightest clearance re-scanned against the
+    /// scene it was baked from), the I/O map's counts and findings, the
+    /// scenario matrix (`scenarios=` a `ScenarioRuns` — its runs also
+    /// stand in for `timelines` when none are given), the BOM's totals,
+    /// the plan-view footprint, and the SHA-256 of every file in
+    /// `deliverables` (paths of things written from this scene). A
+    /// reading surface — pytest keeps the `assert`s.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (timelines = None, *, scenarios = None, deliverables = None,
+        clearance_dt = Some(0.01), title = None, ground_z = 0.02))]
+    fn cell_report(
+        &self,
+        py: Python<'_>,
+        timelines: Option<Bound<'_, PyAny>>,
+        scenarios: Option<PyRef<'_, ScenarioRuns>>,
+        deliverables: Option<Vec<PathBuf>>,
+        clearance_dt: Option<f64>,
+        title: Option<String>,
+        ground_z: f64,
+    ) -> PyResult<CellReport> {
+        use botrail_scene::report::{CellReportInput, CycleInput, Deliverable, ScenarioRow};
+        if let Some(dt) = clearance_dt {
+            if !(dt.is_finite() && dt > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "clearance_dt must be positive, got {dt}"
+                )));
+            }
+        }
+        // Collect (name, timeline pyref) pairs.
+        let mut named: Vec<(String, PyRef<'_, SequenceTimeline>)> = Vec::new();
+        let explicit = timelines.is_some();
+        match timelines {
+            None => {}
+            Some(value) => {
+                if let Ok(tl) = value.extract::<PyRef<'_, SequenceTimeline>>() {
+                    let name = tl.inner.sequences.join("+");
+                    named.push((name, tl));
+                } else if let Ok(dict) = value.downcast::<PyDict>() {
+                    for (k, v) in dict.iter() {
+                        let name: String = k.extract().map_err(|_| {
+                            PyValueError::new_err("cell_report: timeline names must be strings")
+                        })?;
+                        let tl: PyRef<'_, SequenceTimeline> = v.extract().map_err(|_| {
+                            PyValueError::new_err(
+                                "cell_report: timelines values must be SequenceTimeline",
+                            )
+                        })?;
+                        named.push((name, tl));
+                    }
+                } else if let Ok(list) = value.extract::<Vec<PyRef<'_, SequenceTimeline>>>() {
+                    for tl in list {
+                        let mut name = tl.inner.sequences.join("+");
+                        if let Some(sc) = &tl.inner.scenario {
+                            name = format!("{name} ({sc})");
+                        }
+                        named.push((name, tl));
+                    }
+                } else {
+                    return Err(PyValueError::new_err(
+                        "cell_report: timelines must be a SequenceTimeline, a list of them, or a {name: timeline} dict",
+                    ));
+                }
+            }
+        }
+        let mut scenario_rows: Vec<ScenarioRow> = Vec::new();
+        if let Some(runs) = &scenarios {
+            for (name, tl) in &runs.runs {
+                let tl = tl.borrow(py);
+                scenario_rows.push(ScenarioRow {
+                    name: name.clone(),
+                    ok: true,
+                    duration: Some(tl.inner.duration),
+                    error: None,
+                });
+                if !explicit {
+                    named.push((name.clone(), tl));
+                }
+            }
+            for (name, error) in &runs.failures {
+                scenario_rows.push(ScenarioRow {
+                    name: name.clone(),
+                    ok: false,
+                    duration: None,
+                    error: Some(error.clone()),
+                });
+            }
+        }
+        // Clearances against each timeline's own snapshot.
+        let mut clearances: Vec<Option<botrail_scene::verify::Clearance>> = Vec::new();
+        for (_, tl) in &named {
+            let clearance = match clearance_dt {
+                Some(dt) => tl
+                    .scene
+                    .timeline_min_clearance(&tl.inner, dt)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                None => None,
+            };
+            clearances.push(clearance);
+        }
+        let cycles: Vec<CycleInput<'_>> = named
+            .iter()
+            .zip(clearances)
+            .map(|((name, tl), clearance)| CycleInput {
+                name: name.clone(),
+                timeline: &tl.inner,
+                clearance,
+            })
+            .collect();
+        // Deliverable digests: hashlib on the Python side keeps the core
+        // dependency-free.
+        let mut files = Vec::new();
+        for path in deliverables.unwrap_or_default() {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
+            let digest: String = py
+                .import("hashlib")?
+                .call_method1("sha256", (pyo3::types::PyBytes::new(py, &bytes),))?
+                .call_method0("hexdigest")?
+                .extract()?;
+            files.push(Deliverable {
+                path: path.display().to_string(),
+                sha256: Some(digest),
+                bytes: Some(bytes.len() as u64),
+            });
+        }
+        let report = self.hub.authored_snapshot().cell_report(CellReportInput {
+            title,
+            cycles,
+            scenarios: scenario_rows,
+            deliverables: files,
+            ground_z,
+        });
+        Ok(CellReport { inner: report })
     }
 
     /// Wires an input point (`"beam_pick"`, `"line"` for a device's
@@ -4354,6 +4884,37 @@ impl SequenceTimeline {
         self.inner.sequences.clone()
     }
 
+    /// Compares this bake with a controller trace (`bt.trace.load` — a
+    /// CSV path / text, a `{name: [(t, value), ...]}` dict, or a `Trace`)
+    /// edge by edge, by name: matched edges within `tolerance` seconds,
+    /// missing ones (baked, never seen), extra ones (seen, never baked).
+    /// `align_on=` names a signal whose first rising edge sets the trace's
+    /// clock against the bake's; `signals=` picks the names to judge;
+    /// `io=` renames binding tags to point names. Returns a
+    /// `bt.trace.TraceDiff` (`ok`, `signals`, `findings()`, `to_markdown()`,
+    /// `to_json()`) — the offline commissioning check.
+    #[pyo3(signature = (trace, *, tolerance = 0.05, signals = None, align_on = None, io = None))]
+    fn diff(
+        slf: Py<Self>,
+        py: Python<'_>,
+        trace: Py<PyAny>,
+        tolerance: f64,
+        signals: Option<Vec<String>>,
+        align_on: Option<String>,
+        io: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let module = py.import("botrail.trace")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("tolerance", tolerance)?;
+        kwargs.set_item("signals", signals)?;
+        kwargs.set_item("align_on", align_on)?;
+        kwargs.set_item("io", io)?;
+        Ok(module
+            .getattr("diff")?
+            .call((slf, trace), Some(&kwargs))?
+            .unbind())
+    }
+
     /// The scenario this bake ran under; `None` is the unmodified scene
     /// (`baseline`).
     #[getter]
@@ -5287,6 +5848,252 @@ impl IoPoint {
 }
 
 /// One lint finding of the I/O map.
+/// The cell report `Scene.cell_report()` gathers: robots, cycles, I/O,
+/// scenarios, BOM totals, footprint, deliverable digests. Every section
+/// is a plain dict / list (JSON-shaped); `to_markdown()` renders the same
+/// data for people.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct CellReport {
+    inner: botrail_scene::report::CellReport,
+}
+
+impl CellReport {
+    fn section(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
+        let value =
+            serde_json::to_value(&self.inner).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        json_to_py(py, value.get(key).unwrap_or(&serde_json::Value::Null))
+    }
+}
+
+#[pymethods]
+impl CellReport {
+    #[getter]
+    fn title(&self) -> String {
+        self.inner.title.clone()
+    }
+
+    /// The robots: `name`, `dof`, `base`, and `catalog` / `manufacturer` /
+    /// `model` / `reach` when the catalog knows them.
+    #[getter]
+    fn robots(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "robots")
+    }
+
+    /// The cycles passed in: `name`, `sequences`, `scenario`, `duration`,
+    /// `steps` (`name`, `sequence`, `start`, `end`), `robots` (`robot`,
+    /// `busy`, `utilization`), `clearance` (`distance`, `t`, `pair`) and
+    /// `branches`.
+    #[getter]
+    fn cycles(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "cycles")
+    }
+
+    /// The I/O summary — `points`, `by_kind`, `bound`, `unbound`,
+    /// `internal`, `safety`, `nodes`, `findings` — or `None` when the map
+    /// could not be derived (see `io_error`).
+    #[getter]
+    fn io(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "io")
+    }
+
+    #[getter]
+    fn io_error(&self) -> Option<String> {
+        self.inner.io_error.clone()
+    }
+
+    /// The scenario matrix: `name`, `ok`, `duration`, `error`.
+    #[getter]
+    fn scenarios(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "scenarios")
+    }
+
+    /// BOM totals: `rows`, `unidentified`, `by_category`, `totals`.
+    #[getter]
+    fn bom(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "bom")
+    }
+
+    /// The plan-view footprint: `min`, `max`, `width`, `depth`, `area`,
+    /// `height`.
+    #[getter]
+    fn footprint(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "footprint")
+    }
+
+    /// The hashed deliverables: `path`, `sha256`, `bytes`.
+    #[getter]
+    fn deliverables(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "deliverables")
+    }
+
+    /// The cycle time of `name` (or of the first cycle), or `None`.
+    #[pyo3(signature = (name = None))]
+    fn cycle_time(&self, name: Option<&str>) -> Option<f64> {
+        self.inner.cycle_time(name)
+    }
+
+    /// The tightest clearance over every cycle that measured one, or
+    /// `None`.
+    fn min_clearance(&self) -> Option<f64> {
+        self.inner.min_clearance()
+    }
+
+    fn to_markdown(&self) -> String {
+        self.inner.to_markdown()
+    }
+
+    fn to_json(&self) -> String {
+        self.inner.to_json()
+    }
+
+    /// Writes the report to `path`; the format follows the extension
+    /// (`.md`, `.json`) unless `format` says otherwise.
+    #[pyo3(signature = (path, format = None))]
+    fn save(&self, path: PathBuf, format: Option<&str>) -> PyResult<()> {
+        let format = match format {
+            Some(f) => f.to_string(),
+            None => match path.extension().and_then(|e| e.to_str()) {
+                Some("md") | Some("markdown") => "md".to_string(),
+                Some("json") => "json".to_string(),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "CellReport: unknown extension {:?} — use .md or .json (or pass format=)",
+                        other.unwrap_or("")
+                    )))
+                }
+            },
+        };
+        let text = match format.as_str() {
+            "md" | "markdown" => self.inner.to_markdown(),
+            "json" => self.inner.to_json(),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "CellReport: unknown format {other:?} — use \"md\" or \"json\""
+                )))
+            }
+        };
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CellReport({:?}, {} cycle(s), footprint {:.2}×{:.2} m, BOM {} lines)",
+            self.inner.title,
+            self.inner.cycles.len(),
+            self.inner.footprint.width,
+            self.inner.footprint.depth,
+            self.inner.bom.rows
+        )
+    }
+}
+
+/// The bill of materials `Scene.bom()` derives — one row per distinct
+/// product, in scene order.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct Bom {
+    inner: botrail_scene::part::Bom,
+}
+
+#[pymethods]
+impl Bom {
+    /// The rows as dicts: `category`, `names` (the residents the row
+    /// stands for), `manufacturer`, `model`, `catalog` (`id@revision`),
+    /// `qty`, `description`, `attributes`.
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        self.inner
+            .rows
+            .iter()
+            .map(|row| bom_row_dict(py, row))
+            .collect()
+    }
+
+    /// Rows nothing identifies yet (no catalog reference, maker or
+    /// model) — the purchasing to-do list.
+    fn unidentified(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        self.inner
+            .unidentified()
+            .into_iter()
+            .map(|row| bom_row_dict(py, row))
+            .collect()
+    }
+
+    /// Σ qty × `key` over the rows carrying it as a number, or `None`
+    /// when no row does (a missing figure must not read as zero).
+    fn total(&self, key: &str) -> Option<f64> {
+        self.inner.total(key)
+    }
+
+    /// Every attribute column any row carries, sorted.
+    fn attribute_keys(&self) -> Vec<String> {
+        self.inner.attribute_keys()
+    }
+
+    fn to_csv(&self) -> String {
+        self.inner.to_csv()
+    }
+
+    fn to_markdown(&self) -> String {
+        self.inner.to_markdown()
+    }
+
+    /// `{"rows": [...], "totals": {...}}`.
+    fn to_json(&self) -> String {
+        self.inner.to_json()
+    }
+
+    /// Writes the table to `path`; the format follows the extension
+    /// (`.csv`, `.md`, `.json`) unless `format` says otherwise.
+    #[pyo3(signature = (path, format = None))]
+    fn save(&self, path: PathBuf, format: Option<&str>) -> PyResult<()> {
+        let format = match format {
+            Some(f) => f.to_string(),
+            None => match path.extension().and_then(|e| e.to_str()) {
+                Some("csv") => "csv".to_string(),
+                Some("md") | Some("markdown") => "md".to_string(),
+                Some("json") => "json".to_string(),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "BOM: unknown extension {:?} — use .csv, .md or .json (or pass format=)",
+                        other.unwrap_or("")
+                    )))
+                }
+            },
+        };
+        let text = match format.as_str() {
+            "csv" => self.inner.to_csv(),
+            "md" | "markdown" => self.inner.to_markdown(),
+            "json" => self.inner.to_json(),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "BOM: unknown format {other:?} — use \"csv\", \"md\" or \"json\""
+                )))
+            }
+        };
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.rows.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let unidentified = self.inner.unidentified().len();
+        if unidentified == 0 {
+            format!("Bom({} rows)", self.inner.rows.len())
+        } else {
+            format!(
+                "Bom({} rows, {unidentified} unidentified)",
+                self.inner.rows.len()
+            )
+        }
+    }
+}
+
 #[pyclass(frozen, module = "botrail._core")]
 #[derive(Clone)]
 struct IoFinding {
@@ -5365,6 +6172,29 @@ impl IoReport {
             .into_iter()
             .map(|f| IoFinding { inner: f.clone() })
             .collect()
+    }
+
+    /// The findings as JSON: `{"ok": bool, "findings": [{"severity", "code",
+    /// "message", "at": [[sequence, step index, step name], ...]}]}`.
+    fn to_json(&self) -> String {
+        let findings: Vec<serde_json::Value> = self
+            .inner
+            .findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "severity": f.severity.as_str(),
+                    "code": f.code.as_str(),
+                    "message": f.message,
+                    "at": f.at.iter().map(step_ref_tuple).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "ok": self.inner.errors().is_empty(),
+            "findings": findings,
+        }))
+        .expect("report serializes")
     }
 
     fn infos(&self) -> Vec<IoFinding> {
@@ -6174,6 +7004,16 @@ impl ToolpathReport {
 /// Parses a G-code subset into toolpath-move JSON:
 /// `{"moves": [...], "warnings": [...]}`. `bt.toolpath.from_gcode` wraps
 /// this — call that instead.
+/// The JSON Schema (draft 2020-12) of the `.botrail` project file, as a
+/// string — generated from the Rust types the loader reads, so it is
+/// always the contract `Scene.load_project` enforces. Doc comments are
+/// the descriptions. Write it out for an editor or hand it to an agent
+/// that authors projects directly.
+#[pyfunction]
+fn project_schema() -> String {
+    botrail_scene::project::ProjectFile::json_schema()
+}
+
 #[pyfunction]
 #[pyo3(signature = (text, chord_tol = 1e-4))]
 fn _parse_gcode_json(text: &str, chord_tol: f64) -> PyResult<String> {
@@ -6226,6 +7066,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IoFinding>()?;
     m.add_class::<IoReport>()?;
     m.add_class::<IoMap>()?;
+    m.add_class::<Bom>()?;
+    m.add_class::<CellReport>()?;
     m.add_class::<ToolpathReport>()?;
     m.add_class::<FeedReport>()?;
     m.add_class::<StockCarve>()?;
@@ -6234,6 +7076,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StudioServer>()?;
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;
+    m.add_function(wrap_pyfunction!(project_schema, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_gcode_json, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_apt_json, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
