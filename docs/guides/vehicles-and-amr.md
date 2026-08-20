@@ -143,6 +143,41 @@ deck, so a stand that sits 0.65 m to the machine's left is in the same place
 at every station it visits. That is the whole idea of a mobile manipulator,
 and it falls out of the mounting rather than needing anything extra.
 
+## Carriers from the catalog
+
+A mobile base is a [catalog](robots.md#the-model-catalog) product like any
+other (`vehicle.amr`), and it answers the four questions a cell has for a
+machine it did not design. Read them out of the package instead of typing
+them in, and swapping the carrier stays an argument rather than an edit:
+
+```python
+carrier = bt.Robot.from_catalog("rb-kairos", format="usd")   # geometry + frames
+package = Path(bt.catalog_package("rb-kairos"))
+specs = yaml.safe_load((package / "manifest.yaml").read_text())["specs"]
+
+probe = bt.Scene(carrier)                     # FK once, in a scene of its own
+deck = probe.link_pose(carrier.flange_link)   # where the arm bolts on
+for piece in sorted((package / "collision").glob("*.stl")):
+    pose = probe.link_pose(piece.stem)        # …and the body, piece by piece
+```
+
+* **`frames.flange_frame`** surfaces as `carrier.flange_link`: the mount
+  plate, and so the arm's `mount_robot` offset. `specs.deck_height_mm` says
+  the same thing on the data sheet.
+* **The `collision/` meshes** are the body — place each at its link's pose
+  (a `format="usd"` package names links by prim path, so match the last
+  segment) and hand the group to `add_vehicle(body=[...])`. What drives the
+  aisle is then the geometry you can see.
+* **Their union** gives the footprint, and its half-diagonal is the pivot
+  swing that decides corners.
+* **`specs`** carry `max_speed_mps` (derate it — vehicles here run at
+  constant speed) and `payload_kg` for the load chain: carrier ≥ arm +
+  gripper + part, arm ≥ gripper + part, gripper ≥ part. One of the three is
+  always the binding one.
+
+`examples/amr_demo.py --compare` bakes one authored cell on every carrier
+the catalog ships and prints what each answers.
+
 ## What this does not model
 
 Worth stating plainly, because the vocabulary invites bigger expectations:
@@ -165,7 +200,10 @@ the cell starts waiting on it.
 * `examples/agv_cell_demo.py` — an AGV serving the factory cell: called
   while the arm picks, held outside the gate by an interlock, loaded on the
   deck, released once its own load sensor says it has the part.
-* `examples/amr_demo.py` — the arm riding the vehicle across two stations,
-  stowing itself on the move.
+* `examples/amr_demo.py` — a carrier, an arm and a gripper straight out of
+  the catalog: the machine fetches a part from a bench in the aisle, carries
+  it on its own deck, and hands it to a conveyor in a machining bay, folding
+  the arm away on the move. `--carrier NAME` swaps the base; `--compare`
+  bakes the same cell on every mobile base the catalog ships.
 * `examples/agv_sweep_demo.py` — dispatch delay and dock depth as
   deterministic response curves.

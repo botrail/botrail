@@ -95,9 +95,9 @@ def cell_for(recording: Path) -> bt.Scene:
 
         print(f"{recording}: weld line ({', '.join(sorted(names))})")
         return weld_line_demo.build_line()[0]
-    # The AMR carries its own arm and has no cell at all, so check it first:
-    # its body prims are named like the AGV's.
-    if marks(recording, '"stand_place"'):
+    # The AMR carries its own arm, so check it before the AGV: both bake a
+    # vehicle body under `/World/Env`, and only the AMR calls its `amr`.
+    if marks(recording, 'def Xform "amr"'):
         print(f"{recording}: AMR (arm riding the vehicle)")
         return amr_demo.build_scene()
     if has_vehicle(recording):
