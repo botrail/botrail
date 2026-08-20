@@ -4,7 +4,7 @@ site_url: https://botrail.github.io/botrail/
 repo_url: https://github.com/botrail/botrail
 repo_name: botrail/botrail
 edit_uri: edit/main/docs/
-copyright: MIT licensed
+copyright: Copyright &copy; 2026 k-tanaka and botrail contributors. Commercial licensing by 株式会社UnRobotics
 
 docs_dir: docs
 site_dir: site
@@ -154,4 +154,5 @@ nav:
       - Traces (bt.trace): reference/api/trace.md
       - Parameter studies (bt.sweep / bt.optimize): reference/api/study.md
       - Studio: reference/api/studio.md
+  - License: license.md
   - Contributing: contributing.md

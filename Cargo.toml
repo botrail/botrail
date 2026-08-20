@@ -19,7 +19,8 @@ members = [
 [workspace.package]
 version = "0.6.0"
 edition = "2021"
-license = "MIT"
+license = "PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
 repository = "https://github.com/neka-nat/botrail"
 authors = ["neka-nat <nekanat.stock@gmail.com>"]
 

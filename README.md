@@ -229,4 +229,20 @@ Contributor notes are in the
 
 ## License
 
-MIT
+botrail 0.6.0 and later is source-available under your choice of the
+[PolyForm Small Business License 1.0.0](https://polyformproject.org/licenses/small-business/1.0.0)
+or the
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+Use not permitted by either license requires a separate commercial license from
+[株式会社UnRobotics](https://www.un-robotics.com/#contact).
+
+See the [license notice](LICENSE), [included license texts](LICENSES/),
+[commercial licensing information](COMMERCIAL-LICENSE.md), and
+[licensing FAQ](docs/license.md). Versions v0.5.0 and earlier remain under the
+MIT License terms shipped with those releases.
+
+Redistributions must preserve these notices:
+
+Required Notice: Copyright (c) 2026 k-tanaka and botrail contributors.
+
+Required Notice: botrail is licensed by 株式会社UnRobotics (https://www.un-robotics.com/).

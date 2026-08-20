@@ -4,6 +4,19 @@ botrail is a Rust workspace with pyo3 bindings and a React studio bundled into
 the Python package. This page covers building it from source. For a reader's
 view of how the pieces fit, see [Architecture](concepts/architecture.md).
 
+## Licensing contributions
+
+botrail uses a source-available and commercial licensing model. Before an
+external contribution can be merged, the contributor must enter into a
+Contributor License Agreement (CLA) with 株式会社UnRobotics that permits the
+contribution to be distributed under botrail's public and commercial licenses.
+Opening a pull request does not by itself grant these additional rights or
+guarantee that the contribution will be accepted.
+
+Please use the [UnRobotics contact form](https://www.un-robotics.com/#contact)
+before contributing so the CLA can be completed. See [Licensing](license.md)
+for the licenses that apply to the repository.
+
 ## Build from source
 
 Requirements: Rust (stable), Python 3.9+, [maturin](https://maturin.rs),

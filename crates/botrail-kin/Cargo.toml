@@ -4,6 +4,7 @@ description = "Kinematics for botrail: forward kinematics over a RobotModel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 authors.workspace = true
 

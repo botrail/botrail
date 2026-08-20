@@ -1,15 +1,17 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin>=1.9.3,<2"]
 build-backend = "maturin"
 
 [project]
 name = "botrail"
-version = "0.4.0"
+version = "0.6.0"
 description = "Build robot cells as code, verify them deterministically, ship them as USD — ROS-free, with a web-based 3D studio"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "LICENSES/*.md", "COMMERCIAL-LICENSE.md"]
 authors = [{ name = "neka-nat", email = "nekanat.stock@gmail.com" }]
+maintainers = [{ name = "株式会社UnRobotics" }]
 keywords = ["robotics", "motion-planning", "urdf", "xacro", "kinematics"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -31,7 +33,10 @@ catalog = ["huggingface_hub>=0.24"]
 botrail = "botrail._cli:main"
 
 [project.urls]
+Homepage = "https://www.un-robotics.com/"
 Repository = "https://github.com/botrail/botrail"
+Licensing = "https://github.com/botrail/botrail/blob/main/docs/license.md"
+"Commercial Licensing" = "https://www.un-robotics.com/#contact"
 
 [dependency-groups]
 # pyyaml: the from_catalog tests fake out huggingface_hub with a local
@@ -55,7 +60,3 @@ docs = [
 manifest-path = "crates/botrail-py/Cargo.toml"
 module-name = "botrail._core"
 python-source = "python"
-# maturin auto-detects LICENSE into the metadata (License-File) but leaves it
-# out of workspace sdists — PyPI rejects that combination, so include it
-# explicitly.
-include = [{ path = "LICENSE", format = "sdist" }]

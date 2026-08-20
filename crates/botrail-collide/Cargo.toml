@@ -4,6 +4,7 @@ description = "Collision checking for botrail on top of parry3d (solid shapes on
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 authors.workspace = true
 

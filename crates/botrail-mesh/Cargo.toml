@@ -4,6 +4,7 @@ description = "Minimal triangle-mesh loading (STL/OBJ) for botrail collision sha
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 authors.workspace = true
 

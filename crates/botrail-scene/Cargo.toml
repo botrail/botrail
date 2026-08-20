@@ -4,6 +4,7 @@ description = "Scene state and wire protocol types shared between botrail core a
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 authors.workspace = true
 

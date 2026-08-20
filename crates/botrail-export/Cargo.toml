@@ -4,6 +4,7 @@ description = "Vendor robot-script export (post-processors) for planned trajecto
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 authors.workspace = true
 
