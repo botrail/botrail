@@ -234,7 +234,7 @@ botrail 0.6.0 and later is source-available under your choice of the
 or the
 [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 Use not permitted by either license requires a separate commercial license from
-[株式会社UnRobotics](https://www.un-robotics.com/#contact).
+[UnRobotics Inc.](https://www.un-robotics.com/#contact).
 
 See the [license notice](LICENSE), [included license texts](LICENSES/),
 [commercial licensing information](COMMERCIAL-LICENSE.md), and
@@ -245,4 +245,4 @@ Redistributions must preserve these notices:
 
 Required Notice: Copyright (c) 2026 k-tanaka and botrail contributors.
 
-Required Notice: botrail is licensed by 株式会社UnRobotics (https://www.un-robotics.com/).
+Required Notice: botrail is licensed by UnRobotics Inc. (https://www.un-robotics.com/).

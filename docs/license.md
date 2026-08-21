@@ -3,7 +3,7 @@
 Starting with version 0.6.0, botrail is source-available under two public
 licenses. You may use botrail under either license whose conditions cover your
 use. Use that is not covered by either license requires a separate written
-commercial license from 株式会社UnRobotics.
+commercial license from UnRobotics Inc.
 
 This page is a practical summary, not a replacement for the license terms. If
 this page and a license differ, the license terms control.
@@ -41,10 +41,11 @@ These licenses impose field-of-use and organization-size conditions, so botrail
 If neither public license permits your use, obtain a commercial license before
 using botrail. The licensor and commercial contracting entity is:
 
-**株式会社UnRobotics**  
+**UnRobotics Inc.**
+
 <https://www.un-robotics.com/>
 
-Use the [UnRobotics contact form](https://www.un-robotics.com/#contact) to
+Use the [UnRobotics Inc. contact form](https://www.un-robotics.com/#contact) to
 discuss pricing and terms. The repository does not grant a commercial license;
 commercial rights arise only from a separate written agreement.
 
@@ -54,7 +55,7 @@ commercial rights arise only from a separate written agreement.
 
 You do not need to make a repository change or send a notice to choose between
 the two public licenses. Your actual use must satisfy all conditions of at least
-one of them. If it does not, or if you are unsure, contact UnRobotics before
+one of them. If it does not, or if you are unsure, contact UnRobotics Inc. before
 using botrail.
 
 ### Does an integrator's license cover its customer?

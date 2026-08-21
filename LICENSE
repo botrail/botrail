@@ -1,7 +1,7 @@
 botrail License Notice
 
 Licensor and commercial contracting entity:
-株式会社UnRobotics
+UnRobotics Inc.
 https://www.un-robotics.com/
 
 SPDX-License-Identifier: PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0
@@ -18,7 +18,7 @@ botrail is made available, at your option, under either of these licenses:
   https://polyformproject.org/licenses/noncommercial/1.0.0
 
 Use that is not permitted by either license requires a separate written
-commercial license from 株式会社UnRobotics. See COMMERCIAL-LICENSE.md or
+commercial license from UnRobotics Inc. See COMMERCIAL-LICENSE.md or
 https://www.un-robotics.com/#contact.
 
 This licensing change begins with botrail version 0.6.0. Versions v0.5.0 and
@@ -27,4 +27,4 @@ versions. Each release remains governed by the license materials shipped with
 that release.
 
 Required Notice: Copyright (c) 2026 k-tanaka and botrail contributors.
-Required Notice: botrail is licensed by 株式会社UnRobotics (https://www.un-robotics.com/).
+Required Notice: botrail is licensed by UnRobotics Inc. (https://www.un-robotics.com/).

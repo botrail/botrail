@@ -4,7 +4,7 @@ site_url: https://botrail.github.io/botrail/
 repo_url: https://github.com/botrail/botrail
 repo_name: botrail/botrail
 edit_uri: edit/main/docs/
-copyright: Copyright &copy; 2026 k-tanaka and botrail contributors. Commercial licensing by 株式会社UnRobotics
+copyright: Copyright &copy; 2026 k-tanaka and botrail contributors. Commercial licensing by UnRobotics Inc.
 
 docs_dir: docs
 site_dir: site
