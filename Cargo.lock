@@ -1094,9 +1094,9 @@ dependencies = [
 
 [[package]]
 name = "pyisheval"
-version = "0.19.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6b4f0a37aafb4eec4b490a57eaedb854733d958d8d2c65643df74ae8b7ccb8d"
+checksum = "83331eb8d4c0e1c5bf383812023efb129583ec11267d1b005bd1e0ae59f84ed4"
 dependencies = [
  "indexmap",
  "lazy_static",
@@ -1967,9 +1967,9 @@ dependencies = [
 
 [[package]]
 name = "xurdf"
-version = "0.6.0"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cdc19e931880a6ef2da9cd5e999a4ffa69facf9e219f41efba5cb74473969ea"
+checksum = "8b731efdde9a66f73ac0a3b88c4083464b0d5c3de32187b06c1cddd0ec3239fe"
 dependencies = [
  "anyhow",
  "indexmap",

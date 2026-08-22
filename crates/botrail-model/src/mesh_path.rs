@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub struct ModelOptions {
     /// Maps ROS package names to directories for resolving `package://` URIs.
     pub package_paths: HashMap<String, PathBuf>,
+    /// Fills a xacro's `$(arg …)` substitutions, so one parametric file can
+    /// be expanded to the size at hand. Ignored by the plain URDF readers.
+    pub xacro_args: HashMap<String, String>,
 }
 
 /// Resolves a URDF mesh URI to a filesystem path. Resolution is best-effort:

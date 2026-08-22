@@ -321,8 +321,12 @@ impl RobotModel {
         options: &ModelOptions,
     ) -> Result<Self, ModelError> {
         let path = path.as_ref();
-        let xml =
-            xurdf::parse_xacro_from_file(path).map_err(|e| ModelError::Parse(e.to_string()))?;
+        // XacroOptions keeps a private resolver, so it is built and then set.
+        let mut xacro = xurdf::XacroOptions::default();
+        xacro.args = options.xacro_args.clone();
+        xacro.package_paths = options.package_paths.clone();
+        let xml = xurdf::parse_xacro_from_file_with_options(path, xacro)
+            .map_err(|e| ModelError::Parse(e.to_string()))?;
         Self::from_urdf_str_with(&xml, path.parent(), options)
     }
 

@@ -1,7 +1,7 @@
 # Standard parts and CAD geometry
 
 Every cell has scenery nobody wants to model: the fence, the tables, the
-pedestal under the robot, the conveyor's body, the pallets. `bt.parts`
+pedestal under the robot, the racks, the conveyor's body, the pallets. `bt.parts`
 generates them from parameters — as ordinary residents (boxes under a name
 prefix, a frame where the next thing mounts, a device or a sensor where one
 belongs) with their [part identity](parts-and-bom.md) already pinned, so the
@@ -19,6 +19,7 @@ conv = bt.parts.conveyor(scene, "conv", length=2.0, width=0.4, position=(0, 1.2,
                          direction=(1, 0), speed=0.2, model="GVL-2000")
 bt.parts.table(scene, "table", size=(1.2, 0.8, 0.75), position=(1.0, 0.0), model="HFS8-1200")
 bt.parts.pallet(scene, "pallet", position=(-1.2, 0.0))
+rack = bt.parts.rack(scene, "rack", size=(1.2, 0.6, 1.8), position=(-1.2, 1.2), levels=4)
 bt.parts.light_curtain(scene, "lc", frm=(-1, -2), to=(1, -2), model="SL-V")
 ```
 
@@ -30,14 +31,41 @@ bt.parts.light_curtain(scene, "lc", frm=(-1, -2), to=(1, -2), model="SL-V")
 | [`table`][botrail.parts.table] | `<name>/top`, four legs | `<name>/top` (centre of the top face) | — | `<name>` (`structure.table`) |
 | [`pedestal`][botrail.parts.pedestal] | `<name>/base`, `<name>/column`, `<name>/top` | `<name>/mount` (the robot's base pose) | — | `<name>` (`structure.pedestal`) |
 | [`conveyor`][botrail.parts.conveyor] | `<name>/belt`, side rails, legs | `<name>/infeed`, `<name>/outfeed` | the conveyor device `<name>`, its zone on the belt | the *device* (`conveyor`) — the body is its geometry, not a second product |
+| [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`pallet`][botrail.parts.pallet] | bottom boards, blocks, deck boards | `<name>/top` | — | `<name>` (`pallet`, `EPAL 1` by default) |
 | [`light_curtain`][botrail.parts.light_curtain] | two columns | — | the beam sensor `<name>` (trips on the robot) | the *sensor* (`sensor.light_curtain`) |
 
 Every generator takes `model=`, `manufacturer=` and free attributes
-(`mass_kg=…`) for the part it pins, and returns a
+(`mass_kg=…`) for the part it pins — or `catalog=`, the id of a spec pack, and
+then the dimensions, part numbers and mass come from the catalog and the
+generator refuses a size nobody sells (see
+[the model catalog](robots.md#the-model-catalog)). Each returns a
 [`Built`][botrail.parts.Built] naming what it made — `built.frames`,
 `built.devices`, `built.obstacles` — with `built.remove(scene)` to take the
 whole thing down again.
+
+## Drawn, and what it hits
+
+A catalog part is drawn the way it looks: a mesh panel as a tube frame with a
+grid of wire in it, a conveyor with its rollers and drive, a rack with its
+beams and braces. All of that is **decoration** — added with collision off,
+under `<name>/trim/` — while the massing underneath (the panel slab, the belt,
+the uprights) keeps collision and stops being drawn where the detail stands in
+for it. Changing `detail` therefore never changes what a robot can hit, what
+the BOM says, or what a plan gives you; it costs scene entries and nothing
+else. `detail="plain"` is the bare massing, and is what a generator called
+without a catalog does — there are no real sections to draw from.
+[`examples/equipment_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/equipment_cell_demo.py)
+builds a cell whose fence, conveyor and rack all come from the catalog, and
+prints the bill it can be ordered from.
+
+Where the drawing comes from is the product's business, not the generator's: a
+pack can name a file of primitives per part (`components[].trim`, a URDF or
+xacro), and the generator expands it to the size at hand with
+[`load_urdf`][botrail._core.Scene.load_urdf] instead of drawing its own
+shapes. One parametric file covers every size a product is sold in, so making
+a fence look like *that* maker's fence is an edit to the catalog, not to
+botrail. Parts the pack says nothing about keep the built-in look.
 
 A fence's edge is split into panels of *about* `panel_pitch` (stretched so an
 edge takes a whole number of them) with a post at every corner and between

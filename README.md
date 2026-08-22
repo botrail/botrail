@@ -76,6 +76,9 @@ python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
 python examples/cell_deliverables_demo.py  # the whole document set from one
                                   # script: layout SVG/DXF, BOM, I/O list, robot
                                   # program, USD, cell report (no downloads)
+python examples/equipment_cell_demo.py     # fence, conveyor and rack ordered from
+                                  # the catalog: a bill with real part numbers,
+                                  # and each drawn from the package's own file
 python examples/play_record.py \
        cell_dual.usda             # replay a baked USD in the studio (any of
                                   # the recordings above; omit for cell_seq)

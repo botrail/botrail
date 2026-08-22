@@ -599,8 +599,17 @@ impl Scene {
             };
             // A body generated under a device's or sensor's own name
             // (`conv/belt` for the conveyor `conv`) is labelled by that
-            // device — no second label on the geometry.
-            if pinned.is_none() && named_equipment.contains(&key.trim_start_matches('/')) {
+            // device — no second label on the geometry. The whole branch
+            // counts, not just its first level: a catalog conveyor puts its
+            // stands under `conv/stands/…`, which makes `conv` a container
+            // and its unit key `belt` — still the conveyor's geometry.
+            // Anything with a part of its own was taken above and keeps its
+            // label (the stands are their own line on the bill).
+            let branch = o.name.trim_start_matches('/').split('/').next().unwrap_or("");
+            if pinned.is_none()
+                && (named_equipment.contains(&key.trim_start_matches('/'))
+                    || named_equipment.contains(&branch))
+            {
                 continue;
             }
             match label_units.iter_mut().find(|(k, _, _)| *k == key) {

@@ -180,3 +180,23 @@ def test_generated_structures_round_trip_through_the_project(tmp_path: Path) -> 
     assert again.layout("svg") == scene.layout("svg")
     assert again.footprint() == pytest.approx(scene.footprint())
     assert set(again.frames) == set(scene.frames)
+
+
+def test_rack_stacks_shelves_and_puts_a_frame_on_each() -> None:
+    """A bay of shelves on four uprights: `levels` boards, evenly spaced with
+    the top one at the bay height, and a frame on each deck where the parts
+    sit — the target a pick aims at."""
+    scene = scene_()
+    built = bt.parts.rack(scene, "rack", (1.2, 0.6, 1.8), (1.0, 0.5), levels=3, model="MS-1260")
+    assert [round(scene.frame(f)[0][2], 3) for f in built.frames] == [0.6, 1.2, 1.8]
+    assert sum("/uprights/" in n for n in built.obstacles) == 4
+    lo, hi = scene.obstacle_bounds("rack/shelves/l2")
+    assert hi[2] == pytest.approx(1.8) and hi[0] - lo[0] == pytest.approx(1.2 - 2 * 0.04)
+    assert len(built.frames) == 3
+    row = rows(scene)["rack"]
+    assert (row["category"], row["model"], row["qty"]) == ("structure.rack", "MS-1260", 1)
+    # levels is what the rack is, not a quantity — no totals column for it.
+    assert row["attributes"]["levels"] == "3"
+    assert scene.bom().total("mass_kg") is None
+    built.remove(scene)
+    assert scene.obstacle_names == [] and scene.frames == {} and scene.parts() == []

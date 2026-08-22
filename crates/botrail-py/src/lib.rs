@@ -922,6 +922,88 @@ impl Scene {
         Ok(names)
     }
 
+    /// Imports a URDF or xacro as **scenery**: every visual becomes an
+    /// obstacle named `<prefix>/<link>`, posed at the model's zero
+    /// configuration and placed at `position` / `quaternion`. Links that
+    /// carry no geometry become named frames (see `frame()`), so a file can
+    /// name where the next thing mounts. `args` fills the file's
+    /// `$(arg …)` substitutions, which is what lets one parametric file
+    /// draw every size a product is sold in. `geometry="collision"` reads
+    /// the collision shapes instead of the visuals. Returns the obstacle
+    /// names it added.
+    ///
+    /// This is furniture, not a machine: joints are taken at zero and
+    /// nothing here articulates. A robot is `Robot.from_urdf` /
+    /// `Robot.from_xacro` and `add_robot`.
+    #[pyo3(signature = (
+        path, prefix = None, position = None, quaternion = None, args = None,
+        geometry = "visual", frames = true, package_paths = None
+    ))]
+    fn load_urdf(
+        &self,
+        path: PathBuf,
+        prefix: Option<String>,
+        position: Option<[f64; 3]>,
+        quaternion: Option<[f64; 4]>,
+        args: Option<std::collections::HashMap<String, String>>,
+        geometry: &str,
+        frames: bool,
+        package_paths: Option<std::collections::HashMap<String, PathBuf>>,
+    ) -> PyResult<Vec<String>> {
+        let collision = match geometry {
+            "visual" => false,
+            "collision" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "geometry must be \"visual\" or \"collision\", not `{other}`"
+                )))
+            }
+        };
+        let options = botrail_model::ModelOptions {
+            package_paths: package_paths.unwrap_or_default(),
+            xacro_args: args.unwrap_or_default(),
+        };
+        // Plain URDF passes through the xacro reader unchanged, so one path
+        // serves both.
+        let model = RobotModel::from_xacro_file_with(&path, &options).map_err(model_err)?;
+        let poses = botrail_kin::forward_kinematics(&model, &vec![0.0; model.dof()])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let base = pose_from(position.unwrap_or([0.0; 3]), quaternion);
+        let prefix = match prefix {
+            Some(p) if !p.is_empty() => format!("{}/", p.trim_end_matches('/')),
+            _ => String::new(),
+        };
+        let mut batch = Vec::new();
+        let mut named = Vec::new();
+        for (index, link) in model.links.iter().enumerate() {
+            let shapes = if collision { &link.collisions } else { &link.visuals };
+            let world = base * poses[index];
+            if shapes.is_empty() {
+                if frames {
+                    named.push((format!("{prefix}{}", link.name), world));
+                }
+                continue;
+            }
+            for (i, shape) in shapes.iter().enumerate() {
+                let name = if shapes.len() == 1 {
+                    format!("{prefix}{}", link.name)
+                } else {
+                    format!("{prefix}{}/{i}", link.name)
+                };
+                batch.push(botrail_scene::ObstacleSpec {
+                    name,
+                    geometry: shape.geometry.clone(),
+                    pose: world * shape.origin,
+                    color: shape.color,
+                    material: None,
+                });
+            }
+        }
+        let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
+        self.hub.add_frames(named);
+        Ok(names)
+    }
+
     /// Registers (or updates) a named world frame.
     #[pyo3(signature = (name, position, quaternion = None))]
     fn add_frame(&self, name: &str, position: [f64; 3], quaternion: Option<[f64; 4]>) {

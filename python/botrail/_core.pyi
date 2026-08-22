@@ -170,6 +170,17 @@ class Scene:
         prefix: Optional[str] = None,
         search_paths: Optional[list[Union[str, Path]]] = None,
     ) -> list[str]: ...
+    def load_urdf(
+        self,
+        path: Union[str, Path],
+        prefix: Optional[str] = None,
+        position: Optional[tuple[float, float, float]] = None,
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+        args: Optional[dict[str, str]] = None,
+        geometry: str = "visual",
+        frames: bool = True,
+        package_paths: Optional[dict[str, Union[str, Path]]] = None,
+    ) -> list[str]: ...
     def add_frame(
         self,
         name: str,
