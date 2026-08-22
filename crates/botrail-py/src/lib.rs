@@ -976,7 +976,11 @@ impl Scene {
         let mut batch = Vec::new();
         let mut named = Vec::new();
         for (index, link) in model.links.iter().enumerate() {
-            let shapes = if collision { &link.collisions } else { &link.visuals };
+            let shapes = if collision {
+                &link.collisions
+            } else {
+                &link.visuals
+            };
             let world = base * poses[index];
             if shapes.is_empty() {
                 if frames {

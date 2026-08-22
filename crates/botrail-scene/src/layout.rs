@@ -605,7 +605,12 @@ impl Scene {
             // and its unit key `belt` — still the conveyor's geometry.
             // Anything with a part of its own was taken above and keeps its
             // label (the stands are their own line on the bill).
-            let branch = o.name.trim_start_matches('/').split('/').next().unwrap_or("");
+            let branch = o
+                .name
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+                .unwrap_or("");
             if pinned.is_none()
                 && (named_equipment.contains(&key.trim_start_matches('/'))
                     || named_equipment.contains(&branch))
