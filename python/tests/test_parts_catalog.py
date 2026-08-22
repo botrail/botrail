@@ -76,6 +76,54 @@ configuration:
           - {height_mm: 2200, width_mm: 1000, kg: 19.5}
 """
 
+# Some makers do not write a dimension in the article number as it stands:
+# a 2200 mm panel is coded 220, and the post that carries it — a floor gap
+# taller — is coded 230. The pack brings the table, per part.
+CODED_MANIFEST = """
+schema_version: '0.1'
+id: acme/fence/coded/r1
+kind: spec
+category: structure.fence
+name: Coded Guard
+manufacturer:
+  name: ACME Guarding
+distribution: public
+configuration:
+  generator: fence
+  params:
+    height_mm:
+      values: [1900, 2200]
+      default: 2200
+    post_finish:
+      values: [graphite-black, zinc-yellow]
+      default: graphite-black
+  components:
+    - role: panel
+      category: structure.fence
+      part_number: W322-{height_mm_code}{width_mm_code}
+      widths_mm: [250, 400, 800, 1000, 1200, 1500]
+      dimensions_mm: {thickness: 30}
+      codes:
+        height_mm: {1900: "190", 2200: "220"}
+        width_mm: {250: "025", 400: "040", 800: "080", 1000: "100", 1200: "120", 1500: "150"}
+      mass:
+        per_m2_kg: 2.4
+        area: [height_mm, width_mm]
+        per_mm: {height_mm: 0.0022, width_mm: 0.0022}
+    - role: post
+      category: structure.fence.post
+      part_number: "{post_finish_code}-{height_mm_code}"
+      dimensions_mm: {section_w: 50, section_d: 50}
+      # Written the way a published manifest carries it: YAML through JSON
+      # turns the keys into strings.
+      codes:
+        height_mm: {"1900": "200", "2200": "230"}
+        post_finish: {graphite-black: P31, zinc-yellow: P11}
+      mass:
+        base_kg: 1.2
+        per_mm: {height_mm: 0.0028}
+"""
+
 # A conveyor is the other shape of equipment: one model, ordered to a size,
 # with a speed the drive has to be able to reach.
 BELT_MANIFEST = """
@@ -167,6 +215,14 @@ def pack(tmp_path: Path) -> Path:
     directory = tmp_path / "guard"
     directory.mkdir()
     (directory / "manifest.yaml").write_text(MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def coded(tmp_path: Path) -> Path:
+    directory = tmp_path / "coded"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(CODED_MANIFEST)
     return directory
 
 
@@ -332,6 +388,34 @@ def test_parameters_are_chosen_by_name_and_recorded(pack: Path) -> None:
     assert rows(scene)["fence/posts"]["model"] == "GPP-2200"
     with pytest.raises(ValueError, match="mesh_mm=10x10 is not available"):
         bt.parts.fence(scene, "f2", path=RING, catalog=pack, mesh_mm="10x10")
+
+
+def test_the_bom_carries_the_article_number_the_maker_prints(coded: Path) -> None:
+    """A dimension is not always what the article number says. Here 2200 mm
+    is written 220 on the panel and 230 on the post — same fence, one order
+    code per part — and a colour picks the post's prefix."""
+    scene = scene_()
+    bt.parts.fence(scene, "fence", path=RING, catalog=coded, post_finish="zinc-yellow")
+    by = rows(scene)
+    # 2400 mm edge = 1500 + 800 with 50 mm posts; 1600 = 800 + 400 + 250.
+    assert {row["model"] for name, row in by.items() if "/panels/" in name} == {
+        "W322-220150", "W322-220080", "W322-220040", "W322-220025",
+    }
+    assert by["fence/posts"]["model"] == "P11-230"
+    assert by["fence"]["attributes"]["post_finish"] == "zinc-yellow"
+    # Mesh by the square metre, frame by the edge: 2.4 x 2.2 x 1.5 + 0.0022 x 3700
+    assert by["fence/panels/w1500"]["attributes"]["mass_kg"] == pytest.approx(16.06)
+
+
+def test_an_order_code_the_pack_does_not_have_says_so(coded: Path, tmp_path: Path) -> None:
+    directory = tmp_path / "holed"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(
+        CODED_MANIFEST.replace(', 2200: "230"', "").replace(', "2200": "230"', "")
+    )
+    scene = scene_()
+    with pytest.raises(ValueError, match="post has no order code for height_mm=2200"):
+        bt.parts.fence(scene, "fence", path=RING, catalog=directory)
 
 
 def test_the_panel_pitch_still_caps_the_width(pack: Path) -> None:

@@ -233,7 +233,8 @@ def test_signal_track_kind() -> None:
     assert [n for n, _ in tl.signals] == ["seen", "eye", "belt"]
 
 
-@pytest.mark.skipif(not HAS_FRANKA, reason="Isaac Franka not in the botrail cache")
+@pytest.mark.skipif(not (HAS_FRANKA and HAS_CATALOG),
+                    reason="the demo cell needs the Isaac Franka and the botrail catalog")
 def test_golden_sequence_demo() -> None:
     import sequence_demo as sd
     from demo import build_scene
@@ -247,7 +248,8 @@ def test_golden_sequence_demo() -> None:
     assert scene.io_report().findings == []
 
 
-@pytest.mark.skipif(not HAS_FRANKA, reason="Isaac Franka not in the botrail cache")
+@pytest.mark.skipif(not (HAS_FRANKA and HAS_CATALOG),
+                    reason="the demo cell needs the Isaac Franka and the botrail catalog")
 def test_golden_dual_cell_demo() -> None:
     import dual_cell_demo as dc
 
@@ -275,7 +277,8 @@ def test_golden_dual_cell_demo() -> None:
     assert codes.count("word_unexpressible") == 2
 
 
-@pytest.mark.skipif(not HAS_FRANKA, reason="Isaac Franka not in the botrail cache")
+@pytest.mark.skipif(not (HAS_FRANKA and HAS_CATALOG),
+                    reason="the demo cell needs the Isaac Franka and the botrail catalog")
 def test_golden_agv_cell_demo() -> None:
     import agv_cell_demo as ag
 
@@ -290,7 +293,11 @@ def test_golden_agv_cell_demo() -> None:
     # `panda` gets no handshake points.
     assert {p.host for p in table.values()} == {"<panda>"}
     assert table[("agv.station", "output")].kind == "Word"
-    assert [f.code for f in scene.io_report().findings] == ["word_unexpressible"]
+    # The cell's belt is a catalog conveyor that came with the factory scene,
+    # and this program never commands it — an info line, not a point.
+    report = scene.io_report()
+    assert [f.code for f in report.findings] == ["unreferenced", "word_unexpressible"]
+    assert "`conv`" in report.infos()[0].message
 
 
 # ------------------------------------------------ the assignment layer (I1)

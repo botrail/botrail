@@ -57,7 +57,10 @@ else. `detail="plain"` is the bare massing, and is what a generator called
 without a catalog does — there are no real sections to draw from.
 [`examples/equipment_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/equipment_cell_demo.py)
 builds a cell whose fence, conveyor and rack all come from the catalog, and
-prints the bill it can be ordered from.
+prints the bill it can be ordered from;
+[`examples/demo.py`](https://github.com/botrail/botrail/blob/main/examples/demo.py)
+equips the tutorial cell the same way, next to a USD layer that keeps the
+layout and the teach frames.
 
 Where the drawing comes from is the product's business, not the generator's: a
 pack can name a file of primitives per part (`components[].trim`, a URDF or

@@ -17,7 +17,11 @@ the catalog builder validates a package before it is published.
 
 Nothing here evaluates expressions: a parameter is a list of values or a
 stepped range, and mass is a table, a length coefficient or an areal
-density. See docs/equipment-catalog.md in botrail-catalog-builder.
+density (or an areal one plus a coefficient, for a panel whose frame runs
+round its edge). A part number is a template over those values — and where a
+maker does not write a dimension as it stands, the pack carries a table of
+the codes it writes instead, per part. See docs/equipment-catalog.md in
+botrail-catalog-builder.
 """
 
 from __future__ import annotations
@@ -216,13 +220,33 @@ class Spec:
         return rules.get(key, default)
 
     def part_number(self, role: str, **values: Any) -> str:
-        template = self.component(role).get("part_number")
+        component = self.component(role)
+        template = component.get("part_number")
         if not template:
             return ""
+        fields = {k: _plain(v) for k, v in values.items()}
+        fields.update(self._order_codes(role, component, values))
         try:
-            return str(template).format(**{k: _plain(v) for k, v in values.items()})
+            return str(template).format(**fields)
         except KeyError as exc:
             raise ValueError(f"{self.id}: part number for {role!r} needs {exc}") from exc
+
+    def _order_codes(self, role: str, component: dict, values: dict) -> dict:
+        """What a dimension is called in the article number. Some makers do not
+        write it as it stands — Axelent codes a 2200 mm panel as 220 — so the
+        pack carries the table, per part: the post of that same fence stands
+        2300 mm tall and is coded 230."""
+        codes = {}
+        for name, table in (component.get("codes") or {}).items():
+            if name not in values or not isinstance(table, dict):
+                continue
+            code = _code(table, values[name])
+            if code is None:
+                raise ValueError(
+                    f"{self.id}: {role} has no order code for {name}={_plain(values[name])}"
+                )
+            codes[f"{name}_code"] = code
+        return codes
 
     def mass_kg(self, role: str, **values: Any) -> Optional[float]:
         mass = self.component(role).get("mass")
@@ -282,3 +306,16 @@ def _same(a: Any, b: Any) -> bool:
     if isinstance(a, str) or isinstance(b, str):
         return a == b
     return abs(float(a) - float(b)) < _EPS
+
+
+def _code(table: dict, value: Any) -> Optional[str]:
+    """A code table read back from the manifest has string keys (YAML through
+    JSON turns 2200 into "2200"), so match on the number where there is one."""
+    for key, code in table.items():
+        try:
+            if abs(float(key) - float(value)) < _EPS:
+                return str(code)
+        except (TypeError, ValueError):
+            if str(key) == str(value):
+                return str(code)
+    return None

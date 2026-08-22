@@ -24,6 +24,8 @@ sys.path.insert(0, str(EXAMPLES))
 
 CACHE = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
 HAS_FRANKA = (CACHE / "assets" / "franka" / "franka.usd").exists()
+HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+HAS_CATALOG = any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))
 
 
 def cell() -> bt.Scene:
@@ -248,11 +250,14 @@ def test_parts_round_trip_through_project_and_generated_python(tmp_path: Path) -
 # ------------------------------------------------------------ the demo
 
 
-@pytest.mark.skipif(not HAS_FRANKA, reason="Isaac Franka not in the botrail cache")
+@pytest.mark.skipif(not (HAS_FRANKA and HAS_CATALOG),
+                    reason="the demo cell needs the Isaac Franka and the botrail catalog")
 def test_sequence_demo_bom_is_complete() -> None:
-    """The flagship demo identifies its equipment and scenery in four
-    lines; the derived BOM has no unidentified row and pins the pedestal
-    subtree and the pallet as single parts."""
+    """The flagship demo types four lines of identity; the rest of the bill
+    comes off the catalog packages the cell was ordered from. Nothing is
+    left unidentified, the pedestal subtree and the pallet are still single
+    parts, and every catalog line carries the part number it would be
+    ordered by and the revision it was resolved at."""
     import sequence_demo as sd
     from demo import build_scene
 
@@ -261,19 +266,49 @@ def test_sequence_demo_bom_is_complete() -> None:
     sd.identify_parts(scene)
     bom = scene.bom()
     assert bom.unidentified() == []
-    assert [row["names"] for row in bom.rows] == [
+
+    # The four typed lines — the robot, the photo-eye, and the two whole
+    # USD subtrees pinned as one part each.
+    typed = [row for row in bom.rows if row["catalog"] is None]
+    assert [row["names"] for row in typed] == [
         ["panda"],
-        ["conv"],
         ["beam_pick"],
         ["/World/Pedestal"],
         ["/World/Pallet"],
     ]
-    assert [row["category"] for row in bom.rows] == [
+    assert [row["category"] for row in typed] == [
         "robot",
-        "conveyor",
         "sensor.photoelectric",
         "structure.pedestal",
         "pallet",
     ]
-    assert bom.total("mass_kg") == pytest.approx(18 + 48 + 120 + 25)
+
+    # The catalog writes the rest: the belt and its stands, the rack and its
+    # shelves, and the guarding down to a line per panel width. The guard is
+    # two runs of one product, so its groups share the rows — a merged row
+    # carries both names.
+    ordered = {
+        name: row
+        for row in bom.rows
+        if row["catalog"] is not None
+        for name in row["names"]
+    }
+    assert set(ordered) == {
+        "conv", "conv/stands", "rack", "rack/shelves",
+        "fence/east", "fence/east/posts", "fence/west", "fence/west/posts",
+        "fence/west/door",
+        *(f"fence/east/panels/w{mm}" for mm in (1500, 1000, 800, 300, 200)),
+        *(f"fence/west/panels/w{mm}" for mm in (1500, 400, 300, 200)),
+    }
+    # The part numbers spell out what was ordered: 3.8 m x 400 mm of belt,
+    # a 900 x 450 x 1800 bay, an 800 mm door in a 2 m guard.
+    assert ordered["conv"]["model"] == "BCU-400-3800"
+    assert ordered["rack"]["model"] == "MR-900x450x1800"
+    assert ordered["fence/west/door"]["model"] == "MGD-2000x800"
+    assert all("@" in row["catalog"] for row in ordered.values())  # id@revision
+    assert ordered["conv"]["qty"] == 1
+    assert ordered["fence/east/posts"]["qty"] == 18  # both runs, one row
+
+    # Typed masses plus the ones the packages computed from the sizes.
+    assert bom.total("mass_kg") == pytest.approx(18 + 120 + 25 + 378.26)
 

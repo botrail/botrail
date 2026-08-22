@@ -179,7 +179,7 @@ document and this overlay cannot disagree.
 
 The bottom dock is the one transport bar: every playback — a motion
 preview, a baked cycle, a loaded recording — plays and scrubs here. For a
-baked sequence it is a timing chart: the cycle time (*cycle 15.56s* above),
+baked sequence it is a timing chart: the cycle time (*cycle 16.69s* above),
 one colored band per step, and one lane per signal — internal relays,
 sensors, device running-states — each lane wearing the channel chip of the
 point bound to it, so the chart doubles as the addressed I/O waveform

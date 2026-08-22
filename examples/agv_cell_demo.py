@@ -86,10 +86,13 @@ BLACK = (0.010, 0.010, 0.011)
 LANE_Y = -2.90
 WAREHOUSE = (-2.60, LANE_Y)
 GATE = (0.0, LANE_Y)
-# As far in as the cell allows: 30 mm further and the body clips the
-# pallet's deck boards, which is also why the handover ends up at the very
-# limit of the arm's reach (see `build_cycle`).
-DOCK = (0.0, -1.15)
+# As far in as the cell allows, and it is the load that decides how far that
+# has to be: the arm reaches to y = -0.770 and no further, so the deck's
+# leading edge has to come to meet it or the carton ends up straddling the
+# edge. At -1.13 the edge stands at -0.728 and the body clears the pallet's
+# deck boards by 8 mm — 8 mm on one side, 10 mm of carton on the other, and
+# the cell has nothing left to give (see `build_cycle`).
+DOCK = (0.0, -1.13)
 CLASH_DOCK = (0.0, -0.75)
 
 # Not the spec 2.0 m/s, and the reason is worth stating: V0 vehicles move at
@@ -120,6 +123,11 @@ HOVER = 0.15
 # drawn surface is rejected as a collision; 310 mm is the first height that
 # clears, and the 7 mm it floats by is invisible.
 DECK_TOP = 0.310
+# How far onto the deck the carton goes, from the vehicle frame. The deck's
+# leading edge is 0.4020 m ahead of that frame (a 0.813 m shell sitting
+# 4.5 mm behind it), so this is 40 mm short of the edge: 30 mm of carton and
+# 10 mm of margin. It is also as far as the arm reaches — see `build_cycle`.
+DECK_REACH = 0.362
 
 
 def fetch_mir250() -> Path:
@@ -250,13 +258,16 @@ def build_cycle(scene: bt.Scene, call_delay: float = 0.0) -> str:
     home = list(scene.joint_positions)
     pick = scene.frame("/World/Conveyor/PickFrame")
 
-    # The handover point: the deck's leading edge. It is not a free choice
-    # — the cell's pallet keeps the vehicle at y = -1.15, which puts the
-    # deck edge at exactly 0.75 m from the robot's base, and that is this
-    # arm's limit. 50 mm further onto the deck is already out of reach.
-    # A layout that wants margin has to move the pallet or the pedestal;
-    # this is the kind of thing the check exists to make visible.
-    deck = ((DOCK[0], DOCK[1] + 0.40, DECK_TOP + BOX_SIZE / 2 + 0.002), pick[1])
+    # The handover point: as far onto the deck as this arm goes. It is not a
+    # free choice — the reach runs out at y = -0.770, and the deck's leading
+    # edge is 0.4020 m ahead of the vehicle frame, so an offset of 0.40 puts
+    # the carton's *centre* on the edge with half of it hanging in the air.
+    # `DECK_REACH` is what lands the near face 10 mm inside the deck with
+    # the wrist still able to get there, and the 20 mm the vehicle had to
+    # come forward for it is 20 mm off its clearance to the pallet. A layout
+    # that wants margin has to move the pallet or the pedestal; this is the
+    # kind of thing the check exists to make visible.
+    deck = ((DOCK[0], DOCK[1] + DECK_REACH, DECK_TOP + BOX_SIZE / 2 + 0.002), pick[1])
 
     # Teach hover-first at each station so the grasp warm-starts from the
     # pose above it, and go home between stations — the deck is a 180 deg
@@ -374,7 +385,7 @@ def main() -> None:
     # Where the carton ended up — it rode the deck out of the cell.
     carried = tl.object_pose(CARTON, tl.duration)[0]
     print(f"carton ends at {tuple(round(v, 3) for v in carried)} "
-          f"(placed at y = {DOCK[1] + 0.40:.2f})")
+          f"(placed at y = {DOCK[1] + DECK_REACH:.3f})")
 
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")

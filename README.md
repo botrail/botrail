@@ -61,8 +61,10 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
 
 ## Try it
 
-Run the bundled demos — a Franka Panda in a small USD factory cell (the
-first run downloads NVIDIA's official Franka asset, ~10 MB):
+Run the bundled demos — a Franka Panda in a small USD factory cell whose
+belt, rack and guarding are ordered from the model catalog (the first run
+downloads NVIDIA's official Franka asset, ~10 MB, and the catalog packages;
+`pip install botrail[catalog]` for those):
 
 ```bash
 python examples/demo.py           # interactive studio: pose, plan, play

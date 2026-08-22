@@ -48,7 +48,7 @@ def bake(call_delay: float = 0.0, dock_y: float = None):
 
 
 def main() -> None:
-    print("== dispatch delay sweep (dock at y = -1.15) ==")
+    print(f"== dispatch delay sweep (dock at y = {cell.DOCK[1]:.2f}) ==")
     print(f"{'late s':>7} | {'cycle s':>8} | {'entry s':>8} | {'transfer @ s':>12}")
     base = None
     for delay in (0.0, 1.0, 2.0, 2.5, 3.0, 4.0, 6.0):
@@ -66,7 +66,7 @@ def main() -> None:
 
     print("== dock depth sweep (call on time) ==")
     print(f"{'dock y':>7} | {'cycle s':>8} | {'entry s':>8} | {'transfer @ s':>12}")
-    for y in (-1.05, -1.10, -1.15, -1.25, -1.35):
+    for y in (-1.10, -1.12, -1.13, -1.14, -1.15):
         row = bake(dock_y=y)
         if isinstance(row, str):
             reason = "vehicle hits the pallet" if "collides" in row else "arm cannot reach"
@@ -74,8 +74,9 @@ def main() -> None:
             continue
         cycle, entry, transfer = row
         print(f"{y:7.2f} | {cycle:8.2f} | {entry:8.2f} | {transfer:12.2f}")
-    print("-> the feasible band is narrow, and it is the *layout* that sets")
-    print("   it: the pallet keeps the vehicle out, the arm's reach pulls it in")
+    print("-> 30 mm of band, and it is the *layout* that sets it: the pallet")
+    print("   keeps the vehicle out, the arm's reach pulls it in, and the")
+    print("   carton has to land on the deck rather than over its edge")
 
     print("\nEvery row is a deterministic bake: re-running prints the same")
     print("numbers, which is what makes an arrival-variation study something")

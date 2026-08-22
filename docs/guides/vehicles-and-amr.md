@@ -66,7 +66,7 @@ While a vehicle is travelling, every scan tick tests its body and its load
 against everything else. A contact is a hard, timestamped failure:
 
 ```
-vehicle `agv` collides with `/World/Pallet/DeckBoard_1` at t = 9.320s
+vehicle `agv` collides with `/World/Pallet/DeckBoard_1` at t = 10.570s
 (body part `agv/base`); widen the aisle or re-teach the path
 ```
 

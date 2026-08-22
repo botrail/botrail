@@ -9,9 +9,10 @@ structured like a real cell — *planned* transfer moves between stations,
 *guarded* ramp moves (no collision check) for the approach/retreat through
 contact, an internal `carrying` signal, and timer steps. Everything bakes
 into one deterministic timeline (cycle time printed), then exports to USD.
-The same scene also yields the cell's bill of materials: the conveyor, the
-photo-eye and the pedestal are *identified* (`scene.set_part`) and the
-parts list is derived, never typed.
+The same scene also yields the cell's bill of materials: the belt, the rack
+and the guarding came from the catalog and are already identified, the
+photo-eye and the pedestal are *identified* here (`scene.set_part`), and
+the parts list is derived, never typed.
 
 Run with:  python examples/sequence_demo.py [out.usda]
 """
@@ -50,17 +51,11 @@ def build_cycle(scene: bt.Scene) -> str:
 
     # ---- conveyor feed: Box_A starts upstream, a beam guards the pick ---
     # The taught grasp sits at the box's centre, so the pick frame's height
-    # is also where the box rides down the belt.
+    # is also where the box rides down the belt. The belt needs no declaring
+    # here: `conv` is the catalog conveyor demo.py ordered, and its transport
+    # zone came with it — sized to the belt, at the speed the drive is set
+    # to. All this step does is put the part at the head of the queue.
     scene.set_obstacle_pose(BOX, (-0.9, pick[0][1], pick[0][2]))
-    # The transport zone floor sits above the belt slab (top 0.55) so the
-    # advection carries the goods, not the conveyor's own structure.
-    scene.add_conveyor(
-        "conv",
-        zone_position=(-0.45, 0.62, 0.60),
-        zone_size=(1.3, 0.4, 0.14),
-        velocity=(0.15, 0.0, 0.0),
-        running=False,
-    )
     # The beam trips once the box's leading face comes within the beam
     # radius, so parking it half a box downstream of the pick frame fires
     # the latch just as the box reaches the taught grasp — which is what
@@ -142,15 +137,16 @@ def build_cycle(scene: bt.Scene) -> str:
 
 def identify_parts(scene: bt.Scene) -> None:
     """Pins what the cell's equipment *is* — the identity the BOM is
-    derived from. A robot loaded from the catalog would arrive identified
-    (maker, product, specs come off the manifest); this one is NVIDIA's
-    Isaac USD, so it is named here. The scenery of the factory stage is
-    geometry until a part is pinned to it: the pedestal (a whole USD
-    subtree) and the pallet become parts, and the conveyor and its
-    photo-eye get their model numbers. Free attributes (`mass_kg`) are
-    summed by `bom.total()`. Nothing else in the demo changes."""
+    derived from. The belt, the rack and the guarding arrive identified:
+    they came from the catalog, so their part numbers, masses and
+    configurations are already on them. What is left is everything that did
+    not — this robot is NVIDIA's Isaac USD, and the scenery of the factory
+    stage is geometry until a part is pinned to it: the pedestal (a whole
+    USD subtree), the pallet, the photo-eye. Free attributes (`mass_kg`)
+    are summed by `bom.total()`. The four lines below are the difference
+    between a bill you can send to a supplier and one with holes in it —
+    and the catalog lines are the ones nobody had to write."""
     scene.set_part("panda", manufacturer="Franka Robotics", model="Panda", mass_kg=18)
-    scene.set_part("conv", manufacturer="MISUMI", model="GVL-1200-300", mass_kg=48)
     scene.set_part("beam_pick", manufacturer="KEYENCE", model="PZ-G61N", category="sensor.photoelectric")
     scene.set_part("/World/Pedestal", model="PD-500", category="structure.pedestal",
                    description="robot pedestal, 4 anchors", mass_kg=120)

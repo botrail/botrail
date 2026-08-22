@@ -21,17 +21,24 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 sys.path.insert(0, str(EXAMPLES))
 
 CACHE = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
+HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+# The cell is the Isaac Franka on the factory layout, equipped from the model
+# catalog — both have to be cached before this can run.
 pytestmark = pytest.mark.skipif(
-    not (CACHE / "assets" / "franka" / "franka.usd").exists(),
-    reason="Isaac Franka not in the botrail cache (run examples/demo.py once)",
+    not ((CACHE / "assets" / "franka" / "franka.usd").exists()
+         and any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))),
+    reason="the demo cell needs the Isaac Franka and the botrail catalog "
+           "(run examples/demo.py once)",
 )
 
 # Baked on the pinned dependency set. The tolerance absorbs libm-level drift
 # between machines, not behaviour changes — a replan that adds a detour
 # shifts the cycle by far more than this. 2026-08-06: 90.76 → 83.71 when IK
 # gained null-space joint centering; the taught 7-DOF configurations moved
-# off their limits and the transfer plans shortened.
-GOLDEN_CYCLE = 83.71
+# off their limits and the transfer plans shortened. 2026-08-22: 83.71 →
+# 84.16 when both pallets moved 160 mm clear of the pedestal they were
+# standing inside — every transfer reaches that much further.
+GOLDEN_CYCLE = 84.16
 CYCLE_BUDGET = 1.0
 
 
@@ -197,13 +204,20 @@ def test_the_interlock_keeps_the_arms_out_of_each_others_airspace(baked) -> None
     timing the two transfers happen to miss — so asserting "it collides"
     would be asserting a coincidence. Asserting the *separation* is the
     real invariant, and it is the one that fails the moment the interlock
-    goes."""
+    goes.
+
+    The unguarded run is the control: it has to violate the property, or
+    the guarded zero would prove nothing. *How much* it violates it by is
+    the coincidence (0.13 s as the cell stands, seconds when the transfers
+    line up differently, and it moves whenever the layout does), so what is
+    asserted is only that the overlap is real — several rollout ticks, not
+    a boundary artefact."""
     demo, _scene, timeline = baked
     assert demo.shared_airspace(timeline) == 0.0
 
     scene = demo.build_cell()
     unguarded = scene.simulate_sequence(demo.build_cycle(scene, interlocked=False))
-    assert demo.shared_airspace(unguarded) > 0.5
+    assert demo.shared_airspace(unguarded) > 0.05
 
 
 def test_converging_arms_are_caught_by_the_rollout(baked) -> None:

@@ -14,20 +14,20 @@ python examples/sequence_demo.py
 ```
 
 ```text
-cycle time: 15.56s
+cycle time: 16.69s
     0.00 –   6.01  feed
     6.01 –   6.01  latch
     6.01 –   6.61  descend
     6.61 –   7.01  close
     7.01 –   7.01  grasp
     7.01 –   7.61  lift
-    7.61 –  11.35  carry
-   11.35 –  12.15  lower
-   12.15 –  12.15  release
-   12.15 –  12.55  open
-   12.55 –  13.35  retreat
-   13.35 –  13.85  settle
-   13.85 –  15.56  home
+    7.61 –  11.84  carry
+   11.84 –  12.64  lower
+   12.64 –  12.64  release
+   12.64 –  13.04  open
+   13.04 –  13.84  retreat
+   13.84 –  14.34  settle
+   14.34 –  16.69  home
 tracked pick: caught the box 150 mm downstream, belt still running
 exported to cell_seq.usda — view with: usdview cell_seq.usda
 ```
@@ -38,24 +38,27 @@ far the pick would have missed by.
 
 ## The infeed
 
-The demo builds on the [Pose and plan](pose-and-plan.md) scene and gives it
-behavior — a conveyor and a beam:
+The demo builds on the [Pose and plan](pose-and-plan.md) scene, which already
+has a belt: `conv` is the catalog conveyor that cell was ordered with, and its
+transport zone came with it. What this demo adds is a part at the head of the
+queue and a beam to see it arrive:
 
 ```python
---8<-- "examples/sequence_demo.py:48:72"
+--8<-- "examples/sequence_demo.py:48:70"
 ```
 
-Two details are doing real work here. The conveyor's transport zone floats
-*above* the belt slab, so the advection carries the goods and not the
-conveyor's own structure. And the beam is not placed at the pick frame — it is
-placed half a box-width plus a beam-radius downstream, because a beam trips
-when the box's *leading face* reaches it. Placed that way, the latch fires at
-the exact moment the box's center crosses the taught grasp.
+Note what is *not* here — no zone to size, no belt speed to restate. A
+[standard part](../guides/standard-parts.md) carries its own behavior, so a
+sequence only has to start it. What does need care is the beam: it is not
+placed at the pick frame but half a box-width plus a beam-radius downstream,
+because a beam trips when the box's *leading face* reaches it. Placed that
+way, the latch fires at the exact moment the box's center crosses the taught
+grasp.
 
 ## Teaching, hover-first
 
 ```python
---8<-- "examples/sequence_demo.py:74:85"
+--8<-- "examples/sequence_demo.py:72:83"
 ```
 
 Each station is solved hover-first so the grasp warm-starts from the pose right
@@ -81,7 +84,7 @@ which the planner excludes.
 ## The sequence
 
 ```python
---8<-- "examples/sequence_demo.py:100:136"
+--8<-- "examples/sequence_demo.py:98:135"
 ```
 
 Read it the way a PLC programmer would:
@@ -111,7 +114,7 @@ The step table above is `timeline.step_spans`. The 150 mm is two
 [`object_pose`][botrail.SequenceTimeline.object_pose] queries:
 
 ```python
---8<-- "examples/sequence_demo.py:151:155"
+--8<-- "examples/sequence_demo.py:168:172"
 ```
 
 Anything the bake computed is queryable afterwards — that is what the

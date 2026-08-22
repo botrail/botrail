@@ -103,7 +103,10 @@ def main() -> None:
             scene.set_joint_positions(list(tl.sample(t)))
             scene.set_obstacle_pose(BOX, *tl.object_pose(BOX, t))
             scene.attach(BOX, link="/panda/panda_hand", touch_links=TOUCH)
-            page.evaluate("window.__CAM = {pos: [1.5, -0.6, 1.35], look: [-0.1, 0.62, 0.62]}")
+            # From inside the cell, south-east of the pick and clear of the
+            # rack — its top deck stands at 1.35, exactly where this camera
+            # used to sit.
+            page.evaluate("window.__CAM = {pos: [1.25, -0.95, 1.30], look: [0.0, 0.62, 0.62]}")
             time.sleep(1.5)
             page.screenshot(path=OUT / "sequence.png")
             print("wrote sequence.png")

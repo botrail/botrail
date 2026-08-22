@@ -19,15 +19,15 @@ python examples/dual_cell_demo.py
 ```
 
 ```text
-cycle time: 83.71s
-  near  moving 24.02s of 83.71s
-  far   moving 33.17s of 83.71s
-both arms in motion for 11.5s of it
+cycle time: 84.16s
+  near  moving 26.27s of 84.16s
+  far   moving 24.88s of 84.16s
+both arms in motion for 9.0s of it
 stacked 2 course(s) on each pallet from a pool of 6
 exported to cell_dual.usda — view with: usdview cell_dual.usda
 ```
 
-The third line is what the second arm bought: 11.5 s in which both arms were in
+The third line is what the second arm bought: 9 s in which both arms were in
 motion at once — picks overlapped with transfers instead of queueing behind
 them.
 
@@ -132,8 +132,8 @@ python examples/dual_cell_demo.py --clash
 ```
 
 ```text
-the unarbitrated cell happens to run (83.71s), but both arms are over the
-station together for 1.86s.
+the unarbitrated cell happens to run (84.16s), but both arms are over the
+station together for 0.13s.
    Nothing separated them — the transfers merely missed each other.
 
 asked to enter together, they are caught:
@@ -144,8 +144,10 @@ asked to enter together, they are caught:
 
 Two lessons in one run. Dropping the interlock does **not** necessarily crash
 the cell: the unarbitrated bake can succeed, with the zones reporting how long
-both arms were over the station together — nothing separated them, the
-transfers merely missed each other, and "it worked when we tried it" is not a
+both arms were over the station together — 0.13 s here, and that number is
+the point. It is not a margin anybody designed; it is how much the two
+transfers happened to miss by, and it moves whenever anything in the layout
+does. Nothing separated them, and "it worked when we tried it" is not a
 safety argument. Then the `clash` sequence gives them one reason to converge,
 and the rollout catches it at the tick it happens, naming the links. That
 guard does not depend on timing.

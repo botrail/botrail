@@ -10,8 +10,10 @@ python examples/demo.py
 ```
 
 The first run downloads NVIDIA's official Isaac Sim Franka asset (~10 MB) into
-the botrail cache; after that it starts instantly. Then the studio opens with
-the arm standing on its pedestal, and everything below is live.
+the botrail cache, and the cell's equipment from the model catalog (a few
+hundred kB — `pip install botrail[catalog]` if you have not already); after
+that it starts instantly. Then the studio opens with the arm standing on its
+pedestal, and everything below is live.
 
 ## A USD robot
 
@@ -63,6 +65,37 @@ The same cell also authors `/World/Conveyor/PickFrame` and
 `/World/Pallet/PlaceFrame`: the two *taught stations*. Keeping teach points in
 the layout file, not in the program, is what makes the next part work.
 
+## The equipment, ordered
+
+What that layer does *not* model is the belt, the rack and the guarding. Those
+are standard products bought to size, so they come from the
+[model catalog](../guides/robots.md#the-model-catalog) instead — three
+products, each ordered by a [generator](../guides/standard-parts.md) handed a
+catalog id (the guard takes two calls, because two things cross the perimeter
+and each opening breaks the run):
+
+```python
+--8<-- "examples/demo.py:91:118"
+```
+
+Each one is checked against what the package actually sells: ask the fence for
+1.8 m and it answers with the heights it has and stops. The panel widths are
+never written down — each edge of a `GUARD` run is filled with the fewest
+panels that reach the next corner — and the belt arrives as a **device** as
+well as a body, so the [next tutorial](sequence-cell.md) can start it without
+declaring anything. What comes out the other end is a bill of materials with
+part numbers on it:
+
+```text
+| conveyor.belt       | botrail | BCU-400-3800     | 1  | 44.5 kg |
+| structure.rack      | botrail | MR-900x450x1800  | 1  | 18.4 kg |
+| structure.fence     | botrail | MG-2000x1500     | 5  | 16.0 kg |
+| structure.fence.post| botrail | MGP-2000         | 18 |  7.0 kg |
+| structure.door      | botrail | MGD-2000x800     | 1  | 15.6 kg |
+```
+
+[Parts and the BOM](../guides/parts-and-bom.md) picks that up.
+
 ## Teaching grasps by IK
 
 The teach frames are *grasp* poses — the point between the fingertips, tool
@@ -70,7 +103,7 @@ axis along the approach. IK, though, solves for a link. So a taught pose is
 backed off along the tool axis to the hand frame first:
 
 ```python
---8<-- "examples/demo.py:68:95"
+--8<-- "examples/demo.py:142:169"
 ```
 
 `teach_grasp` is the scripted form of dragging the studio's TCP gizmo: solve
