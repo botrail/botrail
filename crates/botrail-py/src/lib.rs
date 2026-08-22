@@ -935,6 +935,9 @@ impl Scene {
     /// This is furniture, not a machine: joints are taken at zero and
     /// nothing here articulates. A robot is `Robot.from_urdf` /
     /// `Robot.from_xacro` and `add_robot`.
+    // The argument list is the Python signature; grouping it would change
+    // the call, not tidy it.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         path, prefix = None, position = None, quaternion = None, args = None,
         geometry = "visual", frames = true, package_paths = None
