@@ -261,11 +261,22 @@ class Spec:
             raise ValueError(f"{self.id}: no mass row for {role} at {wanted}")
         total = float(mass.get("base_kg", 0.0))
         if "per_m2_kg" in mass:
-            side_a, side_b = (float(values[key]) for key in mass["area"])
+            side_a, side_b = (self._dimension(role, values, key) for key in mass["area"])
             total += (side_a / 1000.0) * (side_b / 1000.0) * float(mass["per_m2_kg"])
         for key, coeff in (mass.get("per_mm") or {}).items():
-            total += float(coeff) * float(values[key])
+            total += float(coeff) * self._dimension(role, values, key)
         return round(total, 3)
+
+    def _dimension(self, role: str, values: dict, key: str) -> float:
+        """A dimension the mass is worked out from. Mass follows what the
+        catalog resolved, so a pack that weighs a part by an axis it does not
+        sell is broken rather than merely quiet."""
+        try:
+            return float(values[key])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                f"{self.id}: the mass of {role!r} needs {key}, which this pack does not size"
+            ) from None
 
 
 def _read_manifest(directory: Path) -> dict:

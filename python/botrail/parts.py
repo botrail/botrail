@@ -608,6 +608,21 @@ def _sized(params: dict, key: str, given: Optional[float]) -> Optional[float]:
     return given if value is None else float(value) / 1000.0
 
 
+def _sized_box(spec, params: dict, given, keys) -> tuple[float, float, float]:
+    """The three sides in metres, from the catalog where it sells them and
+    from the caller where it does not. Asking for a size the pack cannot
+    resolve either way says which axis is missing."""
+    if given is not None:
+        for key, value in zip(keys, given):
+            if key in spec.params():
+                params[key] = spec.choose(key, round(float(value) * 1000.0, 3))
+    sides = [_sized(params, key, side) for key, side in zip(keys, given or (None, None, None))]
+    missing = [key[: -len("_mm")] for key, side in zip(keys, sides) if side is None]
+    if missing:
+        raise ValueError(f"{spec.id}: this pack does not size the {', '.join(missing)} — pass size=")
+    return (sides[0], sides[1], sides[2])
+
+
 def _plain(value):
     """2000.0 reads as 2000 — these end up in part numbers and on the BOM."""
     if isinstance(value, float) and abs(value - round(value)) < 1e-6:
@@ -692,14 +707,17 @@ def _slots(
 def table(
     scene,
     name: str,
-    size: Point3,
-    position: Point2 | Point3,
+    size: Optional[Point3] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
     *,
-    top_thickness: float = 0.03,
-    leg: float = 0.04,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    top_thickness: Optional[float] = None,
+    leg: Optional[float] = None,
     yaw: float = 0.0,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
+    top_model: Optional[str] = None,
     color: Color = STEEL,
     **attributes,
 ) -> Built:
@@ -707,27 +725,114 @@ def table(
     `position` (its centre, x, y[, floor z]): a top of `top_thickness` on
     four legs. Adds the frame `<name>/top` at the centre of the top face —
     where a fixture or a workpiece sits — and pins one part
-    (`structure.table`) on the group."""
-    lx, wy, h = size
+    (`structure.table`) on the group.
+
+    With `catalog=` — the id of a table spec pack, or a package directory — a
+    stand you can order: the sides are matched against the ones that are sold
+    (omit `size` for the pack's defaults, so `position` alone will do), the
+    profile section and the board thickness come from the pack, and where the
+    maker sells the board separately it lands on the BOM as its own line.
+
+    `detail="full"` (the default with a catalog) adds the rails under the
+    board and a pad under each foot — decoration that never collides, so the
+    legs and the board stay the only thing a robot can hit."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("table")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
+        top_thickness = (
+            top_thickness
+            if top_thickness is not None
+            else _mm(spec.dimension_mm("top", "thickness", 30.0))
+        )
+        leg = leg if leg is not None else _mm(spec.dimension_mm("frame", "leg", 40.0))
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    if size is None:
+        raise ValueError("table: size is required without a catalog")
+    top_thickness = 0.03 if top_thickness is None else top_thickness
+    leg = 0.04 if leg is None else leg
+    lx, wy, h = (float(v) for v in size)
+    if min(lx, wy, h) <= 0:
+        raise ValueError("table: size must be positive")
+
     x, y = float(position[0]), float(position[1])
     z0 = float(position[2]) if len(position) > 2 else 0.0
     q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
     built = Built(name)
     built.obstacles.append(
         scene.add_box(f"{name}/top", size=(lx, wy, top_thickness), position=(x, y, z0 + h - top_thickness / 2),
                       quaternion=q, color=color)
     )
-    c, s = math.cos(yaw), math.sin(yaw)
-    for i, (sx, sy) in enumerate([(-1, -1), (1, -1), (1, 1), (-1, 1)]):
-        dx, dy = sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2)
-        px, py = x + c * dx - s * dy, y + s * dx + c * dy
+    corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    for i, (sx, sy) in enumerate(corners):
+        px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
         built.obstacles.append(
             scene.add_box(f"{name}/leg{i}", size=(leg, leg, h - top_thickness),
                           position=(px, py, z0 + (h - top_thickness) / 2), quaternion=q, color=color)
         )
     scene.add_frame(f"{name}/top", position=(x, y, z0 + h), quaternion=q)
     built.frames.append(f"{name}/top")
-    scene.set_part(name, kind="group", category="structure.table", **_identity(model, manufacturer, attributes))
+
+    if mode == "full":
+        drawn = _load_trim(
+            scene, built, spec, "frame", f"{name}/trim/frame", (x, y, z0), q,
+            width=lx, depth=wy, height=h, leg=leg, top_thickness=top_thickness,
+        )
+        if drawn:
+            for i in range(len(corners)):
+                scene.set_obstacle_visible(f"{name}/leg{i}", False)
+        else:
+            # An aluminium stand is legs plus the rails that tie them together
+            # under the board, and a pad under each foot.
+            rail = leg * 0.8
+            under = z0 + h - top_thickness - rail / 2
+            for i, (ex, ey) in enumerate([(0, -1), (0, 1), (-1, 0), (1, 0)]):
+                span = (rail * 0.6, wy - 2 * leg, rail) if ex else (lx - 2 * leg, rail * 0.6, rail)
+                px, py = world(ex * (lx / 2 - leg / 2), ey * (wy / 2 - leg / 2))
+                _trim(scene, built, f"{name}/trim/rail{i}", span, (px, py, under), q, DARK_STEEL)
+            for i, (sx, sy) in enumerate(corners):
+                px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
+                _trim(scene, built, f"{name}/trim/foot{i}", (leg * 1.8, leg * 1.8, leg / 4),
+                      (px, py, z0 + leg / 8), q, DARK_STEEL)
+        if _load_trim(
+            scene, built, spec, "top", f"{name}/trim/top", (x, y, z0 + h), q,
+            width=lx, depth=wy, thickness=top_thickness,
+        ):
+            scene.set_obstacle_visible(f"{name}/top", False)
+
+    if spec is None:
+        scene.set_part(name, kind="group", category="structure.table", **_identity(model, manufacturer, attributes))
+        return built
+
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("frame", "structure.table"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("frame", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("frame", **params)), **attributes},
+    )
+    if spec.has_component("top"):
+        # The board is its own article where the maker sells it that way.
+        scene.set_part(
+            f"{name}/top", category=spec.category("top", "structure.table"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=top_model or spec.part_number("top", **params),
+            **_kg(spec.mass_kg("top", **params)),
+        )
     return built
 
 
@@ -737,13 +842,15 @@ def table(
 def pedestal(
     scene,
     name: str,
-    height: float,
-    position: Point2 | Point3,
+    height: Optional[float] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
     *,
-    top: Point2 = (0.35, 0.35),
-    base: Point2 = (0.5, 0.5),
-    column: float = 0.2,
-    plate: float = 0.02,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    top: Optional[Point2] = None,
+    base: Optional[Point2] = None,
+    column: Optional[float] = None,
+    plate: Optional[float] = None,
     yaw: float = 0.0,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -753,7 +860,53 @@ def pedestal(
     """A robot pedestal: base plate, column, top plate, `height` from floor
     to the top face at `position`. Adds the frame `<name>/mount` at the top
     centre — the robot's base pose (`scene.set_robot_base_pose(*scene.frame(
-    "<name>/mount"))`) — and pins one part (`structure.pedestal`)."""
+    "<name>/mount"))`) — and pins one part (`structure.pedestal`).
+
+    With `catalog=` — the id of a pedestal spec pack, or a package directory —
+    a stand you can order: the height is matched against the ones that are
+    sold (omit it for the pack's default) and the column, plates and their
+    footprints come from the pack, so the BOM names the stand a robot is
+    actually bolted to.
+
+    `detail="full"` (the default with a catalog) adds the gussets between the
+    column and the base — decoration that never collides."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("pedestal")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if height is not None and "height_mm" in spec.params():
+            params["height_mm"] = spec.choose("height_mm", round(height * 1000.0, 3))
+        height = _sized(params, "height_mm", height)
+        if height is None:
+            raise ValueError(f"{spec.id}: this pack does not size the height — pass height=")
+        base = base if base is not None else (
+            _mm(spec.dimension_mm("pedestal", "base_w", 500.0)),
+            _mm(spec.dimension_mm("pedestal", "base_d", 500.0)),
+        )
+        top = top if top is not None else (
+            _mm(spec.dimension_mm("pedestal", "top_w", 350.0)),
+            _mm(spec.dimension_mm("pedestal", "top_d", 350.0)),
+        )
+        column = column if column is not None else _mm(spec.dimension_mm("pedestal", "column", 200.0))
+        plate = plate if plate is not None else _mm(spec.dimension_mm("pedestal", "plate", 20.0))
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    if height is None:
+        raise ValueError("pedestal: height is required without a catalog")
+    top = (0.35, 0.35) if top is None else top
+    base = (0.5, 0.5) if base is None else base
+    column = 0.2 if column is None else column
+    plate = 0.02 if plate is None else plate
+    if height <= 0 or column <= 0 or plate <= 0:
+        raise ValueError("pedestal: height, column and plate must be positive")
+
     x, y = float(position[0]), float(position[1])
     z0 = float(position[2]) if len(position) > 2 else 0.0
     q = _yaw_quat(yaw)
@@ -773,7 +926,41 @@ def pedestal(
     )
     scene.add_frame(f"{name}/mount", position=(x, y, z0 + height), quaternion=q)
     built.frames.append(f"{name}/mount")
-    scene.set_part(name, kind="group", category="structure.pedestal", **_identity(model, manufacturer, attributes))
+
+    if mode == "full":
+        drawn = _load_trim(
+            scene, built, spec, "pedestal", f"{name}/trim/stand", (x, y, z0), q,
+            height=height, column=column, plate=plate,
+            base_w=base[0], base_d=base[1], top_w=top[0], top_d=top[1],
+        )
+        if drawn:
+            for part in ("base", "column", "top"):
+                scene.set_obstacle_visible(f"{name}/{part}", False)
+        else:
+            # The gussets that take the moment out of a robot into the floor.
+            c, s_ = math.cos(yaw), math.sin(yaw)
+            reach = max(min(base[0], base[1]) / 2 - column / 2, 0.0) * 0.7
+            rise = min(shaft * 0.35, max(reach * 1.4, plate * 3))
+            web = max(plate / 2, 0.004)
+            if reach > web:
+                for i, (ux, uy) in enumerate([(1, 0), (-1, 0), (0, 1), (0, -1)]):
+                    dx, dy = ux * (column / 2 + reach / 2), uy * (column / 2 + reach / 2)
+                    px, py = x + c * dx - s_ * dy, y + s_ * dx + c * dy
+                    _trim(scene, built, f"{name}/trim/gusset{i}",
+                          (reach if ux else web, reach if uy else web, rise),
+                          (px, py, z0 + plate + rise / 2), q, color)
+
+    if spec is None:
+        scene.set_part(name, kind="group", category="structure.pedestal", **_identity(model, manufacturer, attributes))
+        return built
+
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("pedestal", "structure.pedestal"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("pedestal", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("pedestal", **params)), **attributes},
+    )
     return built
 
 
@@ -826,25 +1013,9 @@ def rack(
         params = {key: spec.default(key) for key in spec.params()}
         for key in [key for key in attributes if key in params]:
             params[key] = spec.choose(key, attributes.pop(key))
-        if size is not None:
-            for key, value in zip(("width_mm", "depth_mm", "height_mm"), size):
-                if key in spec.params():
-                    params[key] = spec.choose(key, round(float(value) * 1000.0, 3))
         if levels is not None and "levels" in spec.params():
             params["levels"] = spec.choose("levels", levels)
-        given = size or (None, None, None)
-        sides = [
-            _sized(params, key, side)
-            for key, side in zip(("width_mm", "depth_mm", "height_mm"), given)
-        ]
-        if any(side is None for side in sides):
-            missing = [
-                key
-                for key, side in zip(("width", "depth", "height"), sides)
-                if side is None
-            ]
-            raise ValueError(f"{spec.id}: this pack does not size the {', '.join(missing)} — pass size=")
-        size = (sides[0], sides[1], sides[2])
+        size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
         if params.get("levels") is not None:
             levels = int(round(float(params["levels"])))
         upright = upright if upright is not None else _mm(spec.dimension_mm("bay", "upright", 40.0))

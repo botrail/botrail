@@ -205,6 +205,84 @@ configuration:
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 # A 2.4 x 1.6 m cell: both edge lengths need more than one panel width.
+# A stand is the other half of the framing catalogue: the aluminium frame is
+# one article and the board on it is another, so the bench takes two lines.
+STAND_MANIFEST = """
+schema_version: '0.1'
+id: acme/stand/frame-bench/r1
+kind: spec
+category: structure.table
+name: Frame Bench
+manufacturer:
+  name: ACME Framing
+distribution: public
+configuration:
+  generator: table
+  params:
+    width_mm:
+      values: [900, 1200, 1500]
+      default: 1200
+    depth_mm:
+      values: [600, 750]
+      default: 600
+    height_mm:
+      values: [700, 750, 800, 900]
+      default: 750
+  components:
+    - role: frame
+      category: structure.table
+      part_number: FB-{width_mm}x{depth_mm}x{height_mm}
+      dimensions_mm: {leg: 40}
+      mass:
+        base_kg: 6.0
+        per_mm: {width_mm: 0.008, depth_mm: 0.006, height_mm: 0.009}
+    - role: top
+      category: structure.table
+      part_number: FB-TOP-{width_mm}x{depth_mm}
+      dimensions_mm: {thickness: 25}
+      mass:
+        base_kg: 1.0
+        per_m2_kg: 14.0
+        area: [width_mm, depth_mm]
+"""
+
+# A pedestal is one article — what a robot is bolted to.
+PILLAR_MANIFEST = """
+schema_version: '0.1'
+id: acme/stand/robot-pillar/r1
+kind: spec
+category: structure.pedestal
+name: Robot Pillar
+manufacturer:
+  name: ACME Framing
+distribution: public
+configuration:
+  generator: pedestal
+  params:
+    height_mm:
+      values: [400, 500, 600, 700]
+      default: 500
+    finish:
+      values: [painted, plated]
+      default: painted
+  components:
+    - role: pedestal
+      category: structure.pedestal
+      part_number: RP-{height_mm}{finish_code}
+      dimensions_mm:
+        column: 180
+        plate: 20
+        base_w: 450
+        base_d: 450
+        top_w: 300
+        top_d: 300
+      codes:
+        finish: {painted: K, plated: P}
+      mass:
+        base_kg: 12.0
+        per_mm: {height_mm: 0.05}
+"""
+
 RING = [(-1.2, -0.6), (1.2, -0.6), (1.2, 1.0), (-1.2, 1.0)]
 
 
@@ -239,6 +317,22 @@ def shelving(tmp_path: Path) -> Path:
     directory = tmp_path / "rack"
     directory.mkdir()
     (directory / "manifest.yaml").write_text(RACK_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def stand(tmp_path: Path) -> Path:
+    directory = tmp_path / "bench"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(STAND_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def pillar(tmp_path: Path) -> Path:
+    directory = tmp_path / "pillar"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(PILLAR_MANIFEST)
     return directory
 
 
@@ -624,6 +718,92 @@ def test_a_pack_that_sizes_only_some_of_it_leaves_the_rest_to_the_caller(tmp_pat
         bt.parts.rack(scene, "other", catalog=directory, position=(2.0, 0.0))
 
 
+# ------------------------------------------------------------ stand, pedestal
+
+
+def test_the_bench_is_a_size_you_can_order_and_the_board_is_its_own_line(stand: Path) -> None:
+    """An aluminium stand is bought as a frame plus a board — two articles,
+    two BOM lines — and the sizes are the ones the maker cuts to."""
+    scene = scene_()
+    built = bt.parts.table(scene, "bench", catalog=stand, position=(0.0, 0.0))
+    # The pack sizes it, so `position` alone was enough.
+    lo, hi = scene.obstacle_bounds("bench/top")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3)) == (1.2, 0.6)
+    assert hi[2] == pytest.approx(0.75)
+    assert built.frames == ["bench/top"]          # where the work sits
+    by = rows(scene)
+    frame = by["bench"]
+    assert frame["model"] == "FB-1200x600x750" and frame["manufacturer"] == "ACME Framing"
+    assert frame["description"] == "Frame Bench"
+    assert frame["catalog"].startswith("acme/stand/frame-bench/r1")
+    # 6.0 + 0.008x1200 + 0.006x600 + 0.009x750
+    assert frame["attributes"]["mass_kg"] == pytest.approx(25.95)
+    board = by["bench/top"]
+    assert board["model"] == "FB-TOP-1200x600" and board["qty"] == 1
+    assert board["attributes"]["mass_kg"] == pytest.approx(11.08)   # 1.0 + 0.72 x 14
+    assert scene.bom().total("mass_kg") == pytest.approx(25.95 + 11.08)
+
+
+def test_a_bench_size_nobody_cuts_is_refused(stand: Path) -> None:
+    scene = scene_()
+    with pytest.raises(ValueError, match=r"width_mm=1000 is not available — choose from 900 / 1200 / 1500"):
+        bt.parts.table(scene, "bench", (1.0, 0.6, 0.75), (0.0, 0.0), catalog=stand)
+    with pytest.raises(ValueError, match="height_mm=850 is not available"):
+        bt.parts.table(scene, "bench", (1.2, 0.6, 0.85), (0.0, 0.0), catalog=stand)
+
+
+def test_the_pedestal_names_the_stand_the_robot_is_bolted_to(pillar: Path) -> None:
+    """The mount frame is the robot's base pose, and the line under it says
+    which stand was ordered — the finish is part of that number."""
+    scene = scene_()
+    built = bt.parts.pedestal(scene, "ped", catalog=pillar, position=(1.0, 0.0))
+    assert built.frames == ["ped/mount"]
+    assert scene.frame("ped/mount")[0][2] == pytest.approx(0.5)     # the pack's height
+    lo, hi = scene.obstacle_bounds("ped/base")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3)) == (0.45, 0.45)
+    lo, hi = scene.obstacle_bounds("ped/column")
+    assert round(hi[0] - lo[0], 3) == 0.18
+    row = rows(scene)["ped"]
+    assert row["model"] == "RP-500K" and row["attributes"]["finish"] == "painted"
+    assert row["attributes"]["mass_kg"] == pytest.approx(37.0)      # 12.0 + 0.05 x 500
+    # The finish is an axis of the part number, chosen by name.
+    scene2 = scene_()
+    bt.parts.pedestal(scene2, "ped", catalog=pillar, position=(0.0, 0.0), height=0.7, finish="plated")
+    assert rows(scene2)["ped"]["model"] == "RP-700P"
+    with pytest.raises(ValueError, match="height_mm=550 is not available"):
+        bt.parts.pedestal(scene_(), "ped", catalog=pillar, position=(0.0, 0.0), height=0.55)
+
+
+def test_a_stand_pack_without_a_height_leaves_it_to_the_caller(tmp_path: Path) -> None:
+    """Not every stand is sold by height (a maker may cut the column to
+    order), and the generator says so rather than guessing."""
+    directory = tmp_path / "cut"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(
+        PILLAR_MANIFEST.replace("""    height_mm:
+      values: [400, 500, 600, 700]
+      default: 500
+""", "")
+        .replace("RP-{height_mm}{finish_code}", "RP-CUT{finish_code}")
+        .replace("        per_mm: {height_mm: 0.05}\n", "")
+    )
+    scene = scene_()
+    bt.parts.pedestal(scene, "ped", 0.62, (0.0, 0.0), catalog=directory)
+    assert scene.frame("ped/mount")[0][2] == pytest.approx(0.62)
+    assert rows(scene)["ped"]["model"] == "RP-CUTK"
+    with pytest.raises(ValueError, match="does not size the height — pass height="):
+        bt.parts.pedestal(scene_(), "ped", catalog=directory, position=(0.0, 0.0))
+    # ...and a pack that weighs a part by an axis it does not sell says so,
+    # rather than quietly leaving the term out.
+    (directory / "manifest.yaml").write_text(
+        (directory / "manifest.yaml").read_text().replace(
+            "        base_kg: 12.0\n", "        base_kg: 12.0\n        per_mm: {height_mm: 0.05}\n"
+        )
+    )
+    with pytest.raises(ValueError, match="the mass of 'pedestal' needs height_mm"):
+        bt.parts.pedestal(scene_(), "ped", 0.62, (0.0, 0.0), catalog=directory)
+
+
 # -------------------------------------------------------------------- detail
 
 
@@ -636,17 +816,19 @@ def _drawn(scene, tmp_path: Path) -> dict:
 
 
 def test_full_detail_draws_the_machine_without_changing_what_it_hits(
-    pack: Path, belt: Path, shelving: Path, tmp_path: Path
+    pack: Path, belt: Path, shelving: Path, stand: Path, pillar: Path, tmp_path: Path
 ) -> None:
     """`detail="full"` is decoration: a mesh panel gets its frame and wire, a
-    conveyor its rollers and drive, a rack its beams and braces — all of it
-    out of collision, with the massing underneath untouched. How a cell looks
-    never changes how it verifies."""
+    conveyor its rollers and drive, a rack its beams and braces, a stand its
+    rails and feet — all of it out of collision, with the massing underneath
+    untouched. How a cell looks never changes how it verifies."""
     def build(mode: str):
         scene = scene_()
         bt.parts.fence(scene, "fence", path=RING, catalog=pack, door=(0, 1), detail=mode)
         bt.parts.conveyor(scene, "conv", catalog=belt, position=(0.0, 2.0), detail=mode)
         bt.parts.rack(scene, "rack", catalog=shelving, position=(2.0, 2.0), detail=mode)
+        bt.parts.table(scene, "bench", catalog=stand, position=(-2.0, 2.0), detail=mode)
+        bt.parts.pedestal(scene, "ped", catalog=pillar, position=(-2.0, -2.0), detail=mode)
         return scene
 
     plain, full = build("plain"), build("full")
@@ -662,7 +844,10 @@ def test_full_detail_draws_the_machine_without_changing_what_it_hits(
     # The panels themselves stop being drawn — the frame and wire stand in.
     panels = [n for n in massing if "/panels/" in n]
     assert panels and all(flags[n] == (True, False) for n in panels)
-    assert {"fence/trim/e0_0/frame_t", "conv/trim/drive", "rack/trim/brace_l"} <= set(trim)
+    assert {
+        "fence/trim/e0_0/frame_t", "conv/trim/drive", "rack/trim/brace_l",
+        "bench/trim/rail0", "bench/trim/foot0", "ped/trim/gusset0",
+    } <= set(trim)
 
 
 def test_a_hand_written_part_stays_the_plain_massing(shelving: Path, tmp_path: Path) -> None:
