@@ -1,12 +1,21 @@
-<?xml version="1.0"?>
-<!-- A hand-authored router spindle for the machining demo: motor body,
-     collet, and an 8 mm end mill extending out of the flange (+Z of the
-     mount, as tools do). The `tip` link is the TCP; its frame is flipped
-     a half-turn about X so its +Z runs from the cutter tip back toward
-     the tool body — the axis convention `PathTarget.tool_axis` and the
-     5-DOF axis-aligned IK expect. Collision is authored as primitives;
-     in C0 the stock is display-only (a cutter is supposed to touch it),
-     fixtures and clamps stay live. -->
+//! Hand-authored URDF fixtures for this crate's module tests.
+//!
+//! These live in the crate rather than under `examples/` because no demo
+//! loads them any more — the machining and painting demos order their tools
+//! from the catalog. Keeping the tests' own tool here makes them
+//! self-contained (no example asset can be retired out from under them) and
+//! keeps `examples/` to what a reader is meant to run.
+
+/// A router spindle: motor body, collet, and an 8 mm end mill extending out
+/// of the flange (`+Z` of the mount, as tools do). The `tip` link is the
+/// TCP; its frame is flipped a half-turn about X so its `+Z` runs from the
+/// cutter tip back toward the tool body — the axis convention
+/// `PathTarget::tool_axis` and the 5-DOF axis-aligned IK
+/// expect. Collision is authored as primitives.
+///
+/// The paint tests use it too: what they need from a tool is a TCP standing
+/// off the flange with that axis convention, which this already is.
+pub(crate) const SPINDLE_URDF: &str = r#"<?xml version="1.0"?>
 <robot name="spindle">
   <link name="spindle_mount">
     <visual>
@@ -51,4 +60,4 @@
     <parent link="cutter"/><child link="tip"/>
     <origin xyz="0 0 0.03" rpy="3.14159265358979 0 0"/>
   </joint>
-</robot>
+</robot>"#;

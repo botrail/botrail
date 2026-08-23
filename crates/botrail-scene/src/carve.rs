@@ -542,7 +542,7 @@ mod tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// Arm + spindle, so the TCP is the cutter tip with local `+Z`
     /// pointing tip-toward-body (the machining axis convention).

@@ -1515,7 +1515,7 @@ mod tests {
     fn allowed_contact_cuts_the_stock_but_rapids_stay_strict() {
         // Arm + spindle over a *live* stock plate: cutting into it is only
         // legal through the allowed pair, and never during a rapid.
-        const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+        const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
         let arm = RobotModel::from_urdf_str(ARM).unwrap();
         let spindle = RobotModel::from_urdf_str(SPINDLE).unwrap();
         let robot = arm

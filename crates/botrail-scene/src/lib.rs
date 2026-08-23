@@ -25,6 +25,9 @@ pub mod toolpath;
 pub mod verify;
 pub mod wire;
 
+#[cfg(test)]
+mod testdata;
+
 use std::sync::Arc;
 
 use motion::{Motion, MotionError, PlannedMotion, Segment};

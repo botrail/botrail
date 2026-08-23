@@ -2403,7 +2403,7 @@ mod tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn round_gun() -> Applicator {
         Applicator {
@@ -2905,6 +2905,7 @@ mod standoff_tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn scene_with_plate(size: [f64; 3], pose: Isometry3<f64>) -> Scene {
         let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(ARM).unwrap()));
@@ -3096,8 +3097,7 @@ mod standoff_tests {
         // A parked gun over the plate, checked off a hand-built timeline:
         // the FK-driven probe has to agree with the authored one.
         let arm = RobotModel::from_urdf_str(ARM).unwrap();
-        let tool = RobotModel::from_urdf_str(include_str!("../../../examples/assets/spindle.urdf"))
-            .unwrap();
+        let tool = RobotModel::from_urdf_str(SPINDLE).unwrap();
         let robot = arm
             .attach_tool(
                 &tool,
@@ -3181,8 +3181,7 @@ mod standoff_tests {
     #[test]
     fn naming_the_face_makes_the_statistics_path_independent() {
         let arm = RobotModel::from_urdf_str(ARM).unwrap();
-        let tool = RobotModel::from_urdf_str(include_str!("../../../examples/assets/spindle.urdf"))
-            .unwrap();
+        let tool = RobotModel::from_urdf_str(SPINDLE).unwrap();
         let robot = arm
             .attach_tool(
                 &tool,
@@ -3271,7 +3270,7 @@ mod mesh_target_tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// A mesh target must take paint like a primitive one does — the
     /// self-shadow ray has to know the patch's own triangle from something
@@ -3379,7 +3378,7 @@ mod trigger_tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// The authoring trap: a sequence that opens the gun in the same step
     /// it starts the toolpath. The rollout plans a joint-space approach in
@@ -3561,7 +3560,7 @@ mod brush_tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn gun_robot() -> Arc<RobotModel> {
         let arm = RobotModel::from_urdf_str(ARM).unwrap();
@@ -3868,7 +3867,7 @@ mod palette_tests {
     use std::sync::Arc;
 
     const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
-    const SPINDLE: &str = include_str!("../../../examples/assets/spindle.urdf");
+    const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn coat_with(options: CoatOptions, plate_color: Option<[f32; 3]>) -> FilmCoat {
         let arm = RobotModel::from_urdf_str(ARM).unwrap();

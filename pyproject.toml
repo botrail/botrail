@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "botrail"
-version = "0.6.0"
+version = "0.7.0"
 description = "Build robot cells as code, verify them deterministically, ship them as USD — ROS-free, with a web-based 3D studio"
 readme = "README.md"
 requires-python = ">=3.9"
