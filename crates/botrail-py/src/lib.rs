@@ -319,6 +319,96 @@ fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isom
         .into()
 }
 
+/// One footfall as Python sees it: `(leg, lift, land, (x, y, z))`.
+type FootfallRow = (String, f64, f64, (f64, f64, f64));
+
+/// A gait from a `bt.Gait` (anything with a `_spec()` returning the plain
+/// dict `bt.gait.Gait._spec` builds) or from such a dict directly.
+fn gait_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::GaitSpec> {
+    use botrail_scene::seq::{FootContact, GaitPattern, GaitSpec, LegSpec};
+    use pyo3::types::PyDict;
+    let spec: Bound<'_, PyDict> = if obj.is_instance_of::<PyDict>() {
+        obj.downcast::<PyDict>()?.clone()
+    } else {
+        obj.call_method0("_spec")
+            .map_err(|_| {
+                PyValueError::new_err("gait must be a bt.Gait (or the dict its _spec() builds)")
+            })?
+            .downcast_into::<PyDict>()?
+    };
+    let field = |key: &str| -> PyResult<Bound<'_, PyAny>> {
+        spec.get_item(key)?
+            .ok_or_else(|| PyValueError::new_err(format!("gait spec lacks `{key}`")))
+    };
+    let optional = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        Ok(spec.get_item(key)?.filter(|v| !v.is_none()))
+    };
+    let legs: Vec<(String, String, String)> = field("legs")?.extract()?;
+    let legs = legs
+        .into_iter()
+        .map(|(name, foot, contact)| {
+            let contact = match contact.as_str() {
+                "point" => FootContact::Point,
+                "sole" => FootContact::Sole { yaw_free: false },
+                "sole_yaw_free" => FootContact::Sole { yaw_free: true },
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "leg `{name}`: contact must be point, sole or sole_yaw_free, got `{other}`"
+                    )))
+                }
+            };
+            Ok(LegSpec {
+                name,
+                foot,
+                contact,
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let pattern: String = match optional("pattern")? {
+        Some(v) => v.extract()?,
+        None => "trot".to_string(),
+    };
+    let pattern = match pattern.as_str() {
+        "walk" => GaitPattern::Walk,
+        "trot" => GaitPattern::Trot,
+        "biped" => GaitPattern::Biped,
+        "custom" => GaitPattern::Custom {
+            duty: field("duty")?.extract()?,
+            phases: field("phases")?.extract()?,
+        },
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "pattern must be walk, trot, biped or custom, got `{other}`"
+            )))
+        }
+    };
+    let number = |key: &str, default: f64| -> PyResult<f64> {
+        match optional(key)? {
+            Some(v) => v.extract(),
+            None => Ok(default),
+        }
+    };
+    let pairs = |key: &str| -> PyResult<Vec<(String, f64)>> {
+        match optional(key)? {
+            Some(v) => v.extract(),
+            None => Ok(Vec::new()),
+        }
+    };
+    Ok(GaitSpec {
+        body_link: optional("body_link")?.map(|v| v.extract()).transpose()?,
+        legs,
+        pattern,
+        period: number("period", 0.5)?,
+        lift: number("lift", 0.06)?,
+        stance: pairs("stance")?,
+        max_stride: number("max_stride", 0.4)?,
+        foot_radius: number("foot_radius", 0.0)?,
+        arm_swing: pairs("arm_swing")?,
+        bob: number("bob", 0.0)?,
+        lateral: number("lateral", 0.0)?,
+    })
+}
+
 /// An obstacle pose in a scenario dict: a bare position (upright) or a
 /// `(position, quaternion)` pair.
 #[derive(FromPyObject)]
@@ -682,18 +772,29 @@ impl Scene {
     /// arm and a chassis become an AMR. Planned motions cannot start while
     /// the vehicle is driving (a plan is baked in world coordinates); ramps
     /// can, which is how an arm stows itself on the move.
-    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None))]
+    ///
+    /// With a `gait` (a `bt.Gait`) the robot *is* the vehicle's legs: it
+    /// walks whenever the vehicle drives, and stands in the gait's stance
+    /// when it does not. The offset then defaults to the one that puts the
+    /// stance feet on the vehicle plane, and the robot is set to its stance.
+    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None))]
     fn mount_robot(
         &self,
         device: &str,
         offset_position: Option<[f64; 3]>,
         offset_quaternion: Option<[f64; 4]>,
         robot: Option<&str>,
+        gait: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
-        let offset = pose_from(offset_position.unwrap_or([0.0; 3]), offset_quaternion);
+        let gait = gait.map(gait_from_py).transpose()?;
+        let offset = match (offset_position, offset_quaternion, &gait) {
+            // Derived from the stance: the feet on the floor.
+            (None, None, Some(_)) => None,
+            (position, quaternion, _) => Some(pose_from(position.unwrap_or([0.0; 3]), quaternion)),
+        };
         self.hub
-            .mount_robot(index, device, offset)
+            .mount_robot_with(index, device, offset, gait)
             .map_err(scene_err)
     }
 
@@ -4501,6 +4602,28 @@ impl SequenceTimeline {
     #[pyo3(signature = (t, robot = None))]
     fn sample(&self, t: f64, robot: Option<&str>) -> PyResult<Vec<f64>> {
         Ok(self.track_for(robot)?.1.trajectory.sample(t))
+    }
+
+    /// The steps a walking robot's legs took, as `(leg, lift, land,
+    /// (x, y, z))` in landing order: the foot left its previous anchor at
+    /// `lift` and has stood at the position since `land`. Empty unless the
+    /// robot walks its vehicle (a `bt.Gait` on its mount).
+    #[pyo3(signature = (robot = None))]
+    fn footfalls(&self, robot: Option<&str>) -> PyResult<Vec<FootfallRow>> {
+        Ok(self
+            .track_for(robot)?
+            .1
+            .footfalls
+            .iter()
+            .map(|f| {
+                (
+                    f.leg.clone(),
+                    f.lift,
+                    f.land,
+                    (f.position.x, f.position.y, f.position.z),
+                )
+            })
+            .collect())
     }
 
     /// A robot's move intervals as `(label, start, end)` — the intervals a

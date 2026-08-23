@@ -361,6 +361,80 @@ pub struct RobotMount {
     pub device: String,
     /// Where the robot's base sits in the vehicle's frame.
     pub offset: Isometry3<f64>,
+    /// Set when the robot *is* the vehicle's legs: while the vehicle
+    /// drives, the gait swings these legs so that every planted foot stays
+    /// where it touched down. Not an action — a property of the mount, the
+    /// way a wheel's spin is a property of the axle it sits on.
+    pub gait: Option<GaitSpec>,
+}
+
+/// How a mounted robot walks. Authored once per machine (a catalog package
+/// declares it); the scan engine derives everything else from the vehicle's
+/// motion. See design/design-legged.md §4.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GaitSpec {
+    /// The link the legs hang from; `None` is the root link.
+    pub body_link: Option<String>,
+    /// The legs, in the order the pattern's phase table is read.
+    pub legs: Vec<LegSpec>,
+    pub pattern: GaitPattern,
+    /// Cycle period in seconds.
+    pub period: f64,
+    /// Swing apex above the ground, metres.
+    pub lift: f64,
+    /// The standing configuration as `(joint, value)` pairs. Must name
+    /// every leg joint; other joints keep their mount-time value.
+    pub stance: Vec<(String, f64)>,
+    /// Longest stride the legs can take between two landings, metres.
+    /// `speed · period` (and the pivot's outer-foot arc) must stay under it.
+    pub max_stride: f64,
+    /// How far the foot link's origin stands above the floor: a ball
+    /// foot's radius, or an ankle frame's height over its sole. Zero for a
+    /// frame on the sole itself.
+    pub foot_radius: f64,
+    /// Joints swung in time with the first leg, `(joint, amplitude)` —
+    /// a biped's arms. Not swung while the robot holds something or a
+    /// ramp is driving them.
+    pub arm_swing: Vec<(String, f64)>,
+    /// Body sway while walking, metres: `bob` up and down twice a cycle,
+    /// `lateral` over the planted leg once a cycle. The legs absorb it; the
+    /// feet do not move. Zero is a body that rides rigidly, as a quadruped
+    /// at a trot very nearly does.
+    pub bob: f64,
+    pub lateral: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegSpec {
+    /// Display name (`FL`, `L`, ...).
+    pub name: String,
+    /// The foot link: its origin is what touches the floor.
+    pub foot: String,
+    pub contact: FootContact,
+}
+
+/// What a foot is to the floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FootContact {
+    /// A ball or a point: position only, any orientation.
+    Point,
+    /// A sole that lies flat on the floor; `yaw_free` lets the foot point
+    /// where the leg's DOF take it.
+    Sole { yaw_free: bool },
+}
+
+/// Which legs fly when. The built-ins are laid over the legs in declaration
+/// order — `FL, FR, RL, RR` for the quadruped patterns, `L, R` for biped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GaitPattern {
+    /// Lateral-sequence walk, duty 0.75: three feet down at all times.
+    Walk,
+    /// Diagonal pairs in antiphase, duty 0.5 — the quadruped's cruise.
+    Trot,
+    /// Alternating legs, duty 0.6.
+    Biped,
+    /// Any duty factor and per-leg phases in `[0, 1)`.
+    Custom { duty: f64, phases: Vec<f64> },
 }
 
 #[derive(Debug, Clone)]
@@ -1172,6 +1246,31 @@ impl Scene {
         }
         for device in &self.devices {
             self.validate_vehicle(device).map_err(|m| (None, m))?;
+        }
+        // A gait is checked against the model at mount time; what it cannot
+        // know then is how fast the vehicle it rides will drive.
+        for robot in self.robots() {
+            let Some(mount) = &robot.mount else { continue };
+            let Some(spec) = &mount.gait else { continue };
+            let resolved = crate::gait::resolve_gait(&robot.model, spec, robot.joint_positions())
+                .map_err(|m| (None, format!("robot `{}` gait: {m}", robot.name)))?;
+            let rates = self.devices.iter().find_map(|d| match &d.kind {
+                DeviceKind::Vehicle {
+                    speed, turn_speed, ..
+                } if d.name == mount.device => Some((*speed, *turn_speed)),
+                _ => None,
+            });
+            let Some((speed, turn_speed)) = rates else {
+                return Err((
+                    None,
+                    format!(
+                        "robot `{}` is mounted on `{}`, which is not a vehicle",
+                        robot.name, mount.device
+                    ),
+                ));
+            };
+            crate::gait::check_stride(&resolved, &mount.offset, speed, turn_speed)
+                .map_err(|m| (None, format!("robot `{}`: {m}", robot.name)))?;
         }
         for sensor in &self.sensors {
             let Some(mount) = &sensor.mount else { continue };

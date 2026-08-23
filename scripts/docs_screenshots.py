@@ -10,6 +10,7 @@ the examples, so the first run downloads the asset (~10 MB, cached).
 Writes docs/assets/studio/*.png — commit the results.
 """
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ import weld_line_demo  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 from sequence_demo import BOX, TOUCH, build_cycle  # noqa: E402
 import agv_cell_demo  # noqa: E402
+import legged_patrol_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -154,6 +156,34 @@ def main() -> None:
             time.sleep(20.5)
             page.screenshot(path=OUT / "vehicle.png")
             print("wrote vehicle.png")
+            server.stop()
+
+        if want("legged"):
+            # ---- 5b. the legged cell: a quadruped carrying a part out ----
+            # The Go2 is fetched from Unitree's repository on first run
+            # (~20 MB, cached); `--robot quad` would do without, but the
+            # picture is the real machine.
+            scene = legged_patrol_demo.build_scene("go2")
+            names = legged_patrol_demo.build_cycle(scene)
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(2.0)
+            scene.simulate_sequences(names, max_duration=90.0)
+            page.wait_for_selector(".timeline-bands", timeout=60000)
+            page.evaluate("window.__CAM = {pos: [4.6, -2.4, 1.7], look: [2.6, 0.4, 0.35]}")
+            # Mid-walk to the bay with the part on its back, ~21 s in: wait
+            # on the studio's own clock rather than ours.
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                text = page.locator(".timeline-bands").locator("xpath=..").inner_text()
+                times = re.findall(r"(\d+\.\d+)s", text)
+                if times and float(times[-1]) >= 21.0:
+                    break
+                time.sleep(0.1)
+            page.screenshot(path=OUT / "legged.png")
+            print("wrote legged.png")
             server.stop()
 
         # ---- 6. the I/O map: the wired pick cell, table over the viewport,

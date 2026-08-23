@@ -100,6 +100,36 @@ pub enum SeqError {
         body: String,
         obstacle: String,
     },
+    /// A robot riding a travelling vehicle — its legs, its arm, what it
+    /// holds — met the environment. The vehicle's aisle check, for the part
+    /// of the machine that is a robot rather than a body.
+    #[error(
+        "robot `{robot}` riding `{vehicle}` collides with `{obstacle}` at t = {t:.3}s \
+         (`{part}`); widen the aisle or re-teach the path"
+    )]
+    RiderCollision {
+        t: f64,
+        vehicle: String,
+        robot: String,
+        part: String,
+        obstacle: String,
+    },
+    /// A walking leg could not reach its footfall: the vehicle's rates ask
+    /// more of the leg than its geometry gives. Authoring, like the aisle
+    /// check — a slower vehicle, a shorter gait period, a lower stance.
+    #[error(
+        "robot `{robot}`: leg `{leg}` cannot reach its footfall at t = {t:.3}s \
+         (a {stride:.3} m stride, {detail}); lower the vehicle speed or shorten the \
+         gait period"
+    )]
+    GaitReach {
+        t: f64,
+        robot: String,
+        leg: String,
+        stride: f64,
+        /// How far the solve fell short.
+        detail: String,
+    },
 }
 
 /// ` — forced: a=false, b=true` for a timeout under faults, empty otherwise.
@@ -249,7 +279,7 @@ pub enum TrackSpan {
 }
 
 /// Advances `from` by one vehicle motion piece lasting `dt`.
-fn apply_piece(from: &Isometry3<f64>, piece: &VehiclePiece, dt: f64) -> Isometry3<f64> {
+pub(crate) fn apply_piece(from: &Isometry3<f64>, piece: &VehiclePiece, dt: f64) -> Isometry3<f64> {
     match piece {
         VehiclePiece::Lin { velocity } => {
             let mut next = *from;
@@ -401,6 +431,13 @@ pub struct RobotTrack {
     /// rides a vehicle. Spans tile `[0, duration]` in the same vocabulary
     /// the load uses, because it is the same rigid motion.
     pub base: Option<Vec<TrackSpan>>,
+    /// Every step the robot's legs took, in landing order — empty unless
+    /// it walks (a gait on its mount). The joints carry the legs' motion
+    /// like any other; this is the plan they followed.
+    pub footfalls: Vec<crate::gait::Footfall>,
+    /// The body's bob and lean over each walk, composed onto `base` by
+    /// [`SequenceTimeline::base_pose`]. Empty unless the gait sways.
+    pub sway: Vec<crate::gait::BodySway>,
 }
 
 /// One motion/ramp as the rollout planned it: which program step fired it
@@ -632,9 +669,11 @@ impl SequenceTimeline {
         Self::span_pose(&track.spans, link_poses, t)
     }
 
-    /// Where a mounted robot's base was at `t`.
+    /// Where a mounted robot's base was at `t`: the rigid ride on its
+    /// vehicle, plus the body's sway while it walks.
     pub fn base_pose(track: &RobotTrack, t: f64) -> Option<Isometry3<f64>> {
-        Self::span_pose(track.base.as_deref()?, &[], t)
+        let rigid = Self::span_pose(track.base.as_deref()?, &[], t)?;
+        Some(rigid * crate::gait::sway_offset(&track.sway, t))
     }
 
     /// Pose from a span list at `t` (spans tile `[0, duration]`; the last
@@ -832,6 +871,8 @@ struct RobotRuntime {
     planned: Vec<PlannedMove>,
     /// Base motion, for a robot riding a vehicle.
     base: Option<Vec<TrackSpan>>,
+    /// The legs, for a robot that walks its vehicle.
+    gait: Option<GaitRuntime>,
 }
 
 impl RobotRuntime {
@@ -844,6 +885,66 @@ impl RobotRuntime {
         self.positions.push(q);
         self.velocities.push(v);
     }
+
+    /// Drops every baked waypoint after `t`. A gait bakes tick by tick,
+    /// and a move's pre-baked future (a ramp's end point) would block that
+    /// — the move is re-baked from its own samples when the gait lets go.
+    fn truncate_after(&mut self, t: f64) {
+        while self.times.last().is_some_and(|last| *last > t + 1e-9) {
+            self.times.pop();
+            self.positions.pop();
+            self.velocities.pop();
+        }
+    }
+
+    /// Re-bakes what the in-flight move still has to do after `t`.
+    fn rebake_active_tail(&mut self, t: f64) {
+        let Some(active) = &self.active else { return };
+        let tail: Vec<(f64, Vec<f64>, Vec<f64>)> = match active {
+            ActiveMove::Ramp {
+                start,
+                duration,
+                to,
+                ..
+            } => vec![(start + duration, to.clone(), vec![0.0; to.len()])],
+            ActiveMove::Traj { start, traj } => (0..traj.times.len())
+                .map(|i| {
+                    (
+                        start + traj.times[i],
+                        traj.positions[i].clone(),
+                        traj.velocities[i].clone(),
+                    )
+                })
+                .collect(),
+        };
+        for (time, q, v) in tail {
+            if time > t + 1e-9 {
+                self.append_waypoint(time, q, v);
+            }
+        }
+    }
+
+    /// Whether the gait is driving the legs right now (walking, or
+    /// settling after arrival).
+    fn walking(&self) -> bool {
+        self.gait.as_ref().is_some_and(|g| g.plan.is_some())
+    }
+}
+
+/// A walking robot's legs: the gait as resolved against its model, the
+/// plan of the drive in progress, and every footfall taken so far.
+struct GaitRuntime {
+    gait: crate::gait::ResolvedGait,
+    offset: Isometry3<f64>,
+    /// `Some` from dispatch until the last foot has settled.
+    plan: Option<crate::gait::GaitPlan>,
+    history: Vec<crate::gait::Footfall>,
+    /// The sway currently composed onto the world base (identity when
+    /// standing): the vehicle drives the base *under* it, so it is undone
+    /// before the rigid ride is advanced and recorded.
+    sway: Isometry3<f64>,
+    /// Every walk's sway, for the timeline.
+    sways: Vec<crate::gait::BodySway>,
 }
 
 /// One program's scan-loop cursor. Several of these advancing over one
@@ -977,6 +1078,11 @@ struct Rollout {
     /// order. A pinned lane is seeded with its value and every later
     /// write to it — sensor geometry, a program's `set` — is dropped.
     forced: Vec<(usize, bool)>,
+
+    /// The vehicles that moved this tick, each with what it carries (body
+    /// and load) — what its riding robots are checked against the rest of
+    /// the world *not* being.
+    moving: Vec<(String, Vec<String>)>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -1163,7 +1269,8 @@ enum Leg {
 }
 
 /// The net rigid motion a vehicle applied over one sub-interval of a tick.
-enum VehiclePiece {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VehiclePiece {
     Lin {
         velocity: Vector3<f64>,
     },
@@ -1545,6 +1652,18 @@ impl Rollout {
             .iter()
             .map(|sr| {
                 let q = sr.joint_positions().to_vec();
+                let gait = sr.mount.as_ref().and_then(|mount| {
+                    let spec = mount.gait.as_ref()?;
+                    Some(GaitRuntime {
+                        gait: crate::gait::resolve_gait(&sr.model, spec, &q)
+                            .expect("a mounted gait was validated against its model"),
+                        offset: mount.offset,
+                        plan: None,
+                        history: Vec::new(),
+                        sway: Isometry3::identity(),
+                        sways: Vec::new(),
+                    })
+                });
                 RobotRuntime {
                     times: vec![0.0],
                     positions: vec![q.clone()],
@@ -1557,6 +1676,7 @@ impl Rollout {
                     moves: Vec::new(),
                     planned: Vec::new(),
                     base: sr.mount.as_ref().map(|_| Vec::new()),
+                    gait,
                 }
             })
             .collect();
@@ -1599,6 +1719,7 @@ impl Rollout {
             sensors,
             devices,
             forced,
+            moving: Vec::new(),
             objects,
             signals,
             step_spans: Vec::new(),
@@ -1725,7 +1846,17 @@ impl Rollout {
             // Under a track the commanded joints are solved in
             // `follow_tracked_parts`, once this tick's part motion is known.
             if rt.tracking.is_none() {
-                rt.q = rt.q_nom.clone();
+                let mut q = rt.q_nom.clone();
+                // While the legs walk they are the gait's: a ramp alongside
+                // the drive moves the rest of the robot (`advance_gaits`).
+                if let Some(gr) = rt.gait.as_ref() {
+                    if let Some(plan) = &gr.plan {
+                        for qi in plan.owned(&gr.gait) {
+                            q[qi] = rt.q[qi];
+                        }
+                    }
+                }
+                rt.q = q;
                 self.world
                     .set_joint_positions_for(r, rt.q.clone())
                     .expect("sampled q has robot DOF");
@@ -2044,8 +2175,46 @@ impl Rollout {
         }
         self.return_to_magazines(returned);
         self.feed_from_sources(dt);
+        // Legs after the vehicles: a foot target is solved against where
+        // the body is *now*.
+        self.advance_gaits()?;
         self.follow_tracked_parts()?;
+        self.check_rider_collisions()?;
         self.check_robot_collisions()?;
+        Ok(())
+    }
+
+    /// The riders' aisle check: a robot on a vehicle that moved this tick
+    /// — its links and what it holds — against everything the vehicle does
+    /// not carry. After the legs and any track have been solved, so it
+    /// sees the robot where it actually is.
+    fn check_rider_collisions(&mut self) -> Result<(), SeqError> {
+        let moving = std::mem::take(&mut self.moving);
+        for (vehicle, carried) in &moving {
+            for r in 0..self.world.robots().len() {
+                let rides = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .is_some_and(|m| &m.device == vehicle);
+                if !rides {
+                    continue;
+                }
+                if let Some((part, obstacle)) = self
+                    .world
+                    .rider_obstacle_contacts(r, carried)
+                    .into_iter()
+                    .next()
+                {
+                    return Err(SeqError::RiderCollision {
+                        t: self.t,
+                        vehicle: vehicle.clone(),
+                        robot: self.world.robots()[r].name.clone(),
+                        part,
+                        obstacle,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2466,7 +2635,14 @@ impl Rollout {
                 if !rides {
                     continue;
                 }
-                let mut base = *self.world.robots()[r].base_pose();
+                // A walking body sways on top of its rigid ride; the ride
+                // is what the vehicle advances and the track records.
+                let sway = self.robots[r]
+                    .gait
+                    .as_ref()
+                    .map(|g| g.sway)
+                    .unwrap_or_else(Isometry3::identity);
+                let mut base = *self.world.robots()[r].base_pose() * sway.inverse();
                 for (tau0, tau1, piece) in pieces {
                     let from = base;
                     base = apply_piece(&from, piece, tau1 - tau0);
@@ -2474,10 +2650,19 @@ impl Rollout {
                         push_vehicle_span(spans, from, *tau0, *tau1, piece);
                     }
                 }
-                self.world.set_robot_base_pose_for(r, base);
+                self.world.set_robot_base_pose_for(r, base * sway);
             }
         }
         self.check_vehicle_collisions(&moves)?;
+        self.moving = moves
+            .iter()
+            .map(|(mv, riders)| {
+                (
+                    mv.name.clone(),
+                    mv.body.iter().chain(riders).cloned().collect(),
+                )
+            })
+            .collect();
         Ok(moves.into_iter().flat_map(|(_, riders)| riders).collect())
     }
 
@@ -3062,7 +3247,18 @@ impl Rollout {
             } => {
                 let r = self.action_robot(robot)?;
                 let model = self.world.robots()[r].model.clone();
+                let vehicle = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .map(|m| m.device.clone())
+                    .unwrap_or_default();
                 let rt = &mut self.robots[r];
+                let walking = rt.walking();
+                let owned: Vec<usize> = rt
+                    .gait
+                    .as_ref()
+                    .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
+                    .unwrap_or_default();
                 let mut goal = rt.q_nom.clone();
                 for (joint, value) in targets {
                     let ji = model
@@ -3071,12 +3267,22 @@ impl Rollout {
                     let qi = model.joints[ji]
                         .q_index
                         .ok_or_else(|| err(format!("joint `{joint}` is not actuated")))?;
+                    // A leg mid-walk has one driver, the gait: a ramp on it
+                    // would fight the footfalls. Standing, the legs are free.
+                    if walking && owned.contains(&qi) {
+                        return Err(err(format!(
+                            "joint `{joint}` is driven by the gait while `{vehicle}` walks; \
+                             ramp it after device_done"
+                        )));
+                    }
                     goal[qi] = *value;
                 }
                 // Two rest-to-rest waypoints: cubic Hermite eases in/out.
                 // A tracked ramp cannot bake ahead — its poses are carried
                 // by a part that has not moved yet — so it bakes per tick.
-                if rt.tracking.is_none() {
+                // Nor can one alongside a walk: the legs bake tick by tick,
+                // and the ramp's samples ride with them.
+                if rt.tracking.is_none() && !walking {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
@@ -3215,6 +3421,9 @@ impl Rollout {
             Action::Device { device, command } => {
                 let t = self.t;
                 let mut lane_update = None;
+                // A vehicle dispatched this scan: its drive, closed form,
+                // for the legs of whatever rides it.
+                let mut dispatched: Option<crate::gait::BodyProfile> = None;
                 let found = self.devices.iter_mut().find(|d| match d {
                     DeviceRuntime::Conveyor { name, .. }
                     | DeviceRuntime::Axis { name, .. }
@@ -3310,6 +3519,7 @@ impl Rollout {
                             waypoints,
                             stations,
                             ring,
+                            speed,
                             turn_speed,
                             allow_reverse,
                             position,
@@ -3354,6 +3564,7 @@ impl Rollout {
                         } else {
                             *at = None;
                             lane_update = Some((*lane, true));
+                            dispatched = Some(body_profile(legs, *position, *heading, *speed, t));
                         }
                     }
                     // Kind/command mismatches are rejected by validation.
@@ -3361,6 +3572,9 @@ impl Rollout {
                 }
                 if let Some((lane, value)) = lane_update {
                     self.set_lane(lane, t, value);
+                }
+                if let Some(profile) = dispatched {
+                    self.start_gaits(device, profile)?;
                 }
             }
         }
@@ -3415,6 +3629,21 @@ impl Rollout {
                     },
                     moves: rt.moves,
                     planned: rt.planned,
+                    footfalls: rt
+                        .gait
+                        .as_ref()
+                        .map(|g| {
+                            let mut steps = g.history.clone();
+                            steps.sort_by(|a, b| {
+                                a.land
+                                    .partial_cmp(&b.land)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.leg.cmp(&b.leg))
+                            });
+                            steps
+                        })
+                        .unwrap_or_default(),
+                    sway: rt.gait.map(|g| g.sways).unwrap_or_default(),
                     // The cycle usually ends parked: close a travelling span
                     // at its own end and rest there, rather than extending it
                     // to the horn and driving off the timeline.
@@ -3463,6 +3692,369 @@ impl Rollout {
             step_spans: self.step_spans,
             branches: self.branches,
         }
+    }
+}
+
+/// The closed-form drive a vehicle is about to make: its route legs laid out
+/// in time from `t0`, each with the frame it starts from. Built from the
+/// same legs the tick walk consumes, at the same rates, so the body the
+/// footfalls are planned against is the body that will be driven.
+fn body_profile(
+    legs: &std::collections::VecDeque<Leg>,
+    mut position: nalgebra::Point2<f64>,
+    mut heading: f64,
+    speed: f64,
+    t0: f64,
+) -> crate::gait::BodyProfile {
+    let mut pieces = Vec::with_capacity(legs.len());
+    let mut t = t0;
+    for leg in legs {
+        let frame = vehicle_frame(&position, heading);
+        match leg {
+            Leg::Turn { to, omega } => {
+                let need = wrap_angle(to - heading) / omega;
+                if need > 1e-12 {
+                    pieces.push((
+                        t,
+                        t + need,
+                        frame,
+                        VehiclePiece::Piv {
+                            center: nalgebra::Point3::new(position.x, position.y, 0.0),
+                            omega: *omega,
+                        },
+                    ));
+                    t += need;
+                }
+                heading = *to;
+            }
+            Leg::Straight { to, dir } => {
+                let need = (to - position).norm() / speed;
+                if need > 1e-12 {
+                    pieces.push((
+                        t,
+                        t + need,
+                        frame,
+                        VehiclePiece::Lin {
+                            velocity: Vector3::new(dir.x * speed, dir.y * speed, 0.0),
+                        },
+                    ));
+                    t += need;
+                }
+                position = *to;
+            }
+        }
+    }
+    crate::gait::BodyProfile {
+        t0,
+        t_end: t,
+        pieces,
+        end_frame: vehicle_frame(&position, heading),
+    }
+}
+
+impl ActiveMove {
+    /// Pins the given DOF to `values` for the rest of the move — what a
+    /// gait does to a move that outlives the walk: the legs it left at
+    /// the stance must not be yanked back to where the move sampled them.
+    fn pin_joints(&mut self, joints: &[usize], values: &[f64]) {
+        match self {
+            ActiveMove::Ramp { from, to, .. } => {
+                for &qi in joints {
+                    from[qi] = values[qi];
+                    to[qi] = values[qi];
+                }
+            }
+            ActiveMove::Traj { traj, .. } => {
+                for i in 0..traj.positions.len() {
+                    for &qi in joints {
+                        traj.positions[i][qi] = values[qi];
+                        traj.velocities[i][qi] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Rollout {
+    /// A vehicle was dispatched: every robot that walks it plans its
+    /// footfalls for the whole drive, right now, from the closed-form
+    /// profile — the rest of the walk is sampling that plan.
+    fn start_gaits(
+        &mut self,
+        device: &str,
+        profile: crate::gait::BodyProfile,
+    ) -> Result<(), SeqError> {
+        for r in 0..self.robots.len() {
+            let rides = self.world.robots()[r]
+                .mount
+                .as_ref()
+                .is_some_and(|m| m.device == device);
+            if !rides || self.robots[r].gait.is_none() {
+                continue;
+            }
+            let mut gr = self.robots[r].gait.take().expect("checked above");
+            let result = self.start_gait(r, &mut gr, profile.clone());
+            self.robots[r].gait = Some(gr);
+            result?;
+        }
+        Ok(())
+    }
+
+    fn start_gait(
+        &mut self,
+        r: usize,
+        gr: &mut GaitRuntime,
+        profile: crate::gait::BodyProfile,
+    ) -> Result<(), SeqError> {
+        let t = self.t;
+        let err = |message: String| SeqError::Action {
+            step: self.cur_step(),
+            name: self.cur_step_name(),
+            message,
+        };
+        // A ramp still moving a leg would be walked over mid-way.
+        let ramp_driving = |qi: usize| -> bool {
+            matches!(
+                &self.robots[r].active,
+                Some(ActiveMove::Ramp {
+                    start,
+                    duration,
+                    from,
+                    to,
+                }) if start + duration > t + 1e-9 && from[qi] != to[qi]
+            )
+        };
+        let model = self.world.robots()[r].model.clone();
+        for leg in &gr.gait.legs {
+            if let Some(&qi) = leg.joints.iter().find(|&&qi| ramp_driving(qi)) {
+                return Err(err(format!(
+                    "a ramp is still moving leg `{}` (joint `{}`); wait for done \
+                     before the goto",
+                    leg.name, model.joints[model.actuated_joints[qi]].name
+                )));
+            }
+        }
+        // The arms swing unless the hands are full or a ramp has them: a
+        // carried part rides still, and a stow finishes on its own.
+        let hands_full = self.world.attachments().iter().any(|a| a.robot == r);
+        let swing: Vec<crate::gait::ArmSwing> = gr
+            .gait
+            .arm_swing
+            .iter()
+            .filter(|(qi, _)| !hands_full && !ramp_driving(*qi))
+            .map(|&(qi, amplitude)| crate::gait::ArmSwing {
+                joint: qi,
+                center: self.robots[r].q[qi],
+                amplitude,
+            })
+            .collect();
+        self.world
+            .set_joint_positions_for(r, self.robots[r].q.clone())
+            .expect("commanded q has robot DOF");
+        // Where the feet stand as the drive begins — and, for a goto issued
+        // while the previous drive's legs were still settling, which swing
+        // is in the air and finishes as planned.
+        let n = gr.gait.legs.len();
+        let (feet, carry): (Vec<_>, Vec<_>) = match &gr.plan {
+            Some(plan) => (0..n)
+                .map(|i| {
+                    let (position, yaw, flying) = plan.anchor(i, t);
+                    ((position, yaw), flying.cloned())
+                })
+                .unzip(),
+            None => {
+                let robot = &self.world.robots()[r];
+                let feet = crate::gait::feet_at(
+                    &robot.model,
+                    &gr.gait,
+                    robot.joint_positions(),
+                    &(robot.base_pose() * gr.sway.inverse()),
+                );
+                (feet, vec![None; n])
+            }
+        };
+        let plan = crate::gait::plan_gait(&gr.gait, &gr.offset, profile, &feet, &carry, swing);
+        for (i, leg) in plan.legs.iter().enumerate() {
+            let carried = carry[i].as_ref();
+            gr.history.extend(
+                leg.footfalls
+                    .iter()
+                    .filter(|f| carried != Some(*f))
+                    .cloned(),
+            );
+        }
+        if let Some(sway) = &plan.sway {
+            // A walk dispatched mid-settle takes over the sway from here.
+            if let Some(open) = gr.sways.last_mut() {
+                if open.done > t {
+                    open.done = t;
+                }
+            }
+            gr.sways.push(sway.clone());
+        }
+        // The walk bakes tick by tick from here; a move's pre-baked future
+        // would block it (and is re-baked when the legs let go).
+        let rt = &mut self.robots[r];
+        rt.truncate_after(t);
+        let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
+        rt.append_waypoint(t, q, zeros);
+        gr.plan = Some(plan);
+        Ok(())
+    }
+
+    /// One scan tick of every walking robot's legs: foot targets off the
+    /// plan, a warm-started solve per leg, the result merged over whatever
+    /// else drives the robot, and the tick baked. When the last foot has
+    /// settled the legs snap to the stance (the solve is within a few
+    /// micrometres of it) and are handed back.
+    fn advance_gaits(&mut self) -> Result<(), SeqError> {
+        for r in 0..self.robots.len() {
+            if !self.robots[r].walking() {
+                continue;
+            }
+            let mut gr = self.robots[r].gait.take().expect("walking");
+            let result = self.gait_tick(r, &mut gr);
+            self.robots[r].gait = Some(gr);
+            result?;
+        }
+        Ok(())
+    }
+
+    fn gait_tick(&mut self, r: usize, gr: &mut GaitRuntime) -> Result<(), SeqError> {
+        use crate::gait::{swing_pose, LegState};
+        let t = self.t;
+        let plan = gr.plan.as_ref().expect("walking");
+        let finishing = t >= plan.done - 1e-9;
+        let gait = &gr.gait;
+        // The body's sway for this tick, composed onto the rigid ride the
+        // vehicle left the base on (last tick's sway undone first).
+        let rigid = *self.world.robots()[r].base_pose() * gr.sway.inverse();
+        let sway = match (&plan.sway, finishing) {
+            (Some(s), false) => s.offset_at(t),
+            _ => Isometry3::identity(),
+        };
+        self.world.set_robot_base_pose_for(r, rigid * sway);
+        gr.sway = sway;
+
+        let rest = plan.rest(gait);
+        let mut q = self.robots[r].q.clone();
+        let seed = q.clone();
+        if finishing {
+            for leg in &gait.legs {
+                for &qi in &leg.joints {
+                    q[qi] = rest[qi];
+                }
+            }
+            for s in &plan.swing {
+                q[s.joint] = s.center;
+            }
+        } else {
+            for (i, leg) in gait.legs.iter().enumerate() {
+                let (target, stride) = match plan.state(gait, i, t) {
+                    LegState::Planted(pose) => (pose, None),
+                    LegState::Swinging { from, to, u } => (
+                        swing_pose(&from, &to, gait.lift, u),
+                        Some((to.translation.vector - from.translation.vector).norm()),
+                    ),
+                };
+                // A planted yaw-free sole gets its hip yaw from geometry
+                // first; in the air the leg is left to the solve, which
+                // would otherwise spin the plane as the foot passes the hip.
+                let seed = match (&leg.yaw_seed, stride.is_none()) {
+                    (Some(ys), true) => {
+                        let parent = self.world.link_poses_for(r)[ys.parent];
+                        match ys
+                            .yaw_for(&parent, &nalgebra::Point3::from(target.translation.vector))
+                        {
+                            Some(yaw) => {
+                                let mut seeded = seed.clone();
+                                seeded[ys.joint] = yaw;
+                                seeded
+                            }
+                            None => seed.clone(),
+                        }
+                    }
+                    _ => seed.clone(),
+                };
+                let result = self
+                    .world
+                    .solve_ik_world_for(r, leg.foot, &target, &seed, &leg.ik)
+                    .expect("seed has robot DOF");
+                // The solve aims at a fraction of a micrometre and usually
+                // gets there; a foot straight under its hip is singular for
+                // a yaw-free leg, where it creeps instead. Out of reach is
+                // what would show: a tenth of a millimetre, a milliradian.
+                // A yaw-free sole in the air is let be: keeping it level
+                // through a pivot would mean flipping the leg's plane as
+                // the foot passes under the hip, and a sole only has to be
+                // level when it stands.
+                let airborne_axis = stride.is_some() && leg.ik.mode == botrail_kin::IkMode::Axis;
+                if !result.converged
+                    && !airborne_axis
+                    && (result.pos_error > 1e-4 || result.rot_error > 1e-3)
+                {
+                    let base = self.world.robots()[r].base_pose();
+                    let nominal = base * leg.nominal;
+                    let stride = stride.unwrap_or_else(|| {
+                        (target.translation.vector - nominal.translation.vector).norm()
+                    });
+                    return Err(SeqError::GaitReach {
+                        t,
+                        robot: self.world.robots()[r].name.clone(),
+                        leg: leg.name.clone(),
+                        stride,
+                        detail: format!(
+                            "{:.1e} m / {:.1e} rad short after {} iterations",
+                            result.pos_error, result.rot_error, result.iters
+                        ),
+                    });
+                }
+                for &qi in &leg.joints {
+                    q[qi] = result.q[qi];
+                }
+            }
+            let phase = 2.0 * std::f64::consts::PI * (t - plan.profile.t0) / gait.period;
+            for s in &plan.swing {
+                q[s.joint] = s.center + s.amplitude * phase.sin();
+            }
+        }
+        let dt = self.options.dt;
+        let rt = &mut self.robots[r];
+        let previous = rt.q.clone();
+        rt.q = q;
+        self.world
+            .set_joint_positions_for(r, rt.q.clone())
+            .expect("solved q has robot DOF");
+        // The tick bakes with velocities by difference — except on the
+        // settling tick, where the legs come to rest: a hold follows, and a
+        // cubic through a resting sample with a one-tick velocity on it
+        // would swing the legs around for the length of the hold.
+        let owned = plan.owned(gait);
+        let velocity: Vec<f64> =
+            rt.q.iter()
+                .zip(&previous)
+                .enumerate()
+                .map(|(qi, (now, before))| {
+                    if finishing && owned.contains(&qi) {
+                        0.0
+                    } else {
+                        (now - before) / dt
+                    }
+                })
+                .collect();
+        let q = rt.q.clone();
+        rt.append_waypoint(t, q, velocity);
+        if finishing {
+            gr.plan = None;
+            // A move that outlives the walk keeps the legs where the walk
+            // left them, and its remaining samples go back on the bake.
+            if let Some(active) = rt.active.as_mut() {
+                active.pin_joints(&owned, &rest);
+            }
+            rt.rebake_active_tail(t);
+        }
+        Ok(())
     }
 }
 
@@ -8013,5 +8605,1184 @@ mod parallel_program_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("st2/gate") && !err.contains("quick"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod gait_tests {
+    use super::*;
+    use crate::seq::{
+        Device, DeviceKind, FootContact, GaitPattern, GaitSpec, LegSpec, Step, VehiclePath,
+    };
+    use botrail_model::Geometry;
+    use nalgebra::{Point2, Point3};
+    use std::f64::consts::FRAC_PI_2;
+    use std::sync::Arc;
+
+    const QUAD: &str = include_str!("../../../examples/quad_test.urdf");
+    const LEGS: [&str; 4] = ["FL", "FR", "RL", "RR"];
+    const FOOT_R: f64 = 0.02;
+
+    /// Foot depth below the body at the stance: thigh 0.7, calf -1.4 on two
+    /// 0.2 m segments fold to a foot straight under the hip.
+    fn stance_depth() -> f64 {
+        0.4 * 0.7f64.cos()
+    }
+
+    fn quad_gait() -> GaitSpec {
+        let leg = |n: &str| LegSpec {
+            name: n.into(),
+            foot: format!("{n}_foot"),
+            contact: FootContact::Point,
+        };
+        let mut stance = Vec::new();
+        for n in LEGS {
+            stance.push((format!("{n}_hip_joint"), 0.0));
+            stance.push((format!("{n}_thigh_joint"), 0.7));
+            stance.push((format!("{n}_calf_joint"), -1.4));
+        }
+        GaitSpec {
+            body_link: None,
+            legs: LEGS.iter().map(|n| leg(n)).collect(),
+            pattern: GaitPattern::Trot,
+            period: 0.5,
+            lift: 0.05,
+            stance,
+            max_stride: 0.5,
+            foot_radius: FOOT_R,
+            arm_swing: Vec::new(),
+            bob: 0.0,
+            lateral: 0.0,
+        }
+    }
+
+    /// An L: 2 m along +x, a 90° pivot, 1 m along +y. At 0.5 m/s and 90°/s
+    /// the drive takes 4 + 1 + 2 = 7 s.
+    fn dog(speed: f64, turn_speed: f64, allow_reverse: bool, start: &str) -> Device {
+        Device {
+            name: "dog".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point2::new(0.0, 0.0),
+                        Point2::new(2.0, 0.0),
+                        Point2::new(2.0, 1.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: Vec::new(),
+                speed,
+                turn_speed,
+                start: start.into(),
+                allow_reverse,
+                tray: None,
+            },
+        }
+    }
+
+    fn quad_scene(device: Device, gait: Option<GaitSpec>) -> Scene {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(QUAD).unwrap(),
+        ));
+        scene.upsert_device(device);
+        scene.mount_robot_with(0, "dog", None, gait).unwrap();
+        scene
+    }
+
+    fn dog_scene() -> Scene {
+        quad_scene(dog(0.5, FRAC_PI_2, false, "a"), Some(quad_gait()))
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "dog".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "dog".into(),
+        }
+    }
+
+    /// Drive to `station`, then stand for `dwell` seconds.
+    fn patrol(scene: &mut Scene, station: &str, dwell: f64, dt: f64) -> SequenceTimeline {
+        scene.upsert_sequence(Sequence {
+            name: "patrol".into(),
+            steps: vec![
+                step("drive", vec![goto(station)], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: dwell }),
+            ],
+        });
+        let options = RolloutOptions {
+            dt,
+            ..RolloutOptions::default()
+        };
+        scene.simulate_sequence("patrol", &options).unwrap()
+    }
+
+    fn feet_world(scene: &Scene, tl: &SequenceTimeline, t: f64) -> Vec<Point3<f64>> {
+        let track = &tl.robots[0];
+        let q = track.trajectory.sample(t);
+        let base = SequenceTimeline::base_pose(track, t).unwrap();
+        let model = &scene.robots()[0].model;
+        let poses = botrail_kin::forward_kinematics_with_base(model, &q, &base).unwrap();
+        LEGS.iter()
+            .map(|n| {
+                let link = model.link_index(&format!("{n}_foot")).unwrap();
+                Point3::from(poses[link].translation.vector)
+            })
+            .collect()
+    }
+
+    fn leg_q(scene: &Scene, q: &[f64], leg: &str) -> [f64; 3] {
+        let model = &scene.robots()[0].model;
+        let qi = |j: &str| {
+            model.joints[model.joint_index(&format!("{leg}_{j}")).unwrap()]
+                .q_index
+                .unwrap()
+        };
+        [
+            q[qi("hip_joint")],
+            q[qi("thigh_joint")],
+            q[qi("calf_joint")],
+        ]
+    }
+
+    #[test]
+    fn mounting_with_a_gait_stands_the_robot_on_the_vehicle_plane() {
+        let scene = dog_scene();
+        let base = scene.robots()[0].base_pose();
+        assert!(
+            (base.translation.z - (stance_depth() + FOOT_R)).abs() < 1e-9,
+            "base z = {}",
+            base.translation.z
+        );
+        assert!((base.translation.x).abs() < 1e-12 && base.translation.y.abs() < 1e-12);
+        let q = scene.robots()[0].joint_positions();
+        for leg in LEGS {
+            let [hip, thigh, calf] = leg_q(&scene, q, leg);
+            assert!(
+                (hip, thigh, calf) == (0.0, 0.7, -1.4),
+                "{leg}: {hip} {thigh} {calf}"
+            );
+        }
+        let poses = scene.link_poses();
+        for leg in LEGS {
+            let link = scene.robot().link_index(&format!("{leg}_foot")).unwrap();
+            assert!(
+                (poses[link].translation.z - FOOT_R).abs() < 1e-9,
+                "{leg} foot z = {}",
+                poses[link].translation.z
+            );
+        }
+    }
+
+    #[test]
+    fn a_gait_is_checked_against_the_model_by_name() {
+        let bad = |edit: &dyn Fn(&mut GaitSpec)| {
+            let mut spec = quad_gait();
+            edit(&mut spec);
+            let mut scene = Scene::new(Arc::new(
+                botrail_model::RobotModel::from_urdf_str(QUAD).unwrap(),
+            ));
+            scene.upsert_device(dog(0.5, FRAC_PI_2, false, "a"));
+            scene
+                .mount_robot_with(0, "dog", None, Some(spec))
+                .unwrap_err()
+                .to_string()
+        };
+        let e = bad(&|s| s.legs[0].foot = "FL_paw".into());
+        assert!(e.contains("unknown foot link `FL_paw`"), "{e}");
+        let e = bad(&|s| s.stance.retain(|(j, _)| j != "RR_calf_joint"));
+        assert!(e.contains("RR_calf_joint"), "{e}");
+        let e = bad(&|s| s.stance.push(("RL_calf_joint".into(), 1.0)));
+        assert!(e.contains("outside its limits"), "{e}");
+        let e = bad(&|s| s.legs.pop().map(|_| ()).unwrap_or(()));
+        assert!(e.contains("trot pattern is for 4 legs"), "{e}");
+        // A stance that does not stand level: one knee folded further.
+        let e = bad(&|s| {
+            for (j, v) in &mut s.stance {
+                if j == "RR_calf_joint" {
+                    *v = -2.0;
+                }
+            }
+        });
+        assert!(e.contains("does not stand level"), "{e}");
+    }
+
+    #[test]
+    fn planted_feet_never_move() {
+        let mut scene = dog_scene();
+        let tl = patrol(&mut scene, "c", 2.0, 0.01);
+        let track = &tl.robots[0];
+        assert!(
+            track.footfalls.len() >= 4 * 13,
+            "only {} footfalls over a 7 s trot",
+            track.footfalls.len()
+        );
+        let times = &track.trajectory.times;
+        let start = feet_world(&scene, &tl, 0.0);
+        for (i, leg) in LEGS.iter().enumerate() {
+            // The planted intervals: from t = 0 to the first lift, then
+            // from each landing to the next lift.
+            let steps: Vec<&crate::gait::Footfall> =
+                track.footfalls.iter().filter(|f| f.leg == *leg).collect();
+            let mut anchors = vec![(0.0, steps[0].lift, start[i])];
+            for pair in steps.windows(2) {
+                anchors.push((pair[0].land, pair[1].lift, pair[0].position));
+            }
+            let last = steps.last().unwrap();
+            anchors.push((last.land, tl.duration, last.position));
+            let mut checked = 0;
+            for (from, to, anchor) in anchors {
+                for &t in times
+                    .iter()
+                    .filter(|&&t| t >= from + 1e-9 && t <= to - 1e-9)
+                {
+                    let foot = feet_world(&scene, &tl, t)[i];
+                    let slip = (foot - anchor).norm();
+                    assert!(slip < 1e-6, "{leg} slipped {slip:.2e} m at t = {t}");
+                    checked += 1;
+                }
+            }
+            assert!(
+                checked > 100,
+                "{leg}: only {checked} planted samples checked"
+            );
+        }
+        // Landings happen where the plan said, and swings clear the floor.
+        for f in &track.footfalls {
+            let i = LEGS.iter().position(|l| *l == f.leg).unwrap();
+            let at_land = feet_world(&scene, &tl, f.land)[i];
+            assert!((at_land - f.position).norm() < 1e-6);
+            let mid = feet_world(&scene, &tl, 0.5 * (f.lift + f.land))[i];
+            assert!(mid.z > FOOT_R + 0.03, "swing apex {} too low", mid.z);
+        }
+    }
+
+    #[test]
+    fn the_walk_is_deterministic_to_the_bit() {
+        let a = patrol(&mut dog_scene(), "c", 1.0, 0.01);
+        let b = patrol(&mut dog_scene(), "c", 1.0, 0.01);
+        assert_eq!(
+            a.robots[0].trajectory.positions,
+            b.robots[0].trajectory.positions
+        );
+        assert_eq!(a.robots[0].footfalls, b.robots[0].footfalls);
+    }
+
+    #[test]
+    fn footfalls_do_not_depend_on_the_scan_period() {
+        let coarse = patrol(&mut dog_scene(), "c", 1.0, 0.01);
+        let fine = patrol(&mut dog_scene(), "c", 1.0, 0.005);
+        assert_eq!(coarse.robots[0].footfalls, fine.robots[0].footfalls);
+        assert!(!coarse.robots[0].footfalls.is_empty());
+    }
+
+    #[test]
+    fn the_legs_settle_into_the_stance_after_arrival() {
+        let mut scene = dog_scene();
+        let tl = patrol(&mut scene, "c", 2.0, 0.01);
+        let track = &tl.robots[0];
+        let done = track.footfalls.iter().map(|f| f.land).fold(0.0, f64::max);
+        // Arrival is at 7 s; the settle is at most one more cycle and a
+        // swing per leg.
+        assert!(done > 7.0 && done <= 7.0 + 1.5 * 0.5, "settled at {done}");
+        for t in [done + 0.2, tl.duration] {
+            let q = track.trajectory.sample(t);
+            for leg in LEGS {
+                let [hip, thigh, calf] = leg_q(&scene, &q, leg);
+                assert!(
+                    hip.abs() < 1e-9 && (thigh - 0.7).abs() < 1e-9 && (calf + 1.4).abs() < 1e-9,
+                    "{leg} at t = {t}: {hip} {thigh} {calf}"
+                );
+            }
+        }
+        // Parked at (2, 1) facing +y: every foot stands under its hip.
+        let feet = feet_world(&scene, &tl, tl.duration);
+        let expect = |x: f64, y: f64| Point3::new(2.0 - y, 1.0 + x, FOOT_R);
+        for (i, (x, y)) in [(0.19, 0.15), (0.19, -0.15), (-0.19, 0.15), (-0.19, -0.15)]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                (feet[i] - expect(*x, *y)).norm() < 1e-9,
+                "{}: {:?} vs {:?}",
+                LEGS[i],
+                feet[i],
+                expect(*x, *y)
+            );
+        }
+    }
+
+    #[test]
+    fn a_stride_the_legs_cannot_take_is_refused_by_name() {
+        // Declared: the stride check at simulate.
+        let mut scene = quad_scene(dog(2.0, FRAC_PI_2, false, "a"), Some(quad_gait()));
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![step("drive", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_stride"), "{err}");
+
+        // Undeclared: a generous max_stride lets the solve discover it.
+        let mut spec = quad_gait();
+        spec.max_stride = 5.0;
+        let mut scene = quad_scene(dog(2.0, FRAC_PI_2, false, "a"), Some(spec));
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![step("drive", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, SeqError::GaitReach { .. }),
+            "unexpected: {err}"
+        );
+        assert!(
+            err.to_string().contains("cannot reach its footfall"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_leg_ramp_is_refused_mid_walk_while_the_head_may_nod() {
+        let mut scene = dog_scene();
+        let ramp = |joint: &str, value: f64| Action::StartRamp {
+            robot: None,
+            targets: vec![(joint.into(), value)],
+            duration: 1.0,
+        };
+        scene.upsert_sequence(Sequence {
+            name: "nod".into(),
+            steps: vec![
+                step("drive", vec![goto("c"), ramp("neck", 0.5)], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("nod", &RolloutOptions::default())
+            .unwrap();
+        let neck = scene.robot().joints[scene.robot().joint_index("neck").unwrap()]
+            .q_index
+            .unwrap();
+        let track = &tl.robots[0];
+        assert!((track.trajectory.sample(0.5)[neck] - 0.25).abs() < 1e-6);
+        assert!((track.trajectory.sample(tl.duration)[neck] - 0.5).abs() < 1e-9);
+        assert!(!track.footfalls.is_empty());
+
+        scene.upsert_sequence(Sequence {
+            name: "kick".into(),
+            steps: vec![step(
+                "drive",
+                vec![goto("c"), ramp("FL_calf_joint", -1.0)],
+                device_done(),
+            )],
+        });
+        let err = scene
+            .simulate_sequence("kick", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("driven by the gait"), "{err}");
+
+        // Standing, a leg may be ramped (a crouch); the walk then starts
+        // from wherever the legs are.
+        scene.upsert_sequence(Sequence {
+            name: "crouch".into(),
+            steps: vec![
+                step("crouch", vec![ramp("FL_calf_joint", -1.0)], Condition::Done),
+                step("drive", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("crouch", &RolloutOptions::default())
+            .unwrap();
+        let calf = scene.robot().joints[scene.robot().joint_index("FL_calf_joint").unwrap()]
+            .q_index
+            .unwrap();
+        assert!((tl.robots[0].trajectory.sample(1.0)[calf] + 1.0).abs() < 1e-9);
+        assert!((tl.robots[0].trajectory.sample(tl.duration)[calf] + 1.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pivot_steps_the_feet_around_the_vehicle_origin() {
+        let mut scene = dog_scene();
+        let tl = patrol(&mut scene, "c", 1.0, 0.01);
+        let radius = (0.19f64 * 0.19 + 0.15 * 0.15).sqrt();
+        let (mut on_straight, mut on_pivot) = (0, 0);
+        for f in &tl.robots[0].footfalls {
+            let mid = f.land + 0.125;
+            if mid < 4.0 {
+                // Straight along +x: the lateral offset never changes.
+                assert!((f.position.y.abs() - 0.15).abs() < 1e-9, "{:?}", f);
+                on_straight += 1;
+            } else if mid < 5.0 {
+                let r = ((f.position.x - 2.0).powi(2) + f.position.y.powi(2)).sqrt();
+                assert!((r - radius).abs() < 1e-9, "{:?} r = {r}", f);
+                on_pivot += 1;
+            }
+            assert!((f.position.z - FOOT_R).abs() < 1e-9);
+        }
+        assert!(
+            on_straight >= 4 * 7 && on_pivot >= 4,
+            "{on_straight} / {on_pivot}"
+        );
+    }
+
+    #[test]
+    fn backing_up_walks_the_legs_backwards() {
+        // From `c` (facing +y) the first leg back to (2, 0) is a reverse:
+        // the body keeps facing +y and the feet step along -y.
+        let mut scene = quad_scene(dog(0.5, FRAC_PI_2, true, "c"), Some(quad_gait()));
+        let tl = patrol(&mut scene, "a", 1.0, 0.01);
+        let fl: Vec<&crate::gait::Footfall> = tl.robots[0]
+            .footfalls
+            .iter()
+            .filter(|f| f.leg == "FL" && f.land + 0.125 < 2.0 && f.lift > 0.6)
+            .collect();
+        assert!(fl.len() >= 2, "{}", fl.len());
+        for pair in fl.windows(2) {
+            let (a, b) = (pair[0].position, pair[1].position);
+            assert!((a.y - b.y - 0.25).abs() < 1e-9, "{a:?} -> {b:?}");
+            assert!((a.x - b.x).abs() < 1e-9);
+        }
+        let base = SequenceTimeline::base_pose(&tl.robots[0], 1.0).unwrap();
+        let heading = base.rotation * Vector3::x();
+        assert!((heading - Vector3::y()).norm() < 1e-9);
+    }
+
+    #[test]
+    fn a_footprint_body_around_the_legs_is_not_a_collision() {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(QUAD).unwrap(),
+        ));
+        // Long enough to cover the head, which pokes 0.37 m ahead: the
+        // footprint is what the aisle check should answer with.
+        scene
+            .add_obstacle(
+                "footprint",
+                Geometry::Box {
+                    size: Vector3::new(0.8, 0.4, 0.4),
+                },
+                Isometry3::translation(0.05, 0.0, 0.2),
+            )
+            .unwrap();
+        let mut device = dog(0.5, FRAC_PI_2, false, "a");
+        if let DeviceKind::Vehicle { body, .. } = &mut device.kind {
+            body.push("footprint".into());
+        }
+        scene.upsert_device(device);
+        scene
+            .mount_robot_with(0, "dog", None, Some(quad_gait()))
+            .unwrap();
+        // Standing inside its own footprint is the arrangement.
+        assert!(scene.check_collisions().is_empty());
+        // ...and the footprint still drives the aisle check: a post in the
+        // way of the first leg fails the walk by name.
+        scene
+            .add_obstacle(
+                "post",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 1.0),
+                },
+                Isometry3::translation(1.0, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![step("drive", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, SeqError::VehicleCollision { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_leg_that_meets_the_environment_mid_walk_is_named() {
+        let mut scene = dog_scene();
+        // A post beside the body (which is 0.25 m wide), in the lane the
+        // left feet (at y = 0.15) swing through: nothing but a leg meets it.
+        scene
+            .add_obstacle(
+                "post",
+                Geometry::Box {
+                    size: Vector3::new(0.06, 0.06, 0.4),
+                },
+                Isometry3::translation(1.0, 0.17, 0.2),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![step("drive", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap_err();
+        match &err {
+            SeqError::RiderCollision {
+                vehicle,
+                robot,
+                part,
+                obstacle,
+                ..
+            } => {
+                assert_eq!(vehicle, "dog");
+                assert_eq!(robot, "quad_test");
+                assert_eq!(obstacle, "post");
+                assert!(part.starts_with("FL") || part.starts_with("RL"), "{part}");
+            }
+            other => panic!("unexpected: {other}"),
+        }
+        assert!(err.to_string().contains("riding `dog`"), "{err}");
+        // Out of the legs' way, the walk goes through.
+        scene
+            .set_obstacle_pose("post", Isometry3::translation(1.0, 0.6, 0.2))
+            .unwrap();
+        scene
+            .simulate_sequence("go", &RolloutOptions::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn a_gait_mount_round_trips_through_project_and_python() {
+        let mut scene = dog_scene();
+        let tl = patrol(&mut scene, "c", 1.0, 0.01);
+        let project = scene.to_project();
+        let json = serde_json::to_string(&project).unwrap();
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let mount = back.robots[0].mount.as_ref().expect("the mount is saved");
+        assert_eq!(mount.device, "dog");
+        let gait = mount.gait.as_ref().expect("the gait is saved");
+        assert_eq!(gait.legs.len(), 4);
+        assert_eq!(gait.pattern, crate::project::GaitPatternMsg::Trot);
+
+        // Rebuilt from the file, the cell stands the same and walks the
+        // same steps.
+        let again = Scene::from_project(&back).unwrap();
+        let mount = again.robot_mount(0).expect("mounted again");
+        assert_eq!(mount.device, "dog");
+        assert!(mount.gait.is_some());
+        assert!(
+            (again.robots()[0].base_pose().translation.z
+                - scene.robots()[0].base_pose().translation.z)
+                .abs()
+                < 1e-12
+        );
+        let tl2 = again
+            .simulate_sequence("patrol", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(tl.duration, tl2.duration);
+        assert_eq!(tl.robots[0].footfalls, tl2.robots[0].footfalls);
+
+        // ...and the generated script re-authors the mount and its gait.
+        let code = crate::project::generate_python(&project);
+        assert!(code.contains("scene.mount_robot(\"dog\""), "{code}");
+        assert!(
+            code.contains("gait=bt.Gait(legs={\"FL\": (\"FL_foot\", \"point\")"),
+            "{code}"
+        );
+        assert!(code.contains("pattern=\"trot\""), "{code}");
+        assert!(code.contains("\"FL_calf_joint\": -1.4"), "{code}");
+    }
+
+    #[test]
+    fn a_walking_robot_has_no_script_to_export() {
+        let mut scene = dog_scene();
+        scene.upsert_sequence(Sequence {
+            name: "nod".into(),
+            steps: vec![
+                step(
+                    "nod",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("neck".into(), 0.3)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+                step("drive", vec![goto("c")], device_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("nod", &RolloutOptions::default())
+            .unwrap();
+        let io = crate::script::SequenceIo::from_ports(Default::default(), Default::default());
+        let err = crate::script::sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io,
+            &botrail_export::ProgramOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("gait"), "{err}");
+    }
+
+    #[test]
+    fn a_walked_vehicle_is_one_bom_line() {
+        let scene = dog_scene();
+        let categories: Vec<String> = scene
+            .bom()
+            .rows
+            .iter()
+            .map(|r| r.category.clone())
+            .collect();
+        assert!(
+            !categories.iter().any(|c| c.starts_with("vehicle")),
+            "{categories:?}"
+        );
+        assert!(!categories.is_empty());
+        // Pinned to a part of its own, the vehicle is listed after all.
+        let mut pinned = dog_scene();
+        pinned
+            .set_part(
+                "dog",
+                None,
+                crate::part::Part {
+                    model: Some("GO2".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(pinned
+            .bom()
+            .rows
+            .iter()
+            .any(|r| r.category.starts_with("vehicle")));
+    }
+
+    #[test]
+    fn walking_costs_no_cycle_time() {
+        let walked = patrol(&mut dog_scene(), "c", 1.0, 0.01);
+        let mut carried = quad_scene(dog(0.5, FRAC_PI_2, false, "a"), None);
+        let carried = patrol(&mut carried, "c", 1.0, 0.01);
+        assert_eq!(walked.duration, carried.duration);
+        assert!(carried.robots[0].footfalls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod biped_tests {
+    use super::*;
+    use crate::seq::{
+        Device, DeviceKind, FootContact, GaitPattern, GaitSpec, LegSpec, Step, VehiclePath,
+    };
+    use botrail_model::Geometry;
+    use nalgebra::{Point2, Point3, UnitQuaternion};
+    use std::f64::consts::FRAC_PI_2;
+    use std::sync::Arc;
+
+    const BIPED: &str = include_str!("../../../examples/biped_test.urdf");
+    const SOLE: f64 = 0.05;
+
+    /// The same model with the ankle roll welded: 5-DOF legs.
+    fn biped_5dof() -> String {
+        BIPED
+            .replace(
+                r#"<joint name="L_ankle_roll_joint" type="revolute">"#,
+                r#"<joint name="L_ankle_roll_joint" type="fixed">"#,
+            )
+            .replace(
+                r#"<joint name="R_ankle_roll_joint" type="revolute">"#,
+                r#"<joint name="R_ankle_roll_joint" type="fixed">"#,
+            )
+    }
+
+    fn biped_gait(ankle_roll: bool) -> GaitSpec {
+        let mut stance = Vec::new();
+        for side in ["L", "R"] {
+            stance.push((format!("{side}_hip_yaw_joint"), 0.0));
+            stance.push((format!("{side}_hip_roll_joint"), 0.0));
+            stance.push((format!("{side}_hip_pitch_joint"), -0.4));
+            stance.push((format!("{side}_knee_joint"), 0.8));
+            stance.push((format!("{side}_ankle_pitch_joint"), -0.4));
+            if ankle_roll {
+                stance.push((format!("{side}_ankle_roll_joint"), 0.0));
+            }
+        }
+        GaitSpec {
+            body_link: None,
+            legs: ["L", "R"]
+                .iter()
+                .map(|s| LegSpec {
+                    name: s.to_string(),
+                    foot: format!("{s}_foot"),
+                    contact: FootContact::Sole { yaw_free: false },
+                })
+                .collect(),
+            pattern: GaitPattern::Biped,
+            period: 0.8,
+            lift: 0.05,
+            stance,
+            max_stride: 0.5,
+            foot_radius: SOLE,
+            arm_swing: vec![
+                ("L_shoulder_pitch_joint".into(), 0.3),
+                ("R_shoulder_pitch_joint".into(), -0.3),
+            ],
+            bob: 0.0,
+            lateral: 0.0,
+        }
+    }
+
+    /// An L: 2 m along +x (6.67 s at 0.3 m/s), a 1 s pivot, 1 m along +y.
+    fn walker() -> Device {
+        Device {
+            name: "walker".into(),
+            kind: DeviceKind::Vehicle {
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point2::new(0.0, 0.0),
+                        Point2::new(2.0, 0.0),
+                        Point2::new(2.0, 1.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: Vec::new(),
+                speed: 0.3,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                allow_reverse: false,
+                tray: None,
+            },
+        }
+    }
+
+    fn biped_scene(urdf: &str, gait: GaitSpec) -> Scene {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
+        ));
+        scene.upsert_device(walker());
+        scene
+            .mount_robot_with(0, "walker", None, Some(gait))
+            .unwrap();
+        scene
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "walker".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "walker".into(),
+        }
+    }
+
+    fn walk(scene: &mut Scene, dt: f64) -> SequenceTimeline {
+        scene.upsert_sequence(Sequence {
+            name: "walk".into(),
+            steps: vec![
+                step("go", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 2.0 }),
+            ],
+        });
+        let options = RolloutOptions {
+            dt,
+            ..RolloutOptions::default()
+        };
+        scene.simulate_sequence("walk", &options).unwrap()
+    }
+
+    fn qi(scene: &Scene, joint: &str) -> usize {
+        let model = &scene.robots()[0].model;
+        model.joints[model.joint_index(joint).unwrap()]
+            .q_index
+            .unwrap()
+    }
+
+    /// World pose of a foot link at `t`, off the baked timeline.
+    fn foot_pose(scene: &Scene, tl: &SequenceTimeline, leg: &str, t: f64) -> Isometry3<f64> {
+        let track = &tl.robots[0];
+        let q = track.trajectory.sample(t);
+        let base = SequenceTimeline::base_pose(track, t).unwrap();
+        let model = &scene.robots()[0].model;
+        let poses = botrail_kin::forward_kinematics_with_base(model, &q, &base).unwrap();
+        poses[model.link_index(&format!("{leg}_foot")).unwrap()]
+    }
+
+    /// The foot link's heading about +Z, relative to its stance rotation.
+    fn foot_yaw(scene: &Scene, pose: &Isometry3<f64>, leg: &str) -> f64 {
+        let model = &scene.robots()[0].model;
+        let stance =
+            botrail_kin::forward_kinematics(model, scene.robots()[0].joint_positions()).unwrap();
+        let nominal = stance[model.link_index(&format!("{leg}_foot")).unwrap()].rotation;
+        crate::gait::yaw_of(&Isometry3::from_parts(
+            nalgebra::Translation3::identity(),
+            pose.rotation * nominal.inverse(),
+        ))
+    }
+
+    fn tilt(pose: &Isometry3<f64>) -> f64 {
+        (pose.rotation * Vector3::z()).z.clamp(-1.0, 1.0).acos()
+    }
+
+    #[test]
+    fn sole_feet_land_flat_and_pointed_where_the_body_heads() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let tl = walk(&mut scene, 0.01);
+        let track = &tl.robots[0];
+        assert!(track.footfalls.len() >= 2 * 13, "{}", track.footfalls.len());
+        let times = &track.trajectory.times;
+        let mut checked = 0;
+        for leg in ["L", "R"] {
+            let steps: Vec<_> = track.footfalls.iter().filter(|f| f.leg == leg).collect();
+            for pair in steps.windows(2) {
+                let (f, next) = (pair[0], pair[1]);
+                for &t in times
+                    .iter()
+                    .filter(|&&t| t >= f.land + 1e-9 && t <= next.lift - 1e-9)
+                {
+                    let pose = foot_pose(&scene, &tl, leg, t);
+                    assert!(
+                        (pose.translation.vector - f.position.coords).norm() < 1e-6,
+                        "{leg} slipped at {t}"
+                    );
+                    assert!(
+                        tilt(&pose) < 1e-4,
+                        "{leg} tilted {:.2e} at {t}",
+                        tilt(&pose)
+                    );
+                    let yaw = foot_yaw(&scene, &pose, leg);
+                    assert!(
+                        (yaw - f.yaw).abs() < 1e-4,
+                        "{leg} points {yaw} instead of {} at {t}",
+                        f.yaw
+                    );
+                    checked += 1;
+                }
+            }
+            // Through the pivot (6.67–7.67 s) each landing turns a little
+            // further; by the end the feet point where the body does.
+            let turning: Vec<f64> = steps
+                .iter()
+                .filter(|f| f.land + 0.24 > 6.67 && f.land + 0.24 < 7.67)
+                .map(|f| f.yaw)
+                .collect();
+            assert!(!turning.is_empty(), "{leg}: {turning:?}");
+            assert!(
+                turning.windows(2).all(|w| w[1] > w[0]),
+                "{leg}: {turning:?}"
+            );
+            assert!((steps.last().unwrap().yaw - FRAC_PI_2).abs() < 1e-9);
+        }
+        assert!(checked > 200, "only {checked} planted samples");
+        // Mid-swing the sole is still level, and off the floor.
+        for f in &track.footfalls {
+            let pose = foot_pose(&scene, &tl, &f.leg, 0.5 * (f.lift + f.land));
+            assert!(tilt(&pose) < 1e-4);
+            assert!(pose.translation.z > SOLE + 0.03);
+        }
+    }
+
+    #[test]
+    fn five_dof_legs_keep_the_sole_level_with_the_heading_free() {
+        let urdf = biped_5dof();
+        let mut scene = biped_scene(&urdf, biped_gait(false));
+        assert_eq!(scene.robots()[0].model.dof(), 14);
+        let tl = walk(&mut scene, 0.01);
+        let track = &tl.robots[0];
+        let mut checked = 0;
+        for f in &track.footfalls {
+            for k in 1..4 {
+                let t = f.land + 0.1 * k as f64;
+                if t >= tl.duration {
+                    continue;
+                }
+                let pose = foot_pose(&scene, &tl, &f.leg, t);
+                assert!(
+                    tilt(&pose) < 1e-4,
+                    "{} tilted {:.2e} at {t}",
+                    f.leg,
+                    tilt(&pose)
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 50);
+    }
+
+    #[test]
+    fn arms_swing_in_step_unless_the_hands_are_full() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let (l, r) = (
+            qi(&scene, "L_shoulder_pitch_joint"),
+            qi(&scene, "R_shoulder_pitch_joint"),
+        );
+        let tl = walk(&mut scene, 0.01);
+        let track = &tl.robots[0];
+        let mut peak = 0.0f64;
+        for (t, q) in track
+            .trajectory
+            .times
+            .iter()
+            .zip(&track.trajectory.positions)
+        {
+            assert!((q[l] + q[r]).abs() < 1e-9, "arms out of step at {t}");
+            if *t < 11.0 {
+                peak = peak.max(q[l].abs());
+            }
+        }
+        assert!(peak > 0.29, "peak swing {peak}");
+        let rest = track.trajectory.sample(tl.duration);
+        assert!(rest[l].abs() < 1e-12 && rest[r].abs() < 1e-12);
+
+        // Hands full: a box in the left hand rides still, and so do the arms.
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let hand = scene.link_poses()[scene.robot().link_index("L_hand").unwrap()];
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.08, 0.08, 0.08),
+                },
+                hand * Isometry3::translation(0.0, 0.0, -0.1),
+            )
+            .unwrap();
+        scene
+            .attach_obstacle_to(0, "box", Some("L_hand"), None)
+            .unwrap();
+        let tl = walk(&mut scene, 0.01);
+        let track = &tl.robots[0];
+        assert!(!track.footfalls.is_empty());
+        for q in &track.trajectory.positions {
+            assert!(q[l].abs() < 1e-12 && q[r].abs() < 1e-12);
+        }
+        // ...and the box went along for the walk.
+        let carried = tl.objects.iter().find(|o| o.name == "box").unwrap();
+        let poses = vec![botrail_kin::forward_kinematics_with_base(
+            &scene.robots()[0].model,
+            &track.trajectory.sample(tl.duration),
+            &SequenceTimeline::base_pose(track, tl.duration).unwrap(),
+        )
+        .unwrap()];
+        let end = SequenceTimeline::object_pose(carried, &poses, tl.duration).unwrap();
+        assert!(
+            end.translation.x > 1.5,
+            "box ends at {:?}",
+            end.translation.vector
+        );
+    }
+
+    #[test]
+    fn a_ramped_arm_is_left_alone_and_a_swung_one_cannot_be_ramped() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let (l, r) = (
+            qi(&scene, "L_shoulder_pitch_joint"),
+            qi(&scene, "R_shoulder_pitch_joint"),
+        );
+        let ramp = |joint: &str, value: f64, duration: f64| Action::StartRamp {
+            robot: None,
+            targets: vec![(joint.into(), value)],
+            duration,
+        };
+        // A raise still in flight at dispatch finishes as ramped; the other
+        // arm swings.
+        scene.upsert_sequence(Sequence {
+            name: "raise".into(),
+            steps: vec![
+                step(
+                    "raise",
+                    vec![ramp("L_shoulder_pitch_joint", -1.0, 3.0)],
+                    Condition::Immediately,
+                ),
+                step("go", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("raise", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.robots[0];
+        assert!((track.trajectory.sample(3.0)[l] + 1.0).abs() < 1e-6);
+        assert!((track.trajectory.sample(tl.duration)[l] + 1.0).abs() < 1e-9);
+        let peak = track
+            .trajectory
+            .positions
+            .iter()
+            .map(|q| q[r].abs())
+            .fold(0.0, f64::max);
+        assert!(peak > 0.29, "right arm did not swing: {peak}");
+
+        // A ramp on a swinging arm mid-walk is refused by name.
+        scene.upsert_sequence(Sequence {
+            name: "wave".into(),
+            steps: vec![step(
+                "go",
+                vec![goto("c"), ramp("R_shoulder_pitch_joint", 0.5, 1.0)],
+                device_done(),
+            )],
+        });
+        let err = scene
+            .simulate_sequence("wave", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("driven by the gait"), "{err}");
+    }
+
+    #[test]
+    fn the_body_sways_and_the_feet_stay_put() {
+        let mut spec = biped_gait(true);
+        spec.bob = 0.02;
+        spec.lateral = 0.015;
+        let mut scene = biped_scene(BIPED, spec);
+        let height = scene.robots()[0].base_pose().translation.z;
+        let tl = walk(&mut scene, 0.01);
+        let track = &tl.robots[0];
+        assert_eq!(track.sway.len(), 1);
+        let sway = &track.sway[0];
+        assert!(
+            sway.t0 == 0.0 && sway.done > 11.0 && sway.done < 12.5,
+            "{sway:?}"
+        );
+
+        let (mut lo, mut hi, mut left, mut right) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for k in 100..600 {
+            let t = k as f64 * 0.01;
+            let base = SequenceTimeline::base_pose(track, t).unwrap();
+            let rigid = SequenceTimeline::span_pose(track.base.as_ref().unwrap(), &[], t).unwrap();
+            let offset = rigid.inverse() * base;
+            lo = lo.min(offset.translation.z);
+            hi = hi.max(offset.translation.z);
+            left = left.min(offset.translation.y);
+            right = right.max(offset.translation.y);
+            assert!(offset.translation.x.abs() < 1e-12);
+            assert!(offset.rotation.angle() < 1e-12);
+        }
+        assert!(hi > 0.018 && lo < -0.018, "bob {lo}..{hi}");
+        assert!(right > 0.013 && left < -0.013, "lean {left}..{right}");
+
+        // The feet do not follow the body.
+        let times = &track.trajectory.times;
+        let mut checked = 0;
+        for leg in ["L", "R"] {
+            let steps: Vec<_> = track.footfalls.iter().filter(|f| f.leg == leg).collect();
+            for pair in steps.windows(2) {
+                let (f, next) = (pair[0], pair[1]);
+                for &t in times
+                    .iter()
+                    .filter(|&&t| t >= f.land + 1e-9 && t <= next.lift - 1e-9)
+                {
+                    let pose = foot_pose(&scene, &tl, leg, t);
+                    assert!((pose.translation.vector - f.position.coords).norm() < 1e-6);
+                    assert!(tilt(&pose) < 1e-4);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200);
+
+        // Settled: the base is back on its rigid ride at the stance height.
+        for t in [sway.done + 0.1, tl.duration] {
+            let base = SequenceTimeline::base_pose(track, t).unwrap();
+            assert!((base.translation.z - height).abs() < 1e-12, "t = {t}");
+        }
+        // Closed form: the sway does not depend on the scan period.
+        let fine = walk(
+            &mut biped_scene(BIPED, {
+                let mut s = biped_gait(true);
+                s.bob = 0.02;
+                s.lateral = 0.015;
+                s
+            }),
+            0.005,
+        );
+        assert_eq!(fine.robots[0].sway, track.sway);
+        assert_eq!(fine.robots[0].footfalls, track.footfalls);
+    }
+
+    #[test]
+    fn a_sole_that_does_not_stand_level_is_refused() {
+        let mut spec = biped_gait(true);
+        for (joint, value) in &mut spec.stance {
+            if joint == "L_ankle_pitch_joint" {
+                *value = -0.2;
+            }
+        }
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(BIPED).unwrap(),
+        ));
+        scene.upsert_device(walker());
+        let err = scene
+            .mount_robot_with(0, "walker", None, Some(spec))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tilted"), "{err}");
+
+        // A point-footed leg cannot be asked for a sole.
+        let quad = include_str!("../../../examples/quad_test.urdf");
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(quad).unwrap(),
+        ));
+        scene.upsert_device(walker());
+        let mut stance = Vec::new();
+        for n in ["FL", "FR", "RL", "RR"] {
+            stance.push((format!("{n}_hip_joint"), 0.0));
+            stance.push((format!("{n}_thigh_joint"), 0.7));
+            stance.push((format!("{n}_calf_joint"), -1.4));
+        }
+        let spec = GaitSpec {
+            body_link: None,
+            legs: ["FL", "FR", "RL", "RR"]
+                .iter()
+                .map(|n| LegSpec {
+                    name: n.to_string(),
+                    foot: format!("{n}_foot"),
+                    contact: FootContact::Sole { yaw_free: true },
+                })
+                .collect(),
+            pattern: GaitPattern::Trot,
+            period: 0.5,
+            lift: 0.05,
+            stance,
+            max_stride: 0.5,
+            foot_radius: 0.02,
+            arm_swing: Vec::new(),
+            bob: 0.0,
+            lateral: 0.0,
+        };
+        let err = scene
+            .mount_robot_with(0, "walker", None, Some(spec))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs 5 or 6 DOF"), "{err}");
+        let _ = UnitQuaternion::<f64>::identity();
+        let _: Point3<f64> = Point3::origin();
     }
 }

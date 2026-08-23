@@ -1,6 +1,6 @@
 """botrail: ROS-free robot motion authoring with a web-based 3D studio."""
 
-from . import catalog, io, paint, parts, select, seq, study, toolpath, trace
+from . import catalog, gait, io, paint, parts, select, seq, study, toolpath, trace
 from ._core import (
     Bom,
     CellReport,
@@ -26,6 +26,7 @@ from ._core import (
     catalog_package,
     project_schema,
 )
+from .gait import Gait
 from ._launcher import studio
 from .study import optimize, sweep
 
@@ -35,6 +36,7 @@ __all__ = [
     "Clearance",
     "FeedReport",
     "FilmCoat",
+    "Gait",
     "IkResult",
     "IoFinding",
     "IoMap",
@@ -53,6 +55,7 @@ __all__ = [
     "catalog_package",
     "project_schema",
     "catalog",
+    "gait",
     "io",
     "paint",
     "parts",

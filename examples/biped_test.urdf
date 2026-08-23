@@ -1,0 +1,212 @@
+<?xml version="1.0"?>
+<!--
+  A primitive biped for botrail's gait tests and the offline humanoid demo:
+  a pelvis with a torso and head, two 6-DOF legs (hip yaw / roll / pitch,
+  knee, ankle pitch / roll) whose foot link is the ankle roll link with its
+  sole 50 mm below, and two 2-DOF arms (shoulder pitch, elbow) ending in a
+  hand link. Stance: hip pitch -0.4, knee 0.8, ankle pitch -0.4 stands
+  0.645 m of leg under the pelvis with the soles flat; foot_radius 0.05.
+  Elbows bend forward (negative), like a person's.
+-->
+<robot name="biped_test">
+  <link name="pelvis">
+    <visual><geometry><box size="0.16 0.26 0.12"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <link name="torso">
+    <visual><origin xyz="0 0 0.22"/><geometry><box size="0.18 0.30 0.40"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="waist_joint" type="fixed">
+    <parent link="pelvis"/><child link="torso"/>
+    <origin xyz="0 0 0.06"/>
+  </joint>
+  <link name="head">
+    <visual><geometry><sphere radius="0.09"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="neck_joint" type="fixed">
+    <parent link="torso"/><child link="head"/>
+    <origin xyz="0 0 0.54"/>
+  </joint>
+
+  <link name="L_hip_yaw_link">
+    <visual><geometry><cylinder radius="0.05" length="0.05"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_hip_yaw_joint" type="revolute">
+    <parent link="pelvis"/><child link="L_hip_yaw_link"/>
+    <origin xyz="0 0.1 -0.06"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5" upper="1.5" effort="50" velocity="5"/>
+  </joint>
+  <link name="L_hip_roll_link">
+    <visual><origin rpy="0 1.5707963 0"/><geometry><cylinder radius="0.045" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_hip_roll_joint" type="revolute">
+    <parent link="L_hip_yaw_link"/><child link="L_hip_roll_link"/>
+    <origin xyz="0 0 -0.04"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.6" upper="0.6" effort="50" velocity="5"/>
+  </joint>
+  <link name="L_thigh">
+    <visual><origin xyz="0 0 -0.19"/><geometry><box size="0.09 0.08 0.32"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="L_hip_pitch_joint" type="revolute">
+    <parent link="L_hip_roll_link"/><child link="L_thigh"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="50" velocity="5"/>
+  </joint>
+  <link name="L_shank">
+    <visual><origin xyz="0 0 -0.175"/><geometry><box size="0.07 0.065 0.35"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="L_knee_joint" type="revolute">
+    <parent link="L_thigh"/><child link="L_shank"/>
+    <origin xyz="0 0 -0.35"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="2.5" effort="50" velocity="5"/>
+  </joint>
+  <link name="L_ankle_pitch_link">
+    <visual><origin rpy="1.5707963 0 0"/><geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_ankle_pitch_joint" type="revolute">
+    <parent link="L_shank"/><child link="L_ankle_pitch_link"/>
+    <origin xyz="0 0 -0.35"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.0" upper="1.0" effort="50" velocity="5"/>
+  </joint>
+  <link name="L_foot">
+    <visual><origin xyz="0.03 0 -0.035"/><geometry><box size="0.22 0.10 0.03"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_ankle_roll_joint" type="revolute">
+    <parent link="L_ankle_pitch_link"/><child link="L_foot"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.5" upper="0.5" effort="50" velocity="5"/>
+  </joint>
+
+  <link name="R_hip_yaw_link">
+    <visual><geometry><cylinder radius="0.05" length="0.05"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_hip_yaw_joint" type="revolute">
+    <parent link="pelvis"/><child link="R_hip_yaw_link"/>
+    <origin xyz="0 -0.1 -0.06"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.5" upper="1.5" effort="50" velocity="5"/>
+  </joint>
+  <link name="R_hip_roll_link">
+    <visual><origin rpy="0 1.5707963 0"/><geometry><cylinder radius="0.045" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_hip_roll_joint" type="revolute">
+    <parent link="R_hip_yaw_link"/><child link="R_hip_roll_link"/>
+    <origin xyz="0 0 -0.04"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.6" upper="0.6" effort="50" velocity="5"/>
+  </joint>
+  <link name="R_thigh">
+    <visual><origin xyz="0 0 -0.19"/><geometry><box size="0.09 0.08 0.32"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="R_hip_pitch_joint" type="revolute">
+    <parent link="R_hip_roll_link"/><child link="R_thigh"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="50" velocity="5"/>
+  </joint>
+  <link name="R_shank">
+    <visual><origin xyz="0 0 -0.175"/><geometry><box size="0.07 0.065 0.35"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="R_knee_joint" type="revolute">
+    <parent link="R_thigh"/><child link="R_shank"/>
+    <origin xyz="0 0 -0.35"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="2.5" effort="50" velocity="5"/>
+  </joint>
+  <link name="R_ankle_pitch_link">
+    <visual><origin rpy="1.5707963 0 0"/><geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_ankle_pitch_joint" type="revolute">
+    <parent link="R_shank"/><child link="R_ankle_pitch_link"/>
+    <origin xyz="0 0 -0.35"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.0" upper="1.0" effort="50" velocity="5"/>
+  </joint>
+  <link name="R_foot">
+    <visual><origin xyz="0.03 0 -0.035"/><geometry><box size="0.22 0.10 0.03"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_ankle_roll_joint" type="revolute">
+    <parent link="R_ankle_pitch_link"/><child link="R_foot"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.5" upper="0.5" effort="50" velocity="5"/>
+  </joint>
+
+  <link name="L_upper_arm">
+    <visual><origin xyz="0 0 -0.14"/><geometry><cylinder radius="0.04" length="0.28"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="L_shoulder_pitch_joint" type="revolute">
+    <parent link="torso"/><child link="L_upper_arm"/>
+    <origin xyz="0 0.21 0.40"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="30" velocity="5"/>
+  </joint>
+  <link name="L_forearm">
+    <visual><origin xyz="0 0 -0.12"/><geometry><cylinder radius="0.035" length="0.24"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_elbow_joint" type="revolute">
+    <parent link="L_upper_arm"/><child link="L_forearm"/>
+    <origin xyz="0 0 -0.28"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="0.0" effort="30" velocity="5"/>
+  </joint>
+  <link name="L_hand">
+    <visual><geometry><box size="0.06 0.04 0.10"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="L_wrist_joint" type="fixed">
+    <parent link="L_forearm"/><child link="L_hand"/>
+    <origin xyz="0 0 -0.27"/>
+  </joint>
+
+  <link name="R_upper_arm">
+    <visual><origin xyz="0 0 -0.14"/><geometry><cylinder radius="0.04" length="0.28"/></geometry>
+      <material name="shell"><color rgba="0.82 0.83 0.85 1"/></material></visual>
+  </link>
+  <joint name="R_shoulder_pitch_joint" type="revolute">
+    <parent link="torso"/><child link="R_upper_arm"/>
+    <origin xyz="0 -0.21 0.40"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="30" velocity="5"/>
+  </joint>
+  <link name="R_forearm">
+    <visual><origin xyz="0 0 -0.12"/><geometry><cylinder radius="0.035" length="0.24"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_elbow_joint" type="revolute">
+    <parent link="R_upper_arm"/><child link="R_forearm"/>
+    <origin xyz="0 0 -0.28"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="0.0" effort="30" velocity="5"/>
+  </joint>
+  <link name="R_hand">
+    <visual><geometry><box size="0.06 0.04 0.10"/></geometry>
+      <material name="dark"><color rgba="0.15 0.15 0.16 1"/></material></visual>
+  </link>
+  <joint name="R_wrist_joint" type="fixed">
+    <parent link="R_forearm"/><child link="R_hand"/>
+    <origin xyz="0 0 -0.27"/>
+  </joint>
+</robot>

@@ -178,6 +178,13 @@ for piece in sorted((package / "collision").glob("*.stl")):
 `examples/amr_demo.py --compare` bakes one authored cell on every carrier
 the catalog ships and prints what each answers.
 
+## Legs instead of wheels
+
+A quadruped or a humanoid is the same vehicle with a gait on its mount:
+`scene.mount_robot(device, robot=..., gait=bt.Gait(...))`, and the `goto`
+that dispatches the vehicle is what makes it walk. See
+[Legged robots](legged.md).
+
 ## What this does not model
 
 Worth stating plainly, because the vocabulary invites bigger expectations:

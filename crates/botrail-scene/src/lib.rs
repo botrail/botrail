@@ -8,6 +8,7 @@
 pub mod apt;
 pub mod carve;
 pub mod coat;
+pub mod gait;
 pub mod gcode;
 pub mod handshake;
 pub mod iomap;
@@ -589,15 +590,35 @@ impl Scene {
         device: &str,
         offset: Isometry3<f64>,
     ) -> Result<(), SceneError> {
-        let start = match self.devices.iter().find(|d| d.name == device) {
+        self.mount_robot_with(robot, device, Some(offset), None)
+    }
+
+    /// [`Scene::mount_robot`], optionally with a gait: the robot then *is*
+    /// the vehicle's legs and walks whenever it drives. With a gait, the
+    /// offset defaults to the one that stands the stance feet on the
+    /// vehicle plane, and the robot is put into its stance.
+    pub fn mount_robot_with(
+        &mut self,
+        robot: usize,
+        device: &str,
+        offset: Option<Isometry3<f64>>,
+        gait: Option<crate::seq::GaitSpec>,
+    ) -> Result<(), SceneError> {
+        let (start, body) = match self.devices.iter().find(|d| d.name == device) {
             Some(crate::seq::Device {
-                kind: crate::seq::DeviceKind::Vehicle { path, start, .. },
+                kind:
+                    crate::seq::DeviceKind::Vehicle {
+                        path, start, body, ..
+                    },
                 ..
-            }) => path.frame_at(start).ok_or_else(|| {
-                SceneError::BadMount(format!(
-                    "vehicle `{device}` starts at unknown station `{start}`"
-                ))
-            })?,
+            }) => (
+                path.frame_at(start).ok_or_else(|| {
+                    SceneError::BadMount(format!(
+                        "vehicle `{device}` starts at unknown station `{start}`"
+                    ))
+                })?,
+                body.clone(),
+            ),
             Some(_) => {
                 return Err(SceneError::BadMount(format!(
                     "`{device}` is not a vehicle; only vehicles carry robots"
@@ -605,11 +626,37 @@ impl Scene {
             }
             None => return Err(SceneError::UnknownDevice(device.to_string())),
         };
+        // A walking robot stands *inside* its vehicle's body — the
+        // footprint the aisle check drives — so contact between its links
+        // and that body is the arrangement, not a collision.
+        if gait.is_some() {
+            for member in &body {
+                for link in 0..self.robots[robot].model.links.len() {
+                    self.allow_link_obstacle_contact(robot, link, member)?;
+                }
+            }
+        }
+        let (offset, stance) = match &gait {
+            Some(spec) => {
+                let resolved = crate::gait::resolve_gait(
+                    &self.robots[robot].model,
+                    spec,
+                    self.robots[robot].joint_positions(),
+                )
+                .map_err(|m| SceneError::BadMount(format!("gait: {m}")))?;
+                (offset.unwrap_or(resolved.offset), Some(resolved.stance))
+            }
+            None => (offset.unwrap_or_else(Isometry3::identity), None),
+        };
         self.robots[robot].mount = Some(crate::seq::RobotMount {
             device: device.to_string(),
             offset,
+            gait,
         });
         self.set_robot_base_pose_for(robot, start * offset);
+        if let Some(q) = stance {
+            self.set_joint_positions_for(robot, q)?;
+        }
         Ok(())
     }
 
@@ -1163,6 +1210,91 @@ impl Scene {
         Self::remap_obstacle_ids(pairs, &[], &attached_map)
     }
 
+    /// What a robot riding a travelling vehicle touches in the environment
+    /// right now — its links and what it holds, against every enabled
+    /// obstacle that is not `carried` (the vehicle's body and load) and not
+    /// attached to anything — as `(link or held object, obstacle)` names.
+    /// The rider's aisle check: self-collision and the other robots are
+    /// not its question, and are not priced.
+    pub fn rider_obstacle_contacts(
+        &self,
+        robot: usize,
+        carried: &[String],
+    ) -> Vec<(String, String)> {
+        let r = &self.robots[robot];
+        let poses = self.link_poses_for(robot);
+        let queries = [RobotQuery {
+            collider: &r.collider,
+            link_poses: &poses,
+            acm: &r.acm,
+        }];
+        let mut obstacles = Vec::new();
+        let mut map = Vec::new();
+        for (i, (o, c)) in self
+            .obstacles
+            .iter()
+            .zip(&self.obstacle_colliders)
+            .enumerate()
+        {
+            if o.enabled && !self.is_attached(&o.name) && !carried.iter().any(|n| n == &o.name) {
+                obstacles.push((o.pose, c));
+                map.push(i);
+            }
+        }
+        let mut attached = Vec::new();
+        let mut attached_map = Vec::new();
+        for att in &self.attachments {
+            if att.robot != robot {
+                continue;
+            }
+            let Some(i) = self.obstacles.iter().position(|o| o.name == att.object) else {
+                continue;
+            };
+            if !self.obstacles[i].enabled {
+                continue;
+            }
+            attached.push(botrail_collide::AttachedCollider {
+                robot: 0,
+                link: att.link,
+                offset: att.grasp,
+                collider: &self.obstacle_colliders[i],
+                skip_links: &att.touch_links,
+            });
+            attached_map.push(i);
+        }
+        let mut allowance = botrail_collide::ContactAllowance::default();
+        for contact in &self.allowed_contacts {
+            if contact.robot != robot {
+                continue;
+            }
+            let Some(orig) = self
+                .obstacles
+                .iter()
+                .position(|o| o.name == contact.obstacle)
+            else {
+                continue;
+            };
+            if let Some(filtered) = map.iter().position(|&m| m == orig) {
+                allowance.allow(0, contact.link, filtered);
+            }
+        }
+        botrail_collide::check_against_obstacles(&queries, &obstacles, &attached, &allowance)
+            .into_iter()
+            .filter_map(|pair| {
+                let obstacle = match pair.b {
+                    ColliderId::Obstacle(k) => self.obstacles[map[k]].name.clone(),
+                    _ => return None,
+                };
+                let part = match pair.a {
+                    ColliderId::Link { link, .. } => r.model.links[link].name.clone(),
+                    ColliderId::Attached(k) => self.obstacles[attached_map[k]].name.clone(),
+                    ColliderId::Obstacle(_) => return None,
+                };
+                Some((part, obstacle))
+            })
+            .collect()
+    }
+
     /// Marks contact between `link` of `robot` and obstacle `obstacle` as
     /// process-intended (see [`AllowedContact`]). Idempotent.
     pub fn allow_link_obstacle_contact(
@@ -1690,6 +1822,8 @@ impl Scene {
                 },
                 planned: Vec::new(),
                 base: None,
+                footfalls: Vec::new(),
+                sway: Vec::new(),
             })
             .collect();
         rollout::SequenceTimeline {

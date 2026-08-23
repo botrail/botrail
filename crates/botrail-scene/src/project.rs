@@ -241,6 +241,147 @@ pub struct ProjectRobotMsg {
     /// World pose of the robot's root link.
     pub base_pose: PoseMsg,
     pub joint_positions: Vec<f64>,
+    /// The vehicle this robot rides, if any (absent in older files, and
+    /// for a robot bolted to the floor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<RobotMountMsg>,
+}
+
+/// A robot riding a vehicle (`Scene::mount_robot`): the device, where the
+/// base sits in its frame, and — for a machine whose legs are the robot —
+/// the gait that walks it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RobotMountMsg {
+    pub device: String,
+    pub offset: PoseMsg,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gait: Option<GaitMsg>,
+}
+
+/// [`crate::seq::GaitSpec`] as a project carries it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GaitMsg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_link: Option<String>,
+    pub legs: Vec<GaitLegMsg>,
+    pub pattern: GaitPatternMsg,
+    pub period: f64,
+    pub lift: f64,
+    /// The standing configuration, `(joint, value)`.
+    pub stance: Vec<(String, f64)>,
+    pub max_stride: f64,
+    #[serde(default)]
+    pub foot_radius: f64,
+    /// `(joint, amplitude)` swung in step with the first leg.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arm_swing: Vec<(String, f64)>,
+    #[serde(default)]
+    pub bob: f64,
+    #[serde(default)]
+    pub lateral: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GaitLegMsg {
+    pub name: String,
+    pub foot: String,
+    /// `point`, `sole` or `sole_yaw_free`.
+    pub contact: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GaitPatternMsg {
+    Walk,
+    Trot,
+    Biped,
+    Custom { duty: f64, phases: Vec<f64> },
+}
+
+pub fn gait_msg(spec: &crate::seq::GaitSpec) -> GaitMsg {
+    use crate::seq::{FootContact, GaitPattern};
+    GaitMsg {
+        body_link: spec.body_link.clone(),
+        legs: spec
+            .legs
+            .iter()
+            .map(|l| GaitLegMsg {
+                name: l.name.clone(),
+                foot: l.foot.clone(),
+                contact: match l.contact {
+                    FootContact::Point => "point",
+                    FootContact::Sole { yaw_free: false } => "sole",
+                    FootContact::Sole { yaw_free: true } => "sole_yaw_free",
+                }
+                .to_string(),
+            })
+            .collect(),
+        pattern: match &spec.pattern {
+            GaitPattern::Walk => GaitPatternMsg::Walk,
+            GaitPattern::Trot => GaitPatternMsg::Trot,
+            GaitPattern::Biped => GaitPatternMsg::Biped,
+            GaitPattern::Custom { duty, phases } => GaitPatternMsg::Custom {
+                duty: *duty,
+                phases: phases.clone(),
+            },
+        },
+        period: spec.period,
+        lift: spec.lift,
+        stance: spec.stance.clone(),
+        max_stride: spec.max_stride,
+        foot_radius: spec.foot_radius,
+        arm_swing: spec.arm_swing.clone(),
+        bob: spec.bob,
+        lateral: spec.lateral,
+    }
+}
+
+pub fn gait_from_msg(msg: &GaitMsg) -> Result<crate::seq::GaitSpec, String> {
+    use crate::seq::{FootContact, GaitPattern, GaitSpec, LegSpec};
+    let mut legs = Vec::with_capacity(msg.legs.len());
+    for leg in &msg.legs {
+        let contact = match leg.contact.as_str() {
+            "point" => FootContact::Point,
+            "sole" => FootContact::Sole { yaw_free: false },
+            "sole_yaw_free" => FootContact::Sole { yaw_free: true },
+            other => {
+                return Err(format!(
+                    "leg `{}`: contact must be point, sole or sole_yaw_free, got `{other}`",
+                    leg.name
+                ))
+            }
+        };
+        legs.push(LegSpec {
+            name: leg.name.clone(),
+            foot: leg.foot.clone(),
+            contact,
+        });
+    }
+    Ok(GaitSpec {
+        body_link: msg.body_link.clone(),
+        legs,
+        pattern: match &msg.pattern {
+            GaitPatternMsg::Walk => GaitPattern::Walk,
+            GaitPatternMsg::Trot => GaitPattern::Trot,
+            GaitPatternMsg::Biped => GaitPattern::Biped,
+            GaitPatternMsg::Custom { duty, phases } => GaitPattern::Custom {
+                duty: *duty,
+                phases: phases.clone(),
+            },
+        },
+        period: msg.period,
+        lift: msg.lift,
+        stance: msg.stance.clone(),
+        max_stride: msg.max_stride,
+        foot_radius: msg.foot_radius,
+        arm_swing: msg.arm_swing.clone(),
+        bob: msg.bob,
+        lateral: msg.lateral,
+    })
 }
 
 /// A `.botrail` project: one robot cell as text — robots and their
@@ -353,6 +494,7 @@ impl ProjectFile {
                         source: RobotSourceMsg::Urdf { xml: v1.robot_urdf },
                         base_pose: identity_pose(),
                         joint_positions: v1.joint_positions,
+                        mount: None,
                     }],
                     obstacles: v1.obstacles,
                     motions: v1.motions,
@@ -446,6 +588,11 @@ impl Scene {
                     source: robot_source_msg(&r.model.source),
                     base_pose: PoseMsg::from(r.base_pose()),
                     joint_positions: r.joint_positions().to_vec(),
+                    mount: r.mount.as_ref().map(|m| RobotMountMsg {
+                        device: m.device.clone(),
+                        offset: PoseMsg::from(&m.offset),
+                        gait: m.gait.as_ref().map(gait_msg),
+                    }),
                 })
                 .collect(),
             obstacles: self
@@ -712,6 +859,26 @@ impl Scene {
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
+        // Mounts need their vehicles in place. Mounting parks the robot at
+        // the vehicle's start station and, with a gait, stands it in its
+        // stance; the file's own pose and joints then take precedence.
+        for (i, robot_msg) in project.robots.iter().enumerate() {
+            let Some(mount) = &robot_msg.mount else {
+                continue;
+            };
+            let name = self.robots()[i].name.clone();
+            let gait = mount
+                .gait
+                .as_ref()
+                .map(gait_from_msg)
+                .transpose()
+                .map_err(|m| ProjectError::Incompatible(format!("robot `{name}` gait: {m}")))?;
+            self.mount_robot_with(i, &mount.device, Some((&mount.offset).into()), gait)
+                .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
+            self.set_robot_base_pose_for(i, (&robot_msg.base_pose).into());
+            self.set_joint_positions_for(i, robot_msg.joint_positions.clone())
+                .map_err(|e| ProjectError::Scene(e.to_string()))?;
+        }
         self.set_scenarios(
             project
                 .scenarios
@@ -765,6 +932,54 @@ impl Scene {
 }
 
 // ------------------------------------------------------------- codegen
+
+/// A gait as the `bt.Gait(...)` call that rebuilds it.
+fn py_gait(gait: &GaitMsg) -> String {
+    let legs: Vec<String> = gait
+        .legs
+        .iter()
+        .map(|l| format!("{:?}: ({:?}, {:?})", l.name, l.foot, l.contact))
+        .collect();
+    let stance: Vec<String> = gait
+        .stance
+        .iter()
+        .map(|(j, v)| format!("{j:?}: {v}"))
+        .collect();
+    let mut call = format!(
+        "bt.Gait(legs={{{}}}, stance={{{}}}, period={}, lift={}, max_stride={}, foot_radius={}",
+        legs.join(", "),
+        stance.join(", "),
+        gait.period,
+        gait.lift,
+        gait.max_stride,
+        gait.foot_radius
+    );
+    match &gait.pattern {
+        GaitPatternMsg::Walk => call.push_str(", pattern=\"walk\""),
+        GaitPatternMsg::Trot => call.push_str(", pattern=\"trot\""),
+        GaitPatternMsg::Biped => call.push_str(", pattern=\"biped\""),
+        GaitPatternMsg::Custom { duty, phases } => call.push_str(&format!(
+            ", pattern=\"custom\", duty={duty}, phases={}",
+            py_list(phases)
+        )),
+    }
+    if !gait.arm_swing.is_empty() {
+        let swing: Vec<String> = gait
+            .arm_swing
+            .iter()
+            .map(|(j, a)| format!("{j:?}: {a}"))
+            .collect();
+        call.push_str(&format!(", arm_swing={{{}}}", swing.join(", ")));
+    }
+    if gait.bob != 0.0 || gait.lateral != 0.0 {
+        call.push_str(&format!(", bob={}, lateral={}", gait.bob, gait.lateral));
+    }
+    if let Some(body) = &gait.body_link {
+        call.push_str(&format!(", body_link={body:?}"));
+    }
+    call.push(')');
+    call
+}
 
 fn py_list(values: &[f64]) -> String {
     let items: Vec<String> = values.iter().map(|v| format!("{v:.6}")).collect();
@@ -1177,6 +1392,31 @@ pub fn generate_python(project: &ProjectFile) -> String {
                     out.push_str(", allow_reverse=True)\n");
                 }
             }
+        }
+    }
+    // Mounts after the vehicles they ride. A gait stands the robot in its
+    // stance, so the saved joints are set again afterwards.
+    for (i, robot_msg) in project.robots.iter().enumerate() {
+        let Some(mount) = &robot_msg.mount else {
+            continue;
+        };
+        let gait = match &mount.gait {
+            Some(g) => format!(", gait={}", py_gait(g)),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "scene.mount_robot({:?}, offset_position={}, offset_quaternion={}{}{gait})\n",
+            mount.device,
+            py_tuple(&mount.offset.position),
+            py_tuple(&mount.offset.quaternion),
+            robot_kwarg(project, i)
+        ));
+        if mount.gait.is_some() {
+            out.push_str(&format!(
+                "scene.set_joint_positions({}{})\n",
+                py_list(&robot_msg.joint_positions),
+                robot_kwarg(project, i)
+            ));
         }
     }
     for signal in &project.signals {

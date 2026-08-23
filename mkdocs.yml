@@ -126,6 +126,7 @@ nav:
       - Sequences: guides/sequences.md
       - Sensors and devices: guides/sensors-and-devices.md
       - Vehicles and AMRs: guides/vehicles-and-amr.md
+      - Legged robots: guides/legged.md
       - Attach and tracking: guides/attach-and-tracking.md
       - Timeline assertions: guides/timeline-assertions.md
       - The I/O map: guides/io-map.md
@@ -154,6 +155,7 @@ nav:
       - Standard parts (bt.parts): reference/api/parts.md
       - Requirements and the check (bt.select): reference/api/select.md
       - Catalog search (bt.catalog): reference/api/catalog.md
+      - Gaits (bt.Gait): reference/api/gait.md
       - Traces (bt.trace): reference/api/trace.md
       - Parameter studies (bt.sweep / bt.optimize): reference/api/study.md
       - Studio: reference/api/studio.md

@@ -311,13 +311,16 @@ impl SceneHub {
 
     /// Puts a robot on a vehicle; the base then follows it. Broadcasts the
     /// new state, since mounting moves the robot to the vehicle at once.
-    pub fn mount_robot(
+    /// Puts a robot on a vehicle, optionally with a gait; the offset
+    /// defaults to the stance-derived one when a gait is given.
+    pub fn mount_robot_with(
         &self,
         robot: usize,
         device: &str,
-        offset: Isometry3<f64>,
+        offset: Option<Isometry3<f64>>,
+        gait: Option<botrail_scene::seq::GaitSpec>,
     ) -> Result<(), SceneError> {
-        let result = self.with_scene(|scene| scene.mount_robot(robot, device, offset));
+        let result = self.with_scene(|scene| scene.mount_robot_with(robot, device, offset, gait));
         if result.is_ok() {
             botrail_session::emit_state(self);
         }

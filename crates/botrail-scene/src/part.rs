@@ -807,6 +807,17 @@ impl Scene {
         }
         for device in &self.devices {
             let part = explicit(PartTargetKind::Device, &device.name);
+            // A vehicle whose legs are a robot *is* that robot: one
+            // machine, listed once on the robot's line — unless the device
+            // was pinned to a part of its own.
+            let walked = self.robots.iter().any(|r| {
+                r.mount
+                    .as_ref()
+                    .is_some_and(|m| m.device == device.name && m.gait.is_some())
+            });
+            if walked && part.is_none() {
+                continue;
+            }
             let Some(category) = device_category(&device.kind).or(part.and(Some("device"))) else {
                 continue;
             };

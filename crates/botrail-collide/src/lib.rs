@@ -537,6 +537,39 @@ pub fn check_scene(
         }
     }
     cross_robot_pairs(robots, inter_acm, &bp, &mut pairs);
+    obstacle_pairs(robots, obstacles, attached, allowance, &bp, &mut pairs);
+    attached_robot_and_mutual_pairs(robots, attached, &bp, false, &mut pairs);
+    pairs
+}
+
+/// Only the robot-vs-obstacle section of [`check_scene`]: every link and
+/// every attached object against the given obstacles, with no self or
+/// cross-robot pairs. What a robot riding a travelling vehicle is checked
+/// with — the aisle check for the part of the machine that is a robot —
+/// where pricing its self-collisions every tick would be waste and its
+/// fellow robots are the scan tick's own question.
+pub fn check_against_obstacles(
+    robots: &[RobotQuery<'_>],
+    obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
+    attached: &[AttachedCollider],
+    allowance: &ContactAllowance,
+) -> Vec<CollisionPair> {
+    let bp = BroadPhase::new(robots, attached);
+    let mut pairs = Vec::new();
+    obstacle_pairs(robots, obstacles, attached, allowance, &bp, &mut pairs);
+    pairs
+}
+
+/// The robot-vs-obstacle section, shared by [`check_scene`] and
+/// [`check_against_obstacles`].
+fn obstacle_pairs(
+    robots: &[RobotQuery<'_>],
+    obstacles: &[(Isometry3<f64>, &ObstacleCollider)],
+    attached: &[AttachedCollider],
+    allowance: &ContactAllowance,
+    bp: &BroadPhase,
+    pairs: &mut Vec<CollisionPair>,
+) {
     for (k, (obs_pose, obs)) in obstacles.iter().enumerate() {
         let op = to_parry_pose(obs_pose);
         let obs_aabb = obs.local_aabb.map(|a| a.transform_by(&op));
@@ -571,8 +604,6 @@ pub fn check_scene(
             }
         }
     }
-    attached_robot_and_mutual_pairs(robots, attached, &bp, false, &mut pairs);
-    pairs
 }
 
 /// The robot-vs-robot section, shared by [`check_scene`] and

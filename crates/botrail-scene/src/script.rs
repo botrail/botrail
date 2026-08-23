@@ -151,6 +151,19 @@ pub fn merged_sequence_program(
     })?;
     let robot = driven_robot(scene, seq)?;
     let robot_name = scene.robots()[robot].name.clone();
+    // A walking robot's joints are its legs, driven by the gait the vehicle
+    // dispatched; no controller takes that as a program.
+    if scene.robots()[robot]
+        .mount
+        .as_ref()
+        .is_some_and(|m| m.gait.is_some())
+    {
+        return Err(format!(
+            "robot `{robot_name}` walks its vehicle: its legs are a gait, not a program — \
+             there is no controller script to export for it (the cycle belongs to the PLC \
+             side: export_plcopen)"
+        ));
+    }
     let io = SequenceIo {
         self_robot: Some(robot_name.clone()),
         ..io.clone()
@@ -1868,6 +1881,8 @@ mod tests {
                 },
             ],
             base: None,
+            footfalls: Vec::new(),
+            sway: Vec::new(),
         };
         let timeline = |ramp_to: f64, arm: usize| crate::rollout::SequenceTimeline {
             duration: 1.0,

@@ -1346,6 +1346,183 @@
         "pose"
       ]
     },
+    "GaitLegMsg": {
+      "type": "object",
+      "properties": {
+        "contact": {
+          "description": "`point`, `sole` or `sole_yaw_free`.",
+          "type": "string"
+        },
+        "foot": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "foot",
+        "contact"
+      ]
+    },
+    "GaitMsg": {
+      "description": "[`crate::seq::GaitSpec`] as a project carries it.",
+      "type": "object",
+      "properties": {
+        "arm_swing": {
+          "description": "`(joint, amplitude)` swung in step with the first leg.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number",
+                "format": "double"
+              }
+            ]
+          }
+        },
+        "bob": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "body_link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "foot_radius": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "lateral": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "legs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GaitLegMsg"
+          }
+        },
+        "lift": {
+          "type": "number",
+          "format": "double"
+        },
+        "max_stride": {
+          "type": "number",
+          "format": "double"
+        },
+        "pattern": {
+          "$ref": "#/$defs/GaitPatternMsg"
+        },
+        "period": {
+          "type": "number",
+          "format": "double"
+        },
+        "stance": {
+          "description": "The standing configuration, `(joint, value)`.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number",
+                "format": "double"
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "legs",
+        "pattern",
+        "period",
+        "lift",
+        "stance",
+        "max_stride"
+      ]
+    },
+    "GaitPatternMsg": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "walk"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "trot"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "biped"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "duty": {
+              "type": "number",
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "custom"
+            },
+            "phases": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "duty",
+            "phases"
+          ]
+        }
+      ]
+    },
     "GeometryMsg": {
       "oneOf": [
         {
@@ -2247,6 +2424,17 @@
             "format": "double"
           }
         },
+        "mount": {
+          "description": "The vehicle this robot rides, if any (absent in older files, and\nfor a robot bolted to the floor).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RobotMountMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "name": {
           "description": "Scene-unique instance name; `None` (older files) falls back to the\nmodel name.",
           "type": [
@@ -2279,6 +2467,32 @@
       "required": [
         "joint",
         "value"
+      ]
+    },
+    "RobotMountMsg": {
+      "description": "A robot riding a vehicle (`Scene::mount_robot`): the device, where the\nbase sits in its frame, and — for a machine whose legs are the robot —\nthe gait that walks it.",
+      "type": "object",
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "gait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GaitMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "offset": {
+          "$ref": "#/$defs/PoseMsg"
+        }
+      },
+      "required": [
+        "device",
+        "offset"
       ]
     },
     "RobotSourceMsg": {
