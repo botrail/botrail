@@ -1,0 +1,215 @@
+"""`scene.requirements()` / `scene.check()` — what the cell asks of every BOM
+line, compared with what the chosen part says. botrail derives and compares;
+it never chooses: a part that falls short is an error, a part that does not
+say is a warning, a line nobody has identified carries its requirements
+into the `unidentified_part` note.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+import botrail as bt
+
+EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+sys.path.insert(0, str(EXAMPLES))
+
+HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+HAS_CATALOG = any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))
+
+PICK = [0.95, 0.85, -1.1, 0.25, 0.0, 0.0]
+
+
+def cell(*, reach_mm: float = 1000.0, part_mass: float | None = 0.8) -> bt.Scene:
+    """A hand-identified pick cell: every number the derivations read is
+    authored here, so the expected requirements follow by hand."""
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene.set_part("simple_arm", manufacturer="ACME", model="SA-6", payload_kg=3.0, reach_mm=reach_mm, mass_kg=28)
+    stand = bt.parts.pedestal(scene, "stand", height=0.4, position=(0, 0))
+    scene.set_robot_base_pose(*scene.frame(stand.frames[0]))
+    scene.add_box("part", size=(0.06, 0.06, 0.06), position=(0.25, 0.35, 0.43))
+    if part_mass is not None:
+        scene.set_part("part", category="workpiece", mass_kg=part_mass)
+    scene.add_conveyor("belt", zone_position=(-0.1, 0.35, 0.45), zone_size=(0.9, 0.2, 0.14), velocity=(0.12, 0, 0))
+    scene.set_part("belt", manufacturer="MISUMI", model="GVL-900-200", length_mm=900, width_mm=200, max_speed_mps=0.2, load_kg=10)
+    scene.add_beam_sensor("eye", frm=(0.25, 0.25, 0.43), to=(0.25, 0.45, 0.43))
+    scene.add_zone_sensor("area", position=(0, 0, 0.9), size=(1.0, 0.6, 0.4))
+    scene.set_part("area", model="OS32C", range_mm=1000)
+    scene.add_io_node("UR", kind="robot_controller", robots=["simple_arm"], channels=bt.io.ur_standard())
+    scene.set_part("UR", manufacturer="Universal Robots", model="CB3")
+    scene.add_segment("to_pick", goal=PICK)
+    scene.add_segment("home", goal=[0.0] * 6)
+    seq = scene.sequence("pick")
+    seq.step("feed", actions=[bt.seq.start("belt"), bt.seq.motion("to_pick")], transition=bt.seq.done())
+    seq.step("await", transition=bt.seq.rising("eye"))
+    seq.step("grip", actions=[bt.seq.attach("part")], transition=bt.seq.immediately())
+    seq.step("home", actions=[bt.seq.motion("home")], transition=bt.seq.done())
+    scene.auto_assign_io()  # the I/O lint is clean: what remains is the requirement comparison
+    return scene
+
+
+def by_key(row) -> dict[str, bt.select.Requirement]:
+    return {r.key: r for r in row.requirements}
+
+
+def test_requirements_follow_from_the_cell() -> None:
+    scene = cell()
+    req = scene.requirements()
+    assert [r.target for r in req] == [r["names"][0] for r in scene.bom().rows]
+
+    robot = by_key(req["simple_arm"])
+    # Payload: no tool, the heaviest grasped part.
+    assert robot["payload_kg"].value == pytest.approx(0.8) and "grasps part" in robot["payload_kg"].basis
+    assert robot["payload_kg"].status == "ok" and robot["payload_kg"].provided == 3.0
+    # Reach: the farthest taught goal measured at the TCP (a plain URDF has no
+    # flange), from the base, plus the 10 % margin.
+    base = scene.robot_base_pose[0]
+    tcp = scene.robot.tcp_link
+    farthest = max(
+        math.dist(scene.link_pose_at(tcp, q)[0], base) for q in (PICK, [0.0] * 6)
+    )
+    assert robot["reach_mm"].value == pytest.approx(farthest * 1000 * 1.1, rel=1e-6)
+    assert "(TCP)" in robot["reach_mm"].basis and robot["reach_mm"].status == "ok"
+
+    belt = by_key(req["belt"])
+    assert belt["length_mm"].value == 900 and belt["width_mm"].value == 200
+    assert belt["speed_mps"].value == pytest.approx(0.12) and belt["speed_mps"].provided == 0.2
+    # The part starts inside the transport zone: it is the belt's load.
+    assert belt["load_kg"].value == pytest.approx(0.8) and belt["load_kg"].status == "ok"
+    assert req["belt"].status == "ok"
+
+    # A beam's span, an area sensor's half-diagonal.
+    assert by_key(req["eye"])["sensing_range_mm"].value == pytest.approx(200)
+    assert req["eye"].status == "unidentified" and req["eye"] in req.unidentified()
+    area = by_key(req["area"])["range_mm"]
+    assert area.value == pytest.approx(0.5 * math.hypot(1.0, 0.6) * 1000, abs=0.05) and area.status == "ok"
+
+    # I/O nodes count the points assigned to them; the I/O report owns their
+    # capacity findings, so they raise none here.
+    node = by_key(req["UR"])
+    assert node["di"].value == 2 and node["do"].value == 1  # eye + area / belt run
+    # ... and its "provided" is what it declares: 8 DI / 8 DO here.
+    assert node["di"].provided == 8 and node["di"].status == "ok" and req["UR"].status == "ok"
+    assert not [f for f in req.findings() if f.target == "UR"]
+
+    # The pedestal carries the robot standing on it.
+    stand = by_key(req["stand"])["load_kg"]
+    assert stand.value == pytest.approx(28) and "simple_arm standing" in stand.basis
+    assert req["stand"].status == "unidentified"
+
+    # Lines the cell asks nothing of.
+    assert req["part"].requirements == [] and req["part"].status == "unidentified"
+    assert req["simple_arm"].minimum == {"payload_kg": 0.8, "reach_mm": robot["reach_mm"].value}
+    assert "stand" in req and "nope" not in req
+    with pytest.raises(KeyError):
+        req["nope"]
+
+
+def test_short_unknown_and_incomplete_are_named() -> None:
+    scene = cell(reach_mm=300.0, part_mass=None)
+    scene.set_part("belt", manufacturer="MISUMI", model="GVL-900-200", length_mm=900)  # no width / speed / load
+    req = scene.requirements()
+    codes = [(f.code, f.target) for f in req.findings()]
+    assert ("spec_short", "simple_arm") in codes
+    assert ("spec_unknown", "belt") in codes
+    # No mass on the grasped part: the payload is not guessed, the note says why.
+    assert ("requirement_incomplete", "simple_arm") in codes
+    assert "payload_kg" not in by_key(req["simple_arm"])
+    assert any("no mass for part" in n for n in req["simple_arm"].notes)
+    short = [f for f in req.findings() if f.code == "spec_short"]
+    assert "reach_mm 300 < required" in short[0].message
+    assert req.short() == [req["simple_arm"]] and not req.ok
+    unknown = {r.key for r in req["belt"].requirements if r.status == "unknown"}
+    assert unknown == {"width_mm", "speed_mps"}  # no part on the belt -> no load requirement
+    assert req["belt"].status == "unknown"
+
+
+def test_check_aggregates_every_static_check() -> None:
+    scene = cell(reach_mm=300.0)
+    report = scene.check()
+    codes = [f.code for f in report.findings]
+    assert not report.ok and "spec_short" in codes
+    note = next(f for f in report.findings if f.code == "unidentified_part" and f.target == "eye")
+    assert "needs sensing_range_mm >= 200" in note.message
+    d = json.loads(report.to_json())
+    assert d["ok"] is False and d["requirements"]["lines"] == len(scene.bom())
+    assert d["requirements"]["short"] == 1
+    assert report.to_markdown().startswith("FAIL")
+    assert len(report.errors()) == 1 and report.errors()[0].target == "simple_arm"
+    # Fix the robot: the check passes (unknowns and notes are not failures).
+    scene.set_part("simple_arm", reach_mm=2000)
+    assert scene.check().ok
+
+
+def test_formats_and_sequence_filter(tmp_path: Path) -> None:
+    scene = cell()
+    req = scene.requirements()
+    md = req.to_markdown()
+    assert "| simple_arm | robot | payload_kg >= 0.8 |" in md and "Notes:" not in md
+    rows = json.loads(req.to_json())["rows"]
+    assert rows[0]["requirements"][0] == {
+        "key": "payload_kg", "op": ">=", "value": 0.8, "basis": "grasps part 0.8 kg",
+        "provided": 3.0, "provided_key": "payload_kg", "status": "ok",
+    }
+    csv_text = req.to_csv()
+    assert csv_text.splitlines()[0].startswith("line,category,qty,identified,requirement")
+    req.save(tmp_path / "req.md")
+    req.save(tmp_path / "req.json")
+    assert (tmp_path / "req.md").read_text() == md
+    # A second program that never grasps: counting only it drops the payload.
+    other = scene.sequence("idle")
+    other.step("wait", transition=bt.seq.elapsed(1.0))
+    assert "payload_kg" in by_key(scene.requirements(sequences=["pick"])["simple_arm"])
+    assert "payload_kg" not in by_key(scene.requirements(sequences=["idle"])["simple_arm"])
+    assert scene.requirements().sequences == ["pick", "idle"]
+    with pytest.raises(ValueError):
+        scene.requirements(sequences=["nope"])
+    # The margin is a parameter, not a constant.
+    r0 = by_key(scene.requirements(margin=0.0)["simple_arm"])["reach_mm"].value
+    r2 = by_key(scene.requirements(margin=0.2)["simple_arm"])["reach_mm"].value
+    assert r2 == pytest.approx(r0 * 1.2, rel=1e-6)
+    with pytest.raises(ValueError):
+        scene.requirements(margin=-1)
+
+
+def test_cli_check_carries_requirements(capsys) -> None:
+    from botrail._cli import main
+
+    scene = cell()
+    path = Path(os.environ.get("TMPDIR", "/tmp")) / "botrail_select_cli.botrail"
+    scene.save_project(path)
+    assert main(["check", str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["requirements"] == {"lines": len(scene.bom()), "short": 0, "unknown": 0, "unidentified": 3}
+    assert [f["target"] for f in out["findings"] if f["code"] == "unidentified_part"] == ["eye", "stand", "part"]
+
+
+@pytest.mark.skipif(not HAS_CATALOG, reason="botrail catalog not in the HF cache")
+def test_catalog_robot_and_tool_rows() -> None:
+    """A catalog cobot and gripper: specs come with the identity, the tool
+    line gets the grasp's stroke and payload, reach is measured at the
+    flange the catalog declares."""
+    robot = bt.Robot.from_catalog("universal_robots/ur5e")
+    tool = bt.Robot.from_catalog("robotiq/2f-85")
+    scene = bt.Scene(robot.attach_tool(tool), name="ur5e")
+    scene.add_box("carton", size=(0.25, 0.18, 0.15), position=(0.6, 0.0, 0.5))
+    scene.set_part("carton", category="workpiece", mass_kg=2.3)
+    scene.add_segment("to_pick", goal=[0.0, -1.2, 1.4, -1.8, -1.57, 0.0, 0.0])
+    seq = scene.sequence("pick")
+    seq.step("go", actions=[bt.seq.motion("to_pick")], transition=bt.seq.done())
+    seq.step("grip", actions=[bt.seq.attach("carton")], transition=bt.seq.immediately())
+    req = scene.requirements()
+    arm, grip = by_key(req["ur5e"]), by_key(req["ur5e/tool"])
+    assert arm["payload_kg"].value == pytest.approx(0.925 + 2.3) and arm["payload_kg"].status == "ok"
+    assert "(flange)" in arm["reach_mm"].basis and arm["reach_mm"].provided == 850
+    assert grip["payload_kg"].value == pytest.approx(2.3) and grip["payload_kg"].provided == 5.0
+    # 85 mm of stroke cannot open past the carton's smallest side.
+    assert grip["stroke_mm"].value == 150 and grip["stroke_mm"].status == "short"
+    assert req["ur5e/tool"].minimum == {"payload_kg": 2.3, "stroke_mm": 150.0}
+    assert [f.code for f in req.findings() if f.target == "ur5e/tool"] == ["spec_short"]

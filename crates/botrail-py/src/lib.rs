@@ -2487,6 +2487,68 @@ impl Scene {
             .unbind())
     }
 
+    /// World pose of `link_name` at joint configuration `joints` — forward
+    /// kinematics without moving the robot (its current joints and any
+    /// connected studio are untouched). `bt.select.requirements` measures
+    /// taught targets through this.
+    #[pyo3(signature = (link_name, joints, robot = None))]
+    fn link_pose_at(
+        &self,
+        link_name: &str,
+        joints: Vec<f64>,
+        robot: Option<&str>,
+    ) -> PyResult<([f64; 3], [f64; 4])> {
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .link_pose_at(index, link_name, &joints)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// The project (`.botrail` contents) as JSON without writing a file —
+    /// the one read-out `bt.select` derives requirements through.
+    fn _project_json(&self) -> String {
+        self.hub.project_json()
+    }
+
+    /// What every bill-of-materials line must be able to do, derived from
+    /// the cell (payload from the tool and the grasped parts, reach from
+    /// the taught targets, a beam's span, a conveyor's size and load, ...)
+    /// and compared with what the chosen part says. Returns a
+    /// `bt.select.Requirements` (rows, `findings()`, `to_markdown()`,
+    /// `to_json()`); botrail derives and compares — it does not choose.
+    #[pyo3(signature = (*, sequences = None, margin = 0.1))]
+    fn requirements(
+        slf: Py<Self>,
+        py: Python<'_>,
+        sequences: Option<Vec<String>>,
+        margin: f64,
+    ) -> PyResult<Py<PyAny>> {
+        let module = py.import("botrail.select")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sequences", sequences)?;
+        kwargs.set_item("margin", margin)?;
+        Ok(module
+            .getattr("requirements")?
+            .call((slf,), Some(&kwargs))?
+            .unbind())
+    }
+
+    /// Every static check in one report — the I/O lint, each sequence
+    /// walked for dangling references, unidentified equipment lines and
+    /// the requirement comparison (`spec_short` / `spec_unknown`). Returns
+    /// a `bt.select.CheckReport` (`ok`, `findings`, `to_json()`,
+    /// `to_markdown()`); `botrail check` prints the same thing.
+    #[pyo3(signature = (*, sequences = None))]
+    fn check(slf: Py<Self>, py: Python<'_>, sequences: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
+        let module = py.import("botrail.select")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sequences", sequences)?;
+        Ok(module
+            .getattr("check")?
+            .call((slf,), Some(&kwargs))?
+            .unbind())
+    }
+
     /// Adds or replaces a sequence from wire-format JSON (the
     /// `SequenceBuilder` sugar calls this).
     fn _upsert_sequence_json(&self, json: &str) -> PyResult<()> {

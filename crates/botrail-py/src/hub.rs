@@ -245,6 +245,24 @@ impl SceneHub {
         })
     }
 
+    /// World pose of `link_name` of robot `robot` at configuration `q` —
+    /// forward kinematics alone, the scene's joints untouched.
+    pub fn link_pose_at(
+        &self,
+        robot: usize,
+        link_name: &str,
+        q: &[f64],
+    ) -> Result<PoseArrays, String> {
+        self.with_scene(|scene| {
+            let index = scene.robots()[robot]
+                .model
+                .link_index(link_name)
+                .ok_or_else(|| format!("unknown link `{link_name}`"))?;
+            let poses = scene.fk_for(robot, q).map_err(|e| e.to_string())?;
+            Ok(pose_arrays(&poses[index]))
+        })
+    }
+
     /// World pose of the robot root as `(position, quaternion_xyzw)`.
     pub fn robot_base_pose(&self) -> PoseArrays {
         pose_arrays(&self.robot_base_isometry())

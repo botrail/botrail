@@ -12,7 +12,9 @@ could not be loaded or the arguments were wrong (`{"ok": false, "error":
 ## `botrail check <cell>`
 
 Loads the cell, derives the I/O map and lints it, walks every sequence,
-lists unidentified BOM lines, and counts what is in the scene:
+lists unidentified BOM lines (with what the cell asks of them), compares
+every line's [requirements](../guides/selection.md) with what its part says,
+and counts what is in the scene — the same list as `scene.check()`:
 
 ```json
 {
@@ -21,14 +23,19 @@ lists unidentified BOM lines, and counts what is in the scene:
   "robots": ["simple_arm"],
   "counts": {"obstacles": 19, "frames": 0, "sensors": 1, "devices": 1,
              "sequences": 1, "scenarios": 2, "parts": 8, "bom_rows": 8},
-  "findings": [{"severity": "info", "code": "unidentified_part",
-                "message": "eye (sensor.photoelectric) has no maker, model or catalog reference"}]
+  "findings": [{"severity": "info", "code": "unidentified_part", "target": "eye",
+                "message": "eye (sensor.photoelectric) has no maker, model or catalog reference — needs sensing_range_mm >= 200"}],
+  "requirements": {"lines": 8, "short": 0, "unknown": 2, "unidentified": 1}
 }
 ```
 
 `findings[].severity` is `error` / `warning` / `info` (the I/O lint codes,
-`sequence` for a program that cannot be walked, `unidentified_part`); exit
-1 when any is an error.
+`sequence` for a program that cannot be walked, `unidentified_part`,
+`spec_short` when a part's stated spec falls short of what the cell asks,
+`spec_unknown` when an identified part states no value, and
+`requirement_incomplete` when a requirement could not be derived — a
+grasped part with no `mass_kg`); exit 1 when any is an error.
+`requirements` counts the BOM lines by the outcome of that comparison.
 
 ## `botrail simulate <cell>`
 

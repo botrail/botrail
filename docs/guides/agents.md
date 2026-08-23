@@ -48,6 +48,9 @@ For an agent learning the API, the shortest path through the docs is:
    — the engineering documents and how each is derived.
 5. The [API reference](../reference/api/scene.md) — every method's docstring;
    the same text `help(bt.Scene)` shows.
+6. [Selecting parts](selection.md) — `scene.requirements()` / `botrail check`:
+   what each BOM line must be able to do and whether its part can, and
+   `bt.catalog.search_for(row)` for the candidates to pick from.
 
 The repository's `examples/` are complete, runnable cells (the docs'
 tutorials walk through them), and `python/tests/` shows what is asserted
@@ -84,6 +87,20 @@ by coordinate descent — for the best feasible point under constraints on
 the metrics. Both are deterministic and return every evaluated row, so an
 agent can read the whole search, not just its answer
 ([Parameter sweeps](../tutorials/parameter-sweep.md)).
+
+## Selecting parts
+
+botrail does not choose parts, and neither should an agent from memory. The
+loop is: read `scene.requirements().to_json()` (what every BOM line must be
+able to do, and why); for a line that is `unidentified` or `short`, call
+`bt.catalog.search_for(row)` and pick **from what comes back**; write the pick
+with `product.identify(scene, target)`; run `scene.check()` (or `botrail
+check`) until no `spec_short` remains. A line with no candidates stays an
+`unidentified_part` finding whose `needs ...` text is the question to hand
+to a person or a vendor — never a model number invented to make the check
+pass. `set_part(catalog=...)` accepts any id, but only a catalog product's
+numbers (or numbers typed on `set_part`) count as "what the part says"; a
+name alone stays `unknown`. See [Selecting parts](selection.md).
 
 ## What botrail does not do here
 

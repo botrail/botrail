@@ -48,6 +48,13 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
   digests) all come out of the same script as the simulation, so a layout
   edit changes exactly the documents it touches — and never lets them
   disagree.
+- **Selection, checked — not chosen** — `scene.requirements()` derives what
+  every BOM line must be able to do (payload from the grasped parts, reach
+  from the taught targets, a beam's span, a conveyor's load...) and compares
+  it with what the chosen part says; `bt.catalog.search` finds real products
+  that satisfy it. A part that falls short is an error, a part that does not
+  say is a warning, a line nobody has identified becomes the question to ask
+  a vendor.
 - **Interactive posing** — draggable TCP gizmo with live IK, joint sliders.
 - **Collision checking** — primitives and STL/OBJ meshes (cached VHACD convex
   decomposition), live highlighting, clearance readout.

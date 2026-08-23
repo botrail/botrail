@@ -89,32 +89,13 @@ def _bake(scene, sequences: Optional[list], scenarios: bool, max_duration: float
 
 
 def cmd_check(args) -> int:
+    from . import select
+
     scene = load_cell(args.cell)
-    findings: list[dict[str, Any]] = []
-    io_error = None
-    try:
-        for f in scene.io_report().findings:
-            findings.append({"severity": f.severity, "code": f.code, "message": f.message})
-    except ValueError as e:
-        io_error = str(e)
-        findings.append({"severity": "error", "code": "io_derivation", "message": str(e)})
-    for row in scene.bom().unidentified():
-        findings.append(
-            {
-                "severity": "info",
-                "code": "unidentified_part",
-                "message": f"{', '.join(row['names'])} ({row['category']}) has no maker, model or catalog reference",
-            }
-        )
-    for name in scene.sequence_names:
-        # A sequence that cannot even be walked is an error, not a surprise
-        # at bake time. `io_points` derives per program set and validates
-        # the references on the way.
-        try:
-            scene.io_points(sequences=[name])
-        except ValueError as e:
-            if io_error is None:
-                findings.append({"severity": "error", "code": "sequence", "message": f"{name}: {e}"})
+    # The I/O lint, each sequence walked, unidentified lines with what the
+    # cell asks of them, and the requirement comparison — `bt.select.check`.
+    report = select.check(scene)
+    findings = [f.to_dict() for f in report.findings]
     errors = sum(1 for f in findings if f["severity"] == "error")
     out = {
         "ok": errors == 0,
@@ -131,6 +112,7 @@ def cmd_check(args) -> int:
             "bom_rows": len(scene.bom()),
         },
         "findings": findings,
+        "requirements": report.to_dict()["requirements"],
     }
     print(json.dumps(out, indent=2))
     return 0 if out["ok"] else 1

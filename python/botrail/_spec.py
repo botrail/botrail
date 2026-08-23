@@ -240,7 +240,12 @@ class Spec:
         for name, table in (component.get("codes") or {}).items():
             if name not in values or not isinstance(table, dict):
                 continue
-            code = _code(table, values[name])
+            # A stepped axis is coded in bands (any height from 700 to 799 is
+            # one article); a list of values has a code each, and a missing
+            # one is a hole in the pack rather than a band to fall into.
+            param = self.params().get(name)
+            banded = isinstance(param, dict) and "values" not in param
+            code = _code(table, values[name], band=banded)
             if code is None:
                 raise ValueError(
                     f"{self.id}: {role} has no order code for {name}={_plain(values[name])}"
@@ -319,9 +324,13 @@ def _same(a: Any, b: Any) -> bool:
     return abs(float(a) - float(b)) < _EPS
 
 
-def _code(table: dict, value: Any) -> Optional[str]:
+def _code(table: dict, value: Any, band: bool = False) -> Optional[str]:
     """A code table read back from the manifest has string keys (YAML through
-    JSON turns 2200 into "2200"), so match on the number where there is one."""
+    JSON turns 2200 into "2200"), so match on the number where there is one.
+
+    With `band`, the keys are the low end of a range instead: a stand cut to
+    any height between 700 and 799 mm is one article, so the greatest key at
+    or below the value names it."""
     for key, code in table.items():
         try:
             if abs(float(key) - float(value)) < _EPS:
@@ -329,4 +338,18 @@ def _code(table: dict, value: Any) -> Optional[str]:
         except (TypeError, ValueError):
             if str(key) == str(value):
                 return str(code)
-    return None
+    if not band:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    best: Optional[tuple[float, str]] = None
+    for key, code in table.items():
+        try:
+            low = float(key)
+        except (TypeError, ValueError):
+            continue
+        if low <= number + _EPS and (best is None or low > best[0]):
+            best = (low, str(code))
+    return None if best is None else best[1]

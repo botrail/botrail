@@ -205,6 +205,101 @@ configuration:
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 # A 2.4 x 1.6 m cell: both edge lengths need more than one panel width.
+# Wire shelving is not sold as a bay: you buy posts (in pairs) and shelves,
+# and the same finish is called something different on each of them.
+POST_RACK_MANIFEST = """
+schema_version: '0.1'
+id: acme/shelf/wire/r1
+kind: spec
+category: structure.rack
+name: Wire Shelving
+manufacturer:
+  name: ACME Storage
+distribution: public
+configuration:
+  generator: rack
+  params:
+    width_mm:
+      values: [900, 1200]
+      default: 1200
+    depth_mm:
+      values: [450, 600]
+      default: 450
+    height_mm:
+      values: [1400, 1900]
+      default: 1900
+    levels:
+      min: 2
+      max: 5
+      step: 1
+      default: 4
+    finish:
+      values: [chrome, white]
+      default: chrome
+  components:
+    - role: upright
+      category: structure.rack
+      part_number: B{height_mm_code}P{finish_code}2
+      dimensions_mm: {section: 25.4}
+      codes:
+        height_mm: {1400: "54", 1900: "74"}
+        finish: {chrome: S, white: W}
+      mass:
+        table:
+          - {height_mm: 1400, kg: 2.1}
+          - {height_mm: 1900, kg: 2.8}
+    - role: shelf
+      category: structure.rack.shelf
+      part_number: B{depth_mm_code}{width_mm_code}{finish_code}1
+      dimensions_mm: {thickness: 30}
+      codes:
+        depth_mm: {450: "18", 600: "24"}
+        width_mm: {900: "36", 1200: "48"}
+        finish: {chrome: C, white: W}
+      mass:
+        table:
+          - {depth_mm: 450, width_mm: 900, kg: 3.2}
+          - {depth_mm: 450, width_mm: 1200, kg: 4.0}
+          - {depth_mm: 600, width_mm: 900, kg: 3.9}
+          - {depth_mm: 600, width_mm: 1200, kg: 4.8}
+  rules:
+    uprights_per_pack: 2
+    level_pitch_min_mm: 25.4
+"""
+
+# Some stands are cut to order and sold in bands: any height from 700 to 799
+# is one article, so the code table is read as the low end of a band.
+BAND_MANIFEST = """
+schema_version: '0.1'
+id: acme/stand/cut-pillar/r1
+kind: spec
+category: structure.pedestal
+name: Cut Pillar
+manufacturer:
+  name: ACME Framing
+distribution: public
+configuration:
+  generator: pedestal
+  params:
+    height_mm:
+      min: 200
+      max: 1300
+      step: 1
+      default: 750
+  components:
+    - role: pedestal
+      category: structure.pedestal
+      part_number: ZFR-F03{height_mm_code}
+      dimensions_mm: {column: 280, plate: 30, base_w: 485, base_d: 485, top_w: 280, top_d: 280}
+      codes:
+        height_mm:
+          {200: "2", 300: "3", 400: "4", 500: "5", 600: "6", 700: "7",
+           800: "8", 900: "9", 1000: A, 1100: B, 1200: C}
+      mass:
+        base_kg: 30.4
+        per_mm: {height_mm: 0.048}
+"""
+
 # A stand is the other half of the framing catalogue: the aluminium frame is
 # one article and the board on it is another, so the bench takes two lines.
 STAND_MANIFEST = """
@@ -293,6 +388,14 @@ def pack(tmp_path: Path) -> Path:
     directory = tmp_path / "guard"
     directory.mkdir()
     (directory / "manifest.yaml").write_text(MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def wire(tmp_path: Path) -> Path:
+    directory = tmp_path / "wire"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(POST_RACK_MANIFEST)
     return directory
 
 
@@ -718,6 +821,30 @@ def test_a_pack_that_sizes_only_some_of_it_leaves_the_rest_to_the_caller(tmp_pat
         bt.parts.rack(scene, "other", catalog=directory, position=(2.0, 0.0))
 
 
+def test_shelving_bought_as_posts_and_shelves_lists_both(wire: Path) -> None:
+    """No bay article to name, so the group line carries the series and the
+    posts get their own — four of them, in the pairs they are sold in. The
+    finish is one choice with a different code on each part."""
+    scene = scene_()
+    built = bt.parts.rack(scene, "shelf", catalog=wire, position=(0.0, 0.0))
+    assert len(built.frames) == 4
+    by = rows(scene)
+    series = by["shelf"]
+    assert series["model"] == "Wire Shelving" and series["qty"] == 1
+    assert "mass_kg" not in series["attributes"]          # 二重計上しない
+    assert by["shelf/uprights"]["model"] == "B74PS2"      # ステンレスポール 1900
+    assert by["shelf/uprights"]["qty"] == 2               # 4 本 = 2 本入り x 2
+    assert by["shelf/uprights"]["attributes"]["mass_kg"] == pytest.approx(2.8)
+    assert by["shelf/shelves"]["model"] == "B1848C1"      # 奥行 450 x 間口 1200 クローム
+    assert by["shelf/shelves"]["qty"] == 4
+    assert scene.bom().total("mass_kg") == pytest.approx(2 * 2.8 + 4 * 4.0)
+    # 仕上げは 1 つの軸だが、ポールは S、棚板は C — 部材ごとのコード表が効く
+    other = scene_()
+    bt.parts.rack(other, "shelf", catalog=wire, position=(0.0, 0.0), finish="white", depth_mm=600)
+    assert rows(other)["shelf/uprights"]["model"] == "B74PW2"
+    assert rows(other)["shelf/shelves"]["model"] == "B2448W1"
+
+
 # ------------------------------------------------------------ stand, pedestal
 
 
@@ -802,6 +929,25 @@ def test_a_stand_pack_without_a_height_leaves_it_to_the_caller(tmp_path: Path) -
     )
     with pytest.raises(ValueError, match="the mass of 'pedestal' needs height_mm"):
         bt.parts.pedestal(scene_(), "ped", 0.62, (0.0, 0.0), catalog=directory)
+
+
+def test_a_stand_cut_to_order_still_names_one_article(tmp_path: Path) -> None:
+    """A height given to the millimetre still lands on a part number, because
+    the pack codes the axis in bands — and the mass follows the cut."""
+    directory = tmp_path / "cut"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(BAND_MANIFEST)
+    scene = scene_()
+    bt.parts.pedestal(scene, "ped", 0.75, (0.0, 0.0), catalog=directory)
+    row = rows(scene)["ped"]
+    assert row["model"] == "ZFR-F037"
+    assert row["attributes"]["mass_kg"] == pytest.approx(66.4)      # 30.4 + 0.048 x 750
+    for height, code in ((0.2, "2"), (0.799, "7"), (0.8, "8"), (1.0, "A"), (1.3, "C")):
+        one = scene_()
+        bt.parts.pedestal(one, "ped", height, (0.0, 0.0), catalog=directory)
+        assert rows(one)["ped"]["model"] == f"ZFR-F03{code}"
+    with pytest.raises(ValueError, match=r"height_mm=1400 is out of range 200\.\.1300"):
+        bt.parts.pedestal(scene_(), "ped", 1.4, (0.0, 0.0), catalog=directory)
 
 
 # -------------------------------------------------------------------- detail

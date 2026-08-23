@@ -114,3 +114,10 @@ The BOM is a *derived table*, not a purchasing system: botrail holds the
 slot for a price and sums it if you fill it in, but it does not know prices,
 lead times or stock, and it does not validate attributes. Nothing here sizes
 a frame, a supply or a valve — a part's `mass_kg` is a number you wrote down.
+
+## What the cell asks of each line
+
+A BOM line also carries *requirements* — the payload, reach, stroke, span,
+load the cell implies for it — and the check compares them with the part's
+attributes. See [Selecting parts](selection.md): `scene.requirements()`,
+`scene.check()` and `bt.catalog.search`.

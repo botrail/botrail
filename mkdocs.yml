@@ -130,6 +130,7 @@ nav:
       - Timeline assertions: guides/timeline-assertions.md
       - The I/O map: guides/io-map.md
       - Parts and the BOM: guides/parts-and-bom.md
+      - Selecting parts (requirements, check, catalog search): guides/selection.md
       - Layout sheet and cell report: guides/layout-and-report.md
       - Standard parts and CAD geometry: guides/standard-parts.md
       - Working with agents and automation: guides/agents.md
@@ -151,6 +152,8 @@ nav:
       - Timeline: reference/api/timeline.md
       - Sequences (bt.seq): reference/api/seq.md
       - Standard parts (bt.parts): reference/api/parts.md
+      - Requirements and the check (bt.select): reference/api/select.md
+      - Catalog search (bt.catalog): reference/api/catalog.md
       - Traces (bt.trace): reference/api/trace.md
       - Parameter studies (bt.sweep / bt.optimize): reference/api/study.md
       - Studio: reference/api/studio.md

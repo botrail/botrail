@@ -62,7 +62,12 @@ def test_project_schema_is_the_loaders_contract(tmp_path: Path) -> None:
 def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "check", str(DEMO))
     assert code == 0 and out["ok"] and out["robots"] == ["simple_arm"]
-    assert out["counts"]["sequences"] == 1 and out["counts"]["parts"] == 8 and out["findings"] == []
+    assert out["counts"]["sequences"] == 1 and out["counts"]["parts"] == 8
+    # The demo's hand-typed parts carry no specs: what the cell asks of them
+    # is a warning each, never an error.
+    assert {f["severity"] for f in out["findings"]} <= {"warning", "info"}
+    assert "spec_unknown" in {f["code"] for f in out["findings"]}
+    assert out["requirements"]["lines"] == out["counts"]["bom_rows"] and out["requirements"]["short"] == 0
     # The same cell as a project file.
     import cell_deliverables_demo as demo
 

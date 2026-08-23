@@ -999,6 +999,11 @@ def rack(
     the shelves are a line of their own on the BOM with their own part number,
     and a level spacing the catalog does not allow is refused.
 
+    Shelving sold as posts and shelves rather than as a bay works the same
+    way: a pack with an `upright` component and no `bay` puts the series on
+    the group line and the posts on their own, four of them, counted in the
+    packs the maker sells them in (`rules.uprights_per_pack`).
+
     `detail="full"` (the default with a catalog) adds the beams under each
     deck, the diagonal braces on the sides and the foot plates — decoration
     that never collides, so the uprights and decks stay the only thing a
@@ -1018,7 +1023,10 @@ def rack(
         size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
         if params.get("levels") is not None:
             levels = int(round(float(params["levels"])))
-        upright = upright if upright is not None else _mm(spec.dimension_mm("bay", "upright", 40.0))
+        section = spec.dimension_mm("upright", "section", None)
+        if section is None:
+            section = spec.dimension_mm("bay", "upright", 40.0)
+        upright = upright if upright is not None else _mm(section)
         shelf_thickness = (
             shelf_thickness
             if shelf_thickness is not None
@@ -1125,12 +1133,29 @@ def rack(
         return built
 
     recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    # Shelving is sold two ways. A bay is one article you order as a unit (the
+    # shelves on top of it are extra); a post system has no such article — you
+    # buy posts and shelves — so the group line carries the series name and the
+    # posts get a line of their own, priced by the pack they come in.
+    bay = spec.has_component("bay")
     scene.set_part(
-        name, kind="group", category=spec.category("bay", "structure.rack"), qty=1,
-        catalog=spec.catalog_ref, manufacturer=manufacturer,
-        model=model or spec.part_number("bay", **params), description=spec.name,
-        **{**recorded, **_kg(spec.mass_kg("bay", **params)), **attributes},
+        name, kind="group",
+        category=spec.category("bay", "structure.rack") if bay else "structure.rack",
+        qty=1, catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or (spec.part_number("bay", **params) if bay else spec.name),
+        **({"description": spec.name} if bay else {}),
+        **{**recorded, **(_kg(spec.mass_kg("bay", **params)) if bay else {}), **attributes},
     )
+    if spec.has_component("upright"):
+        per_pack = float(spec.rule("uprights_per_pack", 1) or 1)
+        scene.set_part(
+            f"{name}/uprights", kind="group",
+            category=spec.category("upright", "structure.rack"),
+            qty=max(1, math.ceil(4 / per_pack)),
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("upright", **params),
+            **_kg(spec.mass_kg("upright", **params)),
+        )
     if spec.has_component("shelf"):
         scene.set_part(
             f"{name}/shelves", kind="group", category=spec.category("shelf", "structure.rack.shelf"),
