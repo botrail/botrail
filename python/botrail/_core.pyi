@@ -76,7 +76,7 @@ class Robot:
 class Scene:
     def __init__(
         self,
-        robot: Robot,
+        robot: Optional[Robot] = None,
         base_position: Optional[tuple[float, float, float]] = None,
         base_quaternion: Optional[tuple[float, float, float, float]] = None,
         name: Optional[str] = None,
@@ -201,6 +201,7 @@ class Scene:
     def remove_obstacle(self, name: str) -> None: ...
     def set_obstacle_enabled(self, name: str, enabled: bool) -> None: ...
     def set_obstacle_visible(self, name: str, visible: bool) -> None: ...
+    def set_obstacle_walkable(self, name: str, walkable: bool = True) -> None: ...
     def set_obstacle_color(
         self, name: str, color: Optional[tuple[float, float, float]]
     ) -> None: ...
@@ -504,16 +505,33 @@ class Scene:
         self,
         name: str,
         body: list[str],
-        path: list[tuple[float, float]],
+        path: list[tuple[float, float]] | list[tuple[float, float, float]],
         stations: dict[str, int],
         speed: float = 0.5,
         turn_speed: float = 1.5707963267948966,
         start: Optional[str] = None,
         ring: bool = False,
         allow_reverse: bool = False,
+        max_grade: Optional[float] = None,
+        drive: str = "differential",
+        climb_speed: Optional[float] = None,
+        descent_speed: Optional[float] = None,
+        fixed_yaw: Optional[float] = None,
         tray_position: Optional[tuple[float, float, float]] = None,
         tray_size: Optional[tuple[float, float, float]] = None,
         tray_quaternion: Optional[tuple[float, float, float, float]] = None,
+    ) -> None: ...
+    def add_lift(
+        self,
+        name: str,
+        car: list[str],
+        zone_position: tuple[float, float, float],
+        zone_size: tuple[float, float, float],
+        stops: dict[str, float],
+        speed: float = 0.5,
+        axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        zone_quaternion: Optional[tuple[float, float, float, float]] = None,
+        start: Optional[str] = None,
     ) -> None: ...
     def remove_device(self, name: str) -> None: ...
     @property

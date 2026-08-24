@@ -182,6 +182,9 @@ impl SceneHub {
                     .robot_index(name)
                     .ok_or_else(|| format!("unknown robot `{name}` (robots: {})", names())),
                 None if scene.robots().len() == 1 => Ok(0),
+                None if scene.robots().is_empty() => {
+                    Err("scene has no robot; add one with add_robot".to_string())
+                }
                 None => Err(format!(
                     "scene has {} robots; pass robot=<name> (one of: {})",
                     scene.robots().len(),
@@ -414,6 +417,10 @@ impl SceneHub {
 
     pub fn set_obstacle_visible(&self, name: &str, visible: bool) -> Result<(), SceneError> {
         botrail_session::set_obstacle_visible(self, name, visible)
+    }
+
+    pub fn set_obstacle_walkable(&self, name: &str, walkable: bool) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_walkable(self, name, walkable)
     }
 
     pub fn set_obstacle_material(
@@ -1029,6 +1036,10 @@ impl SceneHub {
                     rec.object_tracks.iter().map(|(n, ..)| n.clone()).collect();
                 let timeline = wire::TimelineMsg {
                     duration,
+                    // Recordings replay captured link/object poses; the
+                    // vehicle frame was not captured, so mounted sensors
+                    // draw at the parked frame here.
+                    vehicles: Vec::new(),
                     robots: rec
                         .robots
                         .iter()

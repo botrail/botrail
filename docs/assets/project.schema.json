@@ -366,6 +366,32 @@
         }
       ]
     },
+    "AerialMsg": {
+      "description": "The aerial drive of a flying vehicle: present on the wire means the\nmachine flies its legs — z is free, each axis at its own rate.",
+      "type": "object",
+      "properties": {
+        "climb_speed": {
+          "type": "number",
+          "format": "double"
+        },
+        "descent_speed": {
+          "type": "number",
+          "format": "double"
+        },
+        "fixed_yaw": {
+          "description": "Hold this yaw over the whole flight; absent flies course-facing.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "climb_speed",
+        "descent_speed"
+      ]
+    },
     "AllowedContactMsg": {
       "description": "One [`crate::AllowedContact`] by names: robot instance, link, obstacle.",
       "type": "object",
@@ -949,6 +975,23 @@
             "type",
             "distance"
           ]
+        },
+        {
+          "description": "Send a lift to a named stop; await with `device_done`. The cargo\nis fixed the moment this fires (the doors are closed).",
+          "type": "object",
+          "properties": {
+            "stop": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "move_to_stop"
+            }
+          },
+          "required": [
+            "type",
+            "stop"
+          ]
         }
       ]
     },
@@ -1127,6 +1170,17 @@
           "description": "A guided transport vehicle: drives station to station along an\nauthored path, carrying its body obstacles rigidly.",
           "type": "object",
           "properties": {
+            "aerial": {
+              "description": "Aerial drive: present means the machine flies its legs (z free,\neach axis at its own rate); `allow_reverse` / `max_grade` are\nthen unused.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AerialMsg"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "allow_reverse": {
               "description": "May it drive a leg backwards instead of turning around for it?",
               "type": "boolean"
@@ -1137,9 +1191,21 @@
                 "type": "string"
               }
             },
+            "holonomic": {
+              "description": "Holonomic drive: the machine translates while holding its\nheading — no pivot turns. `allow_reverse` is then unused;\n`max_grade` still applies (it is a ground drive).",
+              "type": "boolean"
+            },
             "kind": {
               "type": "string",
               "const": "vehicle"
+            },
+            "max_grade": {
+              "description": "Steepest grade the drive may climb, as rise over horizontal run\n(0.10 = 10 %). Absent means level paths only.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
             },
             "path": {
               "$ref": "#/$defs/VehiclePathMsg"
@@ -1173,6 +1239,67 @@
             "body",
             "speed",
             "turn_speed",
+            "start"
+          ]
+        },
+        {
+          "description": "A lift (elevator): the car obstacles ride along `axis` between\nnamed stops, carrying what the capture zone held at dispatch —\nloose parts by origin, vehicles whole.",
+          "type": "object",
+          "properties": {
+            "axis": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "car": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "lift"
+            },
+            "speed": {
+              "type": "number",
+              "format": "double"
+            },
+            "start": {
+              "type": "string"
+            },
+            "stops": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LiftStopMsg"
+              }
+            },
+            "zone_pose": {
+              "description": "Capture zone at the reference position (`position = 0`).",
+              "$ref": "#/$defs/PoseMsg"
+            },
+            "zone_size": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "required": [
+            "kind",
+            "car",
+            "zone_pose",
+            "zone_size",
+            "axis",
+            "speed",
+            "stops",
             "start"
           ]
         }
@@ -1417,6 +1544,14 @@
         },
         "lift": {
           "type": "number",
+          "format": "double"
+        },
+        "max_step": {
+          "description": "Tallest step the machine may take, metres (see `GaitSpec::max_step`).",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "max_stride": {
@@ -2013,6 +2148,23 @@
         "label"
       ]
     },
+    "LiftStopMsg": {
+      "description": "One named stop of a lift, metres along its axis from the reference.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "number",
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "at"
+      ]
+    },
     "Logic": {
       "type": "string",
       "enum": [
@@ -2133,6 +2285,10 @@
           "description": "Invisible obstacles still collide; they are simply not drawn. Files\nwritten before this existed have every obstacle visible, which is\nwhat they meant.",
           "type": "boolean",
           "default": true
+        },
+        "walkable": {
+          "description": "A walkable top face — a stair tread, a mezzanine slab: footfalls of\na walking machine snap onto it. Files written before this existed\nhave no walkable surfaces, which is what they meant.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -3148,7 +3304,7 @@
       ]
     },
     "VehiclePathMsg": {
-      "description": "An authored vehicle guide path: floor waypoints plus named station\nstops (as waypoint indices).",
+      "description": "An authored vehicle guide path: waypoints on the guidance surface\n(`[x, y, z]` — z is the floor height there) plus named station stops\n(as waypoint indices).",
       "type": "object",
       "properties": {
         "ring": {
@@ -3161,6 +3317,7 @@
           }
         },
         "waypoints": {
+          "description": "Written as `[x, y, z]`; a legacy two-element `[x, y]` is read as\nz = 0, so pre-3D projects and recordings load unchanged.",
           "type": "array",
           "items": {
             "type": "array",
@@ -3168,8 +3325,8 @@
               "type": "number",
               "format": "double"
             },
-            "maxItems": 2,
-            "minItems": 2
+            "maxItems": 3,
+            "minItems": 3
           }
         }
       },

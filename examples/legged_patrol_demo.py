@@ -55,6 +55,8 @@ Run with:  python examples/legged_patrol_demo.py [out.usdc] [--robot go2|quad|<p
                                                  [--compare [<package dir> ...]]
 """
 
+from __future__ import annotations
+
 import argparse
 import math
 import os
@@ -82,6 +84,9 @@ GO2_GAIT = {
     "stance": {f"{n}_{j}_joint": v for n in ("FL", "FR", "RL", "RR")
                for j, v in (("hip", 0.0), ("thigh", 0.8), ("calf", -1.5))},
     "pattern": "trot", "period": 0.45, "lift": 0.07, "max_stride": 0.45, "foot_radius": 0.022,
+    # The step Unitree rates it for. The catalog package says the same
+    # (`max_step_height_mm`), so both ways of loading the dog agree.
+    "max_step": 0.16,
 }
 GO2_FOOTPRINT = (0.66, 0.31, 0.40)   # the body the gate has to pass, metres
 GO2_SPEED, GO2_TURN = 0.6, 1.0       # m/s on a straight, rad/s in a pivot
@@ -319,16 +324,20 @@ def fetch_go2() -> Path:
 
 
 # ------------------------------------------------------------------ the cell
-def dog_of(robot: str):
+def dog_of(robot: str, *, posture: str | None = None):
     """The walker named by `--robot`: its model, gait, footprint, rates.
 
     `go2` comes from the catalog when the package and the catalog extra are
     there, and from Unitree's URDF otherwise; a directory is a package the
     catalog builder wrote; `quad` is the primitive test quadruped.
+
+    `posture="stairs"` asks the package for its stair posture. Only a
+    catalog package carries one — the hand-written fallbacks come back in
+    their standing stance, and the caller sees that in `gait.stance`.
     """
     if robot == "go2":
         try:
-            return catalog_walker(GO2_PACKAGE)
+            return catalog_walker(GO2_PACKAGE, posture=posture)
         except Exception as err:  # noqa: BLE001 — no extra / offline / not published: fall back
             if GO2_PACKAGE not in _FALLBACK_TOLD:
                 _FALLBACK_TOLD.add(GO2_PACKAGE)
@@ -338,11 +347,11 @@ def dog_of(robot: str):
         return (bt.Robot.from_urdf(EXAMPLES / "quad_test.urdf"), bt.Gait(**QUAD_GAIT),
                 QUAD_FOOTPRINT, QUAD_SPEED, QUAD_TURN)
     if Path(robot).is_dir():
-        return catalog_walker(Path(robot))
+        return catalog_walker(Path(robot), posture=posture)
     raise ValueError(f"unknown robot `{robot}` (go2 | quad | a package directory)")
 
 
-def catalog_walker(package):
+def catalog_walker(package, *, posture: str | None = None):
     """A `vehicle.legged` package as the cell's walker.
 
     The manifest decides everything the hand-written constants decide for
@@ -358,8 +367,20 @@ def catalog_walker(package):
     else:
         model = bt.Robot.from_catalog(package)
         manifest = bt.gait._read_manifest(bt.gait._package_dir(package, None))
-    gait = bt.Gait.from_catalog(package)
+    # Ask what the package has rather than require it: a machine that has
+    # never been measured on a flight still walks a floor, and the cell that
+    # wanted the posture is the one that should say what it did instead.
+    if posture is not None and posture not in bt.Gait.postures(package):
+        if (package, posture) not in _FALLBACK_TOLD:
+            _FALLBACK_TOLD.add((package, posture))
+            print(f"catalog {package} states no `{posture}` posture; using the standing one")
+        posture = None
+    gait = bt.Gait.from_catalog(package, posture=posture)
     specs = manifest.get("specs") or {}
+    # The rates below come from the *walking* gait — a stair posture shortens
+    # the swing, not the stride the package was validated at.
+    if posture is not None:
+        gait.max_stride = bt.Gait.from_catalog(package).max_stride
     length, width = (v / 1e3 for v in (specs.get("footprint_mm") or (700, 310)))
     height = (specs.get("height_mm") or 400) / 1e3
     speed = 0.6 * gait.max_stride / gait.period

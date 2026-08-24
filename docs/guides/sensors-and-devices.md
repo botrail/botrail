@@ -127,6 +127,37 @@ own rules — the aisle check, trays, mounted sensors, what happens to planned
 motions while driving — to get their own page:
 [Vehicles and AMRs](vehicles-and-amr.md).
 
+## Lifts
+
+The sixth device is an elevator: a car of ordinary obstacles moved along an
+axis between named stops, carrying **whatever its capture zone holds when
+the ride is commanded** — loose parts by origin, and vehicles *whole*, the
+chassis, the deck load and any mounted robot riding one rigid motion.
+
+```python
+scene.add_lift("lift", car=["lift"],                # obstacles, prefix ok
+               zone_position=(3.25, 0.0, 1.0), zone_size=(1.3, 1.3, 2.0),
+               stops={"1F": 0.0, "2F": 2.2}, speed=0.6)
+```
+
+Command it with `bt.seq.move_to("lift", "2F")` and await `device_done`.
+The cargo is fixed the moment the command fires — an elevator moves after
+the doors close — so a vehicle still driving refuses the ride, a vehicle
+half out of the zone refuses to board by name, and nothing joins mid-ride.
+
+The vertical hop in a vehicle's path (two waypoints stacked at the car) is
+a *lift edge*: validation accepts it only where a lift's zone covers both
+ends at its stops, and `goto` never walks across it — drive to the near
+side, ride, continue. A stop between floors leaves the vehicle off its
+path, and the next `goto` says so.
+
+Doors are not part of the device, and need no special vocabulary: a panel
+on a `add_linear_axis` physically blocks the path while closed — boarding
+through it simply fails the aisle check — and the open/close steps are
+ordinary sequence lanes on the timing chart. `examples/lift_demo.py` runs
+the whole interlock chain: call → door open → board → door close → ride →
+alight.
+
 ## Housekeeping
 
 ```python

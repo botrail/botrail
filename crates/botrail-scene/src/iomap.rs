@@ -1127,7 +1127,7 @@ fn walk_action(
         DeviceCommand::Start | DeviceCommand::Stop => DeviceCmd::Run,
         DeviceCommand::Advance(_) => DeviceCmd::Advance,
         DeviceCommand::Goto { .. } => DeviceCmd::Goto,
-        DeviceCommand::MoveTo(_) => DeviceCmd::MoveTo,
+        DeviceCommand::MoveTo(_) | DeviceCommand::MoveToStop(_) => DeviceCmd::MoveTo,
         DeviceCommand::SetSpeed(_) => DeviceCmd::SetSpeed,
     };
     match action {
@@ -4088,8 +4088,8 @@ pub(crate) mod tests {
             kind: DeviceKind::Vehicle {
                 path: crate::seq::VehiclePath {
                     waypoints: vec![
-                        nalgebra::Point2::new(0.0, 0.0),
-                        nalgebra::Point2::new(1.0, 0.0),
+                        nalgebra::Point3::new(0.0, 0.0, 0.0),
+                        nalgebra::Point3::new(1.0, 0.0, 0.0),
                     ],
                     stations: vec![("a".into(), 0), ("b".into(), 1)],
                     ring: false,
@@ -4098,7 +4098,7 @@ pub(crate) mod tests {
                 speed: 1.0,
                 turn_speed: 1.0,
                 start: "a".into(),
-                allow_reverse: false,
+                drive: crate::seq::Drive::default(),
                 tray: None,
             },
         });

@@ -274,7 +274,7 @@ class Carrier:
 
 
 # ------------------------------------------------------------------ the cell
-def build_scene(carrier: str = CARRIER) -> bt.Scene:
+def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
     """The aisle, the bay, and the machine standing at the bench.
 
     Shared with `play_record.py`, which rebuilds the cell a recording was
@@ -340,6 +340,10 @@ def build_scene(carrier: str = CARRIER) -> bt.Scene:
     scene.set_obstacle_enabled("amr/plate", False)
 
     legs = (CORNER_X - machine.infeed[0], machine.outfeed[1] - LANE_Y)
+    # A mecanum variant translates the same path without ever pivoting —
+    # it docks facing what it faced when parked, and the corner costs
+    # nothing but its length.
+    drive = dict(drive="holonomic") if holonomic else dict(allow_reverse=True)
     scene.add_vehicle(
         "amr",
         body=["amr"],
@@ -348,9 +352,9 @@ def build_scene(carrier: str = CARRIER) -> bt.Scene:
         speed=machine.cruise(max(legs)),
         turn_speed=TURN,
         start="infeed",
-        allow_reverse=True,
         tray_position=(*machine.tray, machine.surface + 0.06),
         tray_size=(*machine.tray_size, 0.12),
+        **drive,
     )
     # From here the arm's base is not a scene constant: it is the deck.
     scene.mount_robot("amr", offset_position=machine.mount)
@@ -570,9 +574,9 @@ def pivot_at(tl, dt: float = 0.02) -> float:
     return tl.duration
 
 
-def bake(carrier: str, drive_and_plan: bool = False):
+def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False):
     """One carrier, all the way through: scene, cycle, timeline."""
-    scene = build_scene(carrier)
+    scene = build_scene(carrier, holonomic=holonomic)
     name = build_cycle(scene, carrier, drive_and_plan)
     return scene, scene.simulate_sequence(name, max_duration=150.0)
 
@@ -647,7 +651,8 @@ def main() -> None:
         print(f"  {who:<9} carries {carried:5.1f} kg of {rated:6.1f} kg rated")
 
     try:
-        _, tl = bake(carrier, "--drive-and-plan" in args)
+        _, tl = bake(carrier, "--drive-and-plan" in args,
+                     holonomic="--holonomic" in args)
     except (ValueError, RuntimeError) as err:
         print(f"\ncycle failed: {err}")
         sys.exit(1)

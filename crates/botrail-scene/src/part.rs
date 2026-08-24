@@ -537,6 +537,7 @@ fn device_category(kind: &DeviceKind) -> Option<&'static str> {
         DeviceKind::Conveyor { .. } => Some("conveyor"),
         DeviceKind::LinearAxis { .. } => Some("axis.linear"),
         DeviceKind::Vehicle { .. } => Some("vehicle"),
+        DeviceKind::Lift { .. } => Some("lift"),
         // A magazine and a return chute model an endless line; they are
         // not equipment anyone buys.
         DeviceKind::Source { .. } | DeviceKind::Sink { .. } => None,
@@ -807,15 +808,20 @@ impl Scene {
         }
         for device in &self.devices {
             let part = explicit(PartTargetKind::Device, &device.name);
-            // A vehicle whose legs are a robot *is* that robot: one
-            // machine, listed once on the robot's line — unless the device
-            // was pinned to a part of its own.
-            let walked = self.robots.iter().any(|r| {
+            // A vehicle whose machine is a robot *is* that robot: legs (a
+            // gait mount), or the whole airframe (a rigid mount on a
+            // vehicle with no body of its own — a UAV). One machine, listed
+            // once on the robot's line — unless the device was pinned to a
+            // part of its own. An AMR carrying an arm stays two rows: the
+            // chassis has a body, so vehicle and rider are two products.
+            let bodiless = matches!(&device.kind,
+                DeviceKind::Vehicle { body, .. } if body.is_empty());
+            let is_the_robot = self.robots.iter().any(|r| {
                 r.mount
                     .as_ref()
-                    .is_some_and(|m| m.device == device.name && m.gait.is_some())
+                    .is_some_and(|m| m.device == device.name && (m.gait.is_some() || bodiless))
             });
-            if walked && part.is_none() {
+            if is_the_robot && part.is_none() {
                 continue;
             }
             let Some(category) = device_category(&device.kind).or(part.and(Some("device"))) else {

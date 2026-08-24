@@ -4,6 +4,7 @@ import type { ObjectTrackMsg } from "./ObjectTrackMsg";
 import type { RobotTimelineMsg } from "./RobotTimelineMsg";
 import type { SignalTrackMsg } from "./SignalTrackMsg";
 import type { StepSpanMsg } from "./StepSpanMsg";
+import type { VehicleTrackMsg } from "./VehicleTrackMsg";
 
 /**
  * A baked sequence rollout: each robot rides its own embedded trajectory
@@ -24,7 +25,11 @@ robots: Array<RobotTimelineMsg>,
  * World-pose track per moving scene object, aligned with the (shared)
  * trajectory sample grid. Empty when nothing rides along.
  */
-objects: Array<ObjectTrackMsg>, step_spans: Array<StepSpanMsg>, signals: Array<SignalTrackMsg>, 
+objects: Array<ObjectTrackMsg>, 
+/**
+ * Reference-frame track per vehicle that drove, on the same grid.
+ */
+vehicles: Array<VehicleTrackMsg>, step_spans: Array<StepSpanMsg>, signals: Array<SignalTrackMsg>, 
 /**
  * Every selection divergence this bake resolved, in resolution order.
  */

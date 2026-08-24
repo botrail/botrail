@@ -270,6 +270,7 @@ function startPlayback(tracks: PlaybackTracks) {
     overridePoses: sample.poses,
     overrideJoints: sample.joints,
     overrideBases: sample.bases,
+    overrideVehiclePoses: sample.vehicles,
     overrideObstaclePoses: sample.objects,
     stowedObstacles: sample.stowed,
   };
@@ -316,6 +317,9 @@ export interface StudioState {
    * Their base is not a scene constant, so the views cannot read it from
    * the description while a timeline plays. */
   overrideBases: Record<string, PoseMsg> | null;
+  /** Vehicle name -> reference-frame pose during playback — what places
+   * its mounted sensors while it drives. */
+  overrideVehiclePoses: Record<string, PoseMsg> | null;
   /** Playback poses of attached objects, keyed by obstacle name. */
   overrideObstaclePoses: Record<string, PoseMsg> | null;
   /** Objects stowed at the current playback instant — waiting in a
@@ -456,6 +460,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   overridePoses: null,
   overrideJoints: null,
   overrideBases: null,
+  overrideVehiclePoses: null,
   overrideObstaclePoses: null,
   stowedObstacles: new Set<string>(),
   motions: [],
@@ -519,6 +524,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           overridePoses: null,
           overrideJoints: null,
           overrideBases: null,
+          overrideVehiclePoses: null,
           overrideObstaclePoses: null,
           stowedObstacles: new Set<string>(),
           motions: [],
@@ -906,6 +912,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overridePoses: sample.poses,
       overrideJoints: sample.joints,
       overrideBases: sample.bases,
+      overrideVehiclePoses: sample.vehicles,
       overrideObstaclePoses: sample.objects,
       stowedObstacles: sample.stowed,
     }),
@@ -919,6 +926,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overridePoses: null,
       overrideJoints: null,
       overrideBases: null,
+      overrideVehiclePoses: null,
       overrideObstaclePoses: null,
     }),
   setDroppedStage: (stage) => set({ droppedStage: stage }),

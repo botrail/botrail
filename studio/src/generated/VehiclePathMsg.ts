@@ -2,7 +2,13 @@
 import type { VehicleStationMsg } from "./VehicleStationMsg";
 
 /**
- * An authored vehicle guide path: floor waypoints plus named station
- * stops (as waypoint indices).
+ * An authored vehicle guide path: waypoints on the guidance surface
+ * (`[x, y, z]` — z is the floor height there) plus named station stops
+ * (as waypoint indices).
  */
-export type VehiclePathMsg = { waypoints: Array<[number, number]>, stations: Array<VehicleStationMsg>, ring: boolean, };
+export type VehiclePathMsg = { 
+/**
+ * Written as `[x, y, z]`; a legacy two-element `[x, y]` is read as
+ * z = 0, so pre-3D projects and recordings load unchanged.
+ */
+waypoints: Array<[number, number, number]>, stations: Array<VehicleStationMsg>, ring: boolean, };

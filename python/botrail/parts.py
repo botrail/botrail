@@ -51,6 +51,10 @@ FENCE_POST: Color = (0.16, 0.17, 0.19)
 STEEL: Color = (0.42, 0.44, 0.47)
 DARK_STEEL: Color = (0.20, 0.21, 0.23)
 WOOD: Color = (0.52, 0.36, 0.18)
+# 縞鋼板 — the bright non-slip plate a stair tread is made of, and the
+# safety colour its handrail is painted (both linear RGB, like the rest).
+CHECKER_PLATE: Color = (0.50, 0.52, 0.53)
+SAFETY_ORANGE: Color = (0.91, 0.36, 0.02)
 BELT: Color = (0.10, 0.10, 0.11)
 
 
@@ -167,6 +171,13 @@ def _axis_quat(nx: float, ny: float) -> tuple[float, float, float, float]:
 def _pitch_quat(angle: float) -> tuple[float, float, float, float]:
     """A rotation about X — takes +Y (a bar's long axis) up by `angle`."""
     return (math.sin(angle / 2.0), 0.0, 0.0, math.cos(angle / 2.0))
+
+
+def _slope_quat(angle: float) -> tuple[float, float, float, float]:
+    """A rotation about +Y. `-pitch` lays a box's long +X axis up a
+    slope; `pi/2 - pitch` stands a cylinder's +Z axis along one.
+    (`_pitch_quat` turns about X, which is what a +Y-long bar needs.)"""
+    return (0.0, math.sin(angle / 2.0), 0.0, math.cos(angle / 2.0))
 
 
 def _mul_quat(a, b):
@@ -1486,3 +1497,289 @@ def light_curtain(
 
 
 __all__ = ["Built", "conveyor", "fence", "light_curtain", "pallet", "pedestal", "table"]
+
+
+# -------------------------------------------------------------------- stairs
+
+
+def stairs(
+    scene,
+    name: str,
+    *,
+    steps: Optional[int] = None,
+    rise: Optional[float] = None,
+    tread: Optional[float] = None,
+    width: Optional[float] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
+    yaw: float = 0.0,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    nosing: Optional[float] = None,
+    rail_height: Optional[float] = None,
+    rails: bool = True,
+    model: Optional[str] = None,
+    rail_model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    tread_color: Color = CHECKER_PLATE,
+    rail_color: Color = SAFETY_ORANGE,
+    **attributes,
+) -> Built:
+    """A steel stair flight, the kind bolted against a mezzanine: `steps`
+    checker-plate treads climbing `rise` per step along local +x from
+    `position` (rotated by `yaw`), carried on a plate stringer each side and
+    handed by a tubular rail in safety orange.
+
+    Every tread is a *walkable* box, so a legged machine's footfalls snap
+    onto it (see the legged guide); everything else —
+    stringers, support legs, the handrail — is an ordinary obstacle, so an
+    AGV driven into the flight fails its aisle check and an arm sweeping
+    through the rail collides. Adds the frames `<name>/foot` (on the floor
+    at the bottom) and `<name>/top` (the landing edge) — author the vehicle
+    path's z between them — and pins the flight (`structure.stairs`).
+
+    Each tread overhangs the one below by `nosing`, the way a real one does.
+    That overlap is what a walking machine needs at the seam: **keep it at
+    least twice the foot radius**, or a foothold lands in the gap between
+    two treads and the bake refuses it by name.
+
+    With `catalog=` — the id of a stair spec pack, or a package directory —
+    the flight is one you can order: the rise, tread, width and number of
+    steps are matched against what is sold, the sections come from the pack,
+    the handrails are a line of their own on the BOM (one per side), and a
+    combination the maker does not sell — too steep, too shallow for the
+    walking rule `2 x rise + tread` — is refused with the numbers.
+
+    `rails=False` drops the handrail (a flight against a wall)."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("stairs")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        for given, key in ((rise, "rise_mm"), (tread, "tread_mm"), (width, "width_mm")):
+            if given is not None and key in spec.params():
+                params[key] = spec.choose(key, round(float(given) * 1000.0, 3))
+        if steps is not None and "steps" in spec.params():
+            params["steps"] = spec.choose("steps", steps)
+        rise = _sized(params, "rise_mm", rise)
+        tread = _sized(params, "tread_mm", tread)
+        width = _sized(params, "width_mm", width)
+        if params.get("steps") is not None:
+            steps = int(round(float(params["steps"])))
+        manufacturer = manufacturer or spec.manufacturer
+
+    rise = 0.175 if rise is None else float(rise)
+    tread = 0.27 if tread is None else float(tread)
+    width = 0.9 if width is None else float(width)
+    if steps is None:
+        raise ValueError("stairs: steps is required (a catalog pack defaults it)")
+    steps = int(steps)
+    if steps < 1:
+        raise ValueError(f"stairs: steps must be >= 1, got {steps}")
+    if rise <= 0 or tread <= 0 or width <= 0:
+        raise ValueError("stairs: rise, tread and width must be positive")
+
+    def dim(role: str, key: str, default_mm: float) -> float:
+        """A drawn section: the pack's where it carries one, else the
+        generator's own."""
+        if spec is not None and spec.has_component(role):
+            return float(_mm(spec.dimension_mm(role, key, default_mm)))
+        return default_mm / 1000.0
+
+    plate = dim("flight", "plate", 9.0)  # stringer plate
+    stringer = dim("flight", "stringer", 250.0)  # its depth
+    deck = dim("flight", "tread", 32.0)  # checker plate on its angle
+    foot_plate = dim("flight", "foot", 90.0)  # levelling foot
+    nose = nosing if nosing is not None else dim("flight", "nosing", 60.0)
+    nose = min(float(nose), tread / 2.0)
+    tube = dim("handrail", "tube", 42.7)
+    post = dim("handrail", "post", 48.6)
+    rail_h = rail_height if rail_height is not None else dim("handrail", "height", 900.0)
+    ret = dim("handrail", "return", 450.0)
+
+    # The rule the trade sizes stairs by — 2 x rise + tread, the pace of a
+    # person on them. A pack that states it does not sell what falls outside.
+    if spec is not None:
+        low, high = spec.rule("walk_rule_min_mm"), spec.rule("walk_rule_max_mm")
+        walk = 2.0 * rise * 1000.0 + tread * 1000.0
+        if (low is not None and walk < float(low) - 1e-6) or (
+            high is not None and walk > float(high) + 1e-6
+        ):
+            raise ValueError(
+                f"{spec.id}: rise {rise * 1000:.0f} with tread {tread * 1000:.0f} gives "
+                f"2R + T = {walk:.0f} mm, outside the "
+                f"{float(low or 0):.0f}..{float(high or 0):.0f} mm this flight is sold "
+                "in — take a deeper tread or a lower rise"
+            )
+
+    x0, y0 = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s_ = math.cos(yaw), math.sin(yaw)
+
+    def at(lx: float, ly: float, lz: float) -> tuple:
+        return (x0 + c * lx - s_ * ly, y0 + s_ * lx + c * ly, z0 + lz)
+
+    run, height = steps * tread, steps * rise
+    pitch = math.atan2(rise, tread)
+    cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+
+    def pitch_z(x: float) -> float:
+        """The nosing line at `x` — what a stringer's top edge follows and
+        what a handrail is measured from."""
+        return rise * (x + nose) / tread + rise
+
+    mode = _detail(detail, spec is not None)
+    built = Built(name)
+
+    # -- treads: checker plate, and the only walkable thing in the flight --
+    for i in range(1, steps + 1):
+        made = scene.add_box(
+            f"{name}/tread{i:02d}",
+            size=(tread + nose, width, deck),
+            position=at((i - 0.5) * tread - nose / 2.0, 0.0, i * rise - deck / 2.0),
+            quaternion=q,
+            color=tread_color,
+        )
+        scene.set_obstacle_walkable(made, True)
+        built.obstacles.append(made)
+
+    # -- stringers: a plate each side, top edge on the nosing line ---------
+    # Cut where the plate would otherwise run under the floor, as a real
+    # flight is cut to meet it.
+    start = max(0.0, tread * (stringer * cos_p - rise) / rise - nose)
+    span = max(run - start, tread)
+    xc = (start + run) / 2.0
+    slope_q = _mul_quat(q, _slope_quat(-pitch))
+    y_side = (width + plate) / 2.0
+    for side, uy in (("l", 1.0), ("r", -1.0)):
+        built.obstacles.append(
+            scene.add_box(
+                f"{name}/stringer_{side}",
+                size=(span / cos_p, plate, stringer),
+                position=at(
+                    xc + (stringer / 2.0) * sin_p,
+                    uy * y_side,
+                    pitch_z(xc) - (stringer / 2.0) * cos_p,
+                ),
+                quaternion=slope_q,
+                color=color,
+            )
+        )
+
+    # -- what stands it up: a leg under the high end, levelling feet -------
+    leg_x = run - max(0.15, tread / 2.0)
+    leg_top = pitch_z(leg_x) - stringer * cos_p
+    for side, uy in (("l", 1.0), ("r", -1.0)):
+        if leg_top > 0.1:
+            built.obstacles.append(
+                scene.add_box(
+                    f"{name}/leg_{side}",
+                    size=(0.06, 0.06, leg_top),
+                    position=at(leg_x, uy * y_side, leg_top / 2.0),
+                    quaternion=q,
+                    color=color,
+                )
+            )
+        if mode == "full":
+            for label, lx in (("a", start + 0.05), ("b", leg_x)):
+                _trim(
+                    scene, built, f"{name}/trim/foot_{side}{label}",
+                    (foot_plate, foot_plate, 0.012),
+                    at(lx, uy * y_side, 0.006), q, DARK_STEEL,
+                )
+
+    # -- the handrail: sloped run, level return over the landing, posts ----
+    if rails:
+        rail_q = _mul_quat(q, _slope_quat(math.pi / 2.0 - pitch))
+        flat_q = _axis_quat(c, s_)
+        x_top = max(run - tread - nose, 0.0)  # the last nosing
+        x_end = x_top + ret
+        y_rail = y_side + tube / 2.0 + 0.02
+        for side, uy in (("l", 1.0), ("r", -1.0)):
+            ys = uy * y_rail
+            built.obstacles.append(
+                scene.add_cylinder(
+                    f"{name}/handrails/rail_{side}",
+                    radius=tube / 2.0,
+                    length=max(x_top / cos_p, tube),
+                    position=at(
+                        x_top / 2.0,
+                        ys,
+                        (pitch_z(0.0) + pitch_z(x_top)) / 2.0 + rail_h,
+                    ),
+                    quaternion=rail_q,
+                    color=rail_color,
+                )
+            )
+            built.obstacles.append(
+                scene.add_cylinder(
+                    f"{name}/handrails/return_{side}",
+                    radius=tube / 2.0,
+                    length=max(x_end - x_top, tube),
+                    position=at((x_top + x_end) / 2.0, ys, height + rail_h),
+                    quaternion=flat_q,
+                    color=rail_color,
+                )
+            )
+            for label, lx, base, top in (
+                ("a", 0.0, 0.0, pitch_z(0.0) + rail_h),  # on the floor
+                ("b", x_top, pitch_z(x_top) - 0.05, height + rail_h),  # on the flight
+                ("c", x_end, height, height + rail_h),  # on the landing
+            ):
+                built.obstacles.append(
+                    scene.add_cylinder(
+                        f"{name}/handrails/post_{side}{label}",
+                        radius=post / 2.0,
+                        length=max(top - base, post),
+                        position=at(lx, ys, (base + top) / 2.0),
+                        quaternion=q,
+                        color=rail_color,
+                    )
+                )
+            if mode == "full":
+                _trim(
+                    scene, built, f"{name}/handrails/trim/foot_{side}",
+                    (foot_plate, foot_plate, 0.012), at(0.0, ys, 0.006), q, DARK_STEEL,
+                )
+
+    scene.add_frame(f"{name}/foot", position=at(0.0, 0.0, 0.0), quaternion=q)
+    scene.add_frame(f"{name}/top", position=at(run, 0.0, height), quaternion=q)
+    built.frames.extend([f"{name}/foot", f"{name}/top"])
+
+    if spec is None:
+        scene.set_part(
+            name, kind="group", category="structure.stairs", qty=1,
+            **_identity(model, manufacturer, {
+                "rise_mm": str(round(rise * 1000)),
+                "tread_mm": str(round(tread * 1000)),
+                "width_mm": str(round(width * 1000)),
+                "steps": str(steps),
+                **attributes,
+            }),
+        )
+        return built
+
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("flight", "structure.stairs"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("flight", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("flight", **params)), **attributes},
+    )
+    # The rail is bought by the side, the way the flight is bought by the
+    # flight — two lines, because that is how the order goes out.
+    if rails and spec.has_component("handrail"):
+        scene.set_part(
+            f"{name}/handrails", kind="group",
+            category=spec.category("handrail", "structure.stairs.rail"),
+            qty=2, catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=rail_model or spec.part_number("handrail", **params),
+            **_kg(spec.mass_kg("handrail", **params)),
+        )
+    return built

@@ -406,6 +406,7 @@ fn gait_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::GaitSpec
         arm_swing: pairs("arm_swing")?,
         bob: number("bob", 0.0)?,
         lateral: number("lateral", 0.0)?,
+        max_step: optional("max_step")?.map(|v| v.extract()).transpose()?,
     })
 }
 
@@ -637,7 +638,7 @@ impl IkResult {
 #[pyclass(frozen, module = "botrail._core")]
 struct Scene {
     hub: Arc<SceneHub>,
-    robot: Robot,
+    robot: Option<Robot>,
 }
 
 impl Scene {
@@ -733,22 +734,37 @@ impl Scene {
     /// (identity when omitted). `name` sets the robot's scene-unique
     /// instance name (default: the model name).
     #[new]
-    #[pyo3(signature = (robot, base_position = None, base_quaternion = None, name = None))]
+    #[pyo3(signature = (robot = None, base_position = None, base_quaternion = None, name = None))]
     fn new(
-        robot: &Robot,
+        robot: Option<&Robot>,
         base_position: Option<[f64; 3]>,
         base_quaternion: Option<[f64; 4]>,
         name: Option<&str>,
-    ) -> Self {
+    ) -> PyResult<Self> {
+        let Some(robot) = robot else {
+            // A cell with no robot in it — devices, vehicles and obstacles
+            // only. The base/name kwargs describe the robot, so passing
+            // them without one is a confusion worth naming.
+            if base_position.is_some() || base_quaternion.is_some() || name.is_some() {
+                return Err(PyValueError::new_err(
+                    "base_position/base_quaternion/name describe the robot; \
+                     pass them with one, or place robots via add_robot",
+                ));
+            }
+            return Ok(Scene {
+                hub: Arc::new(SceneHub::new(botrail_scene::Scene::empty())),
+                robot: None,
+            });
+        };
         let base = pose_from(base_position.unwrap_or([0.0; 3]), base_quaternion);
         let mut scene = botrail_scene::Scene::with_base(robot.inner.clone(), base);
         if let Some(name) = name {
             scene.rename_robot(0, name);
         }
-        Scene {
+        Ok(Scene {
             hub: Arc::new(SceneHub::new(scene)),
-            robot: robot.clone(),
-        }
+            robot: Some(robot.clone()),
+        })
     }
 
     /// Adds another robot instance and returns its (possibly uniquified)
@@ -799,8 +815,10 @@ impl Scene {
     }
 
     #[getter]
-    fn robot(&self) -> Robot {
-        self.robot.clone()
+    fn robot(&self) -> PyResult<Robot> {
+        self.robot
+            .clone()
+            .ok_or_else(|| PyValueError::new_err("scene has no robot; add one with add_robot"))
     }
 
     /// Instance names of every robot in the scene, in insertion order.
@@ -1163,6 +1181,19 @@ impl Scene {
     fn set_obstacle_visible(&self, name: &str, visible: bool) -> PyResult<()> {
         self.hub
             .set_obstacle_visible(name, visible)
+            .map_err(scene_err)
+    }
+
+    /// Marks an obstacle's top face as a place a walking machine's feet
+    /// may stand — a stair tread, a mezzanine slab. Footfalls snap onto
+    /// it and the walker may touch it (nobody collision-checks a floor
+    /// against the machine standing on it); everything else still
+    /// collides with it normally. Only an upright box (yaw rotation is
+    /// fine) can be walkable.
+    #[pyo3(signature = (name, walkable = true))]
+    fn set_obstacle_walkable(&self, name: &str, walkable: bool) -> PyResult<()> {
+        self.hub
+            .set_obstacle_walkable(name, walkable)
             .map_err(scene_err)
     }
 
@@ -1648,6 +1679,111 @@ impl Scene {
         Ok(())
     }
 
+    /// Adds a lift (elevator): the `car` obstacles ride along `axis`
+    /// between named `stops`, and whatever the capture zone holds when
+    /// the ride is commanded rides too — loose parts by origin, and
+    /// vehicles whole (body, deck load, mounted robot). Command it with
+    /// `bt.seq.move_to(name, "2F")` and await `bt.seq.device_done(name)`.
+    /// The zone (like the car) is authored where the car stands at
+    /// `start`; a vehicle half out of it refuses to board by name.
+    /// Doors are ordinary authoring — an `add_linear_axis` panel and a
+    /// signal — not part of the device. Car entries name obstacles
+    /// exactly, or as subtree prefixes.
+    #[pyo3(signature = (name, car, zone_position, zone_size, stops, speed = 0.5,
+                        axis = [0.0, 0.0, 1.0], zone_quaternion = None, start = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_lift(
+        &self,
+        name: &str,
+        car: Vec<String>,
+        zone_position: [f64; 3],
+        zone_size: [f64; 3],
+        stops: std::collections::BTreeMap<String, f64>,
+        speed: f64,
+        axis: [f64; 3],
+        zone_quaternion: Option<[f64; 4]>,
+        start: Option<String>,
+    ) -> PyResult<()> {
+        let axis = nalgebra::Unit::try_new(nalgebra::Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
+            .ok_or_else(|| PyValueError::new_err("axis must be a nonzero vector"))?;
+        if stops.is_empty() {
+            return Err(PyValueError::new_err(
+                "stops is empty; name at least the stop the car starts at",
+            ));
+        }
+        if !(speed.is_finite() && speed > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "speed must be positive, got {speed}"
+            )));
+        }
+        // The default start is the lowest stop (deterministic).
+        let start = match start {
+            Some(s) => {
+                if !stops.contains_key(&s) {
+                    return Err(PyValueError::new_err(format!(
+                        "start `{s}` is not a stop (stops: {})",
+                        stops
+                            .keys()
+                            .map(|k| format!("`{k}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                s
+            }
+            None => stops
+                .iter()
+                .min_by(|a, b| {
+                    a.1.partial_cmp(b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.0.cmp(b.0))
+                })
+                .map(|(n, _)| n.clone())
+                .expect("stops is non-empty"),
+        };
+        // Car entries: exact obstacle names, or subtree prefixes.
+        let known = self.hub.obstacle_names();
+        let mut members: Vec<String> = Vec::new();
+        for entry in &car {
+            if known.iter().any(|n| n == entry) {
+                members.push(entry.clone());
+                continue;
+            }
+            let prefix = format!("{}/", entry.trim_end_matches('/'));
+            let hits: Vec<String> = known
+                .iter()
+                .filter(|n| n.starts_with(&prefix))
+                .cloned()
+                .collect();
+            if hits.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "car entry `{entry}` matches no obstacle (exactly or as a prefix)"
+                )));
+            }
+            members.extend(hits);
+        }
+        let mut seen = std::collections::HashSet::new();
+        members.retain(|m| seen.insert(m.clone()));
+        // The zone is authored where the car stands at `start`; store it
+        // at the reference position so it rides `axis · position`.
+        let start_value = stops[&start];
+        let mut zone_pose = pose_from(zone_position, zone_quaternion);
+        zone_pose.translation.vector -= axis.into_inner() * start_value;
+        self.hub.upsert_device(botrail_scene::seq::Device {
+            name: name.to_string(),
+            kind: botrail_scene::seq::DeviceKind::Lift {
+                car: members,
+                zone_pose,
+                zone_size: nalgebra::Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                axis,
+                speed,
+                stops: stops.into_iter().collect(),
+                start,
+            },
+        });
+        Ok(())
+    }
+
     /// Adds a guided transport vehicle (an AGV / AMR as the cell sees it):
     /// it drives station to station along `path` — straight legs at
     /// `speed`, in-place pivot turns at `turn_speed` — carrying the `body`
@@ -1656,9 +1792,26 @@ impl Scene {
     /// is the last leg's direction, so the waypoint before a station sets
     /// how the vehicle docks. Body entries name obstacles exactly, or as
     /// subtree prefixes (`"/World/AGV"` takes every obstacle under it).
+    ///
+    /// Waypoints are `(x, y)` or `(x, y, z)`: z is the floor height on the
+    /// guidance surface, so a ramp climbs with its waypoints (the body
+    /// stays level, and speed is spent along the 3D path). A path that
+    /// climbs needs `max_grade` — the steepest rise over horizontal run
+    /// the machine may take (0.10 = 10 %); without it only level paths
+    /// pass validation.
+    ///
+    /// `drive="aerial"` makes the machine a multirotor: z is its own axis
+    /// (any climb, no grade rule, vertical legs fly — a ground station
+    /// under an overhead waypoint *is* the takeoff), `speed` is the
+    /// horizontal cruise and each leg's clock is the slower axis,
+    /// `max(run/speed, rise/climb_speed (or descent_speed))`. The nose
+    /// faces each leg's course, or holds `fixed_yaw` the whole flight.
     #[pyo3(signature = (name, body, path, stations, speed = 0.5,
                         turn_speed = std::f64::consts::FRAC_PI_2,
                         start = None, ring = false, allow_reverse = false,
+                        max_grade = None, drive = "differential",
+                        climb_speed = None, descent_speed = None,
+                        fixed_yaw = None,
                         tray_position = None, tray_size = None,
                         tray_quaternion = None))]
     #[allow(clippy::too_many_arguments)]
@@ -1666,13 +1819,18 @@ impl Scene {
         &self,
         name: &str,
         body: Vec<String>,
-        path: Vec<[f64; 2]>,
+        path: Vec<Vec<f64>>,
         stations: std::collections::BTreeMap<String, usize>,
         speed: f64,
         turn_speed: f64,
         start: Option<String>,
         ring: bool,
         allow_reverse: bool,
+        max_grade: Option<f64>,
+        drive: &str,
+        climb_speed: Option<f64>,
+        descent_speed: Option<f64>,
+        fixed_yaw: Option<f64>,
         tray_position: Option<[f64; 3]>,
         tray_size: Option<[f64; 3]>,
         tray_quaternion: Option<[f64; 4]>,
@@ -1707,6 +1865,84 @@ impl Scene {
                 "turn_speed must be positive, got {turn_speed}"
             )));
         }
+        if let Some(g) = max_grade {
+            if !(g.is_finite() && g > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "max_grade must be positive (rise over run), got {g}"
+                )));
+            }
+        }
+        let mut waypoints: Vec<nalgebra::Point3<f64>> = Vec::with_capacity(path.len());
+        for (i, p) in path.iter().enumerate() {
+            match p.as_slice() {
+                [x, y] => waypoints.push(nalgebra::Point3::new(*x, *y, 0.0)),
+                [x, y, z] => waypoints.push(nalgebra::Point3::new(*x, *y, *z)),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "path waypoint {i} needs 2 or 3 coordinates (x, y[, z]), got {}",
+                        other.len()
+                    )))
+                }
+            }
+        }
+        let drive = match drive {
+            "differential" => {
+                if climb_speed.is_some() || descent_speed.is_some() || fixed_yaw.is_some() {
+                    return Err(PyValueError::new_err(
+                        "climb_speed / descent_speed / fixed_yaw belong to drive=\"aerial\"",
+                    ));
+                }
+                botrail_scene::seq::Drive::Differential {
+                    allow_reverse,
+                    max_grade,
+                }
+            }
+            "holonomic" => {
+                if climb_speed.is_some() || descent_speed.is_some() || fixed_yaw.is_some() {
+                    return Err(PyValueError::new_err(
+                        "climb_speed / descent_speed / fixed_yaw belong to drive=\"aerial\"",
+                    ));
+                }
+                if allow_reverse {
+                    return Err(PyValueError::new_err(
+                        "allow_reverse is a differential-drive idea; a holonomic \
+                         machine never turns in the first place",
+                    ));
+                }
+                botrail_scene::seq::Drive::Holonomic { max_grade }
+            }
+            "aerial" => {
+                if allow_reverse || max_grade.is_some() {
+                    return Err(PyValueError::new_err(
+                        "allow_reverse / max_grade belong to a ground drive; an aerial \
+                         machine flies its legs",
+                    ));
+                }
+                let (Some(climb), Some(descent)) = (climb_speed, descent_speed) else {
+                    return Err(PyValueError::new_err(
+                        "drive=\"aerial\" needs climb_speed and descent_speed (m/s)",
+                    ));
+                };
+                if !(climb.is_finite() && climb > 0.0 && descent.is_finite() && descent > 0.0) {
+                    return Err(PyValueError::new_err(format!(
+                        "climb_speed / descent_speed must be positive, got {climb} / {descent}"
+                    )));
+                }
+                botrail_scene::seq::Drive::Aerial {
+                    climb_speed: climb,
+                    descent_speed: descent,
+                    yaw: fixed_yaw
+                        .map(botrail_scene::seq::AerialYaw::Fixed)
+                        .unwrap_or(botrail_scene::seq::AerialYaw::Course),
+                }
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "drive must be \"differential\", \"holonomic\" or \"aerial\", \
+                     got {other:?}"
+                )))
+            }
+        };
         // The default start is the lowest-index station (deterministic).
         let start = match start {
             Some(s) => {
@@ -1776,10 +2012,7 @@ impl Scene {
             name: name.to_string(),
             kind: botrail_scene::seq::DeviceKind::Vehicle {
                 path: botrail_scene::seq::VehiclePath {
-                    waypoints: path
-                        .iter()
-                        .map(|p| nalgebra::Point2::new(p[0], p[1]))
-                        .collect(),
+                    waypoints,
                     stations: stations.into_iter().collect(),
                     ring,
                 },
@@ -1787,7 +2020,7 @@ impl Scene {
                 speed,
                 turn_speed,
                 start,
-                allow_reverse,
+                drive,
                 tray,
             },
         });
@@ -3892,11 +4125,7 @@ impl Scene {
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             models.push(Arc::new(model));
         }
-        let mut models = models.into_iter();
-        let first = models
-            .next()
-            .ok_or_else(|| PyValueError::new_err("project has no robots"))?;
-        let mut scene = botrail_scene::Scene::new(first);
+        let mut scene = botrail_scene::Scene::empty();
         for model in models {
             scene.add_robot(model, None, nalgebra::Isometry3::identity());
         }
@@ -3904,9 +4133,9 @@ impl Scene {
         scene
             .apply_project(&project)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let robot = Robot {
-            inner: scene.robot().clone(),
-        };
+        let robot = scene.robots().first().map(|sr| Robot {
+            inner: sr.model.clone(),
+        });
         Ok(Scene {
             hub: Arc::new(SceneHub::new(scene)),
             robot,

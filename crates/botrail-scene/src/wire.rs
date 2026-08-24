@@ -317,6 +317,11 @@ pub struct ObstacleMsg {
     /// what they meant.
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// A walkable top face — a stair tread, a mezzanine slab: footfalls of
+    /// a walking machine snap onto it. Files written before this existed
+    /// have no walkable surfaces, which is what they meant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub walkable: bool,
     /// Display colour, linear RGB, from the scene file's
     /// `primvars:displayColor`. Absent means "no authored appearance": the
     /// studio then draws the obstacle as a neutral collision proxy.
@@ -667,21 +672,87 @@ pub enum DeviceKindMsg {
         /// May it drive a leg backwards instead of turning around for it?
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_reverse: bool,
+        /// Steepest grade the drive may climb, as rise over horizontal run
+        /// (0.10 = 10 %). Absent means level paths only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_grade: Option<f64>,
+        /// Holonomic drive: the machine translates while holding its
+        /// heading — no pivot turns. `allow_reverse` is then unused;
+        /// `max_grade` still applies (it is a ground drive).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        holonomic: bool,
+        /// Aerial drive: present means the machine flies its legs (z free,
+        /// each axis at its own rate); `allow_reverse` / `max_grade` are
+        /// then unused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aerial: Option<AerialMsg>,
         /// Load deck in the vehicle frame: pose plus full size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tray: Option<VehicleTrayMsg>,
     },
+    /// A lift (elevator): the car obstacles ride along `axis` between
+    /// named stops, carrying what the capture zone held at dispatch —
+    /// loose parts by origin, vehicles whole.
+    Lift {
+        car: Vec<String>,
+        /// Capture zone at the reference position (`position = 0`).
+        zone_pose: PoseMsg,
+        zone_size: [f64; 3],
+        axis: [f64; 3],
+        speed: f64,
+        stops: Vec<LiftStopMsg>,
+        start: String,
+    },
 }
 
-/// An authored vehicle guide path: floor waypoints plus named station
-/// stops (as waypoint indices).
+/// An authored vehicle guide path: waypoints on the guidance surface
+/// (`[x, y, z]` — z is the floor height there) plus named station stops
+/// (as waypoint indices).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VehiclePathMsg {
-    pub waypoints: Vec<[f64; 2]>,
+    /// Written as `[x, y, z]`; a legacy two-element `[x, y]` is read as
+    /// z = 0, so pre-3D projects and recordings load unchanged.
+    #[serde(deserialize_with = "waypoints_2_or_3")]
+    pub waypoints: Vec<[f64; 3]>,
     pub stations: Vec<VehicleStationMsg>,
     pub ring: bool,
+}
+
+/// Accepts waypoint lists written as `[x, y]` (legacy, z = 0) or
+/// `[x, y, z]`.
+fn waypoints_2_or_3<'de, D>(deserializer: D) -> Result<Vec<[f64; 3]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wp {
+        Three([f64; 3]),
+        Two([f64; 2]),
+    }
+    let raw = Vec::<Wp>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|w| match w {
+            Wp::Three(p) => p,
+            Wp::Two([x, y]) => [x, y, 0.0],
+        })
+        .collect())
+}
+
+/// The aerial drive of a flying vehicle: present on the wire means the
+/// machine flies its legs — z is free, each axis at its own rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AerialMsg {
+    pub climb_speed: f64,
+    pub descent_speed: f64,
+    /// Hold this yaw over the whole flight; absent flies course-facing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_yaw: Option<f64>,
 }
 
 /// A vehicle's load deck, in the vehicle frame.
@@ -699,6 +770,15 @@ pub struct VehicleTrayMsg {
 pub struct VehicleStationMsg {
     pub name: String,
     pub index: usize,
+}
+
+/// One named stop of a lift, metres along its axis from the reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiftStopMsg {
+    pub name: String,
+    pub at: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -722,6 +802,11 @@ pub enum DeviceCommandMsg {
     /// (indexed transfer); await with `device_done`.
     Advance {
         distance: f64,
+    },
+    /// Send a lift to a named stop; await with `device_done`. The cargo
+    /// is fixed the moment this fires (the doors are closed).
+    MoveToStop {
+        stop: String,
     },
 }
 
@@ -970,6 +1055,18 @@ pub struct RobotTimelineMsg {
     pub base: Vec<PoseMsg>,
 }
 
+/// A vehicle's reference-frame pose track on a baked timeline — what
+/// places its mounted sensors (authored in the vehicle frame) during
+/// playback. A one-pose track is constant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct VehicleTrackMsg {
+    /// Device name.
+    pub name: String,
+    /// Pose per sample on the timeline's shared grid.
+    pub poses: Vec<PoseMsg>,
+}
+
 /// A baked sequence rollout: each robot rides its own embedded trajectory
 /// on a single clock (the studio plays them with the existing machinery),
 /// grasped/tracked objects follow world-pose tracks, plus the step bands
@@ -984,6 +1081,9 @@ pub struct TimelineMsg {
     /// World-pose track per moving scene object, aligned with the (shared)
     /// trajectory sample grid. Empty when nothing rides along.
     pub objects: Vec<ObjectTrackMsg>,
+    /// Reference-frame track per vehicle that drove, on the same grid.
+    #[serde(default)]
+    pub vehicles: Vec<VehicleTrackMsg>,
     pub step_spans: Vec<StepSpanMsg>,
     pub signals: Vec<SignalTrackMsg>,
     /// Every selection divergence this bake resolved, in resolution order.
@@ -1613,6 +1713,9 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 DeviceCommand::Goto { station } => DeviceCommandMsg::Goto {
                     station: station.clone(),
                 },
+                DeviceCommand::MoveToStop(stop) => {
+                    DeviceCommandMsg::MoveToStop { stop: stop.clone() }
+                }
                 DeviceCommand::Advance(distance) => DeviceCommandMsg::Advance {
                     distance: *distance,
                 },
@@ -1679,6 +1782,7 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
                 DeviceCommandMsg::Goto { station } => DeviceCommand::Goto {
                     station: station.clone(),
                 },
+                DeviceCommandMsg::MoveToStop { stop } => DeviceCommand::MoveToStop(stop.clone()),
                 DeviceCommandMsg::Advance { distance } => DeviceCommand::Advance(*distance),
             },
         },
@@ -1910,16 +2014,34 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 speed,
                 turn_speed,
                 start,
-                allow_reverse,
+                drive,
                 tray,
             } => DeviceKindMsg::Vehicle {
-                allow_reverse: *allow_reverse,
+                allow_reverse: drive.allow_reverse(),
+                max_grade: drive.max_grade(),
+                holonomic: matches!(drive, crate::seq::Drive::Holonomic { .. }),
+                aerial: match drive {
+                    crate::seq::Drive::Aerial {
+                        climb_speed,
+                        descent_speed,
+                        yaw,
+                    } => Some(AerialMsg {
+                        climb_speed: *climb_speed,
+                        descent_speed: *descent_speed,
+                        fixed_yaw: match yaw {
+                            crate::seq::AerialYaw::Fixed(psi) => Some(*psi),
+                            crate::seq::AerialYaw::Course => None,
+                        },
+                    }),
+                    crate::seq::Drive::Differential { .. }
+                    | crate::seq::Drive::Holonomic { .. } => None,
+                },
                 tray: tray.map(|(pose, size)| VehicleTrayMsg {
                     pose: PoseMsg::from(&pose),
                     size: [size.x, size.y, size.z],
                 }),
                 path: VehiclePathMsg {
-                    waypoints: path.waypoints.iter().map(|p| [p.x, p.y]).collect(),
+                    waypoints: path.waypoints.iter().map(|p| [p.x, p.y, p.z]).collect(),
                     stations: path
                         .stations
                         .iter()
@@ -1933,6 +2055,29 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 body: body.clone(),
                 speed: *speed,
                 turn_speed: *turn_speed,
+                start: start.clone(),
+            },
+            DeviceKind::Lift {
+                car,
+                zone_pose,
+                zone_size,
+                axis,
+                speed,
+                stops,
+                start,
+            } => DeviceKindMsg::Lift {
+                car: car.clone(),
+                zone_pose: PoseMsg::from(zone_pose),
+                zone_size: [zone_size.x, zone_size.y, zone_size.z],
+                axis: [axis.x, axis.y, axis.z],
+                speed: *speed,
+                stops: stops
+                    .iter()
+                    .map(|(name, at)| LiftStopMsg {
+                        name: name.clone(),
+                        at: *at,
+                    })
+                    .collect(),
                 start: start.clone(),
             },
         },
@@ -1999,9 +2144,28 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 turn_speed,
                 start,
                 allow_reverse,
+                max_grade,
+                holonomic,
+                aerial,
                 tray,
             } => DeviceKind::Vehicle {
-                allow_reverse: *allow_reverse,
+                drive: match aerial {
+                    Some(a) => crate::seq::Drive::Aerial {
+                        climb_speed: a.climb_speed,
+                        descent_speed: a.descent_speed,
+                        yaw: a
+                            .fixed_yaw
+                            .map(crate::seq::AerialYaw::Fixed)
+                            .unwrap_or(crate::seq::AerialYaw::Course),
+                    },
+                    None if *holonomic => crate::seq::Drive::Holonomic {
+                        max_grade: *max_grade,
+                    },
+                    None => crate::seq::Drive::Differential {
+                        allow_reverse: *allow_reverse,
+                        max_grade: *max_grade,
+                    },
+                },
                 tray: tray.as_ref().map(|t| {
                     (
                         (&t.pose).into(),
@@ -2012,7 +2176,7 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                     waypoints: path
                         .waypoints
                         .iter()
-                        .map(|p| nalgebra::Point2::new(p[0], p[1]))
+                        .map(|p| nalgebra::Point3::new(p[0], p[1], p[2]))
                         .collect(),
                     stations: path
                         .stations
@@ -2024,6 +2188,24 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 body: body.clone(),
                 speed: *speed,
                 turn_speed: *turn_speed,
+                start: start.clone(),
+            },
+            DeviceKindMsg::Lift {
+                car,
+                zone_pose,
+                zone_size,
+                axis,
+                speed,
+                stops,
+                start,
+            } => DeviceKind::Lift {
+                car: car.clone(),
+                zone_pose: zone_pose.into(),
+                zone_size: Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
+                axis: nalgebra::Unit::try_new(Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
+                    .unwrap_or_else(|| nalgebra::Unit::new_unchecked(Vector3::z())),
+                speed: *speed,
+                stops: stops.iter().map(|s| (s.name.clone(), s.at)).collect(),
                 start: start.clone(),
             },
         },
@@ -2513,6 +2695,7 @@ pub fn obstacles_message(
                 pose: PoseMsg::from(&o.pose),
                 enabled: o.enabled,
                 visible: o.visible,
+                walkable: o.walkable,
                 color: o.color,
                 material: o.material.map(Into::into),
                 legend: o.legend.as_ref().map(Into::into),
@@ -2640,6 +2823,7 @@ mod tests {
     #[test]
     fn timeline_span_attribution_and_branches_roundtrip() {
         let msg = TimelineMsg {
+            vehicles: Vec::new(),
             duration: 1.0,
             robots: vec![],
             objects: vec![],

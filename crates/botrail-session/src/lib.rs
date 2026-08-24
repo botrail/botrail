@@ -607,6 +607,18 @@ pub fn set_obstacle_visible(
     Ok(())
 }
 
+/// Marks an obstacle's top face walkable (a stair tread, a mezzanine slab)
+/// and rebroadcasts.
+pub fn set_obstacle_walkable(
+    host: &impl SessionHost,
+    name: &str,
+    walkable: bool,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_walkable(name, walkable))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
 pub fn set_obstacle_material(
     host: &impl SessionHost,
     name: &str,
@@ -1216,10 +1228,20 @@ pub fn timeline_msg(
         .iter()
         .map(|track| track.trajectory.resample(1.0 / 30.0))
         .collect();
-    let grid: &[f64] = sampled
-        .first()
-        .map(|(times, _)| times.as_slice())
-        .unwrap_or(&[]);
+    // A robot-less cell (a conveyor line, an AGV loop) still has objects
+    // and vehicles to animate, so the clock is built from the duration at
+    // the same rate the robot resample would have used.
+    let uniform: Vec<f64>;
+    let grid: &[f64] = match sampled.first() {
+        Some((times, _)) => times.as_slice(),
+        None => {
+            let steps = (timeline.duration * 30.0).ceil().max(1.0) as usize;
+            uniform = (0..=steps)
+                .map(|k| (k as f64 / steps as f64) * timeline.duration)
+                .collect();
+            &uniform
+        }
+    };
 
     // A mounted robot's base moves; everything that does FK off it has to
     // ask the track, not the parked scene.
@@ -1273,6 +1295,31 @@ pub fn timeline_msg(
         // magazine) collapses to a single pose — the client reads a
         // one-pose track as constant, and a hundred stages would
         // otherwise each ship a copy of the whole grid.
+        if msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
+            msg.poses.truncate(1);
+        }
+    }
+
+    // The vehicle frames, sampled like the object tracks — they place the
+    // mounted sensors during playback. The robot-less clock above covers
+    // them too, so every track shares one grid.
+    let mut vehicles: Vec<wire::VehicleTrackMsg> = timeline
+        .vehicles
+        .iter()
+        .map(|track| wire::VehicleTrackMsg {
+            name: track.name.clone(),
+            poses: grid
+                .iter()
+                .map(|&t| {
+                    PoseMsg::from(
+                        &botrail_scene::rollout::SequenceTimeline::span_pose(&track.spans, &[], t)
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        })
+        .collect();
+    for msg in &mut vehicles {
         if msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
             msg.poses.truncate(1);
         }
@@ -1337,6 +1384,7 @@ pub fn timeline_msg(
     wire::TimelineMsg {
         duration: timeline.duration,
         robots,
+        vehicles,
         objects: object_tracks,
         step_spans: timeline
             .step_spans
@@ -1573,6 +1621,77 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::sync::Arc;
+
+    #[test]
+    fn a_robotless_timeline_still_has_a_clock() {
+        // An AGV loop with no robot anywhere: the wire timeline has no
+        // robot trajectory to borrow a sample grid from, so one is built
+        // from the duration — and the object and vehicle tracks ride it.
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "chassis",
+                botrail_model::Geometry::Box {
+                    size: nalgebra::Vector3::new(0.4, 0.3, 0.2),
+                },
+                nalgebra::Isometry3::translation(0.0, 0.0, 0.1),
+            )
+            .unwrap();
+        scene.upsert_device(botrail_scene::seq::Device {
+            name: "agv".into(),
+            kind: botrail_scene::seq::DeviceKind::Vehicle {
+                path: botrail_scene::seq::VehiclePath {
+                    waypoints: vec![
+                        nalgebra::Point3::new(0.0, 0.0, 0.0),
+                        nalgebra::Point3::new(2.0, 0.0, 0.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("b".into(), 1)],
+                    ring: false,
+                },
+                body: vec!["chassis".into()],
+                speed: 0.5,
+                turn_speed: 1.0,
+                start: "a".into(),
+                drive: botrail_scene::seq::Drive::Differential {
+                    allow_reverse: false,
+                    max_grade: None,
+                },
+                tray: None,
+            },
+        });
+        scene.upsert_sequence(botrail_scene::seq::Sequence {
+            name: "haul".into(),
+            steps: vec![botrail_scene::seq::Step {
+                name: "go".into(),
+                actions: vec![botrail_scene::seq::Action::Device {
+                    device: "agv".into(),
+                    command: botrail_scene::seq::DeviceCommand::Goto {
+                        station: "b".into(),
+                    },
+                }],
+                transition: botrail_scene::seq::Condition::DeviceDone {
+                    device: "agv".into(),
+                },
+                select: Vec::new(),
+            }],
+        });
+        let tl = scene
+            .simulate_sequence("haul", &botrail_scene::rollout::RolloutOptions::default())
+            .unwrap();
+        let msg = timeline_msg(&scene, &tl);
+        assert!(msg.robots.is_empty());
+        let chassis = msg
+            .objects
+            .iter()
+            .find(|o| o.name == "chassis")
+            .expect("the body is tracked");
+        assert!(chassis.poses.len() > 30, "{}", chassis.poses.len());
+        let agv = &msg.vehicles[0];
+        assert_eq!(agv.poses.len(), chassis.poses.len());
+        // The last sample is the arrival, at the duration.
+        let last = chassis.poses.last().unwrap();
+        assert!((last.position[0] - 2.0).abs() < 1e-3, "{:?}", last.position);
+    }
 
     /// Minimal single-threaded host: RefCell scene, collected messages.
     struct TestHost {

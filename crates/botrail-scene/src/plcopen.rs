@@ -595,6 +595,17 @@ impl<'a> Pou<'a> {
                         );
                         st.push(format!("{v} := {};", st_real(*pos)));
                     }
+                    DeviceCommand::MoveToStop(stop) => {
+                        // A lift call: the stop by name, the way the PLC
+                        // programs an elevator controller.
+                        let v = self.var(
+                            device,
+                            Some(Aspect::Position),
+                            false,
+                            &format!("{}_stop", ident(device)),
+                        );
+                        st.push(format!("{v} := '{stop}';"));
+                    }
                     DeviceCommand::Goto { station } => {
                         let word = self.var(
                             device,

@@ -54,7 +54,7 @@ function GuidePath({ device, moving }: { device: DeviceMsg; moving: boolean }) {
   const points = useMemo(() => {
     if (kind.kind !== "vehicle") return [];
     const pts = kind.path.waypoints.map(
-      ([x, y]) => new THREE.Vector3(x, y, FLOOR_LIFT),
+      ([x, y, z]) => new THREE.Vector3(x, y, (z ?? 0) + FLOOR_LIFT),
     );
     if (kind.path.ring && pts.length > 1) pts.push(pts[0].clone());
     return pts;
@@ -68,7 +68,10 @@ function GuidePath({ device, moving }: { device: DeviceMsg; moving: boolean }) {
         const wp = kind.path.waypoints[station.index];
         if (!wp) return null;
         return (
-          <group key={station.name} position={[wp[0], wp[1], FLOOR_LIFT]}>
+          <group
+            key={station.name}
+            position={[wp[0], wp[1], (wp[2] ?? 0) + FLOOR_LIFT]}
+          >
             <mesh>
               <circleGeometry args={[0.09, 24]} />
               <meshBasicMaterial color={color} transparent opacity={0.5} />

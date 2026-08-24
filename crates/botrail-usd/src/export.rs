@@ -244,8 +244,10 @@ pub fn export_animation(
     if n == 0 {
         return Err(UsdExportError::Input("no frames".into()));
     }
-    if input.robots.is_empty() {
-        return Err(UsdExportError::Input("no robots".into()));
+    if input.robots.is_empty() && input.objects.is_empty() {
+        // A robot-less cell still animates its objects (an AGV loop, a
+        // conveyor line); with neither there is nothing to write.
+        return Err(UsdExportError::Input("no robots and no objects".into()));
     }
     for robot in input.robots {
         if robot.link_poses.len() != n {

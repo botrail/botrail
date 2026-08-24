@@ -255,6 +255,76 @@ def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene) -> None:
     assert not tl.signal("at_a").value_at(tl.duration)
 
 
+def test_vehicle_climbs_a_ramp_with_a_declared_grade(scene: bt.Scene) -> None:
+    # A 4 m run rising 0.4 m — a 10 % ramp. Without a declared ability the
+    # slope is refused by name; with one, the whole machine rides up it and
+    # cruise speed is spent along the 3D path.
+    scene.add_box("agv/chassis", (0.2, 0.2, 0.2), (0.3, 2.0, 0.1))
+    ramp = [(0.0, 2.0), (4.0, 2.0, 0.4)]
+    scene.add_vehicle(
+        "agv", body=["agv"], path=ramp, stations={"a": 0, "b": 1}, speed=0.5
+    )
+    sq = scene.sequence("haul")
+    sq.step("go", actions=[bt.seq.goto("agv", "b")], transition=bt.seq.device_done("agv"))
+    with pytest.raises(ValueError, match="declares no max_grade"):
+        sq.simulate()
+
+    # Too weak a drive is named with both numbers.
+    scene.add_vehicle(
+        "agv", body=["agv"], path=ramp, stations={"a": 0, "b": 1}, speed=0.5,
+        max_grade=0.05,
+    )
+    with pytest.raises(ValueError, match="over the drive's max_grade"):
+        sq.simulate()
+
+    scene.add_vehicle(
+        "agv", body=["agv"], path=ramp, stations={"a": 0, "b": 1}, speed=0.5,
+        max_grade=0.2,
+    )
+    tl = sq.simulate()
+    assert abs(tl.duration - math.hypot(4.0, 0.4) / 0.5) <= 0.011
+    p, _ = tl.object_pose("agv/chassis", tl.duration)
+    assert max(abs(a - b) for a, b in zip(p, (4.3, 2.0, 0.5))) < 1e-9
+    # Halfway through the drive the chassis is halfway up the ramp.
+    p, _ = tl.object_pose("agv/chassis", tl.duration / 2)
+    assert abs(p[2] - 0.3) < 1e-3
+    # The generated script round-trips the 3D waypoint and the grade.
+    code = scene.generate_python()
+    assert "(4, 2, 0.4)" in code and "max_grade=0.2" in code
+
+    # Straight up is never a drive's job (that is a lift's).
+    scene.add_vehicle(
+        "agv", body=["agv"], path=[(0.0, 2.0), (0.0, 2.0, 1.0)],
+        stations={"a": 0, "b": 1}, max_grade=5.0,
+    )
+    with pytest.raises(ValueError, match="vertical"):
+        sq.simulate()
+
+
+def test_a_holonomic_vehicle_holds_its_heading(scene: bt.Scene) -> None:
+    # Mecanum wheels: the L-path costs only its length, and the body
+    # arrives unrotated — it docks facing what it faced when parked.
+    scene.add_box("agv/chassis", (0.2, 0.2, 0.2), (0.3, 2.2, 0.1))
+    scene.add_vehicle(
+        "agv", body=["agv"], path=[(0.0, 2.0), (2.0, 2.0), (2.0, 3.0)],
+        stations={"dock": 0, "warehouse": 2}, speed=0.5, drive="holonomic",
+    )
+    sq = scene.sequence("haul")
+    sq.step("out", actions=[bt.seq.goto("agv", "warehouse")],
+            transition=bt.seq.device_done("agv"))
+    tl = sq.simulate()
+    assert abs(tl.duration - 6.0) <= 0.011
+    _p, q = tl.object_pose("agv/chassis", tl.duration)
+    assert q == pytest.approx((0.0, 0.0, 0.0, 1.0), abs=1e-9)
+    assert 'drive="holonomic"' in scene.generate_python()
+    # The kwargs guard each other: reversing is a differential-drive idea.
+    with pytest.raises(ValueError, match="never turns"):
+        scene.add_vehicle(
+            "agv2", body=["agv"], path=[(0.0, 2.0), (1.0, 2.0)],
+            stations={"a": 0}, drive="holonomic", allow_reverse=True,
+        )
+
+
 def test_vehicle_reverses_out_instead_of_turning(scene: bt.Scene) -> None:
     # Out and back on a straight run. Turning around costs two 180 deg
     # pivots; reversing costs none, and the machine ends facing the way it

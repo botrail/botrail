@@ -34,6 +34,7 @@ bt.parts.light_curtain(scene, "lc", frm=(-1, -2), to=(1, -2), model="SL-V")
 | [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`pallet`][botrail.parts.pallet] | bottom boards, blocks, deck boards | `<name>/top` | — | `<name>` (`pallet`, `EPAL 1` by default) |
 | [`light_curtain`][botrail.parts.light_curtain] | two columns | — | the beam sensor `<name>` (trips on the robot) | the *sensor* (`sensor.light_curtain`) |
+| [`stairs`][botrail.parts.stairs] | a walkable checker-plate tread per step under `<name>/tread…`, a plate stringer and support leg each side, the handrail under `<name>/handrails/` | `<name>/foot`, `<name>/top` (author the vehicle path's z between them) | — | `<name>` (`structure.stairs`), and with a catalog `<name>/handrails` (`structure.stairs.rail`, qty = 2 sides) |
 
 Every generator takes `model=`, `manufacturer=` and free attributes
 (`mass_kg=…`) for the part it pins — or `catalog=`, the id of a spec pack, and

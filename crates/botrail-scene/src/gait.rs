@@ -53,6 +53,11 @@ pub struct BodySway {
     pub lean: f64,
 }
 
+/// How far above or below the vehicle plane a walkable surface is searched
+/// for a foothold when the gait declares no `max_step`: covers industrial
+/// stair risers (180–250 mm) with room to spare.
+pub(crate) const DEFAULT_STEP_REACH: f64 = 0.3;
+
 fn smooth(u: f64) -> f64 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
@@ -76,6 +81,194 @@ impl BodySway {
             UnitQuaternion::identity(),
         )
     }
+}
+
+/// The body's pitch over one walk. A machine on a grade tilts onto it —
+/// its hips follow the ground, so every leg works the range it works on the
+/// flat. Without it a level body on a stair asks the downhill legs to reach
+/// half a machine-length of grade *plus* half a riser, which is more than a
+/// real leg has. Piecewise and closed form: the angle holds over each leg of
+/// the drive and blends over one body length where the grade changes, so any
+/// resample rate sees the same body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyPitch {
+    pub t0: f64,
+    pub t1: f64,
+    /// Nose-up angle at each end, radians.
+    pub from: f64,
+    pub to: f64,
+}
+
+/// How high the body rides over its guide line at one moment. A machine
+/// on stairs does not hold one height above the straight line its route
+/// draws — it rides the steps: as the feet climb, the body climbs with
+/// them. Without it a fixed stance has to serve both extremes at once (a
+/// leg reaching down to a low tread while another is at its swing apex),
+/// which costs half a riser more of leg travel than a real machine spends
+/// and caps the flight far below what the machine is rated for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyRise {
+    pub t0: f64,
+    pub t1: f64,
+    /// Height over the guide plane at each end, metres.
+    pub from: f64,
+    pub to: f64,
+}
+
+/// The rise at `t`: held before the first span and after the last.
+pub fn rise_at(rises: &[BodyRise], t: f64) -> f64 {
+    let Some(first) = rises.first() else {
+        return 0.0;
+    };
+    if t <= first.t0 {
+        return first.from;
+    }
+    for span in rises {
+        if t < span.t1 {
+            let width = span.t1 - span.t0;
+            if width <= 1e-12 || t <= span.t0 {
+                return span.from;
+            }
+            return span.from + (span.to - span.from) * smooth((t - span.t0) / width);
+        }
+    }
+    rises.last().map(|s| s.to).unwrap_or(0.0)
+}
+
+/// Where one leg's foot is at `t`: its anchor, gliding along the swing
+/// chord while it flies (so the mean over the legs moves, never steps).
+fn foot_height(plan: &LegPlan, t: f64) -> f64 {
+    let mut prev = plan.start.z;
+    for f in &plan.footfalls {
+        if t < f.lift {
+            return prev;
+        }
+        if t < f.land {
+            let u = (t - f.lift) / (f.land - f.lift).max(1e-12);
+            return prev + (f.position.z - prev) * smooth(u);
+        }
+        prev = f.position.z;
+    }
+    prev
+}
+
+/// How the body rides a drive: the mean of where its feet are, over the
+/// guide plane, sampled at every lift and landing (between them the legs
+/// glide, so this is the curve itself, not a fit to it).
+pub(crate) fn plan_rise(
+    legs: &[LegPlan],
+    profile: &BodyProfile,
+    foot_radius: f64,
+) -> Vec<BodyRise> {
+    if legs.is_empty() {
+        return Vec::new();
+    }
+    let mut times: Vec<f64> = vec![profile.t0];
+    for leg in legs {
+        for f in &leg.footfalls {
+            times.push(f.lift);
+            times.push(f.land);
+        }
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    let value = |t: f64| -> f64 {
+        let mean: f64 = legs.iter().map(|l| foot_height(l, t)).sum::<f64>() / legs.len() as f64;
+        mean - foot_radius - profile.frame_at(t).translation.z
+    };
+    let mut spans: Vec<BodyRise> = Vec::new();
+    for pair in times.windows(2) {
+        let (t0, t1) = (pair[0], pair[1]);
+        let (from, to) = (value(t0), value(t1));
+        if t1 - t0 < 1e-12 {
+            continue;
+        }
+        if (to - from).abs() < 1e-12 && spans.last().is_some_and(|s| (s.to - from).abs() < 1e-12) {
+            spans.last_mut().expect("checked").t1 = t1;
+            continue;
+        }
+        spans.push(BodyRise { t0, t1, from, to });
+    }
+    spans
+}
+
+/// The pitch angle at `t`: held before the first span and after the last
+/// (a machine parked on a grade stands on it).
+pub fn pitch_angle(pitches: &[BodyPitch], t: f64) -> f64 {
+    let Some(first) = pitches.first() else {
+        return 0.0;
+    };
+    if t <= first.t0 {
+        return first.from;
+    }
+    for span in pitches {
+        if t < span.t1 {
+            let width = span.t1 - span.t0;
+            if width <= 1e-12 || t <= span.t0 {
+                return span.from;
+            }
+            return span.from + (span.to - span.from) * smooth((t - span.t0) / width);
+        }
+    }
+    pitches.last().map(|s| s.to).unwrap_or(0.0)
+}
+
+/// The body-frame offset that tilts a walking body onto its grade.
+pub fn pitch_offset(pitches: &[BodyPitch], t: f64) -> Isometry3<f64> {
+    let angle = pitch_angle(pitches, t);
+    if angle.abs() < 1e-12 {
+        return Isometry3::identity();
+    }
+    Isometry3::from_parts(
+        Translation3::identity(),
+        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), -angle),
+    )
+}
+
+/// The pitch a drive asks of a body `body_len` long: the grade of each
+/// piece, blended over the time the machine takes to cover its own length.
+pub(crate) fn plan_pitch(profile: &BodyProfile, body_len: f64) -> Vec<BodyPitch> {
+    let mut knots: Vec<(f64, f64)> = vec![(profile.t0, 0.0)];
+    let mut grade = 0.0;
+    for (a, b, _frame, piece) in &profile.pieces {
+        let (g, speed) = match piece {
+            VehiclePiece::Lin { velocity } => {
+                let run = velocity.x.hypot(velocity.y);
+                if run > 1e-9 {
+                    (velocity.z / run, run)
+                } else {
+                    (grade, 0.0)
+                }
+            }
+            // A pivot turns on whatever it stands on.
+            VehiclePiece::Piv { .. } => (grade, 0.0),
+        };
+        grade = g;
+        let half = 0.5 * (b - a);
+        let blend = if speed > 1e-9 {
+            (0.5 * body_len / speed).min(half)
+        } else {
+            half
+        };
+        knots.push((a + blend, g.atan()));
+        knots.push((b - blend, g.atan()));
+    }
+    // The drive ends level: the settle puts the legs back in the stance,
+    // and the stance is what a parked machine stands in.
+    knots.push((profile.t_end, 0.0));
+    let mut spans: Vec<BodyPitch> = Vec::new();
+    for pair in knots.windows(2) {
+        let ((t0, from), (t1, to)) = (pair[0], pair[1]);
+        if t1 - t0 < 1e-12 {
+            continue;
+        }
+        if (to - from).abs() < 1e-12 && spans.last().is_some_and(|s| (s.to - from).abs() < 1e-12) {
+            spans.last_mut().expect("checked").t1 = t1;
+            continue;
+        }
+        spans.push(BodyPitch { t0, t1, from, to });
+    }
+    spans
 }
 
 /// The sway offset of the walk covering `t`, identity between walks.
@@ -167,6 +360,14 @@ pub(crate) struct ResolvedGait {
     /// Mount offset that stands the stance feet on the vehicle plane: the
     /// root lifted by the feet's depth below it (plus the foot radius).
     pub offset: Isometry3<f64>,
+    /// Foot radius (see `GaitSpec::foot_radius`) — also the margin a
+    /// foothold needs from a tread's edge.
+    pub foot_radius: f64,
+    /// Declared step ability (see `GaitSpec::max_step`).
+    pub max_step: Option<f64>,
+    /// The link the legs hang from — the machine's body. What a walking
+    /// vehicle carries rides *this*, not the line its route draws.
+    pub body: usize,
 }
 
 impl ResolvedGait {
@@ -488,6 +689,9 @@ pub(crate) fn resolve_gait(
         lateral: spec.lateral,
         lean,
         offset,
+        foot_radius: spec.foot_radius,
+        max_step: spec.max_step,
+        body,
     })
 }
 
@@ -668,6 +872,10 @@ pub(crate) struct GaitPlan {
     /// is driving them.
     pub swing: Vec<ArmSwing>,
     pub sway: Option<BodySway>,
+    /// How the body tilts over this drive (empty on the level).
+    pub pitch: Vec<BodyPitch>,
+    /// How the body rides over the guide line (empty on flat ground).
+    pub rise: Vec<BodyRise>,
 }
 
 /// What a leg is doing at an instant.
@@ -747,17 +955,48 @@ pub(crate) fn plan_gait(
     feet: &[(Point3<f64>, f64)],
     carry: &[Option<Footfall>],
     swing: Vec<ArmSwing>,
+    // `floor(x, y, hint)`: the walkable surface under a foothold at
+    // `(x, y)`, if any — a stair tread instead of the slope the guide line
+    // interpolates. `hint` is the surface the foot stands on *now*: a step
+    // is measured from the foot, not from the body, which is half a machine
+    // away and, on a pitch, a step lower. `None` leaves the foot on the
+    // guide surface the tilted stance puts it on.
+    floor: &dyn Fn(f64, f64, f64) -> Option<f64>,
 ) -> GaitPlan {
     let (t0, t_end) = (profile.t0, profile.t_end);
+    // The body tilts onto the grade; the footholds are read from the tilted
+    // stance, so a leg reaches the same way uphill as it does on the flat.
+    let (front, back) = gait.legs.iter().fold((f64::MIN, f64::MAX), |(hi, lo), l| {
+        let x = l.nominal.translation.x;
+        (hi.max(x), lo.min(x))
+    });
+    let pitch = plan_pitch(&profile, (front - back).abs().max(1e-6));
     let swing_time = gait.swing();
     let stance_half = 0.5 * gait.duty * gait.period;
     let mut legs = Vec::with_capacity(gait.legs.len());
     let mut done = t0;
     for (i, leg) in gait.legs.iter().enumerate() {
-        let foot_at = |frame: &Isometry3<f64>| -> Point3<f64> {
-            Point3::from((frame * offset * leg.nominal).translation.vector)
+        let foot_at = |frame: &Isometry3<f64>, from: &Point3<f64>, tilt: f64| -> Point3<f64> {
+            let lean = pitch_offset(
+                &[BodyPitch {
+                    t0: 0.0,
+                    t1: 0.0,
+                    from: tilt,
+                    to: tilt,
+                }],
+                0.0,
+            );
+            let mut p = Point3::from((frame * offset * lean * leg.nominal).translation.vector);
+            // The foot stands `foot_radius` above whatever it stands on, so
+            // the surface it is on now is what the next one is measured from.
+            let hint = from.z - gait.foot_radius;
+            if let Some(surface) = floor(p.x, p.y, hint) {
+                // On real ground the foot sits on it exactly — the tilt
+                // decided *where* the foot reaches, not how high it floats.
+                p.z = surface + gait.foot_radius;
+            }
+            p
         };
-        let parked = foot_at(&profile.end_frame);
         let mut footfalls: Vec<Footfall> = Vec::new();
         let mut last = feet[i].0;
         let mut earliest = t0;
@@ -773,13 +1012,16 @@ pub(crate) fn plan_gait(
             if lift < earliest - 1e-9 {
                 continue;
             }
+            // Where the walk leaves this foot: re-read as the foot climbs,
+            // since the ground it parks on is found from where it stands.
+            let parked = foot_at(&profile.end_frame, &last, pitch_angle(&pitch, t_end));
             if lift >= t_end - 1e-9 && (last - parked).norm() < 1e-9 {
                 break;
             }
             let land = lift + swing_time;
             let mid = land + stance_half;
             let frame = profile.frame_at(mid);
-            let position = foot_at(&frame);
+            let position = foot_at(&frame, &last, pitch_angle(&pitch, mid));
             footfalls.push(Footfall {
                 leg: leg.name.clone(),
                 lift,
@@ -810,12 +1052,15 @@ pub(crate) fn plan_gait(
         lateral: gait.lateral,
         lean: gait.lean,
     });
+    let rise = plan_rise(&legs, &profile, gait.foot_radius);
     GaitPlan {
         profile,
         legs,
         done,
         swing,
         sway,
+        pitch,
+        rise,
     }
 }
 

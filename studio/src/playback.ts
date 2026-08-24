@@ -10,6 +10,7 @@ import type {
   PoseMsg,
   TimelineMsg,
   TrajectoryMsg,
+  VehicleTrackMsg,
 } from "./protocol";
 
 /** Per-robot trajectories on a single clock. */
@@ -21,6 +22,8 @@ export interface PlaybackTracks {
   robots: { name: string; trajectory: TrajectoryMsg; base?: PoseMsg[] }[];
   /** World-pose tracks of moving scene objects, sampled on `times`. */
   objects: { times: number[]; tracks: ObjectTrackMsg[] } | null;
+  /** Vehicle reference-frame tracks — what places mounted sensors. */
+  vehicles: { times: number[]; tracks: VehicleTrackMsg[] } | null;
 }
 
 /** Display overrides at one playback instant. */
@@ -35,6 +38,8 @@ export interface PlaybackSample {
   stowed: Set<string>;
   /** Robot name -> base pose, for robots riding a vehicle. */
   bases: Record<string, PoseMsg> | null;
+  /** Vehicle name -> reference-frame pose (places mounted sensors). */
+  vehicles: Record<string, PoseMsg> | null;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -49,11 +54,29 @@ export function tracksFromTrajectory(
       traj.object_tracks && traj.object_tracks.length > 0
         ? { times: traj.times, tracks: traj.object_tracks }
         : null,
+    vehicles: null,
   };
+}
+
+/** The shared sample grid of a timeline's tracks. Robot trajectories carry
+ * it explicitly; a robot-less cell (an AGV loop, a conveyor line) ships
+ * only per-sample poses, so the clock is rebuilt from the duration and the
+ * densest track — the same uniform grid the server sampled on. */
+function timelineTimes(timeline: TimelineMsg): number[] {
+  const fromRobot = timeline.robots[0]?.trajectory.times;
+  if (fromRobot && fromRobot.length > 0) return fromRobot;
+  const n = Math.max(
+    0,
+    ...timeline.objects.map((o) => o.poses.length),
+    ...(timeline.vehicles ?? []).map((v) => v.poses.length),
+  );
+  if (n <= 1) return [0];
+  return Array.from({ length: n }, (_, k) => (k / (n - 1)) * timeline.duration);
 }
 
 /** Tracks for a baked timeline (sequence rollout / USD recording). */
 export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
+  const times = timelineTimes(timeline);
   return {
     duration: timeline.duration,
     robots: timeline.robots.map((r) => ({
@@ -64,9 +87,15 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
     objects:
       timeline.objects.length > 0
         ? {
-            // All robot tracks of a timeline share one sample grid.
-            times: timeline.robots[0]?.trajectory.times ?? [],
+            times,
             tracks: timeline.objects,
+          }
+        : null,
+    vehicles:
+      timeline.vehicles && timeline.vehicles.length > 0
+        ? {
+            times,
+            tracks: timeline.vehicles,
           }
         : null,
   };
@@ -93,10 +122,21 @@ export function samplePlayback(
       (joints ??= {})[name] = sampleJoints(trajectory, t);
     }
   }
+  let vehicles: Record<string, PoseMsg> | null = null;
+  if (tracks.vehicles) {
+    for (const { name, poses: vposes } of tracks.vehicles.tracks) {
+      // A one-pose track is constant (the collapsed form off the wire).
+      (vehicles ??= {})[name] =
+        vposes.length === 1
+          ? vposes[0]
+          : samplePose(tracks.vehicles.times, vposes, t);
+    }
+  }
   return {
     poses,
     joints,
     bases,
+    vehicles,
     objects: sampleObjectPoses(tracks.objects, t),
     stowed: sampleStowedObjects(tracks.objects, t),
   };

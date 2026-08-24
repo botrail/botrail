@@ -49,7 +49,12 @@ on a baked timeline stay within a micrometre of their landings.
 What it does *not* answer is whether the machine could actually walk:
 
 * No balance, no contact forces, no slip, no falling over.
-* Floors are the vehicle's plane: no steps, stairs or slopes.
+* Floors follow the vehicle's path: a ramp is walkable when its waypoints
+  climb (declare `max_grade` — see
+  [vehicles](vehicles-and-amr.md#travel-is-authored-not-planned)), and
+  steps are walkable where a *walkable surface* stands (a stair tread, a
+  mezzanine slab — see [Stairs and steps](#stairs-and-steps)). What the
+  feet do on them is placement, not physics: no balance there either.
 * No acceleration — vehicles move at constant speed, legged or not.
 * A leg's reach is checked (a stride the legs cannot take is refused by
   name, before or during the bake), its torque is not.
@@ -98,6 +103,16 @@ on a quadruped's back by an arm is cargo the moment it is released, with no
 load action. A humanoid carries in its hands: `attach` the part to a hand
 link, and it rides still through the walk (the arms do not swing with full
 hands).
+
+**A walking machine's deck is its body.** On a wheeled vehicle the tray is
+rigid with the route, and the two are the same thing; on a legged one they
+are not — the body tilts onto a grade and rides up the steps while the
+route stays on the guide line between the waypoints. So the zone is placed
+on the body and what it holds is bound to the body link, which is what a
+strap does: on a flight the load climbs and tilts with the back it sits
+on, instead of floating a ride's worth above it. Everything downstream —
+the studio, the USD bake, the collision checks — reads that pose, so no
+authoring changes.
 
 ## Humanoids
 
@@ -151,6 +166,81 @@ gate sees (`footprint_mm`, `height_mm`) and cap the vehicle's speed
 (`max_speed_mps`); `examples/legged_patrol_demo.py --compare` bakes one
 cell on every package named and tables which fit and how long they take.
 
+## Stairs and steps
+
+A staircase is authored as geometry, not as a special move: mark an
+upright box's top face *walkable* (`scene.set_obstacle_walkable(name)`) and
+footfalls snap onto it. `bt.parts.stairs` builds a whole flight that way —
+every tread a walkable box, stringers, legs and the handrail ordinary
+obstacles — with the frames `<name>/foot` and `<name>/top` to author the
+guide path's z between (the path climbs as a slope; the *feet* land on the
+treads it interpolates past). `catalog=` orders the flight instead of
+drawing it, and the sizes then come from what the maker sells. The swing
+clears the higher tread by the authored `lift` automatically.
+
+**The body rides the steps, not the guide line.** Two things happen to it
+on a flight, and both are about reach rather than looks:
+
+* it **pitches** to the grade of the path under it (blended over one body
+  length so nothing snaps, level again when it parks) — a level body asks
+  its downhill legs for half a machine-length of slope *below* the hips,
+  which is more than a real leg has;
+* it **rises** with the feet — the height it holds follows where its feet
+  actually are (a swinging foot counts along its arc, so the body glides
+  rather than steps), instead of holding one height over the straight line
+  the route draws. Without it a single stance has to serve both extremes
+  at once: a leg reaching down to a low tread while another folds up under
+  a high one.
+
+Together they roughly double the riser a given machine can take. Wheeled
+vehicles are unchanged — their bodies stay level.
+
+**Take the stair posture.** A machine walks a flight lower than it stands,
+and picks its feet up less. Those two numbers decide the riser it can take
+at all, they belong to the machine, and a package that has been measured on
+a flight carries them:
+
+```python
+gait = bt.Gait.from_catalog("unitree/go2/go2", posture="stairs")
+```
+
+`bt.Gait.postures(package)` says whether there is one — `("stairs",)` or
+`()` — so a cell that can do either asks first rather than handling a
+refusal. Asking for a posture a package does not carry is refused by name;
+the cell then states the stance and lift itself
+(`bt.Gait.from_catalog(..., stance=…, lift=…)`). For a Go2 on a 150 mm
+riser that is roughly 0.25 m of stance depth (against 0.311 standing) and
+a 15 mm swing. Get it wrong and the bake says so, with the distance the
+leg was short by.
+
+Stating it yourself, what is worth writing down is the *depth*, not the
+joint angles: which fold puts a foot 0.25 m under the body depends on the
+legs, and a standing stance is rarely a clean one to scale (the Go2's is
+thigh 0.8 / calf −1.5, its foot 0.178 m ahead of the hip). That is why the
+angles live in the package, which knows the legs.
+`examples/stairs_delivery_demo.py` does both: it asks the package for the
+posture, and where there is none it solves the fold by standing a scratch
+copy of the machine and reading a foot — so the same cell posture-fits
+whatever walks it, and the primitive `quad_test.urdf`, having shorter legs,
+is told to take a lower flight.
+
+Walkable excuses exactly one thing: the machine walking on it. Its own
+aisle check and its rider check treat treads the way no one
+collision-checks a floor against the machine standing on it — while an
+AGV driven into the flight, or an arm sweeping through it, still collides
+by name.
+
+Two checks come with the terrain, both at dispatch, both naming the
+offender:
+
+* **Step height** — `bt.Gait(max_step=...)` declares the tallest rise one
+  leg may take (a catalog package fills it from `max_step_height_mm`).
+  A flight over the ability is refused with the leg and both numbers;
+  without a declaration the IK (`GaitReach`) is the backstop.
+* **Tread edges** — a foothold closer to a tread's edge than the foot
+  radius is refused with the tread's name and the margin, before anything
+  walks half-on, half-off a step.
+
 ## Reading the bake
 
 `timeline.footfalls(robot)` lists every step as `(leg, lift, land,
@@ -177,3 +267,7 @@ like any other.
 * `examples/humanoid_carry_demo.py` — a Unitree G1 picks a tote off a
   bench, carries it to another, sets it down and walks back. `--robot
   biped` runs it on `examples/biped_test.urdf`.
+* `examples/stairs_delivery_demo.py` — a quadruped carries a tote up a
+  `bt.parts.stairs` flight to a mezzanine: footfalls on the treads, the
+  body on the slope. `--tall` raises the risers over the gait's
+  `max_step` and shows the refusal, named.

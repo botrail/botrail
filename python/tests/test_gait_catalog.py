@@ -70,6 +70,50 @@ def test_a_biped_block_carries_soles_sway_and_arm_swing(tmp_path: Path) -> None:
     assert gait._spec()["legs"][1] == ("R", "right_ankle_roll_link", "sole")
 
 
+STAIRS = {
+    "stance": {f"{leg}_{j}_joint": v for leg in ("FL", "FR", "RL", "RR")
+               for j, v in (("hip", 0), ("thigh", 0.9436), ("calf", -1.8873))},
+    "lift_m": 0.015,
+}
+
+
+def test_a_package_states_which_postures_it_carries(tmp_path: Path) -> None:
+    """A cell that can do either asks, rather than requiring the posture and
+    handling the refusal."""
+    assert bt.Gait.postures(_package(tmp_path, locomotion=LOCOMOTION)) == ()
+    with_stairs = _package(tmp_path, locomotion={**LOCOMOTION, "stairs": STAIRS})
+    assert bt.Gait.postures(with_stairs) == ("stairs",)
+
+
+def test_the_stair_posture_replaces_the_stance_and_the_swing(tmp_path: Path) -> None:
+    package = _package(tmp_path, locomotion={**LOCOMOTION, "stairs": STAIRS},
+                       specs={"max_step_height_mm": 160})
+    stairs = bt.Gait.from_catalog(package, posture="stairs")
+    assert stairs.stance["FL_thigh_joint"] == 0.9436
+    assert stairs.lift == 0.015
+    # everything else is the package's walk, and the rating still rides along
+    assert (stairs.pattern, stairs.period, stairs.max_stride) == ("trot", 0.45, 0.45)
+    assert stairs.max_step == 0.16
+
+    standing = bt.Gait.from_catalog(package)
+    assert standing.stance["FL_thigh_joint"] == 0.8 and standing.lift == 0.07
+
+    # an override still wins over the posture
+    assert bt.Gait.from_catalog(package, posture="stairs", lift=0.02).lift == 0.02
+
+
+def test_a_posture_the_package_does_not_carry_is_refused_by_name(tmp_path: Path) -> None:
+    package = _package(tmp_path, locomotion=LOCOMOTION)
+    with pytest.raises(ValueError) as refusal:
+        bt.Gait.from_catalog(package, posture="stairs")
+    assert "locomotion.stairs" in str(refusal.value)
+    assert "unitree/go2/go2/r1" in str(refusal.value)
+
+    with pytest.raises(ValueError, match="posture must be one of"):
+        bt.Gait.from_catalog(_package(tmp_path, locomotion={**LOCOMOTION, "stairs": STAIRS}),
+                             posture="crouch")
+
+
 def test_a_package_without_legs_is_refused_by_name(tmp_path: Path) -> None:
     package = _package(tmp_path, id="universal_robots/ur/ur5e/r1", category="manipulator")
     with pytest.raises(ValueError, match=r"universal_robots/ur/ur5e/r1.*no `locomotion` block.*manipulator"):

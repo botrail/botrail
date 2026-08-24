@@ -56,6 +56,8 @@ __all__ = ["Gait"]
 
 _CONTACTS = ("point", "sole", "sole_yaw_free")
 _PATTERNS = ("walk", "trot", "biped", "custom")
+# Postures a package may carry beside its standing stance (`locomotion.<name>`).
+_POSTURES = ("stairs",)
 
 
 @dataclass
@@ -91,6 +93,12 @@ class Gait:
         lateral: Lean of the body over the planted leg, metres, once a
             cycle. Both are zero by default (a trotting quadruped's body
             rides nearly rigid); a biped wants a couple of centimetres.
+        max_step: Tallest step (rise between two consecutive footholds of
+            one leg, metres) the machine may take — a catalog package fills
+            it from ``max_step_height_mm``. Also how far above or below the
+            vehicle plane a walkable surface (a stair tread) is searched
+            for a foothold. ``None`` skips the declared check and searches
+            0.3 m; unreachable steps then fall to the IK.
         duty: Stance fraction of the cycle, ``custom`` pattern only.
         phases: Per-leg cycle phase in ``[0, 1)``, ``custom`` pattern only.
         body_link: The link the legs hang from; the root link by default.
@@ -113,10 +121,16 @@ class Gait:
     arm_swing: Mapping[str, float] = field(default_factory=dict)
     bob: float = 0.0
     lateral: float = 0.0
+    max_step: float | None = None
 
     @classmethod
     def from_catalog(
-        cls, package: str | Path, *, revision: str | None = None, **overrides: Any
+        cls,
+        package: str | Path,
+        *,
+        revision: str | None = None,
+        posture: str | None = None,
+        **overrides: Any,
     ) -> Gait:
         """The gait a catalog package declares.
 
@@ -128,6 +142,14 @@ class Gait:
         to walk with — becomes the Gait; keyword ``overrides`` replace any
         field (``period=0.5``). A package without the block (anything but
         ``vehicle.legged``) is refused by name.
+
+        ``posture="stairs"`` asks for the package's stair posture instead of
+        its standing one: lower, and with a shorter swing, which is how a
+        legged machine actually takes a flight (a body held at its walking
+        height asks the downhill legs for reach they do not have). A package
+        that does not carry one is refused by name rather than walked up a
+        flight in the wrong posture — state the stance yourself, or pass
+        ``posture=None`` to take the standing one knowingly.
         """
         directory = _package_dir(package, revision)
         manifest = _read_manifest(directory)
@@ -155,8 +177,37 @@ class Gait:
             "bob": float(defaults.get("bob_m") or 0.0),
             "lateral": float(defaults.get("lateral_m") or 0.0),
         }
+        step_mm = (manifest.get("specs") or {}).get("max_step_height_mm")
+        if step_mm:
+            kwargs["max_step"] = float(step_mm) / 1000.0
+        if posture is not None:
+            if posture not in _POSTURES:
+                raise ValueError(f"posture must be one of {_POSTURES} or None, got {posture!r}")
+            block = loc.get(posture)
+            if not block:
+                raise ValueError(
+                    f"{ident}: manifest.yaml declares no `locomotion.{posture}` posture — "
+                    f"state the stance and lift in the cell (`Gait.from_catalog(..., "
+                    f"stance=..., lift=...)`), or ask for the standing one with posture=None"
+                )
+            kwargs["stance"] = {str(j): float(v) for j, v in (block.get("stance") or {}).items()}
+            if block.get("lift_m"):
+                kwargs["lift"] = float(block["lift_m"])
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @staticmethod
+    def postures(package: str | Path, *, revision: str | None = None) -> tuple[str, ...]:
+        """The postures a package carries beside its standing stance.
+
+        ``("stairs",)`` for a package that states how the machine stands on
+        a flight, ``()`` for one that does not — a cell that can do either
+        asks first, rather than requiring the posture and handling the
+        refusal. The names are what :meth:`from_catalog` takes as
+        ``posture=``.
+        """
+        loc = _read_manifest(_package_dir(package, revision)).get("locomotion") or {}
+        return tuple(name for name in _POSTURES if loc.get(name))
 
     def _spec(self) -> dict:
         """The plain dict the extension reads (see `gait_from_py`)."""
@@ -187,6 +238,7 @@ class Gait:
             "body_link": self.body_link,
             "bob": float(self.bob),
             "lateral": float(self.lateral),
+            "max_step": None if self.max_step is None else float(self.max_step),
         }
         if self.pattern == "custom":
             spec["duty"] = float(self.duty)  # type: ignore[arg-type]

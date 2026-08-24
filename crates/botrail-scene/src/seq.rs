@@ -190,12 +190,9 @@ pub enum DeviceKind {
         turn_speed: f64,
         /// Station the vehicle starts parked at.
         start: String,
-        /// May it drive a leg backwards rather than turn around for it?
-        /// A differential-drive machine backs out of a dead end instead of
-        /// pirouetting in it — and a pivot sweeps the body's half-diagonal,
-        /// so in a dock that is often the difference between fitting and
-        /// not. Off (the default) keeps every arrival nose-first.
-        allow_reverse: bool,
+        /// The drive semantics — how the path becomes motion, and what z
+        /// profile the machine can honour.
+        drive: Drive,
         /// Load deck, as a box *in the vehicle frame*: any unattached
         /// obstacle whose origin lies inside it rides along, rotation
         /// included. It is the conveyor's zone rule moved onto a moving
@@ -203,6 +200,113 @@ pub enum DeviceKind {
         /// no load/unload action to author and nothing to keep in step.
         tray: Option<(Isometry3<f64>, Vector3<f64>)>,
     },
+    /// A lift (elevator): a car of obstacles moved along `axis` between
+    /// named stops, carrying whatever its capture zone holds — loose parts
+    /// by origin, and *vehicles* whole, their body, deck load and mounted
+    /// robot riding the same rigid motion. Commanded with
+    /// [`DeviceCommand::MoveToStop`]; `DeviceDone` is in-position at the
+    /// stop. The cargo is fixed when the ride is commanded — an elevator
+    /// moves after the doors close — and a vehicle half out of the zone
+    /// refuses to board by name. Doors are ordinary authoring (a
+    /// `LinearAxis` panel and a signal), not part of the device.
+    Lift {
+        /// Obstacles forming the car (floor plate, walls) — they ride too.
+        car: Vec<String>,
+        /// Capture zone at the reference position (`position = 0`), in the
+        /// world frame; it rides `axis · position` with the car.
+        zone_pose: Isometry3<f64>,
+        zone_size: Vector3<f64>,
+        /// Travel direction; +Z for the ordinary elevator.
+        axis: nalgebra::Unit<Vector3<f64>>,
+        speed: f64,
+        /// Named stop positions along `axis`, metres from the reference.
+        stops: Vec<(String, f64)>,
+        /// The stop the car starts at.
+        start: String,
+    },
+}
+
+/// How a vehicle turns its path into motion — the drive semantics, and the
+/// z profile the machine can honour. Every existing vehicle is the
+/// differential drive; holonomic and aerial drives are later variants of
+/// the same slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Drive {
+    /// Differential drive: face the leg, then drive it — straight legs at
+    /// cruise speed, in-place pivot turns between them.
+    Differential {
+        /// May it drive a leg backwards rather than turn around for it?
+        /// A differential-drive machine backs out of a dead end instead of
+        /// pirouetting in it — and a pivot sweeps the body's half-diagonal,
+        /// so in a dock that is often the difference between fitting and
+        /// not. Off (the default) keeps every arrival nose-first.
+        allow_reverse: bool,
+        /// Steepest grade the machine may climb, as rise over horizontal
+        /// run (0.10 = 10 %). `None` means level paths only: a path that
+        /// climbs is refused by name until the machine declares what it
+        /// can do.
+        max_grade: Option<f64>,
+    },
+    /// Holonomic drive (mecanum / omni wheels): the machine translates in
+    /// any direction while holding its heading — no pivot turns, ever.
+    /// It docks facing whatever it faced when parked, which is the whole
+    /// point of buying those wheels. The z rules are a ground drive's
+    /// (grade within `max_grade`, vertical stacks are a lift's job).
+    Holonomic {
+        /// Steepest grade the machine may climb (see `Differential`).
+        max_grade: Option<f64>,
+    },
+    /// Aerial drive (a multirotor): z is the machine's own axis, so the
+    /// path may climb, dive or hang vertical legs with no grade rule and
+    /// no lift. Each leg flies every axis at its own limit — the slower
+    /// axis sets the clock, `T = max(run / speed, rise / climb (or
+    /// descent))`, closed form. There is no takeoff command: a ground
+    /// station next to an overhead waypoint *is* the takeoff, as a
+    /// vertical leg.
+    Aerial {
+        /// Climb rate, m/s (positive).
+        climb_speed: f64,
+        /// Descent rate, m/s (positive).
+        descent_speed: f64,
+        /// What the nose does about +Z while flying.
+        yaw: AerialYaw,
+    },
+}
+
+/// An aerial drive's yaw policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AerialYaw {
+    /// Face each leg's horizontal course (a vertical leg keeps the
+    /// heading it has).
+    Course,
+    /// Hold this yaw over the whole flight — a camera that must keep
+    /// facing the racks.
+    Fixed(f64),
+}
+
+impl Drive {
+    pub fn allow_reverse(&self) -> bool {
+        match self {
+            Drive::Differential { allow_reverse, .. } => *allow_reverse,
+            Drive::Holonomic { .. } | Drive::Aerial { .. } => false,
+        }
+    }
+
+    pub fn max_grade(&self) -> Option<f64> {
+        match self {
+            Drive::Differential { max_grade, .. } | Drive::Holonomic { max_grade } => *max_grade,
+            Drive::Aerial { .. } => None,
+        }
+    }
+}
+
+impl Default for Drive {
+    fn default() -> Self {
+        Drive::Differential {
+            allow_reverse: false,
+            max_grade: None,
+        }
+    }
 }
 
 /// A named initial-state delta — one row of the cell's test-case matrix
@@ -277,13 +381,14 @@ impl FaultKind {
 /// The reserved name for the unmodified scene.
 pub const BASELINE_SCENARIO: &str = "baseline";
 
-/// An authored guide path. Waypoints are floor points (the vehicle frame
-/// stays on the floor plane); stations are the named stops a `Goto` can
+/// An authored guide path. Waypoints are points on the guidance surface —
+/// z is the floor height there, so a flat cell authors z = 0 and a ramp
+/// climbs with its waypoints. Stations are the named stops a `Goto` can
 /// target, as waypoint indices — the point-table mental model of a PLC
 /// positioning unit.
 #[derive(Debug, Clone)]
 pub struct VehiclePath {
-    pub waypoints: Vec<nalgebra::Point2<f64>>,
+    pub waypoints: Vec<nalgebra::Point3<f64>>,
     /// `(name, waypoint index)` pairs.
     pub stations: Vec<(String, usize)>,
     /// A closed loop: a goto walks whichever way around is shorter.
@@ -306,7 +411,8 @@ impl VehiclePath {
         let n = self.waypoints.len();
         let dir = |i: usize, j: usize| {
             let d = self.waypoints[j] - self.waypoints[i];
-            (d.norm() > 1e-9).then(|| d.y.atan2(d.x))
+            // Heading is about +Z, so only the horizontal run can set it.
+            (d.x.hypot(d.y) > 1e-9).then(|| d.y.atan2(d.x))
         };
         for step in 1..n {
             let j = if self.ring {
@@ -343,10 +449,12 @@ impl VehiclePath {
     }
 }
 
-/// The SE(2) frame of a vehicle: floor position plus heading about +Z.
-pub fn vehicle_frame(position: &nalgebra::Point2<f64>, heading: f64) -> Isometry3<f64> {
+/// The frame of a vehicle: its position on the guidance surface (z is the
+/// floor height there) plus heading about +Z. The body stays level — pitch
+/// and roll never enter, on a ramp the machine translates up it.
+pub fn vehicle_frame(position: &nalgebra::Point3<f64>, heading: f64) -> Isometry3<f64> {
     Isometry3::from_parts(
-        nalgebra::Translation3::new(position.x, position.y, 0.0),
+        nalgebra::Translation3::new(position.x, position.y, position.z),
         nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), heading),
     )
 }
@@ -402,6 +510,12 @@ pub struct GaitSpec {
     /// at a trot very nearly does.
     pub bob: f64,
     pub lateral: f64,
+    /// Tallest step (rise between two consecutive footholds of one leg,
+    /// metres) the machine may take. `None` skips the declared check and
+    /// leaves unreachable steps to the IK (`GaitReach`); a catalog package
+    /// fills it from `max_step_height_mm`. Also sets how far above/below
+    /// the vehicle plane a walkable surface is searched for a foothold.
+    pub max_step: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -456,6 +570,10 @@ pub enum DeviceCommand {
     /// `elapsed(pitch/v + one tick)` arithmetic an indexing line otherwise
     /// needs (and the silent 1-scan shortfall when it is forgotten).
     Advance(f64),
+    /// Send a lift to a named stop; await it with `DeviceDone`. The
+    /// cargo — vehicles and loose parts in the capture zone — is fixed
+    /// the moment this fires.
+    MoveToStop(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1246,6 +1364,7 @@ impl Scene {
         }
         for device in &self.devices {
             self.validate_vehicle(device).map_err(|m| (None, m))?;
+            self.validate_lift(device).map_err(|m| (None, m))?;
         }
         // A gait is checked against the model at mount time; what it cannot
         // know then is how fast the vehicle it rides will drive.
@@ -1256,11 +1375,16 @@ impl Scene {
                 .map_err(|m| (None, format!("robot `{}` gait: {m}", robot.name)))?;
             let rates = self.devices.iter().find_map(|d| match &d.kind {
                 DeviceKind::Vehicle {
-                    speed, turn_speed, ..
-                } if d.name == mount.device => Some((*speed, *turn_speed)),
+                    speed,
+                    turn_speed,
+                    drive,
+                    ..
+                } if d.name == mount.device => {
+                    Some((*speed, *turn_speed, matches!(drive, Drive::Aerial { .. })))
+                }
                 _ => None,
             });
-            let Some((speed, turn_speed)) = rates else {
+            let Some((speed, turn_speed, aerial)) = rates else {
                 return Err((
                     None,
                     format!(
@@ -1269,6 +1393,16 @@ impl Scene {
                     ),
                 ));
             };
+            if aerial {
+                return Err((
+                    None,
+                    format!(
+                        "robot `{}` has a gait, but `{}` is an aerial vehicle — legs \
+                         walk floors; give the machine a ground drive or drop the gait",
+                        robot.name, mount.device
+                    ),
+                ));
+            }
             crate::gait::check_stride(&resolved, &mount.offset, speed, turn_speed)
                 .map_err(|m| (None, format!("robot `{}`: {m}", robot.name)))?;
         }
@@ -1518,7 +1652,7 @@ impl Scene {
             turn_speed,
             start,
             tray,
-            ..
+            drive,
         } = &device.kind
         else {
             return Ok(());
@@ -1580,11 +1714,176 @@ impl Scene {
                 "vehicle `{dev}` turn_speed must be positive, got {turn_speed}"
             ));
         }
+        if let Drive::Aerial {
+            climb_speed,
+            descent_speed,
+            ..
+        } = drive
+        {
+            // The air has no grade and no lift edges: z is the machine's
+            // own axis. Only the rates have to be real.
+            if !(climb_speed.is_finite() && *climb_speed > 0.0) {
+                return Err(format!(
+                    "vehicle `{dev}` climb_speed must be positive, got {climb_speed}"
+                ));
+            }
+            if !(descent_speed.is_finite() && *descent_speed > 0.0) {
+                return Err(format!(
+                    "vehicle `{dev}` descent_speed must be positive, got {descent_speed}"
+                ));
+            }
+            for name in body {
+                if !self.obstacles.iter().any(|o| &o.name == name) {
+                    return Err(format!(
+                        "vehicle `{dev}` body names unknown obstacle `{name}`"
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        if let Some(limit) = drive.max_grade() {
+            if !(limit.is_finite() && limit > 0.0) {
+                return Err(format!(
+                    "vehicle `{dev}` max_grade must be positive (rise over run), got {limit}"
+                ));
+            }
+        }
+        // The z profile a ground drive can honour: level legs always,
+        // graded legs only within a declared ability, vertical stacks
+        // never — climbing straight up is a lift's job, not a wheel's.
+        let n = path.waypoints.len();
+        let edges = (0..n.saturating_sub(1))
+            .map(|i| (i, i + 1))
+            .chain((path.ring && n > 1).then_some((n - 1, 0)));
+        for (i, j) in edges {
+            let d = path.waypoints[j] - path.waypoints[i];
+            if d.norm() < 1e-9 {
+                continue;
+            }
+            let run = d.x.hypot(d.y);
+            let rise = d.z.abs();
+            if rise <= 1e-9 {
+                continue;
+            }
+            if run <= 1e-9 {
+                // A vertical edge is never driven: it is ridden. Legal
+                // only when a lift's capture zone covers both ends at its
+                // stops — the hop the route refuses to walk (§goto) and
+                // the ride performs.
+                if self.lift_covers(&path.waypoints[i], &path.waypoints[j]) {
+                    continue;
+                }
+                return Err(format!(
+                    "vehicle `{dev}` path is vertical between waypoints {i} and {j} \
+                     (Δz = {:.3} m with no horizontal run) — a ground drive cannot \
+                     climb straight up; that hop is a lift's job (put both ends \
+                     inside a lift's capture zone at its stops)",
+                    d.z
+                ));
+            }
+            let grade = rise / run;
+            match drive.max_grade() {
+                None => {
+                    return Err(format!(
+                        "vehicle `{dev}` path climbs {:.1}° between waypoints {i} \
+                         and {j}, but the drive declares no max_grade — pass \
+                         max_grade (rise over run, e.g. 0.10 for 10 %) to allow \
+                         slopes",
+                        grade.atan().to_degrees()
+                    ))
+                }
+                Some(limit) if grade > limit + 1e-12 => {
+                    return Err(format!(
+                        "vehicle `{dev}` path climbs {:.1}° ({:.1} %) between \
+                         waypoints {i} and {j}, over the drive's max_grade {:.1} %",
+                        grade.atan().to_degrees(),
+                        grade * 100.0,
+                        limit * 100.0
+                    ))
+                }
+                _ => {}
+            }
+        }
         for name in body {
             if !self.obstacles.iter().any(|o| &o.name == name) {
                 return Err(format!(
                     "vehicle `{dev}` body names unknown obstacle `{name}`"
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Does some lift's capture zone contain both `a` and `b`, each at
+    /// one of its stops? The legality test for a vertical path edge: the
+    /// hop is ridden, not driven.
+    fn lift_covers(&self, a: &nalgebra::Point3<f64>, b: &nalgebra::Point3<f64>) -> bool {
+        self.devices.iter().any(|d| {
+            let DeviceKind::Lift {
+                zone_pose,
+                zone_size,
+                axis,
+                stops,
+                ..
+            } = &d.kind
+            else {
+                return false;
+            };
+            let half = zone_size / 2.0;
+            let at_a_stop = |p: &nalgebra::Point3<f64>| {
+                stops.iter().any(|(_, v)| {
+                    let local = zone_pose.inverse_transform_point(&(p - axis.into_inner() * *v));
+                    local.x.abs() <= half.x && local.y.abs() <= half.y && local.z.abs() <= half.z
+                })
+            };
+            at_a_stop(a) && at_a_stop(b)
+        })
+    }
+
+    /// A lift definition the scan engine can honour: a real car, resolvable
+    /// stops, positive rates.
+    fn validate_lift(&self, device: &Device) -> Result<(), String> {
+        let DeviceKind::Lift {
+            car,
+            zone_size,
+            speed,
+            stops,
+            start,
+            ..
+        } = &device.kind
+        else {
+            return Ok(());
+        };
+        let dev = &device.name;
+        if zone_size.iter().any(|v| !(v.is_finite() && *v > 0.0)) {
+            return Err(format!(
+                "lift `{dev}` zone size must be positive, got {zone_size:?}"
+            ));
+        }
+        if !(speed.is_finite() && *speed > 0.0) {
+            return Err(format!("lift `{dev}` speed must be positive, got {speed}"));
+        }
+        if stops.is_empty() {
+            return Err(format!("lift `{dev}` has no stops"));
+        }
+        for (name, value) in stops {
+            if !value.is_finite() {
+                return Err(format!("lift `{dev}` stop `{name}` is not finite"));
+            }
+            if stops.iter().filter(|(other, _)| other == name).count() > 1 {
+                return Err(format!("lift `{dev}` has two stops named `{name}`"));
+            }
+        }
+        if !stops.iter().any(|(n, _)| n == start) {
+            let known: Vec<String> = stops.iter().map(|(n, _)| format!("`{n}`")).collect();
+            return Err(format!(
+                "lift `{dev}` starts at unknown stop `{start}` (stops: {})",
+                known.join(", ")
+            ));
+        }
+        for name in car {
+            if !self.obstacles.iter().any(|o| &o.name == name) {
+                return Err(format!("lift `{dev}` car names unknown obstacle `{name}`"));
             }
         }
         Ok(())
@@ -1813,6 +2112,25 @@ impl Scene {
                     (DeviceKind::LinearAxis { .. }, _) => {
                         Err(format!("axis `{device}` only takes move_to commands"))
                     }
+                    (DeviceKind::Lift { stops, .. }, DeviceCommand::MoveToStop(stop)) => {
+                        if stops.iter().any(|(n, _)| n == stop) {
+                            Ok(())
+                        } else {
+                            let known: Vec<String> =
+                                stops.iter().map(|(n, _)| format!("`{n}`")).collect();
+                            Err(format!(
+                                "lift `{device}` has no stop `{stop}` (stops: {})",
+                                known.join(", ")
+                            ))
+                        }
+                    }
+                    (DeviceKind::Lift { .. }, _) => Err(format!(
+                        "lift `{device}` moves to named stops; use \
+                         bt.seq.move_to({device:?}, \"2F\")"
+                    )),
+                    (_, DeviceCommand::MoveToStop(_)) => Err(format!(
+                        "`{device}` is not a lift; move_to with a stop name drives a lift"
+                    )),
                 }
             }
         }
@@ -1850,6 +2168,7 @@ impl Scene {
                     found.kind,
                     DeviceKind::LinearAxis { .. }
                         | DeviceKind::Vehicle { .. }
+                        | DeviceKind::Lift { .. }
                         // A conveyor's "in-position" is a fixed advance
                         // consumed — the await for `Advance`.
                         | DeviceKind::Conveyor { .. }

@@ -5,6 +5,12 @@ An AGV is not a special kind of robot in botrail — it is a
 linear axis. That is how a cell PLC sees one: you send it a destination and
 wait for a completion signal. Everything else follows from that.
 
+A cell of vehicles and conveyors needs no robot at all: `bt.Scene()` opens
+empty, and the bake, the tracks, the studio and the USD export all run
+without one. Everything robot-implicit (`scene.robot`,
+`set_joint_positions()` without a `robot=`) answers by name — `scene has
+no robot; add one with add_robot` — instead of assuming a first robot.
+
 ```python
 scene.add_vehicle(
     "agv",
@@ -41,6 +47,82 @@ turns it pivots in place at `turn_speed`. Both bake to closed-form spans, so
 any resample rate is exact. The **arrival heading is the last leg's
 direction**, which means the waypoint before a station is what decides how
 the machine docks.
+
+Waypoints are `(x, y)` or `(x, y, z)` — z is the floor height on the
+guidance surface, so a ramp climbs with its waypoints. The body stays level
+(heading only; no pitch), cruise speed is spent along the 3D path, and a
+path that climbs needs `max_grade` — the steepest rise over horizontal run
+the machine may take (`0.10` = 10 %). Without it only level paths pass
+validation, and a slope is refused naming the waypoints and the angle. A
+vertical stack of waypoints is never *driven* — that hop is a **lift
+edge**: legal only when both ends sit in a lift's capture zone at its
+stops (see [lifts](sensors-and-devices.md#lifts)), ridden by commanding
+the lift, and never walked by `goto` — a station across the edge is
+refused with directions to drive to the near side, ride, and continue.
+
+### Holonomic drive — mecanum wheels
+
+`drive="holonomic"` translates the machine in any direction while holding
+its heading: no pivot turns, ever — it docks facing whatever it faced when
+parked (the whole point of buying those wheels), and a corner costs only
+its length. `allow_reverse` does not exist here, since there is no turning
+around to avoid; the z rules stay a ground drive's (`max_grade`, lift
+edges). `examples/amr_demo.py --holonomic` runs the AMR cell that way.
+
+### Aerial drive — a drone is a vehicle too
+
+`drive="aerial"` makes the machine a multirotor: z becomes its own axis,
+so the path climbs, dives and hangs vertical legs freely — no `max_grade`,
+no lift, and no takeoff command (the pad station under an overhead
+waypoint *is* the takeoff, as a vertical leg).
+
+```python
+scene.add_vehicle("drone", body=["drone"],
+                  path=[(0.5, 0, 0), (0.5, 0, 2.4), (2.0, 1.1, 2.4)],
+                  stations={"pad": 0, "hover": 2},
+                  speed=0.8, drive="aerial",
+                  climb_speed=0.6, descent_speed=0.9)
+```
+
+`speed` is the horizontal cruise; each leg's clock is the slower axis —
+`max(run / speed, rise / climb_speed (or descent_speed))`, closed form.
+The nose faces each leg's course, or holds `fixed_yaw` the whole flight
+(a camera that must keep facing the racks). Everything else is the same
+vehicle: stations and `goto`, the tray rule, mounted sensors riding the
+airframe — and the same tick checks. Against parked scenery those checks
+say nothing an obstacle check would not; where they earn their keep is
+**two machines sharing space in time**. The drone demo's corridor crosses
+a working arm's bench at working height — inside the arm's reach by
+design, forbidden by geometry alone — and an interlock (`arm_clear`, a
+PLC bit the arm's program raises when it stows) is what makes the cell
+legal. The cross-robot check prices the pair of clocks every tick: drop
+the interlock (`--no-interlock`) and nothing about the paths changes, yet
+the bake refuses at the instant the machines meet, naming a link of each.
+`examples/drone_survey_demo.py` runs the survey beside the arm's own
+program (`--low` shows the other failure: a corridor too low even for the
+stowed arm).
+
+The airframe itself comes from the catalog like any other machine —
+`px4/x500/x500`, the PX4 reference 500-class quadrotor — and **a UAV is a
+robot mounted on an aerial vehicle**, the exact symmetry of a quadruped on
+a differential one (legged = Robot + gait + vehicle; UAV = Robot + rigid
+mount + vehicle):
+
+```python
+x500 = bt.Robot.from_catalog("px4/x500/x500")
+scene.add_robot(x500, name="drone")
+scene.add_vehicle("drone", body=[], path=..., drive="aerial", ...)
+scene.mount_robot("drone", robot="drone")     # rides rigidly, gear on the pad
+```
+
+Being a robot is what buys it interference computation: its links against
+the shelving while it flies (`RiderCollision`), its links against other
+robots' links every tick (the refusal above names both links), and the
+live distance readout while you author. A vehicle with no body of its own
+whose rider is a robot *is* that robot, so the BOM lists one machine on
+one line — the robot's, with the manifest's identity. The manifest's
+`specs.max_climb_mps` / `max_descent_mps` are what the machine is capable
+of; the cell states what it will actually use, which indoors is far less.
 
 `body` names the obstacles carried rigidly. Entries match an obstacle
 exactly or as a subtree prefix, so `body=["/World/AGV"]` picks up everything
@@ -91,6 +173,11 @@ There is no load or unload action, and that is the point — it is the
 frame. A part the arm sets down on the deck simply becomes cargo on the next
 tick; one the arm picks back up stops being cargo, because a grasp wins over
 a deck.
+
+On a [legged](legged.md) vehicle the deck is the machine's *body*, not its
+route: the zone is placed on the body link and the load is bound to it, so
+on a flight the load climbs and tilts with the back it rides. Nothing about
+the authoring changes — the tray is still stated in the vehicle's frame.
 
 !!! note "Rest the load on the collision surface"
     If the vehicle body is a mesh, collision runs on its convex

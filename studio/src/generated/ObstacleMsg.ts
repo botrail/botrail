@@ -21,6 +21,12 @@ enabled: boolean,
  */
 visible: boolean, 
 /**
+ * A walkable top face — a stair tread, a mezzanine slab: footfalls of
+ * a walking machine snap onto it. Files written before this existed
+ * have no walkable surfaces, which is what they meant.
+ */
+walkable?: boolean, 
+/**
  * Display colour, linear RGB, from the scene file's
  * `primvars:displayColor`. Absent means "no authored appearance": the
  * studio then draws the obstacle as a neutral collision proxy.

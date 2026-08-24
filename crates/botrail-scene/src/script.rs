@@ -921,6 +921,7 @@ fn lower_device(
                 DeviceCommand::SetSpeed(v) => format!("set_speed({v})"),
                 DeviceCommand::MoveTo(p) => format!("move_to({p})"),
                 DeviceCommand::Goto { station } => format!("goto({station})"),
+                DeviceCommand::MoveToStop(stop) => format!("move_to({stop})"),
                 DeviceCommand::Advance(d) => format!("advance({d})"),
                 DeviceCommand::Start | DeviceCommand::Stop => unreachable!("coil handled above"),
             };
@@ -1883,6 +1884,8 @@ mod tests {
             base: None,
             footfalls: Vec::new(),
             sway: Vec::new(),
+            pitch: Vec::new(),
+            rise: Vec::new(),
         };
         let timeline = |ramp_to: f64, arm: usize| crate::rollout::SequenceTimeline {
             duration: 1.0,
@@ -1890,6 +1893,7 @@ mod tests {
             scenario: None,
             robots: vec![track(ramp_to)],
             objects: vec![],
+            vehicles: vec![],
             signals: vec![],
             step_spans: vec![],
             branches: vec![BranchTaken {

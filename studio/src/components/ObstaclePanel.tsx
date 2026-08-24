@@ -26,6 +26,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     pose: spawnPose(),
     enabled: true,
     visible: true,
+    walkable: false,
     attached_to: null,
   }),
   sphere: () => ({
@@ -34,6 +35,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     pose: spawnPose(),
     enabled: true,
     visible: true,
+    walkable: false,
     attached_to: null,
   }),
   cylinder: () => ({
@@ -42,6 +44,7 @@ const DEFAULTS: Record<"box" | "sphere" | "cylinder", () => ObstacleMsg> = {
     pose: spawnPose(),
     enabled: true,
     visible: true,
+    walkable: false,
     attached_to: null,
   }),
 };

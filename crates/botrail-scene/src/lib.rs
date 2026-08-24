@@ -139,6 +139,12 @@ pub struct Obstacle {
     /// alongside the convex pieces that actually do the colliding —
     /// without the pieces sitting on top of the shell.
     pub visible: bool,
+    /// A walkable surface: a stair tread, a mezzanine slab — its top face
+    /// is a place a walking machine's feet may stand. Footfalls snap onto
+    /// it, and the walker (body and rider) is allowed to touch it, the way
+    /// no one collision-checks a floor. Only an upright box can say what
+    /// its top face is, so only one can be walkable.
+    pub walkable: bool,
     /// Display colour, linear RGB — the authored `primvars:displayColor` for
     /// imported scenery. `None` leaves the shading to the viewer, which is
     /// what a bare `add_box` gets. Never affects collision or planning.
@@ -329,10 +335,12 @@ impl SceneRobot {
 /// the scene (link poses, IK targets, obstacle poses, constraints) are in
 /// the world frame; each robot's root sits at its base pose. Collision
 /// checking runs against solid colliders (see botrail-collide's shape
-/// policy). A scene always holds at least one robot; the robot-implicit
-/// accessors (`robot()`, `joint_positions()`, …) mean the *first* robot and
-/// exist for the single-robot code paths (wire v2, bindings) until explicit
-/// robot addressing is threaded through them.
+/// policy). A scene may hold no robot at all ([`Scene::empty`] — a
+/// conveyor line, an AGV loop, a drone cell with a box airframe); the
+/// robot-implicit accessors (`robot()`, `joint_positions()`, …) mean the
+/// *first* robot, exist for the single-robot code paths (wire v2,
+/// bindings), and panic on an empty scene — callers that may see one
+/// resolve a robot by name/index first (the bindings already do).
 #[derive(Clone)]
 pub struct Scene {
     robots: Vec<SceneRobot>,
@@ -381,6 +389,37 @@ pub struct Scene {
 impl Scene {
     pub fn new(robot: Arc<RobotModel>) -> Self {
         Self::with_base(robot, Isometry3::identity())
+    }
+
+    /// A scene with no robot in it — a cell of devices, vehicles and
+    /// obstacles (a conveyor line, an AGV loop). `add_robot` works as on
+    /// any scene; everything robot-implicit stays out of reach until one
+    /// is added.
+    pub fn empty() -> Self {
+        Self {
+            robots: Vec::new(),
+            inter_acm: InterRobotAcm::default(),
+            obstacles: Vec::new(),
+            obstacle_colliders: Vec::new(),
+            attachments: Vec::new(),
+            motions: Vec::new(),
+            sequences: Vec::new(),
+            signals: Vec::new(),
+            sensors: Vec::new(),
+            devices: Vec::new(),
+            weld_flashes: Vec::new(),
+            scenarios: Vec::new(),
+            frames: Vec::new(),
+            toolpaths: Vec::new(),
+            toolpath_marks: Vec::new(),
+            allowed_contacts: Vec::new(),
+            applicators: Vec::new(),
+            brushes: Vec::new(),
+            io: iomap::IoMap::default(),
+            parts: Vec::new(),
+            forced_inputs: Vec::new(),
+            collision_warnings: Vec::new(),
+        }
     }
 
     /// A scene with the robot root placed at `base` (world frame).
@@ -815,6 +854,7 @@ impl Scene {
             pose,
             enabled: true,
             visible: true,
+            walkable: false,
             color: None,
             material: None,
             legend: None,
@@ -842,6 +882,7 @@ impl Scene {
                 pose: spec.pose,
                 enabled: true,
                 visible: true,
+                walkable: false,
                 color: spec.color,
                 material: spec.material,
                 legend: None,
@@ -869,6 +910,7 @@ impl Scene {
             pose,
             enabled: true,
             visible: true,
+            walkable: false,
             color: None,
             material: None,
             legend: None,
@@ -928,6 +970,74 @@ impl Scene {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].visible = visible;
         Ok(())
+    }
+
+    /// Marks an obstacle's top face as a place a walking machine's feet
+    /// may stand (a stair tread, a mezzanine slab). Only an upright box —
+    /// yaw rotation is fine — has an unambiguous top face; anything else
+    /// is refused by name.
+    pub fn set_obstacle_walkable(&mut self, name: &str, walkable: bool) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        if walkable {
+            let o = &self.obstacles[index];
+            if !matches!(o.geometry, Geometry::Box { .. }) {
+                return Err(SceneError::UnsupportedGeometry(format!(
+                    "`{name}` is not a box — only an upright box has the flat top \
+                     face a foothold needs"
+                )));
+            }
+            let up = (o.pose.rotation * nalgebra::Vector3::z()).z;
+            if up < (1.0f64).to_radians().cos() {
+                return Err(SceneError::UnsupportedGeometry(format!(
+                    "`{name}` is tilted {:.1}° — a walkable box must stand upright \
+                     (yaw only), or its top face is not a floor",
+                    up.clamp(-1.0, 1.0).acos().to_degrees()
+                )));
+            }
+        }
+        self.obstacles[index].walkable = walkable;
+        Ok(())
+    }
+
+    /// The walkable surface under (over) a point: among walkable boxes
+    /// whose top face covers `(x, y)` and whose top is within `reach` of
+    /// `z_hint`, the highest — as `(top height, obstacle index, margin)`,
+    /// margin being how far inside the face's boundary the point sits.
+    /// `None` when nothing walkable supports the point (the caller falls
+    /// back to the vehicle plane).
+    pub fn floor_support(
+        &self,
+        x: f64,
+        y: f64,
+        z_hint: f64,
+        reach: f64,
+    ) -> Option<(f64, usize, f64)> {
+        let mut best: Option<(f64, usize, f64)> = None;
+        for (i, o) in self.obstacles.iter().enumerate() {
+            if !o.walkable {
+                continue;
+            }
+            let Geometry::Box { size } = &o.geometry else {
+                continue;
+            };
+            let half = size / 2.0;
+            let local =
+                o.pose
+                    .inverse_transform_point(&nalgebra::Point3::new(x, y, o.pose.translation.z));
+            let (mx, my) = (half.x - local.x.abs(), half.y - local.y.abs());
+            if mx < 0.0 || my < 0.0 {
+                continue;
+            }
+            let top = o.pose.translation.z + half.z;
+            if (top - z_hint).abs() > reach {
+                continue;
+            }
+            let margin = mx.min(my);
+            if best.map(|(t, _, _)| top > t).unwrap_or(true) {
+                best = Some((top, i, margin));
+            }
+        }
+        best
     }
 
     pub fn set_obstacle_material(
@@ -1291,6 +1401,67 @@ impl Scene {
                 let part = match pair.a {
                     ColliderId::Link { link, .. } => r.model.links[link].name.clone(),
                     ColliderId::Attached(k) => self.obstacles[attached_map[k]].name.clone(),
+                    ColliderId::Obstacle(_) => return None,
+                };
+                Some((part, obstacle))
+            })
+            .collect()
+    }
+
+    /// What a robot's links touch among the *named* obstacles right now —
+    /// the narrow probe a travelling vehicle runs against every robot it
+    /// passes: only the vehicle's own body and load are asked about, so
+    /// the cost is the pair, not the scene. Contact allowances apply, so
+    /// a dock guide a parked arm legitimately touches can be whitelisted
+    /// the usual way. Returns `(link name, obstacle)` pairs.
+    pub fn robot_contacts_among(&self, robot: usize, names: &[String]) -> Vec<(String, String)> {
+        let r = &self.robots[robot];
+        let poses = self.link_poses_for(robot);
+        let queries = [RobotQuery {
+            collider: &r.collider,
+            link_poses: &poses,
+            acm: &r.acm,
+        }];
+        let mut obstacles = Vec::new();
+        let mut map = Vec::new();
+        for (i, (o, c)) in self
+            .obstacles
+            .iter()
+            .zip(&self.obstacle_colliders)
+            .enumerate()
+        {
+            if o.enabled && !self.is_attached(&o.name) && names.iter().any(|n| n == &o.name) {
+                obstacles.push((o.pose, c));
+                map.push(i);
+            }
+        }
+        let mut allowance = botrail_collide::ContactAllowance::default();
+        for contact in &self.allowed_contacts {
+            if contact.robot != robot {
+                continue;
+            }
+            let Some(orig) = self
+                .obstacles
+                .iter()
+                .position(|o| o.name == contact.obstacle)
+            else {
+                continue;
+            };
+            if let Some(filtered) = map.iter().position(|&m| m == orig) {
+                allowance.allow(0, contact.link, filtered);
+            }
+        }
+        botrail_collide::check_against_obstacles(&queries, &obstacles, &[], &allowance)
+            .into_iter()
+            .filter_map(|pair| {
+                let obstacle = match pair.b {
+                    ColliderId::Obstacle(k) => self.obstacles[map[k]].name.clone(),
+                    _ => return None,
+                };
+                let part = match pair.a {
+                    ColliderId::Link { link, .. } => r.model.links[link].name.clone(),
+                    // The probe queries links only — nothing is attached.
+                    ColliderId::Attached(_) => return None,
                     ColliderId::Obstacle(_) => return None,
                 };
                 Some((part, obstacle))
@@ -1827,6 +1998,8 @@ impl Scene {
                 base: None,
                 footfalls: Vec::new(),
                 sway: Vec::new(),
+                pitch: Vec::new(),
+                rise: Vec::new(),
             })
             .collect();
         rollout::SequenceTimeline {
@@ -1835,6 +2008,7 @@ impl Scene {
             scenario: None,
             robots,
             objects: Vec::new(),
+            vehicles: Vec::new(),
             signals: Vec::new(),
             step_spans: Vec::new(),
             branches: Vec::new(),

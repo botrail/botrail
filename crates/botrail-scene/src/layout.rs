@@ -819,12 +819,21 @@ impl Scene {
                                 dashed: false,
                             });
                             if options.labels {
+                                // The layout is a plan view; a station off
+                                // the ground plane carries its height in
+                                // the label instead of pretending to be on
+                                // the floor.
+                                let text = if p.z.abs() > 1e-6 {
+                                    format!("{}:{station} @z={:.2}", device.name, p.z)
+                                } else {
+                                    format!("{}:{station}", device.name)
+                                };
                                 items.push(LayoutItem {
                                     layer: LayoutLayer::Label,
                                     name: device.name.clone(),
                                     shape: LayoutShape::Text {
                                         at: [p.x, p.y + 0.15],
-                                        text: format!("{}:{station}", device.name),
+                                        text,
                                         size: 0.08,
                                     },
                                     dashed: false,
@@ -834,6 +843,9 @@ impl Scene {
                     }
                 }
                 DeviceKind::Source { .. } => {}
+                // The car is ordinary obstacles (already drawn); a plan
+                // view has nothing more to say about a vertical ride.
+                DeviceKind::Lift { .. } => {}
             }
         }
 

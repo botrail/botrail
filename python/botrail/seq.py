@@ -129,8 +129,17 @@ def set_speed(device: str, speed: float) -> Action:
     }
 
 
-def move_to(device: str, position: float) -> Action:
-    """Command a linear axis to ``position``; await with ``device_done``."""
+def move_to(device: str, position: float | str) -> Action:
+    """Command a linear axis to ``position`` (metres) — or a lift to a
+    named stop (``move_to("lift", "2F")``); await with ``device_done``.
+    A lift's cargo (vehicles and loose parts in its capture zone) is
+    fixed the moment this fires: the doors are closed."""
+    if isinstance(position, str):
+        return {
+            "type": "device",
+            "device": device,
+            "command": {"type": "move_to_stop", "stop": position},
+        }
     return {
         "type": "device",
         "device": device,
