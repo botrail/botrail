@@ -30,6 +30,8 @@ export function SequencePanel() {
   const connected = useStudioStore((s) => s.connection === "connected");
   const sfcOpen = useStudioStore((s) => s.sfcOpen);
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
+  const ldOpen = useStudioStore((s) => s.ldOpen);
+  const setLdOpen = useStudioStore((s) => s.setLdOpen);
   const ioOpen = useStudioStore((s) => s.ioOpen);
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const topoOpen = useStudioStore((s) => s.topoOpen);
@@ -352,6 +354,13 @@ export function SequencePanel() {
               title="the programs as an SFC chart over the viewport"
             >
               ◫ SFC chart
+            </button>
+            <button
+              className={ldOpen ? "active" : undefined}
+              onClick={() => setLdOpen(!ldOpen)}
+              title="the programs as a SET/RST step ladder over the viewport"
+            >
+              ☰ Ladder
             </button>
             <button
               className={ioOpen ? "active" : undefined}

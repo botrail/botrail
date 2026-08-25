@@ -105,6 +105,8 @@ export function TimelineDock() {
   const setLoop = useStudioStore((s) => s.setPlaybackLoop);
   const sfcOpen = useStudioStore((s) => s.sfcOpen);
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
+  const ldOpen = useStudioStore((s) => s.ldOpen);
+  const setLdOpen = useStudioStore((s) => s.setLdOpen);
   const ioOpen = useStudioStore((s) => s.ioOpen);
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const topoOpen = useStudioStore((s) => s.topoOpen);
@@ -185,6 +187,17 @@ export function TimelineDock() {
               title="SFC chart of the baked programs"
             >
               sfc
+            </button>
+          )}
+          {timeline && (
+            <button
+              className={
+                ldOpen ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setLdOpen(!ldOpen)}
+              title="SET/RST ladder of the baked programs"
+            >
+              ld
             </button>
           )}
           {timeline && (

@@ -115,6 +115,25 @@ function persistTopoOpen(open: boolean): boolean {
   return open;
 }
 
+const LD_KEY = "botrail-studio.ld";
+
+function initialLdOpen(): boolean {
+  try {
+    return localStorage.getItem(LD_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistLdOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(LD_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
 /**
  * The SFC chart, the I/O table and the topology share the one panel over
  * the viewport (they overlapped when all three were open, and none of
@@ -122,15 +141,19 @@ function persistTopoOpen(open: boolean): boolean {
  * others, and the panel's tab strip switches. Older stored flags may say
  * several were open — the newest feature wins.
  */
-function initialOverlays(): { sfcOpen: boolean; ioOpen: boolean; topoOpen: boolean } {
-  const topo = initialTopoOpen();
-  const io = !topo && initialIoOpen();
-  const sfc = !topo && !io && initialSfcOpen();
-  return { sfcOpen: sfc, ioOpen: io, topoOpen: topo };
+type Overlays = { sfcOpen: boolean; ldOpen: boolean; ioOpen: boolean; topoOpen: boolean };
+
+function initialOverlays(): Overlays {
+  const ld = initialLdOpen();
+  const topo = !ld && initialTopoOpen();
+  const io = !ld && !topo && initialIoOpen();
+  const sfc = !ld && !topo && !io && initialSfcOpen();
+  return { sfcOpen: sfc, ldOpen: ld, ioOpen: io, topoOpen: topo };
 }
 
-function persistOverlays(o: { sfcOpen: boolean; ioOpen: boolean; topoOpen: boolean }) {
+function persistOverlays(o: Overlays) {
   persistSfcOpen(o.sfcOpen);
+  persistLdOpen(o.ldOpen);
   persistIoOpen(o.ioOpen);
   persistTopoOpen(o.topoOpen);
   return o;
@@ -347,6 +370,8 @@ export interface StudioState {
   io: IoState;
   /** The SFC chart overlay over the viewport (persisted). */
   sfcOpen: boolean;
+  /** The SET/RST ladder overlay over the viewport (persisted). */
+  ldOpen: boolean;
   /** The I/O table overlay over the viewport (persisted). */
   ioOpen: boolean;
   /** The topology diagram overlay over the viewport (persisted). */
@@ -412,6 +437,7 @@ export interface StudioState {
   setSelectedRobot: (robot: string) => void;
   setActiveTab: (tab: SidebarTab) => void;
   setSfcOpen: (open: boolean) => void;
+  setLdOpen: (open: boolean) => void;
   setIoOpen: (open: boolean) => void;
   setTopoOpen: (open: boolean) => void;
   setHighlightLane: (lane: string | null) => void;
@@ -874,24 +900,32 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     set((s) =>
       persistOverlays(
         open
-          ? { sfcOpen: true, ioOpen: false, topoOpen: false }
-          : { sfcOpen: false, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
+          ? { sfcOpen: true, ldOpen: false, ioOpen: false, topoOpen: false }
+          : { sfcOpen: false, ldOpen: s.ldOpen, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
+      ),
+    ),
+  setLdOpen: (open) =>
+    set((s) =>
+      persistOverlays(
+        open
+          ? { sfcOpen: false, ldOpen: true, ioOpen: false, topoOpen: false }
+          : { sfcOpen: s.sfcOpen, ldOpen: false, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
       ),
     ),
   setIoOpen: (open) =>
     set((s) =>
       persistOverlays(
         open
-          ? { sfcOpen: false, ioOpen: true, topoOpen: false }
-          : { sfcOpen: s.sfcOpen, ioOpen: false, topoOpen: s.topoOpen },
+          ? { sfcOpen: false, ldOpen: false, ioOpen: true, topoOpen: false }
+          : { sfcOpen: s.sfcOpen, ldOpen: s.ldOpen, ioOpen: false, topoOpen: s.topoOpen },
       ),
     ),
   setTopoOpen: (open) =>
     set((s) =>
       persistOverlays(
         open
-          ? { sfcOpen: false, ioOpen: false, topoOpen: true }
-          : { sfcOpen: s.sfcOpen, ioOpen: s.ioOpen, topoOpen: false },
+          ? { sfcOpen: false, ldOpen: false, ioOpen: false, topoOpen: true }
+          : { sfcOpen: s.sfcOpen, ldOpen: s.ldOpen, ioOpen: s.ioOpen, topoOpen: false },
       ),
     ),
   setHighlightLane: (lane) => set({ highlightLane: lane }),

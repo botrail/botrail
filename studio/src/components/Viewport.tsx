@@ -21,6 +21,7 @@ import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
 import { IoOverlay } from "./IoOverlay";
 import { IoTopologyOverlay } from "./IoTopologyOverlay";
+import { LadderOverlay } from "./LadderChart";
 import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
@@ -192,6 +193,7 @@ export function Viewport() {
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
       <SfcOverlay />
+      <LadderOverlay />
       <IoOverlay />
       <IoTopologyOverlay />
       <LegendHud />

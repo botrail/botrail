@@ -177,6 +177,26 @@ export function attributionIssues(
   return issues;
 }
 
+/**
+ * A step's render status on a bake: entered (has a span), untaken (sits
+ * on an arm the bake decided against), or unreached (the program never
+ * got this far). Shared by the SFC chart's boxes and the ladder's rungs.
+ */
+export function stepStatus(
+  run: ProgramRun,
+  taken: Map<number, number>,
+  flat: number,
+): "entered" | "untaken" | "unreached" {
+  if (run.spans[flat]) return "entered";
+  for (const { branch, arm } of armAncestors(run.nodes, flat)) {
+    const ordinal = run.nodes[branch].select;
+    if (ordinal !== null && taken.has(ordinal) && taken.get(ordinal) !== arm) {
+      return "untaken";
+    }
+  }
+  return "unreached";
+}
+
 /** Where a program's token sits at time `t`. */
 export type ProgramState =
   | { kind: "idle" }

@@ -1,9 +1,10 @@
 import { useStudioStore } from "../store";
 
-export type OverlayKind = "sfc" | "io" | "topo";
+export type OverlayKind = "sfc" | "ld" | "io" | "topo";
 
 const TABS: { kind: OverlayKind; label: string; title: string }[] = [
   { kind: "sfc", label: "SFC", title: "the programs as an SFC chart" },
+  { kind: "ld", label: "LD", title: "the programs as a SET/RST step ladder" },
   { kind: "io", label: "I/O", title: "the I/O table — points, channels, findings, live levels" },
   { kind: "topo", label: "TOPOLOGY", title: "the electrical topology — controllers, channels, wires, handshakes" },
 ];
@@ -16,10 +17,12 @@ const TABS: { kind: OverlayKind; label: string; title: string }[] = [
  */
 export function OverlayTabs({ active }: { active: OverlayKind }) {
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
+  const setLdOpen = useStudioStore((s) => s.setLdOpen);
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
   const open = (kind: OverlayKind) => {
     if (kind === "sfc") setSfcOpen(true);
+    else if (kind === "ld") setLdOpen(true);
     else if (kind === "io") setIoOpen(true);
     else setTopoOpen(true);
   };

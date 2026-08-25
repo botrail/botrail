@@ -113,10 +113,32 @@ for a beat, so the cause of every transition stays readable at playback
 speed. Clicking any baked step seeks the transport to the moment it
 began; the chart stays up across reloads until closed.
 
-The chart, the I/O table and the topology below are three views of **one
-panel** over the viewport — each is wide, and stacked they hid each other
-— so opening one closes the others, and the panel's tab strip (SFC ·
-I/O · TOPOLOGY) switches between them.
+The chart, the ladder, the I/O table and the topology below are four
+views of **one panel** over the viewport — each is wide, and stacked they
+hid each other — so opening one closes the others, and the panel's tab
+strip (SFC · LD · I/O · TOPOLOGY) switches between them.
+
+## The ladder — ☰ LD
+
+**☰ Ladder** (in RUN, or the `ld` button on the dock) is the same
+programs as the SET/RST step ladder a PLC engineer would write them
+into: one internal relay per step (`S0, S1, …`, each rung group under
+its `S3 · pick` comment), one rung per transition — the step's contact
+in series with its condition network, ending in `(S)` the next step and
+`(R)` itself — entry actions as output rungs, and `elapsed` waits as
+TON timers driven by the step relay. Signals are NO/NC contacts, edges
+`|P|`/`|N|` contacts, `all_of`/`any_of` series/parallel contact
+networks; a ◇ selection becomes one rung per guard, and rung order *is*
+its priority — the scan-order first-wins the rollout implements.
+
+![The ladder view at a routing decision](../assets/studio/ld.png)
+
+After a Simulate the ladder is a monitor mode: contacts light green
+while they conduct at the playhead, TON blocks count up in place
+(`1.47/2.00s`), and the instant a transition fires its SET/RST coils
+flash — while the rungs of arms the bake never took stay dimmed.
+Clicking a step's comment row seeks the transport to the moment that
+step became active.
 
 ## The I/O table — ⚡ I/O
 

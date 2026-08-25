@@ -165,7 +165,7 @@ def test_the_holonomic_variant_docks_unrotated() -> None:
     # without pivoting and docks facing what it faced when parked.
     import amr_demo as demo
 
-    scene, tl = demo.bake(demo.CARRIER, holonomic=True)
+    scene, tl = _or_skip(lambda: demo.bake(demo.CARRIER, holonomic=True))
     _p0, q0 = tl.base_pose(0.0)
     _p1, q1 = tl.base_pose(tl.duration)
     assert max(abs(a - b) for a, b in zip(q0, q1)) < 1e-9

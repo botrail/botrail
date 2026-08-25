@@ -1130,6 +1130,136 @@ button.danger:hover:not(:disabled) {
   color: #5a6374;
 }
 
+/* --- Ladder (LD) overlay (see components/LadderChart.tsx) --- */
+
+/* Rungs are wider than SFC lanes; the shared shell gets more room. */
+.ld-overlay {
+  max-width: min(78%, 980px);
+}
+
+/* One rung list per program, stacked — ladders read down, not across. */
+.ld-scroll {
+  flex-direction: column;
+}
+
+.ld-canvas {
+  position: relative;
+}
+
+.ld-canvas svg {
+  position: absolute;
+  inset: 0;
+}
+
+.ld-canvas svg.ld-live {
+  pointer-events: none;
+}
+
+.ld-canvas line.ld-wire {
+  stroke: #414a5a;
+  stroke-width: 1.5;
+}
+
+.ld-canvas line.ld-rail {
+  stroke: #566072;
+  stroke-width: 2.5;
+}
+
+/* Contact bars, coil circles, TON boxes. */
+.ld-canvas .ld-sym {
+  stroke: #8b94a6;
+  stroke-width: 1.6;
+  fill: none;
+}
+
+.ld-canvas text {
+  fill: #98a2b3;
+  font-size: 10px;
+}
+
+.ld-canvas text.ld-note {
+  fill: #6d7787;
+  font-size: 9px;
+}
+
+/* The S/R letter in a coil, the P/N letter in an edge contact. */
+.ld-canvas text.ld-op {
+  fill: #8b94a6;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+/* Guard rungs the bake decided against, and the SFC step statuses. */
+.ld-rung.off,
+.ld-rung.untaken {
+  opacity: 0.35;
+}
+
+.ld-rung.unreached {
+  opacity: 0.55;
+}
+
+/* The step-comment row over each rung group (`S3 · pick`). */
+.ld-comment {
+  position: absolute;
+  font-size: 10px;
+  color: #7d8698;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+}
+
+.ld-comment.clickable {
+  cursor: pointer;
+}
+
+.ld-comment.clickable:hover {
+  color: #c6cedd;
+}
+
+.ld-comment.untaken {
+  opacity: 0.35;
+}
+
+.ld-comment.unreached {
+  opacity: 0.55;
+}
+
+/* Monitor mode: conducting contacts, firing coils, done timers. */
+.ld-live .ld-sym {
+  stroke: var(--ok);
+  stroke-width: 1.9;
+}
+
+.ld-live text {
+  fill: var(--ok);
+}
+
+.ld-live text.ld-note {
+  fill: var(--ok);
+}
+
+/* An edge contact's signal level, underlined like the SFC chart. */
+.ld-live line.ld-lv {
+  stroke: #98a2b3;
+  stroke-width: 1;
+}
+
+.ld-live .ld-on line.ld-lv,
+.ld-live line.ld-lv.ld-on {
+  stroke: var(--ok);
+}
+
+.ld-live .ld-fire .ld-sym {
+  filter: drop-shadow(0 0 3px rgba(63, 191, 111, 0.8));
+}
+
+.ld-live .ld-ton-fill {
+  fill: rgba(63, 191, 111, 0.45);
+  stroke: none;
+}
+
 /* --- I/O table overlay + chips (see components/IoOverlay.tsx) --- */
 
 .io-overlay {

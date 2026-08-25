@@ -11,8 +11,8 @@ import type {
 } from "../protocol";
 import {
   activeAt,
-  armAncestors,
   attributeSpans,
+  stepStatus,
   takenArms,
   truth,
   EDGE_HOLD,
@@ -201,14 +201,7 @@ type Mode =
  * decided against; unreached = the program never got this far. */
 function boxStatus(mode: Mode, flat: number): string {
   if (mode.kind === "authored") return "";
-  if (mode.run.spans[flat]) return "entered";
-  for (const { branch, arm } of armAncestors(mode.run.nodes, flat)) {
-    const ordinal = mode.run.nodes[branch].select;
-    if (ordinal !== null && mode.taken.has(ordinal) && mode.taken.get(ordinal) !== arm) {
-      return "untaken";
-    }
-  }
-  return "unreached";
+  return stepStatus(mode.run, mode.taken, flat);
 }
 
 /** Guard ticks: the arm the bake took reads green, its rivals dim. */

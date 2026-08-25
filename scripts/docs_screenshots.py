@@ -139,6 +139,31 @@ def main() -> None:
             print("wrote sfc.png")
             server.stop()
 
+        if want("ld"):
+            # ---- 4b. the ladder view: the same cell, parked on the routing
+            # decision — the latched `reject` verdict conducting through an
+            # NC contact is the story told in ladder vocabulary.
+            scene = sfc_chart_demo.build_cell()
+            sfc_chart_demo.teach(scene)
+            sfc_chart_demo.author_pick(scene)
+            sfc_chart_demo.author_lamp(scene)
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(2.0)
+            page.locator("button", has_text="Ladder").click()
+            scene.simulate_sequences(["pick", "lamp"], max_duration=120.0)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            # Seek to the good part's seat: the ◇ judge rung has just fired
+            # (its coils flash), the token rides `S12 · to tray`.
+            page.locator(".ld-comment", has_text="to tray").first.click()
+            page.evaluate("window.__CAM = {pos: [1.9, -1.5, 1.75], look: [0.15, 0.25, 0.6]}")
+            time.sleep(1.5)
+            page.screenshot(path=OUT / "ld.png")
+            print("wrote ld.png")
+            server.stop()
+
         if want("vehicle"):
             # ---- 5. the transport cell: guide path, stations, load sensor -----
             scene = agv_cell_demo.build_scene()
