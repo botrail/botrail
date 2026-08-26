@@ -91,16 +91,20 @@ The nose faces each leg's course, or holds `fixed_yaw` the whole flight
 vehicle: stations and `goto`, the tray rule, mounted sensors riding the
 airframe — and the same tick checks. Against parked scenery those checks
 say nothing an obstacle check would not; where they earn their keep is
-**two machines sharing space in time**. The drone demo's corridor crosses
-a working arm's bench at working height — inside the arm's reach by
-design, forbidden by geometry alone — and an interlock (`arm_clear`, a
-PLC bit the arm's program raises when it stows) is what makes the cell
-legal. The cross-robot check prices the pair of clocks every tick: drop
-the interlock (`--no-interlock`) and nothing about the paths changes, yet
-the bake refuses at the instant the machines meet, naming a link of each.
-`examples/drone_survey_demo.py` runs the survey beside the arm's own
-program (`--low` shows the other failure: a corridor too low even for the
-stowed arm).
+**two machines sharing space in time**. In
+`examples/drone_survey_demo.py` an inventory drone counts a rack aisle
+while a UR12e with a vacuum gripper palletizes cases at the mouth of it;
+the drone's dock sits past the palletizing cell, so every flight in and
+out crosses the airspace the arm swings cases through — forbidden by
+geometry alone. What makes the cell legal is the zone handshake a real
+WMS runs: the drone asks from its pad (`count_request`), the palletizer
+finishes the case in its cup, parks over its own infeed and answers
+(`aisle_clear`), and landing hands the aisle back (`count_done`). The
+cross-robot check prices the pair of clocks every tick: run
+`--no-interlock` and nothing about the paths, the volumes or the machines
+changes, yet the bake refuses at the instant the two meet, naming a link
+of each. (`--low` shows the other failure: a crossing flown through the
+pallet the arm is building, which no timing fixes.)
 
 The airframe itself comes from the catalog like any other machine —
 `px4/x500/x500`, the PX4 reference 500-class quadrotor — and **a UAV is a
@@ -118,11 +122,37 @@ scene.mount_robot("drone", robot="drone")     # rides rigidly, gear on the pad
 Being a robot is what buys it interference computation: its links against
 the shelving while it flies (`RiderCollision`), its links against other
 robots' links every tick (the refusal above names both links), and the
-live distance readout while you author. A vehicle with no body of its own
+live distance readout while you author. The propellers **check as their
+swept discs** (the catalog authors the rotor collision as the spinning
+disc, radius = the footprint's own swept circle) while the visual stays
+the real blade — so no clearance verdict ever depends on where the blades
+happened to stop, a quantity nobody controls. A vehicle with no body of its own
 whose rider is a robot *is* that robot, so the BOM lists one machine on
 one line — the robot's, with the manifest's identity. The manifest's
 `specs.max_climb_mps` / `max_descent_mps` are what the machine is capable
 of; the cell states what it will actually use, which indoors is far less.
+`scene.requirements()` compares the two — and, given the baked cycle
+(`requirements(timeline=tl)`), the survey's exact airborne time against
+the declared hover endurance (`flight_time_min`); see the
+[selection guide](selection.md).
+
+The props can turn while it flies:
+
+```python
+scene.mount_robot("drone", robot="drone",
+                  spin={"rotor_0_joint": 25.0, "rotor_1_joint": 25.0,
+                        "rotor_2_joint": -25.0, "rotor_3_joint": -25.0})
+```
+
+`spin` is presentation, not physics: the named continuous joints advance
+at their signed rates (rad/s — counter-rotating pairs read right)
+whenever the machine is off the pad it started on or moving at all, and
+rest the moment it lands. The spin is baked into the joint track, so the
+studio and the exported USD replay it — but **no verdict reads the
+phase**: the collision stays the swept disc, which is what lets the rate
+be *readable* rather than real (true hover RPM would alias into a strobe
+at any playback rate). A limited joint is refused by name — a spun joint
+must be a rotor.
 
 `body` names the obstacles carried rigidly. Entries match an obstacle
 exactly or as a subtree prefix, so `body=["/World/AGV"]` picks up everything

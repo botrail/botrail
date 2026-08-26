@@ -474,6 +474,14 @@ pub struct RobotMount {
     /// where it touched down. Not an action — a property of the mount, the
     /// way a wheel's spin is a property of the axle it sits on.
     pub gait: Option<GaitSpec>,
+    /// Presentation only: joints spun at a constant signed rate (rad/s)
+    /// while the vehicle is off its starting ground or moving at all — a
+    /// multirotor's propellers. No verdict reads the phase: the checking
+    /// shape stays the swept solid the catalog authors (design-drone.md
+    /// §3.4); this is the picture no longer lying about a parked prop.
+    /// Continuous joints only — a limited joint would be driven through
+    /// its stops.
+    pub spin: Vec<(String, f64)>,
 }
 
 /// How a mounted robot walks. Authored once per machine (a catalog package

@@ -365,7 +365,8 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
     scene.set_part("amr", kind="device", catalog=machine.id,
                    manufacturer=machine.maker, model=machine.product,
                    category="vehicle.amr",
-                   payload_kg=machine.specs["payload_kg"])
+                   payload_kg=machine.specs["payload_kg"],
+                   max_speed_mps=machine.specs["max_speed_mps"])
 
     # -- what the cell handles, and what watches it ----------------------
     # Standing a few millimetres proud of the bench, like everything

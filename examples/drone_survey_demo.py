@@ -1,108 +1,158 @@
-"""An inventory drone shares a cell with a working arm.
+"""A cycle-count drone and a case palletizer share one warehouse aisle.
 
-The machine is `px4/x500/x500` from the catalog — the PX4 reference 500-class
-airframe, carbon frame, four motors, four props and the landing gear it stands
-on, with the rates it is capable of on its manifest. It is a *robot*, mounted
-rigidly on the aerial vehicle — the exact symmetry of a quadruped with a gait
-on a differential one — so its interference is computed at link level: rotors
-against the shelving while it flies, links against the parked arm's links
-every tick, and the live distance readout while you author. The `--low`
-refusal names both links.
+Both machines are ordered, not drawn. The palletizer is a UR12e — 12.5 kg
+at 1.3 m, the cobot class sold for case palletizing — wearing a Schmalz
+ECBPi vacuum gripper on the ISO 9409-1 adapter plate the gripper's own
+manifest says it needs. The drone is the PX4 X500 airframe, a *robot* rigid-mounted
+on an aerial vehicle (the exact symmetry of a quadruped with a gait on a
+differential one), so its interference is computed link by link and its
+propellers check as their swept discs. The racks and the case infeed are
+catalog products too, sized to what those packages actually sell.
 
-The drone is the same `Vehicle` every AGV is — a body, an authored path,
-stations, `goto` / `device_done` — with an aerial drive: z is its own axis,
-so the path climbs freely (no `max_grade`, no lift), and each leg's clock
-is the slower axis, `max(run / speed, rise / climb (or descent))`, closed
-form. There is no takeoff command: the pad station under an overhead
-waypoint *is* the takeoff, as a vertical leg.
+The work is the work a warehouse does. Cases index up the infeed one pitch
+at a time; the TM20 picks each off the belt, swings it across to the
+staging pallet at the mouth of the aisle and sets it down, two to a course.
+The drone flies an inventory count: out of its dock, down the aisle, and up
+and down the rack faces in a serpentine — bay 1 bottom to top, bay 2 top to
+bottom, bay 3 bottom to top — reading one location per stop with a
+side-looking scanner that keeps facing the racks because the aerial drive
+holds a fixed yaw. Nine locations are expected. Eight answer. **Finding the
+ninth missing is what a cycle count is for**, and the empty shelf is in the
+cell so the count has something to find.
 
-The point of the cell is the corridor. The outbound leg crosses the arm's
-bench at working height — inside the arm's reach *by design*, with the
-arm's tool a quarter metre above it when raised. Geometry alone would
-forbid this cell; what permits it is time. The arm tends its bench, stows,
-and raises `arm_clear`; the drone holds at the gate until it does. Run
-`--no-interlock` and nothing about the paths or the volumes changes — only
-the clock — and the bake refuses at the instant the two machines meet,
-naming a link of each. That is what the cross-robot check is *for*: not
-proving a flight clears parked scenery (any obstacle does that), but
-pricing two machines' motions against each other in time.
+The two machines cannot both be at the mouth of the aisle. The dock sits
+past the palletizing cell, so every flight in and out crosses the airspace
+the arm swings cases through — geometry alone forbids this cell. What
+permits it is a zone handshake, the one a real WMS runs: the drone asks
+from its pad (`count_request`) rather than burning battery holding in the
+air; the palletizer finishes the case in its cup — it does not drop one
+because a drone asked — parks over its own infeed and answers
+(`aisle_clear`); the drone launches, counts and comes home; landing raises
+`count_done` and the palletizer picks up where it left off. The timing
+chart shows the whole conversation, and the shift prices it: the count
+costs the palletizer a measurable block of standing by, which is the
+number a planner actually wants before agreeing to fly one.
 
-The onboard scanner is an ordinary mounted zone sensor — it rides the
-airframe (Z0's vehicle track) and blips once over every rack, which is the
-whole survey as timing-chart lanes. And the airspace is checked like any
-aisle: fly the route low (`--low`) and the drone crosses the parked arm —
-`VehicleRobotCollision` names the link, before anything is flown for real.
+Run `--no-interlock` and nothing about the paths, the volumes or the
+machines changes. Only the clock does: the drone crosses the mouth while a
+case is still in the air, and the bake refuses at the instant they meet,
+naming a link of each. That is what the cross-robot check is *for* — not
+proving a flight clears parked scenery, but pricing two machines' motions
+against each other in time.
 
     python examples/drone_survey_demo.py                 # bake + USD
     python examples/drone_survey_demo.py --no-interlock  # right paths, wrong clock
-    python examples/drone_survey_demo.py --low           # wrong corridor outright
-    python examples/drone_survey_demo.py --studio        # watch the survey
+    python examples/drone_survey_demo.py --low           # a crossing under the stack
+    python examples/drone_survey_demo.py --studio        # watch the shift
 
-`--airframe <dir>` flies a package the catalog builder wrote instead; with no
-catalog at all the cell draws a box the size of the same airframe, so the
-timing and the checks still run.
+`--airframe <dir>` flies a package the catalog builder wrote instead of the
+published one.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import botrail as bt
 
 HERE = Path(__file__).resolve().parent
 
-AIRFRAME = "px4/x500/x500"        # the catalog package, tried first
-PAD = (0.5, 0.0)
-RACKS = [2.0, 3.2, 4.4]          # rack centres along x
-CRUISE = 2.4                     # survey altitude, over the racks
-# The outbound corridor crosses the arm's bench at working height — inside
-# the arm's reach *by design*. Sharing that space is a matter of when, not
-# where: the arm tends its bench with the tool a quarter metre above the
-# corridor, stows, and only then may the drone come through. The climb
-# point is past the bench, where the racks begin.
-CORRIDOR = 1.02                  # low corridor altitude, over the stowed arm
-CLIMB_AT = (1.7, 0.0)            # end of the corridor, where it climbs to cruise
-ARM_STOW = {"shoulder_lift": -1.9, "elbow": 2.4}   # folded under the corridor
-ARM_TEND, ARM_FOLD = 8.0, 1.5    # bench work, then the stow ramp
+# ---- what is ordered -------------------------------------------------
+ARM_PACK = "universal_robots/ur12e"                  # 12.5 kg at 1.3 m — the palletizing cobot class
+ADAPTER = "botrail/adapter/flange-plate-ecbpi"       # the plate its manifest requires
+CUP = "botrail/vacuum/vacuum-gripper-ecbpi"          # Schmalz ECBPi, 10 kg
+AIRFRAME = "px4/x500/x500"                           # the inventory drone
+RACK_PACK = "botrail/rack/medium-shelf"
+BELT_PACK = "botrail/conveyor/belt-unit"
+
+# ---- the palletizing cell, at the mouth of the aisle -----------------
+RISER = 0.30                     # a low plinth: the work sits above the shoulder
+ARM_XY = (1.5, -0.85)
+BELT_MID, BELT_Y = 1.0, -1.60    # the case infeed, running towards the pick
+BELT_LEN, BELT_W, BELT_TOP = 3.0, 0.4, 0.75
+PITCH = 0.45                     # one index brings the next case to the stop
+CASE = (0.36, 0.28, 0.24)        # a shipper carton
+CASE_KG = 6.0
+CASES = 4
+PALLET_XY = (1.5, 0.12)          # the staging pallet, in the aisle mouth
+DECK = 0.144                     # EPAL deck height
+SLOTS = (-0.145, 0.145)          # two cases to a course
+SEAT = 0.005                     # everything this cell sets down stands proud of
+                                 # what it stands on: a case resting *on* the belt
+                                 # is a carried part touching an obstacle the moment
+                                 # the cup takes it
+HOVER = 0.25                     # approach and retract standoff
+
+# ---- the aisle -------------------------------------------------------
+BAYS = (3.5, 5.5, 7.5)           # bay centres down the aisle
+BAY_Y = 1.5                      # rack centreline; 0.6 deep, so the face is at 1.2
+RACK = (1.8, 0.6, 1.8)           # width, depth, height — all sizes the pack sells
+LEVELS = 3
+SHELF_Z = tuple(RACK[2] * (i + 1) / LEVELS for i in range(LEVELS))   # 0.6 / 1.2 / 1.8
+SCAN_Z = tuple(z + 0.15 for z in SHELF_Z)                            # label height
+TOTE = (0.6, 0.4, 0.3)
+EMPTY = (1, 2)                   # bay 2, top level: the location that will not answer
+
+# ---- the flight ------------------------------------------------------
+DOCK = (0.0, 0.0)
+PAD = 0.10                       # the dock pad the gear stands on
+LANE_Z = 1.2                     # the crossing altitude at the aisle mouth
+OVER = 2.5                       # transit home, above the racks
+HOLD_X = 0.6                     # the hold point, outside the arm's envelope
 # Indoor rates. The airframe is rated far faster (PX4's multicopter limits,
 # `specs.max_*`); a rack aisle is not the place to use them, and the cell is
 # what says so — the catalog caps, the cell chooses.
 SPEED, CLIMB, DESCENT = 0.8, 0.6, 0.9
-_TOLD: set = set()
+SPIN = 25.0                      # propeller rate, rad/s (see `spin=` below)
+SCAN_DWELL = 1.5                 # a location is read, not glanced at
+BELT_SPEED = 0.25
+
+READY = [0.0, -1.9, 1.9, -1.6, -math.pi / 2, 0.0]   # arm up, cup down
 
 
-def airframe_of(pack=AIRFRAME):
-    """The machine as a `Robot`, with its manifest — or `(None, {})`.
+def down(yaw: float) -> tuple:
+    """Tool +Z at the floor, the cup square to `yaw`. Aiming along the
+    reach keeps the last joint near zero — a wound wrist costs seconds
+    later, unwinding."""
+    return (math.cos(yaw / 2), math.sin(yaw / 2), 0.0, 0.0)
 
-    A UAV is a robot mounted on an aerial vehicle, the exact symmetry of a
-    quadruped on a differential one (`vehicle.legged` = Robot + Gait +
-    Vehicle; `vehicle.uav` = Robot + rigid mount + Vehicle). Being a robot
-    is what buys it interference computation: its links against the racks
-    while it flies (`RiderCollision`), its links against other robots'
-    links every tick (`RobotCollision`), and the live distance readout
-    while you author. `pack=None` skips the catalog entirely (what the
-    offline tests use) and the cell falls back to a box airframe riding
-    the vehicle as plain body geometry — same flight, coarser collisions.
-    """
-    if pack is None:
-        return None, {}
-    try:
-        directory = Path(pack)
-        if directory.is_dir():
-            # A package the catalog builder wrote: the URDF carries the
-            # meshes, the manifest the identity and the rates.
-            return bt.Robot.from_urdf(directory / "urdf" / "model.urdf"), _manifest(directory)
-        model = bt.Robot.from_catalog(str(pack))  # identity rides the model
-        return model, _manifest(Path(bt.catalog_package(str(pack))))
-    except Exception as err:  # noqa: BLE001 - unreachable catalog, not a bad order
-        if "drone" not in _TOLD:
-            _TOLD.add("drone")
-            text = " ".join(str(err).split())
-            if len(text) > 110:
-                text = text[:107] + "..."
-            print(f"catalog {pack} unavailable ({text}); drawing a box airframe")
-        return None, {}
+
+def slot_of(case: int, pallet_y: float = PALLET_XY[1]) -> tuple[float, float]:
+    """Where case `case` lands: two to a course, courses upwards. The
+    build order is the order a palletizer actually stacks in."""
+    course, place = divmod(case, len(SLOTS))
+    return pallet_y + SLOTS[place], DECK + (course + 1) * (CASE[2] + SEAT)
+
+
+def palletizer():
+    """The TM20 with its plate and cup, as one machine.
+
+    The vacuum gripper's manifest names the adapter it needs
+    (`ISO 9409-1-50-4-M6 -> flange-plate-ecbpi`); composing the three in
+    that order is what makes the tool centre point land where the datasheet
+    says it does, and what puts three lines on the bill instead of one."""
+    arm = bt.Robot.from_catalog(ARM_PACK)
+    return (arm
+            .attach_tool(bt.Robot.from_catalog(ADAPTER), prefix="adp_")
+            .attach_tool(bt.Robot.from_catalog(CUP)))
+
+
+def airframe(pack=AIRFRAME):
+    """The drone as a `Robot`, with its manifest.
+
+    A UAV is a robot mounted on an aerial vehicle. Being a robot is what
+    buys it interference computation: its links against the racks while it
+    flies (`RiderCollision`), its links against the palletizer's links
+    every tick (`RobotCollision`), and the live distance readout while you
+    author."""
+    directory = Path(pack)
+    if directory.is_dir():
+        # A package the catalog builder wrote: the URDF carries the meshes,
+        # the manifest the identity and the rates.
+        return bt.Robot.from_urdf(directory / "urdf" / "model.urdf"), _manifest(directory)
+    return bt.Robot.from_catalog(str(pack)), _manifest(Path(bt.catalog_package(str(pack))))
 
 
 def _manifest(directory: Path) -> dict:
@@ -111,154 +161,298 @@ def _manifest(directory: Path) -> dict:
     return yaml.safe_load((directory / "manifest.yaml").read_text(encoding="utf-8")) or {}
 
 
-def build(*, altitude: float = CRUISE, corridor: float = CORRIDOR,
-          interlock: bool = True, pack=AIRFRAME) -> bt.Scene:
-    scene = bt.Scene(bt.Robot.from_urdf(HERE / "simple_arm.urdf"), name="survey")
+def build(*, interlock: bool = True, lane: float = LANE_Z,
+          pallet_y: float = PALLET_XY[1], pack=AIRFRAME) -> bt.Scene:
+    scene = bt.Scene(palletizer(), name="palletizer",
+                     base_position=(*ARM_XY, RISER + 0.005))
+    scene.set_joint_positions(READY)
 
-    # The working arm under the corridor — the airspace the obstacle
-    # checks cannot see, and the cross-robot check can. It starts with its
-    # tool up at 1.26 m, *through* the 1.02 m corridor: geometry alone
-    # would forbid this cell. Time is what permits it.
-    ped = bt.parts.pedestal(scene, "stand", height=0.4, position=(1.3, 0.0))
-    mount_p, mount_q = scene.frame(ped.frames[0])
-    # 5 mm above the plate: standing exactly on it reads as a live
-    # collision in the studio.
-    scene.set_robot_base_pose((mount_p[0], mount_p[1], mount_p[2] + 0.005), mount_q)
+    # -- the palletizing cell ------------------------------------------
+    riser = bt.parts.pedestal(scene, "riser", height=RISER, position=ARM_XY, diameter=0.34)
+    scene.set_obstacle_enabled(f"{riser.name}/column", False)   # the arm stands on it
+    bt.parts.conveyor(scene, "infeed", BELT_LEN, BELT_W,
+                             (BELT_MID, BELT_Y, BELT_TOP),
+                             catalog=BELT_PACK, speed=BELT_SPEED)
+    bt.parts.pallet(scene, "staging", (PALLET_XY[0], pallet_y), model="EPAL 1")
 
-    # Three rack bays with a carton on the top shelf — what the scanner
-    # looks for, placed on the shelf frame the part declares.
-    for i, x in enumerate(RACKS, start=1):
-        bay = bt.parts.rack(scene, f"rack{i}", size=(0.9, 0.45, 1.5),
-                            position=(x, 1.1), levels=3)
-        top, _ = scene.frame(bay.frames[-1])
-        scene.add_box(f"carton{i}", size=(0.3, 0.3, 0.25),
-                      position=(x, 1.1, top[2] + 0.125))
+    # Four cases waiting their turn on the infeed, one index apart. The
+    # belt's transport zone carries them: an index is a distance, not a
+    # timer, so the stop is where the case stops.
+    for i in range(CASES):
+        scene.add_box(f"case{i}", size=CASE,
+                      position=(ARM_XY[0] - (i + 1) * PITCH, BELT_Y, BELT_TOP + SEAT + CASE[2] / 2),
+                      color=(0.72, 0.56, 0.36))
+        scene.set_part(f"case{i}", category="workpiece", model="RSC-360x280x240",
+                       mass_kg=CASE_KG)
+    # Case-in-position: the photo-eye across the belt at the index stop.
+    scene.add_beam_sensor("case_eye", frm=(ARM_XY[0], BELT_Y - 0.3, BELT_TOP + SEAT + CASE[2] / 2),
+                          to=(ARM_XY[0], BELT_Y + 0.3, BELT_TOP + SEAT + CASE[2] / 2))
 
-    # The airframe, parked on its pad: the robot when the catalog answers,
-    # a box of the same footprint when it does not.
-    model, spec = airframe_of(pack)
-    if model is not None:
-        scene.add_robot(model, name="drone")
-    else:
-        scene.add_box("drone/body", size=(0.36, 0.36, 0.12), position=(*PAD, 0.06))
+    # -- the aisle the drone counts ------------------------------------
+    for bay, x in enumerate(BAYS, start=1):
+        bt.parts.rack(scene, f"bay{bay}", RACK, (x, BAY_Y), catalog=RACK_PACK, levels=LEVELS)
+        for level, shelf in enumerate(SHELF_Z):
+            if (bay - 1, level) == EMPTY:
+                continue      # the location the count will fail to find
+            scene.add_box(f"bay{bay}/tote{level}", size=TOTE,
+                          position=(x, BAY_Y, shelf + TOTE[2] / 2),
+                          color=(0.20, 0.34, 0.46))
+            scene.set_part(f"bay{bay}/tote{level}", category="workpiece",
+                           model="TOTE-600x400", mass_kg=11.0)
+
+    # -- the drone ------------------------------------------------------
+    scene.add_box("dock", size=(0.9, 0.9, PAD), position=(*DOCK, PAD / 2),
+                  color=(0.22, 0.24, 0.27))
+    model, spec = airframe(pack)
+    scene.add_robot(model, name="drone")
+    lane_y = 0.0
     scene.add_vehicle(
-        "drone", body=[] if model is not None else ["drone"],
-        path=[(*PAD, 0.0), (*PAD, corridor), (*CLIMB_AT, corridor),
-              (*CLIMB_AT, altitude)]
-        + [(x, 1.1, altitude) for x in RACKS],
-        stations={"pad": 0, "gate": 1, "r1": 4, "r2": 5, "r3": 6},
-        speed=SPEED, start="pad",
+        "drone", body=[],
+        path=[(*DOCK, PAD + 0.005),                     # 0  on the pad
+              (*DOCK, lane),                            # 1  climb out
+              (HOLD_X, lane_y, lane),                   # 2  hold, clear of the arm
+              (2.5, lane_y, lane),                      # 3  across the mouth
+              (2.5, lane_y, SCAN_Z[0])]                 # 4  down to the first face
+        + [(x, lane_y, SCAN_Z[level])                   # 5..13 the serpentine
+           for i, x in enumerate(BAYS)
+           for level in (range(LEVELS) if i % 2 == 0 else reversed(range(LEVELS)))]
+        + [(BAYS[-1], lane_y, OVER),                    # 14 climb over the racks
+           (2.5, lane_y, OVER),                         # 15 transit home
+           (2.5, lane_y, lane)],                        # 16 down to the mouth again
+        stations={"dock": 0, "hold": 2,
+                  **{f"b{i + 1}l{level}": 5 + 3 * i + n
+                     for i, _ in enumerate(BAYS)
+                     for n, level in enumerate(range(LEVELS) if i % 2 == 0
+                                               else reversed(range(LEVELS)))}},
+        ring=True,          # 16 closes back to the dock: one diagonal home
+        speed=SPEED, start="dock",
         drive="aerial", climb_speed=CLIMB, descent_speed=DESCENT,
+        fixed_yaw=0.0,      # the scanner must keep facing the racks
     )
-    if model is not None:
-        # The machine rides its vehicle rigidly — the AMR-arm mount, with
-        # the whole robot as the machine. Its base is the manifest's
-        # base_footprint, so the landing gear stands on the pad.
-        scene.mount_robot("drone", robot="drone")
-        # One machine, one BOM line, on the robot. `from_catalog` carries
-        # the identity itself; a locally built package is pinned from its
-        # manifest (`spec["id"]`, not the directory it happens to sit in).
-        if spec and Path(pack).is_dir():
-            scene.set_part("drone", kind="robot", catalog=spec.get("id"),
-                           manufacturer=(spec.get("manufacturer") or {}).get("name"),
-                           model=spec.get("name"), category=spec.get("category"),
-                           mass_kg=(spec.get("specs") or {}).get("mass_kg"))
+    # The machine rides its vehicle rigidly, gear on the pad. The props turn
+    # while it flies — presentation, not physics: the checks read the swept
+    # discs whatever the phase, so the rate is free to be readable.
+    rotors = sorted(j for j in model.joint_names if "rotor" in j)
+    scene.mount_robot("drone", robot="drone",
+                      spin={name: SPIN if i < len(rotors) / 2 else -SPIN
+                            for i, name in enumerate(rotors)})
+    numeric = {k: float(v) for k, v in (spec.get("specs") or {}).items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    if Path(pack).is_dir():
+        scene.set_part("drone", kind="robot", catalog=spec.get("id"),
+                       manufacturer=(spec.get("manufacturer") or {}).get("name"),
+                       model=spec.get("name"), category=spec.get("category"), **numeric)
+    # The scanner: a side-looking read window riding the airframe, deep
+    # enough to reach the far side of a tote and no taller than the label
+    # it reads — a window as deep as a shelf pitch would answer two
+    # locations at once and count neither.
+    scene.add_zone_sensor("scan", position=(0.0, 0.9, 0.0), size=(0.5, 1.4, 0.12),
+                          watch=[f"bay{b}/tote{n}" for b in (1, 2, 3) for n in range(LEVELS)],
+                          mount="drone")
 
-    # The scanner: a zone under the belly, riding the airframe.
-    scene.add_zone_sensor("scan", position=(0.0, 0.0, -0.65), size=(0.5, 0.5, 1.1),
-                          watch=[f"carton{i}" for i in range(1, 4)], mount="drone")
+    # The cup touches the case it lifts — that is what picking is, so it
+    # is declared rather than discovered at bake time.
+    for i in range(CASES):
+        for link in ("tcp", "body"):
+            scene.allow_link_obstacle_contact(link, f"case{i}", robot="palletizer")
 
-    # The arm's own program, running beside the survey: tend the bench,
-    # stow, say so. The signal is the interlock's fabric — a PLC bit.
-    scene.define_signal("arm_clear", initial=False)
-    tend = scene.sequence("tend")
-    tend.step("work", transition=bt.seq.elapsed(ARM_TEND))
-    tend.step("stow", actions=[bt.seq.ramp(ARM_STOW, ARM_FOLD, robot="survey")],
-              transition=bt.seq.done())
-    tend.step("clear", actions=[bt.seq.set_signal("arm_clear", True)],
-              transition=bt.seq.elapsed(0.0))
-
-    seq = scene.sequence("survey")
-    seq.step("lift", actions=[bt.seq.goto("drone", "gate")],
-             transition=bt.seq.device_done("drone"))
-    if interlock:
-        # The gate: hover at the pad until the arm says the corridor is
-        # free. Drop this step (--no-interlock) and nothing about the
-        # geometry changes — only the clock — and the bake refuses with
-        # both links named at the instant they meet.
-        seq.step("clearance", transition=bt.seq.signal("arm_clear"))
-    for st in ("r1", "r2", "r3"):
-        seq.step(f"to_{st}", actions=[bt.seq.goto("drone", st)],
-                 transition=bt.seq.device_done("drone"))
-        seq.step(f"scan_{st}", transition=bt.seq.elapsed(0.8))
-    seq.step("home", actions=[bt.seq.goto("drone", "pad")],
-             transition=bt.seq.device_done("drone"))
+    teach(scene, pallet_y)
+    programs(scene, interlock=interlock)
     return scene
 
 
-def bake(*, altitude: float = CRUISE, corridor: float = CORRIDOR,
-         interlock: bool = True, pack=AIRFRAME):
-    scene = build(altitude=altitude, corridor=corridor, interlock=interlock, pack=pack)
-    return scene, scene.simulate_sequences(["survey", "tend"], max_duration=120.0)
+def teach(scene: bt.Scene, pallet_y: float) -> None:
+    """Every pose the palletizer works from, solved against the machine's
+    own kinematics rather than typed in — swap the arm and the cell
+    re-teaches itself, or refuses by name."""
+    limits = scene.robot_of("palletizer").joint_limits
+
+    def unwind(q: list, seed: list) -> list:
+        """The same pose, with each wrist turned the short way.
+
+        A 6-axis IK hands back an angle, not a winding: two solutions a
+        full turn apart put the cup in exactly the same place, and taking
+        the wrong one spends a silent 360 deg unwinding between the pick
+        and the place. Nothing in the picture says so — the arm just
+        takes longer and swings where it should not."""
+        out = []
+        for value, want, limit in zip(q, seed, limits):
+            lo, hi = limit or (-math.inf, math.inf)
+            best = value
+            for turn in (-1, 1):
+                other = value + turn * 2 * math.pi
+                if lo - 1e-9 <= other <= hi + 1e-9 and abs(other - want) < abs(best - want):
+                    best = other
+            out.append(best)
+        return out
+
+    def pose(name: str, target, yaw: float, *seeds: list) -> list:
+        """Solve, unwind, and refuse a pose that fouls — in that order.
+
+        A 6-axis IK has several branches, and which one it hands back is
+        decided by where it started. Seeding from the pose the arm
+        actually arrives in keeps the cycle in one branch; falling back to
+        the ready pose is what a programmer does at the teach pendant when
+        the arm folds onto itself."""
+        short, fouled = None, []
+        for seed in seeds:
+            scene.set_joint_positions(seed, robot="palletizer")
+            ik = scene.set_tcp_target(target, down(yaw), robot="palletizer")
+            if not ik.converged:
+                short = ik.pos_error
+                continue
+            q = unwind(list(scene.joint_positions_of("palletizer")), seed)
+            scene.set_joint_positions(q, robot="palletizer")
+            hits = [f"{a[1]} x {b[1]}" for a, b in scene.check_collisions()]
+            if not hits:
+                scene.add_segment(name, goal=q, robot="palletizer")
+                return q
+            fouled = hits
+        if short is not None and not fouled:
+            raise RuntimeError(
+                f"{ARM_PACK} cannot reach {tuple(round(v, 2) for v in target)} "
+                f"from a {RISER:.2f} m plinth at {ARM_XY} — {short * 1e3:.0f} mm "
+                f"short of it. Move the plinth, or order the longer arm.")
+        raise RuntimeError(f"every branch taught for `{name}` fouls: {', '.join(fouled)}")
+
+    # The index stop, approached from above the way every case pick is.
+    pick_hi = pose("pick_hi", (ARM_XY[0], BELT_Y, BELT_TOP + SEAT + CASE[2] + HOVER),
+                   -math.pi / 2, READY)
+    pose("pick_lo", (ARM_XY[0], BELT_Y, BELT_TOP + SEAT + CASE[2]), -math.pi / 2,
+         pick_hi, READY)
+    # Where each case is set down, and the clearance over it. Each is
+    # seeded from the pose the arm actually arrives in, so the cycle stays
+    # in one branch of the arm's kinematics from the first case to the last.
+    for case in range(CASES):
+        y, top = slot_of(case, pallet_y)
+        hi = pose(f"set{case}_hi", (PALLET_XY[0], y, top + HOVER), math.pi / 2, pick_hi, READY)
+        pose(f"set{case}_lo", (PALLET_XY[0], y, top), math.pi / 2, hi, READY)
+    # Parked over its own infeed: out of the aisle, and out of the way of
+    # anything the drone does at the mouth.
+    pose("parked", (ARM_XY[0], BELT_Y + 0.35, BELT_TOP + 0.55), -math.pi / 2, READY, pick_hi)
+    scene.add_segment("ready", goal=READY, robot="palletizer")
+
+
+def programs(scene: bt.Scene, *, interlock: bool) -> None:
+    scene.define_signal("vacuum", initial=False)
+    if interlock:
+        scene.define_signal("count_request", initial=False)
+        scene.define_signal("aisle_clear", initial=False)
+        scene.define_signal("count_done", initial=False)
+
+    pal = scene.sequence("palletize")
+
+    def case_cycle(case: int) -> None:
+        pal.step(f"index{case}", actions=[bt.seq.advance("infeed", PITCH)],
+                 transition=bt.seq.all_of(bt.seq.device_done("infeed"),
+                                          bt.seq.signal("case_eye")))
+        pal.step(f"reach{case}", actions=[bt.seq.motion("pick_hi")], transition=bt.seq.done())
+        pal.step(f"descend{case}", actions=[bt.seq.motion("pick_lo")], transition=bt.seq.done())
+        pal.step(f"grip{case}", actions=[bt.seq.attach(f"case{case}", touch_links=["tcp", "body"], robot="palletizer"),
+                                         bt.seq.set_signal("vacuum", True)],
+                 transition=bt.seq.elapsed(0.3))     # the cup pulls down
+        pal.step(f"lift{case}", actions=[bt.seq.motion("pick_hi")], transition=bt.seq.done())
+        pal.step(f"swing{case}", actions=[bt.seq.motion(f"set{case}_hi")],
+                 transition=bt.seq.done())
+        pal.step(f"place{case}", actions=[bt.seq.motion(f"set{case}_lo")],
+                 transition=bt.seq.done())
+        pal.step(f"release{case}", actions=[bt.seq.detach(f"case{case}"),
+                                            bt.seq.set_signal("vacuum", False)],
+                 transition=bt.seq.elapsed(0.3))     # and lets go
+        pal.step(f"clear{case}", actions=[bt.seq.motion(f"set{case}_hi")],
+                 transition=bt.seq.done())
+
+    case_cycle(0)
+    case_cycle(1)
+    if interlock:
+        # The zone handshake, between cases: a palletizer does not drop the
+        # one in its cup because a drone asked.
+        pal.step("hand_over", transition=bt.seq.signal("count_request"))
+        pal.step("park", actions=[bt.seq.motion("parked")], transition=bt.seq.done())
+        pal.step("grant", actions=[bt.seq.set_signal("aisle_clear", True)],
+                 transition=bt.seq.immediately())
+        pal.step("stand_by", transition=bt.seq.signal("count_done"))
+        pal.step("take_back", actions=[bt.seq.set_signal("aisle_clear", False),
+                                       bt.seq.motion("ready")], transition=bt.seq.done())
+    case_cycle(2)
+    case_cycle(3)
+    pal.step("home", actions=[bt.seq.motion("ready")], transition=bt.seq.done())
+
+    count = scene.sequence("count")
+    if interlock:
+        # Asked for from the pad, not from a hover: a drone that waits in
+        # the air for its window spends the battery it came to use.
+        count.step("request", actions=[bt.seq.set_signal("count_request", True)],
+                   transition=bt.seq.immediately())
+        count.step("permit", transition=bt.seq.signal("aisle_clear"))
+    count.step("launch", actions=[bt.seq.goto("drone", "hold")],
+               transition=bt.seq.device_done("drone"))
+    for bay, _ in enumerate(BAYS, start=1):
+        for level in (range(LEVELS) if bay % 2 else reversed(range(LEVELS))):
+            count.step(f"fly_b{bay}l{level}", actions=[bt.seq.goto("drone", f"b{bay}l{level}")],
+                       transition=bt.seq.device_done("drone"))
+            count.step(f"read_b{bay}l{level}", transition=bt.seq.elapsed(SCAN_DWELL))
+    count.step("home", actions=[bt.seq.goto("drone", "dock")],
+               transition=bt.seq.device_done("drone"))
+    if interlock:
+        count.step("report", actions=[bt.seq.set_signal("count_done", True)],
+                   transition=bt.seq.immediately())
+
+
+def bake(*, interlock: bool = True, lane: float = LANE_Z,
+         pallet_y: float = PALLET_XY[1], pack=AIRFRAME):
+    scene = build(interlock=interlock, lane=lane, pallet_y=pallet_y, pack=pack)
+    return scene, scene.simulate_sequences(["palletize", "count"], max_duration=300.0)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", nargs="?", default=str(HERE / "drone_cell.usdc"))
-    parser.add_argument("--low", action="store_true",
-                        help="a 0.45 m corridor: too low even for the stowed arm, refused by name")
     parser.add_argument("--no-interlock", dest="no_interlock", action="store_true",
-                        help="drop the arm_clear gate: same geometry, wrong clock, refused")
+                        help="drop the zone handshake: same geometry, wrong clock, refused")
+    parser.add_argument("--low", action="store_true",
+                        help="cross the mouth below the staging stack, refused by name")
     parser.add_argument("--airframe", default=AIRFRAME,
                         help="the UAV pack: a catalog id or a package directory")
     parser.add_argument("--studio", action="store_true")
     args = parser.parse_args()
 
-    if args.low:
-        # 0.45 m: above the pedestal, but through even the *stowed* arm —
-        # no timing fixes a corridor this low, and the check says which
-        # link. (0.65 actually flies: the stowed wrist threads the gap
-        # between the landing gear and the belly plate — the collision
-        # model is the machine's own, not a box around it.)
-        try:
-            bake(corridor=0.45, pack=args.airframe)
-        except ValueError as err:
-            print("refused, as it should be:")
-            print(f"  {err}")
-            return
-        raise SystemExit("a 0.45 m corridor through the stowed arm should have been refused")
-
     if args.no_interlock:
-        # Same paths, same volumes, same machines — only the gate removed.
-        # The drone enters the corridor while the arm is still up, and the
-        # refusal names the instant and both links. This is the difference
-        # between checking against scenery and checking against a machine
-        # that moves: collision is a property of the *pair of clocks*.
         try:
             bake(interlock=False, pack=args.airframe)
         except ValueError as err:
             print("refused, as it should be:")
             print(f"  {err}")
             return
-        raise SystemExit("flying the corridor before arm_clear should have been refused")
+        raise SystemExit("crossing the mouth with a case in the air should have been refused")
+
+    if args.low:
+        try:
+            bake(lane=0.5, pack=args.airframe)
+        except ValueError as err:
+            print("refused, as it should be:")
+            print(f"  {err}")
+            return
+        raise SystemExit("a crossing under the staging stack should have been refused")
 
     scene, tl = bake(pack=args.airframe)
-    # The machine's own base reports the landing; the box fallback has no
-    # robot, so its body obstacle stands in.
-    if "drone" in scene.robots:
-        parked, _ = tl.base_pose(0.0, "drone")
-        p, _ = tl.base_pose(tl.duration, "drone")
-    else:
-        frame = next(o for o in scene.obstacle_names if o.startswith("drone/"))
-        parked, _ = tl.object_pose(frame, 0.0)
-        p, _ = tl.object_pose(frame, tl.duration)
     lanes = dict(tl.signals)
-    blips = sum(1 for _, v in lanes["scan"] if v)
-    off = max(abs(p[i] - parked[i]) for i in range(3))
-    print(f"cycle {tl.duration:.2f}s, {blips} scan passes (3 out, 2 on the "
-          f"retrace), back on the pad at ({p[0]:.2f}, {p[1]:.2f}) "
-          f"within {off * 1e3:.1f} mm of where it took off")
-    tl.export_usd(args.out, fps=60)
+    read = sum(1 for _, v in lanes["scan"] if v)
+    expected = len(BAYS) * LEVELS
+    # What the handshake actually cost: not "time not moving" — a
+    # palletizer is not moving while the belt indexes either — but the
+    # block it stood by with the aisle granted away.
+    stood_by = sum(t1 - t0 for name, t0, t1 in tl.step_spans
+                   if name in ("palletize/park", "palletize/stand_by"))
+    airborne = tl.vehicle_airborne("drone")
+    rated = scene.requirements(timeline=tl)["drone"].attributes.get("flight_time_min")
+    print(f"shift {tl.duration:.1f} s — {CASES} cases palletized, "
+          f"{read} of {expected} locations answered")
+    print(f"  bay {EMPTY[0] + 1} level {EMPTY[1] + 1} did not answer: that is the count "
+          f"doing its job, and the reason to fly one")
+    print(f"  the aisle handshake cost the palletizer {stood_by:.1f} s parked and standing by")
+    print(f"  {airborne / 60:.1f} min airborne of the {rated:.0f} min the airframe is rated for")
+    tl.export_usd(args.out, fps=30)
     print(f"wrote {args.out}")
     if args.studio:
         bt.studio(scene)

@@ -257,6 +257,10 @@ pub struct RobotMountMsg {
     pub offset: PoseMsg,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gait: Option<GaitMsg>,
+    /// Presentation: `(joint, rad/s)` spun while the vehicle flies or
+    /// moves (a multirotor's propellers). Absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spin: Vec<(String, f64)>,
 }
 
 /// [`crate::seq::GaitSpec`] as a project carries it.
@@ -592,6 +596,7 @@ impl Scene {
                         device: m.device.clone(),
                         offset: PoseMsg::from(&m.offset),
                         gait: m.gait.as_ref().map(gait_msg),
+                        spin: m.spin.clone(),
                     }),
                 })
                 .collect(),
@@ -880,6 +885,10 @@ impl Scene {
                 .map_err(|m| ProjectError::Incompatible(format!("robot `{name}` gait: {m}")))?;
             self.mount_robot_with(i, &mount.device, Some((&mount.offset).into()), gait)
                 .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
+            if !mount.spin.is_empty() {
+                self.set_mount_spin(i, mount.spin.clone())
+                    .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` spin: {e}")))?;
+            }
             self.set_robot_base_pose_for(i, (&robot_msg.base_pose).into());
             self.set_joint_positions_for(i, robot_msg.joint_positions.clone())
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
@@ -1491,8 +1500,18 @@ pub fn generate_python(project: &ProjectFile) -> String {
             Some(g) => format!(", gait={}", py_gait(g)),
             None => String::new(),
         };
+        let spin = if mount.spin.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = mount
+                .spin
+                .iter()
+                .map(|(joint, rate)| format!("{joint:?}: {rate}"))
+                .collect();
+            format!(", spin={{{}}}", items.join(", "))
+        };
         out.push_str(&format!(
-            "scene.mount_robot({:?}, offset_position={}, offset_quaternion={}{}{gait})\n",
+            "scene.mount_robot({:?}, offset_position={}, offset_quaternion={}{}{gait}{spin})\n",
             mount.device,
             py_tuple(&mount.offset.position),
             py_tuple(&mount.offset.quaternion),

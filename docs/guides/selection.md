@@ -34,7 +34,9 @@ came from:
 | zone sensor | `range_mm` | the half-diagonal of the zone |
 | conveyor | `length_mm`, `width_mm`, `speed_mps`, `load_kg` | the transport zone along and across the belt, the belt speed, the mass of the parts starting on it |
 | linear axis | `stroke_mm`, `speed_mps`, `load_kg` | the range, the speed, the mass of what it carries |
-| vehicle | `max_speed_mps` | the travel speed |
+| vehicle | `max_speed_mps`, `payload_kg` | the travel speed; the mass of the parts starting on its deck (`tray`), counted at the parked frame |
+| vehicle, aerial | `max_climb_mps`, `max_descent_mps` | the authored climb and descent rates |
+| vehicle, aerial | `flight_time_min` | the airborne time of the baked cycle — pass `requirements(timeline=tl)`; without it the comparison is left as a note |
 | I/O node | `di`, `do`, `ai`, `ao`, `safe_di`, `safe_do` | the points assigned to it |
 | pedestal / table | `load_kg` | the robots standing on it (base inside its top, at its height) and their tools |
 | power supply (`power_supply`) | `output_a` | the sum of `current_a` over the other lines |
@@ -43,6 +45,30 @@ A number the cell cannot supply is **not guessed**: a grasped part with no
 `mass_kg` leaves the payload out and adds a note (`requirement_incomplete`)
 saying which part to give a mass. Requirements are geometric and
 deterministic; there is no sizing, no safety evaluation, no choosing.
+
+A machine that *is* the robot — legs (`vehicle.legged`), or a whole
+airframe on an aerial vehicle (`vehicle.uav`) — has one BOM line, and its
+vehicle's requirements land on it, where the package's specs answer them.
+An aerial line nobody has identified is narrowed into the `vehicle.uav`
+category so `search_for` shops the one aisle that flies; ground vehicles
+keep the generic `vehicle` — cart, AGV or AMR stays your call.
+
+Flight time is a **cycle fact**, so it wants the baked cycle:
+
+```python
+tl = scene.simulate_sequences(["survey", "tend"])
+req = scene.requirements(timeline=tl)     # adds flight_time_min
+report = scene.check(timeline=tl)         # ... and compares it
+```
+
+The airborne seconds are read exactly off the vehicle's closed-form track
+(`tl.vehicle_airborne("drone")`): every moving span plus every hover above
+the starting pad — waiting *on* the pad costs nothing. This is a
+comparison against the manufacturer's declared hover endurance
+(`flight_time_min`, quoted with its payload and battery conditions on the
+catalog manifest), **not a battery model**: charge level, degradation and
+the shorter endurance under payload are not simulated. The reference
+altitude is where the machine starts parked.
 
 ## What the part says
 

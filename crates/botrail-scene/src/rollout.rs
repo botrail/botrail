@@ -817,6 +817,69 @@ impl SequenceTimeline {
             0.0
         })
     }
+
+    /// Seconds the vehicle `name` spent off its starting ground: every
+    /// span that moves it, plus every hold above the altitude it started
+    /// at. For an aerial machine this is the motor-on time a declared
+    /// flight time must cover — hover at a station counts, waiting on the
+    /// pad does not; for a ground machine it is simply its driving time.
+    /// The spans are closed form, so the figure is exact, not sampled.
+    /// `None` for a vehicle this timeline never drove (its ride is 0 s
+    /// only if the vehicle exists — the caller knows the scene).
+    pub fn vehicle_airborne(&self, name: &str) -> Option<f64> {
+        let track = self.vehicles.iter().find(|v| v.name == name)?;
+        let ground = track.spans.first().map(|span| match span {
+            TrackSpan::Hold { pose, .. }
+            | TrackSpan::Stowed { pose, .. }
+            | TrackSpan::Linear { from: pose, .. }
+            | TrackSpan::Pivot { from: pose, .. } => pose.translation.z,
+            TrackSpan::Follow { .. } => 0.0,
+        })?;
+        let airborne = |z: f64| z > ground + 1e-6;
+        Some(
+            track
+                .spans
+                .iter()
+                .map(|span| match span {
+                    TrackSpan::Hold { t0, t1, pose } | TrackSpan::Stowed { t0, t1, pose } => {
+                        if airborne(pose.translation.z) {
+                            t1 - t0
+                        } else {
+                            0.0
+                        }
+                    }
+                    // A vehicle frame never follows a robot; count it as
+                    // motion should that ever change.
+                    TrackSpan::Follow { t0, t1, .. } => t1 - t0,
+                    TrackSpan::Linear {
+                        t0,
+                        t1,
+                        from,
+                        velocity,
+                    } => {
+                        if velocity.norm() > 1e-9 || airborne(from.translation.z) {
+                            t1 - t0
+                        } else {
+                            0.0
+                        }
+                    }
+                    TrackSpan::Pivot {
+                        t0,
+                        t1,
+                        from,
+                        omega,
+                        ..
+                    } => {
+                        if omega.abs() > 1e-9 || airborne(from.translation.z) {
+                            t1 - t0
+                        } else {
+                            0.0
+                        }
+                    }
+                })
+                .sum(),
+        )
+    }
 }
 
 impl Scene {
@@ -944,6 +1007,8 @@ struct RobotRuntime {
     base: Option<Vec<TrackSpan>>,
     /// The legs, for a robot that walks its vehicle.
     gait: Option<GaitRuntime>,
+    /// The propellers, for a machine whose mount declares them.
+    spin: Option<SpinRuntime>,
 }
 
 impl RobotRuntime {
@@ -1004,6 +1069,22 @@ impl RobotRuntime {
 
 /// A walking robot's legs: the gait as resolved against its model, the
 /// plan of the drive in progress, and every footfall taken so far.
+/// A spinning mount's resolved state — a multirotor's propellers.
+/// Presentation only: the joints advance at their authored rates while the
+/// vehicle is off its starting ground (or moving at all), and each tick is
+/// baked so studio and USD replay the spin. No verdict reads the phase —
+/// the checking shape is the swept solid (design-drone.md §3.4).
+#[derive(Clone)]
+struct SpinRuntime {
+    /// The ridden vehicle's device name.
+    device: String,
+    /// The ground the machine starts parked on — the same reference
+    /// altitude `vehicle_airborne` measures against.
+    ground: f64,
+    /// `(joint index, signed rad/s)`.
+    joints: Vec<(usize, f64)>,
+}
+
 struct GaitRuntime {
     gait: crate::gait::ResolvedGait,
     offset: Isometry3<f64>,
@@ -1888,6 +1969,33 @@ impl Rollout {
                         carried: Vec::new(),
                     })
                 });
+                let spin = sr.mount.as_ref().and_then(|mount| {
+                    if mount.spin.is_empty() {
+                        return None;
+                    }
+                    let ground = world.devices().iter().find_map(|d| match &d.kind {
+                        crate::seq::DeviceKind::Vehicle { path, start, .. }
+                            if d.name == mount.device =>
+                        {
+                            path.station(start)
+                                .and_then(|at| path.waypoints.get(at))
+                                .map(|p| p.z)
+                        }
+                        _ => None,
+                    })?;
+                    let names = sr.model.actuated_joint_names();
+                    Some(SpinRuntime {
+                        device: mount.device.clone(),
+                        ground,
+                        joints: mount
+                            .spin
+                            .iter()
+                            .filter_map(|(joint, rate)| {
+                                names.iter().position(|n| n == joint).map(|i| (i, *rate))
+                            })
+                            .collect(),
+                    })
+                });
                 RobotRuntime {
                     times: vec![0.0],
                     positions: vec![q.clone()],
@@ -1901,6 +2009,7 @@ impl Rollout {
                     planned: Vec::new(),
                     base: sr.mount.as_ref().map(|_| Vec::new()),
                     gait,
+                    spin,
                 }
             })
             .collect();
@@ -2510,6 +2619,7 @@ impl Rollout {
         // Legs after the vehicles: a foot target is solved against where
         // the body is *now*.
         self.advance_gaits()?;
+        self.advance_spins();
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
         self.check_robot_collisions()?;
@@ -4817,6 +4927,50 @@ impl Rollout {
             self.place_carried(r);
         }
         Ok(())
+    }
+
+    /// One scan tick of every spinning mount — the propellers of a machine
+    /// whose vehicle is off its starting ground, or moving at all (the
+    /// same rule `vehicle_airborne` measures by). Presentation only: the
+    /// rotor joints advance at their authored signed rates and the tick is
+    /// baked, so studio and USD replay the spin; no verdict reads the
+    /// phase (the checking shape is the swept solid, design-drone.md §3.4).
+    fn advance_spins(&mut self) {
+        let dt = self.options.dt;
+        let t = self.t;
+        for r in 0..self.robots.len() {
+            let Some(spin) = self.robots[r].spin.clone() else {
+                continue;
+            };
+            let flying = self.devices.iter().any(|device| match device {
+                DeviceRuntime::Vehicle {
+                    name,
+                    position,
+                    legs,
+                    ..
+                } => *name == spin.device && (!legs.is_empty() || position.z > spin.ground + 1e-6),
+                _ => false,
+            });
+            if !flying {
+                continue;
+            }
+            let rt = &mut self.robots[r];
+            if rt.times.last().is_some_and(|last| *last > t + 1e-9) {
+                // A move's pre-baked future owns the track — an append
+                // would be dropped, so the phase holds with it.
+                continue;
+            }
+            let mut q = rt.q.clone();
+            for (joint, rate) in &spin.joints {
+                q[*joint] += rate * dt;
+            }
+            rt.q = q.clone();
+            let zeros = vec![0.0; q.len()];
+            rt.append_waypoint(t, q.clone(), zeros);
+            self.world
+                .set_joint_positions_for(r, q)
+                .expect("spin keeps the robot's DOF");
+        }
     }
 
     fn gait_tick(&mut self, r: usize, gr: &mut GaitRuntime) -> Result<(), SeqError> {
@@ -8802,6 +8956,131 @@ mod vehicle_tests {
             "mid = {:?}",
             mid.translation.vector
         );
+    }
+
+    #[test]
+    fn airborne_counts_flight_and_hover_but_not_the_pad() {
+        // Up (2.4/0.6), hover 1.5 s, down (2.4/0.9), 2 s on the pad, up
+        // again: everything counts except the wait on the pad. The figure
+        // is what a declared flight time must cover (design-drone.md §3.2).
+        let mut scene = drone_scene(
+            drone(
+                vec![Point3::new(0.0, 2.0, 0.0), Point3::new(0.0, 2.0, 2.4)],
+                vec![("pad".into(), 0), ("up".into(), 1)],
+                crate::seq::AerialYaw::Course,
+            ),
+            iso(0.0, 2.0, 0.06),
+        );
+        scene.upsert_sequence(Sequence {
+            name: "fly".into(),
+            steps: vec![
+                step("t1", vec![drone_goto("up")], drone_done()),
+                step("hover", vec![], Condition::Elapsed { seconds: 1.5 }),
+                step("l1", vec![drone_goto("pad")], drone_done()),
+                step("recharge", vec![], Condition::Elapsed { seconds: 2.0 }),
+                step("t2", vec![drone_goto("up")], drone_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("fly", &RolloutOptions::default())
+            .unwrap();
+        let airborne = tl.vehicle_airborne("drone").unwrap();
+        let expect = 2.4 / 0.6 + 1.5 + 2.4 / 0.9 + 2.4 / 0.6;
+        assert!(
+            (airborne - expect).abs() < 0.05,
+            "airborne = {airborne}, expect {expect}"
+        );
+        assert!((tl.duration - (expect + 2.0)).abs() < 0.05);
+        assert!(tl.vehicle_airborne("nope").is_none());
+    }
+
+    /// A machine with one free-spinning rotor and one limited fin — the
+    /// smallest model that can tell a rotor from a joint that must not spin.
+    const ROTORCRAFT: &str = r#"<robot name="rotorcraft">
+      <link name="body"/>
+      <link name="rotor"/>
+      <joint name="rotor_joint" type="continuous">
+        <parent link="body"/><child link="rotor"/>
+        <origin xyz="0 0 0.05"/><axis xyz="0 0 1"/>
+      </joint>
+      <link name="fin"/>
+      <joint name="tilt" type="revolute">
+        <parent link="body"/><child link="fin"/>
+        <origin xyz="0.1 0 0"/><axis xyz="0 1 0"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn a_spinning_mount_turns_in_the_air_and_rests_on_the_pad() {
+        use std::sync::Arc;
+        // Presentation only, but exact: the rotor's total turn equals
+        // rate x the airborne seconds `vehicle_airborne` reports — spin
+        // through the climb, the hover and the descent, none across the
+        // pad wait — and the limited fin never moves.
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(ROTORCRAFT).unwrap(),
+        ));
+        let mut device = drone(
+            vec![Point3::new(0.0, 2.0, 0.0), Point3::new(0.0, 2.0, 1.2)],
+            vec![("pad".into(), 0), ("up".into(), 1)],
+            crate::seq::AerialYaw::Course,
+        );
+        if let DeviceKind::Vehicle { body, .. } = &mut device.kind {
+            body.clear(); // the machine *is* the robot — a UAV mount
+        }
+        scene.upsert_device(device);
+        scene
+            .mount_robot_with(0, "drone", Some(Isometry3::identity()), None)
+            .unwrap();
+        // The declaration is validated, by name: unknown, limited, zero.
+        let err = scene
+            .set_mount_spin(0, vec![("nope".into(), 40.0)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not an actuated joint"), "{err}");
+        let err = scene
+            .set_mount_spin(0, vec![("tilt".into(), 40.0)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("continuous"), "{err}");
+        let err = scene
+            .set_mount_spin(0, vec![("rotor_joint".into(), 0.0)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-zero"), "{err}");
+        scene
+            .set_mount_spin(0, vec![("rotor_joint".into(), 40.0)])
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "fly".into(),
+            steps: vec![
+                step("t1", vec![drone_goto("up")], drone_done()),
+                step("hover", vec![], Condition::Elapsed { seconds: 1.0 }),
+                step("l1", vec![drone_goto("pad")], drone_done()),
+                step("recharge", vec![], Condition::Elapsed { seconds: 2.0 }),
+                step("t2", vec![drone_goto("up")], drone_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("fly", &RolloutOptions::default())
+            .unwrap();
+        let airborne = tl.vehicle_airborne("drone").unwrap();
+        let track = &tl.robots[0].trajectory;
+        let total = track.sample(tl.duration)[0] - track.sample(0.0)[0];
+        assert!(
+            (total - 40.0 * airborne).abs() < 1.0,
+            "rotor turned {total:.1} rad over {airborne:.2} s airborne"
+        );
+        // The pad wait spans ~[4.34, 6.34]: the phase holds across it.
+        let parked = track.sample(4.6)[0];
+        assert!(
+            (track.sample(6.2)[0] - parked).abs() < 1e-9,
+            "the rotor must rest on the pad"
+        );
+        assert!(track.sample(4.6)[0] > 1.0, "it flew first");
+        // The limited fin is never touched.
+        assert!(track.sample(tl.duration)[1].abs() < 1e-12);
     }
 
     #[test]

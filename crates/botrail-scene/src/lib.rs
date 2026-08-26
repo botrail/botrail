@@ -694,11 +694,56 @@ impl Scene {
             device: device.to_string(),
             offset,
             gait,
+            spin: Vec::new(),
         });
         self.set_robot_base_pose_for(robot, start * offset);
         if let Some(q) = stance {
             self.set_joint_positions_for(robot, q)?;
         }
+        Ok(())
+    }
+
+    /// Declares the mounted machine's free-spinning joints — a
+    /// multirotor's propellers, turned at `rate` rad/s (signed, so
+    /// counter-rotating pairs read right) while its vehicle is off the
+    /// ground it started on, or moving at all. Presentation only: the
+    /// spin is baked into the joint track for studio and USD, and no
+    /// check reads the phase — the collision stays the swept solid the
+    /// catalog authors (design-drone.md §3.4). Continuous joints only.
+    pub fn set_mount_spin(
+        &mut self,
+        robot: usize,
+        spin: Vec<(String, f64)>,
+    ) -> Result<(), SceneError> {
+        if self.robots[robot].mount.is_none() {
+            return Err(SceneError::BadMount(
+                "spin needs a mounted robot — call mount_robot first".to_string(),
+            ));
+        }
+        let model = &self.robots[robot].model;
+        let names = model.actuated_joint_names();
+        let limits = model.actuated_joint_limits();
+        for (joint, rate) in &spin {
+            let Some(index) = names.iter().position(|n| n == joint) else {
+                return Err(SceneError::BadMount(format!(
+                    "spin joint `{joint}` is not an actuated joint of this robot (joints: {})",
+                    names.join(", ")
+                )));
+            };
+            if limits[index].is_some() {
+                return Err(SceneError::BadMount(format!(
+                    "spin joint `{joint}` has position limits — a spun joint must be \
+                     continuous (a rotor), or the spin would drive it through its stops"
+                )));
+            }
+            if !rate.is_finite() || *rate == 0.0 {
+                return Err(SceneError::BadMount(format!(
+                    "spin joint `{joint}`: rate {rate} rad/s — state a finite, non-zero \
+                     signed rate, or drop the joint"
+                )));
+            }
+        }
+        self.robots[robot].mount.as_mut().expect("mounted").spin = spin;
         Ok(())
     }
 

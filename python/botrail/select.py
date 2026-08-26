@@ -20,7 +20,7 @@ same column. The keys, and the attribute names that answer them
 
 | requirement            | derived from                                               | answered by                                  |
 |------------------------|------------------------------------------------------------|----------------------------------------------|
-| `payload_kg`           | tool mass + the heaviest part the robot grasps             | `payload_kg`                                 |
+| `payload_kg`           | tool mass + the heaviest part the robot grasps; parts riding a vehicle's deck at start | `payload_kg`                                 |
 | `reach_mm`             | the farthest taught target from the base, plus a margin    | `reach_mm`                                   |
 | `stroke_mm`            | the smallest side of the grasped parts (parallel gripper)  | `stroke_mm`, `opening_mm`                    |
 | `sensing_range_mm`     | a beam sensor's span                                       | `sensing_range_mm`, `range_mm`, `max_range_mm` |
@@ -29,6 +29,9 @@ same column. The keys, and the attribute names that answer them
 | `length_mm`, `width_mm`| a conveyor's zone along and across its belt                | `length_mm` / `width_mm`, `belt_width_mm`    |
 | `speed_mps`            | a conveyor's belt speed, an axis speed                     | `max_speed_mps`, `speed_max_mps`, `speed_mps`|
 | `max_speed_mps`        | a vehicle's travel speed                                   | the same                                     |
+| `max_climb_mps`        | an aerial vehicle's climb rate                             | the same                                     |
+| `max_descent_mps`      | an aerial vehicle's descent rate                           | the same                                     |
+| `flight_time_min`      | an aerial vehicle's airborne time per cycle, from the baked timeline (`requirements(timeline=tl)`) | the same |
 | `load_kg`              | parts on a conveyor / an axis; robots standing on a pedestal | `load_kg`, `capacity_kg`, `max_load_kg`, `payload_kg` |
 | `output_a`             | the sum of `current_a` over the other lines (power supply) | `output_a`, `current_a`                      |
 | `di` `do` `ai` `ao` `safe_di` `safe_do` | points assigned to an I/O node                | the node's declared channels                 |
@@ -70,6 +73,9 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "width_mm": ("width_mm", "belt_width_mm"),
     "speed_mps": ("max_speed_mps", "speed_max_mps", "speed_mps"),
     "max_speed_mps": ("max_speed_mps", "speed_max_mps", "speed_mps"),
+    "max_climb_mps": ("max_climb_mps",),
+    "max_descent_mps": ("max_descent_mps",),
+    "flight_time_min": ("flight_time_min",),
     "load_kg": ("load_kg", "capacity_kg", "max_load_kg", "payload_kg"),
     "output_a": ("output_a", "current_a"),
     "di": ("di",),
@@ -382,24 +388,37 @@ class CheckReport:
 # ------------------------------------------------------------- derivation
 
 
-def requirements(scene, *, sequences: Optional[list[str]] = None, margin: float = 0.1) -> Requirements:
+def requirements(
+    scene, *, sequences: Optional[list[str]] = None, margin: float = 0.1, timeline=None
+) -> Requirements:
     """Derive what every BOM line must be able to do from the cell it is in,
     and compare it with what the chosen part says (its catalog specs or the
     attributes typed on `set_part`).
 
     `sequences` limits the programs whose grasps and I/O points are counted
-    (default: all). `margin` is added to the reach requirement (0.1 = 10 %).
-    Nothing is chosen and nothing is sized: a number the cell cannot supply
-    (a grasped part with no `mass_kg`) becomes a note, not a guess.
+    (default: all). `margin` is added to the reach and flight-time
+    requirements (0.1 = 10 %). `timeline` is an optional baked
+    `simulate_sequences` result: cycle facts only it can supply — an aerial
+    vehicle's airborne time — are derived from it, and left as a note when
+    it is absent. Nothing is chosen and nothing is sized: a number the cell
+    cannot supply (a grasped part with no `mass_kg`) becomes a note, not a
+    guess.
     """
     if margin < 0:
         raise ValueError("margin must be >= 0")
-    cell = _Cell(scene, sequences)
+    cell = _Cell(scene, sequences, timeline)
     rows: list[Row] = []
     for bom_row in scene.bom().rows:
         names = list(bom_row["names"])
         category = bom_row["category"] or ""
         kind = cell.kind_of(names[0], category)
+        identified = bool(bom_row.get("catalog") or bom_row.get("model") or bom_row.get("manufacturer"))
+        if category in ("", "vehicle", "robot"):
+            # The derived default categories. An aerial machine is shopped
+            # in one aisle: narrow them so `search_for` looks there. A
+            # category an author or a catalog identity stated is never one
+            # of these, so it is never overridden.
+            category = cell.category_hint(names[0], kind) or category
         reqs: list[Requirement] = []
         notes: list[str] = []
         for name in names:
@@ -408,7 +427,6 @@ def requirements(scene, *, sequences: Optional[list[str]] = None, margin: float 
             notes += n
         reqs = _merge(reqs)
         attributes = dict(bom_row.get("attributes") or {})
-        identified = bool(bom_row.get("catalog") or bom_row.get("model") or bom_row.get("manufacturer"))
         if kind == "io_node":
             # A node's "provided" is what it declares: its channels by kind.
             attributes = {**cell.node_capacity(names[0]), **attributes}
@@ -440,11 +458,12 @@ def requirements(scene, *, sequences: Optional[list[str]] = None, margin: float 
     return Requirements(rows, margin=margin, sequences=cell.sequence_names)
 
 
-def check(scene, *, sequences: Optional[list[str]] = None) -> CheckReport:
+def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> CheckReport:
     """Every static check in one report: the I/O lint, each sequence walked
     for dangling references, unidentified equipment lines (with what the
-    cell asks of them) and the requirement comparison. Errors make `ok`
-    false; `botrail check` prints exactly this."""
+    cell asks of them) and the requirement comparison. `timeline` (a baked
+    cycle) adds the cycle-fact requirements — an aerial vehicle's flight
+    time. Errors make `ok` false; `botrail check` prints exactly this."""
     findings: list[Finding] = []
     io_error: Optional[str] = None
     try:
@@ -462,7 +481,7 @@ def check(scene, *, sequences: Optional[list[str]] = None) -> CheckReport:
         except ValueError as e:
             if io_error is None:
                 findings.append(Finding("error", "sequence", f"{name}: {e}", name))
-    req = requirements(scene, sequences=sequences)
+    req = requirements(scene, sequences=sequences, timeline=timeline)
     unidentified = {tuple(r["names"]) for r in scene.bom().unidentified()}
     for row in req.rows:
         if tuple(row.names) in unidentified:
@@ -480,8 +499,9 @@ def check(scene, *, sequences: Optional[list[str]] = None) -> CheckReport:
 class _Cell:
     """Everything the derivations read, indexed once from the project JSON."""
 
-    def __init__(self, scene, sequences: Optional[list[str]]) -> None:
+    def __init__(self, scene, sequences: Optional[list[str]], timeline=None) -> None:
         self.scene = scene
+        self.timeline = timeline
         self.project = json.loads(scene._project_json())
         self.robots: list[str] = list(scene.robots)
         self.default_robot = self.robots[0] if self.robots else None
@@ -497,6 +517,11 @@ class _Cell:
         self.obstacles: dict[str, dict] = {o["name"]: o for o in self.project.get("obstacles") or []}
         self.sensors: dict[str, dict] = {s["name"]: s["kind"] for s in self.project.get("sensors") or []}
         self.devices: dict[str, dict] = {d["name"]: d["kind"] for d in self.project.get("devices") or []}
+        self.mounts: dict[str, dict] = {
+            (r.get("name") or self.default_robot): r["mount"]
+            for r in self.project.get("robots") or []
+            if r.get("mount")
+        }
         io = self.project.get("io") or {}
         self.nodes: dict[str, dict] = {n["name"]: n for n in io.get("nodes") or []}
         self.parts: dict[tuple[str, str], dict] = {(p["target"], p["kind"]): p for p in scene.parts()}
@@ -541,6 +566,38 @@ class _Cell:
             return "obstacle"
         return "group"
 
+    def vehicle_of(self, robot: str) -> Optional[str]:
+        """The vehicle merged into this robot's BOM line — the machine *is*
+        the robot: legs (a gait mount), or the whole airframe (a rigid mount
+        on a vehicle with no body of its own — a UAV). Mirrors `Scene::bom`,
+        including the escape: a part pinned on the device keeps it a line of
+        its own, so the robot does not absorb its requirements."""
+        mount = self.mounts.get(robot)
+        if not mount:
+            return None
+        device = mount.get("device")
+        kind = self.devices.get(device)
+        if not kind or kind.get("kind") != "vehicle" or (device, "device") in self.parts:
+            return None
+        if mount.get("gait") or not kind.get("body"):
+            return device
+        return None
+
+    def category_hint(self, name: str, kind: str) -> Optional[str]:
+        """A shopping aisle for a line the author left with the derived
+        default category. Only the aerial machine has exactly one aisle;
+        ground vehicles stay unhinted (cart, AGV or AMR is a choice)."""
+        if kind == "device":
+            device = self.devices.get(name)
+        elif kind == "robot":
+            ridden = self.vehicle_of(name)
+            device = self.devices.get(ridden) if ridden else None
+        else:
+            return None
+        if device and device.get("kind") == "vehicle" and device.get("aerial"):
+            return "vehicle.uav"
+        return None
+
     def derive(self, name: str, kind: str, category: str, margin: float) -> tuple[list[Requirement], list[str]]:
         if kind == "robot":
             return self._robot(name, margin)
@@ -549,7 +606,7 @@ class _Cell:
         if kind == "sensor":
             return self._sensor(name, category)
         if kind == "device":
-            return self._device(name)
+            return self._device(name, margin)
         if kind == "io_node":
             return self._node(name)
         return self._structure(name, category)
@@ -738,6 +795,13 @@ class _Cell:
                     basis=f"farthest taught target {farthest:.2f} m from the base ({where}), +{margin:.0%}",
                 )
             )
+        ridden = self.vehicle_of(name)
+        if ridden is not None:
+            # The machine is the robot (legs, or a whole airframe): what the
+            # cell asks of its vehicle lands on the same line its specs do.
+            r, n = self._vehicle(ridden, self.devices[ridden], margin)
+            reqs += r
+            notes += n
         return reqs, notes
 
     def _tool(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:
@@ -802,7 +866,7 @@ class _Cell:
             )
         return reqs, []
 
-    def _device(self, name: str) -> tuple[list[Requirement], list[str]]:
+    def _device(self, name: str, margin: float) -> tuple[list[Requirement], list[str]]:
         kind = self.devices.get(name)
         if not kind:
             return [], []
@@ -846,10 +910,110 @@ class _Cell:
             if unknown:
                 notes.append(f"load counts no mass for {', '.join(unknown)} — give them mass_kg on set_part")
         elif k == "vehicle":
-            speed = float(kind.get("speed") or 0.0)
-            if speed > _EPS:
-                reqs.append(Requirement("max_speed_mps", _round(speed, 3), basis="travel speed"))
+            r, n = self._vehicle(name, kind, margin)
+            reqs += r
+            notes += n
         return reqs, notes
+
+    def _vehicle(self, name: str, kind: dict, margin: float) -> tuple[list[Requirement], list[str]]:
+        reqs: list[Requirement] = []
+        notes: list[str] = []
+        speed = float(kind.get("speed") or 0.0)
+        if speed > _EPS:
+            reqs.append(Requirement("max_speed_mps", _round(speed, 3), basis="travel speed"))
+        aerial = kind.get("aerial")
+        if aerial:
+            reqs.append(Requirement("max_climb_mps", _round(float(aerial["climb_speed"]), 3), basis="climb rate"))
+            reqs.append(
+                Requirement("max_descent_mps", _round(float(aerial["descent_speed"]), 3), basis="descent rate")
+            )
+            # Flight time is a cycle fact, so it needs the baked cycle: the
+            # airborne seconds are read exactly off the vehicle's closed-form
+            # track — every moving span, plus every hover above the starting
+            # pad (waiting *on* the pad costs nothing). This is a comparison
+            # against the declared hover endurance, not a battery model.
+            if self.timeline is None:
+                notes.append("flight time not compared — bake the cycle and pass requirements(timeline=tl)")
+            else:
+                try:
+                    airborne = float(self.timeline.vehicle_airborne(name))
+                except ValueError as e:
+                    airborne = 0.0
+                    notes.append(f"flight time not compared — {e}")
+                if airborne > _EPS:
+                    reqs.append(
+                        Requirement(
+                            "flight_time_min",
+                            _round(airborne * (1.0 + margin) / 60.0, 2),
+                            basis=f"airborne {airborne:.1f} s per cycle, +{margin:.0%}",
+                        )
+                    )
+        tray = kind.get("tray")
+        frame = self._parked_frame(kind) if tray else None
+        if frame is not None:
+            position, quaternion = frame
+            pose = tray["pose"]
+            offset = _rotate(quaternion, pose["position"])
+            zone_position = tuple(position[i] + offset[i] for i in range(3))
+            zone_quaternion = _quat_mul(quaternion, pose["quaternion"])
+            body = set(kind.get("body") or [])
+            carried = [o for o in self._objects_in(zone_position, zone_quaternion, tray["size"]) if o not in body]
+            load, unknown = self._total_mass(carried)
+            if len(carried) > len(unknown):
+                reqs.append(
+                    Requirement("payload_kg", _round(load, 3), basis=f"{len(carried)} part(s) on the deck at start")
+                )
+            if unknown:
+                notes.append(f"deck load counts no mass for {', '.join(unknown)} — give them mass_kg on set_part")
+        return reqs, notes
+
+    def _parked_frame(self, kind: dict) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float, float]]]:
+        """World pose of the vehicle parked at its start station — a mirror
+        of `VehiclePath::frame_at` (the studio keeps the same mirror in TS):
+        the heading faces the leg leaving the waypoint (wrapping on a ring),
+        or the leg arriving when nothing leaves."""
+        path = kind.get("path") or {}
+        waypoints = [(list(w) + [0.0])[:3] for w in path.get("waypoints") or []]
+        stations = {s["name"]: int(s["index"]) for s in path.get("stations") or []}
+        at = stations.get(kind.get("start"))
+        n = len(waypoints)
+        if at is None or not 0 <= at < n:
+            return None
+        ring = bool(path.get("ring"))
+
+        def direction(i: int, j: int) -> Optional[float]:
+            dx = waypoints[j][0] - waypoints[i][0]
+            dy = waypoints[j][1] - waypoints[i][1]
+            # Heading is about +Z: only the horizontal run can set it.
+            return math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-9 else None
+
+        heading: Optional[float] = None
+        for step in range(1, n):
+            if ring:
+                j = (at + step) % n
+            elif at + step < n:
+                j = at + step
+            else:
+                break
+            heading = direction(at, j)
+            if heading is not None:
+                break
+        if heading is None:
+            for step in range(1, n):
+                if ring:
+                    j = (at + n - (step % n)) % n
+                elif step <= at:
+                    j = at - step
+                else:
+                    break
+                heading = direction(j, at)
+                if heading is not None:
+                    break
+        if heading is None:
+            heading = 0.0
+        p = waypoints[at]
+        q = (0.0, 0.0, math.sin(heading / 2.0), math.cos(heading / 2.0))
+        return (float(p[0]), float(p[1]), float(p[2])), q
 
     def _node(self, name: str) -> tuple[list[Requirement], list[str]]:
         counts: dict[str, int] = {}
@@ -1071,6 +1235,18 @@ def _rotate(q, v) -> tuple[float, float, float]:
 def _rotate_inverse(q, v) -> tuple[float, float, float]:
     x, y, z, w = (float(c) for c in q)
     return _rotate((-x, -y, -z, w), v)
+
+
+def _quat_mul(a, b) -> tuple[float, float, float, float]:
+    """Compose unit quaternions `a ∘ b`, both `(x, y, z, w)`."""
+    ax, ay, az, aw = (float(c) for c in a)
+    bx, by, bz, bw = (float(c) for c in b)
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
 
 
 def _extent_along(size, local_dir) -> float:

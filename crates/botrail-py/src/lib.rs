@@ -793,7 +793,12 @@ impl Scene {
     /// walks whenever the vehicle drives, and stands in the gait's stance
     /// when it does not. The offset then defaults to the one that puts the
     /// stance feet on the vehicle plane, and the robot is set to its stance.
-    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None))]
+    /// `spin` is presentation: `{joint: rad/s}` turned while the vehicle
+    /// is off its starting ground or moving — a multirotor's propellers,
+    /// signed so counter-rotating pairs read right. Continuous joints
+    /// only; no check reads the phase (the collision stays the swept
+    /// solid the catalog authors).
+    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None, spin = None))]
     fn mount_robot(
         &self,
         device: &str,
@@ -801,6 +806,7 @@ impl Scene {
         offset_quaternion: Option<[f64; 4]>,
         robot: Option<&str>,
         gait: Option<&Bound<'_, PyAny>>,
+        spin: Option<std::collections::BTreeMap<String, f64>>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
         let gait = gait.map(gait_from_py).transpose()?;
@@ -809,8 +815,9 @@ impl Scene {
             (None, None, Some(_)) => None,
             (position, quaternion, _) => Some(pose_from(position.unwrap_or([0.0; 3]), quaternion)),
         };
+        let spin = spin.map(|m| m.into_iter().collect()).unwrap_or_default();
         self.hub
-            .mount_robot_with(index, device, offset, gait)
+            .mount_robot_with(index, device, offset, gait, spin)
             .map_err(scene_err)
     }
 
@@ -2850,17 +2857,19 @@ impl Scene {
     /// and compared with what the chosen part says. Returns a
     /// `bt.select.Requirements` (rows, `findings()`, `to_markdown()`,
     /// `to_json()`); botrail derives and compares — it does not choose.
-    #[pyo3(signature = (*, sequences = None, margin = 0.1))]
+    #[pyo3(signature = (*, sequences = None, margin = 0.1, timeline = None))]
     fn requirements(
         slf: Py<Self>,
         py: Python<'_>,
         sequences: Option<Vec<String>>,
         margin: f64,
+        timeline: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let module = py.import("botrail.select")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("sequences", sequences)?;
         kwargs.set_item("margin", margin)?;
+        kwargs.set_item("timeline", timeline)?;
         Ok(module
             .getattr("requirements")?
             .call((slf,), Some(&kwargs))?
@@ -2872,11 +2881,17 @@ impl Scene {
     /// the requirement comparison (`spec_short` / `spec_unknown`). Returns
     /// a `bt.select.CheckReport` (`ok`, `findings`, `to_json()`,
     /// `to_markdown()`); `botrail check` prints the same thing.
-    #[pyo3(signature = (*, sequences = None))]
-    fn check(slf: Py<Self>, py: Python<'_>, sequences: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*, sequences = None, timeline = None))]
+    fn check(
+        slf: Py<Self>,
+        py: Python<'_>,
+        sequences: Option<Vec<String>>,
+        timeline: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let module = py.import("botrail.select")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("sequences", sequences)?;
+        kwargs.set_item("timeline", timeline)?;
         Ok(module
             .getattr("check")?
             .call((slf,), Some(&kwargs))?
@@ -4896,6 +4911,28 @@ impl SequenceTimeline {
                 )
             })
             .collect()
+    }
+
+    /// Seconds the vehicle spent off its starting ground: every span that
+    /// moves it, plus every hold above the altitude it started at — exact,
+    /// the spans are closed form. For an aerial machine this is the
+    /// motor-on time a declared `flight_time_min` must cover (hover at a
+    /// station counts, waiting on the pad does not); for a ground machine
+    /// it is simply its driving time. A vehicle that never drove flew 0 s.
+    fn vehicle_airborne(&self, name: &str) -> PyResult<f64> {
+        if let Some(seconds) = self.inner.vehicle_airborne(name) {
+            return Ok(seconds);
+        }
+        let exists = self.scene.devices().iter().any(|d| {
+            d.name == name && matches!(d.kind, botrail_scene::seq::DeviceKind::Vehicle { .. })
+        });
+        if exists {
+            Ok(0.0)
+        } else {
+            Err(PyValueError::new_err(format!(
+                "`{name}` is not a vehicle of this timeline's scene"
+            )))
+        }
     }
 
     /// Where a mounted robot's base was at time `t` — `None` for a robot

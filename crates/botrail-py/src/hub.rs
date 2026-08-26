@@ -322,8 +322,15 @@ impl SceneHub {
         device: &str,
         offset: Option<Isometry3<f64>>,
         gait: Option<botrail_scene::seq::GaitSpec>,
+        spin: Vec<(String, f64)>,
     ) -> Result<(), SceneError> {
-        let result = self.with_scene(|scene| scene.mount_robot_with(robot, device, offset, gait));
+        let result = self.with_scene(|scene| {
+            scene.mount_robot_with(robot, device, offset, gait)?;
+            if !spin.is_empty() {
+                scene.set_mount_spin(robot, spin.clone())?;
+            }
+            Ok(())
+        });
         if result.is_ok() {
             botrail_session::emit_state(self);
         }
