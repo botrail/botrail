@@ -597,6 +597,16 @@ pub enum SensorKindMsg {
         to: [f64; 3],
         radius: f64,
     },
+    /// Vision presence: ON while a watched body overlaps the named
+    /// camera's view frustum (occlusion-tested against other obstacles).
+    Vision {
+        camera: String,
+        /// Detection band along the view axis (m); `None` = the camera's
+        /// near/far clip.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detect_range: Option<[f64; 2]>,
+        occlusion: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -615,6 +625,40 @@ pub enum SensorWatchMsg {
         names: Vec<String>,
     },
     All,
+}
+
+/// A camera: a named viewpoint with pinhole optics. Presentation only —
+/// it publishes no signal (a vision sensor referencing it is the planned
+/// signal path).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CameraMsg {
+    pub name: String,
+    pub mount: CameraMountMsg,
+    /// Offset in the mount frame (world pose for a `world` mount).
+    /// -Z is the view direction, +Y is image-up.
+    pub pose: PoseMsg,
+    /// Horizontal field of view, degrees.
+    pub fov_deg: f64,
+    /// Image size in pixels (frustum aspect, export pixel size).
+    pub resolution: [u32; 2],
+    pub near: f64,
+    pub far: f64,
+}
+
+/// What a camera is bolted to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CameraMountMsg {
+    /// A fixture; the pose is a world pose.
+    World,
+    /// Rides a vehicle device.
+    Vehicle { device: String },
+    /// Bolted to a robot link (a wrist camera).
+    Link { robot: String, link: String },
 }
 
 /// A scripted auxiliary device commanded from sequences.
@@ -1154,6 +1198,10 @@ pub enum ServerMessage {
     Devices {
         devices: Vec<DeviceMsg>,
     },
+    /// The full camera list; resent on every change.
+    Cameras {
+        cameras: Vec<CameraMsg>,
+    },
     /// The full scenario list; resent on every change.
     Scenarios {
         scenarios: Vec<ScenarioMsg>,
@@ -1394,6 +1442,13 @@ pub enum ClientMessage {
         device: DeviceMsg,
     },
     RemoveDevice {
+        name: String,
+    },
+    /// Add or replace a camera.
+    UpsertCamera {
+        camera: CameraMsg,
+    },
+    RemoveCamera {
         name: String,
     },
     /// I/O map edits (the assignment layer — nodes, bindings,
@@ -1916,6 +1971,15 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
                 to: [to.x, to.y, to.z],
                 radius: *radius,
             },
+            SensorKind::Vision {
+                camera,
+                detect_range,
+                occlusion,
+            } => SensorKindMsg::Vision {
+                camera: camera.clone(),
+                detect_range: *detect_range,
+                occlusion: *occlusion,
+            },
         },
         watch: match &sensor.watch {
             SensorWatch::Objects(names) => SensorWatchMsg::Objects {
@@ -1945,6 +2009,15 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
                 to: nalgebra::Point3::new(to[0], to[1], to[2]),
                 radius: *radius,
             },
+            SensorKindMsg::Vision {
+                camera,
+                detect_range,
+                occlusion,
+            } => SensorKind::Vision {
+                camera: camera.clone(),
+                detect_range: *detect_range,
+                occlusion: *occlusion,
+            },
         },
         watch: match &msg.watch {
             SensorWatchMsg::Objects { names } => SensorWatch::Objects(names.clone()),
@@ -1953,6 +2026,55 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
             SensorWatchMsg::Robot => SensorWatch::Robot,
             SensorWatchMsg::All => SensorWatch::All,
         },
+    }
+}
+
+pub fn camera_msg(camera: &crate::seq::Camera) -> CameraMsg {
+    CameraMsg {
+        name: camera.name.clone(),
+        mount: match &camera.mount {
+            crate::seq::CameraMount::World => CameraMountMsg::World,
+            crate::seq::CameraMount::Vehicle { device } => CameraMountMsg::Vehicle {
+                device: device.clone(),
+            },
+            crate::seq::CameraMount::Link { robot, link } => CameraMountMsg::Link {
+                robot: robot.clone(),
+                link: link.clone(),
+            },
+        },
+        pose: PoseMsg::from(&camera.pose),
+        fov_deg: camera.fov_deg,
+        resolution: camera.resolution,
+        near: camera.near,
+        far: camera.far,
+    }
+}
+
+pub fn camera_from_msg(msg: &CameraMsg) -> crate::seq::Camera {
+    crate::seq::Camera {
+        name: msg.name.clone(),
+        mount: match &msg.mount {
+            CameraMountMsg::World => crate::seq::CameraMount::World,
+            CameraMountMsg::Vehicle { device } => crate::seq::CameraMount::Vehicle {
+                device: device.clone(),
+            },
+            CameraMountMsg::Link { robot, link } => crate::seq::CameraMount::Link {
+                robot: robot.clone(),
+                link: link.clone(),
+            },
+        },
+        pose: (&msg.pose).into(),
+        fov_deg: msg.fov_deg,
+        resolution: msg.resolution,
+        near: msg.near,
+        far: msg.far,
+    }
+}
+
+/// The full camera list as a `cameras` message.
+pub fn cameras_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Cameras {
+        cameras: scene.cameras().iter().map(camera_msg).collect(),
     }
 }
 

@@ -113,13 +113,15 @@ export function samplePlayback(
     if (base && base.length > 0) {
       (bases ??= {})[name] = samplePose(trajectory.times, base, t);
     }
+    // Joints always (the USD appliers and the joint panel read them);
+    // world link poses too when the wire carries them — URDF robots, and
+    // USD robots with a link-mounted camera to place.
+    (joints ??= {})[name] = sampleJoints(trajectory, t);
     if (trajectory.link_poses) {
       (poses ??= {})[name] = samplePoses(
         { ...trajectory, link_poses: trajectory.link_poses },
         t,
       );
-    } else {
-      (joints ??= {})[name] = sampleJoints(trajectory, t);
     }
   }
   let vehicles: Record<string, PoseMsg> | null = null;

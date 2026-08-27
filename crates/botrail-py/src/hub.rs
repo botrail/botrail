@@ -734,8 +734,8 @@ impl SceneHub {
         })
     }
 
-    pub fn upsert_sensor(&self, sensor: botrail_scene::seq::Sensor) {
-        botrail_session::upsert_sensor(self, sensor);
+    pub fn upsert_sensor(&self, sensor: botrail_scene::seq::Sensor) -> Result<(), SceneError> {
+        botrail_session::upsert_sensor(self, sensor)
     }
 
     pub fn upsert_io_node(&self, node: botrail_scene::iomap::IoNode) -> Result<(), SceneError> {
@@ -811,6 +811,18 @@ impl SceneHub {
 
     pub fn sensor_names(&self) -> Vec<String> {
         self.with_scene(|scene| scene.sensors().iter().map(|s| s.name.clone()).collect())
+    }
+
+    pub fn upsert_camera(&self, camera: botrail_scene::seq::Camera) -> Result<(), SceneError> {
+        botrail_session::upsert_camera(self, camera)
+    }
+
+    pub fn remove_camera(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_camera(self, name)
+    }
+
+    pub fn camera_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.cameras().iter().map(|c| c.name.clone()).collect())
     }
 
     pub fn add_scenario(&self, scenario: botrail_scene::seq::Scenario) -> Result<(), SceneError> {
@@ -984,6 +996,7 @@ impl SceneHub {
             times: &times,
             objects: &objects,
             curves: &[],
+            cameras: &[],
         };
         let options = botrail_usd::export::ExportOptions { fps };
         botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())

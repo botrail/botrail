@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type {
+  CameraMsg,
   DeviceMsg,
   PoseMsg,
   SensorMsg,
@@ -8,8 +9,10 @@ import type {
 } from "../protocol";
 import { useStudioStore } from "../store";
 import {
+  sendRemoveCamera,
   sendRemoveDevice,
   sendRemoveSensor,
+  sendUpsertCamera,
   sendUpsertDevice,
   sendUpsertSensor,
 } from "../ws";
@@ -60,9 +63,11 @@ function watchLabel(watch: SensorWatchMsg): string {
 export function SensorDevicePanel() {
   const sensors = useStudioStore((s) => s.sensors);
   const devices = useStudioStore((s) => s.devices);
+  const cameras = useStudioStore((s) => s.cameras);
   const selection = useStudioStore((s) => s.selection);
   const selectSensor = useStudioStore((s) => s.selectSensor);
   const selectDevice = useStudioStore((s) => s.selectDevice);
+  const selectCamera = useStudioStore((s) => s.selectCamera);
   const selectedObstacle = selection.type === "obstacle" ? selection.name : null;
 
   // New sensors watch the selected obstacle when there is one — placing a
@@ -132,6 +137,37 @@ export function SensorDevicePanel() {
     selectDevice(name);
   };
 
+  const addVision = () => {
+    // The optics come from a camera; default to the one being watched.
+    const camera =
+      useStudioStore.getState().pipCamera ?? cameras[0]?.name ?? null;
+    if (!camera) return;
+    const name = freshName("vision", sensors);
+    sendUpsertSensor({
+      name,
+      kind: { kind: "vision", camera, detect_range: null, occlusion: true },
+      watch: defaultWatch(),
+      mount: null,
+    });
+    selectSensor(name);
+  };
+
+  const addCamera = () => {
+    const name = freshName("camera", cameras);
+    // Identity quaternion looks straight down (-Z view in a Z-up world):
+    // a bird's-eye camera out of the box; aim it with the rotate gizmo.
+    sendUpsertCamera({
+      name,
+      mount: { kind: "world" },
+      pose: at([0.8, 0, 1.6]),
+      fov_deg: 60,
+      resolution: [1280, 720],
+      near: 0.05,
+      far: 30,
+    });
+    selectCamera(name);
+  };
+
   const editedSensor =
     selection.type === "sensor"
       ? (sensors.find((s) => s.name === selection.name) ?? null)
@@ -139,6 +175,10 @@ export function SensorDevicePanel() {
   const editedDevice =
     selection.type === "device"
       ? (devices.find((d) => d.name === selection.name) ?? null)
+      : null;
+  const editedCamera =
+    selection.type === "camera"
+      ? (cameras.find((c) => c.name === selection.name) ?? null)
       : null;
 
   return (
@@ -161,17 +201,32 @@ export function SensorDevicePanel() {
           >
             + Axis
           </button>
+          <button
+            onClick={addCamera}
+            title="camera viewpoint (frustum gizmo; picture is presentation only)"
+          >
+            + Camera
+          </button>
+          <button
+            onClick={addVision}
+            disabled={cameras.length === 0}
+            title="vision presence sensor looking through a camera (frustum test)"
+          >
+            + Vision
+          </button>
         </div>
 
         {editedSensor ? (
           <SensorForm sensor={editedSensor} selectedObstacle={selectedObstacle} />
         ) : editedDevice ? (
           <DeviceForm device={editedDevice} />
+        ) : editedCamera ? (
+          <CameraForm camera={editedCamera} />
         ) : (
           <div className="hint">
-            {sensors.length === 0 && devices.length === 0
-              ? "no sensors or devices"
-              : "select a sensor or device in the scene tree to edit it"}
+            {sensors.length === 0 && devices.length === 0 && cameras.length === 0
+              ? "no sensors, devices or cameras"
+              : "select a sensor, device or camera in the scene tree to edit it"}
           </div>
         )}
       </div>
@@ -186,9 +241,14 @@ function SensorForm({
   sensor: SensorMsg;
   selectedObstacle: string | null;
 }) {
+  const cameras = useStudioStore((s) => s.cameras);
   const commit = (patch: Partial<SensorMsg>) =>
     sendUpsertSensor({ ...sensor, ...patch });
   const { kind } = sensor;
+  const visionCamera =
+    kind.kind === "vision"
+      ? (cameras.find((c) => c.name === kind.camera) ?? null)
+      : null;
 
   return (
     <div className="obstacle-form">
@@ -234,6 +294,75 @@ function SensorForm({
             min={0.001}
             onCommit={(radius) => commit({ kind: { ...kind, radius } })}
           />
+        </>
+      )}
+      {kind.kind === "vision" && (
+        <>
+          <label className="field num-field">
+            <span className="field-label">camera</span>
+            <select
+              value={kind.camera}
+              onChange={(e) =>
+                commit({ kind: { ...kind, camera: e.target.value } })
+              }
+            >
+              {cameras.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <NumField
+            label="near"
+            value={kind.detect_range?.[0] ?? visionCamera?.near ?? 0.05}
+            min={0.001}
+            onCommit={(a) =>
+              commit({
+                kind: {
+                  ...kind,
+                  detect_range: [
+                    a,
+                    kind.detect_range?.[1] ?? visionCamera?.far ?? 30,
+                  ],
+                },
+              })
+            }
+          />
+          <NumField
+            label="far"
+            value={kind.detect_range?.[1] ?? visionCamera?.far ?? 30}
+            min={0.01}
+            onCommit={(b) =>
+              commit({
+                kind: {
+                  ...kind,
+                  detect_range: [
+                    kind.detect_range?.[0] ?? visionCamera?.near ?? 0.05,
+                    b,
+                  ],
+                },
+              })
+            }
+          />
+          {kind.detect_range && (
+            <button
+              title="follow the camera's near/far clip again"
+              onClick={() => commit({ kind: { ...kind, detect_range: null } })}
+            >
+              camera range
+            </button>
+          )}
+          <label className="seq-program">
+            <input
+              type="checkbox"
+              checked={kind.occlusion}
+              onChange={(e) =>
+                commit({ kind: { ...kind, occlusion: e.target.checked } })
+              }
+            />
+            occlusion (a body hidden behind another does not trip)
+          </label>
         </>
       )}
       <div className="seg">
@@ -375,6 +504,81 @@ function DeviceForm({ device }: { device: DeviceMsg }) {
         {kind.kind} devices are authored from Python (pools, paths, and
         stations do not fit a form)
       </span>
+    </div>
+  );
+}
+
+function CameraForm({ camera }: { camera: CameraMsg }) {
+  const commit = (patch: Partial<CameraMsg>) =>
+    sendUpsertCamera({ ...camera, ...patch });
+  const mountLabel =
+    camera.mount.kind === "world"
+      ? "world fixture"
+      : camera.mount.kind === "vehicle"
+        ? `on ${camera.mount.device}`
+        : `on ${camera.mount.robot}/${camera.mount.link}`;
+
+  return (
+    <div className="obstacle-form">
+      <div className="inspector-title" title={camera.name}>
+        🎥 {camera.name}
+        <span className="seq-cond"> · {mountLabel}</span>
+      </div>
+      <VecFields
+        label="pos"
+        value={camera.pose.position}
+        onCommit={(position) =>
+          commit({ pose: { ...camera.pose, position } })
+        }
+      />
+      <NumField
+        label="fov°"
+        value={camera.fov_deg}
+        min={1}
+        onCommit={(fov_deg) => commit({ fov_deg })}
+      />
+      <NumField
+        label="res.w"
+        value={camera.resolution[0]}
+        min={16}
+        onCommit={(w) =>
+          commit({ resolution: [Math.round(w), camera.resolution[1]] })
+        }
+      />
+      <NumField
+        label="res.h"
+        value={camera.resolution[1]}
+        min={16}
+        onCommit={(h) =>
+          commit({ resolution: [camera.resolution[0], Math.round(h)] })
+        }
+      />
+      <NumField
+        label="near"
+        value={camera.near}
+        min={0.001}
+        onCommit={(near) => commit({ near })}
+      />
+      <NumField
+        label="far"
+        value={camera.far}
+        min={0.01}
+        onCommit={(far) => commit({ far })}
+      />
+      {camera.mount.kind === "world" && (
+        <span className="seq-cond">
+          aim it with the viewport gizmo (rotate mode)
+        </span>
+      )}
+      <div className="seg">
+        <button
+          className="danger"
+          title="remove this camera"
+          onClick={() => sendRemoveCamera(camera.name)}
+        >
+          Remove
+        </button>
+      </div>
     </div>
   );
 }

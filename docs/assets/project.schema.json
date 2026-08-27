@@ -29,6 +29,14 @@
         "$ref": "#/$defs/Brush"
       }
     },
+    "cameras": {
+      "description": "Cameras (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CameraMsg"
+      }
+    },
     "devices": {
       "description": "Auxiliary devices (absent in older v2 files).",
       "type": "array",
@@ -564,6 +572,111 @@
       "required": [
         "name",
         "applicator"
+      ]
+    },
+    "CameraMountMsg": {
+      "description": "What a camera is bolted to.",
+      "oneOf": [
+        {
+          "description": "A fixture; the pose is a world pose.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "world"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Rides a vehicle device.",
+          "type": "object",
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "vehicle"
+            }
+          },
+          "required": [
+            "kind",
+            "device"
+          ]
+        },
+        {
+          "description": "Bolted to a robot link (a wrist camera).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "link"
+            },
+            "link": {
+              "type": "string"
+            },
+            "robot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "robot",
+            "link"
+          ]
+        }
+      ]
+    },
+    "CameraMsg": {
+      "description": "A camera: a named viewpoint with pinhole optics. Presentation only —\nit publishes no signal (a vision sensor referencing it is the planned\nsignal path).",
+      "type": "object",
+      "properties": {
+        "far": {
+          "type": "number",
+          "format": "double"
+        },
+        "fov_deg": {
+          "description": "Horizontal field of view, degrees.",
+          "type": "number",
+          "format": "double"
+        },
+        "mount": {
+          "$ref": "#/$defs/CameraMountMsg"
+        },
+        "name": {
+          "type": "string"
+        },
+        "near": {
+          "type": "number",
+          "format": "double"
+        },
+        "pose": {
+          "description": "Offset in the mount frame (world pose for a `world` mount).\n-Z is the view direction, +Y is image-up.",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "resolution": {
+          "description": "Image size in pixels (frustum aspect, export pixel size).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "required": [
+        "name",
+        "mount",
+        "pose",
+        "fov_deg",
+        "resolution",
+        "near",
+        "far"
       ]
     },
     "CatalogRef": {
@@ -2402,6 +2515,11 @@
           "description": "Every obstacle under `<target>/` — an imported subtree, a generated\nassembly. Counted as one line.",
           "type": "string",
           "const": "group"
+        },
+        {
+          "description": "A camera fixture (the purchasable `sensor.camera` article).",
+          "type": "string",
+          "const": "camera"
         }
       ]
     },
@@ -3048,6 +3166,40 @@
             "from",
             "to",
             "radius"
+          ]
+        },
+        {
+          "description": "Vision presence: ON while a watched body overlaps the named\ncamera's view frustum (occlusion-tested against other obstacles).",
+          "type": "object",
+          "properties": {
+            "camera": {
+              "type": "string"
+            },
+            "detect_range": {
+              "description": "Detection band along the view axis (m); `None` = the camera's\nnear/far clip.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "vision"
+            },
+            "occlusion": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "camera",
+            "occlusion"
           ]
         }
       ]

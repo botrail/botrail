@@ -86,8 +86,8 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, scenarios, effects, frames, toolpaths,
-/// io, parts, state. Mesh
+/// sequences, sensors, devices, cameras, scenarios, effects, frames,
+/// toolpaths, io, parts, state. Mesh
 /// visuals are mapped to URLs through the host's
 /// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
 /// the handshake — hosts must not hand-roll it.
@@ -98,9 +98,9 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 }
 
 /// Every scene-content message except `scene_init`, in handshake order:
-/// obstacles, motions, sequences, sensors, devices, scenarios, effects,
-/// frames, toolpaths, io, parts, state. Re-sent wholesale after bulk
-/// changes (project load),
+/// obstacles, motions, sequences, sensors, devices, cameras, scenarios,
+/// effects, frames, toolpaths, io, parts, state. Re-sent wholesale after
+/// bulk changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
     host.with_scene(|scene| {
@@ -110,6 +110,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::sequences_message(scene),
             wire::sensors_message(scene),
             wire::devices_message(scene),
+            wire::cameras_message(scene),
             wire::scenarios_message(scene),
             wire::effects_message(scene),
             wire::frames_message(scene),
@@ -311,8 +312,8 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             Ok(())
         }
         ClientMessage::UpsertSensor { sensor } => {
-            upsert_sensor(host, wire::sensor_from_msg(&sensor));
-            Ok(())
+            upsert_sensor(host, wire::sensor_from_msg(&sensor))
+                .map_err(|e| format!("rejected upsert_sensor: {e}"))
         }
         ClientMessage::RemoveSensor { name } => {
             remove_sensor(host, &name).map_err(|e| format!("rejected remove_sensor: {e}"))
@@ -323,6 +324,13 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         }
         ClientMessage::RemoveDevice { name } => {
             remove_device(host, &name).map_err(|e| format!("rejected remove_device: {e}"))
+        }
+        ClientMessage::UpsertCamera { camera } => {
+            upsert_camera(host, wire::camera_from_msg(&camera))
+                .map_err(|e| format!("rejected upsert_camera: {e}"))
+        }
+        ClientMessage::RemoveCamera { name } => {
+            remove_camera(host, &name).map_err(|e| format!("rejected remove_camera: {e}"))
         }
         ClientMessage::UpsertIoNode { node } => {
             upsert_io_node(host, node).map_err(|e| format!("rejected upsert_io_node: {e}"))
@@ -965,9 +973,13 @@ pub fn remove_scenario(host: &impl SessionHost, name: &str) -> Result<(), SceneE
     Ok(())
 }
 
-pub fn upsert_sensor(host: &impl SessionHost, sensor: botrail_scene::seq::Sensor) {
-    host.with_scene(|scene| scene.upsert_sensor(sensor));
+pub fn upsert_sensor(
+    host: &impl SessionHost,
+    sensor: botrail_scene::seq::Sensor,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_sensor(sensor))?;
     emit_sensors(host);
+    Ok(())
 }
 
 pub fn remove_sensor(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
@@ -984,6 +996,30 @@ fn emit_devices(host: &impl SessionHost) {
     let msg = host.with_scene(|scene| wire::devices_message(scene));
     host.emit(&msg);
     emit_io(host);
+}
+
+fn emit_cameras(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::cameras_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces a camera and rebroadcasts the list.
+pub fn upsert_camera(
+    host: &impl SessionHost,
+    camera: botrail_scene::seq::Camera,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_camera(camera))?;
+    emit_cameras(host);
+    Ok(())
+}
+
+pub fn remove_camera(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_camera(name))?;
+    emit_cameras(host);
+    Ok(())
 }
 
 /// Adds or replaces an auxiliary device and rebroadcasts the list.
@@ -1332,8 +1368,12 @@ pub fn timeline_msg(
         .enumerate()
         .map(|(r, (track, (times, joint_positions)))| {
             let sr = &scene.robots()[r];
-            // USD-rendered robots do FK client-side; skip precomputed poses.
-            let link_poses = sr.model.source.usd_stage().is_none().then(|| {
+            // USD-rendered robots do FK client-side; skip precomputed poses —
+            // unless a camera rides one of this robot's links, which the
+            // studio can only place from sampled world poses.
+            let link_poses = (sr.model.source.usd_stage().is_none()
+                || camera_rides_robot(scene, &sr.name))
+            .then(|| {
                 joint_positions
                     .iter()
                     .zip(&times)
@@ -1559,7 +1599,7 @@ pub fn trajectory_msg(
     robot: usize,
     traj: &botrail_traj::JointTrajectory,
 ) -> wire::TrajectoryMsg {
-    let (model, base, attachments) = host.with_scene(|scene| {
+    let (model, base, attachments, camera_riding) = host.with_scene(|scene| {
         (
             scene.robots()[robot].model.clone(),
             *scene.robots()[robot].base_pose(),
@@ -1569,11 +1609,13 @@ pub fn trajectory_msg(
                 .filter(|a| a.robot == robot)
                 .cloned()
                 .collect::<Vec<_>>(),
+            camera_rides_robot(scene, &scene.robots()[robot].name),
         )
     });
     let (times, joint_positions) = traj.resample(1.0 / 30.0);
-    // USD-rendered robots do FK client-side; skip the precomputed poses.
-    let want_link_poses = model.source.usd_stage().is_none();
+    // USD-rendered robots do FK client-side; skip the precomputed poses —
+    // unless a camera rides a link (see `timeline_msg`).
+    let want_link_poses = model.source.usd_stage().is_none() || camera_riding;
     let mut link_poses = want_link_poses.then(|| Vec::with_capacity(joint_positions.len()));
     let mut object_tracks = (!attachments.is_empty()).then(|| {
         attachments
@@ -1610,6 +1652,16 @@ pub fn trajectory_msg(
         link_poses,
         object_tracks,
     }
+}
+
+/// Is a camera bolted to one of `robot`'s links? Then its link poses must
+/// travel on the wire even for a USD-rendered robot (whose own FK is
+/// client-side) — the camera group is placed from sampled world poses.
+fn camera_rides_robot(scene: &Scene, robot: &str) -> bool {
+    scene.cameras().iter().any(|c| {
+        matches!(&c.mount,
+            botrail_scene::seq::CameraMount::Link { robot: r, .. } if r == robot)
+    })
 }
 
 /// Trajectory limits derived from the model (see
@@ -1748,6 +1800,7 @@ mod tests {
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
+                    ServerMessage::Cameras { .. } => "cameras",
                     ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::Io { .. } => "io",
@@ -1790,13 +1843,14 @@ mod tests {
         assert!(matches!(msgs[3], ServerMessage::Sequences { .. }));
         assert!(matches!(msgs[4], ServerMessage::Sensors { .. }));
         assert!(matches!(msgs[5], ServerMessage::Devices { .. }));
-        assert!(matches!(msgs[6], ServerMessage::Scenarios { .. }));
-        assert!(matches!(msgs[7], ServerMessage::Effects { .. }));
-        assert!(matches!(msgs[8], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[9], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[10], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[11], ServerMessage::Parts { .. }));
-        assert!(matches!(msgs[12], ServerMessage::State { .. }));
+        assert!(matches!(msgs[6], ServerMessage::Cameras { .. }));
+        assert!(matches!(msgs[7], ServerMessage::Scenarios { .. }));
+        assert!(matches!(msgs[8], ServerMessage::Effects { .. }));
+        assert!(matches!(msgs[9], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[10], ServerMessage::Toolpaths { .. }));
+        assert!(matches!(msgs[11], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[12], ServerMessage::Parts { .. }));
+        assert!(matches!(msgs[13], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -2500,14 +2554,16 @@ mod tests {
             .iter()
             .map(|m| match m {
                 ServerMessage::Devices { .. } => "devices",
+                ServerMessage::Cameras { .. } => "cameras",
                 ServerMessage::Scenarios { .. } => "scenarios",
                 ServerMessage::Effects { .. } => "effects",
                 _ => "_",
             })
             .collect();
         let devices = types.iter().position(|t| *t == "devices").unwrap();
-        assert_eq!(types[devices + 1], "scenarios");
-        assert_eq!(types[devices + 2], "effects");
+        assert_eq!(types[devices + 1], "cameras");
+        assert_eq!(types[devices + 2], "scenarios");
+        assert_eq!(types[devices + 3], "effects");
     }
 
     #[test]

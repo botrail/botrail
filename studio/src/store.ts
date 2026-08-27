@@ -14,6 +14,7 @@ import type {
   PartEntry,
   PoseMsg,
   RobotDescMsg,
+  CameraMsg,
   DeviceMsg,
   ScenarioMsg,
   SensorMsg,
@@ -212,6 +213,8 @@ export type Selection =
   /** Fixtures have no gizmo; selecting one opens its form. */
   | { type: "sensor"; name: string }
   | { type: "device"; name: string }
+  /** A camera; a world-mounted one gets a move gizmo. */
+  | { type: "camera"; name: string }
   /** An I/O node (controller / station); read-only details in Layout. */
   | { type: "io_node"; name: string };
 
@@ -360,6 +363,17 @@ export interface StudioState {
   flashes: FlashMsg[];
   /** Auxiliary devices; re-sent in full by the server on every change. */
   devices: DeviceMsg[];
+  /** Cameras; re-sent in full by the server on every change. */
+  cameras: CameraMsg[];
+  /** The camera whose picture the PiP shows; `null` = PiP closed (and the
+   * second render pass does not run at all). */
+  pipCamera: string | null;
+  /** A running camera video export; the exporter component owns the
+   * canvas and the frame stepping while this is set. */
+  camExport: { camera: string; fps: number } | null;
+  /** Export progress in [0, 1] — separate from `camExport` so per-frame
+   * updates don't remount the exporter. */
+  camExportProgress: number;
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
   /** Part identity pinned to residents and groups (what each thing *is*
@@ -425,6 +439,11 @@ export interface StudioState {
   selectGroup: (path: string) => void;
   selectSensor: (name: string) => void;
   selectDevice: (name: string) => void;
+  selectCamera: (name: string) => void;
+  setPipCamera: (name: string | null) => void;
+  beginCamExport: (camera: string, fps: number) => void;
+  setCamExportProgress: (p: number) => void;
+  endCamExport: () => void;
   selectIoNode: (name: string) => void;
   /** Motion-tab list click; an existing motion also retargets the robot
    * to its owner, so added waypoints always fit the motion's DOF. */
@@ -495,6 +514,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   sensors: [],
   flashes: [],
   devices: [],
+  cameras: [],
+  pipCamera: null,
+  camExport: null,
+  camExportProgress: 0,
   scenarios: [],
   parts: [],
   io: emptyIo(),
@@ -558,6 +581,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           signalDefs: [],
           sensors: [],
           devices: [],
+          cameras: [],
+          pipCamera: null,
+          camExport: null,
+          camExportProgress: 0,
           scenarios: [],
           parts: [],
           io: emptyIo(),
@@ -632,6 +659,22 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           selection: gone
             ? { type: "tcp", robot: s.selectedRobot ?? "" }
             : sel,
+        };
+      });
+    } else if (msg.type === "cameras") {
+      set((s) => {
+        const sel = s.selection;
+        const gone =
+          sel.type === "camera" && !msg.cameras.some((x) => x.name === sel.name);
+        const pipGone =
+          s.pipCamera !== null &&
+          !msg.cameras.some((x) => x.name === s.pipCamera);
+        return {
+          cameras: msg.cameras,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
+          pipCamera: pipGone ? null : s.pipCamera,
         };
       });
     } else if (msg.type === "scenarios") {
@@ -837,6 +880,17 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   selectGroup: (path) => set({ selection: { type: "group", path } }),
   selectSensor: (name) => set({ selection: { type: "sensor", name } }),
   selectDevice: (name) => set({ selection: { type: "device", name } }),
+  // Selecting a camera also opens its picture — "what does it see" is why
+  // one gets selected.
+  selectCamera: (name) =>
+    set({ selection: { type: "camera", name }, pipCamera: name }),
+  setPipCamera: (name) => set({ pipCamera: name }),
+  // Deterministic seek export: playback is paused for the duration; the
+  // exporter steps the clock itself (design/design-camera.md 判断 8).
+  beginCamExport: (camera, fps) =>
+    set({ camExport: { camera, fps }, camExportProgress: 0, playing: false }),
+  setCamExportProgress: (p) => set({ camExportProgress: p }),
+  endCamExport: () => set({ camExport: null, camExportProgress: 0 }),
   selectIoNode: (name) => set({ selection: { type: "io_node", name } }),
   selectMotion: (name) =>
     set((s) => {

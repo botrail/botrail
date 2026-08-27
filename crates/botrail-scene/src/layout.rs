@@ -878,6 +878,75 @@ impl Scene {
                         }
                     }
                 }
+                SensorKind::Vision {
+                    camera,
+                    detect_range,
+                    ..
+                } => {
+                    // A fixture camera's field of view as a dashed wedge;
+                    // a straight-down (or moving) camera has no telling
+                    // plan direction, so it draws as its footprint circle.
+                    let Some(cam) = self.cameras().iter().find(|c| &c.name == camera) else {
+                        continue;
+                    };
+                    if !matches!(cam.mount, crate::seq::CameraMount::World) {
+                        continue;
+                    }
+                    let far = detect_range.map(|r| r[1]).unwrap_or(cam.far);
+                    let half = cam.fov_deg.to_radians() / 2.0;
+                    let o = cam.pose.translation;
+                    let at = [o.x, o.y];
+                    let dir = cam.pose.rotation * nalgebra::Vector3::new(0.0, 0.0, -1.0);
+                    let planar = (dir.x * dir.x + dir.y * dir.y).sqrt();
+                    if planar > 0.2 {
+                        let heading = dir.y.atan2(dir.x);
+                        let reach = far * planar;
+                        let edge = |s: f64| {
+                            let ang = heading + s * half;
+                            [at[0] + reach * ang.cos(), at[1] + reach * ang.sin()]
+                        };
+                        let (left, right) = (edge(-1.0), edge(1.0));
+                        for to in [left, right] {
+                            items.push(LayoutItem {
+                                layer: LayoutLayer::Sensor,
+                                name: sensor.name.clone(),
+                                shape: LayoutShape::Line { from: at, to },
+                                dashed: true,
+                            });
+                        }
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Sensor,
+                            name: sensor.name.clone(),
+                            shape: LayoutShape::Line {
+                                from: left,
+                                to: right,
+                            },
+                            dashed: true,
+                        });
+                    } else {
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Sensor,
+                            name: sensor.name.clone(),
+                            shape: LayoutShape::Circle {
+                                center: at,
+                                radius: far * half.tan(),
+                            },
+                            dashed: true,
+                        });
+                    }
+                    if options.labels {
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Label,
+                            name: sensor.name.clone(),
+                            shape: LayoutShape::Text {
+                                at,
+                                text: sensor.name.clone(),
+                                size: 0.08,
+                            },
+                            dashed: false,
+                        });
+                    }
+                }
                 SensorKind::Beam { from, to, .. } => {
                     let a = [from.x, from.y];
                     let b = [to.x, to.y];

@@ -47,6 +47,22 @@ pub enum SensorKind {
         to: Point3<f64>,
         radius: f64,
     },
+    /// Vision presence: ON while a watched body overlaps the referenced
+    /// camera's view frustum (and, with `occlusion`, its origin is not
+    /// hidden behind another obstacle). The camera is the optics — pose,
+    /// mount, fov, aspect all come from it; the sensor is the judgement.
+    /// Geometry only: no pixels are rendered or interpreted.
+    Vision {
+        /// The [`Camera`] this sensor looks through.
+        camera: String,
+        /// Detection band along the view axis, meters; `None` uses the
+        /// camera's near/far clip.
+        detect_range: Option<[f64; 2]>,
+        /// Ray-test the candidate's origin against the *other* obstacles
+        /// (one ray — coarse but deterministic). Robot links neither
+        /// occlude nor get occlusion-tested; they detect by overlap alone.
+        occlusion: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +76,46 @@ pub enum SensorWatch {
     /// must see one arm but not the other).
     Robots(Vec<String>),
     All,
+}
+
+/// A camera: a named viewpoint with pinhole optics, drawn as a frustum in
+/// the studio and (in later phases) rendered picture-in-picture, exported
+/// as video and as a UsdGeomCamera. Pure presentation in this phase — it
+/// publishes no signal and never affects collision, planning or the
+/// rollout. A vision *sensor* referencing one is the planned signal path
+/// (design/design-camera.md §3): the camera is the optics, a sensor is
+/// the judgement.
+#[derive(Debug, Clone)]
+pub struct Camera {
+    pub name: String,
+    /// What the camera is bolted to; [`Camera::pose`] is expressed in
+    /// this frame.
+    pub mount: CameraMount,
+    /// Offset in the mount frame (the world pose for
+    /// [`CameraMount::World`]). Convention: -Z is the view direction,
+    /// +Y is image-up — the three.js / USD camera convention, so both
+    /// consumers apply it verbatim.
+    pub pose: Isometry3<f64>,
+    /// Horizontal field of view, degrees.
+    pub fov_deg: f64,
+    /// Image size in pixels: the frustum's aspect ratio and the pixel
+    /// size of exports.
+    pub resolution: [u32; 2],
+    /// Near clip distance, meters.
+    pub near: f64,
+    /// Far clip distance, meters.
+    pub far: f64,
+}
+
+/// What a [`Camera`] is bolted to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CameraMount {
+    /// A fixture: the pose is a world pose.
+    World,
+    /// Rides a vehicle device; re-resolved as the vehicle moves.
+    Vehicle { device: String },
+    /// Bolted to a robot link (a wrist camera).
+    Link { robot: String, link: String },
 }
 
 /// A weld-current indicator: while `signal` is true, the studio draws an
@@ -837,12 +893,32 @@ impl Scene {
         &self.sensors
     }
 
-    /// Adds or replaces a pseudo-sensor.
-    pub fn upsert_sensor(&mut self, sensor: Sensor) {
+    /// Adds or replaces a pseudo-sensor. A vision sensor must name an
+    /// existing camera — the optics it looks through.
+    pub fn upsert_sensor(&mut self, sensor: Sensor) -> Result<(), SceneError> {
+        if let SensorKind::Vision {
+            camera,
+            detect_range,
+            ..
+        } = &sensor.kind
+        {
+            if !self.cameras.iter().any(|c| &c.name == camera) {
+                return Err(SceneError::UnknownCamera(camera.clone()));
+            }
+            if let Some([near, far]) = detect_range {
+                if !(*near > 0.0 && far > near) {
+                    return Err(SceneError::BadCamera(format!(
+                        "vision sensor `{}`: need 0 < near < far, got {near} / {far}",
+                        sensor.name
+                    )));
+                }
+            }
+        }
         match self.sensors.iter_mut().find(|s| s.name == sensor.name) {
             Some(slot) => *slot = sensor,
             None => self.sensors.push(sensor),
         }
+        Ok(())
     }
 
     pub fn remove_sensor(&mut self, name: &str) -> Result<(), SceneError> {
@@ -857,6 +933,81 @@ impl Scene {
 
     pub fn set_sensors(&mut self, sensors: Vec<Sensor>) {
         self.sensors = sensors;
+        self.prune_parts();
+    }
+
+    pub fn cameras(&self) -> &[Camera] {
+        &self.cameras
+    }
+
+    /// Adds or replaces a camera, validating its mount and optics — a
+    /// camera aimed from a link that does not exist, or with a degenerate
+    /// frustum, is an authoring mistake worth catching at the call site.
+    pub fn upsert_camera(&mut self, camera: Camera) -> Result<(), SceneError> {
+        match &camera.mount {
+            CameraMount::World => {}
+            CameraMount::Vehicle { device } => {
+                if !self.devices.iter().any(|d| &d.name == device) {
+                    return Err(SceneError::UnknownDevice(device.clone()));
+                }
+            }
+            CameraMount::Link { robot, link } => {
+                let Some(r) = self.robot_index(robot) else {
+                    return Err(SceneError::UnknownRobot(robot.clone()));
+                };
+                if self.robots()[r].model.link_index(link).is_none() {
+                    return Err(SceneError::UnknownLink(link.clone()));
+                }
+            }
+        }
+        if !(camera.fov_deg > 0.0 && camera.fov_deg < 180.0) {
+            return Err(SceneError::BadCamera(format!(
+                "camera `{}`: fov must be in (0, 180) degrees, got {}",
+                camera.name, camera.fov_deg
+            )));
+        }
+        if camera.resolution[0] == 0 || camera.resolution[1] == 0 {
+            return Err(SceneError::BadCamera(format!(
+                "camera `{}`: resolution must be positive, got {}x{}",
+                camera.name, camera.resolution[0], camera.resolution[1]
+            )));
+        }
+        if !(camera.near > 0.0 && camera.far > camera.near) {
+            return Err(SceneError::BadCamera(format!(
+                "camera `{}`: need 0 < near < far, got {} / {}",
+                camera.name, camera.near, camera.far
+            )));
+        }
+        match self.cameras.iter_mut().find(|c| c.name == camera.name) {
+            Some(slot) => *slot = camera,
+            None => self.cameras.push(camera),
+        }
+        Ok(())
+    }
+
+    pub fn remove_camera(&mut self, name: &str) -> Result<(), SceneError> {
+        // A vision sensor looking through it would go blind silently.
+        if let Some(sensor) = self.sensors.iter().find(|s| {
+            matches!(&s.kind, SensorKind::Vision { camera, .. } if camera == name)
+        }) {
+            return Err(SceneError::BadCamera(format!(
+                "camera `{name}` is watched by vision sensor `{}`; remove the sensor first",
+                sensor.name
+            )));
+        }
+        let before = self.cameras.len();
+        self.cameras.retain(|c| c.name != name);
+        if self.cameras.len() == before {
+            return Err(SceneError::UnknownCamera(name.to_string()));
+        }
+        self.prune_parts();
+        Ok(())
+    }
+
+    /// Wholesale replacement (project load) — trusted, like
+    /// [`Scene::set_sensors`].
+    pub fn set_cameras(&mut self, cameras: Vec<Camera>) {
+        self.cameras = cameras;
         self.prune_parts();
     }
 

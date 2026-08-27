@@ -421,6 +421,9 @@ pub struct ProjectFile {
     /// Auxiliary devices (absent in older v2 files).
     #[serde(default)]
     pub devices: Vec<DeviceMsg>,
+    /// Cameras (absent in older files).
+    #[serde(default)]
+    pub cameras: Vec<crate::wire::CameraMsg>,
     /// Weld-flash bindings (absent in older files).
     #[serde(default)]
     pub flashes: Vec<crate::wire::FlashMsg>,
@@ -512,6 +515,7 @@ impl ProjectFile {
                     signals: Vec::new(),
                     sensors: Vec::new(),
                     devices: Vec::new(),
+                    cameras: Vec::new(),
                     flashes: Vec::new(),
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
@@ -623,6 +627,11 @@ impl Scene {
             signals: self.signals().iter().map(signal_def_msg).collect(),
             sensors: self.sensors().iter().map(sensor_msg).collect(),
             devices: self.devices().iter().map(device_msg).collect(),
+            cameras: self
+                .cameras()
+                .iter()
+                .map(crate::wire::camera_msg)
+                .collect(),
             flashes: self
                 .weld_flashes()
                 .iter()
@@ -869,6 +878,13 @@ impl Scene {
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
+        self.set_cameras(
+            project
+                .cameras
+                .iter()
+                .map(crate::wire::camera_from_msg)
+                .collect(),
+        );
         // Mounts need their vehicles in place. Mounting parks the robot at
         // the vehicle's start station and, with a gait, stands it in its
         // stance; the file's own pose and joints then take precedence.
@@ -1313,6 +1329,20 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 py_tuple(from),
                 py_tuple(to),
             )),
+            crate::wire::SensorKindMsg::Vision {
+                camera,
+                detect_range,
+                occlusion,
+            } => {
+                let range = detect_range
+                    .map(|[a, b]| format!(", detect_range=({a}, {b})"))
+                    .unwrap_or_default();
+                let occ = if *occlusion { "" } else { ", occlusion=False" };
+                out.push_str(&format!(
+                    "scene.add_vision_sensor({:?}, camera={camera:?}{range}{occ}{watch})\n",
+                    sensor.name,
+                ));
+            }
         }
     }
     for device in &project.devices {
@@ -1524,6 +1554,26 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 robot_kwarg(project, i)
             ));
         }
+    }
+    for camera in &project.cameras {
+        let mount = match &camera.mount {
+            crate::wire::CameraMountMsg::World => String::new(),
+            crate::wire::CameraMountMsg::Vehicle { device } => format!(", mount={device:?}"),
+            crate::wire::CameraMountMsg::Link { robot, link } => {
+                format!(", robot={robot:?}, link={link:?}")
+            }
+        };
+        out.push_str(&format!(
+            "scene.add_camera({:?}, position={}, quaternion={}, fov={}, resolution=({}, {}), near={}, far={}{mount})\n",
+            camera.name,
+            py_tuple(&camera.pose.position),
+            py_tuple(&camera.pose.quaternion),
+            camera.fov_deg,
+            camera.resolution[0],
+            camera.resolution[1],
+            camera.near,
+            camera.far,
+        ));
     }
     for signal in &project.signals {
         out.push_str(&format!(

@@ -94,6 +94,15 @@ export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const playback = useStudioStore((s) => s.playback);
   const recording = useStudioStore((s) => s.recording);
+  const cameras = useStudioStore((s) => s.cameras);
+  const pipCamera = useStudioStore((s) => s.pipCamera);
+  const camExport = useStudioStore((s) => s.camExport);
+  const camExportProgress = useStudioStore((s) => s.camExportProgress);
+  const beginCamExport = useStudioStore((s) => s.beginCamExport);
+  // The PiP camera (the one being watched) is the recording target; else
+  // the first camera in the scene.
+  const camTarget = pipCamera ?? cameras[0]?.name ?? null;
+  const webcodecs = typeof VideoEncoder !== "undefined";
   const segmentEnds = useStudioStore((s) => s.segmentEnds);
   const playbackTime = useStudioStore((s) => s.playbackTime);
   const setPlayback = useStudioStore((s) => s.setPlayback);
@@ -232,6 +241,22 @@ export function TimelineDock() {
               title="download this cycle as a USD animation (.usda)"
             >
               ⤓ usd
+            </button>
+          )}
+          {/* Any playback (bake, recording, motion preview) can be filmed
+              through a camera; the export runs in the browser itself. */}
+          {playback && camTarget && (
+            <button
+              className="timeline-button"
+              disabled={!webcodecs || camExport !== null}
+              onClick={() => beginCamExport(camTarget, 30)}
+              title={
+                webcodecs
+                  ? `record ${camTarget}'s view as WebM, 30 fps (deterministic re-run of the bake)`
+                  : "video export needs WebCodecs (Chrome, Edge, or a recent Firefox)"
+              }
+            >
+              {camExport ? `${Math.round(camExportProgress * 100)}%` : "⤓ cam"}
             </button>
           )}
           <span>{playbackTime.toFixed(2)}s</span>

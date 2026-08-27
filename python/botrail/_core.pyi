@@ -465,9 +465,38 @@ class Scene:
         watch_robots: Optional[list[str]] = None,
         mount: Optional[str] = None,
     ) -> None: ...
+    def add_vision_sensor(
+        self,
+        name: str,
+        camera: str,
+        watch: Optional[list[str]] = None,
+        watch_robot: bool = False,
+        watch_robots: Optional[list[str]] = None,
+        detect_range: Optional[tuple[float, float]] = None,
+        occlusion: bool = True,
+    ) -> None: ...
     def remove_sensor(self, name: str) -> None: ...
     @property
     def sensor_names(self) -> list[str]: ...
+    def add_camera(
+        self,
+        name: str,
+        position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        quaternion: Optional[tuple[float, float, float, float]] = None,
+        look_at: Optional[tuple[float, float, float]] = None,
+        fov: Optional[float] = None,
+        resolution: Optional[tuple[int, int]] = None,
+        near: Optional[float] = None,
+        far: Optional[float] = None,
+        mount: Optional[str] = None,
+        robot: Optional[str] = None,
+        link: Optional[str] = None,
+        from_catalog: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> None: ...
+    def remove_camera(self, name: str) -> None: ...
+    @property
+    def camera_names(self) -> list[str]: ...
     def add_conveyor(
         self,
         name: str,

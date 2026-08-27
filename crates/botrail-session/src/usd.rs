@@ -6,10 +6,11 @@
 //! `botrail_usd::export`.
 
 use botrail_scene::rollout::SequenceTimeline;
+use botrail_scene::seq::{CameraMount, DeviceKind};
 use botrail_scene::Scene;
 use botrail_usd::export::{
-    export_animation, AnimationInput, CurveSpec, ExportOptions, ExportedAnimation, ObjectSpec,
-    PoseTrack, RobotAnimation,
+    export_animation, AnimationInput, CameraSpec, CurveSpec, ExportOptions, ExportedAnimation,
+    ObjectSpec, PoseTrack, RobotAnimation,
 };
 use nalgebra::Isometry3;
 
@@ -248,6 +249,73 @@ pub fn bake_timeline(
         }
     }
 
+    // Cameras: a UsdGeomCamera per authored camera under /World/Cameras,
+    // its world pose mount-resolved per frame — so "through camera" in
+    // usdview frames exactly what the studio's PiP shows. botrail's -Z
+    // look / +Y image-up convention is USD's, poses go over verbatim.
+    let mut cameras: Vec<CameraSpec> = Vec::new();
+    for camera in scene.cameras() {
+        let track = match &camera.mount {
+            CameraMount::World => PoseTrack::Static(camera.pose),
+            CameraMount::Link { robot, link } => {
+                let Some(r) = scene.robot_index(robot) else {
+                    continue;
+                };
+                let Some(l) = scene.robots()[r].model.link_index(link) else {
+                    continue;
+                };
+                collapse_static(
+                    robot_frames[r]
+                        .iter()
+                        .map(|poses| poses[l] * camera.pose)
+                        .collect(),
+                )
+            }
+            CameraMount::Vehicle { device } => {
+                match timeline.vehicles.iter().find(|v| &v.name == device) {
+                    Some(track) => collapse_static(
+                        sample_at
+                            .iter()
+                            .enumerate()
+                            .map(|(k, &t)| {
+                                SequenceTimeline::object_pose(track, &all_frames[k], t)
+                                    .map(|frame| frame * camera.pose)
+                                    .unwrap_or(camera.pose)
+                            })
+                            .collect(),
+                    ),
+                    // A vehicle the cycle never moved: parked at its start
+                    // station. A dangling mount exports nothing.
+                    None => {
+                        let parked = scene.devices().iter().find(|d| &d.name == device).and_then(
+                            |d| match &d.kind {
+                                DeviceKind::Vehicle { path, start, .. } => path.frame_at(start),
+                                _ => None,
+                            },
+                        );
+                        match parked {
+                            Some(frame) => PoseTrack::Static(frame * camera.pose),
+                            None => continue,
+                        }
+                    }
+                }
+            }
+        };
+        // Only the aperture/focal ratio decides the framing; 20.955 "mm"
+        // is the USD default horizontal aperture.
+        const H_APERTURE: f64 = 20.955;
+        let focal = 0.5 * H_APERTURE / (camera.fov_deg.to_radians() / 2.0).tan();
+        let aspect = camera.resolution[1] as f64 / camera.resolution[0] as f64;
+        cameras.push(CameraSpec {
+            name: camera.name.clone(),
+            track,
+            focal_length: focal,
+            horizontal_aperture: H_APERTURE,
+            vertical_aperture: H_APERTURE * aspect,
+            clipping: [camera.near, camera.far],
+        });
+    }
+
     // A sole robot keeps the historical `Robot` prim (byte compat).
     let single = timeline.robots.len() == 1;
     let names: Vec<String> = timeline
@@ -278,9 +346,19 @@ pub fn bake_timeline(
         times: &times,
         objects: &objects,
         curves: &curves,
+        cameras: &cameras,
     };
     let options = ExportOptions { fps };
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
+}
+
+/// A sampled track whose poses never change is a static xform — the
+/// object-track collapse, shared by the camera specs.
+fn collapse_static(sampled: Vec<Isometry3<f64>>) -> PoseTrack {
+    match sampled.first() {
+        Some(first) if sampled.iter().all(|p| p == first) => PoseTrack::Static(*first),
+        _ => PoseTrack::Sampled(sampled),
+    }
 }
 
 /// Two `BasisCurves` overlays per toolpath — cutting (feed) polylines in

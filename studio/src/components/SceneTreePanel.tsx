@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import type { FrameMsg, ObstacleMsg, PartEntry } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import {
+  sendRemoveCamera,
   sendRemoveDevice,
   sendRemoveIoNode,
   sendRemoveSensor,
@@ -29,6 +30,8 @@ export function SceneTreePanel() {
   const selection = useStudioStore((s) => s.selection);
   const selectSensor = useStudioStore((s) => s.selectSensor);
   const selectDevice = useStudioStore((s) => s.selectDevice);
+  const cameras = useStudioStore((s) => s.cameras);
+  const selectCamera = useStudioStore((s) => s.selectCamera);
   const ioNodes = useStudioStore((s) => s.io.io.nodes);
   const ioPoints = useStudioStore((s) => s.io.points);
   const selectIoNode = useStudioStore((s) => s.selectIoNode);
@@ -85,7 +88,7 @@ export function SceneTreePanel() {
         })}
       </div>
       <Tree obstacles={obstacles} frames={frames} partIndex={partIndex} />
-      {(sensors.length > 0 || devices.length > 0) && (
+      {(sensors.length > 0 || devices.length > 0 || cameras.length > 0) && (
         <div className="scene-tree">
           {sensors.map((s) => (
             <div
@@ -138,6 +141,34 @@ export function SceneTreePanel() {
                 className="tree-toggle"
                 title="remove device"
                 onClick={() => sendRemoveDevice(d.name)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          {cameras.map((c) => (
+            <div
+              key={c.name}
+              className={`tree-row${
+                selection.type === "camera" && selection.name === c.name
+                  ? " selected"
+                  : ""
+              }`}
+            >
+              <span className="tree-twist" />
+              <span
+                className="tree-label"
+                title={`${c.mount.kind} camera — click to edit`}
+                onClick={() => selectCamera(c.name)}
+              >
+                {"\u{1F3A5} "}
+                {c.name}
+              </span>
+              <PartBadge entry={partIndex.get(`camera:${c.name}`)} />
+              <button
+                className="tree-toggle"
+                title="remove camera"
+                onClick={() => sendRemoveCamera(c.name)}
               >
                 ×
               </button>

@@ -172,6 +172,8 @@ pub enum PartTargetKind {
     Group,
     Sensor,
     Device,
+    /// A camera fixture (the purchasable `sensor.camera` article).
+    Camera,
     IoNode,
 }
 
@@ -183,6 +185,7 @@ impl PartTargetKind {
             PartTargetKind::Group => "group",
             PartTargetKind::Sensor => "sensor",
             PartTargetKind::Device => "device",
+            PartTargetKind::Camera => "camera",
             PartTargetKind::IoNode => "io_node",
         }
     }
@@ -194,6 +197,7 @@ impl PartTargetKind {
             "group" => PartTargetKind::Group,
             "sensor" => PartTargetKind::Sensor,
             "device" => PartTargetKind::Device,
+            "camera" => PartTargetKind::Camera,
             "io_node" => PartTargetKind::IoNode,
             _ => return None,
         })
@@ -493,6 +497,9 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     if scene.sensors().iter().any(|s| s.name == target) {
         hits.push(PartTargetKind::Sensor);
     }
+    if scene.cameras().iter().any(|c| c.name == target) {
+        hits.push(PartTargetKind::Camera);
+    }
     if scene.io_map().nodes.iter().any(|n| n.name == target) {
         hits.push(PartTargetKind::IoNode);
     }
@@ -517,6 +524,7 @@ fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
         PartTargetKind::Robot => scene.robot_index(target).is_some(),
         PartTargetKind::Device => scene.devices().iter().any(|d| d.name == target),
         PartTargetKind::Sensor => scene.sensors().iter().any(|s| s.name == target),
+        PartTargetKind::Camera => scene.cameras().iter().any(|c| c.name == target),
         PartTargetKind::IoNode => scene.io_map().nodes.iter().any(|n| n.name == target),
         PartTargetKind::Obstacle => scene.obstacles().iter().any(|o| o.name == target),
         PartTargetKind::Group => {
@@ -544,10 +552,14 @@ fn device_category(kind: &DeviceKind) -> Option<&'static str> {
     }
 }
 
-fn sensor_category(kind: &SensorKind) -> &'static str {
+fn sensor_category(kind: &SensorKind) -> Option<&'static str> {
     match kind {
-        SensorKind::Zone { .. } => "sensor.area",
-        SensorKind::Beam { .. } => "sensor.photoelectric",
+        SensorKind::Zone { .. } => Some("sensor.area"),
+        SensorKind::Beam { .. } => Some("sensor.photoelectric"),
+        // The purchasable article is the *camera* (`sensor.camera`); a
+        // vision sensor is judgement bound to it, and a second BOM line
+        // would double-count the hardware (design/design-camera.md 判断 10).
+        SensorKind::Vision { .. } => None,
     }
 }
 
@@ -690,8 +702,8 @@ impl Scene {
                     [one] => *one,
                     [] => {
                         return Err(SceneError::BadPart(format!(
-                            "`{target}` is not a robot, device, sensor, I/O node, obstacle or \
-                             obstacle group in this scene"
+                            "`{target}` is not a robot, device, sensor, camera, I/O node, \
+                             obstacle or obstacle group in this scene"
                         )))
                     }
                     many => {
@@ -834,12 +846,21 @@ impl Scene {
             lines.push(row);
         }
         for sensor in &self.sensors {
-            let mut row = BomRow::from_part(
-                sensor_category(&sensor.kind),
-                &sensor.name,
-                &Part::default(),
-            );
+            let Some(category) = sensor_category(&sensor.kind) else {
+                continue;
+            };
+            let mut row = BomRow::from_part(category, &sensor.name, &Part::default());
             if let Some(part) = explicit(PartTargetKind::Sensor, &sensor.name) {
+                row.apply(part);
+            }
+            lines.push(row);
+        }
+        for camera in &self.cameras {
+            // The purchasable article: any vision sensors looking through
+            // it are judgement, not hardware (they add no line of their
+            // own — see `sensor_category`).
+            let mut row = BomRow::from_part("sensor.camera", &camera.name, &Part::default());
+            if let Some(part) = explicit(PartTargetKind::Camera, &camera.name) {
                 row.apply(part);
             }
             lines.push(row);

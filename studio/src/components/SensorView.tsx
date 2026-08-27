@@ -8,8 +8,9 @@ import { useStudioStore } from "../store";
 const IDLE_COLOR = "#b8a24a";
 const ACTIVE_COLOR = "#e0503c";
 
-/** Is `name`'s lane ON at `t` in the loaded timeline? */
-function laneActiveAt(
+/** Is `name`'s lane ON at `t` in the loaded timeline? Exported for the
+ * camera views, which tint by their vision sensors' lanes. */
+export function laneActiveAt(
   timeline: { signals: { name: string; times: number[]; values: boolean[] }[] } | null,
   name: string,
   t: number,
@@ -23,7 +24,7 @@ function laneActiveAt(
   return value;
 }
 
-interface Frame {
+export interface Frame {
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
 }
@@ -32,8 +33,9 @@ interface Frame {
  * The parked reference frame of a vehicle device: its start station's
  * waypoint plus the heading there — along the leg leaving it, or the leg
  * arriving when nothing leaves (the TS mirror of `VehiclePath::frame_at`).
+ * Exported for every fixture that can ride a vehicle (sensors, cameras).
  */
-function parkedFrame(device: DeviceMsg): Frame | null {
+export function parkedFrame(device: DeviceMsg): Frame | null {
   const kind = device.kind;
   if (kind.kind !== "vehicle") return null;
   const { waypoints, stations, ring } = kind.path;
@@ -155,6 +157,9 @@ export function SensorView() {
 
 function SensorShape({ sensor, active }: { sensor: SensorMsg; active: boolean }) {
   const color = active ? ACTIVE_COLOR : IDLE_COLOR;
+  // A vision sensor's geometry is its camera's frustum, which CameraView
+  // already draws (and tints by this sensor's lane); nothing to add here.
+  if (sensor.kind.kind === "vision") return null;
   if (sensor.kind.kind === "zone") {
     const { pose, size } = sensor.kind;
     return (

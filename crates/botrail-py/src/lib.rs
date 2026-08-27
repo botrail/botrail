@@ -311,6 +311,35 @@ fn resolve_link(model: &RobotModel, link: Option<&str>) -> PyResult<usize> {
     }
 }
 
+/// A camera pose at `position` aimed at `target`: -Z along the view ray,
+/// +Y up-ish (world +Z as the up hint; world +Y for a straight-down or
+/// straight-up view, where the hint degenerates).
+fn look_at_pose(position: [f64; 3], target: [f64; 3]) -> PyResult<nalgebra::Isometry3<f64>> {
+    use nalgebra::{Isometry3, Matrix3, Translation3, UnitQuaternion, Vector3};
+    let eye = Vector3::from(position);
+    let fwd = Vector3::from(target) - eye;
+    if fwd.norm() < 1e-9 {
+        return Err(PyValueError::new_err(
+            "look_at target coincides with the camera position",
+        ));
+    }
+    let f = fwd.normalize();
+    let hint = if f.z.abs() > 0.999 {
+        Vector3::y()
+    } else {
+        Vector3::z()
+    };
+    let z = -f;
+    let x = hint.cross(&z).normalize();
+    let y = z.cross(&x);
+    let rot = Matrix3::from_columns(&[x, y, z]);
+    // The closed-form conversion: `from_matrix`'s iterative refinement
+    // stalls at exactly π (e.g. any camera looking along -Y from +Y) and
+    // silently returns identity.
+    let q = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(rot));
+    Ok(Isometry3::from_parts(Translation3::from(eye), q))
+}
+
 fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isometry3<f64> {
     (&botrail_scene::wire::PoseMsg {
         position,
@@ -1510,16 +1539,17 @@ impl Scene {
         watch_robots: Option<Vec<String>>,
         mount: Option<String>,
     ) -> PyResult<()> {
-        self.hub.upsert_sensor(botrail_scene::seq::Sensor {
-            name: name.to_string(),
-            kind: botrail_scene::seq::SensorKind::Zone {
-                pose: pose_from(position, quaternion),
-                size: nalgebra::Vector3::new(size[0], size[1], size[2]),
-            },
-            watch: sensor_watch(watch, watch_robot, watch_robots),
-            mount,
-        });
-        Ok(())
+        self.hub
+            .upsert_sensor(botrail_scene::seq::Sensor {
+                name: name.to_string(),
+                kind: botrail_scene::seq::SensorKind::Zone {
+                    pose: pose_from(position, quaternion),
+                    size: nalgebra::Vector3::new(size[0], size[1], size[2]),
+                },
+                watch: sensor_watch(watch, watch_robot, watch_robots),
+                mount,
+            })
+            .map_err(scene_err)
     }
 
     /// Adds a photoelectric beam sensor between two world points, ON while
@@ -1537,17 +1567,51 @@ impl Scene {
         watch_robots: Option<Vec<String>>,
         mount: Option<String>,
     ) -> PyResult<()> {
-        self.hub.upsert_sensor(botrail_scene::seq::Sensor {
-            name: name.to_string(),
-            kind: botrail_scene::seq::SensorKind::Beam {
-                from: nalgebra::Point3::new(frm[0], frm[1], frm[2]),
-                to: nalgebra::Point3::new(to[0], to[1], to[2]),
-                radius,
-            },
-            watch: sensor_watch(watch, watch_robot, watch_robots),
-            mount,
-        });
-        Ok(())
+        self.hub
+            .upsert_sensor(botrail_scene::seq::Sensor {
+                name: name.to_string(),
+                kind: botrail_scene::seq::SensorKind::Beam {
+                    from: nalgebra::Point3::new(frm[0], frm[1], frm[2]),
+                    to: nalgebra::Point3::new(to[0], to[1], to[2]),
+                    radius,
+                },
+                watch: sensor_watch(watch, watch_robot, watch_robots),
+                mount,
+            })
+            .map_err(scene_err)
+    }
+
+    /// Adds a vision presence sensor looking through `camera`: its name
+    /// becomes a read-only input signal, ON while a watched body overlaps
+    /// the camera's view frustum. `detect_range` narrows the detection
+    /// band along the view axis (default: the camera's near/far clip);
+    /// `occlusion` (default on) ray-tests each candidate's origin against
+    /// the other obstacles, so a body hidden behind another does not trip
+    /// it. Geometry only — no pixels are rendered or interpreted, and
+    /// robot links (when watched) detect by overlap alone.
+    #[pyo3(signature = (name, camera, watch = None, watch_robot = false, watch_robots = None, detect_range = None, occlusion = true))]
+    fn add_vision_sensor(
+        &self,
+        name: &str,
+        camera: &str,
+        watch: Option<Vec<String>>,
+        watch_robot: bool,
+        watch_robots: Option<Vec<String>>,
+        detect_range: Option<[f64; 2]>,
+        occlusion: bool,
+    ) -> PyResult<()> {
+        self.hub
+            .upsert_sensor(botrail_scene::seq::Sensor {
+                name: name.to_string(),
+                kind: botrail_scene::seq::SensorKind::Vision {
+                    camera: camera.to_string(),
+                    detect_range,
+                    occlusion,
+                },
+                watch: sensor_watch(watch, watch_robot, watch_robots),
+                mount: None,
+            })
+            .map_err(scene_err)
     }
 
     fn remove_sensor(&self, name: &str) -> PyResult<()> {
@@ -1557,6 +1621,149 @@ impl Scene {
     #[getter]
     fn sensor_names(&self) -> Vec<String> {
         self.hub.sensor_names()
+    }
+
+    /// Adds a camera: a named viewpoint with pinhole optics, drawn as a
+    /// frustum in the studio. Presentation only — it publishes no signal
+    /// and never affects planning or the cycle. `position`/`quaternion`
+    /// are in the mount frame (-Z looks, +Y is image-up); `look_at` aims
+    /// the camera at a world point instead of giving a quaternion. Mount
+    /// it with `mount=` (a vehicle device) or `robot=`/`link=` (a wrist
+    /// camera); default is a world fixture. `fov` is the horizontal field
+    /// of view in degrees (default 60); `resolution` sets the frustum
+    /// aspect and the pixel size of exports (default 1280x720).
+    ///
+    /// `from_catalog=` names a `sensor.camera` package: its flat specs
+    /// become the optics defaults (fov/resolution and, from the range
+    /// specs, near/far), explicit arguments still win, and the package's
+    /// identity lands on the BOM (`set_part(kind="camera")`). With an
+    /// explicit pose, `position`/`quaternion` place the package's *mount
+    /// face* and the optical axis follows the package's own calibration
+    /// (`frames.camera_frames`); `look_at` aims the optical axis itself.
+    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, look_at = None, fov = None, resolution = None, near = None, far = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_camera(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+        look_at: Option<[f64; 3]>,
+        fov: Option<f64>,
+        resolution: Option<[u32; 2]>,
+        near: Option<f64>,
+        far: Option<f64>,
+        mount: Option<String>,
+        robot: Option<String>,
+        link: Option<String>,
+        from_catalog: Option<String>,
+        revision: Option<String>,
+    ) -> PyResult<()> {
+        let package = from_catalog
+            .as_deref()
+            .map(|query| catalog::camera_from_catalog(py, query, revision.as_deref()))
+            .transpose()?;
+        let fov = fov
+            .or(package.as_ref().and_then(|p| p.fov_h_deg))
+            .unwrap_or(60.0);
+        let resolution = resolution
+            .or(package.as_ref().and_then(|p| p.resolution))
+            .unwrap_or([1280, 720]);
+        let near = near
+            .or(package.as_ref().and_then(|p| p.near))
+            .unwrap_or(0.05);
+        let far = far.or(package.as_ref().and_then(|p| p.far)).unwrap_or(30.0);
+        let camera_mount = match (mount, robot, link) {
+            (None, None, None) => botrail_scene::seq::CameraMount::World,
+            (Some(device), None, None) => botrail_scene::seq::CameraMount::Vehicle { device },
+            (None, Some(robot), Some(link)) => {
+                botrail_scene::seq::CameraMount::Link { robot, link }
+            }
+            (None, Some(_), None) => {
+                return Err(PyValueError::new_err(
+                    "a robot-mounted camera needs link= (the link it is bolted to)",
+                ))
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "pass either mount= (a vehicle) or robot=/link=, not both",
+                ))
+            }
+        };
+        let pose = match look_at {
+            Some(target) => {
+                if quaternion.is_some() {
+                    return Err(PyValueError::new_err(
+                        "pass either quaternion= or look_at=, not both",
+                    ));
+                }
+                if !matches!(camera_mount, botrail_scene::seq::CameraMount::World) {
+                    return Err(PyValueError::new_err(
+                        "look_at= aims a world fixture; a mounted camera moves, so give \
+                         its quaternion in the mount frame instead",
+                    ));
+                }
+                look_at_pose(position, target)?
+            }
+            // The given pose places the package's mount face; the optical
+            // axis follows its calibration. (`look_at` above aims the
+            // optical axis itself, so the offset does not apply there.)
+            None => match package.as_ref().and_then(|p| p.optical_offset) {
+                Some(offset) => pose_from(position, quaternion) * offset,
+                None => pose_from(position, quaternion),
+            },
+        };
+        self.hub
+            .upsert_camera(botrail_scene::seq::Camera {
+                name: name.to_string(),
+                mount: camera_mount,
+                pose,
+                fov_deg: fov,
+                resolution,
+                near,
+                far,
+            })
+            .map_err(scene_err)?;
+        if let Some(pkg) = package {
+            // The identity a BOM line names it by — the same shape
+            // `bt.catalog.Product.identify` writes.
+            let mut attributes = std::collections::BTreeMap::new();
+            for (key, value) in &pkg.meta.specs {
+                attributes.insert(
+                    key.clone(),
+                    botrail_scene::part::PartAttr::Number(*value),
+                );
+            }
+            let part = botrail_scene::part::Part {
+                catalog: Some(botrail_scene::part::CatalogRef {
+                    id: pkg.id,
+                    revision: Some(pkg.revision),
+                }),
+                manufacturer: pkg.meta.manufacturer,
+                model: pkg.meta.product,
+                category: pkg.meta.category,
+                description: None,
+                qty: 1,
+                attributes,
+            };
+            self.hub
+                .set_part(
+                    name,
+                    Some(botrail_scene::part::PartTargetKind::Camera),
+                    part,
+                )
+                .map_err(scene_err)?;
+        }
+        Ok(())
+    }
+
+    fn remove_camera(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_camera(name).map_err(scene_err)
+    }
+
+    #[getter]
+    fn camera_names(&self) -> Vec<String> {
+        self.hub.camera_names()
     }
 
     /// Adds a conveyor: while running, any unattached obstacle whose origin

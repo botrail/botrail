@@ -132,6 +132,26 @@ pub struct CurveSpec {
     pub width: f32,
 }
 
+/// One camera, authored as a `UsdGeomCamera` under `/World/Cameras` with
+/// its (possibly sampled) world pose. botrail's camera convention — -Z is
+/// the view direction, +Y is image-up — is USD's, so the pose is authored
+/// verbatim and "through camera" in usdview frames what the studio's PiP
+/// shows. Only the aperture/focal *ratio* decides the field of view, so
+/// the units convention (tenths of a unit) never bites.
+pub struct CameraSpec {
+    /// Prim name (sanitized and uniquified on authoring).
+    pub name: String,
+    /// Mount-resolved world pose: static for a fixture, one pose per
+    /// frame for a camera riding a link or a vehicle.
+    pub track: PoseTrack,
+    /// `focalLength`, in the same (nominal mm) scale as the apertures.
+    pub focal_length: f64,
+    pub horizontal_aperture: f64,
+    pub vertical_aperture: f64,
+    /// Near/far clip distances, stage units (m).
+    pub clipping: [f64; 2],
+}
+
 pub struct AnimationInput<'a> {
     /// One bundle per robot, in scene order.
     pub robots: &'a [RobotAnimation<'a>],
@@ -141,6 +161,8 @@ pub struct AnimationInput<'a> {
     pub objects: &'a [ObjectSpec],
     /// Static toolpath overlays; empty = no `/World/Toolpaths` prim.
     pub curves: &'a [CurveSpec],
+    /// Cameras; empty = no `/World/Cameras` prim.
+    pub cameras: &'a [CameraSpec],
 }
 
 pub struct ExportedAnimation {
@@ -298,6 +320,18 @@ pub fn export_animation(
             }
         }
     }
+    for camera in input.cameras {
+        if let PoseTrack::Sampled(samples) = &camera.track {
+            if samples.len() != n {
+                return Err(UsdExportError::Input(format!(
+                    "camera `{}`: {} samples for {} frames",
+                    camera.name,
+                    samples.len(),
+                    n
+                )));
+            }
+        }
+    }
 
     let fps = options.fps;
     let codes: Vec<f64> = input.times.iter().map(|t| t * fps).collect();
@@ -369,12 +403,57 @@ pub fn export_animation(
 
     author_objects(&mut layer, input.objects, &codes, &mut warnings)?;
     author_curves(&mut layer, input.curves, &mut warnings);
+    author_cameras(&mut layer, input.cameras, &codes);
 
     Ok(ExportedAnimation {
         data: layer.finish(),
         assets,
         warnings,
     })
+}
+
+/// Authors each [`CameraSpec`] as a `Camera` prim under `/World/Cameras`
+/// (created only when there is something to hold): the mount-resolved
+/// xform plus the pinhole optics as plain attributes.
+fn author_cameras(layer: &mut LayerBuilder, cameras: &[CameraSpec], codes: &[f64]) {
+    if cameras.is_empty() {
+        return;
+    }
+    layer.ensure_prim("/World/Cameras", Specifier::Def, Some("Xform"));
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for spec in cameras {
+        let prim = format!(
+            "/World/Cameras/{}",
+            unique_child(&mut used, &sanitize_name(&spec.name))
+        );
+        layer.ensure_prim(&prim, Specifier::Def, Some("Camera"));
+        let pose = match &spec.track {
+            PoseTrack::Static(x) => XformValue::Static(*x),
+            PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples.clone()),
+        };
+        layer.xform(&prim, &pose, None);
+        for (name, value) in [
+            ("focalLength", spec.focal_length),
+            ("horizontalAperture", spec.horizontal_aperture),
+            ("verticalAperture", spec.vertical_aperture),
+        ] {
+            layer.attr(
+                &prim,
+                name,
+                "float",
+                AttrValue::Default(Value::Float(value as f32)),
+            );
+        }
+        layer.attr(
+            &prim,
+            "clippingRange",
+            "float2",
+            AttrValue::Default(Value::Vec2f(gf::vec2f(
+                spec.clipping[0] as f32,
+                spec.clipping[1] as f32,
+            ))),
+        );
+    }
 }
 
 /// Authors each [`CurveSpec`] as a linear `BasisCurves` prim under
@@ -1943,6 +2022,7 @@ mod tests {
             times: &times,
             objects: &[],
             curves: &[],
+            cameras: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -2077,6 +2157,7 @@ mod tests {
                 times: &times,
                 objects: &[],
                 curves: &[],
+                cameras: &[],
             },
             &ExportOptions::default(),
         )
@@ -2169,6 +2250,7 @@ mod tests {
                 times: &[0.0],
                 objects: &[],
                 curves: &[],
+                cameras: &[],
             },
             &ExportOptions::default(),
         )
@@ -2257,6 +2339,7 @@ mod tests {
             times: &times,
             objects: &objects,
             curves: &[],
+            cameras: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -2411,6 +2494,7 @@ mod tests {
                 times: &times,
                 objects: &[],
                 curves: &curves,
+                cameras: &[],
             },
             &ExportOptions::default(),
         )
@@ -2493,6 +2577,7 @@ mod tests {
             times: &times,
             objects: &objects,
             curves: &[],
+            cameras: &[],
         };
 
         for name in ["anim.usda", "anim.usdc", "anim.usd"] {
@@ -2564,6 +2649,7 @@ mod tests {
             times: &[],
             objects: &[],
             curves: &[],
+            cameras: &[],
         };
         assert!(matches!(
             export_animation(&empty, &ExportOptions::default(), "a"),
@@ -2576,6 +2662,7 @@ mod tests {
             times: &times,
             objects: &[],
             curves: &[],
+            cameras: &[],
         };
         assert!(matches!(
             export_animation(&bad_len, &ExportOptions::default(), "a"),
@@ -2587,11 +2674,88 @@ mod tests {
             times: &times,
             objects: &[],
             curves: &[],
+            cameras: &[],
         };
         assert!(matches!(
             export_animation(&no_robots, &ExportOptions::default(), "a"),
             Err(UsdExportError::Input(_))
         ));
+    }
+
+    /// Cameras land under `/World/Cameras` as `Camera` prims: pinhole
+    /// attributes plus a static or sampled xform, with the sanitized name.
+    #[test]
+    fn cameras_author_as_usd_camera_prims() {
+        let times = [0.0, 0.5];
+        let objects = [ObjectSpec {
+            name: "crate".into(),
+            geometry: Geometry::Box {
+                size: Vector3::new(0.1, 0.1, 0.1),
+            },
+            track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.05)),
+            color: None,
+            visible: Vec::new(),
+        }];
+        let cameras = [
+            CameraSpec {
+                name: "overview".into(),
+                track: PoseTrack::Static(Isometry3::translation(2.0, -1.0, 1.5)),
+                focal_length: 18.147,
+                horizontal_aperture: 20.955,
+                vertical_aperture: 11.787,
+                clipping: [0.05, 30.0],
+            },
+            CameraSpec {
+                name: "wrist cam".into(),
+                track: PoseTrack::Sampled(vec![
+                    Isometry3::translation(0.0, 0.0, 1.0),
+                    Isometry3::translation(0.2, 0.0, 1.0),
+                ]),
+                focal_length: 22.4,
+                horizontal_aperture: 20.955,
+                vertical_aperture: 11.787,
+                clipping: [0.05, 4.0],
+            },
+        ];
+        let input = AnimationInput {
+            robots: &[],
+            times: &times,
+            objects: &objects,
+            curves: &[],
+            cameras: &cameras,
+        };
+        let exported = export_animation(&input, &ExportOptions::default(), "cams").unwrap();
+        let text = exported.to_usda().unwrap();
+        assert!(text.contains("def Camera \"overview\""), "{text}");
+        assert!(text.contains("def Camera \"wrist_cam\""), "{text}");
+        assert!(text.contains("float focalLength = 18.14"), "{text}");
+        assert!(text.contains("float2 clippingRange = (0.05"), "{text}");
+        assert!(text.contains("float verticalAperture = 11.78"), "{text}");
+        // The sampled camera writes timeSampled xformOps; the static one a
+        // plain default.
+        let wrist = text.split("def Camera \"wrist_cam\"").nth(1).unwrap();
+        assert!(wrist.contains("timeSamples"), "{wrist}");
+        // A sampled length mismatch is refused, like objects.
+        let bad = [CameraSpec {
+            name: "bad".into(),
+            track: PoseTrack::Sampled(vec![Isometry3::identity()]),
+            focal_length: 20.0,
+            horizontal_aperture: 20.955,
+            vertical_aperture: 11.787,
+            clipping: [0.05, 30.0],
+        }];
+        let result = export_animation(
+            &AnimationInput {
+                robots: &[],
+                times: &times,
+                objects: &objects,
+                curves: &[],
+                cameras: &bad,
+            },
+            &ExportOptions::default(),
+            "cams",
+        );
+        assert!(matches!(result, Err(UsdExportError::Input(_))));
     }
 
     /// Two instances of one USD asset: each lands under its own
@@ -2641,6 +2805,7 @@ mod tests {
             times: &times,
             objects: &[],
             curves: &[],
+            cameras: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();

@@ -38,7 +38,8 @@ export function PlaybackDriver() {
 
   useFrame((_, delta) => {
     const s = useStudioStore.getState();
-    if (!s.playing || !s.playback) {
+    // While a camera export runs, the exporter owns the frame stepping.
+    if (s.camExport || !s.playing || !s.playback) {
       wasPlaying.current = false;
       return;
     }
@@ -82,8 +83,10 @@ export function PlaybackDriver() {
 }
 
 /** Positions and blinks every declared weld flash at time `t`: on while
- * its weld-current signal is on, standing at the bound robot's TCP. */
-function updateFlashes(s: StudioState, sample: PlaybackSample, t: number) {
+ * its weld-current signal is on, standing at the bound robot's TCP.
+ * Exported (with the spray/trace updaters) for the camera exporter, which
+ * steps the same imperative path frame by frame. */
+export function updateFlashes(s: StudioState, sample: PlaybackSample, t: number) {
   if (playbackRig.flashes.size === 0) return;
   const signals = s.timeline?.signals ?? [];
   for (const flash of s.flashes) {
@@ -109,7 +112,7 @@ function updateFlashes(s: StudioState, sample: PlaybackSample, t: number) {
 
 /** Poses every declared spray cone at time `t`: at the bound robot's TCP,
  * along its -Z, while the effect's signal is on. */
-function updateSprays(s: StudioState, sample: PlaybackSample, t: number) {
+export function updateSprays(s: StudioState, sample: PlaybackSample, t: number) {
   if (playbackRig.sprays.size === 0) return;
   const signals = s.timeline?.signals ?? [];
   for (const spray of s.flashes) {
@@ -140,7 +143,7 @@ const SPIN_QUAT = new THREE.Quaternion();
 /** Appends the TCP position to every cut trace whose signal is on at `t`
  * (the trail restarts when the playhead jumps backward) and spins the
  * bound cutter link — a visible strobe, not a model of 18k rpm. */
-function updateTraces(
+export function updateTraces(
   s: StudioState,
   sample: PlaybackSample,
   t: number,

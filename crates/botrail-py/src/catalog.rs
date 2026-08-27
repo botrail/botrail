@@ -326,6 +326,10 @@ struct ManifestBits {
     tcp_default: Option<String>,
     flange_frame: Option<String>,
     mount_frame: Option<String>,
+    /// Optical frames a `sensor.camera` package declares (ROS optical
+    /// convention: +Z looks, +Y down) — what a wrist camera's axis is
+    /// posed from.
+    camera_frames: Vec<String>,
     /// Maker / product / category / numeric specs — what a bill of
     /// materials names the package by.
     meta: CatalogMeta,
@@ -375,16 +379,121 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             }
         }
     }
+    let camera_frames: Vec<String> = manifest
+        .get_item("frames")
+        .ok()
+        .and_then(|frames| frames.get_item("camera_frames").ok())
+        .and_then(|v| v.extract::<Option<Vec<String>>>().ok())
+        .flatten()
+        .unwrap_or_default();
     Ok(ManifestBits {
         tcp_default: frame("tcp_default"),
         flange_frame: frame("flange_frame"),
         mount_frame: frame("mount_frame"),
+        camera_frames,
         meta: CatalogMeta {
             manufacturer: text_at(&["manufacturer", "name"]),
             product: text_at(&["name"]),
             category: text_at(&["category"]),
             specs,
         },
+    })
+}
+
+/// The bits `Scene.add_camera(from_catalog=)` composes: optics defaults
+/// from the package's flat specs, the mount→optical offset from its own
+/// zero-pose FK — converted from the ROS optical convention (+Z looks,
+/// +Y down) to botrail's camera frame (-Z looks, +Y up) — and the
+/// identity a BOM line names it by (design-camera.md §11 B4).
+pub struct CameraPackage {
+    pub fov_h_deg: Option<f64>,
+    pub resolution: Option<[u32; 2]>,
+    /// `min_range_mm` / `max_range_mm`, meters.
+    pub near: Option<f64>,
+    pub far: Option<f64>,
+    /// Mount-face frame → botrail camera frame; `None` when the package
+    /// declares no resolvable optical frame.
+    pub optical_offset: Option<nalgebra::Isometry3<f64>>,
+    pub id: String,
+    pub revision: String,
+    pub meta: CatalogMeta,
+}
+
+pub fn camera_from_catalog(
+    py: Python<'_>,
+    query: &str,
+    revision: Option<&str>,
+) -> PyResult<CameraPackage> {
+    let (snapshot, entry, sha) = download_package(py, query, revision)?;
+    let bits = read_manifest(py, &snapshot.join(&entry.id))?;
+    let spec = |key: &str| {
+        bits.meta
+            .specs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| *v)
+    };
+    let resolution = match (spec("resolution_h_px"), spec("resolution_v_px")) {
+        (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => Some([w as u32, h as u32]),
+        _ => None,
+    };
+    let optical_offset = if bits.camera_frames.is_empty() {
+        None
+    } else {
+        let model = from_catalog(py, query, revision, None)?;
+        let q = vec![0.0; model.dof()];
+        let poses = botrail_kin::forward_kinematics_with_base(
+            &model,
+            &q,
+            &nalgebra::Isometry3::identity(),
+        )
+        .map_err(|e| err(e.to_string()))?;
+        // USD link names are prim paths; match by last segment there.
+        let find = |name: &str| {
+            model.link_index(name).or_else(|| {
+                let matches: Vec<usize> = (0..model.links.len())
+                    .filter(|&i| model.links[i].name.rsplit('/').next() == Some(name))
+                    .collect();
+                match matches.as_slice() {
+                    [one] => Some(*one),
+                    _ => None,
+                }
+            })
+        };
+        match bits.camera_frames.iter().find_map(|f| find(f)) {
+            Some(optical) => {
+                let mount = model
+                    .mount_link
+                    .map(|m| poses[m])
+                    .unwrap_or_else(nalgebra::Isometry3::identity);
+                let flip = nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::identity(),
+                    nalgebra::UnitQuaternion::from_axis_angle(
+                        &nalgebra::Vector3::x_axis(),
+                        std::f64::consts::PI,
+                    ),
+                );
+                Some(mount.inverse() * poses[optical] * flip)
+            }
+            None => {
+                eprintln!(
+                    "botrail: catalog `{}`: no camera_frames entry matches a link; \
+                     the optical axis stays at the mount face",
+                    entry.id
+                );
+                None
+            }
+        }
+    };
+    Ok(CameraPackage {
+        fov_h_deg: spec("fov_h_deg"),
+        resolution,
+        near: spec("min_range_mm").map(|v| v / 1000.0),
+        far: spec("max_range_mm").map(|v| v / 1000.0),
+        optical_offset,
+        id: entry.id,
+        revision: sha,
+        meta: bits.meta,
     })
 }
 

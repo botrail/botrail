@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { playbackRig } from "../playbackRig";
 import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
+import { Aid } from "../three/cameraRig";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 import { authoredColor, COLLISION_COLOR } from "../three/palette";
 import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
@@ -173,17 +174,19 @@ function GroupGizmo({ path }: { path: string }) {
     <>
       <group ref={setAnchor} />
       {anchor && (
-        <TransformControls
-          object={anchor}
-          mode={gizmoMode}
-          size={0.9}
-          onMouseDown={onDown}
-          onMouseUp={() => {
-            draggingRef.current = false;
-            startRef.current = null;
-          }}
-          onObjectChange={onDrag}
-        />
+        <Aid>
+          <TransformControls
+            object={anchor}
+            mode={gizmoMode}
+            size={0.9}
+            onMouseDown={onDown}
+            onMouseUp={() => {
+              draggingRef.current = false;
+              startRef.current = null;
+            }}
+            onObjectChange={onDrag}
+          />
+        </Aid>
       )}
     </>
   );
@@ -306,18 +309,20 @@ function ObstacleNode({
         />
       </group>
       {gizmo && !stowed && group && (
-        <TransformControls
-          object={group}
-          mode={gizmoMode}
-          size={0.65}
-          onMouseDown={() => {
-            draggingRef.current = true;
-          }}
-          onMouseUp={() => {
-            draggingRef.current = false;
-          }}
-          onObjectChange={onDrag}
-        />
+        <Aid>
+          <TransformControls
+            object={group}
+            mode={gizmoMode}
+            size={0.65}
+            onMouseDown={() => {
+              draggingRef.current = true;
+            }}
+            onMouseUp={() => {
+              draggingRef.current = false;
+            }}
+            onObjectChange={onDrag}
+          />
+        </Aid>
       )}
     </>
   );

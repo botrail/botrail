@@ -302,6 +302,32 @@ impl ObstacleCollider {
         Self::from_shape(SharedShape::capsule(p(a), p(b), radius))
     }
 
+    /// A pinhole camera's view frustum: the convex hull of the near/far
+    /// rectangle corners, looking down local -Z with +Y up (the camera
+    /// convention). `fov_h` is the full horizontal angle in radians,
+    /// `aspect` width/height. `None` on degenerate inputs (vision
+    /// pseudo-sensors).
+    pub fn frustum(fov_h: f64, aspect: f64, near: f64, far: f64) -> Option<Self> {
+        if !(fov_h > 0.0
+            && fov_h < std::f64::consts::PI
+            && aspect > 0.0
+            && near > 0.0
+            && far > near)
+        {
+            return None;
+        }
+        let tan = (fov_h / 2.0).tan();
+        let mut points = Vec::with_capacity(8);
+        for d in [near, far] {
+            let w = d * tan;
+            let h = w / aspect;
+            for (x, y) in [(-w, -h), (w, -h), (w, h), (-w, h)] {
+                points.push(parry3d_f64::math::Vector::new(x, y, -d));
+            }
+        }
+        SharedShape::convex_hull(&points).map(Self::from_shape)
+    }
+
     /// Overlap test between two colliders at world poses (boolean contact,
     /// the semantics a presence sensor or light beam wants).
     pub fn intersects(

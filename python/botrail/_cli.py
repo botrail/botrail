@@ -236,6 +236,25 @@ def cmd_schema(args) -> int:
     return 0
 
 
+def cmd_capture(args) -> int:
+    from . import capture
+
+    scene = load_cell(args.cell)
+    camera = args.camera
+    if camera is None:
+        names = scene.camera_names
+        if len(names) != 1:
+            have = ", ".join(names) if names else "none"
+            raise CliError(f"--camera is required (cameras in the cell: {have})")
+        camera = names[0]
+    # Bake the cycle to film. A cell with no sequences may still carry a
+    # played recording; record_camera says so clearly if nothing arrives.
+    _bake(scene, args.sequence, scenarios=False, max_duration=args.max_duration)
+    out = capture.record_camera(scene, camera, args.out, fps=args.fps)
+    print(json.dumps({"ok": True, "camera": camera, "fps": args.fps, "out": str(out)}))
+    return 0
+
+
 def cmd_studio(args) -> int:
     import botrail as bt
 
@@ -290,6 +309,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("schema", help="print the .botrail JSON Schema")
     p.add_argument("--out", help="write it here instead of stdout")
     p.set_defaults(func=cmd_schema)
+
+    p = sub.add_parser(
+        "capture",
+        help="record a camera's view of the baked cycle as video (headless browser)",
+    )
+    p.add_argument("cell")
+    p.add_argument("--camera", help="camera name (default: the cell's only camera)")
+    p.add_argument("--out", default="cell.webm", help=".webm, .mp4 or .gif (default cell.webm)")
+    p.add_argument("--fps", type=int, default=30, help="video frame rate (default 30)")
+    p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
+    p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
+    p.set_defaults(func=cmd_capture)
 
     p = sub.add_parser("studio", help="open the cell in the studio")
     p.add_argument("cell")

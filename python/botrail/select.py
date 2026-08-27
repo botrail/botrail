@@ -67,6 +67,11 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "reach_mm": ("reach_mm",),
     "stroke_mm": ("stroke_mm", "opening_mm"),
     "sensing_range_mm": ("sensing_range_mm", "range_mm", "max_range_mm"),
+    "fov_deg": ("fov_h_deg", "hfov_deg", "fov_deg"),
+    "resolution_h_px": ("resolution_h_px",),
+    "resolution_v_px": ("resolution_v_px",),
+    "max_range_mm": ("max_range_mm",),
+    "min_range_mm": ("min_range_mm",),
     "range_mm": ("range_mm", "max_range_mm", "sensing_range_mm"),
     "protective_height_mm": ("protective_height_mm", "height_mm"),
     "length_mm": ("length_mm",),
@@ -516,6 +521,7 @@ class _Cell:
         self.sequence_names = [s["name"] for s in self.sequences]
         self.obstacles: dict[str, dict] = {o["name"]: o for o in self.project.get("obstacles") or []}
         self.sensors: dict[str, dict] = {s["name"]: s["kind"] for s in self.project.get("sensors") or []}
+        self.cameras: dict[str, dict] = {c["name"]: c for c in self.project.get("cameras") or []}
         self.devices: dict[str, dict] = {d["name"]: d["kind"] for d in self.project.get("devices") or []}
         self.mounts: dict[str, dict] = {
             (r.get("name") or self.default_robot): r["mount"]
@@ -560,6 +566,8 @@ class _Cell:
             return "device"
         if name in self.sensors:
             return "sensor"
+        if name in self.cameras:
+            return "camera"
         if name in self.nodes:
             return "io_node"
         if name in self.obstacles:
@@ -605,6 +613,8 @@ class _Cell:
             return self._tool(name, category)
         if kind == "sensor":
             return self._sensor(name, category)
+        if kind == "camera":
+            return self._camera(name)
         if kind == "device":
             return self._device(name, margin)
         if kind == "io_node":
@@ -866,6 +876,53 @@ class _Cell:
             )
         return reqs, []
 
+    def _camera(self, name: str) -> tuple[list[Requirement], list[str]]:
+        """What the cell asks of a camera: the authored framing (fov,
+        resolution) always; a working-distance band only when a vision
+        sensor actually judges through it (a presentation-only camera has
+        no range requirement — its far clip is a draw distance, not a
+        spec). `min_range_mm` is a `<=` requirement, so like the other
+        ceiling checks it gates `check` but stays out of `row.minimum`
+        (design-camera.md §11 B5)."""
+        camera = self.cameras.get(name)
+        if not camera:
+            return [], []
+        reqs: list[Requirement] = [
+            Requirement(
+                "fov_deg",
+                _round(float(camera.get("fov_deg") or 0.0), 2),
+                basis="authored field of view",
+            )
+        ]
+        resolution = camera.get("resolution") or [0, 0]
+        for key, value in (("resolution_h_px", resolution[0]), ("resolution_v_px", resolution[1])):
+            reqs.append(Requirement(key, float(value), basis="authored resolution"))
+        bands = []
+        for sensor_name, kind in self.sensors.items():
+            if kind.get("kind") != "vision" or kind.get("camera") != name:
+                continue
+            band = kind.get("detect_range") or [camera.get("near"), camera.get("far")]
+            bands.append((sensor_name, float(band[0]), float(band[1])))
+        if bands:
+            far_name, _, far_m = max(bands, key=lambda b: b[2])
+            near_name, near_m, _ = min(bands, key=lambda b: b[1])
+            reqs.append(
+                Requirement(
+                    "max_range_mm",
+                    _round(far_m * 1000.0, 1),
+                    basis=f"vision sensor `{far_name}` judges out to {far_m:g} m",
+                )
+            )
+            reqs.append(
+                Requirement(
+                    "min_range_mm",
+                    _round(near_m * 1000.0, 1),
+                    op="<=",
+                    basis=f"vision sensor `{near_name}` judges from {near_m:g} m",
+                )
+            )
+        return reqs, []
+
     def _device(self, name: str, margin: float) -> tuple[list[Requirement], list[str]]:
         kind = self.devices.get(name)
         if not kind:
@@ -1119,6 +1176,8 @@ class _Cell:
 def _kind_hint(category: str) -> str:
     if category.startswith(("conveyor", "axis", "vehicle")):
         return "device"
+    if category == "sensor.camera":
+        return "camera"
     if category.startswith("sensor"):
         return "sensor"
     if category in ("plc", "plc.safety", "io.remote", "robot_controller") or category.startswith("io."):

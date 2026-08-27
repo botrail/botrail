@@ -45,10 +45,42 @@ format at roughly half the size, byte-for-byte the same composed result.
 `.usdz` is rejected on purpose: it is an asset *package*, not a layer, and
 packaging the referenced robot assets is a different operation.
 
+[Cameras](sensors-and-devices.md#cameras) in the scene export as
+`UsdGeomCamera` prims under `/World/Cameras`, their world pose sampled
+frame by frame through their mount (a wrist camera rides the arm, a
+vehicle camera its machine) and their optics carried as
+focal-length/aperture — so *View → Camera* in usdview or Omniverse frames
+exactly what the studio's picture-in-picture shows.
+
 The reverse direction — playing recordings back into the studio, including
 Isaac Sim captures — is
 [`play_usd_animation`][botrail.Scene.play_usd_animation]; the
 [Export and replay USD](../tutorials/replay-usd.md) tutorial covers both ways.
+
+## Camera video
+
+```python
+scene.add_camera("overview", position=(2.0, -1.6, 1.4), look_at=(0, 0, 0.4))
+scene.simulate_sequence("cycle")               # the bake to film
+
+from botrail import capture
+capture.record_camera(scene, "overview", "cycle.mp4")          # or .webm / .gif
+```
+
+```console
+$ botrail capture cell.py --camera overview --out cycle.mp4 --fps 30
+```
+
+Films the baked cycle through a [camera](sensors-and-devices.md#cameras) and
+writes a video — the shareable artifact for people who will not open a USD
+stage. Under the hood it is the studio's own **⤓ cam** exporter driven by a
+headless browser: the cycle is re-walked on a fixed fps grid rather than
+captured in real time, so no frame is ever dropped and the same bake always
+produces the same file, pixel for pixel — on CI's software renderer too.
+`.webm` (VP9) comes straight from the browser; `.mp4` and `.gif` are
+converted with ffmpeg (system, or `pip install imageio-ffmpeg`). Needs
+playwright with a fetched Chromium (`pip install playwright && python -m
+playwright install chromium`); both are checked when called, not at import.
 
 ## CSV and JSON
 

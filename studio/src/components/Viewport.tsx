@@ -13,6 +13,11 @@ import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
+import { CameraView } from "./CameraView";
+import { CameraPass } from "./CameraPass";
+import { CameraPip } from "./CameraPip";
+import { CameraExporter } from "./CameraExporter";
+import { Aid } from "../three/cameraRig";
 import { CutTraceView } from "./CutTraceView";
 import { ToolpathView } from "./ToolpathView";
 import { LegendHud } from "./LegendHud";
@@ -87,6 +92,8 @@ export function Viewport() {
           ? `sensor · ${selection.name}`
           : selection.type === "device"
             ? `device · ${selection.name}`
+            : selection.type === "camera"
+              ? `camera · ${selection.name}`
             : selection.type === "io_node"
               ? `I/O node · ${selection.name}`
               : selection.type === "robot"
@@ -157,20 +164,26 @@ export function Viewport() {
           <meshStandardMaterial color="#1a1d23" roughness={0.94} metalness={0} />
         </mesh>
 
-        {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor). */}
-        <Grid
-          rotation={[Math.PI / 2, 0, 0]}
-          infiniteGrid
-          cellSize={0.1}
-          cellThickness={0.6}
-          cellColor="#2a2f3a"
-          sectionSize={1}
-          sectionThickness={1}
-          sectionColor="#3c4557"
-          fadeDistance={16}
-          fadeStrength={1}
-        />
-        <axesHelper args={[0.3]} />
+        {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor).
+            An authoring aid — wrapped so the camera pass hides it (the
+            floor above stays: a camera does see the floor). */}
+        <Aid>
+          <Grid
+            rotation={[Math.PI / 2, 0, 0]}
+            infiniteGrid
+            cellSize={0.1}
+            cellThickness={0.6}
+            cellColor="#2a2f3a"
+            sectionSize={1}
+            sectionThickness={1}
+            sectionColor="#3c4557"
+            fadeDistance={16}
+            fadeStrength={1}
+          />
+        </Aid>
+        <Aid>
+          <axesHelper args={[0.3]} />
+        </Aid>
 
         <OrbitControls makeDefault target={[0, 0, 0.2]} />
 
@@ -179,19 +192,38 @@ export function Viewport() {
           <UsdRobotView />
           <WasmStageView />
           <ObstacleView />
-          <SensorView />
+          {/* Aids the camera pass hides: sensor volumes, camera gizmos,
+              guide paths, toolpath overlays, transform gizmos. Process
+              light (flash/spray/trace) stays — a camera would see it. */}
+          <Aid>
+            <SensorView />
+          </Aid>
+          <Aid>
+            <CameraView />
+          </Aid>
           <FlashView />
           <SprayView />
-          <VehiclePathView />
-          <ToolpathView />
+          <Aid>
+            <VehiclePathView />
+          </Aid>
+          <Aid>
+            <ToolpathView />
+          </Aid>
           <CutTraceView />
-          <TcpGizmo />
-          <RobotBaseGizmo />
+          <Aid>
+            <TcpGizmo />
+          </Aid>
+          <Aid>
+            <RobotBaseGizmo />
+          </Aid>
           <PlaybackDriver />
+          <CameraPass />
+          <CameraExporter />
         </Suspense>
       </Canvas>
 
       {connected && <div className="focus-chip">{focusLabel}</div>}
+      <CameraPip />
       <SfcOverlay />
       <LadderOverlay />
       <IoOverlay />

@@ -65,6 +65,10 @@ pub enum SceneError {
     UnknownSensor(String),
     #[error("unknown device `{0}`")]
     UnknownDevice(String),
+    #[error("unknown camera `{0}`")]
+    UnknownCamera(String),
+    #[error("{0}")]
+    BadCamera(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
     #[error("unknown scenario `{0}`")]
@@ -355,6 +359,7 @@ pub struct Scene {
     signals: Vec<seq::SignalDef>,
     sensors: Vec<seq::Sensor>,
     devices: Vec<seq::Device>,
+    cameras: Vec<seq::Camera>,
     weld_flashes: Vec<seq::WeldFlash>,
     scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
@@ -407,6 +412,7 @@ impl Scene {
             signals: Vec::new(),
             sensors: Vec::new(),
             devices: Vec::new(),
+            cameras: Vec::new(),
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),
@@ -437,6 +443,7 @@ impl Scene {
             signals: Vec::new(),
             sensors: Vec::new(),
             devices: Vec::new(),
+            cameras: Vec::new(),
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),

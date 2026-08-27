@@ -8,6 +8,7 @@ import { isWasmMode, type SessionBackend } from "./backend";
 import { WasmBackend } from "./backend-wasm";
 import { WsBackend } from "./backend-ws";
 import type {
+  CameraMsg,
   ClientMessage,
   DeviceMsg,
   GeometryMsg,
@@ -287,6 +288,22 @@ export function sendUpsertDevice(device: DeviceMsg): void {
 /** Remove an auxiliary device (sent immediately). */
 export function sendRemoveDevice(name: string): void {
   rawSend({ type: "remove_device", name });
+}
+
+/** Add or replace a camera wholesale. */
+export function sendUpsertCamera(camera: CameraMsg): void {
+  rawSend({ type: "upsert_camera", camera });
+}
+
+/** Camera upserts throttled per-name to ~30 Hz for smooth gizmo drags. */
+export const sendUpsertCameraThrottled = throttledByKey<CameraMsg>(
+  SEND_INTERVAL_MS,
+  (_name, camera) => rawSend({ type: "upsert_camera", camera }),
+);
+
+/** Remove a camera (sent immediately). */
+export function sendRemoveCamera(name: string): void {
+  rawSend({ type: "remove_camera", name });
 }
 
 // ---- I/O map edits: the assignment layer (nodes, bindings, declarations).

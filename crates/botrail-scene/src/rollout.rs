@@ -1338,13 +1338,25 @@ struct TrackLatch {
 
 struct SensorRuntime {
     collider: ObstacleCollider,
-    /// Authored pose — world for a fixture, vehicle-frame for a mounted one.
+    /// Authored pose in the anchor's frame (world for a fixture).
     pose: Isometry3<f64>,
-    /// Device index of the vehicle this rides on, if any.
-    mount: Option<usize>,
+    /// What re-resolves the sensor's frame each tick.
+    anchor: SensorAnchor,
     watch: SensorWatch,
     /// Index of this sensor's lane in the signal tracks.
     lane: usize,
+    /// Vision only: ray-test each candidate's origin against the *other*
+    /// obstacles before declaring it seen.
+    occlusion: bool,
+}
+
+enum SensorAnchor {
+    /// Bolted to the floor.
+    Fixture,
+    /// Rides a vehicle device (index into the device list).
+    Vehicle(usize),
+    /// A vision camera bolted to a robot link.
+    Link { robot: usize, link: usize },
 }
 
 /// Is `point` inside the box centred on `pose` with half-extents `half`?
@@ -1676,14 +1688,73 @@ impl Rollout {
             .sensors()
             .iter()
             .map(|sensor| {
-                let (collider, pose) = match &sensor.kind {
-                    SensorKind::Zone { pose, size } => {
-                        (ObstacleCollider::cuboid(size / 2.0), *pose)
-                    }
+                // A zone/beam fixture rides its authored vehicle mount.
+                let mount_anchor = || {
+                    sensor
+                        .mount
+                        .as_ref()
+                        .and_then(|name| world.devices().iter().position(|d| &d.name == name))
+                        .map(SensorAnchor::Vehicle)
+                        .unwrap_or(SensorAnchor::Fixture)
+                };
+                // A never-tripping stand-in for degenerate optics or a
+                // dangling camera reference (a hand-edited project) — a
+                // dead lane beats a crash mid-bake.
+                let dead = || ObstacleCollider::cuboid(nalgebra::Vector3::repeat(1e-9));
+                let (collider, pose, anchor, occlusion) = match &sensor.kind {
+                    SensorKind::Zone { pose, size } => (
+                        ObstacleCollider::cuboid(size / 2.0),
+                        *pose,
+                        mount_anchor(),
+                        false,
+                    ),
                     SensorKind::Beam { from, to, radius } => (
                         ObstacleCollider::capsule(*from, *to, *radius),
                         Isometry3::identity(),
+                        mount_anchor(),
+                        false,
                     ),
+                    SensorKind::Vision {
+                        camera,
+                        detect_range,
+                        occlusion,
+                    } => match world.cameras().iter().find(|c| &c.name == camera) {
+                        Some(cam) => {
+                            // The camera is the optics: frustum from its
+                            // fov/aspect, frame from its mount, band from
+                            // the sensor (default: the camera's clips).
+                            let [near, far] = detect_range.unwrap_or([cam.near, cam.far]);
+                            let aspect = cam.resolution[0].max(1) as f64
+                                / cam.resolution[1].max(1) as f64;
+                            let collider = ObstacleCollider::frustum(
+                                cam.fov_deg.to_radians(),
+                                aspect,
+                                near,
+                                far,
+                            )
+                            .unwrap_or_else(dead);
+                            let anchor = match &cam.mount {
+                                crate::seq::CameraMount::World => SensorAnchor::Fixture,
+                                crate::seq::CameraMount::Vehicle { device } => world
+                                    .devices()
+                                    .iter()
+                                    .position(|d| &d.name == device)
+                                    .map(SensorAnchor::Vehicle)
+                                    .unwrap_or(SensorAnchor::Fixture),
+                                crate::seq::CameraMount::Link { robot, link } => world
+                                    .robot_index(robot)
+                                    .and_then(|r| {
+                                        world.robots()[r]
+                                            .model
+                                            .link_index(link)
+                                            .map(|l| SensorAnchor::Link { robot: r, link: l })
+                                    })
+                                    .unwrap_or(SensorAnchor::Fixture),
+                            };
+                            (collider, cam.pose, anchor, *occlusion)
+                        }
+                        None => (dead(), Isometry3::identity(), SensorAnchor::Fixture, false),
+                    },
                 };
                 let lane = signals.len();
                 signals.push(BoolTrack {
@@ -1694,12 +1765,10 @@ impl Rollout {
                 SensorRuntime {
                     collider,
                     pose,
-                    mount: sensor
-                        .mount
-                        .as_ref()
-                        .and_then(|name| world.devices().iter().position(|d| &d.name == name)),
+                    anchor,
                     watch: sensor.watch.clone(),
                     lane,
+                    occlusion,
                 }
             })
             .collect();
@@ -3507,24 +3576,32 @@ impl Rollout {
         if self.sensors.is_empty() {
             return;
         }
-        let needs_robot = self.sensors.iter().any(|s| {
+        let needs_links = self.sensors.iter().any(|s| {
             matches!(
                 s.watch,
                 SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::All
-            )
+            ) || matches!(s.anchor, SensorAnchor::Link { .. })
         });
-        let link_poses = needs_robot.then(|| self.world.all_link_poses());
+        let link_poses = needs_links.then(|| self.world.all_link_poses());
         let t = self.t;
         let mut edges = Vec::new();
         for sensor in &self.sensors {
-            // A mounted sensor's geometry is authored in its vehicle's
+            // An anchored sensor's geometry is authored in its anchor's
             // frame, so its world pose is re-resolved every tick — that is
-            // the whole difference between a fixture and one that travels.
-            let pose = match sensor.mount.and_then(|d| self.devices.get(d)) {
-                Some(DeviceRuntime::Vehicle {
-                    position, heading, ..
-                }) => vehicle_frame(position, *heading) * sensor.pose,
-                _ => sensor.pose,
+            // the whole difference between a fixture and one that travels
+            // (a deck sensor on a vehicle, a vision camera on a wrist).
+            let pose = match &sensor.anchor {
+                SensorAnchor::Fixture => sensor.pose,
+                SensorAnchor::Vehicle(d) => match self.devices.get(*d) {
+                    Some(DeviceRuntime::Vehicle {
+                        position, heading, ..
+                    }) => vehicle_frame(position, *heading) * sensor.pose,
+                    _ => sensor.pose,
+                },
+                SensorAnchor::Link { robot, link } => link_poses
+                    .as_ref()
+                    .map(|lp| lp[*robot][*link] * sensor.pose)
+                    .unwrap_or(sensor.pose),
             };
             let mut value = false;
             let watch_objects: Option<&[String]> = match &sensor.watch {
@@ -3533,11 +3610,12 @@ impl Rollout {
                 SensorWatch::Robot | SensorWatch::Robots(_) => Some(&[]),
             };
             if !matches!(sensor.watch, SensorWatch::Robot | SensorWatch::Robots(_)) {
-                for (obstacle, collider) in self
+                for (target, (obstacle, collider)) in self
                     .world
                     .obstacles()
                     .iter()
                     .zip(self.world.obstacle_colliders.iter())
+                    .enumerate()
                 {
                     if !obstacle.enabled {
                         continue;
@@ -3548,6 +3626,9 @@ impl Rollout {
                         }
                     }
                     if sensor.collider.intersects(&pose, collider, &obstacle.pose) {
+                        if sensor.occlusion && self.occluded(&pose, target) {
+                            continue;
+                        }
                         value = true;
                         break;
                     }
@@ -3579,6 +3660,41 @@ impl Rollout {
         for (lane, value) in edges {
             self.set_lane(lane, t, value);
         }
+    }
+
+    /// Is `target`'s origin hidden from `camera` behind another enabled
+    /// obstacle? One ray, origin to origin — coarse but deterministic
+    /// (design/design-camera.md §3): a body half in view can read either
+    /// way, and robot links never occlude.
+    fn occluded(&self, camera: &Isometry3<f64>, target: usize) -> bool {
+        let origin = camera.translation.vector;
+        let goal = self.world.obstacles()[target].pose.translation.vector;
+        let dir = goal - origin;
+        if dir.norm_squared() < 1e-12 {
+            return false;
+        }
+        for (j, (obstacle, collider)) in self
+            .world
+            .obstacles()
+            .iter()
+            .zip(self.world.obstacle_colliders.iter())
+            .enumerate()
+        {
+            if j == target || !obstacle.enabled {
+                continue;
+            }
+            let inv = obstacle.pose.inverse();
+            let local_origin = inv * nalgebra::Point3::from(origin);
+            let local_dir = inv.transform_vector(&dir);
+            // `dir` is unnormalized, so toi is the fraction of the way to
+            // the target: any hit short of it blocks the view.
+            if let Some(toi) = collider.cast_local_ray(&local_origin, &local_dir, 1.0) {
+                if toi < 1.0 - 1e-6 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Records an edge on a signal lane when the value changes. Every

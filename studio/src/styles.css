@@ -866,12 +866,86 @@ button.danger:hover:not(:disabled) {
 
 .legend-hud {
   position: absolute;
-  top: 10px;
+  /* The camera PiP (when open) reserves the top-right corner. */
+  top: calc(10px + var(--pip-reserve, 0px));
   right: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   pointer-events: none;
+}
+
+/* Camera picture-in-picture: a DOM frame whose picture area is painted by
+   the render pass directly into the canvas (scissored inset) — so the
+   picture div itself stays transparent. */
+.camera-pip {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.camera-pip-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(23, 26, 33, 0.94);
+  border-bottom: 1px solid var(--border);
+}
+
+.camera-pip-icon {
+  font-size: 12px;
+}
+
+.camera-pip-name {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.camera-pip-header select {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  color: var(--text);
+  border: none;
+  font-size: 11px;
+}
+
+.camera-pip-res {
+  font-variant-numeric: tabular-nums;
+}
+
+.camera-pip-header button {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.camera-pip-header button:hover {
+  color: var(--text);
+}
+
+.camera-pip-picture {
+  cursor: pointer;
+}
+
+/* A tripped vision sensor looking through the PiP camera. */
+.camera-pip-live {
+  border-color: #e0503c;
 }
 
 .legend-card {

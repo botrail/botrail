@@ -158,11 +158,96 @@ ordinary sequence lanes on the timing chart. `examples/lift_demo.py` runs
 the whole interlock chain: call → door open → board → door close → ride →
 alight.
 
+## Cameras
+
+A named viewpoint with pinhole optics, drawn in the studio as a body plus a
+wireframe frustum whose aspect follows `resolution` and whose angle follows
+`fov` (horizontal, degrees). A camera is presentation only: it publishes no
+signal and never affects planning or the cycle — it answers "what does this
+camera see from here", the layout question you get asked before commissioning.
+
+```python
+# A fixture, aimed at a world point (-Z looks, +Y is image-up):
+scene.add_camera("overview", position=(1.6, -1.4, 1.3), look_at=(0, 0, 0.3),
+                 fov=60, resolution=(1280, 720))
+# A wrist camera, offset in the link frame:
+scene.add_camera("eye_in_hand", robot="ur", link="tool0",
+                 position=(0, 0.05, 0.03), fov=50, resolution=(1920, 1080))
+# Riding a vehicle deck:
+scene.add_camera("agv_front", mount="agv", position=(0.3, 0, 0.4))
+```
+
+Deselected, the frustum draws as a compact aim gizmo; selecting the camera
+(scene tree or click) extends it to the far clip for coverage checks, and a
+world-mounted camera gets the move/rotate gizmo. Mounted cameras ride their
+machine during playback like mounted sensors do.
+
+A real camera comes straight from the catalog:
+
+```python
+scene.add_camera("inspect", from_catalog="realsense/d400/d435",
+                 robot="ur", link="tool0", position=(0, 0.06, 0.02))
+```
+
+The package's flat specs become the optics (fov, resolution, and the
+near/far band from its rated range — explicit arguments still win), the
+given pose places its *mount face* while the optical axis follows the
+package's own calibration (`frames.camera_frames`), and the identity lands
+on the BOM as a `sensor.camera` line, pinned to the catalog revision.
+From there the selection loop closes like for any other equipment:
+`scene.requirements()` derives what the cell asks of the camera — the
+authored framing always, a working-distance band when a vision sensor
+judges through it — and `scene.check()` answers ok / `spec_short` /
+`spec_unknown` against the part's stated specs. (The camera is the
+purchasable article; vision sensors add requirements to its line, never a
+line of their own.)
+
+Selecting a camera also opens its **picture-in-picture** at the viewport's
+top-right: the live view through that camera — scenery, robots and process
+light, with the authoring aids (grid, gizmos, sensor volumes, overlays)
+hidden. The header switches between cameras and toggles the size; closing
+the panel stops the second render pass entirely. It coexists with the
+SFC/ladder/I/O overlays, and the picture follows playback, so a wrist
+camera shows the approach as the arm moves.
+
+### Vision sensors
+
+A camera becomes an *input* by putting a vision sensor behind it: the
+sensor's name becomes a read-only signal, ON while a watched body overlaps
+the camera's view frustum.
+
+```python
+scene.add_vision_sensor("part_seen", camera="eye_in_hand", watch=["workpiece"],
+                        detect_range=(0.3, 2.0))   # default: the camera's near/far
+```
+
+The camera is the optics — pose, mount, field of view all come from it, so
+a wrist camera's sensor sweeps with the arm — and the sensor is the
+judgement. It is a *geometric* judgement: frustum overlap plus (by
+default) a single occlusion ray from the camera to the body's origin, so a
+part hidden behind a wall does not trip it. No pixels are rendered or
+interpreted — it answers "was it in view", not "would the vision system
+have detected it". Robot links, when watched, trip on overlap alone and
+never occlude. Like every sensor, the lane shows in the timing chart, the
+SFC/ladder views, and derives an input contact in the [I/O map](io-map.md);
+the BOM line stays on the camera (`sensor.camera`) — the sensor is logic,
+not hardware.
+
+With a bake (or a motion preview) on the timeline dock, **⤓ cam** records
+the PiP camera's view as a WebM video, right in the browser: the baked
+tracks are re-walked on a fixed 30 fps grid — not captured in real time —
+so the export never drops a frame and the same bake always produces the
+same file. Needs WebCodecs (Chrome, Edge, or a recent Firefox); the button
+says so when it can't run. The same export runs headless from Python and
+CI — [`botrail.capture.record_camera`](export.md#camera-video), or
+`botrail capture` on the command line.
+
 ## Housekeeping
 
 ```python
 scene.sensor_names;  scene.remove_sensor("eye")
 scene.device_names;  scene.remove_device("belt")
+scene.camera_names;  scene.remove_camera("overview")
 ```
 
 Sensors and devices are saved in [projects](projects.md), appear in the
