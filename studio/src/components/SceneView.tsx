@@ -9,7 +9,7 @@ import {
   type RobotUiState,
 } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
-import { authoredColor, COLLISION_COLOR, linkColor } from "../three/palette";
+import { authoredColor, COLLISION_COLOR, UNPAINTED } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
 
 const IDENTITY_POS: [number, number, number] = [0, 0, 0];
@@ -91,7 +91,7 @@ function LinkGroup({
   pose: PoseMsg | undefined;
   colliding: boolean;
 }) {
-  const color = colliding ? COLLISION_COLOR : linkColor(index);
+  const color = colliding ? COLLISION_COLOR : authoredColor(UNPAINTED);
   const position = pose ? pose.position : IDENTITY_POS;
   const quaternion = pose ? pose.quaternion : IDENTITY_QUAT;
   // Registered so the playback driver can move this link without a React
@@ -113,9 +113,10 @@ function LinkGroup({
       {link.visuals.map((visual, j) => (
         // Three shades, most specific first: the collision highlight is
         // the message and always wins; then the color the robot file
-        // authored for this visual; then the palette, which exists only
-        // to tell links apart. A mesh carrying its own materials keeps
-        // them unless one of the first two speaks.
+        // authored for this visual; then the unpainted neutral, which is
+        // what the exported stage uses for the same geometry. A mesh
+        // carrying its own materials keeps them unless one of the first
+        // two speaks.
         <VisualNode key={j} visual={visual} color={color} forceColor={colliding} />
       ))}
     </group>
@@ -128,7 +129,7 @@ function VisualNode({
   forceColor,
 }: {
   visual: VisualMsg;
-  color: string;
+  color: string | THREE.Color;
   forceColor: boolean;
 }) {
   const { origin } = visual;
