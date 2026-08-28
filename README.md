@@ -7,7 +7,35 @@ Documentation: https://botrail.github.io/botrail/ ·
 Live Demo: https://botrail.github.io/botrail/demo/
 
 ![botrail-demo](assets/botrail_demo.png)
-![botrail-demo-line](assets/botrail_demo_line.png)
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/botrail_demo_spindle.png" alt="A Mitsubishi RV-5AS milling a clamped plate with a spindle, toolpath overlaid"/><br/>
+      <sub><b>Robot machining</b> — spindle toolpaths with stepwise stock removal</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/botrail_demo_amr.png" alt="A UR arm riding an AMR between warehouse racks, pallet and outfeed conveyor"/><br/>
+      <sub><b>Mobile manipulation</b> — an arm riding a catalog AMR between stations</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/botrail_demo_stairs.png" alt="A quadruped carrying a box up a steel stair flight to a mezzanine"/><br/>
+      <sub><b>Legged mobility</b> — a quadruped climbs a catalog stair flight, payload on board</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/botrail_demo_humanoid.png" alt="A humanoid carrying a tote between tables along a planned walking path"/><br/>
+      <sub><b>Humanoid pick-and-carry</b> — walking is just another sequence step</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="assets/botrail_demo_line.png" alt="Four FANUC arms welding car bodies along a transfer line inside guarding"/><br/>
+      <sub><b>Multi-robot weld line</b> — four stations, one deterministic timeline</sub>
+    </td>
+  </tr>
+</table>
 
 `pip install botrail`, a few lines of Python, and you get an interactive 3D
 studio in your browser for building robot cells — robots, obstacles,

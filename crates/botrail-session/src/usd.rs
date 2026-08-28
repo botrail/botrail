@@ -352,6 +352,116 @@ pub fn bake_timeline(
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
 }
 
+/// Bakes the scene as it stands — no timeline — into a static USD layer:
+/// every robot at its current joint positions, every visible obstacle at
+/// its pose, toolpath overlays, cameras at their mount-resolved frames
+/// (a vehicle-mounted camera at the parked frame). The cell a layout is
+/// handed around as, rather than a cycle of it.
+pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, String> {
+    let times = [0.0];
+
+    let mut robot_frames: Vec<Vec<Vec<Isometry3<f64>>>> = Vec::with_capacity(scene.robots().len());
+    let mut joint_samples: Vec<Vec<Vec<f64>>> = Vec::with_capacity(scene.robots().len());
+    for (r, robot) in scene.robots().iter().enumerate() {
+        let q = robot.joint_positions().to_vec();
+        let poses = scene.fk_for(r, &q).map_err(|e| e.to_string())?;
+        robot_frames.push(vec![poses]);
+        joint_samples.push(vec![q]);
+    }
+
+    let objects: Vec<ObjectSpec> = scene
+        .obstacles()
+        .iter()
+        // A collision proxy is not part of the picture: the export is
+        // what someone opens in usdview, and hidden means hidden.
+        .filter(|o| o.visible)
+        .map(|o| ObjectSpec {
+            name: o.name.clone(),
+            geometry: o.geometry.clone(),
+            track: PoseTrack::Static(o.pose),
+            color: o.color,
+            visible: Vec::new(),
+        })
+        .collect();
+
+    let mut cameras: Vec<CameraSpec> = Vec::new();
+    for camera in scene.cameras() {
+        let pose = match &camera.mount {
+            CameraMount::World => camera.pose,
+            CameraMount::Link { robot, link } => {
+                let Some(r) = scene.robot_index(robot) else {
+                    continue;
+                };
+                let Some(l) = scene.robots()[r].model.link_index(link) else {
+                    continue;
+                };
+                robot_frames[r][0][l] * camera.pose
+            }
+            CameraMount::Vehicle { device } => {
+                // No cycle ran: the vehicle stands at its start station.
+                let parked = scene
+                    .devices()
+                    .iter()
+                    .find(|d| &d.name == device)
+                    .and_then(|d| match &d.kind {
+                        DeviceKind::Vehicle { path, start, .. } => path.frame_at(start),
+                        _ => None,
+                    });
+                match parked {
+                    Some(frame) => frame * camera.pose,
+                    None => continue,
+                }
+            }
+        };
+        const H_APERTURE: f64 = 20.955;
+        let focal = 0.5 * H_APERTURE / (camera.fov_deg.to_radians() / 2.0).tan();
+        let aspect = camera.resolution[1] as f64 / camera.resolution[0] as f64;
+        cameras.push(CameraSpec {
+            name: camera.name.clone(),
+            track: PoseTrack::Static(pose),
+            focal_length: focal,
+            horizontal_aperture: H_APERTURE,
+            vertical_aperture: H_APERTURE * aspect,
+            clipping: [camera.near, camera.far],
+        });
+    }
+
+    // A sole robot keeps the historical `Robot` prim (byte compat).
+    let single = scene.robots().len() == 1;
+    let names: Vec<String> = scene
+        .robots()
+        .iter()
+        .map(|r| {
+            if single {
+                "Robot".to_string()
+            } else {
+                r.name.clone()
+            }
+        })
+        .collect();
+    let robots: Vec<RobotAnimation> = scene
+        .robots()
+        .iter()
+        .enumerate()
+        .map(|(r, robot)| RobotAnimation {
+            name: &names[r],
+            model: &robot.model,
+            link_poses: &robot_frames[r],
+            joint_samples: Some(&joint_samples[r]),
+        })
+        .collect();
+    let curves = toolpath_curves(scene);
+    let input = AnimationInput {
+        robots: &robots,
+        times: &times,
+        objects: &objects,
+        curves: &curves,
+        cameras: &cameras,
+    };
+    let options = ExportOptions { fps: 60.0 };
+    export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
+}
+
 /// A sampled track whose poses never change is a static xform — the
 /// object-track collapse, shared by the camera specs.
 fn collapse_static(sampled: Vec<Isometry3<f64>>) -> PoseTrack {

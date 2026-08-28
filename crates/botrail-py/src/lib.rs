@@ -1390,27 +1390,45 @@ impl Scene {
         self.hub.attachments()
     }
 
-    /// Bakes a trajectory to a USD animation layer that plays in usdview /
-    /// Omniverse / Blender: robot link motion as timeSamples, obstacles as
-    /// prims, grasped objects riding along. The extension picks the
-    /// serialization — `.usda` text, `.usdc`/`.usd` binary crate (about half
-    /// the size). USD-sourced robots reference their original stage (assets
-    /// copied to a sibling `<stem>_assets/` directory); URDF robots are
-    /// authored from the model's visuals. `robot` names the instance the
-    /// trajectory belongs to (required when the scene has several). Returns
-    /// exporter warnings.
-    #[pyo3(signature = (trajectory, path, fps = 60.0, robot = None))]
+    /// Writes the scene to a USD layer that opens in usdview / Omniverse /
+    /// Blender. With a `trajectory`, an animation: robot link motion as
+    /// timeSamples, obstacles as prims, grasped objects riding along —
+    /// `robot` names the instance the trajectory belongs to (required when
+    /// the scene has several). Without one, the cell as it stands: robots
+    /// at their current joint positions, every visible obstacle at its
+    /// pose, toolpaths and cameras — the static layer a layout is handed
+    /// around as. The extension picks the serialization — `.usda` text,
+    /// `.usdc`/`.usd` binary crate (about half the size). USD-sourced
+    /// robots reference their original stage (assets copied to a sibling
+    /// `<stem>_assets/` directory); URDF robots are authored from the
+    /// model's visuals. Returns exporter warnings.
+    #[pyo3(signature = (path, trajectory = None, fps = 60.0, robot = None))]
     fn export_usd(
         &self,
-        trajectory: &Trajectory,
         path: PathBuf,
+        trajectory: Option<&Trajectory>,
         fps: f64,
         robot: Option<&str>,
     ) -> PyResult<Vec<String>> {
-        let index = self.resolve_robot(robot)?;
-        self.hub
-            .export_trajectory_usd(index, &trajectory.inner, &path, fps)
-            .map_err(PyValueError::new_err)
+        match trajectory {
+            Some(trajectory) => {
+                let index = self.resolve_robot(robot)?;
+                self.hub
+                    .export_trajectory_usd(index, &trajectory.inner, &path, fps)
+                    .map_err(PyValueError::new_err)
+            }
+            None => {
+                if robot.is_some() {
+                    return Err(PyValueError::new_err(
+                        "`robot` names the instance a trajectory belongs to; \
+                         a static export takes the whole scene",
+                    ));
+                }
+                self.hub
+                    .export_scene_usd(&path)
+                    .map_err(PyValueError::new_err)
+            }
+        }
     }
 
     /// Plays a baked USD recording (an Isaac Sim capture or a botrail

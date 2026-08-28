@@ -59,6 +59,10 @@ const FRANKA_LAYERS = [
 const FRANKA_READY = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035];
 
 const CELL_STAGE = "cell/factory.usda";
+// The belt, the rack and the guarding are catalog products the demo script
+// orders at run time; the deployed bundle carries them pre-baked
+// (scripts/bake_demo_equipment.py) as a second, purely additive stage.
+const CELL_EQUIPMENT = "cell/factory_equipment.usda";
 // The cell has two pedestals facing each other across the belt; the demo
 // stands an arm on each. The second is a copy of the first's model, so the
 // 10 MB of asset is fetched and parsed once.
@@ -221,6 +225,17 @@ export class WasmBackend implements SessionBackend {
       return;
     }
     if (!(await this.loadUsdScene(bytes, "factory.usda"))) return;
+
+    // The equipment stage is additive — obstacles only, no frames — so a
+    // bundle without it (an older deploy) still loads the bare layout.
+    try {
+      const equipment = await fetchBytes(
+        new URL(CELL_EQUIPMENT, document.baseURI).href,
+      );
+      await this.loadUsdScene(equipment, "factory_equipment.usda");
+    } catch (err) {
+      console.warn("botrail studio: no equipment stage to load", err);
+    }
 
     // The mount frames only exist once the stage is in, so the placement
     // has to follow the import rather than travel with the session.

@@ -12,11 +12,19 @@ from the scene, so they cannot disagree with it or with each other. The
 ## USD animation
 
 ```python
-scene.export_usd(traj, "motion.usda", fps=60)   # one planned trajectory
+scene.export_usd("cell.usda")                   # the cell as it stands, no motion
+scene.export_usd("motion.usda", traj, fps=60)   # one planned trajectory
 tl.export_usd("cycle.usda", fps=60)             # a whole baked cycle
 tl.export_usd("cycle.usdc", fps=60)             # same layer, binary crate file
 tl.export_usd("takt.usdc", fps=24, start=62.3, end=86.9)   # one takt of a line
 ```
+
+Without a trajectory the export is the **static cell**: robots at their
+current joint positions, every visible obstacle at its pose, toolpaths and
+cameras — the layer a layout is handed around as, and what the browser demo
+is served. Equipment ordered [from the catalog](parts-and-bom.md) comes out
+as ordinary prims, so a cell whose belt and guarding are generated at run
+time still ships as one self-contained USD file.
 
 `start`/`end` clip the export to a window, and on a line that is the
 difference between shippable and not: a full run is mostly repetition, so

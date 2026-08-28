@@ -250,8 +250,8 @@ class Scene:
     def attachments(self) -> list[tuple[str, str]]: ...
     def export_usd(
         self,
-        trajectory: Trajectory,
         path: Union[str, Path],
+        trajectory: Optional[Trajectory] = None,
         fps: float = 60.0,
         robot: Optional[str] = None,
     ) -> list[str]: ...

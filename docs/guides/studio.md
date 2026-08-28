@@ -133,7 +133,9 @@ its priority — the scan-order first-wins the rollout implements.
 
 ![The ladder view at a routing decision](../assets/studio/ld.png)
 
-After a Simulate the ladder is a monitor mode: contacts light green
+After a Simulate the ladder is a monitor mode: the token frames the
+active step's whole rung group — comment row down to its last rung, so
+the box says exactly which rungs the step owns — contacts light green
 while they conduct at the playhead, TON blocks count up in place
 (`1.47/2.00s`), and the instant a transition fires its SET/RST coils
 flash — while the rungs of arms the bake never took stay dimmed.

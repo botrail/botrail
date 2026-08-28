@@ -1002,6 +1002,20 @@ impl SceneHub {
         botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())
     }
 
+    /// Writes the scene as it stands to a static USD layer at `path`:
+    /// robots at their current joint positions, visible obstacles at
+    /// their poses, toolpath overlays and cameras. Returns exporter
+    /// warnings.
+    pub fn export_scene_usd(&self, path: &std::path::Path) -> Result<Vec<String>, String> {
+        let scene = self.snapshot();
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "scene".to_string());
+        let exported = botrail_session::usd::bake_scene(&scene, &stem)?;
+        botrail_usd::export::write_exported(path, exported).map_err(|e| e.to_string())
+    }
+
     /// Loads a baked USD recording (an Isaac Sim capture or a botrail
     /// export), lifts it onto the scene's robot, broadcasts the playable
     /// timeline to the studio, and returns

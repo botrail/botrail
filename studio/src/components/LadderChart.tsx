@@ -13,6 +13,7 @@ import {
   TON_W,
   type LContact,
   type LCoil,
+  type LGroup,
   type LRung,
   type LTon,
   type Ladder,
@@ -40,9 +41,9 @@ import { OverlayTabs } from "./OverlayTabs";
  * one rung group per step under its `S{flat} · name` comment, the way a
  * Mitsubishi-style 歩進回路 reads. Static geometry is memoized; the live
  * layer overprints conducting contacts in green at the playhead, flashes
- * coils the instant a rung fires, runs the TON countdowns, and rides a
- * token over the active step's comment — the ladder as a PLC IDE's
- * monitor mode shows it.
+ * coils the instant a rung fires, runs the TON countdowns, and frames
+ * the active step's whole rung group with the token — the ladder as a
+ * PLC IDE's monitor mode shows it.
  */
 
 const BG = "rgba(23, 26, 33, 0.96)";
@@ -170,11 +171,18 @@ function RungGlyphs({ rung, status }: { rung: LRung; status: string }) {
 
 // ------------------------------------------------------------- live layer
 
+/** A group's lower edge: the bottom of its last rung (bare comment if none). */
+function groupBottom(g: LGroup): number {
+  const last = g.rungs[g.rungs.length - 1];
+  return last ? last.top + last.h : g.top + COMMENT_H;
+}
+
 /**
  * The per-frame layer: monitor-mode truth on every entered rung's
  * contacts (green = conducting, an underline = an edge contact's signal
  * level), coil flashes on the firing instant, TON countdowns, and the
- * token over the active step's comment row.
+ * token framing the active step's whole rung group — comment row down to
+ * its last rung, so the box says exactly which rungs the step owns.
  */
 function LadderLive({
   ladder,
@@ -261,12 +269,14 @@ function LadderLive({
       </svg>
       {active && (
         <div
-          className={state.kind === "finished" ? "sfc-token done" : "sfc-token"}
+          className={
+            state.kind === "finished" ? "sfc-token ld-token done" : "sfc-token ld-token"
+          }
           style={{
             left: 6,
             top: active.top - 2,
             width: ladder.width - 12,
-            height: COMMENT_H + 2,
+            height: groupBottom(active) - active.top + 4,
           }}
         />
       )}

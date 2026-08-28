@@ -1334,6 +1334,21 @@ button.danger:hover:not(:disabled) {
   stroke: none;
 }
 
+/* The playback token frames the active step's whole rung group (comment
+ * row down to its last rung), with a wash so the frame's extent — which
+ * rungs the step owns — reads at a glance even on a tall group. */
+.ld-token {
+  background: rgba(91, 157, 217, 0.07);
+  transition:
+    left 0.12s ease,
+    top 0.12s ease,
+    height 0.12s ease;
+}
+
+.ld-token.done {
+  background: none;
+}
+
 /* --- I/O table overlay + chips (see components/IoOverlay.tsx) --- */
 
 .io-overlay {

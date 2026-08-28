@@ -90,7 +90,7 @@ def test_planning_and_usd_export_carry_the_driven_joint(
     assert len(traj.positions[0]) == 2
 
     out = tmp_path / "grip.usda"
-    assert scene.export_usd(traj, out, fps=30.0) == []
+    assert scene.export_usd(out, traj, fps=30.0) == []
     # URDF robots export as baked link transforms: the mirrored finger is
     # visible as its own animated prim.
     text = out.read_text()

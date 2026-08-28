@@ -16,14 +16,17 @@ did.
 You have met both already:
 
 ```python
-scene.export_usd(traj, "motion.usda", fps=60)   # one planned trajectory
+scene.export_usd("motion.usda", traj, fps=60)   # one planned trajectory
 tl.export_usd("cycle.usda", fps=60)             # a whole baked cycle
 ```
 
 [`Scene.export_usd`][botrail.Scene.export_usd] bakes a single
 [`Trajectory`][botrail.Trajectory]; the timeline version bakes everything the
 cycle did — every robot, every obstacle, grasped objects riding, releasing,
-resting exactly as simulated.
+resting exactly as simulated. Called without a trajectory,
+`scene.export_usd("cell.usda")` writes the *static* cell instead — robots at
+their current pose, every visible obstacle — the layer a layout is handed
+around as.
 
 ## A carry motion, exported
 

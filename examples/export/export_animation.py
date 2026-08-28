@@ -45,7 +45,7 @@ def main() -> None:
     scene.set_joint_positions(lifted_q)
     traj = scene.plan(goal_q)
 
-    warnings = scene.export_usd(traj, out, fps=60.0)
+    warnings = scene.export_usd(out, traj, fps=60.0)
     for w in warnings:
         print(f"warning: {w}")
     print(f"exported a {traj.duration:.2f}s carry motion to {out}")

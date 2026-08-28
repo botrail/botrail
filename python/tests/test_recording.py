@@ -76,7 +76,7 @@ def test_play_recording_joint_and_transform_modes(scene: bt.Scene, tmp_path: Pat
     scene.add_box("crate", (0.1, 0.1, 0.1), (0.8, 0.0, 0.05))
     traj = scene.plan([0.8, -0.5])
     out = tmp_path / "rec.usda"
-    assert scene.export_usd(traj, out, fps=30.0) == []
+    assert scene.export_usd(out, traj, fps=30.0) == []
 
     # Botrail exports carry JointState for every joint → joint playback.
     res = scene.play_usd_animation(out)
@@ -99,7 +99,7 @@ def test_urdf_robots_replay_as_transforms(tmp_path: Path) -> None:
     scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     traj = scene.plan([0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
     out = tmp_path / "rec.usda"
-    assert scene.export_usd(traj, out, fps=30.0) == []
+    assert scene.export_usd(out, traj, fps=30.0) == []
     res = scene.play_usd_animation(out)
     assert res["mode"] == "transforms"
     assert res["warnings"] == []
