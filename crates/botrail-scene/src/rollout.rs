@@ -6002,15 +6002,17 @@ pub(crate) mod tests {
                 Isometry3::translation(0.3, 0.0, 0.5),
             )
             .unwrap();
-        scene.upsert_sensor(Sensor {
-            name: "eye".into(),
-            kind: SensorKind::Zone {
-                pose: Isometry3::translation(0.3, 0.0, 0.5),
-                size: Vector3::new(0.1, 0.1, 0.1),
-            },
-            watch: SensorWatch::AllObjects,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "eye".into(),
+                kind: SensorKind::Zone {
+                    pose: Isometry3::translation(0.3, 0.0, 0.5),
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                watch: SensorWatch::AllObjects,
+                mount: None,
+            })
+            .unwrap();
         scene.define_signal("flag", false);
         joint_motion(&mut scene, "go", 0.5);
         scene.upsert_sequence(Sequence {
@@ -7148,16 +7150,18 @@ mod device_tests {
                 running: false,
             },
         });
-        scene.upsert_sensor(Sensor {
-            name: "beam".into(),
-            kind: SensorKind::Beam {
-                from: Point3::new(0.0, 0.3, 0.5),
-                to: Point3::new(0.0, 0.7, 0.5),
-                radius: 0.005,
-            },
-            watch: SensorWatch::AllObjects,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "beam".into(),
+                kind: SensorKind::Beam {
+                    from: Point3::new(0.0, 0.3, 0.5),
+                    to: Point3::new(0.0, 0.7, 0.5),
+                    radius: 0.005,
+                },
+                watch: SensorWatch::AllObjects,
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_sequence(Sequence {
             name: "feed".into(),
             steps: vec![
@@ -7294,15 +7298,17 @@ mod device_tests {
         let mut scene = sample_scene();
         // Link b (cube at z = 0.5) swings to +y at q = pi/2; park the zone
         // there.
-        scene.upsert_sensor(Sensor {
-            name: "curtain".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.5),
-                size: Vector3::new(0.4, 0.4, 0.4),
-            },
-            watch: SensorWatch::Robot,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "curtain".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.5),
+                    size: Vector3::new(0.4, 0.4, 0.4),
+                },
+                watch: SensorWatch::Robot,
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_sequence(Sequence {
             name: "s".into(),
             steps: vec![step(
@@ -7348,15 +7354,17 @@ mod device_tests {
                 running: false,
             },
         });
-        scene.upsert_sensor(Sensor {
-            name: "eye".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.0),
-                size: Vector3::new(0.1, 0.1, 0.1),
-            },
-            watch: SensorWatch::AllObjects,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "eye".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.0),
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                watch: SensorWatch::AllObjects,
+                mount: None,
+            })
+            .unwrap();
         let check = |scene: &Scene, steps: Vec<Step>, needle: &str| {
             let mut s = scene.clone();
             s.upsert_sequence(Sequence {
@@ -7489,15 +7497,17 @@ mod multi_actor_tests {
                 )
                 .unwrap();
         }
-        scene.upsert_sensor(Sensor {
-            name: "zone".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.3),
-                size: Vector3::new(0.4, 0.4, 0.4),
-            },
-            watch: SensorWatch::Robots(vec!["a".into()]),
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "zone".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.3),
+                    size: Vector3::new(0.4, 0.4, 0.4),
+                },
+                watch: SensorWatch::Robots(vec!["a".into()]),
+                mount: None,
+            })
+            .unwrap();
         scene
     }
 
@@ -9973,25 +9983,29 @@ mod tray_tests {
             )
             .unwrap();
         // A load-present eye over the deck, authored in the vehicle frame.
-        scene.upsert_sensor(Sensor {
-            name: "loaded".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.25),
-                size: Vector3::new(0.4, 0.3, 0.2),
-            },
-            watch: SensorWatch::Objects(vec!["carton".into()]),
-            mount: Some("agv".into()),
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "loaded".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.25),
+                    size: Vector3::new(0.4, 0.3, 0.2),
+                },
+                watch: SensorWatch::Objects(vec!["carton".into()]),
+                mount: Some("agv".into()),
+            })
+            .unwrap();
         // The same zone bolted to the floor, for contrast.
-        scene.upsert_sensor(Sensor {
-            name: "fixture".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.25),
-                size: Vector3::new(0.4, 0.3, 0.2),
-            },
-            watch: SensorWatch::Objects(vec!["carton".into()]),
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "fixture".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.25),
+                    size: Vector3::new(0.4, 0.3, 0.2),
+                },
+                watch: SensorWatch::Objects(vec!["carton".into()]),
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_sequence(Sequence {
             name: "haul".into(),
             steps: vec![step("go", vec![goto("c")], device_done())],
@@ -10112,15 +10126,17 @@ mod tray_tests {
             steps: vec![step("go", vec![goto("c")], device_done())],
         });
         let mut ghost = scene.clone();
-        ghost.upsert_sensor(Sensor {
-            name: "eye".into(),
-            kind: SensorKind::Zone {
-                pose: iso(0.0, 0.0, 0.2),
-                size: Vector3::new(0.1, 0.1, 0.1),
-            },
-            watch: SensorWatch::AllObjects,
-            mount: Some("nowhere".into()),
-        });
+        ghost
+            .upsert_sensor(Sensor {
+                name: "eye".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.0, 0.0, 0.2),
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                watch: SensorWatch::AllObjects,
+                mount: Some("nowhere".into()),
+            })
+            .unwrap();
         check(&ghost, "unknown device `nowhere`");
 
         let mut belt = scene.clone();
@@ -10141,7 +10157,8 @@ mod tray_tests {
             },
             watch: SensorWatch::AllObjects,
             mount: Some("belt".into()),
-        });
+        })
+        .unwrap();
         check(&belt, "not a vehicle");
     }
 }

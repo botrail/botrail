@@ -1162,16 +1162,18 @@ mod tests {
 
     fn cell() -> Scene {
         let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(URDF).unwrap()));
-        scene.upsert_sensor(Sensor {
-            name: "beam pick".into(),
-            kind: SensorKind::Beam {
-                from: Point3::origin(),
-                to: Point3::new(1.0, 0.0, 0.0),
-                radius: 0.01,
-            },
-            watch: SensorWatch::All,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "beam pick".into(),
+                kind: SensorKind::Beam {
+                    from: Point3::origin(),
+                    to: Point3::new(1.0, 0.0, 0.0),
+                    radius: 0.01,
+                },
+                watch: SensorWatch::All,
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_device(crate::seq::Device {
             name: "belt".into(),
             kind: crate::seq::DeviceKind::Conveyor {

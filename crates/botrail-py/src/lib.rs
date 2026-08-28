@@ -1590,6 +1590,7 @@ impl Scene {
     /// it. Geometry only — no pixels are rendered or interpreted, and
     /// robot links (when watched) detect by overlap alone.
     #[pyo3(signature = (name, camera, watch = None, watch_robot = false, watch_robots = None, detect_range = None, occlusion = true))]
+    #[allow(clippy::too_many_arguments)]
     fn add_vision_sensor(
         &self,
         name: &str,

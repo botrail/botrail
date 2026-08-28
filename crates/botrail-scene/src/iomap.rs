@@ -3765,7 +3765,7 @@ pub(crate) mod tests {
         let mut scene = sample_scene();
         joint_motion(&mut scene, "to_pick", 0.5);
         joint_motion(&mut scene, "place", -0.5);
-        scene.upsert_sensor(zone("part_at_pick"));
+        scene.upsert_sensor(zone("part_at_pick")).unwrap();
         scene.define_signal("spec_ok", true);
         scene.define_signal("vacuum", false);
         scene.upsert_device(conveyor("conv", false));
@@ -3872,7 +3872,7 @@ pub(crate) mod tests {
     fn unused_definitions_are_reported_not_listed() {
         let mut scene = pick_cell();
         scene.define_signal("spare", false);
-        scene.upsert_sensor(zone("lonely"));
+        scene.upsert_sensor(zone("lonely")).unwrap();
         scene.upsert_device(conveyor("idle", false));
         scene.upsert_device(conveyor("always_on", true));
         let d = derive(&scene, None).unwrap();

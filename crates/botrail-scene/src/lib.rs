@@ -2419,15 +2419,17 @@ mod tests {
         scene.add_robot(model, Some("b"), iso(2.0, 0.0, 0.0));
 
         // A zone that watches only `b`, and a step addressed to it.
-        scene.upsert_sensor(seq::Sensor {
-            name: "zone".into(),
-            kind: seq::SensorKind::Zone {
-                pose: Isometry3::identity(),
-                size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
-            },
-            watch: seq::SensorWatch::Robots(vec!["b".into()]),
-            mount: None,
-        });
+        scene
+            .upsert_sensor(seq::Sensor {
+                name: "zone".into(),
+                kind: seq::SensorKind::Zone {
+                    pose: Isometry3::identity(),
+                    size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                },
+                watch: seq::SensorWatch::Robots(vec!["b".into()]),
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_sequence(seq::Sequence {
             name: "cell".into(),
             steps: vec![seq::Step {

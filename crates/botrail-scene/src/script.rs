@@ -1106,15 +1106,17 @@ mod tests {
         scene.define_signal("vacuum", false);
         // The robot's own upper cube trips the zone from t = 0, so a
         // `part_here` wait resolves immediately and the rollout completes.
-        scene.upsert_sensor(Sensor {
-            name: "part_here".into(),
-            kind: SensorKind::Zone {
-                pose: Isometry3::translation(0.0, 0.0, 0.55),
-                size: Vector3::new(2.0, 2.0, 0.4),
-            },
-            watch: SensorWatch::Robots(vec!["r".into()]),
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "part_here".into(),
+                kind: SensorKind::Zone {
+                    pose: Isometry3::translation(0.0, 0.0, 0.55),
+                    size: Vector3::new(2.0, 2.0, 0.4),
+                },
+                watch: SensorWatch::Robots(vec!["r".into()]),
+                mount: None,
+            })
+            .unwrap();
         scene
             .add_obstacle(
                 "part",

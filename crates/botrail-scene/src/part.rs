@@ -970,16 +970,18 @@ mod tests {
         scene.set_part("table_b", None, p).unwrap();
         // Two unidentified sensors stay two lines.
         for name in ["eye_1", "eye_2"] {
-            scene.upsert_sensor(Sensor {
-                name: name.into(),
-                kind: SensorKind::Beam {
-                    from: Point3::origin(),
-                    to: Point3::new(1.0, 0.0, 0.0),
-                    radius: 0.01,
-                },
-                watch: SensorWatch::All,
-                mount: None,
-            });
+            scene
+                .upsert_sensor(Sensor {
+                    name: name.into(),
+                    kind: SensorKind::Beam {
+                        from: Point3::origin(),
+                        to: Point3::new(1.0, 0.0, 0.0),
+                        radius: 0.01,
+                    },
+                    watch: SensorWatch::All,
+                    mount: None,
+                })
+                .unwrap();
         }
         let bom = scene.bom();
         let tables: Vec<&BomRow> = bom.rows.iter().filter(|r| r.category == "part").collect();

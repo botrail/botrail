@@ -2520,15 +2520,17 @@ mod tests {
     fn sequences_and_signals_roundtrip_and_generate_python() {
         let mut scene = sample_scene();
         scene.define_signal("armed", true);
-        scene.upsert_sensor(crate::seq::Sensor {
-            name: "eye".into(),
-            kind: crate::seq::SensorKind::Zone {
-                pose: Isometry3::translation(0.3, 0.0, 0.5),
-                size: Vector3::new(0.1, 0.1, 0.1),
-            },
-            watch: crate::seq::SensorWatch::AllObjects,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(crate::seq::Sensor {
+                name: "eye".into(),
+                kind: crate::seq::SensorKind::Zone {
+                    pose: Isometry3::translation(0.3, 0.0, 0.5),
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                watch: crate::seq::SensorWatch::AllObjects,
+                mount: None,
+            })
+            .unwrap();
         scene.upsert_sequence(crate::seq::Sequence {
             name: "cycle".into(),
             steps: vec![

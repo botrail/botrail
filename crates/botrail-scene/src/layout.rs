@@ -1655,16 +1655,18 @@ mod tests {
                 running: false,
             },
         });
-        scene.upsert_sensor(Sensor {
-            name: "eye".into(),
-            kind: SensorKind::Beam {
-                from: Point3::new(1.0, -0.3, 0.5),
-                to: Point3::new(1.0, 0.3, 0.5),
-                radius: 0.01,
-            },
-            watch: SensorWatch::All,
-            mount: None,
-        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "eye".into(),
+                kind: SensorKind::Beam {
+                    from: Point3::new(1.0, -0.3, 0.5),
+                    to: Point3::new(1.0, 0.3, 0.5),
+                    radius: 0.01,
+                },
+                watch: SensorWatch::All,
+                mount: None,
+            })
+            .unwrap();
         scene.add_frame("env/World/mount", Isometry3::translation(0.0, 1.0, 0.0));
         let sheet = scene.layout(&LayoutOptions::default());
         assert!(sheet
