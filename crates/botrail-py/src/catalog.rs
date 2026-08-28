@@ -442,12 +442,9 @@ pub fn camera_from_catalog(
     } else {
         let model = from_catalog(py, query, revision, None)?;
         let q = vec![0.0; model.dof()];
-        let poses = botrail_kin::forward_kinematics_with_base(
-            &model,
-            &q,
-            &nalgebra::Isometry3::identity(),
-        )
-        .map_err(|e| err(e.to_string()))?;
+        let poses =
+            botrail_kin::forward_kinematics_with_base(&model, &q, &nalgebra::Isometry3::identity())
+                .map_err(|e| err(e.to_string()))?;
         // USD link names are prim paths; match by last segment there.
         let find = |name: &str| {
             model.link_index(name).or_else(|| {

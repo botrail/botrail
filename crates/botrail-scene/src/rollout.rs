@@ -1724,8 +1724,8 @@ impl Rollout {
                             // fov/aspect, frame from its mount, band from
                             // the sensor (default: the camera's clips).
                             let [near, far] = detect_range.unwrap_or([cam.near, cam.far]);
-                            let aspect = cam.resolution[0].max(1) as f64
-                                / cam.resolution[1].max(1) as f64;
+                            let aspect =
+                                cam.resolution[0].max(1) as f64 / cam.resolution[1].max(1) as f64;
                             let collider = ObstacleCollider::frustum(
                                 cam.fov_deg.to_radians(),
                                 aspect,

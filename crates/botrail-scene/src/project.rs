@@ -627,11 +627,7 @@ impl Scene {
             signals: self.signals().iter().map(signal_def_msg).collect(),
             sensors: self.sensors().iter().map(sensor_msg).collect(),
             devices: self.devices().iter().map(device_msg).collect(),
-            cameras: self
-                .cameras()
-                .iter()
-                .map(crate::wire::camera_msg)
-                .collect(),
+            cameras: self.cameras().iter().map(crate::wire::camera_msg).collect(),
             flashes: self
                 .weld_flashes()
                 .iter()

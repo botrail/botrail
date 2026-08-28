@@ -1729,10 +1729,7 @@ impl Scene {
             // `bt.catalog.Product.identify` writes.
             let mut attributes = std::collections::BTreeMap::new();
             for (key, value) in &pkg.meta.specs {
-                attributes.insert(
-                    key.clone(),
-                    botrail_scene::part::PartAttr::Number(*value),
-                );
+                attributes.insert(key.clone(), botrail_scene::part::PartAttr::Number(*value));
             }
             let part = botrail_scene::part::Part {
                 catalog: Some(botrail_scene::part::CatalogRef {

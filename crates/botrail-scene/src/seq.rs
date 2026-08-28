@@ -987,9 +987,11 @@ impl Scene {
 
     pub fn remove_camera(&mut self, name: &str) -> Result<(), SceneError> {
         // A vision sensor looking through it would go blind silently.
-        if let Some(sensor) = self.sensors.iter().find(|s| {
-            matches!(&s.kind, SensorKind::Vision { camera, .. } if camera == name)
-        }) {
+        if let Some(sensor) = self
+            .sensors
+            .iter()
+            .find(|s| matches!(&s.kind, SensorKind::Vision { camera, .. } if camera == name))
+        {
             return Err(SceneError::BadCamera(format!(
                 "camera `{name}` is watched by vision sensor `{}`; remove the sensor first",
                 sensor.name
