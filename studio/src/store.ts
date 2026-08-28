@@ -32,7 +32,16 @@ import {
   type PlaybackSample,
   type PlaybackTracks,
 } from "./playback";
+import { applySample } from "./playbackRig";
 import { attributionIssues } from "./sfc";
+import * as THREE from "three";
+import {
+  aimSensorCamera,
+  cameraRig,
+  hideAids,
+  readDepth,
+  restoreAids,
+} from "./three/cameraRig";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 export type GizmoMode = "translate" | "rotate";
@@ -368,9 +377,21 @@ export interface StudioState {
   /** The camera whose picture the PiP shows; `null` = PiP closed (and the
    * second render pass does not run at all). */
   pipCamera: string | null;
+  /** What the PiP shows: the camera's picture, or its depth as a turbo
+   * colormap (design/design-camera.md §12). */
+  pipMode: "rgb" | "depth";
   /** A running camera video export; the exporter component owns the
-   * canvas and the frame stepping while this is set. */
-  camExport: { camera: string; fps: number } | null;
+   * canvas and the frame stepping while this is set. `viz` picks what
+   * the video shows (the camera picture, or its depth colormap);
+   * `depthData` additionally captures metric float32 depth per frame
+   * and downloads it as a second file — the RGBD recording path
+   * (design/design-camera.md §12.4 DEP2). */
+  camExport: {
+    camera: string;
+    fps: number;
+    viz: "rgb" | "depth";
+    depthData: boolean;
+  } | null;
   /** Export progress in [0, 1] — separate from `camExport` so per-frame
    * updates don't remount the exporter. */
   camExportProgress: number;
@@ -441,7 +462,35 @@ export interface StudioState {
   selectDevice: (name: string) => void;
   selectCamera: (name: string) => void;
   setPipCamera: (name: string | null) => void;
-  beginCamExport: (camera: string, fps: number) => void;
+  setPipMode: (mode: "rgb" | "depth") => void;
+  /** Captures the named camera's metric depth image, synchronously:
+   * view-space Z in meters, 0 = no return, row 0 = the top of the
+   * picture, base64-encoded float32 (little endian), plus the
+   * intrinsics' ingredients and the camera's world pose at capture time
+   * (position + xyzw quaternion — the extrinsics a point-cloud
+   * unprojection needs). `t` seeks the baked cycle to that time first
+   * (through the deterministic driver path the video exporter uses) and
+   * puts the display back at the playhead after; omitted, the scene is
+   * captured as it stands. The automation handle (`__STUDIO__`) is the
+   * intended caller (design/design-camera.md §12). */
+  captureDepth: (
+    camera: string,
+    t?: number | null,
+  ) => {
+    width: number;
+    height: number;
+    near: number;
+    far: number;
+    fov_deg: number;
+    position: number[];
+    quaternion: number[];
+    data: string;
+  };
+  beginCamExport: (
+    camera: string,
+    fps: number,
+    opts?: { viz?: "rgb" | "depth"; depthData?: boolean },
+  ) => void;
   setCamExportProgress: (p: number) => void;
   endCamExport: () => void;
   selectIoNode: (name: string) => void;
@@ -516,6 +565,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   devices: [],
   cameras: [],
   pipCamera: null,
+  pipMode: "rgb",
   camExport: null,
   camExportProgress: 0,
   scenarios: [],
@@ -583,6 +633,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           devices: [],
           cameras: [],
           pipCamera: null,
+          pipMode: "rgb",
           camExport: null,
           camExportProgress: 0,
           scenarios: [],
@@ -885,10 +936,83 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   selectCamera: (name) =>
     set({ selection: { type: "camera", name }, pipCamera: name }),
   setPipCamera: (name) => set({ pipCamera: name }),
+  setPipMode: (mode) => set({ pipMode: mode }),
+  captureDepth: (camera, t) => {
+    const s = get();
+    if (s.camExport)
+      throw new Error("depth capture: a video export owns the canvas");
+    const msg = s.cameras.find((c) => c.name === camera);
+    if (!msg) throw new Error(`depth capture: no camera named "${camera}"`);
+    const ctx = cameraRig.ctx;
+    const node = cameraRig.nodes.get(camera);
+    if (!ctx || !node)
+      throw new Error("depth capture: the viewport is not ready");
+    // A seek walks the baked tracks through the driver's imperative path
+    // (applySample — the same route the video exporter takes), so the
+    // camera node itself is already moved when it is aimed below.
+    let restore: (() => void) | null = null;
+    if (t != null) {
+      const tracks = s.playback;
+      if (!tracks)
+        throw new Error(
+          "depth capture: t given but no baked cycle — simulate first",
+        );
+      applySample(
+        samplePlayback(tracks, Math.min(Math.max(t, 0), tracks.duration)),
+      );
+      restore = () =>
+        applySample(samplePlayback(tracks, get().playbackTime));
+    }
+    const cam = new THREE.PerspectiveCamera();
+    aimSensorCamera(cam, msg, node);
+    const saved = hideAids();
+    let depth: Float32Array;
+    try {
+      depth = readDepth(
+        ctx.gl,
+        ctx.scene,
+        cam,
+        msg.resolution[0],
+        msg.resolution[1],
+      );
+    } finally {
+      restoreAids(saved);
+      restore?.();
+    }
+    const bytes = new Uint8Array(depth.buffer);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return {
+      width: msg.resolution[0],
+      height: msg.resolution[1],
+      near: msg.near,
+      far: msg.far,
+      fov_deg: msg.fov_deg,
+      position: [cam.position.x, cam.position.y, cam.position.z],
+      quaternion: [
+        cam.quaternion.x,
+        cam.quaternion.y,
+        cam.quaternion.z,
+        cam.quaternion.w,
+      ],
+      data: btoa(bin),
+    };
+  },
   // Deterministic seek export: playback is paused for the duration; the
   // exporter steps the clock itself (design/design-camera.md 判断 8).
-  beginCamExport: (camera, fps) =>
-    set({ camExport: { camera, fps }, camExportProgress: 0, playing: false }),
+  beginCamExport: (camera, fps, opts) =>
+    set({
+      camExport: {
+        camera,
+        fps,
+        viz: opts?.viz ?? "rgb",
+        depthData: opts?.depthData ?? false,
+      },
+      camExportProgress: 0,
+      playing: false,
+    }),
   setCamExportProgress: (p) => set({ camExportProgress: p }),
   endCamExport: () => set({ camExport: null, camExportProgress: 0 }),
   selectIoNode: (name) => set({ selection: { type: "io_node", name } }),

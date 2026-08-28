@@ -247,10 +247,22 @@ def cmd_capture(args) -> int:
             have = ", ".join(names) if names else "none"
             raise CliError(f"--camera is required (cameras in the cell: {have})")
         camera = names[0]
+    if args.depth:
+        # A depth snapshot (or, for .ply, its point cloud): the scene as
+        # authored, or --at seeks a bake.
+        if args.at is not None:
+            _bake(scene, args.sequence, scenarios=False, max_duration=args.max_duration)
+        out = Path(args.out) if args.out else Path("cell_depth.npy")
+        if out.suffix == ".ply":
+            capture.capture_pointcloud(scene, camera, out, t=args.at)
+        else:
+            capture.capture_depth(scene, camera, out, t=args.at)
+        print(json.dumps({"ok": True, "camera": camera, "t": args.at, "out": str(out)}))
+        return 0
     # Bake the cycle to film. A cell with no sequences may still carry a
     # played recording; record_camera says so clearly if nothing arrives.
     _bake(scene, args.sequence, scenarios=False, max_duration=args.max_duration)
-    out = capture.record_camera(scene, camera, args.out, fps=args.fps)
+    out = capture.record_camera(scene, camera, args.out or "cell.webm", fps=args.fps)
     print(json.dumps({"ok": True, "camera": camera, "fps": args.fps, "out": str(out)}))
     return 0
 
@@ -312,12 +324,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "capture",
-        help="record a camera's view of the baked cycle as video (headless browser)",
+        help="record a camera's view as video, or --depth for a metric depth snapshot (headless browser)",
     )
     p.add_argument("cell")
     p.add_argument("--camera", help="camera name (default: the cell's only camera)")
-    p.add_argument("--out", default="cell.webm", help=".webm, .mp4 or .gif (default cell.webm)")
+    p.add_argument("--out", help="video: .webm/.mp4/.gif (default cell.webm); depth: .npy/.png/.ply (default cell_depth.npy)")
     p.add_argument("--fps", type=int, default=30, help="video frame rate (default 30)")
+    p.add_argument("--depth", action="store_true", help="capture one metric depth image instead of video (.npy float32 meters, or 16-bit .png millimeters; a .json sidecar carries the intrinsics; .ply writes the world-space point cloud)")
+    p.add_argument("--at", type=float, help="depth only: seek the baked cycle to this time, seconds (default: the scene as authored, no bake)")
     p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
     p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
     p.set_defaults(func=cmd_capture)

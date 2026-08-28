@@ -17,7 +17,7 @@ import { CameraView } from "./CameraView";
 import { CameraPass } from "./CameraPass";
 import { CameraPip } from "./CameraPip";
 import { CameraExporter } from "./CameraExporter";
-import { Aid } from "../three/cameraRig";
+import { Aid, CameraRigBridge } from "../three/cameraRig";
 import { CutTraceView } from "./CutTraceView";
 import { ToolpathView } from "./ToolpathView";
 import { LegendHud } from "./LegendHud";
@@ -133,6 +133,7 @@ export function Viewport() {
         onPointerMissed={() => useStudioStore.getState().selectTcp()}
       >
         <color attach="background" args={["#15171c"]} />
+        <CameraRigBridge />
         {/* The environment map does the ambient work, so the lights below it
             are only the key and a fill; stacking a bright ambient on top of
             an IBL is what flattens a scene out. */}

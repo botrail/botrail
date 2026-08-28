@@ -10,6 +10,8 @@ import {
   aimSensorCamera,
   cameraRig,
   hideAids,
+  readDepth,
+  renderDepthPip,
   restoreAids,
 } from "../three/cameraRig";
 import { downloadBlob } from "./Header";
@@ -33,11 +35,20 @@ import {
  * recording as it happens; a priority-2 `useFrame` keeps R3F in manual
  * mode, and PlaybackDriver / CameraPass stand down while `camExport` is
  * set. Same bake, same grid, same file.
+ *
+ * Depth (design/design-camera.md §12.4 DEP2): `viz: "depth"` films the
+ * depth colormap instead of the picture; `depthData` captures metric
+ * float32 depth on the same grid and downloads it as a second file.
  */
 export function CameraExporter() {
   const job = useStudioStore((s) => s.camExport);
   if (!job) return null;
-  return <ExportRunner key={`${job.camera}@${job.fps}`} job={job} />;
+  return (
+    <ExportRunner
+      key={`${job.camera}@${job.fps}:${job.viz}:${job.depthData}`}
+      job={job}
+    />
+  );
 }
 
 interface Rig {
@@ -51,9 +62,26 @@ interface Rig {
   frame: number;
   done: boolean;
   failed: string | null;
+  /** What the video shows: the camera picture, or its depth colormap. */
+  viz: "rgb" | "depth";
+  /** Per-frame metric depth (one Blob each, so the bytes live in the
+   * browser's blob storage rather than the JS heap), downloaded as a
+   * second file after the video; `null` = not capturing depth data
+   * (design/design-camera.md §12.4 DEP2). */
+  depthParts: Blob[] | null;
+  near: number;
+  far: number;
+  fovDeg: number;
 }
 
-function ExportRunner({ job }: { job: { camera: string; fps: number } }) {
+interface Job {
+  camera: string;
+  fps: number;
+  viz: "rgb" | "depth";
+  depthData: boolean;
+}
+
+function ExportRunner({ job }: { job: Job }) {
   const gl = useThree((s) => s.gl);
   const rigRef = useRef<Rig | null>(null);
   const savedView = useRef<{ w: number; h: number; dpr: number } | null>(null);
@@ -105,6 +133,11 @@ function ExportRunner({ job }: { job: { camera: string; fps: number } }) {
         frame: 0,
         done: false,
         failed: null,
+        viz: job.viz,
+        depthParts: job.depthData ? [] : null,
+        near: msg.near,
+        far: msg.far,
+        fovDeg: msg.fov_deg,
       };
       rig.encoder = new VideoEncoder({
         output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -183,8 +216,30 @@ function ExportRunner({ job }: { job: { camera: string; fps: number } }) {
     const saved = hideAids();
     gl.setScissorTest(false);
     gl.setViewport(0, 0, rig.width, rig.height);
-    gl.render(scene, sensorCam);
-    restoreAids(saved);
+    let depthFrame: Float32Array | null = null;
+    try {
+      if (rig.viz === "depth") {
+        // The colormap covers the (temporarily camera-sized) canvas.
+        renderDepthPip(
+          gl,
+          scene,
+          sensorCam,
+          { x: 0, y: 0, w: rig.width, h: rig.height },
+          rig.height,
+        );
+        gl.setScissorTest(false);
+      } else {
+        gl.render(scene, sensorCam);
+      }
+      if (rig.depthParts) {
+        depthFrame = readDepth(gl, scene, sensorCam, rig.width, rig.height);
+      }
+    } catch (e) {
+      rig.failed = String(e);
+      return;
+    } finally {
+      restoreAids(saved);
+    }
 
     try {
       // Same task as the render, so the (non-preserved) buffer is intact.
@@ -197,6 +252,13 @@ function ExportRunner({ job }: { job: { camera: string; fps: number } }) {
     } catch (e) {
       rig.failed = String(e);
       return;
+    }
+    // Only after the video frame went in, so the two streams cannot
+    // drift: frame n exists in both files or in neither.
+    if (rig.depthParts && depthFrame) {
+      // readDepth allocates a plain ArrayBuffer; the cast just narrows
+      // the typed array's ArrayBufferLike for Blob's sake.
+      rig.depthParts.push(new Blob([depthFrame.buffer as ArrayBuffer]));
     }
 
     rig.frame += 1;
@@ -218,7 +280,30 @@ async function finish(rig: Rig, camera: string): Promise<void> {
     rig.encoder.close();
     rig.muxer.finalize();
     const { buffer } = rig.muxer.target;
-    downloadBlob(new Blob([buffer], { type: "video/webm" }), `cell_${camera}.webm`);
+    const stem = rig.viz === "depth" ? `cell_${camera}_depth` : `cell_${camera}`;
+    downloadBlob(new Blob([buffer], { type: "video/webm" }), `${stem}.webm`);
+    if (rig.depthParts) {
+      // Metric depth stream: one self-describing blob — a JSON header
+      // line, then the frames as raw little-endian float32, in the same
+      // order and count as the video's. capture.py turns it into .npz.
+      const header = JSON.stringify({
+        width: rig.width,
+        height: rig.height,
+        fps: rig.fps,
+        frames: rig.depthParts.length,
+        duration: rig.duration,
+        near: rig.near,
+        far: rig.far,
+        fov_deg: rig.fovDeg,
+        camera,
+      });
+      downloadBlob(
+        new Blob([header + "\n", ...rig.depthParts], {
+          type: "application/octet-stream",
+        }),
+        `cell_${camera}_depth.bin`,
+      );
+    }
   } catch (e) {
     console.error(`camera export failed while finalizing: ${e}`);
   }

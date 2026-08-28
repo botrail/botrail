@@ -941,11 +941,42 @@ button.danger:hover:not(:disabled) {
 
 .camera-pip-picture {
   cursor: pointer;
+  position: relative;
 }
 
 /* A tripped vision sensor looking through the PiP camera. */
 .camera-pip-live {
   border-color: #e0503c;
+}
+
+/* Depth-mode toggle and the near/far legend over the picture. */
+.camera-pip-mode {
+  font-weight: 700;
+}
+
+.camera-pip-header button.camera-pip-mode-on {
+  color: #5cc8ff;
+}
+
+.camera-pip-depth-legend {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #e6ecf7;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.camera-pip-depth-ramp {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
 }
 
 .legend-card {

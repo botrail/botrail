@@ -8,6 +8,7 @@ import {
   aimSensorCamera,
   cameraRig,
   hideAids,
+  renderDepthPip,
   restoreAids,
 } from "../three/cameraRig";
 
@@ -53,13 +54,19 @@ function PassRunner({ msg }: { msg: CameraMsg }) {
 
     aimSensorCamera(sensorCam, msg, node);
     const saved = hideAids();
-    // WebGL rects are bottom-left origin; the DOM rect is top-left. The
-    // scissor bounds the clear, so the inset paints over the main view.
-    const y = size.y - rect.y - rect.h;
-    gl.setScissorTest(true);
-    gl.setScissor(rect.x, y, rect.w, rect.h);
-    gl.setViewport(rect.x, y, rect.w, rect.h);
-    gl.render(scene, sensorCam);
+    if (useStudioStore.getState().pipMode === "depth") {
+      // Depth mode (design/design-camera.md §12): scene into a depth
+      // target, colormap blit into the inset.
+      renderDepthPip(gl, scene, sensorCam, rect, size.y);
+    } else {
+      // WebGL rects are bottom-left origin; the DOM rect is top-left. The
+      // scissor bounds the clear, so the inset paints over the main view.
+      const y = size.y - rect.y - rect.h;
+      gl.setScissorTest(true);
+      gl.setScissor(rect.x, y, rect.w, rect.h);
+      gl.setViewport(rect.x, y, rect.w, rect.h);
+      gl.render(scene, sensorCam);
+    }
     restoreAids(saved);
     gl.setScissorTest(false);
     gl.setViewport(0, 0, size.x, size.y);

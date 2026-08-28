@@ -1,8 +1,20 @@
 import { useLayoutEffect, useRef, useState } from "react";
 
 import { useStudioStore } from "../store";
-import { cameraRig } from "../three/cameraRig";
+import { cameraRig, turbo } from "../three/cameraRig";
 import { visionActiveAt } from "./CameraView";
+
+// The legend ramp mirrors the depth pass' colormap: near = hot, far =
+// cold (turbo, reversed), built from the same polynomial the shader uses.
+const DEPTH_RAMP = `linear-gradient(to right, ${Array.from(
+  { length: 9 },
+  (_, i) => {
+    const [r, g, b] = turbo(1 - i / 8);
+    return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+  },
+).join(", ")})`;
+
+const meters = (v: number) => `${Number(v.toFixed(2))} m`;
 
 /**
  * The camera picture-in-picture: a DOM frame (header + border) over the
@@ -19,6 +31,8 @@ export function CameraPip() {
   const pipCamera = useStudioStore((s) => s.pipCamera);
   const setPipCamera = useStudioStore((s) => s.setPipCamera);
   const selectCamera = useStudioStore((s) => s.selectCamera);
+  const depth = useStudioStore((s) => s.pipMode === "depth");
+  const setPipMode = useStudioStore((s) => s.setPipMode);
   const [large, setLarge] = useState(false);
   const pictureRef = useRef<HTMLDivElement | null>(null);
   // A tripped vision sensor looking through this camera lights the frame.
@@ -92,6 +106,13 @@ export function CameraPip() {
           {rw}×{rh}
         </span>
         <button
+          className={depth ? "camera-pip-mode camera-pip-mode-on" : "camera-pip-mode"}
+          onClick={() => setPipMode(depth ? "rgb" : "depth")}
+          title={depth ? "show the camera picture" : "show depth"}
+        >
+          D
+        </button>
+        <button
           onClick={() => setLarge((v) => !v)}
           title={large ? "smaller" : "larger"}
         >
@@ -107,7 +128,18 @@ export function CameraPip() {
         style={{ height: Math.round(width / aspect) }}
         title="click to select the camera"
         onClick={() => selectCamera(camera.name)}
-      />
+      >
+        {depth && (
+          <div className="camera-pip-depth-legend">
+            <span>{meters(camera.near)}</span>
+            <div
+              className="camera-pip-depth-ramp"
+              style={{ background: DEPTH_RAMP }}
+            />
+            <span>{meters(camera.far)}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

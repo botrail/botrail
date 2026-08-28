@@ -96,12 +96,15 @@ export function TimelineDock() {
   const recording = useStudioStore((s) => s.recording);
   const cameras = useStudioStore((s) => s.cameras);
   const pipCamera = useStudioStore((s) => s.pipCamera);
+  const pipMode = useStudioStore((s) => s.pipMode);
   const camExport = useStudioStore((s) => s.camExport);
   const camExportProgress = useStudioStore((s) => s.camExportProgress);
   const beginCamExport = useStudioStore((s) => s.beginCamExport);
   // The PiP camera (the one being watched) is the recording target; else
-  // the first camera in the scene.
+  // the first camera in the scene. A PiP showing depth records the depth
+  // colormap — what you see is what downloads.
   const camTarget = pipCamera ?? cameras[0]?.name ?? null;
+  const camDepthViz = pipCamera !== null && pipMode === "depth";
   const webcodecs = typeof VideoEncoder !== "undefined";
   const segmentEnds = useStudioStore((s) => s.segmentEnds);
   const playbackTime = useStudioStore((s) => s.playbackTime);
@@ -249,10 +252,18 @@ export function TimelineDock() {
             <button
               className="timeline-button"
               disabled={!webcodecs || camExport !== null}
-              onClick={() => beginCamExport(camTarget, 30)}
+              onClick={() =>
+                beginCamExport(
+                  camTarget,
+                  30,
+                  camDepthViz ? { viz: "depth" } : undefined,
+                )
+              }
               title={
                 webcodecs
-                  ? `record ${camTarget}'s view as WebM, 30 fps (deterministic re-run of the bake)`
+                  ? camDepthViz
+                    ? `record ${camTarget}'s depth colormap as WebM, 30 fps (deterministic re-run of the bake)`
+                    : `record ${camTarget}'s view as WebM, 30 fps (deterministic re-run of the bake)`
                   : "video export needs WebCodecs (Chrome, Edge, or a recent Firefox)"
               }
             >
