@@ -1,6 +1,6 @@
 # Parameter sweeps
 
-*Walks through [`examples/sweep_demo.py`](https://github.com/botrail/botrail/blob/main/examples/sweep_demo.py)
+*Walks through [`examples/basics/sweep_demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/sweep_demo.py)
 — the cell authored once as a function of its parameters, baked at every
 variant with `bt.sweep`, compared by the numbers that matter, and searched
 with `bt.optimize`.*
@@ -12,15 +12,15 @@ table. No re-teaching between rows. This example runs from a checkout with no
 downloads (primitive-geometry arm):
 
 ```bash
-python examples/sweep_demo.py
+python examples/basics/sweep_demo.py
 ```
 
 ## The whole script
 
 Short enough to read in one sitting:
 
-```python title="examples/sweep_demo.py"
---8<-- "examples/sweep_demo.py"
+```python title="examples/basics/sweep_demo.py"
+--8<-- "examples/basics/sweep_demo.py"
 ```
 
 Everything hangs off the signature `build_cell(velocity, lane_y)`: belt speed,

@@ -33,7 +33,7 @@ def write_box_stl(path: Path, size: tuple[float, float, float]) -> None:
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def test_mesh_obstacle_collides_and_clears(scene: bt.Scene, tmp_path: Path) -> None:

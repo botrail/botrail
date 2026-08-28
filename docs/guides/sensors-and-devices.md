@@ -154,7 +154,7 @@ path, and the next `goto` says so.
 Doors are not part of the device, and need no special vocabulary: a panel
 on a `add_linear_axis` physically blocks the path while closed — boarding
 through it simply fails the aisle check — and the open/close steps are
-ordinary sequence lanes on the timing chart. `examples/lift_demo.py` runs
+ordinary sequence lanes on the timing chart. `examples/vehicles/lift_demo.py` runs
 the whole interlock chain: call → door open → board → door close → ride →
 alight.
 

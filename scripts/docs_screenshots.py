@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "examples"))
+sys.path[:0] = [str(ROOT / "examples" / d)
+                for d in ("basics", "export", "legged", "vehicles", "welding")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402

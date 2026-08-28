@@ -2402,7 +2402,7 @@ mod tests {
     use botrail_traj::JointTrajectory;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn round_gun() -> Applicator {
@@ -2904,7 +2904,7 @@ mod standoff_tests {
     use nalgebra::Unit;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn scene_with_plate(size: [f64; 3], pose: Isometry3<f64>) -> Scene {
@@ -3269,7 +3269,7 @@ mod mesh_target_tests {
     use botrail_model::RobotModel;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// A mesh target must take paint like a primitive one does — the
@@ -3377,7 +3377,7 @@ mod trigger_tests {
     use nalgebra::Unit;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// The authoring trap: a sequence that opens the gun in the same step
@@ -3559,7 +3559,7 @@ mod brush_tests {
     use nalgebra::Unit;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn gun_robot() -> Arc<RobotModel> {
@@ -3866,7 +3866,7 @@ mod palette_tests {
     use botrail_model::RobotModel;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     fn coat_with(options: CoatOptions, plate_color: Option<[f32; 3]>) -> FilmCoat {

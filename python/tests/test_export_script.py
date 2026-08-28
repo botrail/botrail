@@ -9,7 +9,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def test_urscript_from_motion(scene: bt.Scene) -> None:
@@ -94,7 +94,7 @@ def cell_timeline() -> "bt.SequenceTimeline":
     """A pick cell on the six-axis arm, rolled out: a conveyor feeds a box
     over a beam, the robot picks with a vacuum coil — every lowerable
     element in one sequence."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("part", size=(0.06, 0.06, 0.06), position=(-0.45, 0.35, 0.03))
     scene.add_conveyor(
         "conv",
@@ -187,7 +187,7 @@ def test_sequence_script_unmapped_names_raise(cell_timeline) -> None:
 
 
 def test_branches_and_edges_simulate_and_export() -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.define_signal("part_ok", True)  # this scenario: the part passes
     scene.define_signal("part_ng")
     scene.define_signal("pulse")  # part-arrival edge, raised by the feeder

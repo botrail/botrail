@@ -10,7 +10,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def _dist(a, b) -> float:

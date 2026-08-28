@@ -1,6 +1,6 @@
 # Pick from a moving belt
 
-*Walks through [`examples/sequence_demo.py`](https://github.com/botrail/botrail/blob/main/examples/sequence_demo.py)
+*Walks through [`examples/basics/sequence_demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/sequence_demo.py)
 — a tracking pick on the factory cell, baked into one deterministic timeline.*
 
 The conveyor feeds a box down the belt until it interrupts a photoelectric beam
@@ -10,7 +10,7 @@ dives onto the moving box, closes on it in motion, and only lets go of the belt
 sync once the box is its own.
 
 ```bash
-python examples/sequence_demo.py
+python examples/basics/sequence_demo.py
 ```
 
 ```text
@@ -44,7 +44,7 @@ transport zone came with it. What this demo adds is a part at the head of the
 queue and a beam to see it arrive:
 
 ```python
---8<-- "examples/sequence_demo.py:48:70"
+--8<-- "examples/basics/sequence_demo.py:48:70"
 ```
 
 Note what is *not* here — no zone to size, no belt speed to restate. A
@@ -58,7 +58,7 @@ grasp.
 ## Teaching, hover-first
 
 ```python
---8<-- "examples/sequence_demo.py:72:83"
+--8<-- "examples/basics/sequence_demo.py:72:83"
 ```
 
 Each station is solved hover-first so the grasp warm-starts from the pose right
@@ -84,7 +84,7 @@ which the planner excludes.
 ## The sequence
 
 ```python
---8<-- "examples/sequence_demo.py:98:135"
+--8<-- "examples/basics/sequence_demo.py:98:135"
 ```
 
 Read it the way a PLC programmer would:
@@ -114,7 +114,7 @@ The step table above is `timeline.step_spans`. The 150 mm is two
 [`object_pose`][botrail.SequenceTimeline.object_pose] queries:
 
 ```python
---8<-- "examples/sequence_demo.py:168:172"
+--8<-- "examples/basics/sequence_demo.py:168:172"
 ```
 
 Anything the bake computed is queryable afterwards — that is what the
@@ -122,10 +122,10 @@ Anything the bake computed is queryable afterwards — that is what the
 
 ## The complete script
 
-??? example "examples/sequence_demo.py"
+??? example "examples/basics/sequence_demo.py"
 
     ```python
-    --8<-- "examples/sequence_demo.py"
+    --8<-- "examples/basics/sequence_demo.py"
     ```
 
 ## Next

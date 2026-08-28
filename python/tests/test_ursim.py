@@ -153,7 +153,7 @@ def ursim() -> UrSim:
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.set_joint_positions(START)
     return scene
 

@@ -1,6 +1,6 @@
 """The machining example, asserted the way a cell owner would assert it.
 
-`examples/machining_demo.py` is the C0/C1 cell of
+`examples/machining/machining_demo.py` is the C0/C1 cell of
 design/design-machining.md: a live stock plate trimmed (builder toolpath:
 lines + corner arcs) and pocketed (G-code import) at commanded feed,
 inside a clamp -> spindle -> cut -> unclamp sequence. This pins the
@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "machining"))
 
 import machining_demo as demo  # noqa: E402
 
@@ -460,7 +460,7 @@ def test_the_machined_surfaces_are_classed_in_the_obj(cycle, tmp_path):
     assert obj.count("usemtl") >= 2
     assert obj.count("\nf ") == carve.triangle_count
     # The file round-trips through the scene loader with its colors.
-    scene2 = bt.Scene(bt.Robot.from_urdf(str(EXAMPLES / "simple_arm.urdf")))
+    scene2 = bt.Scene(bt.Robot.from_urdf(str(EXAMPLES / "assets" / "simple_arm.urdf")))
     scene2.add_mesh("part", out, position=(0.5, 0.0, 0.2))
 
 

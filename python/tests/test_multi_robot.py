@@ -12,7 +12,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def robot() -> bt.Robot:
-    return bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")
+    return bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
 
 
 @pytest.fixture()
@@ -225,14 +225,14 @@ def test_rename_robot_carries_the_authored_cell(duo: bt.Scene) -> None:
 
 
 def test_recordings_name_their_robot_instances(duo: bt.Scene, tmp_path: Path) -> None:
-    """`examples/play_record.py` picks which cell to rebuild by reading the
+    """`examples/export/play_record.py` picks which cell to rebuild by reading the
     instance names off a recording, which only works because the exporter
     puts each robot at `/World/<instance name>`. Pin that contract here: if
     the export layout changes, the replay script would quietly load the
     wrong cell instead of failing."""
     import sys
 
-    sys.path.insert(0, str(EXAMPLES))
+    sys.path.insert(0, str(EXAMPLES / "export"))
     import play_record
 
     duo.add_segment("go", goal=[0.2, 0.0, 0.0, 0.0, 0.0, 0.0], robot="arm_b")

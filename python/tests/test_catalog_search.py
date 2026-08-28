@@ -145,7 +145,7 @@ def test_product_attributes_and_repr(index: catalog.Index) -> None:
 
 
 def test_search_for_a_requirement_row_and_identify(index: catalog.Index) -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_beam_sensor("eye", frm=(0.25, 0.25, 0.03), to=(0.25, 2.25, 0.03))  # 2 m span
     req = scene.requirements()
     row = req["eye"]

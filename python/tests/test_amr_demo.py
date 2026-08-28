@@ -1,6 +1,6 @@
 """The AMR example, asserted the way a cell owner would assert it.
 
-`examples/amr_demo.py` is a mobile manipulator assembled from three
+`examples/vehicles/amr_demo.py` is a mobile manipulator assembled from three
 catalog packages — a carrier, an arm, a gripper — running one transfer
 between a bench in an aisle and a conveyor in a machining bay. What these
 tests pin is the part that is easy to break silently: that the machine's
@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "vehicles"))
 
 import amr_demo as demo  # noqa: E402
 

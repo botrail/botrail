@@ -17,7 +17,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     tcp, _ = scene.link_pose(scene.robot.tcp_link)
     # 20 mm above the tool box (tool0 spans +0.04; the box's lower face sits
     # at +0.06): grasped without touching, so post-drop clearance is 0.02.
@@ -94,7 +94,7 @@ def test_min_clearance_measures_the_cycle(scene: bt.Scene) -> None:
 
 
 def test_min_clearance_contact_names_the_pair() -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     # A conveyed crate drives straight through the robot base: no motion is
     # planned, so nothing in the rollout objects — only the clearance scan
     # sees it. Contact starts at x = -(0.075 + 0.02) → t = 0.405/0.25.
@@ -122,7 +122,7 @@ def test_min_clearance_argument_errors(scene: bt.Scene) -> None:
     with pytest.raises(ValueError, match="dt must be positive"):
         tl.min_clearance(dt=0.0)
 
-    empty = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    empty = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     sq = empty.sequence("idle")
     sq.step("wait", transition=bt.seq.elapsed(0.2))
     with pytest.raises(ValueError, match="nothing to measure"):

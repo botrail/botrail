@@ -96,7 +96,7 @@ def test_urdf_robots_replay_as_transforms(tmp_path: Path) -> None:
     importer resolves the writer's flat link naming and plays the
     transform tier. There are no joint tracks to recover, and none are
     needed."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     traj = scene.plan([0.2, 0.0, 0.0, 0.0, 0.0, 0.0])
     out = tmp_path / "rec.usda"
     assert scene.export_usd(traj, out, fps=30.0) == []

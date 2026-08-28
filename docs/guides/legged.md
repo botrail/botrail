@@ -138,7 +138,7 @@ Two things worth knowing before you teach one:
 * **Arm ramps are not planned.** A ramp from "arms at the sides" to "arms
   forward" swings the forearms through a bench at hip height, even though
   both end poses are clear. Teach an intermediate pose (out and up, then
-  in), and check every ramp the way `examples/humanoid_carry_demo.py`
+  in), and check every ramp the way `examples/legged/humanoid_carry_demo.py`
   does: sample it and ask `check_collisions()` — the demo refuses to bake
   a ramp that sweeps through the cell.
 
@@ -163,7 +163,7 @@ A package directory on disk works the same way — `bt.Gait.from_catalog(
 wrote — and a package that is not legged is refused by name. Beside the
 gait, the manifest's `specs` say what the cell needs to size the body the
 gate sees (`footprint_mm`, `height_mm`) and cap the vehicle's speed
-(`max_speed_mps`); `examples/legged_patrol_demo.py --compare` bakes one
+(`max_speed_mps`); `examples/legged/legged_patrol_demo.py --compare` bakes one
 cell on every package named and tables which fit and how long they take.
 
 ## Stairs and steps
@@ -218,7 +218,7 @@ joint angles: which fold puts a foot 0.25 m under the body depends on the
 legs, and a standing stance is rarely a clean one to scale (the Go2's is
 thigh 0.8 / calf −1.5, its foot 0.178 m ahead of the hip). That is why the
 angles live in the package, which knows the legs.
-`examples/stairs_delivery_demo.py` does both: it asks the package for the
+`examples/legged/stairs_delivery_demo.py` does both: it asks the package for the
 posture, and where there is none it solves the fold by standing a scratch
 copy of the machine and reading a foot — so the same cell posture-fits
 whatever walks it, and the primitive `quad_test.urdf`, having shorter legs,
@@ -256,18 +256,18 @@ like any other.
 
 ## Examples
 
-* `examples/legged_patrol_demo.py` — a Unitree Go2 (the catalog package
+* `examples/legged/legged_patrol_demo.py` — a Unitree Go2 (the catalog package
   `unitree/go2/go2` when it is reachable, else Unitree's URDF with the
   meshes converted on first run) walks in through a gate, docks, has a
   part placed on its back by an arm, and carries it to the bay. `--robot
   <dir>` runs it on a package the catalog builder wrote, `--robot quad` on
-  the primitive quadruped in `examples/quad_test.urdf` with no download;
+  the primitive quadruped in `examples/assets/quad_test.urdf` with no download;
   `--narrow` shows the gate check failing; `--compare <dir> ...` tables
   every candidate.
-* `examples/humanoid_carry_demo.py` — a Unitree G1 picks a tote off a
+* `examples/legged/humanoid_carry_demo.py` — a Unitree G1 picks a tote off a
   bench, carries it to another, sets it down and walks back. `--robot
-  biped` runs it on `examples/biped_test.urdf`.
-* `examples/stairs_delivery_demo.py` — a quadruped carries a tote up a
+  biped` runs it on `examples/assets/biped_test.urdf`.
+* `examples/legged/stairs_delivery_demo.py` — a quadruped carries a tote up a
   `bt.parts.stairs` flight to a mezzanine: footfalls on the treads, the
   body on the slope. `--tall` raises the risers over the gait's
   `max_step` and shows the refusal, named.

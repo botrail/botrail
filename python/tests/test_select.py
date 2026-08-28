@@ -18,7 +18,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "drone"))
 
 HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
 HAS_CATALOG = any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))
@@ -29,7 +29,7 @@ PICK = [0.95, 0.85, -1.1, 0.25, 0.0, 0.0]
 def cell(*, reach_mm: float = 1000.0, part_mass: float | None = 0.8) -> bt.Scene:
     """A hand-identified pick cell: every number the derivations read is
     authored here, so the expected requirements follow by hand."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.set_part("simple_arm", manufacturer="ACME", model="SA-6", payload_kg=3.0, reach_mm=reach_mm, mass_kg=28)
     stand = bt.parts.pedestal(scene, "stand", height=0.4, position=(0, 0))
     scene.set_robot_base_pose(*scene.frame(stand.frames[0]))
@@ -194,7 +194,7 @@ def test_vehicle_lines_ask_drive_rates_and_deck_load() -> None:
     """A cart's deck load is counted at the parked frame — heading included
     — the body never counts itself, and a part without mass is a note,
     never a guess."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("cart", size=(0.6, 0.4, 0.3), position=(2.0, 0.0, 0.15))
     # The path leaves the start northward, so the parked heading is +90°:
     # the deck, authored at +x in the vehicle frame, sits at +y in the
@@ -227,7 +227,7 @@ def test_an_aerial_machine_is_shopped_in_the_uav_aisle() -> None:
     """An aerial vehicle asks its climb and descent rates too, and a line
     nobody identified narrows from the derived `vehicle` category into the
     only aisle that flies."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("bee", size=(0.3, 0.3, 0.1), position=(3.0, 0.0, 0.05))
     scene.add_vehicle(
         "bee", body=["bee"],
@@ -257,7 +257,7 @@ def test_the_merged_machine_carries_its_vehicle_requirements() -> None:
     where its catalog specs answer them. An AMR stays two lines and the
     arm absorbs nothing."""
     scene = bt.Scene()
-    scene.add_robot(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"), name="uav")
+    scene.add_robot(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"), name="uav")
     scene.add_vehicle(
         "uav", body=[],
         path=[(0.0, 0.0, 0.0), (0.0, 0.0, 1.0)], stations={"pad": 0, "up": 1},
@@ -273,7 +273,7 @@ def test_the_merged_machine_carries_its_vehicle_requirements() -> None:
     assert r["max_climb_mps"].value == pytest.approx(0.6)
     assert len(req.rows) == len(scene.bom().rows)  # one machine, one line
 
-    amr = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    amr = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     amr.add_box("chassis", size=(0.7, 0.5, 0.3), position=(0.0, 0.0, 0.15))
     amr.add_vehicle("mule", body=["chassis"], path=[(0.0, 0.0), (2.0, 0.0)],
                     stations={"a": 0, "b": 1}, speed=0.5, start="a")
@@ -288,7 +288,7 @@ def test_flight_time_is_a_cycle_fact_and_pad_waits_are_free() -> None:
     exactly off the vehicle's closed-form track — climbs, hovers and the
     descent count, waiting *on* the pad does not — and the declared hover
     endurance answers, short by name when the survey outgrows it."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("bee", size=(0.3, 0.3, 0.1), position=(3.0, 0.0, 0.05))
     scene.add_vehicle(
         "bee", body=["bee"],

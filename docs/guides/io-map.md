@@ -263,7 +263,7 @@ you ask (`include_cosmetic=True`). The studio draws the same graph live —
 
 ## One line, three placements
 
-The two-station weld line (`examples/weld_line_demo.py`) is the same cell
+The two-station weld line (`examples/welding/weld_line_demo.py`) is the same cell
 three times over, depending on who runs which program — and the I/O map is
 where the difference lands:
 

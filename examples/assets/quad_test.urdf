@@ -1,0 +1,229 @@
+<?xml version="1.0"?>
+<!--
+  A primitive quadruped for botrail's gait tests and the offline legged demo:
+  a box body, a nodding head, and four 3-DOF legs (hip roll, thigh pitch,
+  knee pitch) ending in a ball foot. Knees fold backward, like a Go2's.
+  Stance: hip 0, thigh 0.7, calf -1.4 puts each foot straight under its hip
+  0.306 m below the body; the foot ball has radius 0.02.
+-->
+<robot name="quad_test">
+  <link name="body">
+    <visual>
+      <geometry><box size="0.50 0.25 0.12"/></geometry>
+      <material name="shell"><color rgba="0.75 0.76 0.78 1"/></material>
+    </visual>
+  </link>
+  <link name="head">
+    <visual>
+      <origin xyz="0.06 0 0"/>
+      <geometry><box size="0.12 0.10 0.08"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="neck" type="revolute">
+    <parent link="body"/><child link="head"/>
+    <origin xyz="0.25 0 0.03"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.8" upper="0.8" effort="10" velocity="3"/>
+  </joint>
+
+  <link name="FL_hip">
+    <visual>
+      <origin rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FL_hip_joint" type="revolute">
+    <parent link="body"/><child link="FL_hip"/>
+    <origin xyz="0.19 0.09 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="20" velocity="10"/>
+  </joint>
+  <link name="FL_thigh">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.03 0.025 0.20"/></geometry>
+      <material name="shell"><color rgba="0.75 0.76 0.78 1"/></material>
+    </visual>
+  </link>
+  <joint name="FL_thigh_joint" type="revolute">
+    <parent link="FL_hip"/><child link="FL_thigh"/>
+    <origin xyz="0 0.06 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="3.0" effort="20" velocity="10"/>
+  </joint>
+  <link name="FL_calf">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.02 0.02 0.20"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FL_calf_joint" type="revolute">
+    <parent link="FL_thigh"/><child link="FL_calf"/>
+    <origin xyz="0 0 -0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.6" upper="-0.6" effort="20" velocity="10"/>
+  </joint>
+  <link name="FL_foot">
+    <visual>
+      <geometry><sphere radius="0.02"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FL_foot_joint" type="fixed">
+    <parent link="FL_calf"/><child link="FL_foot"/>
+    <origin xyz="0 0 -0.2"/>
+  </joint>
+
+  <link name="FR_hip">
+    <visual>
+      <origin rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FR_hip_joint" type="revolute">
+    <parent link="body"/><child link="FR_hip"/>
+    <origin xyz="0.19 -0.09 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="20" velocity="10"/>
+  </joint>
+  <link name="FR_thigh">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.03 0.025 0.20"/></geometry>
+      <material name="shell"><color rgba="0.75 0.76 0.78 1"/></material>
+    </visual>
+  </link>
+  <joint name="FR_thigh_joint" type="revolute">
+    <parent link="FR_hip"/><child link="FR_thigh"/>
+    <origin xyz="0 -0.06 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="3.0" effort="20" velocity="10"/>
+  </joint>
+  <link name="FR_calf">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.02 0.02 0.20"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FR_calf_joint" type="revolute">
+    <parent link="FR_thigh"/><child link="FR_calf"/>
+    <origin xyz="0 0 -0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.6" upper="-0.6" effort="20" velocity="10"/>
+  </joint>
+  <link name="FR_foot">
+    <visual>
+      <geometry><sphere radius="0.02"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="FR_foot_joint" type="fixed">
+    <parent link="FR_calf"/><child link="FR_foot"/>
+    <origin xyz="0 0 -0.2"/>
+  </joint>
+
+  <link name="RL_hip">
+    <visual>
+      <origin rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RL_hip_joint" type="revolute">
+    <parent link="body"/><child link="RL_hip"/>
+    <origin xyz="-0.19 0.09 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="20" velocity="10"/>
+  </joint>
+  <link name="RL_thigh">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.03 0.025 0.20"/></geometry>
+      <material name="shell"><color rgba="0.75 0.76 0.78 1"/></material>
+    </visual>
+  </link>
+  <joint name="RL_thigh_joint" type="revolute">
+    <parent link="RL_hip"/><child link="RL_thigh"/>
+    <origin xyz="0 0.06 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="3.0" effort="20" velocity="10"/>
+  </joint>
+  <link name="RL_calf">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.02 0.02 0.20"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RL_calf_joint" type="revolute">
+    <parent link="RL_thigh"/><child link="RL_calf"/>
+    <origin xyz="0 0 -0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.6" upper="-0.6" effort="20" velocity="10"/>
+  </joint>
+  <link name="RL_foot">
+    <visual>
+      <geometry><sphere radius="0.02"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RL_foot_joint" type="fixed">
+    <parent link="RL_calf"/><child link="RL_foot"/>
+    <origin xyz="0 0 -0.2"/>
+  </joint>
+
+  <link name="RR_hip">
+    <visual>
+      <origin rpy="1.5707963 0 0"/>
+      <geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RR_hip_joint" type="revolute">
+    <parent link="body"/><child link="RR_hip"/>
+    <origin xyz="-0.19 -0.09 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="20" velocity="10"/>
+  </joint>
+  <link name="RR_thigh">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.03 0.025 0.20"/></geometry>
+      <material name="shell"><color rgba="0.75 0.76 0.78 1"/></material>
+    </visual>
+  </link>
+  <joint name="RR_thigh_joint" type="revolute">
+    <parent link="RR_hip"/><child link="RR_thigh"/>
+    <origin xyz="0 -0.06 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="3.0" effort="20" velocity="10"/>
+  </joint>
+  <link name="RR_calf">
+    <visual>
+      <origin xyz="0 0 -0.1"/>
+      <geometry><box size="0.02 0.02 0.20"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RR_calf_joint" type="revolute">
+    <parent link="RR_thigh"/><child link="RR_calf"/>
+    <origin xyz="0 0 -0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.6" upper="-0.6" effort="20" velocity="10"/>
+  </joint>
+  <link name="RR_foot">
+    <visual>
+      <geometry><sphere radius="0.02"/></geometry>
+      <material name="dark"><color rgba="0.12 0.12 0.13 1"/></material>
+    </visual>
+  </link>
+  <joint name="RR_foot_joint" type="fixed">
+    <parent link="RR_calf"/><child link="RR_foot"/>
+    <origin xyz="0 0 -0.2"/>
+  </joint>
+</robot>

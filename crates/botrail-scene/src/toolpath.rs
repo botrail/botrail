@@ -1292,7 +1292,7 @@ mod tests {
     use botrail_model::RobotModel;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
 
     /// A bent, non-singular working pose whose Y-axis joint angles sum to
     /// zero, so the tool axis points world +Z (tool upright).

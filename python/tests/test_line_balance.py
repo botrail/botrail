@@ -1,6 +1,6 @@
 """Changing the layout is a regression test.
 
-`examples/line_balance_sweep.py` answers "move a spot, what happens to the
+`examples/welding/line_balance_sweep.py` answers "move a spot, what happens to the
 takt?" by baking the real line for each split. That makes the answer a
 *number*, and a number belongs in CI: this file pins the takt of two
 splits and the invariants that make the pins meaningful — the takt is the
@@ -22,14 +22,14 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "welding"))
 
 HF_HUB = Path(
     os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface"
 ) / "hub"
 pytestmark = pytest.mark.skipif(
     not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
-    reason="botrail catalog not in the HF cache (run examples/weld_line_demo.py once)",
+    reason="botrail catalog not in the HF cache (run examples/welding/weld_line_demo.py once)",
 )
 
 # Baked 2026-08-10. Two of the four splits — the shipped 3/2 and its

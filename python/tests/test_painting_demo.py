@@ -1,6 +1,6 @@
 """The painting example, asserted the way a paint engineer would assert it.
 
-`examples/painting_demo.py` is the K0 cell of design/design-painting.md: a
+`examples/painting/painting_demo.py` is the K0 cell of design/design-painting.md: a
 flat panel coated by a rotary bell in a serpentine raster, with the film
 integrated off the baked cycle. This pins the properties that make it
 *painting* rather than motion:
@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "painting"))
 
 import painting_demo as demo  # noqa: E402
 

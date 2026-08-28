@@ -64,7 +64,7 @@ def test_a_robot_added_later_is_first_class() -> None:
     from pathlib import Path
 
     scene = _cell()
-    arm = bt.Robot.from_urdf(Path(__file__).resolve().parents[2] / "examples" / "simple_arm.urdf")
+    arm = bt.Robot.from_urdf(Path(__file__).resolve().parents[2] / "examples" / "assets" / "simple_arm.urdf")
     scene.add_robot(arm, name="arm", base_position=(5.0, 5.0, 0.0))
     assert scene.robots == ["arm"]
     scene.set_joint_positions([0.2] * arm.dof, robot="arm")

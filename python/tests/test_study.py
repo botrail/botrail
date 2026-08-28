@@ -17,7 +17,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "basics"))
 
 import sweep_demo as sd  # noqa: E402
 

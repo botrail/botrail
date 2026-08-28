@@ -15,7 +15,7 @@ def cell() -> bt.Scene:
     """A judged cell: one branch reads an internal signal, one reads a
     zone sensor — so scenarios can steer branches through both a signal
     delta and an obstacle-pose delta."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("part", size=(0.06, 0.06, 0.06), position=(0.6, 0.0, 0.03))
     scene.add_zone_sensor(
         "at_gate",
@@ -108,7 +108,7 @@ def test_scenario_failures_are_collected(cell: bt.Scene) -> None:
 
 
 def test_merged_script_carries_both_arms(tmp_path: Path) -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.define_signal("ok", True)
     scene.add_segment("approach", goal=[0.6, 0.5, -0.8, 0.2, 0.0, 0.0])
     scene.add_segment("place", goal=[0.9, 0.85, -1.1, 0.25, 0.0, 0.0])

@@ -49,7 +49,7 @@ GRIPPER = """
 
 @pytest.fixture()
 def arm() -> bt.Robot:
-    return bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")
+    return bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
 
 
 @pytest.fixture()
@@ -140,7 +140,7 @@ def test_weld_pair_is_exempt_like_urdf_adjacency(arm: bt.Robot, gripper: bt.Robo
 
 
 def test_name_collision_needs_a_prefix(arm: bt.Robot) -> None:
-    twin = bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")
+    twin = bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
     with pytest.raises(ValueError, match="prefix"):
         arm.attach_tool(twin, flange=arm.tcp_link, mount="base_link")
     robot = arm.attach_tool(twin, flange=arm.tcp_link, mount="base_link", prefix="t_")

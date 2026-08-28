@@ -3759,7 +3759,7 @@ pub(crate) mod tests {
         found[0]
     }
 
-    /// The pick cell of `examples/export_urscript.py`, in miniature: a
+    /// The pick cell of `examples/export/export_urscript.py`, in miniature: a
     /// beam, a spec-gauge contact, a belt coil, a vacuum coil, one robot.
     pub(crate) fn pick_cell() -> Scene {
         let mut scene = sample_scene();

@@ -1,4 +1,4 @@
-"""The warehouse cycle-count cell (`examples/drone_survey_demo.py`),
+"""The warehouse cycle-count cell (`examples/drone/drone_survey_demo.py`),
 asserted the way its owner would assert it.
 
 A UR12e with a vacuum gripper palletizes cases at the mouth of an aisle
@@ -33,7 +33,7 @@ import botrail as bt
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "drone"))
 
 HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
 HAS_CATALOG = any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))

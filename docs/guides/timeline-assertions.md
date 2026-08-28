@@ -140,7 +140,7 @@ tl.utilizations()            # {robot: utilization} for the whole cell
 On a line this is the number that decides where work should go: the
 bottleneck station is the one whose arms sit highest, and moving a spot off
 it is the edit whose effect on takt you can then measure rather than
-estimate. `examples/line_balance_sweep.py` does exactly that — bakes the
+estimate. `examples/welding/line_balance_sweep.py` does exactly that — bakes the
 real line once per weld-schedule split and prints takt, per-station cycle,
 and utilization — and `python/tests/test_line_balance.py` pins the result,
 which is what makes "changing the layout" a regression test. The studio

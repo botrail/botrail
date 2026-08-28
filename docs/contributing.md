@@ -26,7 +26,7 @@ Requirements: Rust (stable), Python 3.9+, [maturin](https://maturin.rs),
 ./scripts/build_studio.sh          # build the studio UI into the package
 uv venv .venv && source .venv/bin/activate
 maturin develop --uv
-python examples/demo.py
+python examples/basics/demo.py
 ```
 
 !!! warning "Rebuild the studio bundle after touching `studio/`"
@@ -60,7 +60,7 @@ the same wire protocol.
 # terminal 1: serve a scene on a fixed port
 python -c "
 import botrail as bt
-scene = bt.Scene(bt.Robot.from_urdf('examples/simple_arm.urdf'))
+scene = bt.Scene(bt.Robot.from_urdf('examples/assets/simple_arm.urdf'))
 bt.studio(scene, port=8765, open_browser=False)
 "
 

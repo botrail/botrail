@@ -74,21 +74,21 @@ downloads NVIDIA's official Franka asset, ~10 MB, and the catalog packages;
 `pip install botrail[catalog]` for those):
 
 ```bash
-python examples/demo.py           # interactive studio: pose, plan, play
-python examples/sequence_demo.py  # 13-step cell: conveyor feed → tracked pick
+python examples/basics/demo.py           # interactive studio: pose, plan, play
+python examples/basics/sequence_demo.py  # 13-step cell: conveyor feed → tracked pick
                                   # → pallet; prints the cycle time, exports USD
-python examples/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
+python examples/multi_robot/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
                                   # zone interlock; --clash shows what happens
                                   # without it
-python examples/sweep_demo.py     # parameter sweep: belt speed × lane position
+python examples/basics/sweep_demo.py     # parameter sweep: belt speed × lane position
                                   # vs cycle time and clearance (no downloads)
-python examples/cell_deliverables_demo.py  # the whole document set from one
+python examples/engineering/cell_deliverables_demo.py  # the whole document set from one
                                   # script: layout SVG/DXF, BOM, I/O list, robot
                                   # program, USD, cell report (no downloads)
-python examples/equipment_cell_demo.py     # fence, conveyor and rack ordered from
+python examples/engineering/equipment_cell_demo.py     # fence, conveyor and rack ordered from
                                   # the catalog: a bill with real part numbers,
                                   # and each drawn from the package's own file
-python examples/play_record.py \
+python examples/export/play_record.py \
        cell_dual.usda             # replay a baked USD in the studio (any of
                                   # the recordings above; omit for cell_seq)
 ```
@@ -170,7 +170,7 @@ Move the beam sensor 0.25 m downstream and the cycle grows by exactly
 1.0 s — a layout edit becomes a failing test instead of a shop-floor
 surprise. This repository runs such a cell in its own CI
 ([python/tests/test_cell_regression.py](python/tests/test_cell_regression.py)),
-and [examples/sweep_demo.py](examples/sweep_demo.py) runs the same loop as a
+and [examples/basics/sweep_demo.py](examples/basics/sweep_demo.py) runs the same loop as a
 parameter study — `bt.sweep` bakes the cell over a grid and tables it (belt
 speed moves the cycle; lane position eats the clearance), `bt.optimize`
 searches the grid for the fastest cycle that keeps its clearance — with no
@@ -195,7 +195,7 @@ report.save("cell_report.md")             # cycle time, clearance, I/O, BOM tota
 
 Because they are derived, they cannot disagree with each other or with the
 bake, and a layout edit changes exactly the documents it touches:
-[examples/cell_deliverables_demo.py](examples/cell_deliverables_demo.py)
+[examples/engineering/cell_deliverables_demo.py](examples/engineering/cell_deliverables_demo.py)
 writes the whole set, and
 [python/tests/test_deliverables.py](python/tests/test_deliverables.py) pins
 which files a moved sensor or an added fence panel changes — by name.
@@ -219,7 +219,7 @@ Requirements: Rust (stable), Python >= 3.9, [maturin](https://maturin.rs),
 ./scripts/build_studio.sh                 # build the studio UI into the package
 uv venv .venv && source .venv/bin/activate
 maturin develop --uv
-python examples/demo.py
+python examples/basics/demo.py
 ```
 
 Tests:

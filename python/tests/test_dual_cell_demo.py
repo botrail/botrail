@@ -1,6 +1,6 @@
 """The two-arm example, asserted the way a cell owner would assert it.
 
-`examples/dual_cell_demo.py` is the shipped demonstration of a multi-robot
+`examples/multi_robot/dual_cell_demo.py` is the shipped demonstration of a multi-robot
 cell: two Frankas sharing one infeed, arbitrated by a zone interlock. This
 pins the properties that make it a *correct* cell rather than merely one
 that runs — cartons taken off a moving belt, landed on the right pallet, the
@@ -8,7 +8,7 @@ interlock actually gating the second arm, and the two failure modes that
 appear when the interlock is dropped.
 
 Skipped unless the Isaac Franka has been fetched (the example downloads it
-on first run; see `examples/demo.py`).
+on first run; see `examples/basics/demo.py`).
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "multi_robot"))
 
 CACHE = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
 HF_CACHE = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
     not ((CACHE / "assets" / "franka" / "franka.usd").exists()
          and any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))),
     reason="the demo cell needs the Isaac Franka and the botrail catalog "
-           "(run examples/demo.py once)",
+           "(run examples/basics/demo.py once)",
 )
 
 # Baked on the pinned dependency set. The tolerance absorbs libm-level drift

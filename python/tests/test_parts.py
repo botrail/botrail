@@ -20,7 +20,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "basics"))
 
 CACHE = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
 HAS_FRANKA = (CACHE / "assets" / "franka" / "franka.usd").exists()
@@ -33,7 +33,7 @@ def cell() -> bt.Scene:
     identical tables, a fenced group, a conveyor with a belt slab of the
     same name, a beam sensor, a PLC node with a model, and a source/sink
     pair (which must *not* appear — they model an endless line)."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("table_a", size=(1.2, 0.8, 0.05), position=(0.6, 0.0, 0.7))
     scene.add_box("table_b", size=(1.2, 0.8, 0.05), position=(-0.6, 0.0, 0.7))
     for i in range(3):

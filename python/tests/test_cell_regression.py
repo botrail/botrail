@@ -30,7 +30,7 @@ CYCLE_BUDGET = 8.0
 
 
 def build_cell(beam_x: float = 0.0) -> bt.Scene:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("crate", (0.04, 0.04, 0.04), (-0.5, 0.6, 0.3))
     scene.add_conveyor(
         "belt",

@@ -21,7 +21,7 @@ dependencies, no GPU.
 one takt](assets/weld_line_hero.gif)
 *Four stations, eight arms, three bodies in flight — one program per
 station plus a transfer program, baked into one deterministic takt
-(`examples/weld_line_demo.py --stations 4`).*
+(`examples/welding/weld_line_demo.py --stations 4`).*
 
 ## What makes it different
 

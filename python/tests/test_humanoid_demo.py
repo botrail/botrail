@@ -1,6 +1,6 @@
 """The humanoid example, asserted the way a cell owner would assert it.
 
-`examples/humanoid_carry_demo.py` walks a biped between two benches with a
+`examples/legged/humanoid_carry_demo.py` walks a biped between two benches with a
 tote in its hands. The legs are a gait on the mount, so what the cell-level
 test pins is what a picture cannot and the Rust gait tests do not cover:
 
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "legged"))
 
 import humanoid_carry_demo as demo  # noqa: E402
 

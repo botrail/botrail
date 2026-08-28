@@ -389,7 +389,7 @@ mod tests {
     use std::f64::consts::FRAC_PI_2;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
 
     fn scene() -> Scene {
         Scene::new(Arc::new(RobotModel::from_urdf_str(ARM).unwrap()))

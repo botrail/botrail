@@ -1,6 +1,6 @@
 """The legged example, asserted the way a cell owner would assert it.
 
-`examples/legged_patrol_demo.py` puts a quadruped into a cell as a vehicle
+`examples/legged/legged_patrol_demo.py` puts a quadruped into a cell as a vehicle
 with legs: dispatched with `goto`, docked by a zone, loaded over its back,
 let out on a departure permit. What these tests pin is the part a picture
 cannot show and the kinematics tests in Rust do not cover — the cell-level
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "legged"))
 
 import legged_patrol_demo as demo  # noqa: E402
 
@@ -178,7 +178,7 @@ def test_a_catalog_package_directory_is_a_walker(tmp_path):
 
     package = tmp_path / "test" / "quad" / "quad" / "r1"
     (package / "urdf").mkdir(parents=True)
-    shutil.copy(demo.EXAMPLES / "quad_test.urdf", package / "urdf" / "model.urdf")
+    shutil.copy(demo.ASSETS / "quad_test.urdf", package / "urdf" / "model.urdf")
     gait = demo.QUAD_GAIT
     manifest = {
         "id": "test/quad/quad/r1",

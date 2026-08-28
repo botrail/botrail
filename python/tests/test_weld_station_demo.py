@@ -1,6 +1,6 @@
 """The weld-station example, asserted the way a line owner would assert it.
 
-`examples/weld_station_demo.py` is the W0 cell of the body-in-white plan
+`examples/welding/weld_station_demo.py` is the W0 cell of the body-in-white plan
 (design/design-weld-line.md): four catalog R-2000iC arms with catalog servo
 guns, the catalog body-in-white indexed through the station on a skid,
 twenty-four spots per pair of bodies, and a zone interlock over the stretch
@@ -21,14 +21,14 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "welding"))
 
 HF_HUB = Path(
     os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface"
 ) / "hub"
 pytestmark = pytest.mark.skipif(
     not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
-    reason="botrail catalog not in the HF cache (run examples/weld_station_demo.py once)",
+    reason="botrail catalog not in the HF cache (run examples/welding/weld_station_demo.py once)",
 )
 
 # Baked on the pinned dependency set and the pinned catalog revision. The

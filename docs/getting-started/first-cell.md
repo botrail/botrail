@@ -166,7 +166,7 @@ a shop-floor surprise.
 
     botrail runs a cell like this in its own CI —
     [`python/tests/test_cell_regression.py`](https://github.com/botrail/botrail/blob/main/python/tests/test_cell_regression.py)
-    — and [`examples/sweep_demo.py`](https://github.com/botrail/botrail/blob/main/examples/sweep_demo.py)
+    — and [`examples/basics/sweep_demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/sweep_demo.py)
     runs the parameter study as a script.
 
 ## Ship it

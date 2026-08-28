@@ -56,10 +56,10 @@ for it. Changing `detail` therefore never changes what a robot can hit, what
 the BOM says, or what a plan gives you; it costs scene entries and nothing
 else. `detail="plain"` is the bare massing, and is what a generator called
 without a catalog does — there are no real sections to draw from.
-[`examples/equipment_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/equipment_cell_demo.py)
+[`examples/engineering/equipment_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/engineering/equipment_cell_demo.py)
 builds a cell whose fence, conveyor and rack all come from the catalog, and
 prints the bill it can be ordered from;
-[`examples/demo.py`](https://github.com/botrail/botrail/blob/main/examples/demo.py)
+[`examples/basics/demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/demo.py)
 equips the tutorial cell the same way, next to a USD layer that keeps the
 layout and the teach frames.
 

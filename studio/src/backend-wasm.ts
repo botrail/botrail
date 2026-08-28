@@ -55,7 +55,7 @@ const FRANKA_LAYERS = [
   ].map((part) => `Props/panda_${part}.usd`),
 ];
 
-/** Ready pose, matching `examples/demo.py`. */
+/** Ready pose, matching `examples/basics/demo.py`. */
 const FRANKA_READY = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035];
 
 const CELL_STAGE = "cell/factory.usda";

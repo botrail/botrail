@@ -1,6 +1,6 @@
 """The hood example, asserted the way a paint engineer would assert it.
 
-`examples/painting_hood_demo.py` is the K1 cell of design/design-painting.md:
+`examples/painting/painting_hood_demo.py` is the K1 cell of design/design-painting.md:
 a curved hood section coated by a bell, with two generated programs — a
 flat raster and one wrapped onto the cylinder — checked against the
 shop's standoff and incidence rules *before* baking, then baked and
@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "painting"))
 
 import painting_hood_demo as demo  # noqa: E402
 

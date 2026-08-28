@@ -1,12 +1,12 @@
 # Pose and plan
 
-*Walks through [`examples/demo.py`](https://github.com/botrail/botrail/blob/main/examples/demo.py)
+*Walks through [`examples/basics/demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/demo.py)
 — a Franka Panda in a small USD factory cell, live in the studio.*
 
 ![The demo cell in the studio](../assets/botrail_demo.png)
 
 ```bash
-python examples/demo.py
+python examples/basics/demo.py
 ```
 
 The first run downloads NVIDIA's official Isaac Sim Franka asset (~10 MB) into
@@ -52,7 +52,7 @@ The environment is one hand-authored USD layer, and it comes in with one call:
 
 ```python
 scene = bt.Scene(robot)
-scene.load_usd(Path(__file__).parent / "assets" / "factory.usda")
+scene.load_usd(Path(__file__).parents[1] / "assets" / "factory.usda")
 scene.set_robot_base_pose(*scene.frame("/World/MountFrame"))
 ```
 
@@ -75,7 +75,7 @@ catalog id (the guard takes two calls, because two things cross the perimeter
 and each opening breaks the run):
 
 ```python
---8<-- "examples/demo.py:91:118"
+--8<-- "examples/basics/demo.py:91:118"
 ```
 
 Each one is checked against what the package actually sells: ask the fence for
@@ -103,7 +103,7 @@ axis along the approach. IK, though, solves for a link. So a taught pose is
 backed off along the tool axis to the hand frame first:
 
 ```python
---8<-- "examples/demo.py:142:169"
+--8<-- "examples/basics/demo.py:142:169"
 ```
 
 `teach_grasp` is the scripted form of dragging the studio's TCP gizmo: solve
@@ -136,10 +136,10 @@ object, so poke it from both sides:
 
 ## The complete script
 
-??? example "examples/demo.py"
+??? example "examples/basics/demo.py"
 
     ```python
-    --8<-- "examples/demo.py"
+    --8<-- "examples/basics/demo.py"
     ```
 
 ## Next

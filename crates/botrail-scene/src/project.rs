@@ -2069,7 +2069,7 @@ mod tests {
     use botrail_model::{Geometry, RobotModel};
     use nalgebra::{Isometry3, Vector3};
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
 
     fn sample_scene() -> Scene {
         let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(ARM).unwrap()));

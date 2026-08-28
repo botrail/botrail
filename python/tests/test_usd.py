@@ -74,7 +74,7 @@ def cell(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def test_load_usd_imports_obstacles_and_frames(scene: bt.Scene, cell: Path) -> None:
@@ -163,7 +163,7 @@ def Xform "World" {
 }
 """
     )
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.load_usd(stage)
 
     assert scene.obstacle_color("/World/Rig/Frame") == pytest.approx((0.2, 0.4, 0.6))

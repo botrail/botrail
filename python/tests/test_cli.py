@@ -18,8 +18,8 @@ import botrail as bt
 from botrail import _cli
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-DEMO = EXAMPLES / "cell_deliverables_demo.py"
-sys.path.insert(0, str(EXAMPLES))
+DEMO = EXAMPLES / "engineering" / "cell_deliverables_demo.py"
+sys.path.insert(0, str(EXAMPLES / "engineering"))
 
 
 def run(capsys, *argv) -> tuple[int, dict]:
@@ -75,7 +75,7 @@ def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     code, out2 = run(capsys, "check", str(tmp_path / "cell.botrail"))
     assert code == 0 and out2["counts"] == out["counts"]
     # A cell with a problem: a sequence that starts a motion nobody taught.
-    broken = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    broken = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     broken.add_beam_sensor("eye", frm=(0, 0, 0.5), to=(0, 1, 0.5))
     broken.set_part("eye", model="PZ")
     sq = broken.sequence("go")
@@ -85,7 +85,7 @@ def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     assert code == 1 and not out3["ok"]
     assert any(f["severity"] == "error" for f in out3["findings"]), out3
     # An unidentified equipment line is an info finding, not a failure.
-    plain = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    plain = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     plain.save_project(tmp_path / "plain.botrail")
     code, out4 = run(capsys, "check", str(tmp_path / "plain.botrail"))
     assert code == 0 and [f["code"] for f in out4["findings"]] == ["unidentified_part"]
@@ -106,7 +106,7 @@ def test_check_reports_load_failures_as_json_with_exit_2(capsys, tmp_path: Path)
     # A script that exposes `scene` at top level works too.
     (tmp_path / "top.py").write_text(
         "import botrail as bt\n"
-        f"scene = bt.Scene(bt.Robot.from_urdf({str(EXAMPLES / 'simple_arm.urdf')!r}))\n"
+        f"scene = bt.Scene(bt.Robot.from_urdf({str(EXAMPLES / 'assets' / 'simple_arm.urdf')!r}))\n"
     )
     code, out = run(capsys, "check", str(tmp_path / "top.py"))
     assert code == 0 and out["robots"] == ["simple_arm"]

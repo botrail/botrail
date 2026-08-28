@@ -1,6 +1,6 @@
 """The two-station line, asserted the way a line owner would assert it.
 
-`examples/weld_line_demo.py` is the W1 build of design/design-weld-line.md:
+`examples/welding/weld_line_demo.py` is the W1 build of design/design-weld-line.md:
 three programs (two stations and a transfer) advancing over one world via
 `simulate_sequences`, an indexed transfer moved by `advance` (a distance,
 not a timer), and bodies pipelining through both stations. This pins the
@@ -20,14 +20,14 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "welding"))
 
 HF_HUB = Path(
     os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface"
 ) / "hub"
 pytestmark = pytest.mark.skipif(
     not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
-    reason="botrail catalog not in the HF cache (run examples/weld_line_demo.py once)",
+    reason="botrail catalog not in the HF cache (run examples/welding/weld_line_demo.py once)",
 )
 
 # First pinned 2026-08-09, on the first clean W1 bake (park/slide

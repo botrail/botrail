@@ -21,13 +21,13 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path[:0] = [str(EXAMPLES / d) for d in ("engineering", "export")]
 
 
 def small_cell() -> bt.Scene:
     """A floor slab (ground), a table, a fenced group, a conveyor with a
     beam, a frame — one of everything the sheet draws."""
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("floor", size=(10.0, 10.0, 0.05), position=(0.0, 0.0, -0.025))
     scene.add_box("table", size=(1.0, 0.5, 0.7), position=(1.5, 0.0, 0.35))
     scene.set_part("table", model="T-1000")

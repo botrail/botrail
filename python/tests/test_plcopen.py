@@ -17,7 +17,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "export"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 NS = {"p": "http://www.plcopen.org/xml/tc6_0201", "x": "http://www.w3.org/1999/xhtml"}
@@ -112,7 +112,7 @@ def test_plcopen_renders_the_pick_cell_as_one_sfc_program(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="unknown sequence"):
         scene.plcopen(["nope"])
     with pytest.raises(ValueError, match="no sequences"):
-        bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")).plcopen()
+        bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")).plcopen()
 
 
 def test_plcopen_uses_the_handshake_where_the_plc_drives_the_robot() -> None:

@@ -1,4 +1,4 @@
-"""The elevator cell (`examples/lift_demo.py`): the AMR — chassis, tote on
+"""The elevator cell (`examples/vehicles/lift_demo.py`): the AMR — chassis, tote on
 the deck, mounted arm — rides the lift whole; the door enforces itself as
 an obstacle; the lift edge in the path is never driven.
 """
@@ -13,7 +13,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "vehicles"))
 
 import lift_demo as demo  # noqa: E402
 

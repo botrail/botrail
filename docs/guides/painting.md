@@ -9,7 +9,7 @@ of a cell.
 
 ![A hood section coated by a bell: the film builds up stroke by stroke,
 read against spec](../assets/painting_hero.gif)
-*`examples/painting_hood_demo.py`: a wrapped raster on a curved hood, per-
+*`examples/painting/painting_hood_demo.py`: a wrapped raster on a curved hood, per-
 stroke triggered, the film building up against a 20–30 µm spec (neutral on
 target, blue thin, red thick) and the `spraying` lane in the dock.*
 
@@ -180,6 +180,6 @@ neutral on target, blue thin, red thick: the verdict). `spray_coat` and
 cone's ring is the pattern's footprint at the calibrated standoff — the
 range the gun works over on the part.
 
-Two worked examples: `examples/painting_demo.py` (a flat panel: calibration,
-lap overlap, gun speed) and `examples/painting_hood_demo.py` (a curved hood:
+Two worked examples: `examples/painting/painting_demo.py` (a flat panel: calibration,
+lap overlap, gun speed) and `examples/painting/painting_hood_demo.py` (a curved hood:
 the pre-bake check, brushes and the trigger, the paint bill, the build-up).

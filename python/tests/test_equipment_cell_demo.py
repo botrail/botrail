@@ -1,4 +1,4 @@
-"""`examples/equipment_cell_demo.py` — a cell whose scenery is ordered.
+"""`examples/engineering/equipment_cell_demo.py` — a cell whose scenery is ordered.
 
 The fence, the conveyor and the rack come from the model catalog, so what
 this pins is the part the catalog is responsible for: every line of the bill
@@ -19,12 +19,12 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "engineering"))
 
 HF_HUB = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
 pytestmark = pytest.mark.skipif(
     not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
-    reason="botrail catalog not in the HF cache (run examples/equipment_cell_demo.py once)",
+    reason="botrail catalog not in the HF cache (run examples/engineering/equipment_cell_demo.py once)",
 )
 
 

@@ -469,7 +469,7 @@ mod tests {
     use super::*;
     use nalgebra::{Translation3, UnitQuaternion};
 
-    const SIX_DOF: &str = include_str!("../../../examples/simple_arm.urdf");
+    const SIX_DOF: &str = include_str!("../../../examples/assets/simple_arm.urdf");
 
     fn six_dof() -> RobotModel {
         RobotModel::from_urdf_str(SIX_DOF).unwrap()

@@ -12,7 +12,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def robot() -> bt.Robot:
-    return bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")
+    return bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
 
 
 def quat_z(angle: float) -> tuple[float, float, float, float]:

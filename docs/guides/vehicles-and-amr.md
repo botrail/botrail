@@ -67,7 +67,7 @@ its heading: no pivot turns, ever — it docks facing whatever it faced when
 parked (the whole point of buying those wheels), and a corner costs only
 its length. `allow_reverse` does not exist here, since there is no turning
 around to avoid; the z rules stay a ground drive's (`max_grade`, lift
-edges). `examples/amr_demo.py --holonomic` runs the AMR cell that way.
+edges). `examples/vehicles/amr_demo.py --holonomic` runs the AMR cell that way.
 
 ### Aerial drive — a drone is a vehicle too
 
@@ -92,7 +92,7 @@ vehicle: stations and `goto`, the tray rule, mounted sensors riding the
 airframe — and the same tick checks. Against parked scenery those checks
 say nothing an obstacle check would not; where they earn their keep is
 **two machines sharing space in time**. In
-`examples/drone_survey_demo.py` an inventory drone counts a rack aisle
+`examples/drone/drone_survey_demo.py` an inventory drone counts a rack aisle
 while a UR12e with a vacuum gripper palletizes cases at the mouth of it;
 the drone's dock sits past the palletizing cell, so every flight in and
 out crosses the airspace the arm swings cases through — forbidden by
@@ -292,7 +292,7 @@ for piece in sorted((package / "collision").glob("*.stl")):
   gripper + part, arm ≥ gripper + part, gripper ≥ part. One of the three is
   always the binding one.
 
-`examples/amr_demo.py --compare` bakes one authored cell on every carrier
+`examples/vehicles/amr_demo.py --compare` bakes one authored cell on every carrier
 the catalog ships and prints what each answers.
 
 ## Legs instead of wheels
@@ -316,18 +316,18 @@ Worth stating plainly, because the vocabulary invites bigger expectations:
 
 For arrival variation, sweep it rather than sampling it — see
 [parameter sweeps](../tutorials/parameter-sweep.md) and
-`examples/agv_sweep_demo.py`, which prints how late a dispatch may be before
+`examples/vehicles/agv_sweep_demo.py`, which prints how late a dispatch may be before
 the cell starts waiting on it.
 
 ## Examples
 
-* `examples/agv_cell_demo.py` — an AGV serving the factory cell: called
+* `examples/vehicles/agv_cell_demo.py` — an AGV serving the factory cell: called
   while the arm picks, held outside the gate by an interlock, loaded on the
   deck, released once its own load sensor says it has the part.
-* `examples/amr_demo.py` — a carrier, an arm and a gripper straight out of
+* `examples/vehicles/amr_demo.py` — a carrier, an arm and a gripper straight out of
   the catalog: the machine fetches a part from a bench in the aisle, carries
   it on its own deck, and hands it to a conveyor in a machining bay, folding
   the arm away on the move. `--carrier NAME` swaps the base; `--compare`
   bakes the same cell on every mobile base the catalog ships.
-* `examples/agv_sweep_demo.py` — dispatch delay and dock depth as
+* `examples/vehicles/agv_sweep_demo.py` — dispatch delay and dock depth as
   deterministic response curves.

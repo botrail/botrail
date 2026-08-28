@@ -541,7 +541,7 @@ mod tests {
     use botrail_traj::JointTrajectory;
     use std::sync::Arc;
 
-    const ARM: &str = include_str!("../../../examples/simple_arm.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
     const SPINDLE: &str = crate::testdata::SPINDLE_URDF;
 
     /// Arm + spindle, so the TCP is the cutter tip with local `+Z`

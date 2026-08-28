@@ -11,7 +11,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def goal_folded() -> list[float]:
@@ -79,7 +79,7 @@ def test_plan_reports_failures(scene: bt.Scene) -> None:
 
 def test_plan_respects_velocity_limits(scene: bt.Scene) -> None:
     traj = scene.plan(goal_folded(), broadcast=False)
-    # Velocity limits from examples/simple_arm.urdf, in q order.
+    # Velocity limits from examples/assets/simple_arm.urdf, in q order.
     vmax = {name: v for name, v in zip(traj.joint_names, [2.0, 2.0, 2.5, 3.0, 3.0, 3.0])}
     times, positions = traj.times, traj.positions
     for (t0, q0), (t1, q1) in zip(zip(times, positions), zip(times[1:], positions[1:])):

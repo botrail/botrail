@@ -1,6 +1,6 @@
 # Two arms, one belt
 
-*Walks through [`examples/dual_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/dual_cell_demo.py)
+*Walks through [`examples/multi_robot/dual_cell_demo.py`](https://github.com/botrail/botrail/blob/main/examples/multi_robot/dual_cell_demo.py)
 — two Frankas sharing one infeed, arbitrated by a zone interlock.*
 
 The cell has a single pick point on the belt and two arms facing each other
@@ -15,7 +15,7 @@ zone around the contested airspace, one sensor per arm, and a step that will
 not proceed while the other arm's zone signal is on.
 
 ```bash
-python examples/dual_cell_demo.py
+python examples/multi_robot/dual_cell_demo.py
 ```
 
 ```text
@@ -34,7 +34,7 @@ them.
 ## Adding the second arm
 
 ```python
---8<-- "examples/dual_cell_demo.py:95:106"
+--8<-- "examples/multi_robot/dual_cell_demo.py:95:106"
 ```
 
 The same `Robot` model is added again — a scene holds instances, not one
@@ -64,7 +64,7 @@ when the authoring is wrong.
 ## The interlock
 
 ```python
---8<-- "examples/dual_cell_demo.py:239:249"
+--8<-- "examples/multi_robot/dual_cell_demo.py:239:249"
 ```
 
 One zone volume, two sensors. A zone sensor reports "somebody is inside", not
@@ -80,7 +80,7 @@ And the far arm's pick is gated by the *upstream* photo-eye, so the loop wires
 the station's handback:
 
 ```python
---8<-- "examples/dual_cell_demo.py:376:387"
+--8<-- "examples/multi_robot/dual_cell_demo.py:376:387"
 ```
 
 `--clash` drops exactly one thing — the near arm's `zone_far` condition — and
@@ -92,7 +92,7 @@ The overlap does not happen by itself; the sequence is *shaped* for it. Each
 arm's pick half ends the moment the transfer is started, not finished:
 
 ```python
---8<-- "examples/dual_cell_demo.py:315:321"
+--8<-- "examples/multi_robot/dual_cell_demo.py:315:321"
 ```
 
 `transition=bt.seq.immediately()` releases the sequence while the motion runs —
@@ -128,7 +128,7 @@ Worth reading in the full source, briefly noted here:
 ## What happens without the interlock
 
 ```bash
-python examples/dual_cell_demo.py --clash
+python examples/multi_robot/dual_cell_demo.py --clash
 ```
 
 ```text
@@ -154,10 +154,10 @@ guard does not depend on timing.
 
 ## The complete script
 
-??? example "examples/dual_cell_demo.py"
+??? example "examples/multi_robot/dual_cell_demo.py"
 
     ```python
-    --8<-- "examples/dual_cell_demo.py"
+    --8<-- "examples/multi_robot/dual_cell_demo.py"
     ```
 
 ## Next

@@ -24,7 +24,7 @@ one steady-state takt carries the whole story. The two-station weld line
 measures 45.9 MB as a whole run at 30 fps and **16.4 MB as one takt at 24
 fps** — see `scripts/export_line_recording.py`, which picks the window
 where the pipeline is fullest. (A binary recording keeps its prim names
-out of reach of text sniffing, so `examples/play_record.py` takes an
+out of reach of text sniffing, so `examples/export/play_record.py` takes an
 explicit `--cell` for those.)
 
 Both bake to a USD layer that plays in usdview, Omniverse, or Blender with no

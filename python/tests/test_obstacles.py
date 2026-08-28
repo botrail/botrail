@@ -10,7 +10,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 @pytest.fixture()
 def scene() -> bt.Scene:
-    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    return bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
 
 
 def test_no_obstacles_no_collisions(scene: bt.Scene) -> None:
@@ -92,7 +92,7 @@ def test_obstacle_enable_toggle() -> None:
     import botrail as bt
 
     examples = Path(__file__).resolve().parents[2] / "examples"
-    scene = bt.Scene(bt.Robot.from_urdf(examples / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(examples / "assets" / "simple_arm.urdf"))
     scene.add_box("blocker", size=(0.3, 0.3, 0.3), position=(0.0, 0.0, 0.5))
     assert scene.in_collision()
 

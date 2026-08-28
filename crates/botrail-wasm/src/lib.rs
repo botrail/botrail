@@ -19,7 +19,7 @@ use botrail_session::SessionHost;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-const DEMO_URDF: &str = include_str!("../../../examples/simple_arm.urdf");
+const DEMO_URDF: &str = include_str!("../../../examples/assets/simple_arm.urdf");
 
 fn to_json(msg: &ServerMessage) -> String {
     serde_json::to_string(msg).expect("wire types serialize infallibly")

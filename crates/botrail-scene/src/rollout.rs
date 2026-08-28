@@ -5318,7 +5318,7 @@ pub(crate) mod tests {
     #[test]
     fn start_toolpath_approaches_then_holds_the_feed() {
         use crate::toolpath::{PathTarget, ToolMove, ToolMoveKind, Toolpath};
-        const ARM6: &str = include_str!("../../../examples/simple_arm.urdf");
+        const ARM6: &str = include_str!("../../../examples/assets/simple_arm.urdf");
         let mut scene = Scene::new(Arc::new(
             botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
         ));
@@ -10872,7 +10872,7 @@ mod gait_tests {
     use std::f64::consts::FRAC_PI_2;
     use std::sync::Arc;
 
-    const QUAD: &str = include_str!("../../../examples/quad_test.urdf");
+    const QUAD: &str = include_str!("../../../examples/assets/quad_test.urdf");
     const LEGS: [&str; 4] = ["FL", "FR", "RL", "RR"];
     const FOOT_R: f64 = 0.02;
 
@@ -11912,7 +11912,7 @@ mod biped_tests {
     use std::f64::consts::FRAC_PI_2;
     use std::sync::Arc;
 
-    const BIPED: &str = include_str!("../../../examples/biped_test.urdf");
+    const BIPED: &str = include_str!("../../../examples/assets/biped_test.urdf");
     const SOLE: f64 = 0.05;
 
     /// The same model with the ankle roll welded: 5-DOF legs.
@@ -12369,7 +12369,7 @@ mod biped_tests {
         assert!(err.contains("tilted"), "{err}");
 
         // A point-footed leg cannot be asked for a sole.
-        let quad = include_str!("../../../examples/quad_test.urdf");
+        let quad = include_str!("../../../examples/assets/quad_test.urdf");
         let mut scene = Scene::new(Arc::new(
             botrail_model::RobotModel::from_urdf_str(quad).unwrap(),
         ));

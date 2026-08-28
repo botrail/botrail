@@ -1,4 +1,4 @@
-"""The stairs cell (`examples/stairs_delivery_demo.py`): a steel stair flight
+"""The stairs cell (`examples/legged/stairs_delivery_demo.py`): a steel stair flight
 ordered from the catalog, and a machine that has to be able to climb what
 was ordered.
 
@@ -18,7 +18,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path.insert(0, str(EXAMPLES / "legged"))
 
 import stairs_delivery_demo as demo  # noqa: E402
 
@@ -40,7 +40,7 @@ needs_dog = pytest.mark.skipif(not _has_dog(), reason="the Go2 is not reachable"
 
 
 def test_the_flight_is_a_walkable_stair_with_two_bom_lines() -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     built = bt.parts.stairs(scene, "s", steps=5, rise=0.12, tread=0.35, width=0.8,
                             position=(2.0, 1.0), yaw=0.4, detail="full")
     # Five treads, each walkable and overhanging the one below.
@@ -72,7 +72,7 @@ def test_the_catalog_sizes_the_flight_and_refuses_what_it_does_not_sell() -> Non
         Spec.load(demo.FLIGHT)
     except Exception:  # noqa: BLE001 - the pack is not published yet
         pytest.skip(f"{demo.FLIGHT} is not in the catalog")
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     bt.parts.stairs(scene, "s", catalog=demo.FLIGHT, steps=6, rise=0.15,
                     tread=0.40, width=0.9, position=(2.0, 0.0))
     rows = {r["names"][0]: r for r in scene.bom().rows}

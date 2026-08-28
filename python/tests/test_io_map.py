@@ -16,7 +16,7 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-sys.path.insert(0, str(EXAMPLES))
+sys.path[:0] = [str(EXAMPLES / d) for d in ("basics", "export", "multi_robot", "vehicles", "welding")]
 
 CACHE = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
 HAS_FRANKA = (CACHE / "assets" / "franka" / "franka.usd").exists()
@@ -34,7 +34,7 @@ def points_by_label(scene, sequences=None) -> dict:
 
 @pytest.fixture()
 def pick_cell():
-    """`examples/export_urscript.py`: the cell that already carries its
+    """`examples/export/export_urscript.py`: the cell that already carries its
     I/O list as a hand-written dict — the list the derivation must match."""
     import export_urscript as demo
 
@@ -113,7 +113,7 @@ def test_io_list_formats(pick_cell, tmp_path: Path) -> None:
 def two_arm_cell() -> bt.Scene:
     """Two simple arms in one program (→ the implicit `<cell>` host), a
     belt program, and a watcher on one arm's own controller."""
-    arm = bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf")
+    arm = bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
     scene = bt.Scene(arm, name="near")
     scene.add_robot(arm, name="far", base_position=(1.5, 0.0, 0.0))
     for robot in ("near", "far"):
@@ -216,7 +216,7 @@ def test_name_clash_is_a_warning() -> None:
 
 
 def test_signal_track_kind() -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_box("part", size=(0.05, 0.05, 0.05), position=(0.5, 0.3, 0.03))
     scene.add_conveyor("belt", zone_position=(0.5, 0.3, 0.05), zone_size=(1.0, 0.2, 0.1),
                        velocity=(0.1, 0.0, 0.0), running=True)

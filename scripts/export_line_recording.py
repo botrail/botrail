@@ -9,14 +9,14 @@ quarter of the bytes.
     $ python scripts/export_line_recording.py out/line_takt.usdc [--fps 24]
                                               [--stations 4] [--full]
 
-Play it back into a rebuilt cell with `examples/play_record.py`.
+Play it back into a rebuilt cell with `examples/export/play_record.py`.
 """
 
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "examples"))
+sys.path.insert(0, str(ROOT / "examples" / "welding"))
 
 import weld_line_demo as line  # noqa: E402
 
@@ -58,7 +58,7 @@ def main() -> None:
         f"{label}: [{start:.2f}, {end:.2f}]s of {timeline.duration:.2f}s "
         f"at {fps:.0f} fps -> {out} ({size:.1f} MB)"
     )
-    print(f"play with: python examples/play_record.py {out}")
+    print(f"play with: python examples/export/play_record.py {out}")
 
 
 if __name__ == "__main__":

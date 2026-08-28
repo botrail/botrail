@@ -1,7 +1,7 @@
 # Export and replay USD
 
-*Walks through [`examples/export_animation.py`](https://github.com/botrail/botrail/blob/main/examples/export_animation.py)
-and [`examples/play_record.py`](https://github.com/botrail/botrail/blob/main/examples/play_record.py)
+*Walks through [`examples/export/export_animation.py`](https://github.com/botrail/botrail/blob/main/examples/export/export_animation.py)
+and [`examples/export/play_record.py`](https://github.com/botrail/botrail/blob/main/examples/export/play_record.py)
 — getting animation out of botrail, and back in.*
 
 A bake is only useful if it leaves the building. botrail's animation format is
@@ -32,7 +32,7 @@ a tutorial: **the box has to ride the gripper**, so the grasp happens *before*
 the plan.
 
 ```python
---8<-- "examples/export_animation.py:28:46"
+--8<-- "examples/export/export_animation.py:28:46"
 ```
 
 The order matters. Close the fingers into the box, `attach` it, lift so the
@@ -41,7 +41,7 @@ of the robot: it follows the hand in the plan, collides as the robot, and rides
 along in the export.
 
 ```bash
-python examples/export_animation.py
+python examples/export/export_animation.py
 ```
 
 ```text
@@ -86,7 +86,7 @@ The demo script picks the right cell automatically by sniffing which instance
 prims the recording animates:
 
 ```python
---8<-- "examples/play_record.py:40:53"
+--8<-- "examples/export/play_record.py:41:54"
 ```
 
 A recording baked before a layout change still plays — the new scenery just
@@ -105,22 +105,22 @@ around it — the timeline dock, scrubbing, and the scene's own obstacles
 following their recorded tracks.
 
 ```bash
-python examples/sequence_demo.py          # bake cell_seq.usda
-python examples/play_record.py            # …and watch it in the studio
+python examples/basics/sequence_demo.py          # bake cell_seq.usda
+python examples/export/play_record.py            # …and watch it in the studio
 ```
 
 ## The complete scripts
 
-??? example "examples/export_animation.py"
+??? example "examples/export/export_animation.py"
 
     ```python
-    --8<-- "examples/export_animation.py"
+    --8<-- "examples/export/export_animation.py"
     ```
 
-??? example "examples/play_record.py"
+??? example "examples/export/play_record.py"
 
     ```python
-    --8<-- "examples/play_record.py"
+    --8<-- "examples/export/play_record.py"
     ```
 
 ## Where this leaves you

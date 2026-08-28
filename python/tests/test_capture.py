@@ -31,7 +31,7 @@ def chromium():
 
 
 def test_record_camera_smoke(chromium, tmp_path) -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_camera(
         "cam",
         position=(1.2, -1.0, 0.9),
@@ -60,7 +60,7 @@ def test_record_camera_smoke(chromium, tmp_path) -> None:
 
 
 def test_record_camera_refusals(tmp_path) -> None:
-    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "simple_arm.urdf"))
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     with pytest.raises(ValueError, match="no camera named"):
         capture.record_camera(scene, "ghost", tmp_path / "x.webm")
     scene.add_camera("cam")
