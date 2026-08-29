@@ -134,14 +134,14 @@ dependencies = [
 
 [[package]]
 name = "botrail-bench"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "parry3d-f64",
 ]
 
 [[package]]
 name = "botrail-collide"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "botrail-kin",
  "botrail-mesh",
@@ -156,14 +156,14 @@ dependencies = [
 
 [[package]]
 name = "botrail-export"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "botrail-kin"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "botrail-model",
  "nalgebra",
@@ -172,14 +172,14 @@ dependencies = [
 
 [[package]]
 name = "botrail-mesh"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "botrail-model"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nalgebra",
  "thiserror",
@@ -188,14 +188,14 @@ dependencies = [
 
 [[package]]
 name = "botrail-plan"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "botrail-py"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "botrail-collide",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "botrail-scene"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "botrail-collide",
  "botrail-export",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "botrail-session"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "botrail-kin",
  "botrail-model",
@@ -251,14 +251,14 @@ dependencies = [
 
 [[package]]
 name = "botrail-traj"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "botrail-usd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "botrail-kin",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "botrail-wasm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "botrail-collide",
  "botrail-model",
