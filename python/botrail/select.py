@@ -933,9 +933,10 @@ class _Cell:
 
     def _lidar(self, name: str) -> tuple[list[Requirement], list[str]]:
         """What the cell asks of a lidar: the authored sweep angle always;
-        a measuring band only when field sensors actually judge through it
-        (a survey-only scanner has no range requirement — its authored max
-        range is a scan reach, not a spec). `min_range_mm` is a `<=`
+        a measuring band — and `field_evaluation`, the product feature the
+        judgement runs on — only when field sensors actually judge through
+        it (a survey-only scanner has no range requirement — its authored
+        max range is a scan reach, not a spec). `min_range_mm` is a `<=`
         requirement — a device with a bigger blind ring than authored
         would miss the close intrusions the sim detected — so it gates
         `check` but stays out of `row.minimum` (design-lidar.md 判断 L12,
@@ -950,6 +951,20 @@ class _Cell:
                 basis="authored sweep angle",
             )
         ]
+        channels = int(lidar.get("channels") or 1)
+        if channels > 1:
+            # A 3D sweep was authored: fewer rings or a narrower vertical
+            # field could not reproduce the scans the sim analyzed.
+            reqs.append(
+                Requirement("channels", channels, basis="authored scan rings")
+            )
+            reqs.append(
+                Requirement(
+                    "vfov_deg",
+                    _round(float(lidar.get("vfov_deg") or 0.0), 2),
+                    basis="authored vertical field",
+                )
+            )
         band = lidar.get("range") or [0.0, 0.0]
         radii = []
         for sensor_name, kind in self.sensors.items():
@@ -959,6 +974,18 @@ class _Cell:
             radii.append((sensor_name, float(radius if radius is not None else band[1])))
         if radii:
             far_name, far_m = max(radii, key=lambda r: r[1])
+            # Field evaluation is a product feature, not a given: a 3D
+            # perception lidar measures the same distances but carries no
+            # field engine — a cell judging through fields can only be
+            # built from a device that evaluates them (measurement-grade
+            # like an LMS1xx, or a safety scanner).
+            reqs.append(
+                Requirement(
+                    "field_evaluation",
+                    1,
+                    basis="field sensors judge through it — the device must evaluate fields",
+                )
+            )
             reqs.append(
                 Requirement(
                     "max_range_mm",

@@ -859,16 +859,17 @@ impl SceneHub {
         &self,
         name: &str,
         t: Option<f64>,
+        noise: Option<botrail_scene::scan::ScanNoise>,
     ) -> Result<(botrail_scene::scan::LidarScan, [f64; 2]), String> {
         match t {
             None => self.with_scene(|scene| {
-                let scan =
-                    botrail_scene::scan::lidar_scan(scene, name).map_err(|e| e.to_string())?;
+                let scan = botrail_scene::scan::lidar_scan(scene, name, noise)
+                    .map_err(|e| e.to_string())?;
                 Ok((scan, scan_band(scene, name)))
             }),
             Some(t) => {
                 let (scene, timeline) = self.baked().ok_or_else(no_bake)?;
-                let scan = botrail_scene::scan::lidar_scan_at(&scene, &timeline, name, t)
+                let scan = botrail_scene::scan::lidar_scan_at(&scene, &timeline, name, t, noise)
                     .map_err(|e| e.to_string())?;
                 let band = scan_band(&scene, name);
                 Ok((scan, band))
@@ -881,9 +882,10 @@ impl SceneHub {
         &self,
         name: &str,
         fps: f64,
+        noise: Option<botrail_scene::scan::ScanNoise>,
     ) -> Result<(Vec<botrail_scene::scan::LidarScan>, [f64; 2]), String> {
         let (scene, timeline) = self.baked().ok_or_else(no_bake)?;
-        let frames = botrail_scene::scan::scan_sweep(&scene, &timeline, name, fps)
+        let frames = botrail_scene::scan::scan_sweep(&scene, &timeline, name, fps, noise)
             .map_err(|e| e.to_string())?;
         let band = scan_band(&scene, name);
         Ok((frames, band))

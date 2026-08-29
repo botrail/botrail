@@ -2329,6 +2329,13 @@
       "description": "A LiDAR scanner: a named scan origin with a planar sweep. Presentation\nonly — it publishes no signal (a field sensor referencing it is the\nplanned signal path).",
       "type": "object",
       "properties": {
+        "channels": {
+          "description": "Vertical channels (scan rings); `1` is a planar scanner.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
         "fov_deg": {
           "description": "Full scan angle, degrees, up to 360.",
           "type": "number",
@@ -2358,6 +2365,12 @@
           "description": "Angular resolution, degrees (the scan API's default step).",
           "type": "number",
           "format": "double"
+        },
+        "vfov_deg": {
+          "description": "Full vertical field of view, degrees, centered on the scan\nplane; `0` for a planar scanner.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
         }
       },
       "required": [

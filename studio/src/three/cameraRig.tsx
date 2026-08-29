@@ -306,6 +306,47 @@ export function readDepth(
   return out;
 }
 
+let colorTarget: THREE.WebGLRenderTarget | null = null;
+
+/** Renders the scene through `cam` into an sRGB byte target and returns
+ * RGB rows top-down — the color mate of `readDepth` for the RGBD
+ * capture. Colors ride the render-target path: tone mapping runs the
+ * same, and the sRGB target matches the canvas encoding (the known
+ * residual差 of this route is documented in design-camera.md §12). */
+export function readColor(
+  gl: THREE.WebGLRenderer,
+  scene: THREE.Scene,
+  cam: THREE.PerspectiveCamera,
+  w: number,
+  h: number,
+): Uint8Array {
+  if (!colorTarget || colorTarget.width !== w || colorTarget.height !== h) {
+    colorTarget?.dispose();
+    colorTarget = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      colorSpace: THREE.SRGBColorSpace,
+    });
+  }
+  gl.setRenderTarget(colorTarget);
+  gl.render(scene, cam);
+  const rgba = new Uint8Array(w * h * 4);
+  gl.readRenderTargetPixels(colorTarget, 0, 0, w, h, rgba);
+  gl.setRenderTarget(null);
+  // RGB only, flipped: readPixels rows run bottom-up.
+  const out = new Uint8Array(w * h * 3);
+  for (let row = 0; row < h; row++) {
+    const src = (h - 1 - row) * w * 4;
+    const dst = row * w * 3;
+    for (let col = 0; col < w; col++) {
+      out[dst + col * 3] = rgba[src + col * 4];
+      out[dst + col * 3 + 1] = rgba[src + col * 4 + 1];
+      out[dst + col * 3 + 2] = rgba[src + col * 4 + 2];
+    }
+  }
+  return out;
+}
+
 /** Wraps authoring-aid content in a group the sensor pass hides. */
 export function Aid({ children }: { children: ReactNode }) {
   const prev = useRef<THREE.Object3D | null>(null);

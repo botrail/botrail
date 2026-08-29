@@ -5,7 +5,9 @@
 //! cell can hit: massing bodies included, display-only detail excluded
 //! (design/design-lidar.md 判断 L5; the honest opposite of the studio's
 //! depth capture, which reads the rendered meshes). Deterministic and
-//! headless: no browser, no randomness, byte-stable across calls.
+//! headless: no browser, no hidden randomness, byte-stable across calls —
+//! measurement noise is opt-in ([`ScanNoise`]) and itself a pure hash of
+//! (seed, beam, instant), so a noisy sweep repeats bit-for-bit too.
 //!
 //! Two moments to sweep at: the scene as it stands ([`lidar_scan`]), or
 //! any instant of a baked cycle ([`lidar_scan_at`] / [`scan_sweep`]) —
@@ -19,6 +21,41 @@ use crate::rollout::SequenceTimeline;
 use crate::seq::{DeviceKind, Lidar, LidarMount};
 use crate::{Scene, SceneError};
 
+/// Opt-in measurement noise for a sweep. Deterministic by construction:
+/// each beam's perturbation is a pure hash of (seed, beam index, sweep
+/// instant), so the same call is bit-stable, a different seed is an
+/// independent draw, and a timeline sweep's frames vary beam to beam and
+/// instant to instant the way a real range stream does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScanNoise {
+    /// Gaussian range noise, 1σ in meters (a VLP-16 datasheet's ±3 cm
+    /// accuracy reads as `0.03` here). Applied to valid returns only —
+    /// what a beam hits never changes, only how far it reports it —
+    /// and the noisy range stays clamped to the measuring band.
+    pub sigma: f64,
+    /// Stream seed: keep it for a reproducible draw, change it for an
+    /// independent one.
+    pub seed: u64,
+}
+
+/// SplitMix64 — the classic 64-bit finalizer; enough hash for a
+/// noise stream and dependency-free.
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A standard-normal draw for one beam, hashed from the noise key —
+/// Box–Muller over two unit uniforms.
+fn gauss(key: u64) -> f64 {
+    let unit = |v: u64| ((v >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    let u1 = unit(splitmix64(key));
+    let u2 = unit(splitmix64(key ^ 0xD1B5_4A32_D192_ED03));
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
 /// One simulated sweep of a [`Lidar`].
 #[derive(Debug, Clone)]
 pub struct LidarScan {
@@ -26,7 +63,15 @@ pub struct LidarScan {
     /// Degrees, not radians: the grid is authored in degrees
     /// (`fov_deg` / `resolution_deg`), and building it there keeps the
     /// usual grids exact (a 0.5° step lands on 20.0, not 20.000…018).
+    /// A multi-channel scanner is ring-major: the full azimuth grid for
+    /// the lowest ring first, then the next ring up — `angles` repeats
+    /// per ring while `elevations` steps.
     pub angles: Vec<f64>,
+    /// Beam elevations, degrees above the scan plane (also built in
+    /// degrees — the grid rule above). All zero for a planar scanner; a
+    /// 3D scanner spreads `channels` rings evenly across `vfov_deg`,
+    /// bottom ring first.
+    pub elevations: Vec<f64>,
     /// Nearest hit per beam, meters along the beam; `0.0` = no return
     /// (nothing inside the measuring band `[min, max]`).
     pub ranges: Vec<f64>,
@@ -38,6 +83,28 @@ pub struct LidarScan {
     /// Timeline instant this sweep was taken at; `None` = the scene as
     /// authored (no bake involved).
     pub t: Option<f64>,
+}
+
+impl LidarScan {
+    /// Hit points of the valid beams — world frame, or the scan frame
+    /// with `world = false` (the scan plane is z = 0 there). `stride`
+    /// thins the beam grid before the validity filter, so the same
+    /// stride picks the same beams on every call.
+    pub fn points(&self, world: bool, stride: usize) -> Vec<Point3<f64>> {
+        let stride = stride.max(1);
+        let mut out = Vec::new();
+        for i in (0..self.ranges.len()).step_by(stride) {
+            let r = self.ranges[i];
+            if r <= 0.0 {
+                continue;
+            }
+            let a = self.angles[i].to_radians();
+            let e = self.elevations[i].to_radians();
+            let local = Point3::new(r * e.cos() * a.cos(), r * e.cos() * a.sin(), r * e.sin());
+            out.push(if world { self.pose * local } else { local });
+        }
+        out
+    }
 }
 
 /// The world at one instant, resolved for the beam loop.
@@ -100,7 +167,11 @@ fn parked_vehicle_frame(scene: &Scene, device: &str) -> Isometry3<f64> {
 /// current joint pose): `resolution_deg` steps across `fov_deg`
 /// (adjusted to span the sweep exactly when they do not divide), each
 /// beam returning the nearest collider hit within the measuring band.
-pub fn lidar_scan(scene: &Scene, name: &str) -> Result<LidarScan, SceneError> {
+pub fn lidar_scan(
+    scene: &Scene,
+    name: &str,
+    noise: Option<ScanNoise>,
+) -> Result<LidarScan, SceneError> {
     let Some(lidar) = scene.lidars().iter().find(|l| l.name == name) else {
         return Err(SceneError::UnknownLidar(name.to_string()));
     };
@@ -128,7 +199,7 @@ pub fn lidar_scan(scene: &Scene, name: &str) -> Result<LidarScan, SceneError> {
         link_poses,
         exclude_link,
     };
-    Ok(sweep(scene, lidar, state, None))
+    Ok(sweep(scene, lidar, state, None, noise))
 }
 
 /// Sweeps the named lidar at instant `t` of a baked cycle (clamped to
@@ -143,6 +214,7 @@ pub fn lidar_scan_at(
     timeline: &SequenceTimeline,
     name: &str,
     t: f64,
+    noise: Option<ScanNoise>,
 ) -> Result<LidarScan, SceneError> {
     let Some(lidar) = scene.lidars().iter().find(|l| l.name == name) else {
         return Err(SceneError::UnknownLidar(name.to_string()));
@@ -203,7 +275,7 @@ pub fn lidar_scan_at(
         link_poses,
         exclude_link,
     };
-    Ok(sweep(scene, lidar, state, Some(t)))
+    Ok(sweep(scene, lidar, state, Some(t), noise))
 }
 
 /// One sweep per frame of the export grid (`1/fps` steps plus the final
@@ -215,6 +287,7 @@ pub fn scan_sweep(
     timeline: &SequenceTimeline,
     name: &str,
     fps: f64,
+    noise: Option<ScanNoise>,
 ) -> Result<Vec<LidarScan>, SceneError> {
     if fps <= 0.0 || fps.is_nan() {
         return Err(SceneError::BadLidar(format!(
@@ -234,12 +307,18 @@ pub fn scan_sweep(
     times.push(timeline.duration);
     times
         .into_iter()
-        .map(|t| lidar_scan_at(scene, timeline, name, t))
+        .map(|t| lidar_scan_at(scene, timeline, name, t, noise))
         .collect()
 }
 
 /// The beam loop over one resolved instant.
-fn sweep(scene: &Scene, lidar: &Lidar, state: ScanState, t: Option<f64>) -> LidarScan {
+fn sweep(
+    scene: &Scene,
+    lidar: &Lidar,
+    state: ScanState,
+    t: Option<f64>,
+    noise: Option<ScanNoise>,
+) -> LidarScan {
     let [min_range, max_range] = lidar.range;
     let origin = Point3::from(state.frame.translation.vector);
 
@@ -286,58 +365,88 @@ fn sweep(scene: &Scene, lidar: &Lidar, state: ScanState, t: Option<f64>) -> Lida
 
     // The beam grid spans the sweep exactly, symmetric about +X; a full
     // circle drops the duplicate closing beam. Built in degrees (see
-    // `LidarScan::angles`).
+    // `LidarScan::angles`). Rings span the vertical field the same way,
+    // symmetric about the scan plane, bottom first.
     let steps = ((lidar.fov_deg / lidar.resolution_deg).round().max(1.0)) as usize;
     let full = lidar.fov_deg >= 360.0 - 1e-9;
     let count = if full { steps } else { steps + 1 };
     let step = lidar.fov_deg / steps as f64;
+    let rings: Vec<f64> = if lidar.channels <= 1 {
+        vec![0.0]
+    } else {
+        let vstep = lidar.vfov_deg / (lidar.channels - 1) as f64;
+        (0..lidar.channels)
+            .map(|c| -lidar.vfov_deg / 2.0 + vstep * c as f64)
+            .collect()
+    };
 
-    let mut angles = Vec::with_capacity(count);
-    let mut ranges = Vec::with_capacity(count);
-    let mut hits: Vec<Option<String>> = Vec::with_capacity(count);
-    for i in 0..count {
-        let angle = -lidar.fov_deg / 2.0 + step * i as f64;
-        let a = angle.to_radians();
-        let dir = state.frame.rotation * Vector3::new(a.cos(), a.sin(), 0.0);
-        let mut best: Option<(f64, &str)> = None;
-        for (inv, collider, name) in &obstacles {
-            let lo = inv * origin;
-            let ld = inv.transform_vector(&dir);
-            if let Some(toi) = collider.cast_local_ray(&lo, &ld, max_range) {
-                if best.is_none_or(|(b, _)| toi < b) {
-                    best = Some((toi, name));
+    let beams = count * rings.len();
+    let mut angles = Vec::with_capacity(beams);
+    let mut elevations = Vec::with_capacity(beams);
+    let mut ranges = Vec::with_capacity(beams);
+    let mut hits: Vec<Option<String>> = Vec::with_capacity(beams);
+    for elevation in &rings {
+        let e = elevation.to_radians();
+        let (ce, se) = (e.cos(), e.sin());
+        for i in 0..count {
+            let angle = -lidar.fov_deg / 2.0 + step * i as f64;
+            let a = angle.to_radians();
+            let dir = state.frame.rotation * Vector3::new(ce * a.cos(), ce * a.sin(), se);
+            let mut best: Option<(f64, &str)> = None;
+            for (inv, collider, name) in &obstacles {
+                let lo = inv * origin;
+                let ld = inv.transform_vector(&dir);
+                if let Some(toi) = collider.cast_local_ray(&lo, &ld, max_range) {
+                    if best.is_none_or(|(b, _)| toi < b) {
+                        best = Some((toi, name));
+                    }
                 }
             }
-        }
-        for (inv, r, l, label) in &links {
-            let lo = inv * origin;
-            let ld = inv.transform_vector(&dir);
-            if let Some(toi) = scene.robots()[*r]
-                .collider()
-                .cast_link_ray(*l, &lo, &ld, max_range)
-            {
-                if best.is_none_or(|(b, _)| toi < b) {
-                    best = Some((toi, label.as_str()));
+            for (inv, r, l, label) in &links {
+                let lo = inv * origin;
+                let ld = inv.transform_vector(&dir);
+                if let Some(toi) = scene.robots()[*r]
+                    .collider()
+                    .cast_link_ray(*l, &lo, &ld, max_range)
+                {
+                    if best.is_none_or(|(b, _)| toi < b) {
+                        best = Some((toi, label.as_str()));
+                    }
                 }
             }
-        }
-        angles.push(angle);
-        match best {
-            Some((toi, name)) if toi >= min_range => {
-                ranges.push(toi);
-                hits.push(Some(name.to_string()));
-            }
-            // No hit, or inside the blind ring (an authoring mistake can
-            // also put the origin inside a body): no valid return — the
-            // real device's answer too.
-            _ => {
-                ranges.push(0.0);
-                hits.push(None);
+            angles.push(angle);
+            elevations.push(*elevation);
+            match best {
+                Some((toi, name)) if toi >= min_range => {
+                    // Noise perturbs the measured distance of a real hit,
+                    // never what was hit; the key folds seed, beam index
+                    // and instant so streams repeat bit-for-bit.
+                    let toi = match noise {
+                        Some(n) if n.sigma > 0.0 => {
+                            let key = splitmix64(
+                                splitmix64(n.seed ^ ranges.len() as u64)
+                                    ^ t.map_or(0, f64::to_bits),
+                            );
+                            (toi + n.sigma * gauss(key)).clamp(min_range, max_range)
+                        }
+                        _ => toi,
+                    };
+                    ranges.push(toi);
+                    hits.push(Some(name.to_string()));
+                }
+                // No hit, or inside the blind ring (an authoring mistake
+                // can also put the origin inside a body): no valid return
+                // — the real device's answer too.
+                _ => {
+                    ranges.push(0.0);
+                    hits.push(None);
+                }
             }
         }
     }
     LidarScan {
         angles,
+        elevations,
         ranges,
         hits,
         pose: state.frame,

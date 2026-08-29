@@ -512,6 +512,10 @@ pub struct LidarPackage {
     pub resolution_deg: Option<f64>,
     /// `min_range_mm` / `max_range_mm`, meters.
     pub range: Option<[f64; 2]>,
+    /// Vertical rings of a 3D scanner (`channels` spec, >= 2 to count).
+    pub channels: Option<u32>,
+    /// Full vertical field, degrees (`vfov_deg` spec).
+    pub vfov_deg: Option<f64>,
     /// Mount-face frame → scan frame; `None` when the package declares
     /// no resolvable scan frame.
     pub scan_offset: Option<nalgebra::Isometry3<f64>>,
@@ -580,6 +584,17 @@ pub fn lidar_from_catalog(
         scan_fov_deg: spec("scan_fov_deg"),
         resolution_deg: spec("angular_resolution_deg"),
         range,
+        // A 3D scanner's rings and vertical field travel together; a
+        // package declaring one without the other keeps its planar
+        // default rather than authoring a degenerate sweep.
+        channels: match (spec("channels"), spec("vfov_deg")) {
+            (Some(c), Some(_)) if c >= 2.0 => Some(c.round() as u32),
+            _ => None,
+        },
+        vfov_deg: match (spec("channels"), spec("vfov_deg")) {
+            (Some(c), Some(v)) if c >= 2.0 => Some(v),
+            _ => None,
+        },
         scan_offset,
         id: entry.id,
         revision: sha,

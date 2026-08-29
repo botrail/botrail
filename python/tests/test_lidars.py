@@ -111,6 +111,31 @@ def test_layout_draws_the_scan_wedge(scene) -> None:
     assert "nav" not in svg
 
 
+def test_3d_lidar_round_trips_and_codegen(scene, tmp_path) -> None:
+    import json
+
+    scene.add_lidar("dome", position=(1.0, 0.0, 0.5), channels=16, vfov=30.0)
+    path = tmp_path / "dome.botrail"
+    scene.save_project(path)
+    reloaded = bt.Scene.load_project(path)
+    code = reloaded.generate_python()
+    assert re.search(r'add_lidar\("dome".*channels=16, vfov=30', code), code
+    # A planar scanner's line stays clean of the 3D arguments…
+    scene.add_lidar("flat", position=(0.0, 1.0, 0.2))
+    line = next(l for l in scene.generate_python().splitlines() if '"flat"' in l)
+    assert "channels" not in line and "vfov" not in line, line
+    # …and a legacy file from before the fields loads as one (additive).
+    doc = json.loads(path.read_text())
+    for lidar in doc["lidars"]:
+        del lidar["channels"], lidar["vfov_deg"]
+    legacy = tmp_path / "legacy.botrail"
+    legacy.write_text(json.dumps(doc))
+    old_line = next(
+        l for l in bt.Scene.load_project(legacy).generate_python().splitlines() if '"dome"' in l
+    )
+    assert "channels" not in old_line, old_line
+
+
 def test_lidar_validation(scene) -> None:
     with pytest.raises(ValueError):
         scene.add_lidar("bad", fov=0.0)
@@ -130,6 +155,14 @@ def test_lidar_validation(scene) -> None:
         scene.add_lidar("bad", mount="no_such_vehicle")
     with pytest.raises(ValueError):
         scene.add_lidar("bad", yaw=90.0, quaternion=(0, 0, 0, 1))
+    with pytest.raises(ValueError):
+        scene.add_lidar("bad", channels=0)
+    with pytest.raises(ValueError):
+        scene.add_lidar("bad", channels=16)  # rings need a vertical field
+    with pytest.raises(ValueError):
+        scene.add_lidar("bad", vfov=30.0)  # a vertical field needs rings
+    with pytest.raises(ValueError):
+        scene.add_lidar("bad", channels=16, vfov=200.0)
     with pytest.raises(ValueError):
         scene.remove_lidar("never_added")
     assert scene.lidar_names == []

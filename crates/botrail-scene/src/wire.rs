@@ -693,6 +693,17 @@ pub struct LidarMsg {
     pub range: [f64; 2],
     /// Angular resolution, degrees (the scan API's default step).
     pub resolution_deg: f64,
+    /// Vertical channels (scan rings); `1` is a planar scanner.
+    #[serde(default = "default_channels")]
+    pub channels: u32,
+    /// Full vertical field of view, degrees, centered on the scan
+    /// plane; `0` for a planar scanner.
+    #[serde(default)]
+    pub vfov_deg: f64,
+}
+
+fn default_channels() -> u32 {
+    1
 }
 
 /// What a LiDAR scanner is bolted to.
@@ -1280,6 +1291,20 @@ pub enum ServerMessage {
         /// `export_topology` writes, cosmetic rows left out.
         topology: TopologyMsg,
     },
+    /// Response to a `scan_lidar` request (broadcast to every client):
+    /// one simulated sweep's valid returns as world-frame points — the
+    /// collider truth (massing bodies included, display-only meshes
+    /// not), for the viewport's scan overlay. A snapshot of the scene as
+    /// it stood at the request; a client refreshes by asking again.
+    ScanResult {
+        ok: bool,
+        lidar: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// World-frame hit points, meters, rounded to 0.1 mm (display
+        /// data — the analysis-grade sweep stays in the Python API).
+        points: Vec<[f64; 3]>,
+    },
     /// Response to a `simulate_sequence` request (broadcast to every client).
     SequenceResult {
         ok: bool,
@@ -1509,6 +1534,16 @@ pub enum ClientMessage {
     },
     RemoveLidar {
         name: String,
+    },
+    /// Requests one simulated sweep of the named lidar; answered with a
+    /// `scan_result` broadcast. `t` sweeps at that instant of the last
+    /// baked cycle — the client sends its playhead whenever a timeline
+    /// is loaded, so the overlay matches what the viewport shows;
+    /// absent, the scene as authored.
+    ScanLidar {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        t: Option<f64>,
     },
     /// I/O map edits (the assignment layer — nodes, bindings,
     /// declarations). Each is validated the way the Python API is and
@@ -2176,6 +2211,8 @@ pub fn lidar_msg(lidar: &crate::seq::Lidar) -> LidarMsg {
         fov_deg: lidar.fov_deg,
         range: lidar.range,
         resolution_deg: lidar.resolution_deg,
+        channels: lidar.channels,
+        vfov_deg: lidar.vfov_deg,
     }
 }
 
@@ -2196,6 +2233,8 @@ pub fn lidar_from_msg(msg: &LidarMsg) -> crate::seq::Lidar {
         fov_deg: msg.fov_deg,
         range: msg.range,
         resolution_deg: msg.resolution_deg,
+        channels: msg.channels,
+        vfov_deg: msg.vfov_deg,
     }
 }
 

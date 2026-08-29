@@ -45,6 +45,7 @@ LID_SPECS = {
     "min_range_mm": 500.0,
     "max_range_mm": 20000.0,
     "safety_rated": 0,
+    "field_evaluation": 1,  # 測定機だが評価フィールド機能あり (LMS1xx 型)
 }
 
 LID_MANIFEST = f"""schema_version: '0.1'
@@ -170,6 +171,8 @@ def test_requirements_check_and_search_close_the_loop(scene, catalog) -> None:
     assert reqs["scan_fov_deg"].status == "ok" and reqs["scan_fov_deg"].provided == 270.0
     assert reqs["max_range_mm"].value == 2500.0 and reqs["max_range_mm"].status == "ok"
     assert reqs["min_range_mm"].op == "<=" and reqs["min_range_mm"].status == "ok"
+    # A field rides it, so the device must carry a field engine.
+    assert reqs["field_evaluation"].value == 1 and reqs["field_evaluation"].status == "ok"
     assert "min_range_mm" not in row.minimum and "max_range_mm" in row.minimum
     assert not [f for f in scene.check().findings if f.target == "gate"]
 
@@ -201,3 +204,90 @@ def test_survey_only_scanner_asks_no_range(scene) -> None:
     rows = {r.target: r for r in scene.requirements().rows}
     keys = {r.key for r in rows["survey"].requirements}
     assert keys == {"scan_fov_deg"}, keys
+
+
+def test_from_catalog_3d_rings_and_select(scene, catalog) -> None:
+    # A 16-ring sibling of the ray: same body, plus the 3D specs — the
+    # pair `channels` / `vfov_deg` travels from the package into the
+    # authored sweep, the scan, the codegen and the selection loop.
+    import shutil
+
+    dome_id = "acme/scan/dome/d1"
+    shutil.copytree(catalog / LID_ID, catalog / dome_id)
+    specs = dict(LID_SPECS, scan_fov_deg=360.0, channels=16, vfov_deg=30.0)
+    manifest = LID_MANIFEST.replace(f"id: {LID_ID}", f"id: {dome_id}").replace(
+        "\n".join(f"  {k}: {v}" for k, v in LID_SPECS.items()),
+        "\n".join(f"  {k}: {v}" for k, v in specs.items()),
+    )
+    (catalog / dome_id / "manifest.yaml").write_text(manifest)
+    index = json.loads((catalog / "index.json").read_text())
+    index["products"].append(
+        {
+            **index["products"][0],
+            "id": dome_id,
+            "name": "Dome 16",
+            "specs": specs,
+            "assets": {"urdf": f"{dome_id}/urdf/model.urdf", "usd": None},
+        }
+    )
+    (catalog / "index.json").write_text(json.dumps(index))
+
+    scene.add_lidar("dome", from_catalog="acme/scan/dome", position=(0.5, 0.0, 0.4))
+    line = next(l for l in scene.generate_python().splitlines() if '"dome"' in l)
+    assert "fov=360" in line and "channels=16, vfov=30" in line, line
+    # The rings sweep for real.
+    frame = scene.lidar_scan("dome")
+    assert len(set(frame.elevations)) == 16
+
+    # The authored 3D sweep turns into requirements the package answers.
+    rows = {r.target: r for r in scene.requirements().rows}
+    reqs = {r.key: r for r in rows["dome"].requirements}
+    assert reqs["channels"].value == 16 and reqs["channels"].status == "ok"
+    assert reqs["vfov_deg"].value == 30.0 and reqs["vfov_deg"].status == "ok"
+    # A planar scanner never asks for rings.
+    scene.add_lidar("flat", position=(0.0, 2.0, 0.2))
+    flat_keys = {
+        r.key for r in {r.target: r for r in scene.requirements().rows}["flat"].requirements
+    }
+    assert "channels" not in flat_keys and "vfov_deg" not in flat_keys
+    # An 8-ring part identified by hand falls short of the authored 16.
+    scene.set_part(
+        "dome",
+        kind="lidar",
+        model="D-8",
+        attributes={"scan_fov_deg": 360.0, "channels": 8.0, "vfov_deg": 30.0},
+    )
+    findings = [f for f in scene.check().findings if f.target == "dome"]
+    assert any(f.code == "spec_short" and "channels" in f.message for f in findings), [
+        (f.code, f.message) for f in findings
+    ]
+
+
+def test_fields_require_field_evaluation(scene) -> None:
+    # A 3D perception lidar measures the same distances but carries no
+    # field engine: authoring a field through one must fall out of the
+    # selection loop, not pass silently on its huge measuring range.
+    scene.add_lidar("watch", position=(0.0, 0.0, 0.2), range=(0.5, 20.0))
+    keys = {r.key for r in {r.target: r for r in scene.requirements().rows}["watch"].requirements}
+    assert "field_evaluation" not in keys  # survey-only: no field, no engine asked
+
+    scene.add_field_sensor("guard", lidar="watch", range=2.0)
+    reqs = {r.key: r for r in {r.target: r for r in scene.requirements().rows}["watch"].requirements}
+    assert reqs["field_evaluation"].value == 1
+
+    # Identified as a 3D scanner that states it has no field engine:
+    # short, even though every range axis is comfortable.
+    attrs = {
+        "scan_fov_deg": 360.0,
+        "min_range_mm": 500.0,
+        "max_range_mm": 100000.0,
+        "field_evaluation": 0.0,
+    }
+    scene.set_part("watch", kind="lidar", model="V-3D", attributes=attrs)
+    findings = [f for f in scene.check().findings if f.target == "watch"]
+    assert any(f.code == "spec_short" and "field_evaluation" in f.message for f in findings), [
+        (f.code, f.message) for f in findings
+    ]
+    # The same device with a field engine clears the cell.
+    scene.set_part("watch", kind="lidar", model="F-2D", attributes={**attrs, "field_evaluation": 1.0})
+    assert not [f for f in scene.check().findings if f.target == "watch"]

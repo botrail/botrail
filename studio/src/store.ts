@@ -40,6 +40,7 @@ import {
   aimSensorCamera,
   cameraRig,
   hideAids,
+  readColor,
   readDepth,
   restoreAids,
 } from "./three/cameraRig";
@@ -379,6 +380,10 @@ export interface StudioState {
   cameras: CameraMsg[];
   /** LiDAR scanners; re-sent in full by the server on every change. */
   lidars: LidarMsg[];
+  /** Simulated-sweep overlays by scanner: flat world-frame xyz of the
+   * last `scan_lidar` reply — a snapshot of the scene as it stood at
+   * the request (the Scan button refreshes it). */
+  scanClouds: Record<string, Float32Array>;
   /** The camera whose picture the PiP shows; `null` = PiP closed (and the
    * second render pass does not run at all). */
   pipCamera: string | null;
@@ -467,6 +472,8 @@ export interface StudioState {
   selectDevice: (name: string) => void;
   selectCamera: (name: string) => void;
   selectLidar: (name: string) => void;
+  /** Drops a scanner's sweep overlay from the viewport. */
+  clearScanCloud: (name: string) => void;
   setPipCamera: (name: string | null) => void;
   setPipMode: (mode: "rgb" | "depth") => void;
   /** Captures the named camera's metric depth image, synchronously:
@@ -482,6 +489,7 @@ export interface StudioState {
   captureDepth: (
     camera: string,
     t?: number | null,
+    rgb?: boolean,
   ) => {
     width: number;
     height: number;
@@ -491,6 +499,10 @@ export interface StudioState {
     position: number[];
     quaternion: number[];
     data: string;
+    /** With `rgb`: the same view's color image, base64 of w*h*3 bytes
+     * (sRGB rows top-down) — depth and color share one seek and one
+     * camera pose, so an RGBD pair never tears. */
+    rgb?: string;
   };
   beginCamExport: (
     camera: string,
@@ -571,6 +583,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   devices: [],
   cameras: [],
   lidars: [],
+  scanClouds: {},
   pipCamera: null,
   pipMode: "rgb",
   camExport: null,
@@ -741,13 +754,28 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         const sel = s.selection;
         const gone =
           sel.type === "lidar" && !msg.lidars.some((x) => x.name === sel.name);
+        // A removed scanner takes its sweep overlay with it.
+        const scanClouds = Object.fromEntries(
+          Object.entries(s.scanClouds).filter(([name]) =>
+            msg.lidars.some((x) => x.name === name),
+          ),
+        );
         return {
           lidars: msg.lidars,
+          scanClouds,
           selection: gone
             ? { type: "tcp", robot: s.selectedRobot ?? "" }
             : sel,
         };
       });
+    } else if (msg.type === "scan_result") {
+      if (msg.ok) {
+        const flat = new Float32Array(msg.points.length * 3);
+        msg.points.forEach((p, i) => flat.set(p, i * 3));
+        set((s) => ({ scanClouds: { ...s.scanClouds, [msg.lidar]: flat } }));
+      } else {
+        console.warn(`scan_lidar ${msg.lidar}: ${msg.error}`);
+      }
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
     } else if (msg.type === "parts") {
@@ -956,9 +984,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   selectCamera: (name) =>
     set({ selection: { type: "camera", name }, pipCamera: name }),
   selectLidar: (name) => set({ selection: { type: "lidar", name } }),
+  clearScanCloud: (name) =>
+    set((s) => {
+      const { [name]: _, ...rest } = s.scanClouds;
+      return { scanClouds: rest };
+    }),
   setPipCamera: (name) => set({ pipCamera: name }),
   setPipMode: (mode) => set({ pipMode: mode }),
-  captureDepth: (camera, t) => {
+  captureDepth: (camera, t, rgb) => {
     const s = get();
     if (s.camExport)
       throw new Error("depth capture: a video export owns the canvas");
@@ -988,6 +1021,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     aimSensorCamera(cam, msg, node);
     const saved = hideAids();
     let depth: Float32Array;
+    let color: Uint8Array | null = null;
     try {
       depth = readDepth(
         ctx.gl,
@@ -996,15 +1030,28 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         msg.resolution[0],
         msg.resolution[1],
       );
+      // Color inside the same seek/hide window: an RGBD pair from one
+      // instant and one pose, never torn.
+      if (rgb) {
+        color = readColor(
+          ctx.gl,
+          ctx.scene,
+          cam,
+          msg.resolution[0],
+          msg.resolution[1],
+        );
+      }
     } finally {
       restoreAids(saved);
       restore?.();
     }
-    const bytes = new Uint8Array(depth.buffer);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    }
+    const b64 = (bytes: Uint8Array) => {
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(bin);
+    };
     return {
       width: msg.resolution[0],
       height: msg.resolution[1],
@@ -1018,7 +1065,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         cam.quaternion.z,
         cam.quaternion.w,
       ],
-      data: btoa(bin),
+      data: b64(new Uint8Array(depth.buffer)),
+      ...(color ? { rgb: b64(color) } : {}),
     };
   },
   // Deterministic seek export: playback is paused for the duration; the

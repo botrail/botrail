@@ -1842,7 +1842,7 @@ impl Scene {
     /// The given pose places the package's *mount face* and the scan
     /// origin follows the package's own frame (`frames.lidar_frames` —
     /// ROS laser convention, which is botrail's, so no rotation fix).
-    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, yaw = None, fov = None, range = None, resolution = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
+    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, yaw = None, fov = None, range = None, resolution = None, channels = None, vfov = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_lidar(
         &self,
@@ -1854,6 +1854,8 @@ impl Scene {
         fov: Option<f64>,
         range: Option<[f64; 2]>,
         resolution: Option<f64>,
+        channels: Option<u32>,
+        vfov: Option<f64>,
         mount: Option<String>,
         robot: Option<String>,
         link: Option<String>,
@@ -1873,6 +1875,12 @@ impl Scene {
         let resolution = resolution
             .or(package.as_ref().and_then(|p| p.resolution_deg))
             .unwrap_or(0.5);
+        let channels = channels
+            .or(package.as_ref().and_then(|p| p.channels))
+            .unwrap_or(1);
+        let vfov = vfov
+            .or(package.as_ref().and_then(|p| p.vfov_deg))
+            .unwrap_or(0.0);
         let lidar_mount = match (mount, robot, link) {
             (None, None, None) => botrail_scene::seq::LidarMount::World,
             (Some(device), None, None) => botrail_scene::seq::LidarMount::Vehicle { device },
@@ -1914,6 +1922,8 @@ impl Scene {
                 fov_deg: fov,
                 range,
                 resolution_deg: resolution,
+                channels,
+                vfov_deg: vfov,
             })
             .map_err(scene_err)?;
         if let Some(pkg) = package {
@@ -1965,11 +1975,18 @@ impl Scene {
     /// the last baked cycle instead — joints, moved objects and the
     /// vehicle the scanner rides all follow the timeline's tracks
     /// (clamped to the duration; simulate a sequence first).
-    #[pyo3(signature = (name, t = None))]
-    fn lidar_scan(&self, name: &str, t: Option<f64>) -> PyResult<ScanFrame> {
+    ///
+    /// `noise` adds Gaussian range noise, 1σ meters (a datasheet's
+    /// ±3 cm accuracy reads as `noise=0.03`) — what a beam hits never
+    /// changes, only how far it reports it, clamped to the measuring
+    /// band. Still deterministic: the draw is a pure hash of `seed`,
+    /// beam and instant, so the same call repeats bit-for-bit and a
+    /// different seed is an independent stream.
+    #[pyo3(signature = (name, t = None, noise = 0.0, seed = 0))]
+    fn lidar_scan(&self, name: &str, t: Option<f64>, noise: f64, seed: u64) -> PyResult<ScanFrame> {
         let (scan, range) = self
             .hub
-            .lidar_scan(name, t)
+            .lidar_scan(name, t, scan_noise(noise, seed)?)
             .map_err(PyValueError::new_err)?;
         Ok(ScanFrame {
             inner: scan,
@@ -1982,12 +1999,14 @@ impl Scene {
     /// One sweep per frame over the whole last baked cycle, on the
     /// export grid (`1/fps` steps plus the final instant). The corridor
     /// survey for a riding scanner: merge the frames' `points()` and the
-    /// drive's visibility is one cloud.
-    #[pyo3(signature = (name, fps = 10.0))]
-    fn scan_sweep(&self, name: &str, fps: f64) -> PyResult<Vec<ScanFrame>> {
+    /// drive's visibility is one cloud. `noise`/`seed` as in
+    /// `lidar_scan` — every frame draws its own beams, so the merged
+    /// cloud thickens the way a real drive's does.
+    #[pyo3(signature = (name, fps = 10.0, noise = 0.0, seed = 0))]
+    fn scan_sweep(&self, name: &str, fps: f64, noise: f64, seed: u64) -> PyResult<Vec<ScanFrame>> {
         let (frames, range) = self
             .hub
-            .scan_sweep(name, fps)
+            .scan_sweep(name, fps, scan_noise(noise, seed)?)
             .map_err(PyValueError::new_err)?;
         Ok(frames
             .into_iter()
@@ -6496,6 +6515,18 @@ impl SignalTrack {
     }
 }
 
+/// The `noise=`/`seed=` pair of the scan APIs as the scan engine's
+/// setting — `0.0` is the noiseless engine path, negatives and NaN are
+/// authoring mistakes worth naming.
+fn scan_noise(noise: f64, seed: u64) -> PyResult<Option<botrail_scene::scan::ScanNoise>> {
+    if noise < 0.0 || noise.is_nan() {
+        return Err(PyValueError::new_err(format!(
+            "noise is a 1-sigma range error in meters — need >= 0, got {noise}"
+        )));
+    }
+    Ok((noise > 0.0).then_some(botrail_scene::scan::ScanNoise { sigma: noise, seed }))
+}
+
 /// One simulated laser sweep — the collider truth: one ray per beam
 /// against the scene's collision shapes (obstacles and robot links), so
 /// what it sees is exactly what the cell can hit. Deterministic and
@@ -6518,9 +6549,19 @@ impl ScanFrame {
     }
 
     /// Beam angles, degrees in the scan frame (0 = +X, CCW toward +Y).
+    /// A multi-channel scanner is ring-major: the full azimuth grid of
+    /// the lowest ring first, then the next ring up.
     #[getter]
     fn angles(&self) -> Vec<f64> {
         self.inner.angles.clone()
+    }
+
+    /// Beam elevations, degrees above the scan plane — all zero for a
+    /// planar scanner, one value per ring for a 3D one (parallel to
+    /// `angles`).
+    #[getter]
+    fn elevations(&self) -> Vec<f64> {
+        self.inner.elevations.clone()
     }
 
     /// Nearest hit per beam, meters; `0.0` = no return (nothing inside
@@ -6569,23 +6610,11 @@ impl ScanFrame {
     /// the beams.
     #[pyo3(signature = (world = true, stride = 1))]
     fn points(&self, world: bool, stride: usize) -> Vec<(f64, f64, f64)> {
-        let stride = stride.max(1);
-        let mut out = Vec::new();
-        for i in (0..self.inner.ranges.len()).step_by(stride) {
-            let r = self.inner.ranges[i];
-            if r <= 0.0 {
-                continue;
-            }
-            let a = self.inner.angles[i].to_radians();
-            let local = nalgebra::Point3::new(r * a.cos(), r * a.sin(), 0.0);
-            let p = if world {
-                self.inner.pose * local
-            } else {
-                local
-            };
-            out.push((p.x, p.y, p.z));
-        }
-        out
+        self.inner
+            .points(world, stride)
+            .into_iter()
+            .map(|p| (p.x, p.y, p.z))
+            .collect()
     }
 
     /// Writes the valid hit points as a binary little-endian PLY (world
@@ -6613,12 +6642,29 @@ impl ScanFrame {
 
     fn __repr__(&self) -> String {
         let valid = self.inner.ranges.iter().filter(|r| **r > 0.0).count();
-        format!(
-            "ScanFrame('{}', {} beams, {} returns)",
-            self.lidar,
-            self.inner.ranges.len(),
-            valid
-        )
+        // Ring-major layout: elevation changes exactly at ring seams.
+        let rings = 1 + self
+            .inner
+            .elevations
+            .windows(2)
+            .filter(|w| w[0] != w[1])
+            .count();
+        if rings > 1 {
+            format!(
+                "ScanFrame('{}', {} rings x {} beams, {} returns)",
+                self.lidar,
+                rings,
+                self.inner.ranges.len() / rings,
+                valid
+            )
+        } else {
+            format!(
+                "ScanFrame('{}', {} beams, {} returns)",
+                self.lidar,
+                self.inner.ranges.len(),
+                valid
+            )
+        }
     }
 }
 

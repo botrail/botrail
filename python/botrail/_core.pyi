@@ -517,6 +517,8 @@ class Scene:
         fov: Optional[float] = None,
         range: Optional[tuple[float, float]] = None,
         resolution: Optional[float] = None,
+        channels: Optional[int] = None,
+        vfov: Optional[float] = None,
         mount: Optional[str] = None,
         robot: Optional[str] = None,
         link: Optional[str] = None,
@@ -526,8 +528,20 @@ class Scene:
     def remove_lidar(self, name: str) -> None: ...
     @property
     def lidar_names(self) -> list[str]: ...
-    def lidar_scan(self, name: str, t: Optional[float] = None) -> "ScanFrame": ...
-    def scan_sweep(self, name: str, fps: float = 10.0) -> list["ScanFrame"]: ...
+    def lidar_scan(
+        self,
+        name: str,
+        t: Optional[float] = None,
+        noise: float = 0.0,
+        seed: int = 0,
+    ) -> "ScanFrame": ...
+    def scan_sweep(
+        self,
+        name: str,
+        fps: float = 10.0,
+        noise: float = 0.0,
+        seed: int = 0,
+    ) -> list["ScanFrame"]: ...
     def add_conveyor(
         self,
         name: str,
@@ -1067,6 +1081,8 @@ class ScanFrame:
     def lidar(self) -> str: ...
     @property
     def angles(self) -> list[float]: ...
+    @property
+    def elevations(self) -> list[float]: ...
     @property
     def ranges(self) -> list[float]: ...
     @property

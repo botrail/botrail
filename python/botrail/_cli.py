@@ -298,7 +298,7 @@ def cmd_scan(args) -> int:
         _bake(scene, args.sequence, scenarios=False, max_duration=args.max_duration)
     if args.sweep is not None:
         # The corridor survey: every frame's returns merged into one cloud.
-        frames = scene.scan_sweep(lidar, fps=args.sweep)
+        frames = scene.scan_sweep(lidar, fps=args.sweep, noise=args.noise, seed=args.seed)
         out = Path(args.out) if args.out else Path("cell_sweep.ply")
         points = [p for f in frames for p in f.points()]
         _merged_ply(out, points)
@@ -314,14 +314,17 @@ def cmd_scan(args) -> int:
             )
         )
         return 0
-    frame = scene.lidar_scan(lidar, t=args.at)
+    frame = scene.lidar_scan(lidar, t=args.at, noise=args.noise, seed=args.seed)
     out = Path(args.out) if args.out else Path("cell_scan.ply")
     if out.suffix == ".csv":
         # The per-beam table: what the sweep measured, and what it hit —
         # the blind-spot debugging view.
         with open(out, "w", encoding="utf-8") as f:
-            f.write("angle_deg,range_m,hit\n")
-            f.writelines(f"{a:.4f},{r:.6f},{h or ''}\n" for a, r, h in zip(frame.angles, frame.ranges, frame.hits))
+            f.write("angle_deg,elevation_deg,range_m,hit\n")
+            f.writelines(
+                f"{a:.4f},{e:.4f},{r:.6f},{h or ''}\n"
+                for a, e, r, h in zip(frame.angles, frame.elevations, frame.ranges, frame.hits)
+            )
     else:
         frame.save_ply(out)
     returns = sum(1 for r in frame.ranges if r > 0)
@@ -417,6 +420,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help=".ply point cloud (default cell_scan.ply), or .csv per-beam table (angle, range, hit); --sweep always writes the merged .ply (default cell_sweep.ply)")
     p.add_argument("--at", type=float, help="sweep at this instant of the baked cycle, seconds (default: the scene as authored, no bake)")
     p.add_argument("--sweep", type=float, metavar="FPS", help="sweep every frame of the baked cycle at this rate and merge the clouds")
+    p.add_argument("--noise", type=float, default=0.0, metavar="SIGMA", help="Gaussian range noise, 1-sigma meters (deterministic per --seed; default 0 = exact)")
+    p.add_argument("--seed", type=int, default=0, help="noise stream seed (default 0)")
     p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
     p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
     p.set_defaults(func=cmd_scan)

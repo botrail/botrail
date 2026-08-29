@@ -338,6 +338,48 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::RemoveLidar { name } => {
             remove_lidar(host, &name).map_err(|e| format!("rejected remove_lidar: {e}"))
         }
+        ClientMessage::ScanLidar { name, t } => {
+            // Failure is reported to clients inside the scan_result.
+            // `t` sweeps the baked cycle the way capture does — the
+            // client sends its playhead whenever a timeline is loaded,
+            // so the overlay matches the picture; without `t` the sweep
+            // sees the scene as authored.
+            let scan = match t {
+                None => host.with_scene(|scene| {
+                    botrail_scene::scan::lidar_scan(scene, &name, None)
+                        .map(|scan| scan.points(true, 1))
+                }),
+                Some(t) => match host.baked() {
+                    Some((scene, timeline)) => {
+                        botrail_scene::scan::lidar_scan_at(&scene, &timeline, &name, t, None)
+                            .map(|scan| scan.points(true, 1))
+                    }
+                    None => Err(botrail_scene::SceneError::BadLidar(
+                        "scan at t: nothing baked yet — simulate a sequence first".to_string(),
+                    )),
+                },
+            };
+            let round = |v: f64| (v * 1e4).round() / 1e4;
+            let msg = match scan {
+                Ok(points) => ServerMessage::ScanResult {
+                    ok: true,
+                    lidar: name,
+                    error: None,
+                    points: points
+                        .iter()
+                        .map(|p| [round(p.x), round(p.y), round(p.z)])
+                        .collect(),
+                },
+                Err(e) => ServerMessage::ScanResult {
+                    ok: false,
+                    lidar: name,
+                    error: Some(e.to_string()),
+                    points: Vec::new(),
+                },
+            };
+            host.emit(&msg);
+            Ok(())
+        }
         ClientMessage::UpsertIoNode { node } => {
             upsert_io_node(host, node).map_err(|e| format!("rejected upsert_io_node: {e}"))
         }
@@ -1836,6 +1878,7 @@ mod tests {
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
                     ServerMessage::SequenceResult { .. } => "sequence_result",
+                    ServerMessage::ScanResult { .. } => "scan_result",
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
                     ServerMessage::Cameras { .. } => "cameras",
@@ -2714,6 +2757,83 @@ mod tests {
         handle_client_message(&host, r#"{"type":"attach_obstacle","name":"ghost"}"#);
         assert!(host.message_types().is_empty());
         assert_eq!(host.logs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn scan_lidar_dispatch_broadcasts_the_cloud() {
+        let host = TestHost::new();
+        host.with_scene(|scene| {
+            scene
+                .add_obstacle(
+                    "wall",
+                    Geometry::Box {
+                        size: nalgebra::Vector3::new(0.1, 6.0, 2.0),
+                    },
+                    Isometry3::translation(2.0, 0.0, 0.5),
+                )
+                .unwrap();
+            scene
+                .upsert_lidar(botrail_scene::seq::Lidar {
+                    name: "gate".into(),
+                    mount: botrail_scene::seq::LidarMount::World,
+                    // Clear of the test robot at the origin — a scan
+                    // origin inside a link collider blinds every beam
+                    // (the engine's documented rule).
+                    pose: Isometry3::translation(0.0, -1.5, 0.5),
+                    fov_deg: 90.0,
+                    range: [0.05, 10.0],
+                    resolution_deg: 1.0,
+                    channels: 1,
+                    vfov_deg: 0.0,
+                })
+                .unwrap();
+        });
+        handle_client_message(&host, r#"{"type":"scan_lidar","name":"gate"}"#);
+        assert_eq!(host.message_types(), ["scan_result"]);
+        {
+            let out = host.out.borrow();
+            let ServerMessage::ScanResult {
+                ok,
+                lidar,
+                points,
+                error,
+            } = &out[0]
+            else {
+                panic!("expected scan_result");
+            };
+            assert!(*ok && error.is_none() && lidar == "gate");
+            // Every return lies on the wall face x = 1.95 (rounding to
+            // 0.1 mm keeps that visible).
+            assert!(!points.is_empty());
+            assert!(
+                points.iter().all(|p| (p[0] - 1.95).abs() < 1e-3),
+                "{points:?}"
+            );
+        }
+
+        // Unknown scanner: the failure rides inside the scan_result.
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"scan_lidar","name":"ghost"}"#);
+        {
+            let out = host.out.borrow();
+            let ServerMessage::ScanResult {
+                ok, error, points, ..
+            } = &out[0]
+            else {
+                panic!("expected scan_result");
+            };
+            assert!(!*ok && error.is_some() && points.is_empty());
+        }
+
+        // t without a bake: the refusal names the fix, inside the
+        // scan_result like every other failure.
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"scan_lidar","name":"gate","t":1.0}"#);
+        let out = host.out.borrow();
+        let ServerMessage::ScanResult { ok, error, .. } = &out[0] else {
+            panic!("expected scan_result");
+        };
+        assert!(!*ok && error.as_deref().unwrap_or("").contains("simulate"));
     }
 
     #[test]

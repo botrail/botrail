@@ -25,4 +25,13 @@ range: [number, number],
 /**
  * Angular resolution, degrees (the scan API's default step).
  */
-resolution_deg: number, };
+resolution_deg: number, 
+/**
+ * Vertical channels (scan rings); `1` is a planar scanner.
+ */
+channels: number, 
+/**
+ * Full vertical field of view, degrees, centered on the scan
+ * plane; `0` for a planar scanner.
+ */
+vfov_deg: number, };

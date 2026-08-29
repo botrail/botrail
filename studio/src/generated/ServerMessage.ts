@@ -45,7 +45,12 @@ robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | nu
  * devices and the wires between them) — the same graph
  * `export_topology` writes, cosmetic rows left out.
  */
-topology: TopologyMsg, } | { "type": "sequence_result", ok: boolean, sequence: string, 
+topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, error?: string | null, 
+/**
+ * World-frame hit points, meters, rounded to 0.1 mm (display
+ * data — the analysis-grade sweep stays in the Python API).
+ */
+points: Array<[number, number, number]>, } | { "type": "sequence_result", ok: boolean, sequence: string, 
 /**
  * Scenario the rollout ran under; absent = `baseline`.
  */

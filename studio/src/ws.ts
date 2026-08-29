@@ -312,6 +312,14 @@ export function sendUpsertLidar(lidar: LidarMsg): void {
   rawSend({ type: "upsert_lidar", lidar });
 }
 
+/** One simulated sweep of the named scanner; the reply is a
+ * `scan_result` broadcast the store turns into a viewport overlay.
+ * `t` sweeps the baked cycle at that instant — pass the playhead
+ * whenever a timeline is loaded, so the overlay matches the picture. */
+export function sendScanLidar(name: string, t: number | null): void {
+  rawSend({ type: "scan_lidar", name, t });
+}
+
 /** Lidar upserts throttled per-name to ~30 Hz for smooth gizmo drags. */
 export const sendUpsertLidarThrottled = throttledByKey<LidarMsg>(
   SEND_INTERVAL_MS,

@@ -219,6 +219,10 @@ class DepthFrame:
     cy: float
     position: tuple[float, float, float]
     quaternion: tuple[float, float, float, float]
+    #: The same view's color image, ``(h, w, 3)`` uint8 sRGB — present
+    #: only when captured with ``rgb=True`` (depth and color come from
+    #: one seek and one pose, so the pair never tears).
+    rgb: Any | None = None
 
     @property
     def width(self) -> int:
@@ -258,7 +262,7 @@ class DepthFrame:
             "png_depth_scale": 0.001,
         }
 
-    def points(self, *, world: bool = True, stride: int = 1) -> Any:
+    def points(self, *, world: bool = True, stride: int = 1, color: bool = False) -> Any:
         """Unprojects the depth image into an ``(N, 3)`` float32 point
         cloud in meters; pixels with no return are dropped.
 
@@ -266,9 +270,17 @@ class DepthFrame:
         pose into scene coordinates; ``False`` keeps camera coordinates
         (-Z view, +Y up). ``stride`` keeps every stride-th pixel in both
         directions — a cheap decimation for display-sized clouds.
+        ``color=True`` returns ``(N, 6)`` instead, columns 3:6 the
+        pixel's sRGB in ``[0, 1]`` — needs a frame captured with
+        ``rgb=True``.
         """
         import numpy as np
 
+        if color and self.rgb is None:
+            raise ValueError(
+                "no color image on this frame — capture with rgb=True "
+                "(capture_depth) or color=True (capture_pointcloud)"
+            )
         d = np.asarray(self.depth)[::stride, ::stride]
         v, u = np.nonzero(d)
         z = d[v, u].astype(np.float64)
@@ -280,7 +292,11 @@ class DepthFrame:
         pts = np.stack([uu * z / self.fx, -vv * z / self.fy, -z], axis=1)
         if world:
             pts = pts @ _quat_matrix(self.quaternion).T + np.asarray(self.position)
-        return pts.astype(np.float32)
+        pts = pts.astype(np.float32)
+        if not color:
+            return pts
+        rgb = np.asarray(self.rgb)[::stride, ::stride][v, u].astype(np.float32) / 255.0
+        return np.hstack([pts, rgb])
 
 
 def capture_depth(
@@ -289,6 +305,7 @@ def capture_depth(
     out: str | Path | None = None,
     *,
     t: float | None = None,
+    rgb: bool = False,
     timeout: float = 120.0,
 ) -> DepthFrame:
     """Captures ``camera``'s metric depth image from the scene.
@@ -299,6 +316,10 @@ def capture_depth(
     ``.png`` (16-bit grayscale, millimeters — RealSense ``depth_scale``
     0.001, clipped at 65.535 m); either gets a ``.json`` sidecar with the
     intrinsics. Returns the :class:`DepthFrame` in every case.
+
+    ``rgb=True`` also grabs the same view's color image onto
+    :attr:`DepthFrame.rgb` — one seek, one pose, a true RGBD pair (the
+    colors ride the render-target path; tone mapping matches the PiP).
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -352,8 +373,9 @@ def capture_depth(
                     f"the scene never became capturable in the page{hint}"
                 ) from e
             r = page.evaluate(
-                "([name, t]) => window.__STUDIO__.getState().captureDepth(name, t)",
-                [camera, t],
+                "([name, t, rgb]) =>"
+                " window.__STUDIO__.getState().captureDepth(name, t, rgb)",
+                [camera, t, rgb],
             )
             browser.close()
     finally:
@@ -368,6 +390,13 @@ def capture_depth(
     # Square pixels: the vertical fov is derived from the horizontal one
     # and the aspect (aimSensorCamera), so fy == fx exactly.
     fx = (w / 2.0) / math.tan(math.radians(float(r["fov_deg"])) / 2.0)
+    color = (
+        np.frombuffer(base64.b64decode(r["rgb"]), dtype=np.uint8)
+        .reshape(h, w, 3)
+        .copy()
+        if rgb
+        else None
+    )
     frame = DepthFrame(
         depth=depth,
         camera=camera,
@@ -380,6 +409,7 @@ def capture_depth(
         cy=h / 2.0,
         position=tuple(float(x) for x in r["position"]),
         quaternion=tuple(float(x) for x in r["quaternion"]),
+        rgb=color,
     )
     if out is not None:
         _save_depth(frame, out)
@@ -393,6 +423,7 @@ def capture_pointcloud(
     *,
     t: float | None = None,
     stride: int = 1,
+    color: bool = False,
     timeout: float = 120.0,
 ) -> Any:
     """Captures ``camera``'s depth and unprojects it into a world-space
@@ -402,12 +433,16 @@ def capture_pointcloud(
     — depth pixels with no return are dropped, ``stride`` decimates, and
     ``t`` seeks a baked cycle as in :func:`capture_depth`. ``out``
     writes the cloud as a binary little-endian ``.ply``.
+
+    ``color=True`` colors every point with its pixel's sRGB — the
+    return grows to ``(N, 6)`` (rgb in ``[0, 1]``) and the ``.ply``
+    carries ``uchar`` red/green/blue the way viewers expect.
     """
     out = Path(out) if out is not None else None
     if out is not None and out.suffix != ".ply":
         raise ValueError(f"{out.name}: point clouds are written as .ply")
-    frame = capture_depth(scene, camera, t=t, timeout=timeout)
-    pts = frame.points(world=True, stride=stride)
+    frame = capture_depth(scene, camera, t=t, rgb=color, timeout=timeout)
+    pts = frame.points(world=True, stride=stride, color=color)
     if out is not None:
         _write_ply(out, pts)
     return pts
@@ -499,10 +534,13 @@ def _quat_matrix(q: tuple[float, float, float, float]) -> Any:
 
 
 def _write_ply(path: Path, pts: Any) -> None:
-    """Writes an ``(N, 3)`` float32 array as a binary little-endian PLY
-    — stdlib only, same policy as the PNG writer."""
+    """Writes an ``(N, 3)`` float32 array — or ``(N, 6)`` with sRGB in
+    columns 3:6 — as a binary little-endian PLY (colors as the ``uchar``
+    red/green/blue viewers expect). Stdlib only, same policy as the PNG
+    writer."""
     import numpy as np
 
+    colored = pts.shape[1] == 6
     header = (
         "ply\n"
         "format binary_little_endian 1.0\n"
@@ -510,12 +548,18 @@ def _write_ply(path: Path, pts: Any) -> None:
         "property float x\n"
         "property float y\n"
         "property float z\n"
-        "end_header\n"
+        + ("property uchar red\nproperty uchar green\nproperty uchar blue\n" if colored else "")
+        + "end_header\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         f.write(header.encode("ascii"))
-        f.write(np.ascontiguousarray(pts.astype("<f4")).tobytes())
+        if colored:
+            xyz = np.ascontiguousarray(pts[:, :3].astype("<f4")).view(np.uint8).reshape(len(pts), 12)
+            rgb = np.clip(np.rint(pts[:, 3:] * 255.0), 0, 255).astype(np.uint8)
+            f.write(np.hstack([xyz, rgb]).tobytes())
+        else:
+            f.write(np.ascontiguousarray(pts.astype("<f4")).tobytes())
 
 
 def _check_camera(scene, camera: str) -> None:

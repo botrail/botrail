@@ -13,6 +13,7 @@ import {
   sendRemoveCamera,
   sendRemoveDevice,
   sendRemoveLidar,
+  sendScanLidar,
   sendRemoveSensor,
   sendUpsertCamera,
   sendUpsertDevice,
@@ -184,6 +185,8 @@ export function SensorDevicePanel() {
       fov_deg: 270,
       range: [0.05, 20],
       resolution_deg: 0.5,
+      channels: 1,
+      vfov_deg: 0,
     });
     selectLidar(name);
   };
@@ -719,6 +722,8 @@ function CameraForm({ camera }: { camera: CameraMsg }) {
 function LidarForm({ lidar }: { lidar: LidarMsg }) {
   const commit = (patch: Partial<LidarMsg>) =>
     sendUpsertLidar({ ...lidar, ...patch });
+  const hasCloud = useStudioStore((s) => lidar.name in s.scanClouds);
+  const clearScanCloud = useStudioStore((s) => s.clearScanCloud);
   const mountLabel =
     lidar.mount.kind === "world"
       ? "world fixture"
@@ -761,11 +766,56 @@ function LidarForm({ lidar }: { lidar: LidarMsg }) {
         min={0.01}
         onCommit={(resolution_deg) => commit({ resolution_deg })}
       />
+      <NumField
+        label="rings"
+        value={lidar.channels}
+        min={1}
+        onCommit={(n) => {
+          // Rings and vertical field travel together: the server
+          // rejects a multi-ring scanner without a vertical field (and
+          // the reverse), so the pair changes as one.
+          const channels = Math.max(1, Math.round(n));
+          commit({
+            channels,
+            vfov_deg:
+              channels > 1 ? (lidar.vfov_deg > 0 ? lidar.vfov_deg : 30) : 0,
+          });
+        }}
+      />
+      {lidar.channels > 1 && (
+        <NumField
+          label="vfov°"
+          value={lidar.vfov_deg}
+          min={0.1}
+          onCommit={(vfov_deg) => commit({ vfov_deg: Math.min(vfov_deg, 179) })}
+        />
+      )}
       {lidar.mount.kind === "world" && (
         <span className="seq-cond">
           aim the scan heading (+X) with the viewport gizmo (rotate mode)
         </span>
       )}
+      <div className="seg">
+        <button
+          title="simulate one sweep and overlay its returns in the viewport — at the playhead when a timeline is loaded, else the scene as authored; a snapshot (press again after edits or seeks to refresh)"
+          onClick={() => {
+            // The playhead whenever a timeline is loaded: the viewport
+            // shows the baked sample there, so the sweep must too.
+            const s = useStudioStore.getState();
+            sendScanLidar(lidar.name, s.timeline ? s.playbackTime : null);
+          }}
+        >
+          Scan
+        </button>
+        {hasCloud && (
+          <button
+            title="hide the sweep overlay"
+            onClick={() => clearScanCloud(lidar.name)}
+          >
+            Hide scan
+          </button>
+        )}
+      </div>
       <div className="seg">
         <button
           className="danger"

@@ -269,6 +269,44 @@ def test_depth_frame_points_math() -> None:
     assert f.points(stride=2).shape == (4, 3)
 
 
+def test_depth_frame_colored_points_and_ply(tmp_path) -> None:
+    """color=True: every point carries its pixel's sRGB — (N, 6), the
+    xyz half identical to the plain call — a frame without a color image
+    refuses clearly, and the PLY gains the uchar red/green/blue viewers
+    expect. No browser involved."""
+    np = pytest.importorskip("numpy")
+
+    d = np.full((2, 2), 2.0, dtype=np.float32)
+    d[0, 1] = 0.0  # one lost return
+    rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    rgb[0, 0] = (255, 0, 0)
+    rgb[1, 0] = (0, 255, 0)
+    rgb[1, 1] = (0, 0, 255)
+    base = {"depth": d, "camera": "c", "t": None, "near": 0.1, "far": 10.0,
+            "fx": 2.0, "fy": 2.0, "cx": 1.0, "cy": 1.0}
+
+    f = capture.DepthFrame(**base, position=(0, 0, 0), quaternion=(0, 0, 0, 1), rgb=rgb)
+    pts = f.points(color=True)
+    assert pts.shape == (3, 6)
+    assert np.allclose(pts[:, 3:], [[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+    assert np.allclose(pts[:, :3], f.points())
+    # Stride picks the same pixels for depth and color.
+    assert np.allclose(f.points(stride=2, color=True)[0, 3:], [1, 0, 0])
+    # A frame captured without rgb refuses the colored ask by name.
+    plain = capture.DepthFrame(**base, position=(0, 0, 0), quaternion=(0, 0, 0, 1))
+    with pytest.raises(ValueError, match="rgb=True"):
+        plain.points(color=True)
+
+    # PLY: 15-byte records (3 float + 3 uchar), colors byte-exact.
+    capture._write_ply(tmp_path / "c.ply", pts)
+    raw = (tmp_path / "c.ply").read_bytes()
+    end = raw.index(b"end_header\n") + len(b"end_header\n")
+    header = raw[:end].decode("ascii")
+    assert "property uchar red" in header and "element vertex 3" in header
+    assert len(raw) - end == 3 * 15
+    assert raw[end + 12 : end + 15] == b"\xff\x00\x00"
+
+
 def test_capture_pointcloud(chromium, tmp_path) -> None:
     """§12.4 DEP3: an angled, off-axis camera's cloud lands on the
     authored world planes — depth semantics, K and the pose transform

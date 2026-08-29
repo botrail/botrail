@@ -172,6 +172,136 @@ def test_scan_validation() -> None:
         scene.lidar_scan("nope")
 
 
+# ------------------------------------------------- 3D scans (P1)
+
+
+def test_3d_rings_measure_the_wall() -> None:
+    # A tall wall facing the scanner: every ring's head-on beam measures
+    # the face at d / cos(elevation) — the slant range of a real
+    # multi-line scanner.
+    scene = bt.Scene()
+    scene.add_box("wall", (0.1, 6.0, 4.0), (2.0, 0.0, 1.0))  # face x = 1.95
+    scene.add_lidar(
+        "dome",
+        position=(0.0, 0.0, 1.0),
+        fov=90.0,
+        range=(0.05, 20.0),
+        resolution=1.0,
+        channels=5,
+        vfov=40.0,
+    )
+    frame = scene.lidar_scan("dome")
+    # Ring-major: the full azimuth grid per ring, bottom ring first.
+    assert len(frame.angles) == 5 * 91
+    assert frame.elevations[:91] == [-20.0] * 91
+    assert frame.elevations[-91:] == [20.0] * 91
+    assert frame.angles[:91] == frame.angles[91 : 2 * 91]
+    beams = {(a, e): r for a, e, r in zip(frame.angles, frame.elevations, frame.ranges)}
+    for e in (-20.0, -10.0, 0.0, 10.0, 20.0):
+        want = 1.95 / math.cos(math.radians(e))
+        assert abs(beams[(0.0, e)] - want) < 1e-6, (e, beams[(0.0, e)])
+    # Points leave the scan plane: in the scan frame, a ring's returns
+    # sit at z = r sin(elevation) (the wall is tall enough that every
+    # beam of this sweep lands on it).
+    local = frame.points(world=False)
+    assert len(local) == len(frame.angles)
+    assert abs(local[2 * 91 + 45][2]) < 1e-9  # middle ring stays planar
+    top = beams[(0.0, 20.0)]
+    assert abs(local[4 * 91 + 45][2] - top * math.sin(math.radians(20.0))) < 1e-9
+    # The middle ring of an odd-channel scanner IS the planar scan.
+    scene.add_lidar(
+        "flat", position=(0.0, 0.0, 1.0), fov=90.0, range=(0.05, 20.0), resolution=1.0
+    )
+    planar = scene.lidar_scan("flat")
+    assert frame.ranges[2 * 91 : 3 * 91] == planar.ranges
+    assert frame.hits[2 * 91 : 3 * 91] == planar.hits
+    assert planar.elevations == [0.0] * 91
+    # Deterministic like the planar sweep.
+    again = scene.lidar_scan("dome")
+    assert again.ranges == frame.ranges and again.elevations == frame.elevations
+    assert repr(frame) == "ScanFrame('dome', 5 rings x 91 beams, 455 returns)"
+
+
+def test_3d_ply_lifts_off_the_plane(tmp_path) -> None:
+    scene = bt.Scene()
+    scene.add_box("wall", (0.1, 6.0, 4.0), (2.0, 0.0, 1.0))
+    scene.add_lidar(
+        "dome",
+        position=(0.0, 0.0, 1.0),
+        fov=60.0,
+        range=(0.05, 20.0),
+        resolution=1.0,
+        channels=9,
+        vfov=32.0,
+    )
+    out = tmp_path / "dome.ply"
+    scene.lidar_scan("dome").save_ply(out)
+    points = read_ply(out)
+    # All on the wall face; the head-on beams alone span 9 distinct
+    # heights — one per ring.
+    assert all(abs(x - 1.95) < 1e-4 for x, _, _ in points)
+    assert len({round(z, 4) for x, y, z in points if abs(y) < 1e-6}) == 9
+
+
+# ------------------------------------------------- noise (P2)
+
+
+def noise_cell() -> "bt.Scene":
+    scene = bt.Scene()
+    scene.add_box("wall", (0.1, 6.0, 2.0), (2.0, 0.0, 0.5))
+    scene.add_lidar("scan", position=(0.0, 0.0, 0.2), fov=90.0, range=(0.05, 5.0))
+    return scene
+
+
+def test_noise_is_seeded_and_optional() -> None:
+    scene = noise_cell()
+    exact = scene.lidar_scan("scan")
+    # noise=0 IS the noiseless engine path, bit for bit.
+    assert scene.lidar_scan("scan", noise=0.0).ranges == exact.ranges
+    # A noisy sweep repeats bit-for-bit under the same seed…
+    a = scene.lidar_scan("scan", noise=0.01, seed=7)
+    b = scene.lidar_scan("scan", noise=0.01, seed=7)
+    assert a.ranges == b.ranges
+    # …and a different seed is an independent draw.
+    c = scene.lidar_scan("scan", noise=0.01, seed=8)
+    assert c.ranges != a.ranges
+    # Noise moves distances, never what was hit or which beams return.
+    assert a.hits == exact.hits
+    deltas = [n - e for n, e in zip(a.ranges, exact.ranges) if e > 0.0]
+    assert all(abs(d) < 6 * 0.01 for d in deltas), max(deltas)
+    # The draw looks like its sigma (391 samples: std within a loose band,
+    # and not all beams shifted the same way).
+    std = (sum(d * d for d in deltas) / len(deltas)) ** 0.5
+    assert 0.007 < std < 0.013, std
+    assert min(deltas) < 0 < max(deltas)
+
+
+def test_noise_varies_by_instant_and_stays_in_band() -> None:
+    scene = bt.Scene()
+    scene.add_box("chassis", (0.5, 0.35, 0.25), (0.0, 2.0, 0.125))
+    scene.add_vehicle(
+        "agv", body=["chassis"], path=[(0.0, 2.0), (0.5, 2.0)], stations={"A": 0, "B": 1}
+    )
+    scene.add_box("wall", (0.1, 0.8, 0.6), (2.8, 2.0, 0.3))
+    scene.add_lidar("nav", mount="agv", position=(0.3, 0.0, 0.2), fov=90.0, range=(0.05, 3.0))
+    sq = scene.sequence("drive")
+    sq.step("go", actions=[bt.seq.goto("agv", "B")], transition=bt.seq.device_done("agv"))
+    sq.simulate()
+    # Two frames of one sweep draw different beams (t is in the key), and
+    # the whole stream still repeats bit-for-bit.
+    frames = scene.scan_sweep("nav", fps=5.0, noise=0.02, seed=3)
+    again = scene.scan_sweep("nav", fps=5.0, noise=0.02, seed=3)
+    ahead = lambda f: dict(zip(f.angles, f.ranges))[0.0]
+    assert [f.ranges for f in frames] == [f.ranges for f in again]
+    assert ahead(frames[0]) != ahead(again[1])
+    # A noisy return never leaves the measuring band.
+    scene2 = noise_cell()
+    noisy = scene2.lidar_scan("scan", noise=5.0, seed=1)  # absurd sigma
+    assert all(r == 0.0 or 0.05 <= r <= 5.0 for r in noisy.ranges)
+    with pytest.raises(ValueError, match="noise"):
+        scene2.lidar_scan("scan", noise=-0.01)
+
+
 # ------------------------------------------------- timeline scans (L3)
 
 
@@ -321,7 +451,7 @@ def test_cli_scan_at_and_sweep(capsys, tmp_path) -> None:
     code = _cli.main(["scan", str(cell), "--at", "1e9", "--out", str(csv)])
     assert code == 0 and json.loads(capsys.readouterr().out)["ok"]
     row = next(line for line in csv.read_text().splitlines() if line.startswith("0.0000,"))
-    assert abs(float(row.split(",")[1]) - 0.45) < 2e-3, row
+    assert abs(float(row.split(",")[2]) - 0.45) < 2e-3, row
     # --sweep merges every frame's cloud.
     ply = tmp_path / "sweep.ply"
     code = _cli.main(["scan", str(cell), "--sweep", "2", "--out", str(ply)])
@@ -354,6 +484,6 @@ def test_cli_scan_writes_ply_and_csv(capsys, tmp_path) -> None:
     capsys.readouterr()
     assert code == 0
     lines = csv.read_text().strip().splitlines()
-    assert lines[0] == "angle_deg,range_m,hit"
+    assert lines[0] == "angle_deg,elevation_deg,range_m,hit"
     assert len(lines) - 1 == report["beams"]
     assert any(line.endswith(",wall") for line in lines[1:])

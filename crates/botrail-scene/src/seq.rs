@@ -165,6 +165,15 @@ pub struct Lidar {
     /// Angular resolution, degrees — the default step of the scan API.
     /// Presentation/analysis data; field judgement never reads it.
     pub resolution_deg: f64,
+    /// Vertical channels (scan rings). `1` is a planar scanner; a 3D
+    /// scanner spreads this many rings evenly across [`Lidar::vfov_deg`].
+    /// Scan-API data like `resolution_deg` — field judgement stays on
+    /// the scan plane either way (real safety fields are 2D;
+    /// design/design-lidar.md 判断 L8).
+    pub channels: u32,
+    /// Full vertical field of view, degrees, centered on the scan plane.
+    /// `0` for a planar scanner; meaningful only with `channels > 1`.
+    pub vfov_deg: f64,
 }
 
 /// What a [`Lidar`] is bolted to.
@@ -1146,6 +1155,25 @@ impl Scene {
             return Err(SceneError::BadLidar(format!(
                 "lidar `{}`: resolution must be in (0, fov] degrees, got {}",
                 lidar.name, lidar.resolution_deg
+            )));
+        }
+        if lidar.channels == 0 {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: channels must be >= 1 (1 = a planar scanner)",
+                lidar.name
+            )));
+        }
+        if lidar.channels > 1 && !(lidar.vfov_deg > 0.0 && lidar.vfov_deg < 180.0) {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: a {}-channel scanner needs vfov in (0, 180) degrees, got {}",
+                lidar.name, lidar.channels, lidar.vfov_deg
+            )));
+        }
+        if lidar.channels == 1 && lidar.vfov_deg != 0.0 {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: vfov needs channels >= 2 (a planar scanner has no \
+                 vertical field), got channels=1, vfov={}",
+                lidar.name, lidar.vfov_deg
             )));
         }
         match self.lidars.iter_mut().find(|l| l.name == lidar.name) {

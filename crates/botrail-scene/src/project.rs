@@ -1547,8 +1547,13 @@ pub fn generate_python(project: &ProjectFile) -> String {
                 format!(", robot={robot:?}, link={link:?}")
             }
         };
+        let rings = if lidar.channels > 1 {
+            format!(", channels={}, vfov={}", lidar.channels, lidar.vfov_deg)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "scene.add_lidar({:?}, position={}, quaternion={}, fov={}, range=({}, {}), resolution={}{mount})\n",
+            "scene.add_lidar({:?}, position={}, quaternion={}, fov={}, range=({}, {}), resolution={}{rings}{mount})\n",
             lidar.name,
             py_tuple(&lidar.pose.position),
             py_tuple(&lidar.pose.quaternion),

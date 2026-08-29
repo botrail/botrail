@@ -54,7 +54,38 @@ export function LidarView() {
       {lidars.map((lidar) => (
         <LidarNode key={lidar.name} lidar={lidar} />
       ))}
+      {lidars.map((lidar) => (
+        <ScanCloud key={`cloud:${lidar.name}`} name={lidar.name} />
+      ))}
     </>
+  );
+}
+
+const SCAN_CLOUD_COLOR = "#f0a94e";
+
+/** One scanner's simulated-sweep overlay: the last `scan_lidar` reply's
+ * returns as world-frame points. Rendered at the scene root — the
+ * points already live in world coordinates, so they must not ride the
+ * scanner's mount group. */
+function ScanCloud({ name }: { name: string }) {
+  const cloud = useStudioStore((s) => s.scanClouds[name]);
+  const geometry = useMemo(() => {
+    if (!cloud || cloud.length === 0) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(cloud, 3));
+    return g;
+  }, [cloud]);
+  useEffect(() => () => geometry?.dispose(), [geometry]);
+  if (!geometry) return null;
+  return (
+    <points geometry={geometry} frustumCulled={false}>
+      <pointsMaterial
+        color={SCAN_CLOUD_COLOR}
+        size={0.03}
+        sizeAttenuation
+        depthWrite={false}
+      />
+    </points>
   );
 }
 
