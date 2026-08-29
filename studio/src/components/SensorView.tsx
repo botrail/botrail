@@ -160,6 +160,9 @@ function SensorShape({ sensor, active }: { sensor: SensorMsg; active: boolean })
   // A vision sensor's geometry is its camera's frustum, which CameraView
   // already draws (and tints by this sensor's lane); nothing to add here.
   if (sensor.kind.kind === "vision") return null;
+  // A field's geometry is its lidar's sector, which LidarView draws (and
+  // tints by the field's lane).
+  if (sensor.kind.kind === "field") return null;
   if (sensor.kind.kind === "zone") {
     const { pose, size } = sensor.kind;
     return (

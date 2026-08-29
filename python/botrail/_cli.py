@@ -24,7 +24,7 @@ import runpy
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 class CliError(Exception):
@@ -49,7 +49,7 @@ def load_cell(path: str):
         sys.path.insert(0, str(p.parent))
         try:
             namespace = runpy.run_path(str(p), run_name="__botrail_cell__")
-        except Exception as e:  # noqa: BLE001 — the user's script failed; say so
+        except Exception as e:
             raise CliError(f"{path}: {type(e).__name__}: {e}\n{traceback.format_exc()}") from e
         for key in ("scene",):
             if isinstance(namespace.get(key), bt.Scene):
@@ -267,6 +267,78 @@ def cmd_capture(args) -> int:
     return 0
 
 
+def _merged_ply(path: Path, points: list) -> None:
+    """All frames' world points as one binary little-endian PLY (the
+    same shape `ScanFrame.save_ply` writes for a single sweep)."""
+    import struct
+
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {len(points)}\n"
+        "property float x\nproperty float y\nproperty float z\nend_header\n"
+    )
+    with open(path, "wb") as f:
+        f.write(header.encode())
+        f.writelines(struct.pack("<3f", x, y, z) for x, y, z in points)
+
+
+def cmd_scan(args) -> int:
+    scene = load_cell(args.cell)
+    lidar = args.lidar
+    if lidar is None:
+        names = scene.lidar_names
+        if len(names) != 1:
+            have = ", ".join(names) if names else "none"
+            raise CliError(f"--lidar is required (lidars in the cell: {have})")
+        lidar = names[0]
+    if args.at is not None and args.sweep is not None:
+        raise CliError("pass either --at or --sweep, not both")
+    if args.at is not None or args.sweep is not None:
+        # A timeline sweep needs the bake in place first.
+        _bake(scene, args.sequence, scenarios=False, max_duration=args.max_duration)
+    if args.sweep is not None:
+        # The corridor survey: every frame's returns merged into one cloud.
+        frames = scene.scan_sweep(lidar, fps=args.sweep)
+        out = Path(args.out) if args.out else Path("cell_sweep.ply")
+        points = [p for f in frames for p in f.points()]
+        _merged_ply(out, points)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "lidar": lidar,
+                    "frames": len(frames),
+                    "points": len(points),
+                    "out": str(out),
+                }
+            )
+        )
+        return 0
+    frame = scene.lidar_scan(lidar, t=args.at)
+    out = Path(args.out) if args.out else Path("cell_scan.ply")
+    if out.suffix == ".csv":
+        # The per-beam table: what the sweep measured, and what it hit —
+        # the blind-spot debugging view.
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("angle_deg,range_m,hit\n")
+            f.writelines(f"{a:.4f},{r:.6f},{h or ''}\n" for a, r, h in zip(frame.angles, frame.ranges, frame.hits))
+    else:
+        frame.save_ply(out)
+    returns = sum(1 for r in frame.ranges if r > 0)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "lidar": lidar,
+                "beams": len(frame.ranges),
+                "returns": returns,
+                "out": str(out),
+            }
+        )
+    )
+    return 0
+
+
 def cmd_studio(args) -> int:
     import botrail as bt
 
@@ -335,6 +407,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
     p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
     p.set_defaults(func=cmd_capture)
+
+    p = sub.add_parser(
+        "scan",
+        help="simulate one sweep of a lidar against the cell's colliders (no browser)",
+    )
+    p.add_argument("cell")
+    p.add_argument("--lidar", help="lidar name (default: the cell's only lidar)")
+    p.add_argument("--out", help=".ply point cloud (default cell_scan.ply), or .csv per-beam table (angle, range, hit); --sweep always writes the merged .ply (default cell_sweep.ply)")
+    p.add_argument("--at", type=float, help="sweep at this instant of the baked cycle, seconds (default: the scene as authored, no bake)")
+    p.add_argument("--sweep", type=float, metavar="FPS", help="sweep every frame of the baked cycle at this rate and merge the clouds")
+    p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
+    p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
+    p.set_defaults(func=cmd_scan)
 
     p = sub.add_parser("studio", help="open the cell in the studio")
     p.add_argument("cell")

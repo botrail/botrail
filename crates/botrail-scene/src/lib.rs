@@ -19,6 +19,7 @@ pub mod plcopen;
 pub mod project;
 pub mod report;
 pub mod rollout;
+pub mod scan;
 pub mod script;
 pub mod seq;
 pub mod toolpath;
@@ -69,6 +70,10 @@ pub enum SceneError {
     UnknownCamera(String),
     #[error("{0}")]
     BadCamera(String),
+    #[error("unknown lidar `{0}`")]
+    UnknownLidar(String),
+    #[error("{0}")]
+    BadLidar(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
     #[error("unknown scenario `{0}`")]
@@ -360,6 +365,7 @@ pub struct Scene {
     sensors: Vec<seq::Sensor>,
     devices: Vec<seq::Device>,
     cameras: Vec<seq::Camera>,
+    lidars: Vec<seq::Lidar>,
     weld_flashes: Vec<seq::WeldFlash>,
     scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
@@ -413,6 +419,7 @@ impl Scene {
             sensors: Vec::new(),
             devices: Vec::new(),
             cameras: Vec::new(),
+            lidars: Vec::new(),
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),
@@ -444,6 +451,7 @@ impl Scene {
             sensors: Vec::new(),
             devices: Vec::new(),
             cameras: Vec::new(),
+            lidars: Vec::new(),
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),

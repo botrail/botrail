@@ -424,6 +424,9 @@ pub struct ProjectFile {
     /// Cameras (absent in older files).
     #[serde(default)]
     pub cameras: Vec<crate::wire::CameraMsg>,
+    /// LiDAR scanners (absent in older files).
+    #[serde(default)]
+    pub lidars: Vec<crate::wire::LidarMsg>,
     /// Weld-flash bindings (absent in older files).
     #[serde(default)]
     pub flashes: Vec<crate::wire::FlashMsg>,
@@ -516,6 +519,7 @@ impl ProjectFile {
                     sensors: Vec::new(),
                     devices: Vec::new(),
                     cameras: Vec::new(),
+                    lidars: Vec::new(),
                     flashes: Vec::new(),
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
@@ -628,6 +632,7 @@ impl Scene {
             sensors: self.sensors().iter().map(sensor_msg).collect(),
             devices: self.devices().iter().map(device_msg).collect(),
             cameras: self.cameras().iter().map(crate::wire::camera_msg).collect(),
+            lidars: self.lidars().iter().map(crate::wire::lidar_msg).collect(),
             flashes: self
                 .weld_flashes()
                 .iter()
@@ -879,6 +884,13 @@ impl Scene {
                 .cameras
                 .iter()
                 .map(crate::wire::camera_from_msg)
+                .collect(),
+        );
+        self.set_lidars(
+            project
+                .lidars
+                .iter()
+                .map(crate::wire::lidar_from_msg)
                 .collect(),
         );
         // Mounts need their vehicles in place. Mounting parks the robot at
@@ -1297,50 +1309,6 @@ pub fn generate_python(project: &ProjectFile) -> String {
         ));
     }
 
-    for sensor in &project.sensors {
-        let watch = match &sensor.watch {
-            crate::wire::SensorWatchMsg::AllObjects => String::new(),
-            crate::wire::SensorWatchMsg::Objects { names } => {
-                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
-                format!(", watch=[{}]", items.join(", "))
-            }
-            crate::wire::SensorWatchMsg::Robot => ", watch=[], watch_robot=True".to_string(),
-            crate::wire::SensorWatchMsg::Robots { names } => {
-                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
-                format!(", watch=[], watch_robots=[{}]", items.join(", "))
-            }
-            crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
-        };
-        match &sensor.kind {
-            crate::wire::SensorKindMsg::Zone { pose, size } => out.push_str(&format!(
-                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch})\n",
-                sensor.name,
-                py_tuple(&pose.position),
-                py_tuple(size),
-                py_tuple(&pose.quaternion),
-            )),
-            crate::wire::SensorKindMsg::Beam { from, to, radius } => out.push_str(&format!(
-                "scene.add_beam_sensor({:?}, frm={}, to={}, radius={radius}{watch})\n",
-                sensor.name,
-                py_tuple(from),
-                py_tuple(to),
-            )),
-            crate::wire::SensorKindMsg::Vision {
-                camera,
-                detect_range,
-                occlusion,
-            } => {
-                let range = detect_range
-                    .map(|[a, b]| format!(", detect_range=({a}, {b})"))
-                    .unwrap_or_default();
-                let occ = if *occlusion { "" } else { ", occlusion=False" };
-                out.push_str(&format!(
-                    "scene.add_vision_sensor({:?}, camera={camera:?}{range}{occ}{watch})\n",
-                    sensor.name,
-                ));
-            }
-        }
-    }
     for device in &project.devices {
         match &device.kind {
             crate::wire::DeviceKindMsg::Conveyor {
@@ -1570,6 +1538,88 @@ pub fn generate_python(project: &ProjectFile) -> String {
             camera.near,
             camera.far,
         ));
+    }
+    for lidar in &project.lidars {
+        let mount = match &lidar.mount {
+            crate::wire::LidarMountMsg::World => String::new(),
+            crate::wire::LidarMountMsg::Vehicle { device } => format!(", mount={device:?}"),
+            crate::wire::LidarMountMsg::Link { robot, link } => {
+                format!(", robot={robot:?}, link={link:?}")
+            }
+        };
+        out.push_str(&format!(
+            "scene.add_lidar({:?}, position={}, quaternion={}, fov={}, range=({}, {}), resolution={}{mount})\n",
+            lidar.name,
+            py_tuple(&lidar.pose.position),
+            py_tuple(&lidar.pose.quaternion),
+            lidar.fov_deg,
+            lidar.range[0],
+            lidar.range[1],
+            lidar.resolution_deg,
+        ));
+    }
+    // Sensors come after cameras and lidars: a vision or field sensor
+    // names the optics it judges through, and the generated script must
+    // run top to bottom.
+    for sensor in &project.sensors {
+        let watch = match &sensor.watch {
+            crate::wire::SensorWatchMsg::AllObjects => String::new(),
+            crate::wire::SensorWatchMsg::Objects { names } => {
+                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+                format!(", watch=[{}]", items.join(", "))
+            }
+            crate::wire::SensorWatchMsg::Robot => ", watch=[], watch_robot=True".to_string(),
+            crate::wire::SensorWatchMsg::Robots { names } => {
+                let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
+                format!(", watch=[], watch_robots=[{}]", items.join(", "))
+            }
+            crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
+        };
+        match &sensor.kind {
+            crate::wire::SensorKindMsg::Zone { pose, size } => out.push_str(&format!(
+                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch})\n",
+                sensor.name,
+                py_tuple(&pose.position),
+                py_tuple(size),
+                py_tuple(&pose.quaternion),
+            )),
+            crate::wire::SensorKindMsg::Beam { from, to, radius } => out.push_str(&format!(
+                "scene.add_beam_sensor({:?}, frm={}, to={}, radius={radius}{watch})\n",
+                sensor.name,
+                py_tuple(from),
+                py_tuple(to),
+            )),
+            crate::wire::SensorKindMsg::Vision {
+                camera,
+                detect_range,
+                occlusion,
+            } => {
+                let range = detect_range
+                    .map(|[a, b]| format!(", detect_range=({a}, {b})"))
+                    .unwrap_or_default();
+                let occ = if *occlusion { "" } else { ", occlusion=False" };
+                out.push_str(&format!(
+                    "scene.add_vision_sensor({:?}, camera={camera:?}{range}{occ}{watch})\n",
+                    sensor.name,
+                ));
+            }
+            crate::wire::SensorKindMsg::Field {
+                lidar,
+                range,
+                sector,
+                shadowing,
+            } => {
+                let range = range.map(|r| format!(", range={r}")).unwrap_or_default();
+                let sector = sector
+                    .map(|[a, b]| format!(", sector=({a}, {b})"))
+                    .unwrap_or_default();
+                let shadow = if *shadowing { "" } else { ", shadowing=False" };
+                out.push_str(&format!(
+                    "scene.add_field_sensor({:?}, lidar={lidar:?}{range}{sector}{shadow}{watch})\n",
+                    sensor.name,
+                ));
+            }
+        }
     }
     for signal in &project.signals {
         out.push_str(&format!(

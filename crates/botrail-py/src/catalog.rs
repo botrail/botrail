@@ -330,6 +330,10 @@ struct ManifestBits {
     /// convention: +Z looks, +Y down) — what a wrist camera's axis is
     /// posed from.
     camera_frames: Vec<String>,
+    /// Scan-origin frames a `sensor.lidar` package declares (ROS laser
+    /// convention: scan plane XY, 0° along +X — botrail's own lidar
+    /// frame, so no rotation fix on import).
+    lidar_frames: Vec<String>,
     /// Maker / product / category / numeric specs — what a bill of
     /// materials names the package by.
     meta: CatalogMeta,
@@ -379,18 +383,21 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             }
         }
     }
-    let camera_frames: Vec<String> = manifest
-        .get_item("frames")
-        .ok()
-        .and_then(|frames| frames.get_item("camera_frames").ok())
-        .and_then(|v| v.extract::<Option<Vec<String>>>().ok())
-        .flatten()
-        .unwrap_or_default();
+    let frame_list = |key: &str| -> Vec<String> {
+        manifest
+            .get_item("frames")
+            .ok()
+            .and_then(|frames| frames.get_item(key).ok())
+            .and_then(|v| v.extract::<Option<Vec<String>>>().ok())
+            .flatten()
+            .unwrap_or_default()
+    };
     Ok(ManifestBits {
         tcp_default: frame("tcp_default"),
         flange_frame: frame("flange_frame"),
         mount_frame: frame("mount_frame"),
-        camera_frames,
+        camera_frames: frame_list("camera_frames"),
+        lidar_frames: frame_list("lidar_frames"),
         meta: CatalogMeta {
             manufacturer: text_at(&["manufacturer", "name"]),
             product: text_at(&["name"]),
@@ -488,6 +495,92 @@ pub fn camera_from_catalog(
         near: spec("min_range_mm").map(|v| v / 1000.0),
         far: spec("max_range_mm").map(|v| v / 1000.0),
         optical_offset,
+        id: entry.id,
+        revision: sha,
+        meta: bits.meta,
+    })
+}
+
+/// The bits `Scene.add_lidar(from_catalog=)` composes: sweep defaults
+/// from the package's flat specs, the mount→scan-frame offset from its
+/// own zero-pose FK — no convention fix: the catalog's `lidar_frames`
+/// are ROS laser frames (scan plane XY, 0° along +X), which is botrail's
+/// lidar frame verbatim — and the identity a BOM line names it by
+/// (design-lidar.md §11).
+pub struct LidarPackage {
+    pub scan_fov_deg: Option<f64>,
+    pub resolution_deg: Option<f64>,
+    /// `min_range_mm` / `max_range_mm`, meters.
+    pub range: Option<[f64; 2]>,
+    /// Mount-face frame → scan frame; `None` when the package declares
+    /// no resolvable scan frame.
+    pub scan_offset: Option<nalgebra::Isometry3<f64>>,
+    pub id: String,
+    pub revision: String,
+    pub meta: CatalogMeta,
+}
+
+pub fn lidar_from_catalog(
+    py: Python<'_>,
+    query: &str,
+    revision: Option<&str>,
+) -> PyResult<LidarPackage> {
+    let (snapshot, entry, sha) = download_package(py, query, revision)?;
+    let bits = read_manifest(py, &snapshot.join(&entry.id))?;
+    let spec = |key: &str| {
+        bits.meta
+            .specs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| *v)
+    };
+    let range = match (spec("min_range_mm"), spec("max_range_mm")) {
+        (Some(min), Some(max)) if min > 0.0 && max > min => Some([min / 1000.0, max / 1000.0]),
+        _ => None,
+    };
+    let scan_offset = if bits.lidar_frames.is_empty() {
+        None
+    } else {
+        let model = from_catalog(py, query, revision, None)?;
+        let q = vec![0.0; model.dof()];
+        let poses =
+            botrail_kin::forward_kinematics_with_base(&model, &q, &nalgebra::Isometry3::identity())
+                .map_err(|e| err(e.to_string()))?;
+        // USD link names are prim paths; match by last segment there.
+        let find = |name: &str| {
+            model.link_index(name).or_else(|| {
+                let matches: Vec<usize> = (0..model.links.len())
+                    .filter(|&i| model.links[i].name.rsplit('/').next() == Some(name))
+                    .collect();
+                match matches.as_slice() {
+                    [one] => Some(*one),
+                    _ => None,
+                }
+            })
+        };
+        match bits.lidar_frames.iter().find_map(|f| find(f)) {
+            Some(scan) => {
+                let mount = model
+                    .mount_link
+                    .map(|m| poses[m])
+                    .unwrap_or_else(nalgebra::Isometry3::identity);
+                Some(mount.inverse() * poses[scan])
+            }
+            None => {
+                eprintln!(
+                    "botrail: catalog `{}`: no lidar_frames entry matches a link; \
+                     the scan origin stays at the mount face",
+                    entry.id
+                );
+                None
+            }
+        }
+    };
+    Ok(LidarPackage {
+        scan_fov_deg: spec("scan_fov_deg"),
+        resolution_deg: spec("angular_resolution_deg"),
+        range,
+        scan_offset,
         id: entry.id,
         revision: sha,
         meta: bits.meta,

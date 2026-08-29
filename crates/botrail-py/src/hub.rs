@@ -28,6 +28,21 @@ fn pose_arrays(pose: &Isometry3<f64>) -> PoseArrays {
     ([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
 }
 
+/// The named scanner's measuring band in `scene`; the scan already
+/// resolved the name, so a miss cannot happen.
+fn scan_band(scene: &Scene, name: &str) -> [f64; 2] {
+    scene
+        .lidars()
+        .iter()
+        .find(|l| l.name == name)
+        .expect("the scan resolved this lidar")
+        .range
+}
+
+fn no_bake() -> String {
+    "nothing baked yet — simulate a sequence first".to_string()
+}
+
 pub struct SceneHub {
     scene: Mutex<Scene>,
     /// Serialized `ServerMessage`s fanned out to every websocket client.
@@ -823,6 +838,55 @@ impl SceneHub {
 
     pub fn camera_names(&self) -> Vec<String> {
         self.with_scene(|scene| scene.cameras().iter().map(|c| c.name.clone()).collect())
+    }
+
+    pub fn upsert_lidar(&self, lidar: botrail_scene::seq::Lidar) -> Result<(), SceneError> {
+        botrail_session::upsert_lidar(self, lidar)
+    }
+
+    pub fn remove_lidar(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_lidar(self, name)
+    }
+
+    pub fn lidar_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.lidars().iter().map(|l| l.name.clone()).collect())
+    }
+
+    /// One simulated sweep plus the scanner's measuring band. `t` sweeps
+    /// at that instant of the last bake (the pre-rollout snapshot pair
+    /// `store_baked` keeps) instead of the scene as it stands.
+    pub fn lidar_scan(
+        &self,
+        name: &str,
+        t: Option<f64>,
+    ) -> Result<(botrail_scene::scan::LidarScan, [f64; 2]), String> {
+        match t {
+            None => self.with_scene(|scene| {
+                let scan =
+                    botrail_scene::scan::lidar_scan(scene, name).map_err(|e| e.to_string())?;
+                Ok((scan, scan_band(scene, name)))
+            }),
+            Some(t) => {
+                let (scene, timeline) = self.baked().ok_or_else(no_bake)?;
+                let scan = botrail_scene::scan::lidar_scan_at(&scene, &timeline, name, t)
+                    .map_err(|e| e.to_string())?;
+                let band = scan_band(&scene, name);
+                Ok((scan, band))
+            }
+        }
+    }
+
+    /// One sweep per frame of the export grid over the whole last bake.
+    pub fn scan_sweep(
+        &self,
+        name: &str,
+        fps: f64,
+    ) -> Result<(Vec<botrail_scene::scan::LidarScan>, [f64; 2]), String> {
+        let (scene, timeline) = self.baked().ok_or_else(no_bake)?;
+        let frames = botrail_scene::scan::scan_sweep(&scene, &timeline, name, fps)
+            .map_err(|e| e.to_string())?;
+        let band = scan_band(&scene, name);
+        Ok((frames, band))
     }
 
     pub fn add_scenario(&self, scenario: botrail_scene::seq::Scenario) -> Result<(), SceneError> {

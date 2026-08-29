@@ -63,6 +63,29 @@ pub enum SensorKind {
         /// occlude nor get occlusion-tested; they detect by overlap alone.
         occlusion: bool,
     },
+    /// Laser-scanner field: ON while a watched body crosses the
+    /// referenced lidar's scan-plane sector (and, with `shadowing`, its
+    /// origin is not hidden behind another obstacle). The lidar is the
+    /// sweep — pose, mount, fov all come from it; the sensor is the
+    /// judgement, so one scanner carries several fields (warning +
+    /// protective), the real field-set shape. Geometry only: no per-angle
+    /// rays (design/design-lidar.md 判断 L3).
+    Field {
+        /// The [`Lidar`] this field sweeps through.
+        lidar: String,
+        /// Field radius, meters; `None` uses the lidar's max range.
+        range: Option<f64>,
+        /// Angular window `[start, end]` in the scan frame, degrees
+        /// (0 = +X, CCW), within the lidar's sweep; `None` uses the full
+        /// sweep.
+        sector: Option<[f64; 2]>,
+        /// Ray-test the candidate's origin against the *other* obstacles
+        /// (one ray — coarse but deterministic, the vision rule). Robot
+        /// links neither shadow nor get shadow-tested; a vehicle-mounted
+        /// field also ignores its own machine's body (the massing chassis
+        /// would otherwise blind or trip it).
+        shadowing: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +138,43 @@ pub enum CameraMount {
     /// Rides a vehicle device; re-resolved as the vehicle moves.
     Vehicle { device: String },
     /// Bolted to a robot link (a wrist camera).
+    Link { robot: String, link: String },
+}
+
+/// A LiDAR scanner: a named scan origin with a planar sweep, drawn as a
+/// sector in the studio. Pure presentation in this phase — it publishes
+/// no signal and never affects collision, planning or the rollout. A
+/// *field* sensor referencing one is the planned signal path
+/// (design/design-lidar.md §3): the scanner is the sweep, a sensor is
+/// the judgement.
+#[derive(Debug, Clone)]
+pub struct Lidar {
+    pub name: String,
+    /// What the scanner is bolted to; [`Lidar::pose`] is expressed in
+    /// this frame.
+    pub mount: LidarMount,
+    /// Offset in the mount frame (the world pose for
+    /// [`LidarMount::World`]). Convention: the scan plane is local XY,
+    /// angle 0 along +X, counter-clockwise toward +Y — the ROS laser
+    /// frame, so catalog devices import with no rotation fix.
+    pub pose: Isometry3<f64>,
+    /// Full scan angle, degrees, up to 360.
+    pub fov_deg: f64,
+    /// Measuring range `[min, max]`, meters.
+    pub range: [f64; 2],
+    /// Angular resolution, degrees — the default step of the scan API.
+    /// Presentation/analysis data; field judgement never reads it.
+    pub resolution_deg: f64,
+}
+
+/// What a [`Lidar`] is bolted to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LidarMount {
+    /// A fixture: the pose is a world pose.
+    World,
+    /// Rides a vehicle device; re-resolved as the vehicle moves.
+    Vehicle { device: String },
+    /// Bolted to a robot link.
     Link { robot: String, link: String },
 }
 
@@ -894,7 +954,8 @@ impl Scene {
     }
 
     /// Adds or replaces a pseudo-sensor. A vision sensor must name an
-    /// existing camera — the optics it looks through.
+    /// existing camera, a field sensor an existing lidar — the optics
+    /// they judge through.
     pub fn upsert_sensor(&mut self, sensor: Sensor) -> Result<(), SceneError> {
         if let SensorKind::Vision {
             camera,
@@ -909,6 +970,36 @@ impl Scene {
                 if !(*near > 0.0 && far > near) {
                     return Err(SceneError::BadCamera(format!(
                         "vision sensor `{}`: need 0 < near < far, got {near} / {far}",
+                        sensor.name
+                    )));
+                }
+            }
+        }
+        if let SensorKind::Field {
+            lidar,
+            range,
+            sector,
+            ..
+        } = &sensor.kind
+        {
+            let Some(scanner) = self.lidars.iter().find(|l| &l.name == lidar) else {
+                return Err(SceneError::UnknownLidar(lidar.clone()));
+            };
+            if let Some(r) = range {
+                if !(*r > 0.0 && *r <= scanner.range[1]) {
+                    return Err(SceneError::BadLidar(format!(
+                        "field sensor `{}`: range must be in (0, {}] (lidar `{lidar}`'s max \
+                         range), got {r}",
+                        sensor.name, scanner.range[1]
+                    )));
+                }
+            }
+            if let Some([start, end]) = sector {
+                let half = scanner.fov_deg / 2.0;
+                if !(end > start && *start >= -half - 1e-9 && *end <= half + 1e-9) {
+                    return Err(SceneError::BadLidar(format!(
+                        "field sensor `{}`: sector must satisfy -{half} <= start < end <= \
+                         {half} (lidar `{lidar}`'s sweep), got [{start}, {end}]",
                         sensor.name
                     )));
                 }
@@ -1010,6 +1101,85 @@ impl Scene {
     /// [`Scene::set_sensors`].
     pub fn set_cameras(&mut self, cameras: Vec<Camera>) {
         self.cameras = cameras;
+        self.prune_parts();
+    }
+
+    pub fn lidars(&self) -> &[Lidar] {
+        &self.lidars
+    }
+
+    /// Adds or replaces a LiDAR scanner, validating its mount and sweep —
+    /// a scanner bolted to a link that does not exist, or with a
+    /// degenerate sector, is an authoring mistake worth catching at the
+    /// call site.
+    pub fn upsert_lidar(&mut self, lidar: Lidar) -> Result<(), SceneError> {
+        match &lidar.mount {
+            LidarMount::World => {}
+            LidarMount::Vehicle { device } => {
+                if !self.devices.iter().any(|d| &d.name == device) {
+                    return Err(SceneError::UnknownDevice(device.clone()));
+                }
+            }
+            LidarMount::Link { robot, link } => {
+                let Some(r) = self.robot_index(robot) else {
+                    return Err(SceneError::UnknownRobot(robot.clone()));
+                };
+                if self.robots()[r].model.link_index(link).is_none() {
+                    return Err(SceneError::UnknownLink(link.clone()));
+                }
+            }
+        }
+        if !(lidar.fov_deg > 0.0 && lidar.fov_deg <= 360.0) {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: fov must be in (0, 360] degrees, got {}",
+                lidar.name, lidar.fov_deg
+            )));
+        }
+        let [min, max] = lidar.range;
+        if !(min > 0.0 && max > min) {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: need 0 < min range < max range, got {min} / {max}",
+                lidar.name
+            )));
+        }
+        if !(lidar.resolution_deg > 0.0 && lidar.resolution_deg <= lidar.fov_deg) {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{}`: resolution must be in (0, fov] degrees, got {}",
+                lidar.name, lidar.resolution_deg
+            )));
+        }
+        match self.lidars.iter_mut().find(|l| l.name == lidar.name) {
+            Some(slot) => *slot = lidar,
+            None => self.lidars.push(lidar),
+        }
+        Ok(())
+    }
+
+    pub fn remove_lidar(&mut self, name: &str) -> Result<(), SceneError> {
+        // A field sensor sweeping through it would go blind silently.
+        if let Some(sensor) = self
+            .sensors
+            .iter()
+            .find(|s| matches!(&s.kind, SensorKind::Field { lidar, .. } if lidar == name))
+        {
+            return Err(SceneError::BadLidar(format!(
+                "lidar `{name}` is swept by field sensor `{}`; remove the sensor first",
+                sensor.name
+            )));
+        }
+        let before = self.lidars.len();
+        self.lidars.retain(|l| l.name != name);
+        if self.lidars.len() == before {
+            return Err(SceneError::UnknownLidar(name.to_string()));
+        }
+        self.prune_parts();
+        Ok(())
+    }
+
+    /// Wholesale replacement (project load) — trusted, like
+    /// [`Scene::set_sensors`].
+    pub fn set_lidars(&mut self, lidars: Vec<Lidar>) {
+        self.lidars = lidars;
         self.prune_parts();
     }
 

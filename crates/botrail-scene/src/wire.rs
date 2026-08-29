@@ -607,6 +607,19 @@ pub enum SensorKindMsg {
         detect_range: Option<[f64; 2]>,
         occlusion: bool,
     },
+    /// Laser-scanner field: ON while a watched body crosses the named
+    /// lidar's scan-plane sector (shadow-tested against other obstacles).
+    Field {
+        lidar: String,
+        /// Field radius (m); `None` = the lidar's max range.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<f64>,
+        /// Angular window `[start, end]` in the scan frame (deg, 0 = +X,
+        /// CCW); `None` = the lidar's full sweep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sector: Option<[f64; 2]>,
+        shadowing: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -658,6 +671,41 @@ pub enum CameraMountMsg {
     /// Rides a vehicle device.
     Vehicle { device: String },
     /// Bolted to a robot link (a wrist camera).
+    Link { robot: String, link: String },
+}
+
+/// A LiDAR scanner: a named scan origin with a planar sweep. Presentation
+/// only — it publishes no signal (a field sensor referencing it is the
+/// planned signal path).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LidarMsg {
+    pub name: String,
+    pub mount: LidarMountMsg,
+    /// Offset in the mount frame (world pose for a `world` mount). The
+    /// scan plane is local XY, angle 0 along +X, CCW toward +Y (the ROS
+    /// laser frame).
+    pub pose: PoseMsg,
+    /// Full scan angle, degrees, up to 360.
+    pub fov_deg: f64,
+    /// Measuring range `[min, max]`, meters.
+    pub range: [f64; 2],
+    /// Angular resolution, degrees (the scan API's default step).
+    pub resolution_deg: f64,
+}
+
+/// What a LiDAR scanner is bolted to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LidarMountMsg {
+    /// A fixture; the pose is a world pose.
+    World,
+    /// Rides a vehicle device.
+    Vehicle { device: String },
+    /// Bolted to a robot link.
     Link { robot: String, link: String },
 }
 
@@ -1202,6 +1250,10 @@ pub enum ServerMessage {
     Cameras {
         cameras: Vec<CameraMsg>,
     },
+    /// The full LiDAR list; resent on every change.
+    Lidars {
+        lidars: Vec<LidarMsg>,
+    },
     /// The full scenario list; resent on every change.
     Scenarios {
         scenarios: Vec<ScenarioMsg>,
@@ -1449,6 +1501,13 @@ pub enum ClientMessage {
         camera: CameraMsg,
     },
     RemoveCamera {
+        name: String,
+    },
+    /// Add or replace a LiDAR scanner.
+    UpsertLidar {
+        lidar: LidarMsg,
+    },
+    RemoveLidar {
         name: String,
     },
     /// I/O map edits (the assignment layer — nodes, bindings,
@@ -1980,6 +2039,17 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
                 detect_range: *detect_range,
                 occlusion: *occlusion,
             },
+            SensorKind::Field {
+                lidar,
+                range,
+                sector,
+                shadowing,
+            } => SensorKindMsg::Field {
+                lidar: lidar.clone(),
+                range: *range,
+                sector: *sector,
+                shadowing: *shadowing,
+            },
         },
         watch: match &sensor.watch {
             SensorWatch::Objects(names) => SensorWatchMsg::Objects {
@@ -2017,6 +2087,17 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
                 camera: camera.clone(),
                 detect_range: *detect_range,
                 occlusion: *occlusion,
+            },
+            SensorKindMsg::Field {
+                lidar,
+                range,
+                sector,
+                shadowing,
+            } => SensorKind::Field {
+                lidar: lidar.clone(),
+                range: *range,
+                sector: *sector,
+                shadowing: *shadowing,
             },
         },
         watch: match &msg.watch {
@@ -2075,6 +2156,53 @@ pub fn camera_from_msg(msg: &CameraMsg) -> crate::seq::Camera {
 pub fn cameras_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Cameras {
         cameras: scene.cameras().iter().map(camera_msg).collect(),
+    }
+}
+
+pub fn lidar_msg(lidar: &crate::seq::Lidar) -> LidarMsg {
+    LidarMsg {
+        name: lidar.name.clone(),
+        mount: match &lidar.mount {
+            crate::seq::LidarMount::World => LidarMountMsg::World,
+            crate::seq::LidarMount::Vehicle { device } => LidarMountMsg::Vehicle {
+                device: device.clone(),
+            },
+            crate::seq::LidarMount::Link { robot, link } => LidarMountMsg::Link {
+                robot: robot.clone(),
+                link: link.clone(),
+            },
+        },
+        pose: PoseMsg::from(&lidar.pose),
+        fov_deg: lidar.fov_deg,
+        range: lidar.range,
+        resolution_deg: lidar.resolution_deg,
+    }
+}
+
+pub fn lidar_from_msg(msg: &LidarMsg) -> crate::seq::Lidar {
+    crate::seq::Lidar {
+        name: msg.name.clone(),
+        mount: match &msg.mount {
+            LidarMountMsg::World => crate::seq::LidarMount::World,
+            LidarMountMsg::Vehicle { device } => crate::seq::LidarMount::Vehicle {
+                device: device.clone(),
+            },
+            LidarMountMsg::Link { robot, link } => crate::seq::LidarMount::Link {
+                robot: robot.clone(),
+                link: link.clone(),
+            },
+        },
+        pose: (&msg.pose).into(),
+        fov_deg: msg.fov_deg,
+        range: msg.range,
+        resolution_deg: msg.resolution_deg,
+    }
+}
+
+/// The full LiDAR list as a `lidars` message.
+pub fn lidars_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::Lidars {
+        lidars: scene.lidars().iter().map(lidar_msg).collect(),
     }
 }
 

@@ -15,6 +15,7 @@ import type {
   PoseMsg,
   RobotDescMsg,
   CameraMsg,
+  LidarMsg,
   DeviceMsg,
   ScenarioMsg,
   SensorMsg,
@@ -224,6 +225,8 @@ export type Selection =
   | { type: "device"; name: string }
   /** A camera; a world-mounted one gets a move gizmo. */
   | { type: "camera"; name: string }
+  /** A LiDAR scanner; a world-mounted one gets a move gizmo. */
+  | { type: "lidar"; name: string }
   /** An I/O node (controller / station); read-only details in Layout. */
   | { type: "io_node"; name: string };
 
@@ -374,6 +377,8 @@ export interface StudioState {
   devices: DeviceMsg[];
   /** Cameras; re-sent in full by the server on every change. */
   cameras: CameraMsg[];
+  /** LiDAR scanners; re-sent in full by the server on every change. */
+  lidars: LidarMsg[];
   /** The camera whose picture the PiP shows; `null` = PiP closed (and the
    * second render pass does not run at all). */
   pipCamera: string | null;
@@ -461,6 +466,7 @@ export interface StudioState {
   selectSensor: (name: string) => void;
   selectDevice: (name: string) => void;
   selectCamera: (name: string) => void;
+  selectLidar: (name: string) => void;
   setPipCamera: (name: string | null) => void;
   setPipMode: (mode: "rgb" | "depth") => void;
   /** Captures the named camera's metric depth image, synchronously:
@@ -564,6 +570,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   flashes: [],
   devices: [],
   cameras: [],
+  lidars: [],
   pipCamera: null,
   pipMode: "rgb",
   camExport: null,
@@ -632,6 +639,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           sensors: [],
           devices: [],
           cameras: [],
+          lidars: [],
           pipCamera: null,
           pipMode: "rgb",
           camExport: null,
@@ -726,6 +734,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             ? { type: "tcp", robot: s.selectedRobot ?? "" }
             : sel,
           pipCamera: pipGone ? null : s.pipCamera,
+        };
+      });
+    } else if (msg.type === "lidars") {
+      set((s) => {
+        const sel = s.selection;
+        const gone =
+          sel.type === "lidar" && !msg.lidars.some((x) => x.name === sel.name);
+        return {
+          lidars: msg.lidars,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
         };
       });
     } else if (msg.type === "scenarios") {
@@ -935,6 +955,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   // one gets selected.
   selectCamera: (name) =>
     set({ selection: { type: "camera", name }, pipCamera: name }),
+  selectLidar: (name) => set({ selection: { type: "lidar", name } }),
   setPipCamera: (name) => set({ pipCamera: name }),
   setPipMode: (mode) => set({ pipMode: mode }),
   captureDepth: (camera, t) => {

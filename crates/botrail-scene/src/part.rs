@@ -174,6 +174,8 @@ pub enum PartTargetKind {
     Device,
     /// A camera fixture (the purchasable `sensor.camera` article).
     Camera,
+    /// A LiDAR scanner (the purchasable `sensor.lidar` article).
+    Lidar,
     IoNode,
 }
 
@@ -186,6 +188,7 @@ impl PartTargetKind {
             PartTargetKind::Sensor => "sensor",
             PartTargetKind::Device => "device",
             PartTargetKind::Camera => "camera",
+            PartTargetKind::Lidar => "lidar",
             PartTargetKind::IoNode => "io_node",
         }
     }
@@ -198,6 +201,7 @@ impl PartTargetKind {
             "sensor" => PartTargetKind::Sensor,
             "device" => PartTargetKind::Device,
             "camera" => PartTargetKind::Camera,
+            "lidar" => PartTargetKind::Lidar,
             "io_node" => PartTargetKind::IoNode,
             _ => return None,
         })
@@ -500,6 +504,9 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     if scene.cameras().iter().any(|c| c.name == target) {
         hits.push(PartTargetKind::Camera);
     }
+    if scene.lidars().iter().any(|l| l.name == target) {
+        hits.push(PartTargetKind::Lidar);
+    }
     if scene.io_map().nodes.iter().any(|n| n.name == target) {
         hits.push(PartTargetKind::IoNode);
     }
@@ -525,6 +532,7 @@ fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
         PartTargetKind::Device => scene.devices().iter().any(|d| d.name == target),
         PartTargetKind::Sensor => scene.sensors().iter().any(|s| s.name == target),
         PartTargetKind::Camera => scene.cameras().iter().any(|c| c.name == target),
+        PartTargetKind::Lidar => scene.lidars().iter().any(|l| l.name == target),
         PartTargetKind::IoNode => scene.io_map().nodes.iter().any(|n| n.name == target),
         PartTargetKind::Obstacle => scene.obstacles().iter().any(|o| o.name == target),
         PartTargetKind::Group => {
@@ -560,6 +568,10 @@ fn sensor_category(kind: &SensorKind) -> Option<&'static str> {
         // vision sensor is judgement bound to it, and a second BOM line
         // would double-count the hardware (design/design-camera.md 判断 10).
         SensorKind::Vision { .. } => None,
+        // Same rule for the scanner: the article is the *lidar*
+        // (`sensor.lidar`), a field is judgement bound to it
+        // (design/design-lidar.md 判断 L1).
+        SensorKind::Field { .. } => None,
     }
 }
 
@@ -702,7 +714,7 @@ impl Scene {
                     [one] => *one,
                     [] => {
                         return Err(SceneError::BadPart(format!(
-                            "`{target}` is not a robot, device, sensor, camera, I/O node, \
+                            "`{target}` is not a robot, device, sensor, camera, lidar, I/O node, \
                              obstacle or obstacle group in this scene"
                         )))
                     }
@@ -861,6 +873,16 @@ impl Scene {
             // own — see `sensor_category`).
             let mut row = BomRow::from_part("sensor.camera", &camera.name, &Part::default());
             if let Some(part) = explicit(PartTargetKind::Camera, &camera.name) {
+                row.apply(part);
+            }
+            lines.push(row);
+        }
+        for lidar in &self.lidars {
+            // The purchasable article: any field sensors sweeping through
+            // it are judgement, not hardware (design/design-lidar.md 判断
+            // L1 — the camera rule, applied to scanners).
+            let mut row = BomRow::from_part("sensor.lidar", &lidar.name, &Part::default());
+            if let Some(part) = explicit(PartTargetKind::Lidar, &lidar.name) {
                 row.apply(part);
             }
             lines.push(row);

@@ -947,6 +947,76 @@ impl Scene {
                         });
                     }
                 }
+                SensorKind::Field {
+                    lidar,
+                    range,
+                    sector,
+                    ..
+                } => {
+                    // A fixture scanner's field as its own dashed wedge
+                    // inside the sweep, labelled at the mid-arc (the
+                    // scanner's own label sits at the origin). A tilted
+                    // plane or a travelling mount draws nothing — the
+                    // lidar's own rules.
+                    let Some(scanner) = self.lidars().iter().find(|l| &l.name == lidar) else {
+                        continue;
+                    };
+                    if !matches!(scanner.mount, crate::seq::LidarMount::World) {
+                        continue;
+                    }
+                    let normal = scanner.pose.rotation * nalgebra::Vector3::z();
+                    if normal.z.abs() <= 0.8 {
+                        continue;
+                    }
+                    let o = scanner.pose.translation;
+                    let at = [o.x, o.y];
+                    let reach = range.unwrap_or(scanner.range[1]);
+                    let half = scanner.fov_deg.to_radians() / 2.0;
+                    let [start, end] = sector
+                        .map(|[a, b]| [a.to_radians(), b.to_radians()])
+                        .unwrap_or([-half, half]);
+                    let rim = |ang: f64| {
+                        let v = scanner.pose.rotation
+                            * nalgebra::Vector3::new(ang.cos(), ang.sin(), 0.0);
+                        [at[0] + reach * v.x, at[1] + reach * v.y]
+                    };
+                    let steps = ((end - start).to_degrees() / 10.0).ceil().max(2.0) as usize;
+                    let points: Vec<[f64; 2]> = (0..=steps)
+                        .map(|i| rim(start + (end - start) * i as f64 / steps as f64))
+                        .collect();
+                    let mid = points[steps / 2];
+                    if end - start < std::f64::consts::TAU - 1e-9 {
+                        for rim_end in [points[0], points[steps]] {
+                            items.push(LayoutItem {
+                                layer: LayoutLayer::Sensor,
+                                name: sensor.name.clone(),
+                                shape: LayoutShape::Line {
+                                    from: at,
+                                    to: rim_end,
+                                },
+                                dashed: true,
+                            });
+                        }
+                    }
+                    items.push(LayoutItem {
+                        layer: LayoutLayer::Sensor,
+                        name: sensor.name.clone(),
+                        shape: LayoutShape::Polyline { points },
+                        dashed: true,
+                    });
+                    if options.labels {
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Label,
+                            name: sensor.name.clone(),
+                            shape: LayoutShape::Text {
+                                at: mid,
+                                text: sensor.name.clone(),
+                                size: 0.08,
+                            },
+                            dashed: false,
+                        });
+                    }
+                }
                 SensorKind::Beam { from, to, .. } => {
                     let a = [from.x, from.y];
                     let b = [to.x, to.y];
@@ -980,6 +1050,76 @@ impl Scene {
                         });
                     }
                 }
+            }
+        }
+
+        // ---- lidars ----------------------------------------------------
+        // A fixture scanner's sweep as a dashed wedge: edge rays plus the
+        // arc at max range, the plan-view companion of the studio sector.
+        // A tilted or vertical scan plane has no honest plan wedge, so it
+        // draws as its reach circle; mounted scanners travel and draw
+        // nothing here (the vision-camera rule).
+        for lidar in self.lidars() {
+            if !matches!(lidar.mount, crate::seq::LidarMount::World) {
+                continue;
+            }
+            let o = lidar.pose.translation;
+            let at = [o.x, o.y];
+            let reach = lidar.range[1];
+            let normal = lidar.pose.rotation * nalgebra::Vector3::z();
+            if normal.z.abs() > 0.8 {
+                // Arc points authored in the scan frame (angle 0 = +X,
+                // CCW, centred on +X) and projected onto the plan.
+                let rim = |ang: f64| {
+                    let v = lidar.pose.rotation * nalgebra::Vector3::new(ang.cos(), ang.sin(), 0.0);
+                    [at[0] + reach * v.x, at[1] + reach * v.y]
+                };
+                let half = lidar.fov_deg.to_radians() / 2.0;
+                let steps = (lidar.fov_deg / 10.0).ceil().max(2.0) as usize;
+                let points: Vec<[f64; 2]> = (0..=steps)
+                    .map(|i| rim(-half + 2.0 * half * i as f64 / steps as f64))
+                    .collect();
+                if lidar.fov_deg < 360.0 - 1e-9 {
+                    for rim_end in [points[0], points[steps]] {
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Sensor,
+                            name: lidar.name.clone(),
+                            shape: LayoutShape::Line {
+                                from: at,
+                                to: rim_end,
+                            },
+                            dashed: true,
+                        });
+                    }
+                }
+                items.push(LayoutItem {
+                    layer: LayoutLayer::Sensor,
+                    name: lidar.name.clone(),
+                    shape: LayoutShape::Polyline { points },
+                    dashed: true,
+                });
+            } else {
+                items.push(LayoutItem {
+                    layer: LayoutLayer::Sensor,
+                    name: lidar.name.clone(),
+                    shape: LayoutShape::Circle {
+                        center: at,
+                        radius: reach,
+                    },
+                    dashed: true,
+                });
+            }
+            if options.labels {
+                items.push(LayoutItem {
+                    layer: LayoutLayer::Label,
+                    name: lidar.name.clone(),
+                    shape: LayoutShape::Text {
+                        at,
+                        text: lidar.name.clone(),
+                        size: 0.08,
+                    },
+                    dashed: false,
+                });
             }
         }
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type {
   CameraMsg,
   DeviceMsg,
+  LidarMsg,
   PoseMsg,
   SensorMsg,
   SensorWatchMsg,
@@ -11,9 +12,11 @@ import { useStudioStore } from "../store";
 import {
   sendRemoveCamera,
   sendRemoveDevice,
+  sendRemoveLidar,
   sendRemoveSensor,
   sendUpsertCamera,
   sendUpsertDevice,
+  sendUpsertLidar,
   sendUpsertSensor,
 } from "../ws";
 import { Section } from "./Section";
@@ -64,10 +67,12 @@ export function SensorDevicePanel() {
   const sensors = useStudioStore((s) => s.sensors);
   const devices = useStudioStore((s) => s.devices);
   const cameras = useStudioStore((s) => s.cameras);
+  const lidars = useStudioStore((s) => s.lidars);
   const selection = useStudioStore((s) => s.selection);
   const selectSensor = useStudioStore((s) => s.selectSensor);
   const selectDevice = useStudioStore((s) => s.selectDevice);
   const selectCamera = useStudioStore((s) => s.selectCamera);
+  const selectLidar = useStudioStore((s) => s.selectLidar);
   const selectedObstacle = selection.type === "obstacle" ? selection.name : null;
 
   // New sensors watch the selected obstacle when there is one — placing a
@@ -168,6 +173,38 @@ export function SensorDevicePanel() {
     selectCamera(name);
   };
 
+  const addLidar = () => {
+    const name = freshName("lidar", lidars);
+    // Identity pose scans the world XY plane, angle 0 along +X; aim it
+    // with the rotate gizmo. LMS-class defaults: 270°, 0.05–20 m.
+    sendUpsertLidar({
+      name,
+      mount: { kind: "world" },
+      pose: at([0.8, 0, 0.2]),
+      fov_deg: 270,
+      range: [0.05, 20],
+      resolution_deg: 0.5,
+    });
+    selectLidar(name);
+  };
+
+  const addField = () => {
+    // The sweep comes from a lidar; default to the one being edited.
+    const lidar =
+      (selection.type === "lidar" ? selection.name : null) ??
+      lidars[0]?.name ??
+      null;
+    if (!lidar) return;
+    const name = freshName("field", sensors);
+    sendUpsertSensor({
+      name,
+      kind: { kind: "field", lidar, range: null, sector: null, shadowing: true },
+      watch: defaultWatch(),
+      mount: null,
+    });
+    selectSensor(name);
+  };
+
   const editedSensor =
     selection.type === "sensor"
       ? (sensors.find((s) => s.name === selection.name) ?? null)
@@ -180,11 +217,15 @@ export function SensorDevicePanel() {
     selection.type === "camera"
       ? (cameras.find((c) => c.name === selection.name) ?? null)
       : null;
+  const editedLidar =
+    selection.type === "lidar"
+      ? (lidars.find((l) => l.name === selection.name) ?? null)
+      : null;
 
   return (
     <Section id="sensors" title="Sensors & devices">
       <div className="obstacle-controls">
-        <div className="seg">
+        <div className="seg wrap">
           <button onClick={addZone} title="area/presence sensor (box test)">
             + Zone
           </button>
@@ -214,6 +255,19 @@ export function SensorDevicePanel() {
           >
             + Vision
           </button>
+          <button
+            onClick={addLidar}
+            title="LiDAR scanner (scan sector gizmo; fields are the planned signal path)"
+          >
+            + Lidar
+          </button>
+          <button
+            onClick={addField}
+            disabled={lidars.length === 0}
+            title="laser-scanner field sweeping through a lidar (sector test)"
+          >
+            + Field
+          </button>
         </div>
 
         {editedSensor ? (
@@ -222,9 +276,14 @@ export function SensorDevicePanel() {
           <DeviceForm device={editedDevice} />
         ) : editedCamera ? (
           <CameraForm camera={editedCamera} />
+        ) : editedLidar ? (
+          <LidarForm lidar={editedLidar} />
         ) : (
           <div className="hint">
-            {sensors.length === 0 && devices.length === 0 && cameras.length === 0
+            {sensors.length === 0 &&
+            devices.length === 0 &&
+            cameras.length === 0 &&
+            lidars.length === 0
               ? "no sensors, devices or cameras"
               : "select a sensor, device or camera in the scene tree to edit it"}
           </div>
@@ -242,12 +301,17 @@ function SensorForm({
   selectedObstacle: string | null;
 }) {
   const cameras = useStudioStore((s) => s.cameras);
+  const lidars = useStudioStore((s) => s.lidars);
   const commit = (patch: Partial<SensorMsg>) =>
     sendUpsertSensor({ ...sensor, ...patch });
   const { kind } = sensor;
   const visionCamera =
     kind.kind === "vision"
       ? (cameras.find((c) => c.name === kind.camera) ?? null)
+      : null;
+  const fieldLidar =
+    kind.kind === "field"
+      ? (lidars.find((l) => l.name === kind.lidar) ?? null)
       : null;
 
   return (
@@ -362,6 +426,75 @@ function SensorForm({
               }
             />
             occlusion (a body hidden behind another does not trip)
+          </label>
+        </>
+      )}
+      {kind.kind === "field" && (
+        <>
+          <label className="field num-field">
+            <span className="field-label">lidar</span>
+            <select
+              value={kind.lidar}
+              onChange={(e) =>
+                commit({ kind: { ...kind, lidar: e.target.value } })
+              }
+            >
+              {lidars.map((l) => (
+                <option key={l.name} value={l.name}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <NumField
+            label="range"
+            value={kind.range ?? fieldLidar?.range[1] ?? 20}
+            min={0.01}
+            onCommit={(range) => commit({ kind: { ...kind, range } })}
+          />
+          <NumField
+            label="start°"
+            value={kind.sector?.[0] ?? -(fieldLidar?.fov_deg ?? 270) / 2}
+            onCommit={(a) =>
+              commit({
+                kind: {
+                  ...kind,
+                  sector: [a, kind.sector?.[1] ?? (fieldLidar?.fov_deg ?? 270) / 2],
+                },
+              })
+            }
+          />
+          <NumField
+            label="end°"
+            value={kind.sector?.[1] ?? (fieldLidar?.fov_deg ?? 270) / 2}
+            onCommit={(b) =>
+              commit({
+                kind: {
+                  ...kind,
+                  sector: [kind.sector?.[0] ?? -(fieldLidar?.fov_deg ?? 270) / 2, b],
+                },
+              })
+            }
+          />
+          {(kind.range != null || kind.sector) && (
+            <button
+              title="follow the lidar's full sweep and max range again"
+              onClick={() =>
+                commit({ kind: { ...kind, range: null, sector: null } })
+              }
+            >
+              full sweep
+            </button>
+          )}
+          <label className="seq-program">
+            <input
+              type="checkbox"
+              checked={kind.shadowing}
+              onChange={(e) =>
+                commit({ kind: { ...kind, shadowing: e.target.checked } })
+              }
+            />
+            shadowing (a body hidden behind another does not trip)
           </label>
         </>
       )}
@@ -575,6 +708,69 @@ function CameraForm({ camera }: { camera: CameraMsg }) {
           className="danger"
           title="remove this camera"
           onClick={() => sendRemoveCamera(camera.name)}
+        >
+          Remove
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LidarForm({ lidar }: { lidar: LidarMsg }) {
+  const commit = (patch: Partial<LidarMsg>) =>
+    sendUpsertLidar({ ...lidar, ...patch });
+  const mountLabel =
+    lidar.mount.kind === "world"
+      ? "world fixture"
+      : lidar.mount.kind === "vehicle"
+        ? `on ${lidar.mount.device}`
+        : `on ${lidar.mount.robot}/${lidar.mount.link}`;
+
+  return (
+    <div className="obstacle-form">
+      <div className="inspector-title" title={lidar.name}>
+        {"\u{1F300}"} {lidar.name}
+        <span className="seq-cond"> · {mountLabel}</span>
+      </div>
+      <VecFields
+        label="pos"
+        value={lidar.pose.position}
+        onCommit={(position) => commit({ pose: { ...lidar.pose, position } })}
+      />
+      <NumField
+        label="fov°"
+        value={lidar.fov_deg}
+        min={1}
+        onCommit={(fov_deg) => commit({ fov_deg: Math.min(fov_deg, 360) })}
+      />
+      <NumField
+        label="min"
+        value={lidar.range[0]}
+        min={0.001}
+        onCommit={(min) => commit({ range: [min, lidar.range[1]] })}
+      />
+      <NumField
+        label="max"
+        value={lidar.range[1]}
+        min={0.01}
+        onCommit={(max) => commit({ range: [lidar.range[0], max] })}
+      />
+      <NumField
+        label="res°"
+        value={lidar.resolution_deg}
+        min={0.01}
+        onCommit={(resolution_deg) => commit({ resolution_deg })}
+      />
+      {lidar.mount.kind === "world" && (
+        <span className="seq-cond">
+          aim the scan heading (+X) with the viewport gizmo (rotate mode)
+        </span>
+      )}
+      <div className="seg">
+        <button
+          className="danger"
+          title="remove this lidar"
+          onClick={() => sendRemoveLidar(lidar.name)}
         >
           Remove
         </button>

@@ -1633,6 +1633,46 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Adds a laser-scanner field sweeping through `lidar`: its name
+    /// becomes a read-only input signal, ON while a watched body crosses
+    /// the scanner's scan-plane sector. `range` shrinks the field radius
+    /// (default: the lidar's max range) and `sector=(start, end)` narrows
+    /// its angular window (degrees in the scan frame, 0 = +X, CCW;
+    /// default: the full sweep) — one scanner carries several fields, the
+    /// warning/protective field-set shape. `shadowing` (default on)
+    /// ray-tests each candidate's origin against the other obstacles, so
+    /// a body hidden behind another does not trip it. Geometry only — no
+    /// per-angle rays are cast, robot links (when watched) detect by
+    /// overlap alone, and a vehicle-mounted field ignores its own
+    /// machine's body.
+    #[pyo3(signature = (name, lidar, watch = None, watch_robot = false, watch_robots = None, range = None, sector = None, shadowing = true))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_field_sensor(
+        &self,
+        name: &str,
+        lidar: &str,
+        watch: Option<Vec<String>>,
+        watch_robot: bool,
+        watch_robots: Option<Vec<String>>,
+        range: Option<f64>,
+        sector: Option<[f64; 2]>,
+        shadowing: bool,
+    ) -> PyResult<()> {
+        self.hub
+            .upsert_sensor(botrail_scene::seq::Sensor {
+                name: name.to_string(),
+                kind: botrail_scene::seq::SensorKind::Field {
+                    lidar: lidar.to_string(),
+                    range,
+                    sector,
+                    shadowing,
+                },
+                watch: sensor_watch(watch, watch_robot, watch_robots),
+                mount: None,
+            })
+            .map_err(scene_err)
+    }
+
     fn remove_sensor(&self, name: &str) -> PyResult<()> {
         self.hub.remove_sensor(name).map_err(scene_err)
     }
@@ -1780,6 +1820,184 @@ impl Scene {
     #[getter]
     fn camera_names(&self) -> Vec<String> {
         self.hub.camera_names()
+    }
+
+    /// Adds a LiDAR scanner: a named scan origin with a planar sweep,
+    /// drawn as a sector in the studio. Presentation only — it publishes
+    /// no signal and never affects planning or the cycle (a field sensor
+    /// referencing it is the planned signal path). The scan plane is the
+    /// local XY plane, angle 0 along +X, counter-clockwise toward +Y (the
+    /// ROS laser frame); `yaw` aims that +X heading in the mount frame
+    /// (degrees about +Z) instead of giving a quaternion. Mount it with
+    /// `mount=` (a vehicle device) or `robot=`/`link=`; default is a
+    /// world fixture. `fov` is the full scan angle in degrees up to 360
+    /// (default 270), `range` the measuring band `[min, max]` in meters
+    /// (default (0.05, 20.0)), `resolution` the angular step in degrees
+    /// the scan API will default to (default 0.5).
+    ///
+    /// `from_catalog=` names a `sensor.lidar` package: its flat specs
+    /// become the sweep defaults (fov/resolution and, from the range
+    /// specs, the measuring band), explicit arguments still win, and the
+    /// package's identity lands on the BOM (`set_part(kind="lidar")`).
+    /// The given pose places the package's *mount face* and the scan
+    /// origin follows the package's own frame (`frames.lidar_frames` —
+    /// ROS laser convention, which is botrail's, so no rotation fix).
+    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, yaw = None, fov = None, range = None, resolution = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_lidar(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+        yaw: Option<f64>,
+        fov: Option<f64>,
+        range: Option<[f64; 2]>,
+        resolution: Option<f64>,
+        mount: Option<String>,
+        robot: Option<String>,
+        link: Option<String>,
+        from_catalog: Option<String>,
+        revision: Option<String>,
+    ) -> PyResult<()> {
+        let package = from_catalog
+            .as_deref()
+            .map(|query| catalog::lidar_from_catalog(py, query, revision.as_deref()))
+            .transpose()?;
+        let fov = fov
+            .or(package.as_ref().and_then(|p| p.scan_fov_deg))
+            .unwrap_or(270.0);
+        let range = range
+            .or(package.as_ref().and_then(|p| p.range))
+            .unwrap_or([0.05, 20.0]);
+        let resolution = resolution
+            .or(package.as_ref().and_then(|p| p.resolution_deg))
+            .unwrap_or(0.5);
+        let lidar_mount = match (mount, robot, link) {
+            (None, None, None) => botrail_scene::seq::LidarMount::World,
+            (Some(device), None, None) => botrail_scene::seq::LidarMount::Vehicle { device },
+            (None, Some(robot), Some(link)) => botrail_scene::seq::LidarMount::Link { robot, link },
+            (None, Some(_), None) => {
+                return Err(PyValueError::new_err(
+                    "a robot-mounted lidar needs link= (the link it is bolted to)",
+                ))
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "pass either mount= (a vehicle) or robot=/link=, not both",
+                ))
+            }
+        };
+        let mount_pose = match yaw {
+            Some(deg) => {
+                if quaternion.is_some() {
+                    return Err(PyValueError::new_err(
+                        "pass either quaternion= or yaw=, not both",
+                    ));
+                }
+                let half = deg.to_radians() / 2.0;
+                pose_from(position, Some([0.0, 0.0, half.sin(), half.cos()]))
+            }
+            None => pose_from(position, quaternion),
+        };
+        // The given pose (yaw included) places the package's mount face;
+        // the scan origin follows its own calibration.
+        let pose = match package.as_ref().and_then(|p| p.scan_offset) {
+            Some(offset) => mount_pose * offset,
+            None => mount_pose,
+        };
+        self.hub
+            .upsert_lidar(botrail_scene::seq::Lidar {
+                name: name.to_string(),
+                mount: lidar_mount,
+                pose,
+                fov_deg: fov,
+                range,
+                resolution_deg: resolution,
+            })
+            .map_err(scene_err)?;
+        if let Some(pkg) = package {
+            // The identity a BOM line names it by — the same shape
+            // `bt.catalog.Product.identify` writes.
+            let mut attributes = std::collections::BTreeMap::new();
+            for (key, value) in &pkg.meta.specs {
+                attributes.insert(key.clone(), botrail_scene::part::PartAttr::Number(*value));
+            }
+            let part = botrail_scene::part::Part {
+                catalog: Some(botrail_scene::part::CatalogRef {
+                    id: pkg.id,
+                    revision: Some(pkg.revision),
+                }),
+                manufacturer: pkg.meta.manufacturer,
+                model: pkg.meta.product,
+                category: pkg.meta.category,
+                description: None,
+                qty: 1,
+                attributes,
+            };
+            self.hub
+                .set_part(name, Some(botrail_scene::part::PartTargetKind::Lidar), part)
+                .map_err(scene_err)?;
+        }
+        Ok(())
+    }
+
+    fn remove_lidar(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_lidar(name).map_err(scene_err)
+    }
+
+    #[getter]
+    fn lidar_names(&self) -> Vec<String> {
+        self.hub.lidar_names()
+    }
+
+    /// Simulates one sweep of the named lidar: one ray per beam at the
+    /// scanner's angular resolution, against the scene's *collision*
+    /// shapes — obstacles and robot links alike, massing bodies included.
+    /// That is the honest complement of `capture_depth` (the rendered
+    /// meshes): what the scan sees is what the cell can hit. Blind-spot
+    /// analysis in one call: `0.0` ranges are no-returns, `hits` names
+    /// what each beam struck, `points()`/`save_ply()` give the cloud.
+    /// Deterministic — two calls return identical data.
+    ///
+    /// Without `t` the sweep sees the scene as it stands (a parked
+    /// vehicle, the current joint pose). `t` sweeps at that instant of
+    /// the last baked cycle instead — joints, moved objects and the
+    /// vehicle the scanner rides all follow the timeline's tracks
+    /// (clamped to the duration; simulate a sequence first).
+    #[pyo3(signature = (name, t = None))]
+    fn lidar_scan(&self, name: &str, t: Option<f64>) -> PyResult<ScanFrame> {
+        let (scan, range) = self
+            .hub
+            .lidar_scan(name, t)
+            .map_err(PyValueError::new_err)?;
+        Ok(ScanFrame {
+            inner: scan,
+            lidar: name.to_string(),
+            min_range: range[0],
+            max_range: range[1],
+        })
+    }
+
+    /// One sweep per frame over the whole last baked cycle, on the
+    /// export grid (`1/fps` steps plus the final instant). The corridor
+    /// survey for a riding scanner: merge the frames' `points()` and the
+    /// drive's visibility is one cloud.
+    #[pyo3(signature = (name, fps = 10.0))]
+    fn scan_sweep(&self, name: &str, fps: f64) -> PyResult<Vec<ScanFrame>> {
+        let (frames, range) = self
+            .hub
+            .scan_sweep(name, fps)
+            .map_err(PyValueError::new_err)?;
+        Ok(frames
+            .into_iter()
+            .map(|scan| ScanFrame {
+                inner: scan,
+                lidar: name.to_string(),
+                min_range: range[0],
+                max_range: range[1],
+            })
+            .collect())
     }
 
     /// Adds a conveyor: while running, any unattached obstacle whose origin
@@ -6278,6 +6496,132 @@ impl SignalTrack {
     }
 }
 
+/// One simulated laser sweep — the collider truth: one ray per beam
+/// against the scene's collision shapes (obstacles and robot links), so
+/// what it sees is exactly what the cell can hit. Deterministic and
+/// headless (design/design-lidar.md 判断 L5).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct ScanFrame {
+    inner: botrail_scene::scan::LidarScan,
+    lidar: String,
+    min_range: f64,
+    max_range: f64,
+}
+
+#[pymethods]
+impl ScanFrame {
+    /// The scanned lidar's name.
+    #[getter]
+    fn lidar(&self) -> String {
+        self.lidar.clone()
+    }
+
+    /// Beam angles, degrees in the scan frame (0 = +X, CCW toward +Y).
+    #[getter]
+    fn angles(&self) -> Vec<f64> {
+        self.inner.angles.clone()
+    }
+
+    /// Nearest hit per beam, meters; `0.0` = no return (nothing inside
+    /// the measuring band).
+    #[getter]
+    fn ranges(&self) -> Vec<f64> {
+        self.inner.ranges.clone()
+    }
+
+    /// What each beam hit: an obstacle name, `"robot/link"` for a robot
+    /// link, `None` for no return.
+    #[getter]
+    fn hits(&self) -> Vec<Option<String>> {
+        self.inner.hits.clone()
+    }
+
+    /// Scanner world position at capture.
+    #[getter]
+    fn position(&self) -> (f64, f64, f64) {
+        let t = self.inner.pose.translation;
+        (t.x, t.y, t.z)
+    }
+
+    /// Scanner world orientation at capture (x, y, z, w).
+    #[getter]
+    fn quaternion(&self) -> (f64, f64, f64, f64) {
+        let q = self.inner.pose.rotation.coords;
+        (q.x, q.y, q.z, q.w)
+    }
+
+    /// The measuring band `[min, max]`, meters.
+    #[getter]
+    fn range(&self) -> (f64, f64) {
+        (self.min_range, self.max_range)
+    }
+
+    /// The baked-cycle instant this sweep was taken at; `None` for a
+    /// sweep of the scene as authored.
+    #[getter]
+    fn t(&self) -> Option<f64> {
+        self.inner.t
+    }
+
+    /// Hit points of the valid beams, world frame (or the scan frame
+    /// with `world=False`: the scan plane is z=0 there). `stride` thins
+    /// the beams.
+    #[pyo3(signature = (world = true, stride = 1))]
+    fn points(&self, world: bool, stride: usize) -> Vec<(f64, f64, f64)> {
+        let stride = stride.max(1);
+        let mut out = Vec::new();
+        for i in (0..self.inner.ranges.len()).step_by(stride) {
+            let r = self.inner.ranges[i];
+            if r <= 0.0 {
+                continue;
+            }
+            let a = self.inner.angles[i].to_radians();
+            let local = nalgebra::Point3::new(r * a.cos(), r * a.sin(), 0.0);
+            let p = if world {
+                self.inner.pose * local
+            } else {
+                local
+            };
+            out.push((p.x, p.y, p.z));
+        }
+        out
+    }
+
+    /// Writes the valid hit points as a binary little-endian PLY (world
+    /// frame) — the same shape the depth capture's point clouds use.
+    #[pyo3(signature = (path, stride = 1))]
+    fn save_ply(&self, path: std::path::PathBuf, stride: usize) -> PyResult<()> {
+        use std::io::Write;
+        let points = self.points(true, stride);
+        let mut data = Vec::with_capacity(128 + points.len() * 12);
+        write!(
+            data,
+            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n\
+             property float x\nproperty float y\nproperty float z\nend_header\n",
+            points.len()
+        )
+        .expect("in-memory write");
+        for (x, y, z) in &points {
+            for v in [*x as f32, *y as f32, *z as f32] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::fs::write(&path, data)
+            .map_err(|e| PyValueError::new_err(format!("write {}: {e}", path.display())))
+    }
+
+    fn __repr__(&self) -> String {
+        let valid = self.inner.ranges.iter().filter(|r| **r > 0.0).count();
+        format!(
+            "ScanFrame('{}', {} beams, {} returns)",
+            self.lidar,
+            self.inner.ranges.len(),
+            valid
+        )
+    }
+}
+
 /// The tightest robot-to-environment approach on a timeline. Compares and
 /// converts like its `distance`, so `assert tl.min_clearance() >= 0.005`
 /// reads directly — and its repr names the time (and touching pair) when
@@ -7824,6 +8168,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ScenarioRuns>()?;
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;
+    m.add_class::<ScanFrame>()?;
     m.add_class::<Clearance>()?;
     m.add_class::<IoPoint>()?;
     m.add_class::<IoFinding>()?;

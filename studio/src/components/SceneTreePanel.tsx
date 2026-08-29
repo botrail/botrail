@@ -4,6 +4,7 @@ import type { FrameMsg, ObstacleMsg, PartEntry } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
 import {
   sendRemoveCamera,
+  sendRemoveLidar,
   sendRemoveDevice,
   sendRemoveIoNode,
   sendRemoveSensor,
@@ -32,6 +33,8 @@ export function SceneTreePanel() {
   const selectDevice = useStudioStore((s) => s.selectDevice);
   const cameras = useStudioStore((s) => s.cameras);
   const selectCamera = useStudioStore((s) => s.selectCamera);
+  const lidars = useStudioStore((s) => s.lidars);
+  const selectLidar = useStudioStore((s) => s.selectLidar);
   const ioNodes = useStudioStore((s) => s.io.io.nodes);
   const ioPoints = useStudioStore((s) => s.io.points);
   const selectIoNode = useStudioStore((s) => s.selectIoNode);
@@ -88,7 +91,10 @@ export function SceneTreePanel() {
         })}
       </div>
       <Tree obstacles={obstacles} frames={frames} partIndex={partIndex} />
-      {(sensors.length > 0 || devices.length > 0 || cameras.length > 0) && (
+      {(sensors.length > 0 ||
+        devices.length > 0 ||
+        cameras.length > 0 ||
+        lidars.length > 0) && (
         <div className="scene-tree">
           {sensors.map((s) => (
             <div
@@ -169,6 +175,34 @@ export function SceneTreePanel() {
                 className="tree-toggle"
                 title="remove camera"
                 onClick={() => sendRemoveCamera(c.name)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          {lidars.map((l) => (
+            <div
+              key={l.name}
+              className={`tree-row${
+                selection.type === "lidar" && selection.name === l.name
+                  ? " selected"
+                  : ""
+              }`}
+            >
+              <span className="tree-twist" />
+              <span
+                className="tree-label"
+                title={`${l.mount.kind} lidar — click to edit`}
+                onClick={() => selectLidar(l.name)}
+              >
+                {"\u{1F300} "}
+                {l.name}
+              </span>
+              <PartBadge entry={partIndex.get(`lidar:${l.name}`)} />
+              <button
+                className="tree-toggle"
+                title="remove lidar"
+                onClick={() => sendRemoveLidar(l.name)}
               >
                 ×
               </button>

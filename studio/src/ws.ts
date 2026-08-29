@@ -9,6 +9,7 @@ import { WasmBackend } from "./backend-wasm";
 import { WsBackend } from "./backend-ws";
 import type {
   CameraMsg,
+  LidarMsg,
   ClientMessage,
   DeviceMsg,
   GeometryMsg,
@@ -304,6 +305,22 @@ export const sendUpsertCameraThrottled = throttledByKey<CameraMsg>(
 /** Remove a camera (sent immediately). */
 export function sendRemoveCamera(name: string): void {
   rawSend({ type: "remove_camera", name });
+}
+
+/** Add or replace a LiDAR scanner wholesale. */
+export function sendUpsertLidar(lidar: LidarMsg): void {
+  rawSend({ type: "upsert_lidar", lidar });
+}
+
+/** Lidar upserts throttled per-name to ~30 Hz for smooth gizmo drags. */
+export const sendUpsertLidarThrottled = throttledByKey<LidarMsg>(
+  SEND_INTERVAL_MS,
+  (_name, lidar) => rawSend({ type: "upsert_lidar", lidar }),
+);
+
+/** Remove a LiDAR scanner (sent immediately). */
+export function sendRemoveLidar(name: string): void {
+  rawSend({ type: "remove_lidar", name });
 }
 
 // ---- I/O map edits: the assignment layer (nodes, bindings, declarations).

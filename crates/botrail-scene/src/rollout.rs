@@ -1345,9 +1345,14 @@ struct SensorRuntime {
     watch: SensorWatch,
     /// Index of this sensor's lane in the signal tracks.
     lane: usize,
-    /// Vision only: ray-test each candidate's origin against the *other*
-    /// obstacles before declaring it seen.
+    /// Vision/field only: ray-test each candidate's origin against the
+    /// *other* obstacles before declaring it seen.
     occlusion: bool,
+    /// Obstacle indices this sensor never considers — a vehicle-mounted
+    /// field's own machine body, which the massing chassis would
+    /// otherwise trip or blind (design/design-lidar.md §9). Candidates
+    /// and shadow casters alike.
+    exclude: Vec<usize>,
 }
 
 enum SensorAnchor {
@@ -1755,6 +1760,64 @@ impl Rollout {
                         }
                         None => (dead(), Isometry3::identity(), SensorAnchor::Fixture, false),
                     },
+                    SensorKind::Field {
+                        lidar,
+                        range,
+                        sector,
+                        shadowing,
+                    } => match world.lidars().iter().find(|l| &l.name == lidar) {
+                        Some(scanner) => {
+                            // The lidar is the sweep: sector from its fov
+                            // (or the field's window), radius from its max
+                            // range (or the field's), frame from its
+                            // mount. ±5 mm slab (design/design-lidar.md
+                            // 判断 L6).
+                            let half = scanner.fov_deg.to_radians() / 2.0;
+                            let [start, end] = sector
+                                .map(|[a, b]| [a.to_radians(), b.to_radians()])
+                                .unwrap_or([-half, half]);
+                            let radius = range.unwrap_or(scanner.range[1]);
+                            let collider = ObstacleCollider::sector(start, end, radius, 0.005)
+                                .unwrap_or_else(dead);
+                            let anchor = match &scanner.mount {
+                                crate::seq::LidarMount::World => SensorAnchor::Fixture,
+                                crate::seq::LidarMount::Vehicle { device } => world
+                                    .devices()
+                                    .iter()
+                                    .position(|d| &d.name == device)
+                                    .map(SensorAnchor::Vehicle)
+                                    .unwrap_or(SensorAnchor::Fixture),
+                                crate::seq::LidarMount::Link { robot, link } => world
+                                    .robot_index(robot)
+                                    .and_then(|r| {
+                                        world.robots()[r]
+                                            .model
+                                            .link_index(link)
+                                            .map(|l| SensorAnchor::Link { robot: r, link: l })
+                                    })
+                                    .unwrap_or(SensorAnchor::Fixture),
+                            };
+                            (collider, scanner.pose, anchor, *shadowing)
+                        }
+                        None => (dead(), Isometry3::identity(), SensorAnchor::Fixture, false),
+                    },
+                };
+                // A vehicle-mounted field ignores its own machine's body:
+                // the massing chassis rides inside every sweep and would
+                // trip the field (or shadow everything) forever.
+                let exclude = match (&sensor.kind, &anchor) {
+                    (SensorKind::Field { .. }, SensorAnchor::Vehicle(d)) => {
+                        match &world.devices()[*d].kind {
+                            crate::seq::DeviceKind::Vehicle { body, .. } => body
+                                .iter()
+                                .filter_map(|name| {
+                                    world.obstacles().iter().position(|o| &o.name == name)
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        }
+                    }
+                    _ => Vec::new(),
                 };
                 let lane = signals.len();
                 signals.push(BoolTrack {
@@ -1769,6 +1832,7 @@ impl Rollout {
                     watch: sensor.watch.clone(),
                     lane,
                     occlusion,
+                    exclude,
                 }
             })
             .collect();
@@ -3625,8 +3689,11 @@ impl Rollout {
                             continue;
                         }
                     }
+                    if sensor.exclude.contains(&target) {
+                        continue;
+                    }
                     if sensor.collider.intersects(&pose, collider, &obstacle.pose) {
-                        if sensor.occlusion && self.occluded(&pose, target) {
+                        if sensor.occlusion && self.occluded(&pose, target, &sensor.exclude) {
                             continue;
                         }
                         value = true;
@@ -3662,12 +3729,13 @@ impl Rollout {
         }
     }
 
-    /// Is `target`'s origin hidden from `camera` behind another enabled
+    /// Is `target`'s origin hidden from `sensor` behind another enabled
     /// obstacle? One ray, origin to origin — coarse but deterministic
     /// (design/design-camera.md §3): a body half in view can read either
-    /// way, and robot links never occlude.
-    fn occluded(&self, camera: &Isometry3<f64>, target: usize) -> bool {
-        let origin = camera.translation.vector;
+    /// way, and robot links never occlude. `skip` never blocks the view
+    /// (a vehicle-mounted field's own chassis).
+    fn occluded(&self, sensor: &Isometry3<f64>, target: usize, skip: &[usize]) -> bool {
+        let origin = sensor.translation.vector;
         let goal = self.world.obstacles()[target].pose.translation.vector;
         let dir = goal - origin;
         if dir.norm_squared() < 1e-12 {
@@ -3680,7 +3748,7 @@ impl Rollout {
             .zip(self.world.obstacle_colliders.iter())
             .enumerate()
         {
-            if j == target || !obstacle.enabled {
+            if j == target || !obstacle.enabled || skip.contains(&j) {
                 continue;
             }
             let inv = obstacle.pose.inverse();

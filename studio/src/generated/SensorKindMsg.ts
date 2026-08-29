@@ -6,4 +6,13 @@ export type SensorKindMsg = { "kind": "zone", pose: PoseMsg, size: [number, numb
  * Detection band along the view axis (m); `None` = the camera's
  * near/far clip.
  */
-detect_range?: [number, number] | null, occlusion: boolean, };
+detect_range?: [number, number] | null, occlusion: boolean, } | { "kind": "field", lidar: string, 
+/**
+ * Field radius (m); `None` = the lidar's max range.
+ */
+range?: number | null, 
+/**
+ * Angular window `[start, end]` in the scan frame (deg, 0 = +X,
+ * CCW); `None` = the lidar's full sweep.
+ */
+sector?: [number, number] | null, shadowing: boolean, };

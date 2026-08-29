@@ -86,7 +86,7 @@ pub trait SessionHost {
 }
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
-/// sequences, sensors, devices, cameras, scenarios, effects, frames,
+/// sequences, sensors, devices, cameras, lidars, scenarios, effects, frames,
 /// toolpaths, io, parts, state. Mesh
 /// visuals are mapped to URLs through the host's
 /// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
@@ -98,7 +98,7 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 }
 
 /// Every scene-content message except `scene_init`, in handshake order:
-/// obstacles, motions, sequences, sensors, devices, cameras, scenarios,
+/// obstacles, motions, sequences, sensors, devices, cameras, lidars, scenarios,
 /// effects, frames, toolpaths, io, parts, state. Re-sent wholesale after
 /// bulk changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
@@ -111,6 +111,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::sensors_message(scene),
             wire::devices_message(scene),
             wire::cameras_message(scene),
+            wire::lidars_message(scene),
             wire::scenarios_message(scene),
             wire::effects_message(scene),
             wire::frames_message(scene),
@@ -331,6 +332,11 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         }
         ClientMessage::RemoveCamera { name } => {
             remove_camera(host, &name).map_err(|e| format!("rejected remove_camera: {e}"))
+        }
+        ClientMessage::UpsertLidar { lidar } => upsert_lidar(host, wire::lidar_from_msg(&lidar))
+            .map_err(|e| format!("rejected upsert_lidar: {e}")),
+        ClientMessage::RemoveLidar { name } => {
+            remove_lidar(host, &name).map_err(|e| format!("rejected remove_lidar: {e}"))
         }
         ClientMessage::UpsertIoNode { node } => {
             upsert_io_node(host, node).map_err(|e| format!("rejected upsert_io_node: {e}"))
@@ -1019,6 +1025,34 @@ pub fn upsert_camera(
 pub fn remove_camera(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_camera(name))?;
     emit_cameras(host);
+    // Removal prunes any part pinned to it (the sensor pattern).
+    emit_parts(host);
+    Ok(())
+}
+
+fn emit_lidars(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::lidars_message(scene));
+    host.emit(&msg);
+}
+
+/// Adds or replaces a LiDAR scanner and rebroadcasts the list.
+pub fn upsert_lidar(
+    host: &impl SessionHost,
+    lidar: botrail_scene::seq::Lidar,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_lidar(lidar))?;
+    emit_lidars(host);
+    Ok(())
+}
+
+pub fn remove_lidar(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_lidar(name))?;
+    emit_lidars(host);
+    // Removal prunes any part pinned to it (the sensor pattern).
+    emit_parts(host);
     Ok(())
 }
 
@@ -1369,8 +1403,8 @@ pub fn timeline_msg(
         .map(|(r, (track, (times, joint_positions)))| {
             let sr = &scene.robots()[r];
             // USD-rendered robots do FK client-side; skip precomputed poses —
-            // unless a camera rides one of this robot's links, which the
-            // studio can only place from sampled world poses.
+            // unless a camera or lidar rides one of this robot's links,
+            // which the studio can only place from sampled world poses.
             let link_poses = (sr.model.source.usd_stage().is_none()
                 || camera_rides_robot(scene, &sr.name))
             .then(|| {
@@ -1654,13 +1688,17 @@ pub fn trajectory_msg(
     }
 }
 
-/// Is a camera bolted to one of `robot`'s links? Then its link poses must
-/// travel on the wire even for a USD-rendered robot (whose own FK is
-/// client-side) — the camera group is placed from sampled world poses.
+/// Is a camera or LiDAR bolted to one of `robot`'s links? Then its link
+/// poses must travel on the wire even for a USD-rendered robot (whose own
+/// FK is client-side) — the mounted group is placed from sampled world
+/// poses.
 fn camera_rides_robot(scene: &Scene, robot: &str) -> bool {
     scene.cameras().iter().any(|c| {
         matches!(&c.mount,
             botrail_scene::seq::CameraMount::Link { robot: r, .. } if r == robot)
+    }) || scene.lidars().iter().any(|l| {
+        matches!(&l.mount,
+            botrail_scene::seq::LidarMount::Link { robot: r, .. } if r == robot)
     })
 }
 
@@ -1801,6 +1839,7 @@ mod tests {
                     ServerMessage::Sensors { .. } => "sensors",
                     ServerMessage::Devices { .. } => "devices",
                     ServerMessage::Cameras { .. } => "cameras",
+                    ServerMessage::Lidars { .. } => "lidars",
                     ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::Io { .. } => "io",
@@ -1844,13 +1883,14 @@ mod tests {
         assert!(matches!(msgs[4], ServerMessage::Sensors { .. }));
         assert!(matches!(msgs[5], ServerMessage::Devices { .. }));
         assert!(matches!(msgs[6], ServerMessage::Cameras { .. }));
-        assert!(matches!(msgs[7], ServerMessage::Scenarios { .. }));
-        assert!(matches!(msgs[8], ServerMessage::Effects { .. }));
-        assert!(matches!(msgs[9], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[10], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[11], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[12], ServerMessage::Parts { .. }));
-        assert!(matches!(msgs[13], ServerMessage::State { .. }));
+        assert!(matches!(msgs[7], ServerMessage::Lidars { .. }));
+        assert!(matches!(msgs[8], ServerMessage::Scenarios { .. }));
+        assert!(matches!(msgs[9], ServerMessage::Effects { .. }));
+        assert!(matches!(msgs[10], ServerMessage::Frames { .. }));
+        assert!(matches!(msgs[11], ServerMessage::Toolpaths { .. }));
+        assert!(matches!(msgs[12], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[13], ServerMessage::Parts { .. }));
+        assert!(matches!(msgs[14], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -2555,6 +2595,7 @@ mod tests {
             .map(|m| match m {
                 ServerMessage::Devices { .. } => "devices",
                 ServerMessage::Cameras { .. } => "cameras",
+                ServerMessage::Lidars { .. } => "lidars",
                 ServerMessage::Scenarios { .. } => "scenarios",
                 ServerMessage::Effects { .. } => "effects",
                 _ => "_",
@@ -2562,8 +2603,9 @@ mod tests {
             .collect();
         let devices = types.iter().position(|t| *t == "devices").unwrap();
         assert_eq!(types[devices + 1], "cameras");
-        assert_eq!(types[devices + 2], "scenarios");
-        assert_eq!(types[devices + 3], "effects");
+        assert_eq!(types[devices + 2], "lidars");
+        assert_eq!(types[devices + 3], "scenarios");
+        assert_eq!(types[devices + 4], "effects");
     }
 
     #[test]

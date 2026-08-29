@@ -5,4 +5,4 @@
  * name spaces (a conveyor device and its belt slab may both be `belt`),
  * so the kind is part of the key.
  */
-export type PartTargetKind = "robot" | "obstacle" | "group" | "sensor" | "device" | "camera" | "io_node";
+export type PartTargetKind = "robot" | "obstacle" | "group" | "sensor" | "device" | "camera" | "lidar" | "io_node";

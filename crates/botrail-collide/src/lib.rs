@@ -160,6 +160,28 @@ impl RobotCollider {
     pub fn link_has_geometry(&self, link: usize) -> bool {
         !self.links[link].is_empty()
     }
+
+    /// Distance from `origin` along `dir` to the first solid part of
+    /// `link`, both in the link's *local* frame, or `None` past
+    /// `max_toi`. `dir` need not be normalized; the result is in units
+    /// of `dir`. The scan simulation's robot half — the obstacle half is
+    /// [`ObstacleCollider::cast_local_ray`].
+    pub fn cast_link_ray(
+        &self,
+        link: usize,
+        origin: &nalgebra::Point3<f64>,
+        dir: &nalgebra::Vector3<f64>,
+        max_toi: f64,
+    ) -> Option<f64> {
+        let ray = parry3d_f64::query::Ray::new(
+            parry3d_f64::math::Vector::new(origin.x, origin.y, origin.z),
+            parry3d_f64::math::Vector::new(dir.x, dir.y, dir.z),
+        );
+        self.links[link]
+            .iter()
+            .filter_map(|(offset, shape)| shape.cast_ray(offset, &ray, max_toi, true))
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
 }
 
 /// Collision shapes for one obstacle (world pose supplied per query).
@@ -326,6 +348,43 @@ impl ObstacleCollider {
             }
         }
         SharedShape::convex_hull(&points).map(Self::from_shape)
+    }
+
+    /// A laser scanner's field: the scan-plane sector from `start` to
+    /// `end` (radians, 0 along local +X, CCW toward +Y) out to `radius`,
+    /// thickened to `±half_thickness` along local Z. Convexity caps a
+    /// single hull at 180°, so the sector is decomposed into wedges of at
+    /// most 60°, one hull part each (the `parts` walkers handle compound
+    /// colliders already). Arc vertices every ≤5° sit *on* the arc, so
+    /// the hulls are inscribed — a body grazing the rim between vertices
+    /// can miss by ~0.1% of the radius, deterministic and conservative.
+    /// `None` on degenerate inputs (field pseudo-sensors).
+    pub fn sector(start: f64, end: f64, radius: f64, half_thickness: f64) -> Option<Self> {
+        if !(end > start && radius > 0.0 && half_thickness > 0.0) {
+            return None;
+        }
+        let wedge_count = ((end - start) / (60f64).to_radians()).ceil().max(1.0) as usize;
+        let step = (end - start) / wedge_count as f64;
+        let mut parts: Parts = Vec::with_capacity(wedge_count);
+        for w in 0..wedge_count {
+            let (a0, a1) = (start + step * w as f64, start + step * (w + 1) as f64);
+            let arc_steps = ((a1 - a0) / (5f64).to_radians()).ceil().max(1.0) as usize;
+            let mut points = Vec::with_capacity(2 * (arc_steps + 2));
+            for z in [-half_thickness, half_thickness] {
+                points.push(parry3d_f64::math::Vector::new(0.0, 0.0, z));
+                for i in 0..=arc_steps {
+                    let ang = a0 + (a1 - a0) * i as f64 / arc_steps as f64;
+                    points.push(parry3d_f64::math::Vector::new(
+                        radius * ang.cos(),
+                        radius * ang.sin(),
+                        z,
+                    ));
+                }
+            }
+            parts.push((Pose::identity(), SharedShape::convex_hull(&points)?));
+        }
+        let local_aabb = parts_local_aabb(&parts);
+        Some(ObstacleCollider { parts, local_aabb })
     }
 
     /// Overlap test between two colliders at world poses (boolean contact,
@@ -1469,5 +1528,41 @@ mod broadphase_tests {
         // Gap between the 0.2 cube face (y = 0.1) and the 0.1 cube face
         // (y = 0.7).
         assert!((d - 0.6).abs() < 1e-9, "{d}");
+    }
+
+    /// The scanner-field sector: membership by radius, angle, and slab
+    /// thickness, through the same overlap query the sensors use.
+    #[test]
+    fn sector_membership() {
+        // 270° centred on +X, 2 m reach, ±5 mm slab.
+        let half = 135f64.to_radians();
+        let sector = ObstacleCollider::sector(-half, half, 2.0, 0.005).unwrap();
+        let probe = ObstacleCollider::cuboid(Vector3::repeat(0.05));
+        let world = Isometry3::identity();
+        let hits = |x: f64, y: f64, z: f64| {
+            sector.intersects(&world, &probe, &Isometry3::translation(x, y, z))
+        };
+        // On the heading, inside the reach.
+        assert!(hits(1.0, 0.0, 0.0));
+        // Beyond the reach (probe half-diagonal included).
+        assert!(!hits(2.2, 0.0, 0.0));
+        // Inside the dead 90° wedge behind the scanner (-X ± 45°).
+        assert!(!hits(-1.0, 0.0, 0.0));
+        // Just inside / outside the edge rays (±135°): at 1 m the probe
+        // spans ±0.05 m, so pick points clearly on each side.
+        assert!(hits(-0.6, 0.8, 0.0));
+        assert!(!hits(-0.8, -0.2, 0.0));
+        // The slab: a probe hovering 0.2 m over the plane misses; one
+        // crossing the plane hits.
+        assert!(!hits(1.0, 0.0, 0.2));
+        assert!(hits(1.0, 0.0, 0.04));
+        // A full circle has no dead wedge.
+        let full =
+            ObstacleCollider::sector(-std::f64::consts::PI, std::f64::consts::PI, 2.0, 0.005)
+                .unwrap();
+        assert!(full.intersects(&world, &probe, &Isometry3::translation(-1.0, 0.0, 0.0)));
+        // Degenerate inputs refuse instead of panicking.
+        assert!(ObstacleCollider::sector(0.5, 0.5, 2.0, 0.005).is_none());
+        assert!(ObstacleCollider::sector(-half, half, 0.0, 0.005).is_none());
     }
 }

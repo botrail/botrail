@@ -26,6 +26,7 @@ same column. The keys, and the attribute names that answer them
 | `sensing_range_mm`     | a beam sensor's span                                       | `sensing_range_mm`, `range_mm`, `max_range_mm` |
 | `range_mm`             | a light curtain's span / an area sensor's half-diagonal    | `range_mm`, `max_range_mm`, `sensing_range_mm` |
 | `protective_height_mm` | a light curtain's post height                              | `protective_height_mm`, `height_mm`          |
+| `scan_fov_deg`         | a lidar's authored sweep angle                             | `scan_fov_deg`                               |
 | `length_mm`, `width_mm`| a conveyor's zone along and across its belt                | `length_mm` / `width_mm`, `belt_width_mm`    |
 | `speed_mps`            | a conveyor's belt speed, an axis speed                     | `max_speed_mps`, `speed_max_mps`, `speed_mps`|
 | `max_speed_mps`        | a vehicle's travel speed                                   | the same                                     |
@@ -46,9 +47,10 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional, Union
+from typing import Any, Optional, Union
 
 __all__ = [
     "ALIASES",
@@ -72,6 +74,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "resolution_v_px": ("resolution_v_px",),
     "max_range_mm": ("max_range_mm",),
     "min_range_mm": ("min_range_mm",),
+    "scan_fov_deg": ("scan_fov_deg",),
     "range_mm": ("range_mm", "max_range_mm", "sensing_range_mm"),
     "protective_height_mm": ("protective_height_mm", "height_mm"),
     "length_mm": ("length_mm",),
@@ -522,6 +525,7 @@ class _Cell:
         self.obstacles: dict[str, dict] = {o["name"]: o for o in self.project.get("obstacles") or []}
         self.sensors: dict[str, dict] = {s["name"]: s["kind"] for s in self.project.get("sensors") or []}
         self.cameras: dict[str, dict] = {c["name"]: c for c in self.project.get("cameras") or []}
+        self.lidars: dict[str, dict] = {l["name"]: l for l in self.project.get("lidars") or []}
         self.devices: dict[str, dict] = {d["name"]: d["kind"] for d in self.project.get("devices") or []}
         self.mounts: dict[str, dict] = {
             (r.get("name") or self.default_robot): r["mount"]
@@ -568,6 +572,8 @@ class _Cell:
             return "sensor"
         if name in self.cameras:
             return "camera"
+        if name in self.lidars:
+            return "lidar"
         if name in self.nodes:
             return "io_node"
         if name in self.obstacles:
@@ -615,6 +621,8 @@ class _Cell:
             return self._sensor(name, category)
         if kind == "camera":
             return self._camera(name)
+        if kind == "lidar":
+            return self._lidar(name)
         if kind == "device":
             return self._device(name, margin)
         if kind == "io_node":
@@ -923,6 +931,51 @@ class _Cell:
             )
         return reqs, []
 
+    def _lidar(self, name: str) -> tuple[list[Requirement], list[str]]:
+        """What the cell asks of a lidar: the authored sweep angle always;
+        a measuring band only when field sensors actually judge through it
+        (a survey-only scanner has no range requirement — its authored max
+        range is a scan reach, not a spec). `min_range_mm` is a `<=`
+        requirement — a device with a bigger blind ring than authored
+        would miss the close intrusions the sim detected — so it gates
+        `check` but stays out of `row.minimum` (design-lidar.md 判断 L12,
+        the camera rule applied to sweeps)."""
+        lidar = self.lidars.get(name)
+        if not lidar:
+            return [], []
+        reqs: list[Requirement] = [
+            Requirement(
+                "scan_fov_deg",
+                _round(float(lidar.get("fov_deg") or 0.0), 2),
+                basis="authored sweep angle",
+            )
+        ]
+        band = lidar.get("range") or [0.0, 0.0]
+        radii = []
+        for sensor_name, kind in self.sensors.items():
+            if kind.get("kind") != "field" or kind.get("lidar") != name:
+                continue
+            radius = kind.get("range")
+            radii.append((sensor_name, float(radius if radius is not None else band[1])))
+        if radii:
+            far_name, far_m = max(radii, key=lambda r: r[1])
+            reqs.append(
+                Requirement(
+                    "max_range_mm",
+                    _round(far_m * 1000.0, 1),
+                    basis=f"field sensor `{far_name}` sweeps out to {far_m:g} m",
+                )
+            )
+            reqs.append(
+                Requirement(
+                    "min_range_mm",
+                    _round(float(band[0]) * 1000.0, 1),
+                    op="<=",
+                    basis="authored blind ring — a bigger one would miss close intrusions",
+                )
+            )
+        return reqs, []
+
     def _device(self, name: str, margin: float) -> tuple[list[Requirement], list[str]]:
         kind = self.devices.get(name)
         if not kind:
@@ -1178,6 +1231,8 @@ def _kind_hint(category: str) -> str:
         return "device"
     if category == "sensor.camera":
         return "camera"
+    if category == "sensor.lidar":
+        return "lidar"
     if category.startswith("sensor"):
         return "sensor"
     if category in ("plc", "plc.safety", "io.remote", "robot_controller") or category.startswith("io."):

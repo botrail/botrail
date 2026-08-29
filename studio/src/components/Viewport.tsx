@@ -14,6 +14,7 @@ import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
 import { SensorView } from "./SensorView";
 import { CameraView } from "./CameraView";
+import { LidarView } from "./LidarView";
 import { CameraPass } from "./CameraPass";
 import { CameraPip } from "./CameraPip";
 import { CameraExporter } from "./CameraExporter";
@@ -94,6 +95,8 @@ export function Viewport() {
             ? `device · ${selection.name}`
             : selection.type === "camera"
               ? `camera · ${selection.name}`
+            : selection.type === "lidar"
+              ? `lidar · ${selection.name}`
             : selection.type === "io_node"
               ? `I/O node · ${selection.name}`
               : selection.type === "robot"
@@ -201,6 +204,9 @@ export function Viewport() {
           </Aid>
           <Aid>
             <CameraView />
+          </Aid>
+          <Aid>
+            <LidarView />
           </Aid>
           <FlashView />
           <SprayView />

@@ -66,6 +66,14 @@
       "$ref": "#/$defs/IoMap",
       "default": {}
     },
+    "lidars": {
+      "description": "LiDAR scanners (absent in older files).",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/LidarMsg"
+      }
+    },
     "motions": {
       "type": "array",
       "items": {
@@ -2261,6 +2269,106 @@
         "label"
       ]
     },
+    "LidarMountMsg": {
+      "description": "What a LiDAR scanner is bolted to.",
+      "oneOf": [
+        {
+          "description": "A fixture; the pose is a world pose.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "world"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Rides a vehicle device.",
+          "type": "object",
+          "properties": {
+            "device": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "vehicle"
+            }
+          },
+          "required": [
+            "kind",
+            "device"
+          ]
+        },
+        {
+          "description": "Bolted to a robot link.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "link"
+            },
+            "link": {
+              "type": "string"
+            },
+            "robot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "robot",
+            "link"
+          ]
+        }
+      ]
+    },
+    "LidarMsg": {
+      "description": "A LiDAR scanner: a named scan origin with a planar sweep. Presentation\nonly — it publishes no signal (a field sensor referencing it is the\nplanned signal path).",
+      "type": "object",
+      "properties": {
+        "fov_deg": {
+          "description": "Full scan angle, degrees, up to 360.",
+          "type": "number",
+          "format": "double"
+        },
+        "mount": {
+          "$ref": "#/$defs/LidarMountMsg"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pose": {
+          "description": "Offset in the mount frame (world pose for a `world` mount). The\nscan plane is local XY, angle 0 along +X, CCW toward +Y (the ROS\nlaser frame).",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "range": {
+          "description": "Measuring range `[min, max]`, meters.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "resolution_deg": {
+          "description": "Angular resolution, degrees (the scan API's default step).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "mount",
+        "pose",
+        "fov_deg",
+        "range",
+        "resolution_deg"
+      ]
+    },
     "LiftStopMsg": {
       "description": "One named stop of a lift, metres along its axis from the reference.",
       "type": "object",
@@ -2520,6 +2628,11 @@
           "description": "A camera fixture (the purchasable `sensor.camera` article).",
           "type": "string",
           "const": "camera"
+        },
+        {
+          "description": "A LiDAR scanner (the purchasable `sensor.lidar` article).",
+          "type": "string",
+          "const": "lidar"
         }
       ]
     },
@@ -3200,6 +3313,48 @@
             "kind",
             "camera",
             "occlusion"
+          ]
+        },
+        {
+          "description": "Laser-scanner field: ON while a watched body crosses the named\nlidar's scan-plane sector (shadow-tested against other obstacles).",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "field"
+            },
+            "lidar": {
+              "type": "string"
+            },
+            "range": {
+              "description": "Field radius (m); `None` = the lidar's max range.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "sector": {
+              "description": "Angular window `[start, end]` in the scan frame (deg, 0 = +X,\nCCW); `None` = the lidar's full sweep.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "shadowing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "lidar",
+            "shadowing"
           ]
         }
       ]
