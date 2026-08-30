@@ -178,6 +178,60 @@ def test_usd_mimic_joint_imports_as_a_coupled_dof(tmp_path: Path) -> None:
 
 
 # The same gripper as URDF-to-USD converters author it: no PhysX schema,
+# The same gripper as Isaac Sim 6 / Newton, the official URDF importer and
+# three-usd-robot author it: `NewtonMimicAPI`, one relation
+# (`q = coef1*q_ref + coef0`) with no axis to name.
+USD_GRIPPER_NEWTON = USD_GRIPPER.replace(
+    """        def PhysicsPrismaticJoint "finger_right" (
+            prepend apiSchemas = ["PhysxMimicJointAPI:transY"]
+        )
+        {
+            rel physics:body0 = </Gripper/palm>
+            rel physics:body1 = </Gripper/right>
+            uniform token physics:axis = "Y"
+            float physics:lowerLimit = -0.04
+            float physics:upperLimit = 0
+            float physxMimicJoint:transY:gearing = 1
+            float physxMimicJoint:transY:offset = 0
+            rel physxMimicJoint:transY:referenceJoint = </Gripper/joints/finger_left>
+            uniform token physxMimicJoint:transY:referenceJointAxis = "transY"
+        }""",
+    """        def PhysicsPrismaticJoint "finger_right" (
+            prepend apiSchemas = ["NewtonMimicAPI"]
+        )
+        {
+            rel physics:body0 = </Gripper/palm>
+            rel physics:body1 = </Gripper/right>
+            uniform token physics:axis = "Y"
+            float physics:lowerLimit = -0.04
+            float physics:upperLimit = 0
+            rel newton:mimicJoint = </Gripper/joints/finger_left>
+            float newton:mimicCoef1 = -1
+            float newton:mimicCoef0 = 0
+        }""",
+)
+
+
+def test_usd_newton_mimic_imports_as_a_coupled_dof(tmp_path: Path) -> None:
+    assert USD_GRIPPER_NEWTON != USD_GRIPPER  # the replace applied
+    path = tmp_path / "gripper.usda"
+    path.write_text(USD_GRIPPER_NEWTON)
+    robot = bt.Robot.from_usd(path)
+
+    assert robot.dof == 1
+    assert robot.joint_names == ["/Gripper/joints/finger_left"]
+    assert robot.mimic_joints == {
+        "/Gripper/joints/finger_right": ("/Gripper/joints/finger_left", -1.0, 0.0)
+    }
+
+    scene = bt.Scene(robot)
+    scene.set_joint_positions([0.03])
+    (_, left_y, _), _ = scene.link_pose("/Gripper/left")
+    (_, right_y, _), _ = scene.link_pose("/Gripper/right")
+    assert left_y == pytest.approx(0.03)
+    assert right_y == pytest.approx(-0.03)
+
+
 # the URDF `<mimic>` relation carried as `botrail:mimic` customData
 # (serialized by pxr as a nested namespace dictionary).
 USD_GRIPPER_CUSTOM_DATA = USD_GRIPPER.replace(

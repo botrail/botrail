@@ -90,10 +90,11 @@ robot.tcp_link       # declared TCP if any (catalog, attach_tool), else deepest 
 
 ## Mimic joints
 
-Joints that follow another joint — URDF `<mimic>`, USD
+Joints that follow another joint — URDF `<mimic>`, USD `NewtonMimicAPI`
+(Isaac Sim 6 / Newton and the official URDF importer) or the legacy
 `PhysxMimicJointAPI`, or the `botrail:mimic` customData that URDF-to-USD
-converters author — never appear in `joint_names` or in a position vector. A two-finger gripper
-with a mimicked second finger costs **one** DOF, not two:
+converters author — never appear in `joint_names` or in a position vector. A
+two-finger gripper with a mimicked second finger costs **one** DOF, not two:
 
 ```python
 robot.mimic_joints          # {joint: (source joint, multiplier, offset)}
@@ -107,10 +108,12 @@ the mimic relations applied.
 !!! note "When a mimic is authored wrong"
 
     The Isaac Franka authors its finger mimic about a different axis than the
-    joint actually moves on. botrail refuses to guess: it prints
+    joint actually moves on. `PhysxMimicJointAPI` names the dof it
+    constrains, so botrail refuses to guess: it prints
     `mimic joint authored on `rotX` but the joint moves about `transX`; ignored`
     and keeps both fingers as independent DOF. If your vector is one longer
-    than you expected, read the import notices.
+    than you expected, read the import notices. (three-usd-robot reads it the
+    same way, so the studio picture matches the model.)
 
 ## Mounting a tool
 

@@ -26,11 +26,13 @@
 //!
 //! # Joint couplings (mimic)
 //!
-//! Two encodings collapse a driven joint into its source's DOF:
-//! `PhysxMimicJointAPI` (USD units, PhysX sign convention) and the
+//! Three encodings collapse a driven joint into its source's DOF:
+//! `NewtonMimicAPI` (Isaac Sim 6 / Newton and the official URDF importer:
+//! `q = coef1·q_ref + coef0`, USD units), `PhysxMimicJointAPI` (USD units,
+//! PhysX sign convention, keyed by the dof it constrains) and the
 //! `botrail:mimic` customData dictionary URDF converters author (URDF
 //! semantics: `q = multiplier·q_source + offset`, SI units regardless of
-//! stage units). When both are present the applied schema wins.
+//! stage units). A prim carrying several is read in that order, and says so.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +54,10 @@ use crate::{
 
 /// Every `PhysxMimicJointAPI` instance name (one per dof of a joint).
 const MIMIC_INSTANCES: [&str; 6] = ["rotX", "rotY", "rotZ", "transX", "transY", "transZ"];
+
+/// Newton's single-apply coupling schema (Isaac Sim 6, the official URDF
+/// importer, three-usd-robot's exporter).
+const NEWTON_MIMIC_API: &str = "NewtonMimicAPI";
 
 /// The API instance a revolute/prismatic joint's single dof answers to:
 /// its `physics:axis` letter under the prefix its type implies.
@@ -78,6 +84,25 @@ fn raw_axis_instance(joint_type: JointType, axis: &Vector3<f64>) -> Option<&'sta
         } else {
             'Z'
         },
+    )
+}
+
+/// Whether two encodings of the same coupling say the same thing. The
+/// numbers are authored, not computed, so exact-ish tolerances are right:
+/// a converter writing both writes the same values twice.
+fn relations_agree(a: &(String, f64, f64), b: &(String, f64, f64)) -> bool {
+    a.0 == b.0 && (a.1 - b.1).abs() < 1e-9 && (a.2 - b.2).abs() < 1e-9
+}
+
+/// Whether two joints move the same way — a coupling across kinds (or onto
+/// a joint that does not move at all) has no meaning.
+fn same_motion_kind(a: JointType, b: JointType) -> bool {
+    matches!(
+        (a, b),
+        (
+            JointType::Revolute | JointType::Continuous,
+            JointType::Revolute | JointType::Continuous
+        ) | (JointType::Prismatic, JointType::Prismatic)
     )
 }
 
@@ -162,9 +187,18 @@ struct JointRecord {
     mimic: Option<MimicRecord>,
 }
 
-/// A joint coupling read off a joint prim, in one of the two encodings
+/// A joint coupling read off a joint prim, in one of the three encodings
 /// botrail understands.
 enum MimicRecord {
+    /// `NewtonMimicAPI`, the current schema: `q = coef1·q_ref + coef0`, in
+    /// USD joint units. Single-apply — it couples the two joints' own dofs,
+    /// so unlike PhysX there is no axis to name (or to disagree about).
+    Newton {
+        /// Prim path of the reference joint (`newton:mimicJoint`).
+        reference: String,
+        coef1: f64,
+        coef0: f64,
+    },
     /// One `PhysxMimicJointAPI` instance, straight off the prim. PhysX
     /// couples the pair as `qA + gearing·qB + offset = 0`, in USD joint
     /// units (degrees for angular dofs, stage units for linear ones).
@@ -663,19 +697,40 @@ impl RobotBuilder<'_> {
         .map(f64::from)
         .unwrap_or(0.0);
 
-        let physx = self.read_mimic(info, joint_type, axis_token.as_ref().map(|t| t.as_str()));
-        let custom = self.read_custom_mimic(info, joint_type);
-        let mimic = match (physx, custom) {
-            (Some(physx), Some(_)) => {
-                self.warnings.push(format!(
-                    "{}: both PhysxMimicJointAPI and botrail:mimic customData authored; \
-                     using PhysxMimicJointAPI",
-                    info.path
-                ));
-                Some(physx)
+        // One coupling, three ways to write it: Newton's current schema,
+        // PhysX's legacy one, and the customData URDF converters author.
+        // Prefer them in that order. Carrying several is normal — a package
+        // that wants both an Isaac-readable and a botrail-readable stage
+        // writes two — so only a *disagreement* is worth a word: then the
+        // reader's choice is what moved the joint.
+        let candidates = [
+            ("NewtonMimicAPI", self.read_newton_mimic(info, joint_type)),
+            (
+                "PhysxMimicJointAPI",
+                self.read_mimic(info, joint_type, axis_token.as_ref().map(|t| t.as_str())),
+            ),
+            (
+                "botrail:mimic customData",
+                self.read_custom_mimic(info, joint_type),
+            ),
+        ];
+        let authored: Vec<(&str, (String, f64, f64))> = candidates
+            .iter()
+            .filter_map(|(name, record)| {
+                Some((*name, self.mimic_relation(record.as_ref()?, joint_type)?))
+            })
+            .collect();
+        if let [(winner, kept), rest @ ..] = authored.as_slice() {
+            for (name, other) in rest {
+                if !relations_agree(kept, other) {
+                    self.warnings.push(format!(
+                        "{}: mimic authored as {winner} and {name}, and they disagree; using {winner}",
+                        info.path
+                    ));
+                }
             }
-            (physx, custom) => physx.or(custom),
-        };
+        }
+        let mimic = candidates.into_iter().find_map(|(_, record)| record);
 
         Ok(Some(JointRecord {
             name: info.path.clone(),
@@ -691,6 +746,66 @@ impl RobotBuilder<'_> {
             effort,
             mimic,
         }))
+    }
+
+    /// Reads `NewtonMimicAPI` off a joint prim — the coupling Isaac Sim 6 /
+    /// Newton, the official URDF importer and three-usd-robot author. It
+    /// relates the joints' own dofs (`q = coef1·q_ref + coef0`) in USD
+    /// joint units, so only the schema needs to be applied for it to count.
+    fn read_newton_mimic(&mut self, info: &PrimInfo, joint_type: JointType) -> Option<MimicRecord> {
+        if !info
+            .prim
+            .has_api_schema(NEWTON_MIMIC_API)
+            .ok()
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        if joint_type == JointType::Fixed {
+            self.warnings.push(format!(
+                "{}: NewtonMimicAPI on a fixed joint; ignored",
+                info.path
+            ));
+            return None;
+        }
+        // An authored-off coupling is a deliberate one, not a mistake.
+        if info
+            .prim
+            .attribute("newton:mimicEnabled")
+            .get::<bool>()
+            .ok()
+            .flatten()
+            == Some(false)
+        {
+            return None;
+        }
+        let reference = info
+            .prim
+            .relationship("newton:mimicJoint")
+            .targets()
+            .ok()
+            .and_then(|targets| targets.first().map(|p| p.to_string()));
+        let Some(reference) = reference else {
+            self.warnings.push(format!(
+                "{}: NewtonMimicAPI names no reference joint; ignored",
+                info.path
+            ));
+            return None;
+        };
+        let coefficient = |name: &str, default: f64| {
+            info.prim
+                .attribute(name)
+                .get::<f32>()
+                .ok()
+                .flatten()
+                .map(f64::from)
+                .unwrap_or(default)
+        };
+        Some(MimicRecord::Newton {
+            reference,
+            coef1: coefficient("newton:mimicCoef1", 1.0),
+            coef0: coefficient("newton:mimicCoef0", 0.0),
+        })
     }
 
     /// Reads `PhysxMimicJointAPI` off a joint prim. The API is
@@ -798,6 +913,39 @@ impl RobotBuilder<'_> {
         })
     }
 
+    /// The relation a record states, in a form two encodings can be
+    /// compared in: the source joint's prim name, the multiplier, and the
+    /// offset in botrail units. PhysX gearing is scaled by the *reading*
+    /// joint's unit only — the reference joint is not resolved yet, and a
+    /// coupling across motion kinds is refused either way, so both ends
+    /// share a factor.
+    fn mimic_relation(
+        &self,
+        record: &MimicRecord,
+        joint_type: JointType,
+    ) -> Option<(String, f64, f64)> {
+        let k = self.joint_unit(joint_type)?;
+        let leaf = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+        Some(match record {
+            MimicRecord::Newton {
+                reference,
+                coef1,
+                coef0,
+            } => (leaf(reference), *coef1, coef0 * k),
+            MimicRecord::Physx {
+                reference,
+                gearing,
+                offset,
+                ..
+            } => (leaf(reference), -gearing, -offset * k),
+            MimicRecord::CustomData {
+                joint,
+                multiplier,
+                offset,
+            } => (leaf(joint), *multiplier, *offset),
+        })
+    }
+
     /// Turns each joint's coupling record into a model mimic relation.
     ///
     /// PhysX constrains the pair as `qA + G·qB + γ = 0`, i.e.
@@ -822,6 +970,40 @@ impl RobotBuilder<'_> {
                 continue; // world anchor: no model joint to carry the relation
             };
             let resolved = match mimic {
+                // Newton relates the joints' own dofs, so the pair has to
+                // move the same way; the coefficient is then unitless and
+                // only the offset converts out of USD units.
+                MimicRecord::Newton {
+                    reference,
+                    coef1,
+                    coef0,
+                } => {
+                    let Some(&source_joint) = index.get(reference.as_str()) else {
+                        self.warnings.push(format!(
+                            "{}: mimic reference joint `{reference}` is not part of this articulation; ignored",
+                            record.name
+                        ));
+                        continue;
+                    };
+                    let Some(source) = record_by_name.get(reference.as_str()) else {
+                        continue;
+                    };
+                    if !same_motion_kind(record.joint_type, source.joint_type) {
+                        self.warnings.push(format!(
+                            "{}: mimic couples a {:?} joint to a {:?} reference; ignored",
+                            record.name, record.joint_type, source.joint_type
+                        ));
+                        continue;
+                    }
+                    let Some(k_a) = self.joint_unit(record.joint_type) else {
+                        continue;
+                    };
+                    Some(botrail_model::JointMimic {
+                        source_joint,
+                        multiplier: *coef1,
+                        offset: coef0 * k_a,
+                    })
+                }
                 MimicRecord::Physx {
                     reference,
                     reference_axis,
@@ -1415,6 +1597,180 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         );
     }
 
+    /// [`MIMIC`] with both couplings restated the way Isaac Sim 6 / Newton
+    /// and three-usd-robot author them: `q = coef1·q_ref + coef0`, no axis
+    /// named. Same two relations (`j2 = 0.5·j1 - 30 deg`, `j4 = -j3 - 2 cm`),
+    /// so they have to import to the same model as the PhysX form.
+    fn newton_stage() -> String {
+        let stage = MIMIC
+            .replace("PhysxMimicJointAPI:rotZ", "NewtonMimicAPI")
+            .replace(
+                "            float physxMimicJoint:rotZ:gearing = -0.5\n            \
+                 float physxMimicJoint:rotZ:offset = 30\n            \
+                 rel physxMimicJoint:rotZ:referenceJoint = </Robot/joints/j1>\n            \
+                 uniform token physxMimicJoint:rotZ:referenceJointAxis = \"rotZ\"",
+                "            float newton:mimicCoef1 = 0.5\n            \
+                 float newton:mimicCoef0 = -30\n            \
+                 rel newton:mimicJoint = </Robot/joints/j1>",
+            )
+            .replace("PhysxMimicJointAPI:transX", "NewtonMimicAPI")
+            .replace(
+                "            float physxMimicJoint:transX:gearing = 1\n            \
+                 float physxMimicJoint:transX:offset = 2\n            \
+                 rel physxMimicJoint:transX:referenceJoint = </Robot/joints/j3>",
+                "            float newton:mimicCoef1 = -1\n            \
+                 float newton:mimicCoef0 = -2\n            \
+                 rel newton:mimicJoint = </Robot/joints/j3>",
+            );
+        // A rewrite that missed would leave the PhysX form behind and test
+        // nothing, since both encodings mean the same thing here.
+        assert!(
+            !stage.contains("physxMimicJoint") && stage.matches("newton:mimicJoint").count() == 2,
+            "{stage}"
+        );
+        stage
+    }
+
+    #[test]
+    fn newton_mimic_joints_import_as_coupled_dofs() {
+        let imported = import_arm(&newton_stage());
+        let model = &imported.model;
+        assert_eq!(model.dof(), 2, "{:?}", imported.warnings);
+        assert_eq!(
+            model.actuated_joint_names(),
+            vec!["/Robot/joints/j1", "/Robot/joints/j3"]
+        );
+
+        // The coefficient couples two joints of the same kind, so it is
+        // unitless; the offset converts (degrees, then centimetres).
+        let angular = model.joints[model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert_eq!(
+            angular.source_joint,
+            model.joint_index("/Robot/joints/j1").unwrap()
+        );
+        assert!((angular.multiplier - 0.5).abs() < 1e-12);
+        assert!((angular.offset + 30f64.to_radians()).abs() < 1e-12);
+
+        let linear = model.joints[model.joint_index("/Robot/joints/j4").unwrap()]
+            .mimic
+            .unwrap();
+        assert!((linear.multiplier + 1.0).abs() < 1e-12);
+        assert!((linear.offset + 0.02).abs() < 1e-12, "{}", linear.offset);
+    }
+
+    #[test]
+    fn a_disabled_newton_mimic_keeps_its_dof() {
+        let usda = newton_stage().replace(
+            "            float newton:mimicCoef1 = 0.5",
+            "            bool newton:mimicEnabled = false\n            float newton:mimicCoef1 = 0.5",
+        );
+        let imported = import_arm(&usda);
+        // j2 is free again; j4 still follows j3.
+        assert_eq!(imported.model.dof(), 3, "{:?}", imported.warnings);
+        assert!(
+            imported.model.joints[imported.model.joint_index("/Robot/joints/j2").unwrap()]
+                .mimic
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn newton_mimic_wins_over_the_legacy_encodings() {
+        // j2 carries Newton's schema and PhysX's, saying different things.
+        let usda = newton_stage()
+            .replace(
+                "def PhysicsRevoluteJoint \"j2\" (prepend apiSchemas = [\"NewtonMimicAPI\"])",
+                "def PhysicsRevoluteJoint \"j2\" (prepend apiSchemas = [\"NewtonMimicAPI\", \"PhysxMimicJointAPI:rotZ\"])",
+            )
+            .replace(
+                "            rel newton:mimicJoint = </Robot/joints/j1>",
+                "            rel newton:mimicJoint = </Robot/joints/j1>\n            \
+                 float physxMimicJoint:rotZ:gearing = -2\n            \
+                 rel physxMimicJoint:rotZ:referenceJoint = </Robot/joints/j1>",
+            );
+        let imported = import_arm(&usda);
+        let mimic = imported.model.joints[imported.model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert!(
+            (mimic.multiplier - 0.5).abs() < 1e-12,
+            "{}",
+            mimic.multiplier
+        );
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("using NewtonMimicAPI")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    #[test]
+    fn encodings_that_agree_are_read_without_a_word() {
+        // What a converter writes when it wants both an Isaac-readable and
+        // a botrail-readable stage: the same relation, twice.
+        let usda = newton_stage().replace(
+            "        def PhysicsRevoluteJoint \"j2\" (prepend apiSchemas = [\"NewtonMimicAPI\"])",
+            "        def PhysicsRevoluteJoint \"j2\" (\n            \
+             prepend apiSchemas = [\"NewtonMimicAPI\"]\n            \
+             customData = {\n                \
+             dictionary botrail = {\n                    \
+             dictionary mimic = {\n                        \
+             string joint = \"j1\"\n                        \
+             double multiplier = 0.5\n                        \
+             double offset = -0.5235987755982988\n                    \
+             }\n                }\n            }\n        )",
+        );
+        let imported = import_arm(&usda);
+        let mimic = imported.model.joints[imported.model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert!((mimic.multiplier - 0.5).abs() < 1e-12);
+        assert!((mimic.offset + 30f64.to_radians()).abs() < 1e-12);
+        assert!(
+            !imported.warnings.iter().any(|w| w.contains("disagree")),
+            "{:?}",
+            imported.warnings
+        );
+
+        // Control: the same stage with one number changed does get a word —
+        // which is also what proves the customData above was read at all.
+        let conflicting = usda.replace("double multiplier = 0.5", "double multiplier = 0.9");
+        let imported = import_arm(&conflicting);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("disagree") && w.contains("using NewtonMimicAPI")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    #[test]
+    fn newton_mimic_across_motion_kinds_is_reported() {
+        // j2 (revolute) pointed at j3 (prismatic): the coefficient would
+        // have to carry units, so the joint keeps its own DOF.
+        let usda = newton_stage().replace(
+            "            rel newton:mimicJoint = </Robot/joints/j1>",
+            "            rel newton:mimicJoint = </Robot/joints/j3>",
+        );
+        let imported = import_arm(&usda);
+        assert_eq!(imported.model.dof(), 3, "{:?}", imported.warnings);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/joints/j2") && w.contains("Prismatic")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
     /// huggingface_hub-style cache: the stage file is a symlink onto an
     /// extensionless content-addressed blob. The resolver canonicalizes,
     /// so without care the link's extension — and the format dispatch —
@@ -1560,7 +1916,8 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
             imported
                 .warnings
                 .iter()
-                .any(|w| w.contains("both PhysxMimicJointAPI and botrail:mimic")),
+                .any(|w| w.contains("PhysxMimicJointAPI and botrail:mimic")
+                    && w.contains("using PhysxMimicJointAPI")),
             "{:?}",
             imported.warnings
         );

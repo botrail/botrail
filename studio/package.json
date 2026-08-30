@@ -16,7 +16,7 @@
     "react-dom": "^18.3.1",
     "three": "^0.169.0",
     "three-stdlib": "^2.29.0",
-    "three-usd-robot": "^0.11.0",
+    "three-usd-robot": "^0.13.1",
     "webm-muxer": "^5.1.4",
     "zustand": "^4.5.0"
   },

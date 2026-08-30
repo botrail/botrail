@@ -93,7 +93,7 @@ pub struct JointLimits {
 }
 
 /// A joint driven by another joint through a fixed affine relation —
-/// URDF `<mimic>`, USD `PhysxMimicJointAPI`. The classic case is a
+/// URDF `<mimic>`, USD `NewtonMimicAPI` / `PhysxMimicJointAPI`. The classic case is a
 /// two-finger gripper whose second finger mirrors the first.
 ///
 /// A mimic joint has no degree of freedom of its own: its value is

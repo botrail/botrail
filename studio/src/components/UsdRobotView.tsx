@@ -84,7 +84,7 @@ function UsdRobotInstance({ name }: { name: string }) {
   const displayed = overrideJoints ?? state?.jointPositions ?? null;
   useEffect(() => {
     if (!robot || !desc || !displayed || baked) return;
-    robot.setJointValues(jointMap(desc, displayed));
+    robot.setJointValues(jointMap(robot, desc, displayed));
   }, [robot, desc, displayed, baked]);
 
   // Link-pose playback (transform-mode USD recordings): world-space link
@@ -112,7 +112,7 @@ function UsdRobotInstance({ name }: { name: string }) {
     if (!robot || !desc) return;
     playbackRig.usd.set(name, (sample) => {
       const joints = sample.joints?.[name];
-      if (joints) robot.setJointValues(jointMap(desc, joints));
+      if (joints) robot.setJointValues(jointMap(robot, desc, joints));
       const poses = sample.poses?.[name];
       if (poses) {
         robot.setLinkTransforms(linkPoseMap(desc, poses), { space: "world" });
@@ -183,6 +183,7 @@ function linkPoseMap(
 
 /** DOF vector -> {joint prim path: value} for three-usd-robot. */
 function jointMap(
+  robot: ThreeUsdRobot,
   desc: RobotDescMsg,
   positions: number[],
 ): Record<string, number> {
@@ -191,9 +192,13 @@ function jointMap(
   for (const joint of desc.joints) {
     if (joint.q_index !== null) {
       map[joint.name] = positions[joint.q_index] ?? 0;
-    } else if (joint.mimic) {
-      // Mimic joints hold no DOF of their own; the server sends the
-      // relation so the renderer can place them from their source.
+    } else if (joint.mimic && !robot.isMimicFollower(joint.name)) {
+      // Mimic joints hold no DOF of their own. The loader drives the ones it
+      // read itself (NewtonMimicAPI / PhysxMimicJointAPI) from their leader
+      // and ignores direct sets, so skip those; a stage that carries the
+      // coupling as `botrail:mimic` customData (what URDF-to-USD converters
+      // write) is read by botrail alone, and there the value the server
+      // derives is what places the follower.
       const source = qIndex.get(joint.mimic.joint) ?? null;
       const value = source === null ? 0 : (positions[source] ?? 0);
       map[joint.name] = joint.mimic.multiplier * value + joint.mimic.offset;
