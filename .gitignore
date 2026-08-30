@@ -28,6 +28,10 @@ python/botrail/_studio/
 # Docs (mkdocs build output)
 site/
 
+# Pivate docs
+.internal/
+tmp/
+
 # Editors
 .vscode/
 .idea/
