@@ -1133,7 +1133,10 @@ impl Scene {
     }
 
     /// The authored physics properties of an obstacle, if any.
-    pub fn obstacle_physics(&self, name: &str) -> Result<Option<&botrail_physics::BodyProps>, SceneError> {
+    pub fn obstacle_physics(
+        &self,
+        name: &str,
+    ) -> Result<Option<&botrail_physics::BodyProps>, SceneError> {
         let index = self.obstacle_index(name)?;
         Ok(self.obstacles[index].physics.as_ref())
     }

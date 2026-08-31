@@ -84,12 +84,8 @@ struct ConveyorHooks {
 
 impl PhysicsHooks for ConveyorHooks {
     fn modify_solver_contacts(&self, ctx: &mut ContactModificationContext) {
-        let dynamic1 = ctx
-            .rigid_body1
-            .is_some_and(|h| ctx.bodies[h].is_dynamic());
-        let dynamic2 = ctx
-            .rigid_body2
-            .is_some_and(|h| ctx.bodies[h].is_dynamic());
+        let dynamic1 = ctx.rigid_body1.is_some_and(|h| ctx.bodies[h].is_dynamic());
+        let dynamic2 = ctx.rigid_body2.is_some_and(|h| ctx.bodies[h].is_dynamic());
         // Dynamic-dynamic rides friction (a part on a carried part), and
         // scenery-scenery never solves contacts anyway.
         if dynamic1 == dynamic2 {
@@ -137,10 +133,7 @@ impl ContactCollector {
         c1: rapier3d_f64::geometry::ColliderHandle,
         c2: rapier3d_f64::geometry::ColliderHandle,
     ) -> Option<(RigidBodyHandle, RigidBodyHandle)> {
-        Some((
-            colliders.get(c1)?.parent()?,
-            colliders.get(c2)?.parent()?,
-        ))
+        Some((colliders.get(c1)?.parent()?, colliders.get(c2)?.parent()?))
     }
 }
 
@@ -152,8 +145,7 @@ impl EventHandler for ContactCollector {
         event: CollisionEvent,
         contact_pair: Option<&ContactPair>,
     ) {
-        let Some((b1, b2)) = Self::bodies(colliders, event.collider1(), event.collider2())
-        else {
+        let Some((b1, b2)) = Self::bodies(colliders, event.collider1(), event.collider2()) else {
             return;
         };
         let raw = match event {
@@ -288,7 +280,8 @@ impl PhysicsBackend for RapierBackend {
                 .ccd_enabled(desc.props.ccd)
                 .build();
             let handle = self.bodies.insert(body);
-            self.body_ids.insert(handle, BodyId(self.handles.len() as u32));
+            self.body_ids
+                .insert(handle, BodyId(self.handles.len() as u32));
             self.handles.push(handle);
             // An authored mass spreads over the parts as a uniform density,
             // so the center of mass and inertia still come from the shape.
@@ -337,7 +330,8 @@ impl PhysicsBackend for RapierBackend {
     }
 
     fn set_kinematic_pose(&mut self, body: BodyId, pose: Isometry3<f64>) {
-        self.body_mut(body).set_next_kinematic_position(to_pose(&pose));
+        self.body_mut(body)
+            .set_next_kinematic_position(to_pose(&pose));
     }
 
     fn set_body_kind(&mut self, body: BodyId, kind: BodyKind, velocity: Option<Velocity>) {
@@ -600,7 +594,10 @@ mod tests {
         let mut world = belt_world(0.6, 0.6, true);
         world.zones[0].active = false;
         let travelled = conveyed_velocity(&world, BodyId(1));
-        assert!(travelled.abs() < 1e-6, "moved {travelled} on a stopped belt");
+        assert!(
+            travelled.abs() < 1e-6,
+            "moved {travelled} on a stopped belt"
+        );
     }
 
     /// Frictionless contact transmits no belt drive: the surface slides
@@ -609,7 +606,10 @@ mod tests {
     fn zero_friction_slips_on_the_belt() {
         let world = belt_world(0.0, 0.0, true);
         let travelled = conveyed_velocity(&world, BodyId(1));
-        assert!(travelled.abs() < 5e-3, "moved {travelled} with zero friction");
+        assert!(
+            travelled.abs() < 5e-3,
+            "moved {travelled} with zero friction"
+        );
     }
 
     /// Dropped box lands on the floor slab, settles at its half height,

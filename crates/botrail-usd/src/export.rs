@@ -772,8 +772,9 @@ impl LayerBuilder {
         );
         spec.add(
             FieldKey::TargetPaths,
-            Value::PathListOp(ListOp::explicit(vec![sdf::path(target)
-                .expect("sanitized target path")])),
+            Value::PathListOp(ListOp::explicit(vec![
+                sdf::path(target).expect("sanitized target path")
+            ])),
         );
     }
 
@@ -2124,9 +2125,18 @@ mod tests {
         );
         assert_eq!(text.matches("def Material").count(), 1, "{text}");
         let material = block("def Material \"mat_1\"");
-        assert!(material.contains("float physics:staticFriction = 0.6"), "{material}");
-        assert!(material.contains("float physics:dynamicFriction = 0.6"), "{material}");
-        assert!(material.contains("float physics:restitution = 0.1"), "{material}");
+        assert!(
+            material.contains("float physics:staticFriction = 0.6"),
+            "{material}"
+        );
+        assert!(
+            material.contains("float physics:dynamicFriction = 0.6"),
+            "{material}"
+        );
+        assert!(
+            material.contains("float physics:restitution = 0.1"),
+            "{material}"
+        );
         assert!(
             material.contains("apiSchemas = [\"PhysicsMaterialAPI\"]"),
             "{material}"

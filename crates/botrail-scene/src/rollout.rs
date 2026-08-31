@@ -11,13 +11,13 @@ use botrail_traj::JointTrajectory;
 use nalgebra::Isometry3;
 use thiserror::Error;
 
-use botrail_physics::PhysicsBackend;
 use crate::seq::{
     vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
     Step,
 };
 use crate::Scene;
 use botrail_collide::ObstacleCollider;
+use botrail_physics::PhysicsBackend;
 use nalgebra::Vector3;
 
 #[derive(Debug, Error)]
@@ -1070,11 +1070,9 @@ impl SequenceTimeline {
                         return None;
                     }
                     let pose = pose_at(t)?;
-                    let local = inv
-                        .transform_point(&nalgebra::Point3::from(pose.translation.vector));
-                    (local.x.abs() <= half.x
-                        && local.y.abs() <= half.y
-                        && local.z.abs() <= half.z)
+                    let local =
+                        inv.transform_point(&nalgebra::Point3::from(pose.translation.vector));
+                    (local.x.abs() <= half.x && local.y.abs() <= half.y && local.z.abs() <= half.z)
                         .then_some(pose.translation.vector)
                 };
                 let mut open: Option<(f64, f64)> = None;
@@ -2754,10 +2752,7 @@ impl Rollout {
             // marking it dynamic needs no re-typing. Explicit `mass=`
             // still wins; group identities are a later story — a group's
             // mass is the whole subtree's.
-            let props = self
-                .world
-                .resolved_body_props(&o.name)
-                .unwrap_or_default();
+            let props = self.world.resolved_body_props(&o.name).unwrap_or_default();
             let id = BodyId(desc.bodies.len() as u32);
             names.push(o.name.clone());
             if props.kind == BodyKind::Dynamic {
@@ -2939,7 +2934,8 @@ impl Rollout {
         for k in 1..=phys.substeps {
             let f = k as f64 / phys.substeps as f64;
             for (id, from, to) in &supplied {
-                phys.backend.set_kinematic_pose(*id, interp_pose(from, to, f));
+                phys.backend
+                    .set_kinematic_pose(*id, interp_pose(from, to, f));
             }
             phys.backend.step(sub);
         }
@@ -2957,8 +2953,7 @@ impl Rollout {
                     .set_obstacle_pose(&body.name, pose)
                     .expect("dynamic obstacle exists");
             }
-            let moved = (pose.translation.vector - body.last_pose.translation.vector).norm()
-                > 1e-6
+            let moved = (pose.translation.vector - body.last_pose.translation.vector).norm() > 1e-6
                 || pose.rotation.angle_to(&body.last_pose.rotation) > 1e-6;
             if body.moving {
                 let track = self
@@ -2994,9 +2989,8 @@ impl Rollout {
         // Contact episodes: begins open them at this tick's clock, force
         // reports raise the running peak, ends close them into spans.
         let tick_contacts = phys.backend.drain_contacts();
-        let key = |a: botrail_physics::BodyId, b: botrail_physics::BodyId| {
-            (a.0.min(b.0), a.0.max(b.0))
-        };
+        let key =
+            |a: botrail_physics::BodyId, b: botrail_physics::BodyId| (a.0.min(b.0), a.0.max(b.0));
         for (a, b, p) in tick_contacts.started {
             phys.open_contacts.entry(key(a, b)).or_insert(OpenContact {
                 start: t,
@@ -13293,7 +13287,6 @@ mod biped_tests {
         let _ = UnitQuaternion::<f64>::identity();
         let _: Point3<f64> = Point3::origin();
     }
-
 }
 
 /// Scene-level physics bakes (design-physics.md P1): a dynamic part falls,
@@ -13347,11 +13340,7 @@ mod physics_tests {
             .unwrap();
         scene.upsert_sequence(Sequence {
             name: "settle".into(),
-            steps: vec![step(
-                "wait",
-                vec![],
-                Condition::Elapsed { seconds: 2.5 },
-            )],
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 2.5 })],
         });
         scene
     }
@@ -13411,9 +13400,7 @@ mod physics_tests {
         assert!(touch.position.z.abs() < 0.05, "impact near the floor top");
         // And the settle instant is queryable: it is the trailing hold.
         let settled = timeline.settled_at("part").expect("part settled");
-        assert!(
-            matches!(track.spans.last(), Some(TrackSpan::Hold { t0, .. }) if *t0 == settled)
-        );
+        assert!(matches!(track.spans.last(), Some(TrackSpan::Hold { t0, .. }) if *t0 == settled));
         assert_eq!(timeline.settled_at("floor"), None);
     }
 
@@ -13660,9 +13647,7 @@ mod physics_tests {
         let press = timeline
             .contacts
             .iter()
-            .find(|c| {
-                (c.a == "part" && c.b == "stopper") || (c.a == "stopper" && c.b == "part")
-            })
+            .find(|c| (c.a == "part" && c.b == "stopper") || (c.a == "stopper" && c.b == "part"))
             .expect("stopper press is a contact episode");
         assert!(press.start > rise - 1.0 && press.start < rise + 1.5);
         assert!(press.peak_force > 0.0);
@@ -13820,7 +13805,9 @@ mod physics_tests {
         // ...then shoved: displaced well clear of where it slept, still
         // on the floor (pushed, not batted into orbit or through it).
         let after = SequenceTimeline::object_pose(track, &[], timeline.duration).unwrap();
-        let moved = (after.translation.vector - before.translation.vector).xy().norm();
+        let moved = (after.translation.vector - before.translation.vector)
+            .xy()
+            .norm();
         assert!(moved > 0.05, "pushed {moved} m");
         assert!(
             (after.translation.z - 0.53).abs() < 5e-3,
@@ -13899,7 +13886,10 @@ mod physics_tests {
         // Released mid-swing (peak joint speed): the part flies on.
         let (track, at_release, settled) = bake(0.5);
         assert!(
-            track.spans.iter().any(|s| matches!(s, TrackSpan::Follow { .. })),
+            track
+                .spans
+                .iter()
+                .any(|s| matches!(s, TrackSpan::Follow { .. })),
             "attached ride is a Follow span"
         );
         let carried = (settled.translation.vector - at_release.translation.vector)
@@ -14035,10 +14025,8 @@ mod physics_tests {
                 .unwrap();
             if identified {
                 let mut part = crate::part::Part::default();
-                part.attributes.insert(
-                    "mass_kg".into(),
-                    crate::part::PartAttr::Number(5.0),
-                );
+                part.attributes
+                    .insert("mass_kg".into(), crate::part::PartAttr::Number(5.0));
                 scene
                     .set_part("part", Some(crate::part::PartTargetKind::Obstacle), part)
                     .unwrap();
@@ -14048,11 +14036,7 @@ mod physics_tests {
                 steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 1.5 })],
             });
             let timeline = scene
-                .simulate_sequences_with(
-                    &["settle"],
-                    &RolloutOptions::default(),
-                    rapier(),
-                )
+                .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
                 .unwrap();
             timeline
                 .contacts
@@ -14077,9 +14061,18 @@ mod physics_tests {
         let spans = vec![TrackSpan::Sampled {
             t0: 0.0,
             dt: 0.01,
-            poses: vec![Isometry3::translation(0.0, 0.0, 1.0), Isometry3::translation(0.0, 0.0, 0.9), Isometry3::translation(0.0, 0.0, 0.6)],
+            poses: vec![
+                Isometry3::translation(0.0, 0.0, 1.0),
+                Isometry3::translation(0.0, 0.0, 0.9),
+                Isometry3::translation(0.0, 0.0, 0.6),
+            ],
         }];
-        let at = |t: f64| SequenceTimeline::span_pose(&spans, &[], t).unwrap().translation.z;
+        let at = |t: f64| {
+            SequenceTimeline::span_pose(&spans, &[], t)
+                .unwrap()
+                .translation
+                .z
+        };
         assert_eq!(at(0.0), 1.0);
         assert!((at(0.005) - 0.95).abs() < 1e-12);
         assert_eq!(at(0.01), 0.9);

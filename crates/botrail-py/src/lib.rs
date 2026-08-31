@@ -505,9 +505,9 @@ fn physics_backend(
                 as Box<dyn botrail_physics::PhysicsBackend>
         }));
     }
-    let name: String = v.extract().map_err(|_| {
-        PyValueError::new_err("physics must be a bool or an engine name string")
-    })?;
+    let name: String = v
+        .extract()
+        .map_err(|_| PyValueError::new_err("physics must be a bool or an engine name string"))?;
     match name.as_str() {
         "rapier" => Ok(Some(Box::new(botrail_physics_rapier::RapierBackend::new()))),
         other => Err(PyValueError::new_err(format!(
@@ -1301,10 +1301,7 @@ impl Scene {
         angular_damping: Option<f64>,
         ccd: Option<bool>,
     ) -> PyResult<()> {
-        let mut props = self
-            .hub
-            .obstacle_physics(name)
-            .unwrap_or_default();
+        let mut props = self.hub.obstacle_physics(name).unwrap_or_default();
         if let Some(dynamic) = dynamic {
             props.kind = if dynamic {
                 botrail_physics::BodyKind::Dynamic
