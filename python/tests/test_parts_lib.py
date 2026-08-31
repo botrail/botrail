@@ -182,6 +182,55 @@ def test_generated_structures_round_trip_through_the_project(tmp_path: Path) -> 
     assert set(again.frames) == set(scene.frames)
 
 
+def test_wall_leaves_a_doorway_and_spans_it() -> None:
+    """A partition is piers and heads: what is left of the run once the
+    openings are taken out of it, plus the wall over each one. The pier
+    still collides, so a machine driven at it fails; the opening is the
+    only way through, and it comes with the frame a route is authored on."""
+    scene = scene_()
+    built = bt.parts.wall(
+        scene, "corridor", path=[(0.0, 2.4), (9.0, 2.4)], height=2.7,
+        thickness=0.12, openings=[(0, 3.0, 0.9), (0, 6.0, 1.2, 2.7)],
+        model="PT-2700",
+    )
+    piers = sorted(n for n in built.obstacles if n.startswith("corridor/e0_"))
+    assert len(piers) == 3          # 0..2.55, 3.45..5.4, 6.6..9.0
+    lo, hi = scene.obstacle_bounds("corridor/e0_1")
+    assert (lo[0], hi[0]) == pytest.approx((3.45, 5.40))
+    assert hi[2] == pytest.approx(2.7)
+    # A doorway shorter than the wall is spanned; one as tall as it is a gap.
+    heads = sorted(n for n in built.obstacles if "/head/" in n)
+    assert heads == ["corridor/head/e0_0"]
+    lo, hi = scene.obstacle_bounds(heads[0])
+    assert (lo[2], hi[2]) == pytest.approx((2.1, 2.7))
+    assert built.frames == ["corridor/opening0_0", "corridor/opening0_1"]
+    assert scene.frame("corridor/opening0_1")[0] == pytest.approx((6.0, 2.4, 0.0))
+    row = rows(scene)["corridor"]
+    assert (row["category"], row["model"], row["qty"]) == ("structure.wall", "PT-2700", 1)
+    assert row["attributes"]["length_mm"] == "9000"
+    built.remove(scene)
+    assert scene.obstacle_names == [] and scene.frames == {}
+
+
+def test_wall_closes_a_room_and_refuses_a_plan_that_does_not() -> None:
+    """Four corners closed is a room, and each shared corner gets a column
+    so two runs meet square. An opening that runs off its wall — or into
+    the one beside it — is a floor plan that does not close, and is
+    refused rather than quietly clipped."""
+    scene = scene_()
+    built = bt.parts.wall(scene, "room", path=[(0, 0), (4, 0), (4, 3), (0, 3)],
+                          closed=True, height=2.5, openings=[(0, 2.0, 0.9)])
+    assert sum("/corner" in n for n in built.obstacles) == 4
+    piers = [n for n in built.obstacles if n.startswith("room/e")]
+    assert len(piers) == 5  # two piers on the edge with the door, three whole runs
+    assert sum("/head/" in n for n in built.obstacles) == 1
+    with pytest.raises(ValueError, match="runs off edge 0"):
+        bt.parts.wall(scene, "bad", path=[(0, 0), (2, 0)], openings=[(0, 1.8, 0.9)])
+    with pytest.raises(ValueError, match="overlap"):
+        bt.parts.wall(scene, "bad", path=[(0, 0), (4, 0)],
+                      openings=[(0, 1.0, 1.0), (0, 1.8, 1.0)])
+
+
 def test_rack_stacks_shelves_and_puts_a_frame_on_each() -> None:
     """A bay of shelves on four uprights: `levels` boards, evenly spaced with
     the top one at the bay height, and a frame on each deck where the parts

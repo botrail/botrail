@@ -16,11 +16,12 @@ The `.usdc` files sitting beside some demos are pre-baked recordings of them.
 | `painting/` | `painting_demo.py` — spray cell basics. `painting_hood_demo.py` — coating a hood section mesh. |
 | `multi_robot/` | `dual_cell_demo.py` — two arms sharing one infeed, arbitrated by interlocks. |
 | `vehicles/` | `agv_cell_demo.py` — an AGV crossing the factory cell. `agv_sweep_demo.py` — sweeping its variants. `amr_demo.py` — a mobile manipulator assembled from catalog items. `lift_demo.py` — an AMR riding an elevator between floors. |
-| `legged/` | `legged_patrol_demo.py` — quadruped patrol. `humanoid_carry_demo.py` — humanoid carry. `stairs_delivery_demo.py` — a quadruped climbing catalog stairs. |
+| `legged/` | `legged_patrol_demo.py` — quadruped patrol. `humanoid_carry_demo.py` — humanoid carry. `stairs_delivery_demo.py` — a quadruped climbing catalog stairs. `building_delivery_demo.py` — the same dog delivering B1F→5F through a six-storey building, on the stairs, with the lift unused. |
 | `drone/` | `drone_survey_demo.py` — warehouse cell: UR12e case palletizing beside a drone cycle-counting the racks. |
 | `engineering/` | `cell_deliverables_demo.py` — the whole document set derived from one cell source. `equipment_cell_demo.py` — fence, conveyor and rack ordered from the catalog. |
 
 Demos that build on another one (`sequence_demo` on `demo`, `agv_cell_demo` on
-the factory cell, `stairs_delivery_demo` on the patrol robot) put the sibling
+the factory cell, `stairs_delivery_demo` and `building_delivery_demo` on the
+patrol robot) put the sibling
 group on `sys.path` themselves, so each script also runs standalone from any
 working directory.

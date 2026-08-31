@@ -271,3 +271,11 @@ like any other.
   `bt.parts.stairs` flight to a mezzanine: footfalls on the treads, the
   body on the slope. `--tall` raises the risers over the gait's
   `max_step` and shows the refusal, named.
+* `examples/legged/building_delivery_demo.py` — the same machine delivering
+  through a whole building: B1F 荷受け to 5F, switchback flights and 2.40 m
+  corridors, with a lift that is in the cell and never called. `--code`
+  orders the flight a person's building is built to and the bake refuses
+  it for the dog's rating; `--cart` leaves a cleaning cart across the
+  corridor. The building is `bt.parts.wall` and `bt.parts.stairs`, and
+  **the stair sets the storey** — order a different riser and the floors
+  move.

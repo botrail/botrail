@@ -1,6 +1,6 @@
-"""Standard structures, generated from parameters: fences, tables, pedestals,
-racks, conveyor bodies, pallets, light curtains — the scenery every cell has
-and nobody wants to model.
+"""Standard structures, generated from parameters: fences, walls, tables,
+pedestals, racks, conveyor bodies, pallets, light curtains, stairs — the
+scenery every cell has and nobody wants to model.
 
 Each generator composes the ordinary scene API — `add_box`, `add_frame`,
 `add_conveyor`, `add_beam_sensor`, `set_part` — so what it builds is plain
@@ -56,6 +56,10 @@ WOOD: Color = (0.52, 0.36, 0.18)
 CHECKER_PLATE: Color = (0.50, 0.52, 0.53)
 SAFETY_ORANGE: Color = (0.91, 0.36, 0.02)
 BELT: Color = (0.10, 0.10, 0.11)
+# The two surfaces a building is made of: painted plasterboard, and the
+# fair-faced slab it is built off.
+PLASTER: Color = (0.62, 0.60, 0.56)
+CONCRETE: Color = (0.40, 0.40, 0.39)
 
 
 @dataclass
@@ -1496,7 +1500,10 @@ def light_curtain(
     return built
 
 
-__all__ = ["Built", "conveyor", "fence", "light_curtain", "pallet", "pedestal", "table"]
+__all__ = [
+    "Built", "conveyor", "fence", "light_curtain", "pallet", "pedestal",
+    "rack", "stairs", "table", "wall",
+]
 
 
 # -------------------------------------------------------------------- stairs
@@ -1517,6 +1524,7 @@ def stairs(
     nosing: Optional[float] = None,
     rail_height: Optional[float] = None,
     rails: bool = True,
+    legs: bool = True,
     model: Optional[str] = None,
     rail_model: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -1550,7 +1558,10 @@ def stairs(
     combination the maker does not sell — too steep, too shallow for the
     walking rule `2 x rise + tread` — is refused with the numbers.
 
-    `rails=False` drops the handrail (a flight against a wall)."""
+    `rails=False` drops the handrail (a flight against a wall);
+    `legs=False` drops the support leg under the high end, which a flight
+    slung between two landings — a storey of a building stair — does not
+    have."""
     spec = None
     params: dict = {}
     if catalog is not None:
@@ -1676,7 +1687,7 @@ def stairs(
     leg_x = run - max(0.15, tread / 2.0)
     leg_top = pitch_z(leg_x) - stringer * cos_p
     for side, uy in (("l", 1.0), ("r", -1.0)):
-        if leg_top > 0.1:
+        if legs and leg_top > 0.1:
             built.obstacles.append(
                 scene.add_box(
                     f"{name}/leg_{side}",
@@ -1782,4 +1793,178 @@ def stairs(
             model=rail_model or spec.part_number("handrail", **params),
             **_kg(spec.mass_kg("handrail", **params)),
         )
+    return built
+
+
+# ---------------------------------------------------------------------- wall
+
+
+def _wall_openings(
+    edge: int, openings: Sequence[Sequence[float]], length: float,
+    head: float, height: float,
+) -> list[tuple[float, float, float]]:
+    """The openings on one edge as `(start, end, head)`, in order along it.
+
+    Refused rather than clipped: an opening that runs off the end of its
+    wall, or into the one beside it, is a floor plan that does not close,
+    and a silently shortened door is a route that passes a wall that is
+    not there."""
+    out: list[tuple[float, float, float]] = []
+    for spec in openings:
+        values = [float(v) for v in spec]
+        if len(values) < 3:
+            raise ValueError(
+                "wall: an opening is (edge, centre, width[, head]), "
+                f"got {tuple(spec)!r}"
+            )
+        if int(values[0]) != edge:
+            continue
+        centre, width = values[1], values[2]
+        clear = values[3] if len(values) > 3 else head
+        if width <= 0 or clear <= 0:
+            raise ValueError("wall: an opening's width and head must be positive")
+        start, end = centre - width / 2.0, centre + width / 2.0
+        if start < -1e-9 or end > length + 1e-9:
+            raise ValueError(
+                f"wall: the opening at {centre:.3f} m is {width:.3f} m wide, which "
+                f"runs off edge {edge} ({length:.3f} m long)"
+            )
+        out.append((start, end, min(clear, height)))
+    out.sort()
+    for (_a0, a1, _ah), (b0, _b1, _bh) in zip(out, out[1:]):
+        if b0 < a1 - 1e-9:
+            raise ValueError(
+                f"wall: two openings on edge {edge} overlap at {b0:.3f} m — "
+                "one opening, or two with a pier between them"
+            )
+    return out
+
+
+def wall(
+    scene,
+    name: str,
+    path: Sequence[Point2],
+    *,
+    height: float = 2.7,
+    thickness: float = 0.12,
+    base_z: float = 0.0,
+    closed: bool = False,
+    openings: Sequence[Sequence[float]] = (),
+    head: float = 2.1,
+    detail: Optional[str] = None,
+    color: Color = PLASTER,
+    trim_color: Optional[Color] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    **attributes,
+) -> Built:
+    """A partition along `path` (floor corners, metres): `thickness` thick,
+    `height` tall, standing off `base_z`. `closed` joins the last corner back
+    to the first, so a four-corner path is a room.
+
+    `openings=[(edge, centre, width), ...]` cuts a doorway `width` wide,
+    centred `centre` metres along that edge, and spans the wall over it —
+    the pier each side and the head above are ordinary obstacles, so a
+    machine driven at the pier fails its aisle check while one sent through
+    the opening passes. A fourth element sets that opening's clear height
+    (`head` otherwise); at or above the wall's own height it is a gap
+    through it, with nothing over. Each one adds the frame
+    `<name>/opening{edge}_{i}` on the floor at its centre, facing along the
+    wall — that is where a route is authored through it.
+
+    Corners get a `thickness` square column so two runs meet square, and
+    `detail="full"` adds a skirting to each face and a lining round each
+    opening as decoration (drawn, never collided). Pins one part
+    (`structure.wall`) carrying the run's length, height and thickness.
+
+        bt.parts.wall(scene, "corridor/north", path=[(0, 2.4), (18, 2.4)],
+                      height=2.7, openings=[(0, 6.0, 0.9), (0, 11.0, 0.9)])
+    """
+    pts = [(float(p[0]), float(p[1])) for p in path]
+    if len(pts) < 2:
+        raise ValueError("wall: path needs at least two corners")
+    if height <= 0 or thickness <= 0:
+        raise ValueError("wall: height and thickness must be positive")
+
+    mode = _detail(detail, False)
+    trim = trim_color if trim_color is not None else color
+    edges = list(zip(pts, pts[1:] + ([pts[0]] if closed and len(pts) > 2 else [])))
+    built = Built(name)
+    run = 0.0
+
+    # A column at every corner two runs share. Without it the two boxes
+    # meet on a mitre and leave a notch you can see through — and, at an
+    # acute corner, one a foot could fall into.
+    corners = list(range(len(pts))) if closed and len(pts) > 2 else list(range(1, len(pts) - 1))
+    for i in corners:
+        x, y = pts[i]
+        built.obstacles.append(
+            scene.add_box(f"{name}/corner{i}", size=(thickness, thickness, height),
+                          position=(x, y, base_z + height / 2.0), color=color)
+        )
+
+    for e, ((x0, y0), (x1, y1)) in enumerate(edges):
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 1e-9:
+            continue
+        run += length
+        yaw = math.atan2(y1 - y0, x1 - x0)
+        q = _yaw_quat(yaw)
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+
+        def at(along: float, across: float = 0.0, z: float = 0.0) -> Point3:
+            return (x0 + ux * along - uy * across, y0 + uy * along + ux * across, z)
+
+        holes = _wall_openings(e, openings, length, head, height)
+        # The solid piers: what is left of the run once the openings are
+        # taken out of it.
+        piers = []
+        cut = 0.0
+        for start, end, _clear in holes:
+            if start - cut > 1e-6:
+                piers.append((cut, start))
+            cut = end
+        if length - cut > 1e-6:
+            piers.append((cut, length))
+        for i, (a, b) in enumerate(piers):
+            built.obstacles.append(
+                scene.add_box(f"{name}/e{e}_{i}", size=(b - a, thickness, height),
+                              position=at((a + b) / 2.0, 0.0, base_z + height / 2.0),
+                              quaternion=q, color=color)
+            )
+            if mode == "full":
+                for side, across in (("i", (thickness + 0.012) / 2.0),
+                                     ("o", -(thickness + 0.012) / 2.0)):
+                    _trim(scene, built, f"{name}/trim/skirt_e{e}_{i}{side}",
+                          (b - a, 0.012, 0.06), at((a + b) / 2.0, across, base_z + 0.03),
+                          q, DARK_STEEL)
+        for i, (start, end, clear) in enumerate(holes):
+            centre = (start + end) / 2.0
+            if height - clear > 1e-6:
+                built.obstacles.append(
+                    scene.add_box(f"{name}/head/e{e}_{i}", size=(end - start, thickness, height - clear),
+                                  position=at(centre, 0.0, base_z + (height + clear) / 2.0),
+                                  quaternion=q, color=color)
+                )
+            frame = f"{name}/opening{e}_{i}"
+            scene.add_frame(frame, position=at(centre, 0.0, base_z), quaternion=q)
+            built.frames.append(frame)
+            if mode == "full":
+                lining = thickness + 0.05
+                for side, along in (("a", start), ("b", end)):
+                    _trim(scene, built, f"{name}/trim/jamb_e{e}_{i}{side}",
+                          (0.03, lining, clear), at(along, 0.0, base_z + clear / 2.0), q, trim)
+                _trim(scene, built, f"{name}/trim/head_e{e}_{i}",
+                      (end - start, lining, 0.03), at(centre, 0.0, base_z + clear),
+                      q, trim)
+
+    scene.set_part(
+        name, kind="group", category="structure.wall", qty=1,
+        **_identity(model, manufacturer, {
+            "length_mm": str(round(run * 1000)),
+            "height_mm": str(round(height * 1000)),
+            "thickness_mm": str(round(thickness * 1000)),
+            **attributes,
+        }),
+    )
     return built
