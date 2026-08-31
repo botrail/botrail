@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   BranchTakenMsg,
   CollisionPairMsg,
+  ContactMsg,
   FlashMsg,
   FrameMsg,
   ToolpathOverlayMsg,
@@ -440,6 +441,9 @@ export interface StudioState {
     branches: BranchTakenMsg[];
     /** Scenario the bake ran under; null = the unmodified scene. */
     scenario: string | null;
+    /** Touch episodes of a physics bake (empty on a kinematic one) —
+     * what the contact flashes pop from during playback. */
+    contacts: ContactMsg[];
   } | null;
   /** The USD recording behind the current playback, when there is one. */
   recording: { source: string; mode: string; warnings: string[] } | null;
@@ -829,6 +833,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             signals: msg.timeline.signals,
             branches: msg.timeline.branches,
             scenario: msg.scenario ?? null,
+            contacts: msg.timeline.contacts ?? [],
           },
           segmentEnds: msg.timeline.step_spans.map((s) => s.end),
           ...startPlayback(tracksFromTimeline(msg.timeline)),
@@ -869,6 +874,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             signals: msg.timeline.signals,
             branches: msg.timeline.branches,
             scenario: null,
+            contacts: msg.timeline.contacts ?? [],
           },
           segmentEnds: [],
           ...startPlayback(tracksFromTimeline(msg.timeline)),

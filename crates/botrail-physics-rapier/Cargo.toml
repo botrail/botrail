@@ -1,0 +1,18 @@
+[package]
+name = "botrail-physics-rapier"
+description = "Rapier adapter for botrail-physics (rigid-body dynamics)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+botrail-physics.workspace = true
+nalgebra.workspace = true
+parry3d-f64.workspace = true
+# Pinned to 0.34: the newest series that shares parry3d-f64 0.29 with the
+# workspace, which is what lets botrail-collide's SharedShape/VHACD assets
+# become rapier colliders without conversion (design-physics.md 判断 D2).
+rapier3d-f64 = { version = "0.34", default-features = true }

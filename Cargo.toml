@@ -7,6 +7,8 @@ members = [
     "crates/botrail-collide",
     "crates/botrail-plan",
     "crates/botrail-traj",
+    "crates/botrail-physics",
+    "crates/botrail-physics-rapier",
     "crates/botrail-export",
     "crates/botrail-scene",
     "crates/botrail-session",
@@ -31,6 +33,8 @@ botrail-kin = { path = "crates/botrail-kin" }
 botrail-collide = { path = "crates/botrail-collide" }
 botrail-plan = { path = "crates/botrail-plan" }
 botrail-traj = { path = "crates/botrail-traj" }
+botrail-physics = { path = "crates/botrail-physics" }
+botrail-physics-rapier = { path = "crates/botrail-physics-rapier" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
 botrail-session = { path = "crates/botrail-session" }

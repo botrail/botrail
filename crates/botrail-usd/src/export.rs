@@ -97,6 +97,26 @@ pub struct ObjectSpec {
     /// `visibility`, so a magazine full of stock stays out of the picture
     /// in usdview exactly as it does in the studio.
     pub visible: Vec<bool>,
+    /// Authored physics, exported as UsdPhysics applied schemas (see
+    /// [`PhysicsSpec`]). `None` leaves the prim exactly as before.
+    pub physics: Option<PhysicsSpec>,
+}
+
+/// UsdPhysics authoring for one exported obstacle — the write-side of the
+/// vocabulary the robot importer already reads. A dynamic body gets
+/// `PhysicsRigidBodyAPI` (+ `PhysicsMassAPI` with `physics:mass` when the
+/// mass is known — otherwise the consumer's density default applies,
+/// which in PhysX is the same 1000 kg/m³ botrail uses); every annotated
+/// obstacle gets `PhysicsCollisionAPI` and a bound physics material
+/// carrying friction/restitution. Un-annotated obstacles stay visual-only
+/// — collision in the consumer is opt-in per obstacle, like the bake.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhysicsSpec {
+    pub dynamic: bool,
+    /// Resolved mass (explicit or from the part identity), kg.
+    pub mass: Option<f64>,
+    pub friction: f64,
+    pub restitution: f64,
 }
 
 /// One robot's animation bundle: the instance names the prim under
@@ -732,6 +752,29 @@ impl LayerBuilder {
 
     fn attr(&mut self, prim: &str, name: &str, type_name: &str, value: AttrValue) {
         self.attr_meta(prim, name, type_name, value, &[]);
+    }
+
+    /// Authors a relationship with one explicit target
+    /// (`rel <name> = <target>`).
+    fn rel(&mut self, prim: &str, name: &str, target: &str) {
+        let props = self.prop_children.entry(prim.to_string()).or_default();
+        if !props.iter().any(|p| p == name) {
+            props.push(name.to_string());
+        }
+        let path = sdf::path(prim)
+            .expect("sanitized prim path")
+            .append_property(name)
+            .expect("valid property name");
+        let spec = self.data.create_spec(path, SpecType::Relationship);
+        spec.add(
+            FieldKey::Variability,
+            Value::Variability(Variability::Uniform),
+        );
+        spec.add(
+            FieldKey::TargetPaths,
+            Value::PathListOp(ListOp::explicit(vec![sdf::path(target)
+                .expect("sanitized target path")])),
+        );
     }
 
     /// [`attr`](Self::attr) plus attribute *metadata* — fields on the
@@ -1788,6 +1831,9 @@ fn author_objects(
         return Ok(());
     }
     layer.ensure_prim("/World/Env", Specifier::Def, Some("Xform"));
+    // Physics materials dedupe on (friction, restitution): one prim per
+    // distinct pair, shared by every obstacle that binds it.
+    let mut materials: HashMap<(u64, u64), String> = HashMap::new();
     for obj in objects {
         let mut parent = "/World/Env".to_string();
         let segments: Vec<&str> = obj.name.split('/').filter(|s| !s.is_empty()).collect();
@@ -1833,8 +1879,86 @@ fn author_objects(
                 .collect();
             layer.attr(&prim, "visibility", "token", AttrValue::Samples(samples));
         }
+        if let Some(phys) = &obj.physics {
+            author_object_physics(layer, &prim, phys, &mut materials);
+        }
     }
     Ok(())
+}
+
+/// UsdPhysics applied schemas for one obstacle prim, plus its bound
+/// physics material (created on first use, shared thereafter). This is
+/// the write-side of the vocabulary the robot importer reads
+/// (`PhysicsRigidBodyAPI` and friends) — what makes the exported cell
+/// re-simulatable in a UsdPhysics consumer.
+fn author_object_physics(
+    layer: &mut LayerBuilder,
+    prim: &str,
+    phys: &PhysicsSpec,
+    materials: &mut HashMap<(u64, u64), String>,
+) {
+    let mut schemas: Vec<openusd::tf::Token> = Vec::new();
+    if phys.dynamic {
+        schemas.push("PhysicsRigidBodyAPI".into());
+    }
+    schemas.push("PhysicsCollisionAPI".into());
+    if phys.dynamic && phys.mass.is_some() {
+        schemas.push("PhysicsMassAPI".into());
+    }
+    // The physics-material binding below is a `material:binding:*` rel,
+    // which pxr validation requires MaterialBindingAPI for.
+    schemas.push("MaterialBindingAPI".into());
+    layer.prim_field(
+        prim,
+        FieldKey::ApiSchemas,
+        Value::TokenListOp(ListOp::prepended(schemas)),
+    );
+    if phys.dynamic {
+        if let Some(mass) = phys.mass {
+            layer.attr(
+                prim,
+                "physics:mass",
+                "float",
+                AttrValue::Default(Value::Float(mass as f32)),
+            );
+        }
+    }
+    let key = (phys.friction.to_bits(), phys.restitution.to_bits());
+    let next = materials.len() + 1;
+    let friction = phys.friction as f32;
+    let restitution = phys.restitution as f32;
+    let material = materials.entry(key).or_insert_with(|| {
+        let path = format!("/World/PhysicsMaterials/mat_{next}");
+        layer.ensure_prim("/World/PhysicsMaterials", Specifier::Def, Some("Scope"));
+        layer.ensure_prim(&path, Specifier::Def, Some("Material"));
+        layer.prim_field(
+            &path,
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(ListOp::prepended(vec![openusd::tf::Token::from(
+                "PhysicsMaterialAPI",
+            )])),
+        );
+        layer.attr(
+            &path,
+            "physics:staticFriction",
+            "float",
+            AttrValue::Default(Value::Float(friction)),
+        );
+        layer.attr(
+            &path,
+            "physics:dynamicFriction",
+            "float",
+            AttrValue::Default(Value::Float(friction)),
+        );
+        layer.attr(
+            &path,
+            "physics:restitution",
+            "float",
+            AttrValue::Default(Value::Float(restitution)),
+        );
+        path
+    });
+    layer.rel(prim, "material:binding:physics", material);
 }
 
 /// Shared 2-DOF test articulation (export + recording tests).
@@ -1915,6 +2039,103 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
 
 #[cfg(test)]
 mod tests {
+    /// Physics-annotated obstacles carry UsdPhysics into the layer: a
+    /// dynamic part gets RigidBody + Collision + Mass with `physics:mass`,
+    /// static scenery with props gets Collision only, both bind one
+    /// deduped physics material with friction/restitution — and an
+    /// un-annotated obstacle stays exactly the visual it always was.
+    #[test]
+    fn physics_specs_author_usdphysics() {
+        let objects = vec![
+            ObjectSpec {
+                name: "part".into(),
+                geometry: Geometry::Box {
+                    size: Vector3::new(0.1, 0.05, 0.03),
+                },
+                track: PoseTrack::Static(Isometry3::translation(0.0, 0.0, 0.5)),
+                color: None,
+                visible: Vec::new(),
+                physics: Some(PhysicsSpec {
+                    dynamic: true,
+                    mass: Some(2.5),
+                    friction: 0.6,
+                    restitution: 0.1,
+                }),
+            },
+            ObjectSpec {
+                name: "table".into(),
+                geometry: Geometry::Box {
+                    size: Vector3::new(1.0, 1.0, 0.7),
+                },
+                track: PoseTrack::Static(Isometry3::translation(0.0, 0.0, 0.35)),
+                color: None,
+                visible: Vec::new(),
+                physics: Some(PhysicsSpec {
+                    dynamic: false,
+                    mass: None,
+                    friction: 0.6,
+                    restitution: 0.1,
+                }),
+            },
+            ObjectSpec {
+                name: "decor".into(),
+                geometry: Geometry::Sphere { radius: 0.1 },
+                track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.1)),
+                color: None,
+                visible: Vec::new(),
+                physics: None,
+            },
+        ];
+        let input = AnimationInput {
+            robots: &[],
+            times: &[0.0],
+            objects: &objects,
+            curves: &[],
+            cameras: &[],
+        };
+        let exported = export_animation(&input, &ExportOptions::default(), "phys").unwrap();
+        let text = exported.to_usda().unwrap();
+        let block = |head: &str| -> String {
+            let rest = text.split(head).nth(1).expect("prim authored");
+            rest[..rest.find("\n    def ").unwrap_or(rest.len())].to_string()
+        };
+        let part = block("def Cube \"part\"");
+        assert!(
+            part.contains(
+                "apiSchemas = [\"PhysicsRigidBodyAPI\", \"PhysicsCollisionAPI\", \"PhysicsMassAPI\", \"MaterialBindingAPI\"]"
+            ),
+            "{part}"
+        );
+        assert!(part.contains("float physics:mass = 2.5"), "{part}");
+        assert!(
+            part.contains("rel material:binding:physics = </World/PhysicsMaterials/mat_1>"),
+            "{part}"
+        );
+        let table = block("def Cube \"table\"");
+        assert!(
+            table.contains("apiSchemas = [\"PhysicsCollisionAPI\", \"MaterialBindingAPI\"]"),
+            "{table}"
+        );
+        assert!(!table.contains("physics:mass"), "{table}");
+        // Same (friction, restitution) → the same material prim, once.
+        assert!(
+            table.contains("rel material:binding:physics = </World/PhysicsMaterials/mat_1>"),
+            "{table}"
+        );
+        assert_eq!(text.matches("def Material").count(), 1, "{text}");
+        let material = block("def Material \"mat_1\"");
+        assert!(material.contains("float physics:staticFriction = 0.6"), "{material}");
+        assert!(material.contains("float physics:dynamicFriction = 0.6"), "{material}");
+        assert!(material.contains("float physics:restitution = 0.1"), "{material}");
+        assert!(
+            material.contains("apiSchemas = [\"PhysicsMaterialAPI\"]"),
+            "{material}"
+        );
+        let decor = block("def Sphere \"decor\"");
+        assert!(!decor.contains("apiSchemas"), "{decor}");
+        assert!(!decor.contains("physics"), "{decor}");
+    }
+
     use super::*;
     use crate::articulation::{import_robot, RobotImportOptions};
     use nalgebra::Matrix3;
@@ -2319,6 +2540,7 @@ mod tests {
                 track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.05)),
                 color: Some([0.8, 0.3, 0.1]),
                 visible: Vec::new(),
+                physics: None,
             },
             ObjectSpec {
                 name: "held".into(),
@@ -2326,6 +2548,7 @@ mod tests {
                 track: PoseTrack::Sampled(held_track.clone()),
                 color: None,
                 visible: Vec::new(),
+                physics: None,
             },
         ];
         let robots = [RobotAnimation {
@@ -2565,6 +2788,7 @@ mod tests {
             track: PoseTrack::Sampled(moved),
             color: Some([0.2, 0.5, 0.7]),
             visible: vec![true, true, false],
+            physics: None,
         }];
         let robots = [RobotAnimation {
             name: "Robot",
@@ -2695,6 +2919,7 @@ mod tests {
             track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.05)),
             color: None,
             visible: Vec::new(),
+            physics: None,
         }];
         let cameras = [
             CameraSpec {

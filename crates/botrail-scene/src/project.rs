@@ -624,6 +624,7 @@ impl Scene {
                     attached_to: self
                         .attachment(&o.name)
                         .map(|a| crate::wire::attachment_msg(self, a)),
+                    physics: o.physics.as_ref().map(Into::into),
                 })
                 .collect(),
             motions: self.motions().iter().map(|m| motion_msg(self, m)).collect(),
@@ -766,6 +767,7 @@ impl Scene {
                 o.visible,
                 o.walkable,
                 o.legend.as_ref().map(Into::into),
+                o.physics.as_ref().map(Into::into),
             ));
         }
 
@@ -773,7 +775,7 @@ impl Scene {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (spec, enabled, visible, walkable, legend) in obstacles {
+        for (spec, enabled, visible, walkable, legend, physics) in obstacles {
             let final_name = self
                 .add_obstacle(&spec.name, spec.geometry, spec.pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
@@ -782,6 +784,8 @@ impl Scene {
             self.set_obstacle_material(&final_name, spec.material)
                 .expect("obstacle was just added");
             self.set_obstacle_legend(&final_name, legend)
+                .expect("obstacle was just added");
+            self.set_obstacle_physics(&final_name, physics)
                 .expect("obstacle was just added");
             if !enabled {
                 self.set_obstacle_enabled(&final_name, false)

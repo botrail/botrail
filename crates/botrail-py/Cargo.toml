@@ -25,6 +25,8 @@ botrail-plan.workspace = true
 botrail-traj.workspace = true
 botrail-export.workspace = true
 botrail-scene = { workspace = true, features = ["parallel", "schema"] }
+botrail-physics.workspace = true
+botrail-physics-rapier.workspace = true
 botrail-session.workspace = true
 botrail-usd.workspace = true
 nalgebra.workspace = true

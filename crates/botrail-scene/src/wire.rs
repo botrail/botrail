@@ -339,6 +339,11 @@ pub struct ObstacleMsg {
     /// Present while the obstacle is attached to (grasped by) a robot link.
     #[serde(default)]
     pub attached_to: Option<AttachmentMsg>,
+    /// Authored physics properties. Absent for ordinary scenery — files
+    /// written before this existed simply have none, which is what they
+    /// meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<PhysicsMsg>,
 }
 
 /// Metalness/roughness, the pair every viewer botrail hands a scene to
@@ -349,6 +354,64 @@ pub struct ObstacleMsg {
 pub struct MaterialMsg {
     pub metalness: f32,
     pub roughness: f32,
+}
+
+/// Authored physics of an obstacle (design-physics.md). Inert on a
+/// kinematic bake: absent props — and present ones, when `physics` is not
+/// requested — leave the obstacle the static body it always was.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PhysicsMsg {
+    /// A dynamic body: gravity, contact and friction own its pose during a
+    /// physics bake. (Kinematic bodies are rollout-internal — robot links,
+    /// device-driven scenery — and never authored on an obstacle.)
+    pub dynamic: bool,
+    /// Total mass in kg; absent derives it from the collision shape's
+    /// volume at 1000 kg/m³.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass: Option<f64>,
+    pub friction: f64,
+    pub restitution: f64,
+    pub linear_damping: f64,
+    pub angular_damping: f64,
+    /// Continuous collision detection, for small fast parts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ccd: bool,
+}
+
+impl From<&botrail_physics::BodyProps> for PhysicsMsg {
+    fn from(p: &botrail_physics::BodyProps) -> Self {
+        PhysicsMsg {
+            dynamic: p.kind == botrail_physics::BodyKind::Dynamic,
+            mass: p.mass,
+            friction: p.material.friction,
+            restitution: p.material.restitution,
+            linear_damping: p.linear_damping,
+            angular_damping: p.angular_damping,
+            ccd: p.ccd,
+        }
+    }
+}
+
+impl From<&PhysicsMsg> for botrail_physics::BodyProps {
+    fn from(m: &PhysicsMsg) -> Self {
+        botrail_physics::BodyProps {
+            kind: if m.dynamic {
+                botrail_physics::BodyKind::Dynamic
+            } else {
+                botrail_physics::BodyKind::Static
+            },
+            mass: m.mass,
+            material: botrail_physics::PhysicsMaterial {
+                friction: m.friction,
+                restitution: m.restitution,
+            },
+            linear_damping: m.linear_damping,
+            angular_damping: m.angular_damping,
+            ccd: m.ccd,
+        }
+    }
 }
 
 impl From<crate::Material> for MaterialMsg {
@@ -1192,6 +1255,25 @@ pub struct TimelineMsg {
     /// Every selection divergence this bake resolved, in resolution order.
     #[serde(default)]
     pub branches: Vec<BranchTakenMsg>,
+    /// Touch episodes of a physics bake; empty on a kinematic one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<ContactMsg>,
+}
+
+/// One touch episode of a physics bake (see `rollout::ContactSpan`):
+/// what touched what, when, where it began, and how hard at the peak.
+/// The studio flashes episode starts during playback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ContactMsg {
+    pub a: String,
+    pub b: String,
+    pub start: f64,
+    pub end: f64,
+    /// World position where the touch began.
+    pub position: [f64; 3],
+    /// Peak total contact force over the episode (N).
+    pub peak_force: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2989,6 +3071,7 @@ pub fn obstacles_message(
                 material: o.material.map(Into::into),
                 legend: o.legend.as_ref().map(Into::into),
                 attached_to: scene.attachment(&o.name).map(|a| attachment_msg(scene, a)),
+                physics: o.physics.as_ref().map(Into::into),
             })
             .collect(),
     }
@@ -3113,6 +3196,7 @@ mod tests {
     fn timeline_span_attribution_and_branches_roundtrip() {
         let msg = TimelineMsg {
             vehicles: Vec::new(),
+            contacts: Vec::new(),
             duration: 1.0,
             robots: vec![],
             objects: vec![],

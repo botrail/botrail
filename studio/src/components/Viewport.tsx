@@ -12,6 +12,7 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
+import { ContactFlashView } from "./ContactFlashView";
 import { SensorView } from "./SensorView";
 import { CameraView } from "./CameraView";
 import { LidarView } from "./LidarView";
@@ -209,6 +210,7 @@ export function Viewport() {
             <LidarView />
           </Aid>
           <FlashView />
+          <ContactFlashView />
           <SprayView />
           <Aid>
             <VehiclePathView />

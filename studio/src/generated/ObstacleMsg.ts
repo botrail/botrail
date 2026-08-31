@@ -3,6 +3,7 @@ import type { AttachmentMsg } from "./AttachmentMsg";
 import type { GeometryMsg } from "./GeometryMsg";
 import type { LegendMsg } from "./LegendMsg";
 import type { MaterialMsg } from "./MaterialMsg";
+import type { PhysicsMsg } from "./PhysicsMsg";
 import type { PoseMsg } from "./PoseMsg";
 
 export type ObstacleMsg = { name: string, geometry: GeometryMsg, 
@@ -46,4 +47,10 @@ legend?: LegendMsg | null,
 /**
  * Present while the obstacle is attached to (grasped by) a robot link.
  */
-attached_to: AttachmentMsg | null, };
+attached_to: AttachmentMsg | null, 
+/**
+ * Authored physics properties. Absent for ordinary scenery — files
+ * written before this existed simply have none, which is what they
+ * meant.
+ */
+physics?: PhysicsMsg | null, };

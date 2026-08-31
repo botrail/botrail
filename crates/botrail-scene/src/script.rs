@@ -1893,6 +1893,8 @@ mod tests {
             duration: 1.0,
             sequences: vec!["s".into()],
             scenario: None,
+            physics: None,
+            contacts: vec![],
             robots: vec![track(ramp_to)],
             objects: vec![],
             vehicles: vec![],

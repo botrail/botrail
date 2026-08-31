@@ -213,6 +213,17 @@ class Scene:
         metalness: Optional[float] = None,
         roughness: Optional[float] = None,
     ) -> None: ...
+    def set_physics(
+        self,
+        name: str,
+        dynamic: Optional[bool] = None,
+        mass: Optional[float] = None,
+        friction: Optional[float] = None,
+        restitution: Optional[float] = None,
+        linear_damping: Optional[float] = None,
+        angular_damping: Optional[float] = None,
+        ccd: Optional[bool] = None,
+    ) -> None: ...
     def set_obstacle_legend(
         self,
         name: str,
@@ -403,6 +414,7 @@ class Scene:
         plan_resolution: Optional[float] = None,
         scenario: Optional[str] = None,
         toolpath_spin: Optional[str] = None,
+        physics: Union[bool, str, None] = None,
     ) -> "SequenceTimeline": ...
     def simulate_sequences(
         self,
@@ -412,6 +424,7 @@ class Scene:
         plan_resolution: Optional[float] = None,
         scenario: Optional[str] = None,
         toolpath_spin: Optional[str] = None,
+        physics: Union[bool, str, None] = None,
     ) -> "SequenceTimeline": ...
     def add_scenario(
         self,
@@ -972,6 +985,12 @@ class SequenceTimeline:
     def sequences(self) -> list[str]: ...
     @property
     def scenario(self) -> Optional[str]: ...
+    @property
+    def physics(self) -> Optional[str]: ...
+    @property
+    def contacts(self) -> list[dict[str, Any]]: ...
+    def settled_at(self, name: str) -> Optional[float]: ...
+    def conveyor_stalls(self) -> list[dict[str, Any]]: ...
     @property
     def branches(self) -> list[tuple[str, str, int]]: ...
     def to_script(

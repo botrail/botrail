@@ -461,6 +461,18 @@ impl SceneHub {
         botrail_session::set_obstacle_legend(self, name, legend)
     }
 
+    pub fn set_obstacle_physics(
+        &self,
+        name: &str,
+        physics: Option<botrail_physics::BodyProps>,
+    ) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_physics(self, name, physics)
+    }
+
+    pub fn obstacle_physics(&self, name: &str) -> Option<botrail_physics::BodyProps> {
+        self.with_scene(|scene| scene.obstacle_physics(name).ok().flatten().cloned())
+    }
+
     pub fn set_obstacle_pose(&self, name: &str, pose: Isometry3<f64>) -> Result<(), SceneError> {
         botrail_session::set_obstacle_pose(self, name, pose)
     }
@@ -948,15 +960,6 @@ impl SceneHub {
 
     /// Rolls out a sequence (broadcasting the result to the studio) and
     /// returns the timeline plus the snapshot it ran against.
-    pub fn simulate_sequence(
-        &self,
-        name: &str,
-        scenario: Option<&str>,
-        options: &botrail_scene::rollout::RolloutOptions,
-    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
-        self.simulate_sequences(&[name], scenario, options)
-    }
-
     /// Rolls out several sequences concurrently (one PLC scan advances
     /// every program, in list order); one timeline comes back. Under a
     /// scenario, the returned snapshot is the *applied* one — the world
@@ -968,6 +971,18 @@ impl SceneHub {
         scenario: Option<&str>,
         options: &botrail_scene::rollout::RolloutOptions,
     ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        self.simulate_sequences_with(names, scenario, options, None)
+    }
+
+    /// [`simulate_sequences`](Self::simulate_sequences) with an injected
+    /// physics backend (design-physics.md).
+    pub fn simulate_sequences_with(
+        &self,
+        names: &[&str],
+        scenario: Option<&str>,
+        options: &botrail_scene::rollout::RolloutOptions,
+        backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
         let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
         let mut snapshot = self.snapshot();
         if let Some(scenario) = scenario {
@@ -975,8 +990,9 @@ impl SceneHub {
                 .apply_scenario(scenario)
                 .map_err(|e| e.to_string())?;
         }
-        let timeline =
-            botrail_session::simulate_sequences_and_emit(self, names, scenario, options)?;
+        let timeline = botrail_session::simulate_sequences_and_emit_with(
+            self, names, scenario, options, backend,
+        )?;
         Ok((timeline, snapshot))
     }
 
@@ -1040,6 +1056,16 @@ impl SceneHub {
                     track,
                     color: o.color,
                     visible: Vec::new(),
+                    physics: scene.resolved_body_props(&o.name).map(|props| {
+                        botrail_usd::export::PhysicsSpec {
+                            dynamic: props.kind == botrail_physics::BodyKind::Dynamic,
+                            mass: (props.kind == botrail_physics::BodyKind::Dynamic)
+                                .then_some(props.mass)
+                                .flatten(),
+                            friction: props.material.friction,
+                            restitution: props.material.restitution,
+                        }
+                    }),
                 }
             })
             .collect();
@@ -1140,6 +1166,7 @@ impl SceneHub {
                     // vehicle frame was not captured, so mounted sensors
                     // draw at the parked frame here.
                     vehicles: Vec::new(),
+                    contacts: Vec::new(),
                     robots: rec
                         .robots
                         .iter()

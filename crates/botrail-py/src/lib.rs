@@ -492,6 +492,30 @@ fn scene_err(e: botrail_scene::SceneError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// Resolves the `physics` argument of a bake: `None`/`False` is the
+/// kinematic bake, `True` the default engine, a string names one
+/// (`"rapier"` is the only engine today — design-physics.md).
+fn physics_backend(
+    arg: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Box<dyn botrail_physics::PhysicsBackend>>> {
+    let Some(v) = arg else { return Ok(None) };
+    if let Ok(b) = v.extract::<bool>() {
+        return Ok(b.then(|| {
+            Box::new(botrail_physics_rapier::RapierBackend::new())
+                as Box<dyn botrail_physics::PhysicsBackend>
+        }));
+    }
+    let name: String = v.extract().map_err(|_| {
+        PyValueError::new_err("physics must be a bool or an engine name string")
+    })?;
+    match name.as_str() {
+        "rapier" => Ok(Some(Box::new(botrail_physics_rapier::RapierBackend::new()))),
+        other => Err(PyValueError::new_err(format!(
+            "unknown physics engine `{other}` (available: \"rapier\")"
+        ))),
+    }
+}
+
 /// A part attribute from a Python value: int/float → number (bools are
 /// refused — they are ints in Python and would sum), str → text.
 fn part_attr(key: &str, value: &Bound<'_, PyAny>) -> PyResult<botrail_scene::part::PartAttr> {
@@ -1253,6 +1277,68 @@ impl Scene {
         };
         self.hub
             .set_obstacle_material(name, material)
+            .map_err(scene_err)
+    }
+
+    /// Marks an obstacle for physics: `dynamic=True` hands its pose to
+    /// the engine during a physics bake (`simulate_sequence(...,
+    /// physics=True)`) — it falls, collides, settles. All properties are
+    /// inert on a kinematic bake, so authoring them never changes an
+    /// existing cell. Repeated calls merge: only the knobs you pass
+    /// change. `mass` in kg (unset derives it from the collision shape's
+    /// volume at 1000 kg/m³); `ccd` enables continuous collision
+    /// detection for small fast parts.
+    #[pyo3(signature = (name, dynamic = None, mass = None, friction = None, restitution = None, linear_damping = None, angular_damping = None, ccd = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_physics(
+        &self,
+        name: &str,
+        dynamic: Option<bool>,
+        mass: Option<f64>,
+        friction: Option<f64>,
+        restitution: Option<f64>,
+        linear_damping: Option<f64>,
+        angular_damping: Option<f64>,
+        ccd: Option<bool>,
+    ) -> PyResult<()> {
+        let mut props = self
+            .hub
+            .obstacle_physics(name)
+            .unwrap_or_default();
+        if let Some(dynamic) = dynamic {
+            props.kind = if dynamic {
+                botrail_physics::BodyKind::Dynamic
+            } else {
+                botrail_physics::BodyKind::Static
+            };
+        }
+        if mass.is_some() {
+            if let Some(m) = mass {
+                if !(m.is_finite() && m > 0.0) {
+                    return Err(PyValueError::new_err(format!(
+                        "mass must be positive, got {m}"
+                    )));
+                }
+            }
+            props.mass = mass;
+        }
+        if let Some(friction) = friction {
+            props.material.friction = friction;
+        }
+        if let Some(restitution) = restitution {
+            props.material.restitution = restitution;
+        }
+        if let Some(linear_damping) = linear_damping {
+            props.linear_damping = linear_damping;
+        }
+        if let Some(angular_damping) = angular_damping {
+            props.angular_damping = angular_damping;
+        }
+        if let Some(ccd) = ccd {
+            props.ccd = ccd;
+        }
+        self.hub
+            .set_obstacle_physics(name, Some(props))
             .map_err(scene_err)
     }
 
@@ -4032,7 +4118,7 @@ impl Scene {
     /// `scenario` applies a named initial-state delta (`add_scenario`) to
     /// the snapshot first — the live scene is never touched. `None` and
     /// `"baseline"` both mean the scene as it stands.
-    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None))]
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None))]
     #[allow(clippy::too_many_arguments)]
     fn simulate_sequence(
         &self,
@@ -4042,6 +4128,7 @@ impl Scene {
         plan_resolution: Option<f64>,
         scenario: Option<&str>,
         toolpath_spin: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -4066,7 +4153,7 @@ impl Scene {
         }
         let (timeline, scene) = self
             .hub
-            .simulate_sequence(name, scenario, &options)
+            .simulate_sequences_with(&[name], scenario, &options, physics_backend(physics)?)
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
@@ -4088,7 +4175,7 @@ impl Scene {
     /// joint-space L2). The default 0.05 samples a big arm's sweep every
     /// ~10 cm of TCP travel — coarse enough to step across sheet metal, so
     /// cells full of 12 mm flanges pass 0.005.
-    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None))]
+    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None))]
     #[allow(clippy::too_many_arguments)]
     fn simulate_sequences(
         &self,
@@ -4098,6 +4185,7 @@ impl Scene {
         plan_resolution: Option<f64>,
         scenario: Option<&str>,
         toolpath_spin: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -4123,7 +4211,7 @@ impl Scene {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (timeline, scene) = self
             .hub
-            .simulate_sequences(&refs, scenario, &options)
+            .simulate_sequences_with(&refs, scenario, &options, physics_backend(physics)?)
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
@@ -5920,6 +6008,68 @@ impl SequenceTimeline {
     #[getter]
     fn scenario(&self) -> Option<String> {
         self.inner.scenario.clone()
+    }
+
+    /// The physics engine this bake stepped under (`"rapier"`), or `None`
+    /// for the purely kinematic bake. A physics bake is deterministic per
+    /// machine and build — not the cross-platform bit-identity the
+    /// kinematic bake guarantees.
+    #[getter]
+    fn physics(&self) -> Option<String> {
+        self.inner.physics.clone()
+    }
+
+    /// Touch episodes of a physics bake, in opening order: dicts with
+    /// `a`, `b` (scene names; `robot/link` for an arm part), `start`,
+    /// `end` (s), `position` (world, where the touch began) and
+    /// `peak_force` (N, the episode's largest total contact force).
+    /// Empty on a kinematic bake. Only pairs involving a dynamic body
+    /// are recorded — "part hit the stopper at t=5.6 s with 8 N" is one
+    /// entry here.
+    #[getter]
+    fn contacts<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .contacts
+            .iter()
+            .map(|c| {
+                let d = PyDict::new(py);
+                d.set_item("a", &c.a)?;
+                d.set_item("b", &c.b)?;
+                d.set_item("start", c.start)?;
+                d.set_item("end", c.end)?;
+                d.set_item("position", (c.position.x, c.position.y, c.position.z))?;
+                d.set_item("peak_force", c.peak_force)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// When the object came to rest for good — the start of its trailing
+    /// hold — or `None` while it was still moving (or held, or never
+    /// tracked) at the horn. On a physics bake this is the moment the
+    /// engine put the body to sleep for the last time.
+    fn settled_at(&self, name: &str) -> Option<f64> {
+        self.inner.settled_at(name)
+    }
+
+    /// Stretches where a running conveyor drove under a tracked object
+    /// that made almost no progress along the belt — a queue seating
+    /// against its stopper (by design) or a genuine jam (not): dicts
+    /// with `object`, `device`, `start`, `end`. The detector reports
+    /// arrest; only the author knows intent.
+    fn conveyor_stalls<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .conveyor_stalls(&self.scene)
+            .into_iter()
+            .map(|stall| {
+                let d = PyDict::new(py);
+                d.set_item("object", stall.object)?;
+                d.set_item("device", stall.device)?;
+                d.set_item("start", stall.start)?;
+                d.set_item("end", stall.end)?;
+                Ok(d)
+            })
+            .collect()
     }
 
     /// The path the bake took through branching steps, in resolution

@@ -161,6 +161,13 @@ impl RobotCollider {
         !self.links[link].is_empty()
     }
 
+    /// The solid parts `(link-local pose, shape)` of one link — what a
+    /// physics lowering turns into a kinematic body's colliders, shapes
+    /// shared like [`ObstacleCollider::parts`].
+    pub fn link_parts(&self, link: usize) -> &[(Pose, SharedShape)] {
+        &self.links[link]
+    }
+
     /// Distance from `origin` along `dir` to the first solid part of
     /// `link`, both in the link's *local* frame, or `None` past
     /// `max_toi`. `dir` need not be normalized; the result is in units
@@ -193,6 +200,13 @@ pub struct ObstacleCollider {
 }
 
 impl ObstacleCollider {
+    /// The solid parts `(local pose, shape)` this collider is made of —
+    /// what a physics lowering turns into rigid-body colliders, shapes
+    /// shared (VHACD compounds included).
+    pub fn parts(&self) -> &[(Pose, SharedShape)] {
+        &self.parts
+    }
+
     pub fn from_geometry(geometry: &botrail_model::Geometry) -> Result<Self, CollideError> {
         let (offset, shape) = convert::geometry_to_parry(geometry)?;
         let parts = vec![(offset, shape)];

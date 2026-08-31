@@ -22,6 +22,21 @@ use nalgebra::Isometry3;
 /// run is mostly repetition, and one steady-state takt carries the whole
 /// story at a fraction of the bytes. The exported clock always starts at
 /// zero, so a clipped window plays like a cycle of its own.
+/// The UsdPhysics spec for an obstacle, from its resolved body
+/// properties (part-identity mass included) — `None` for un-annotated
+/// scenery, which exports exactly as before.
+fn physics_spec(scene: &Scene, name: &str) -> Option<botrail_usd::export::PhysicsSpec> {
+    let props = scene.resolved_body_props(name)?;
+    Some(botrail_usd::export::PhysicsSpec {
+        dynamic: props.kind == botrail_physics::BodyKind::Dynamic,
+        mass: (props.kind == botrail_physics::BodyKind::Dynamic)
+            .then_some(props.mass)
+            .flatten(),
+        friction: props.material.friction,
+        restitution: props.material.restitution,
+    })
+}
+
 pub fn bake_timeline(
     scene: &Scene,
     timeline: &SequenceTimeline,
@@ -137,6 +152,7 @@ pub fn bake_timeline(
                 track,
                 color: o.color,
                 visible,
+                physics: physics_spec(scene, &o.name),
             }
         })
         .collect();
@@ -180,6 +196,7 @@ pub fn bake_timeline(
             track: PoseTrack::Sampled(sampled),
             color: Some([0.62, 0.78, 0.95]),
             visible,
+            physics: None,
         });
     }
 
@@ -245,6 +262,7 @@ pub fn bake_timeline(
                 track: PoseTrack::Static(poses[tcp]),
                 color: Some([1.0, 0.82, 0.45]),
                 visible,
+                physics: None,
             });
         }
     }
@@ -381,6 +399,7 @@ pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, 
             track: PoseTrack::Static(o.pose),
             color: o.color,
             visible: Vec::new(),
+            physics: physics_spec(scene, &o.name),
         })
         .collect();
 

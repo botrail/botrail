@@ -9,6 +9,8 @@ studio/dist-wasm/
 studio/public-wasm/
 
 # Generated usd
+/*.usd
+/*.usd[ac]
 examples/**/*.usd
 examples/**/*.usd[ac]
 !examples/assets/*.usd

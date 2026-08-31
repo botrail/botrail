@@ -38,6 +38,7 @@ export type { RampTargetMsg } from "./generated/RampTargetMsg";
 export type { SignalDefMsg } from "./generated/SignalDefMsg";
 export type { StepSpanMsg } from "./generated/StepSpanMsg";
 export type { BranchTakenMsg } from "./generated/BranchTakenMsg";
+export type { ContactMsg } from "./generated/ContactMsg";
 export type { SignalTrackMsg } from "./generated/SignalTrackMsg";
 export type { TimelineMsg } from "./generated/TimelineMsg";
 export type { SensorMsg } from "./generated/SensorMsg";

@@ -14,6 +14,7 @@ botrail-kin.workspace = true
 botrail-plan.workspace = true
 botrail-traj.workspace = true
 botrail-scene.workspace = true
+botrail-physics.workspace = true
 botrail-usd.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true

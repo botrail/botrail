@@ -11,6 +11,7 @@ use botrail_traj::JointTrajectory;
 use nalgebra::Isometry3;
 use thiserror::Error;
 
+use botrail_physics::PhysicsBackend;
 use crate::seq::{
     vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
     Step,
@@ -208,6 +209,31 @@ pub struct RolloutOptions {
     pub toolpath: crate::toolpath::ToolpathOptions,
     /// Instantaneous steps allowed within one scan tick.
     pub immediate_chain_limit: usize,
+    /// Physics stepping, when the bake runs with a backend (see
+    /// [`crate::Scene::simulate_sequences_with`]). `None` — the default —
+    /// is today's purely kinematic bake, bit for bit.
+    pub physics: Option<PhysicsOptions>,
+}
+
+/// How a physics bake steps: plain data — the backend itself is injected
+/// by the caller, so this stays cloneable options like everything else.
+#[derive(Debug, Clone)]
+pub struct PhysicsOptions {
+    /// Physics substeps per scan tick (physics dt = `dt / substeps`).
+    /// The default 4 puts a 100 Hz scan at 400 Hz physics — conservative
+    /// enough for palm-sized parts.
+    pub substeps: u32,
+    /// Gravity in m/s² (botrail is z-up).
+    pub gravity: [f64; 3],
+}
+
+impl Default for PhysicsOptions {
+    fn default() -> Self {
+        PhysicsOptions {
+            substeps: 4,
+            gravity: [0.0, 0.0, -9.81],
+        }
+    }
 }
 
 impl Default for RolloutOptions {
@@ -218,6 +244,7 @@ impl Default for RolloutOptions {
             plan: botrail_plan::PlanOptions::default(),
             toolpath: crate::toolpath::ToolpathOptions::default(),
             immediate_chain_limit: 64,
+            physics: None,
         }
     }
 }
@@ -329,6 +356,17 @@ pub enum TrackSpan {
         center: nalgebra::Point3<f64>,
         omega: f64,
     },
+    /// Physics-owned motion, one pose per scan tick: `poses[k]` is the
+    /// pose at `t0 + k·dt`, interpolated (lerp + slerp) in between. The
+    /// only span kind with no closed form — a dynamic body's fall, slide
+    /// or tumble. Ends at its last sample; sleeping stretches are folded
+    /// into `Hold` spans instead of growing this one.
+    Sampled {
+        t0: f64,
+        /// Sample spacing (the bake's scan period).
+        dt: f64,
+        poses: Vec<Isometry3<f64>>,
+    },
 }
 
 /// Advances `from` by one vehicle motion piece lasting `dt`.
@@ -437,13 +475,25 @@ pub(crate) fn pivot_pose(
 }
 
 impl TrackSpan {
-    fn end_mut(&mut self) -> &mut f64 {
+    /// Sets the span's end time. A `Sampled` span ends at its last sample
+    /// by construction, so this is a no-op there (`span_pose` extends the
+    /// last pose past the end, same as every other final span).
+    fn set_end(&mut self, t: f64) {
         match self {
             TrackSpan::Hold { t1, .. }
             | TrackSpan::Stowed { t1, .. }
             | TrackSpan::Follow { t1, .. }
             | TrackSpan::Linear { t1, .. }
-            | TrackSpan::Pivot { t1, .. } => t1,
+            | TrackSpan::Pivot { t1, .. } => *t1 = t,
+            TrackSpan::Sampled { .. } => {}
+        }
+    }
+
+    /// Grows the span's end time to `t` (never shrinks it).
+    fn extend_to(&mut self, t: f64) {
+        let (_, end) = self.range();
+        if end < t {
+            self.set_end(t);
         }
     }
 
@@ -454,6 +504,9 @@ impl TrackSpan {
             | TrackSpan::Follow { t0, t1, .. }
             | TrackSpan::Linear { t0, t1, .. }
             | TrackSpan::Pivot { t0, t1, .. } => (*t0, *t1),
+            TrackSpan::Sampled { t0, dt, poses } => {
+                (*t0, *t0 + dt * poses.len().saturating_sub(1) as f64)
+            }
         }
     }
 }
@@ -537,6 +590,35 @@ pub struct ProcessSpan {
     pub brush: Option<String>,
 }
 
+/// One touch episode of a physics bake: two bodies came into contact and
+/// (maybe) separated again. `a`/`b` are scene names — an obstacle's own,
+/// or `robot/link` for an arm's part. `position` is where the touch began
+/// (world), `peak_force` the largest total contact force the engine
+/// reported over the episode (N). Episodes still open at bake end close
+/// at `duration`. Only pairs involving a dynamic body are recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContactSpan {
+    pub a: String,
+    pub b: String,
+    pub start: f64,
+    pub end: f64,
+    pub position: nalgebra::Point3<f64>,
+    pub peak_force: f64,
+}
+
+/// One stretch where a conveyor drove under an object that was not
+/// getting anywhere — a stopper accumulation (by design) or a genuine
+/// jam (not); the detector cannot tell intent, only arrest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stall {
+    /// The arrested object.
+    pub object: String,
+    /// The conveyor driving under it.
+    pub device: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// The baked result of a sequence rollout — what playback, USD export, and
 /// the timing chart consume. `duration` is the cycle time.
 #[derive(Debug, Clone)]
@@ -549,6 +631,11 @@ pub struct SequenceTimeline {
     /// (`baseline`). Self-description for result sets, captions, and
     /// export naming.
     pub scenario: Option<String>,
+    /// The physics engine this bake stepped under (`"rapier"`), or `None`
+    /// for the purely kinematic bake. Self-description, like `scenario` —
+    /// a physics bake is deterministic per machine and build, not the
+    /// cross-platform bit-identity the kinematic bake guarantees.
+    pub physics: Option<String>,
     /// One track per robot, in scene order.
     pub robots: Vec<RobotTrack>,
     /// Objects that were grasped at some point (everything else is static).
@@ -564,6 +651,9 @@ pub struct SequenceTimeline {
     /// order — the path the bake took. Script export replays these to
     /// walk the same arms; the spans of untaken arms simply don't exist.
     pub branches: Vec<BranchTaken>,
+    /// Touch episodes of a physics bake, in opening order; empty on a
+    /// kinematic bake.
+    pub contacts: Vec<ContactSpan>,
 }
 
 /// One resolved selection divergence: which arm `sequence` took at the
@@ -787,6 +877,23 @@ impl SequenceTimeline {
                 center,
                 omega,
             } => pivot_pose(from, center, omega * (t.clamp(*t0, *t1) - t0)),
+            TrackSpan::Sampled { t0, dt, poses } => {
+                let last = poses.len() - 1;
+                let u = ((t - t0) / dt).clamp(0.0, last as f64);
+                let k = (u.floor() as usize).min(last.saturating_sub(1));
+                let frac = u - k as f64;
+                if frac <= 1e-12 || k == last {
+                    poses[k]
+                } else {
+                    let (a, b) = (&poses[k], &poses[k + 1]);
+                    Isometry3::from_parts(
+                        nalgebra::Translation3::from(
+                            a.translation.vector.lerp(&b.translation.vector, frac),
+                        ),
+                        a.rotation.slerp(&b.rotation, frac),
+                    )
+                }
+            }
         })
     }
 
@@ -834,6 +941,11 @@ impl SequenceTimeline {
             | TrackSpan::Linear { from: pose, .. }
             | TrackSpan::Pivot { from: pose, .. } => pose.translation.z,
             TrackSpan::Follow { .. } => 0.0,
+            // A vehicle frame is never physics-owned; defensive, like
+            // Follow above.
+            TrackSpan::Sampled { poses, .. } => {
+                poses.first().map(|p| p.translation.z).unwrap_or(0.0)
+            }
         })?;
         let airborne = |z: f64| z > ground + 1e-6;
         Some(
@@ -876,9 +988,136 @@ impl SequenceTimeline {
                             0.0
                         }
                     }
+                    // Never a vehicle frame's span; count it as motion
+                    // should that ever change, like Follow.
+                    span @ TrackSpan::Sampled { .. } => {
+                        let (t0, t1) = span.range();
+                        t1 - t0
+                    }
                 })
                 .sum(),
         )
+    }
+}
+
+impl SequenceTimeline {
+    /// When the object came to rest for good: the start of its trailing
+    /// `Hold` span, or `None` while it was still in motion (or attached,
+    /// or never tracked) at the horn. On a physics bake this is the
+    /// moment the engine put the body to sleep for the last time.
+    pub fn settled_at(&self, name: &str) -> Option<f64> {
+        let track = self.objects.iter().find(|o| o.name == name)?;
+        match track.spans.last()? {
+            TrackSpan::Hold { t0, .. } => Some(*t0),
+            _ => None,
+        }
+    }
+
+    /// Stretches where a running conveyor drove under a tracked object
+    /// that made almost no progress along the belt — a queue seating
+    /// against its stopper (by design), or a genuine jam (not). The
+    /// detector reports arrest; only the author knows intent. Progress is
+    /// judged against the conveyor's *authored* velocity over 1 s
+    /// windows (a `SetSpeed` mid-bake skews the ratio, not the windows).
+    pub fn conveyor_stalls(&self, scene: &Scene) -> Vec<Stall> {
+        const WINDOW: f64 = 1.0;
+        const STEP: f64 = 0.05;
+        const RATIO: f64 = 0.25;
+        let mut stalls = Vec::new();
+        for device in scene.devices() {
+            let DeviceKind::Conveyor {
+                zone_pose,
+                zone_size,
+                velocity,
+                ..
+            } = &device.kind
+            else {
+                continue;
+            };
+            let speed = velocity.norm();
+            if speed < 1e-9 {
+                continue;
+            }
+            let dir = velocity / speed;
+            let Some(lane) = self
+                .signals
+                .iter()
+                .find(|s| s.name == device.name && s.kind == LaneKind::Device)
+            else {
+                continue;
+            };
+            let half = zone_size / 2.0;
+            let inv = zone_pose.inverse();
+            for track in &self.objects {
+                // Pose without FK: a grasped (Follow) object is the
+                // robot's business, never a stall.
+                let pose_at = |t: f64| -> Option<Isometry3<f64>> {
+                    let span = track
+                        .spans
+                        .iter()
+                        .find(|s| {
+                            let (t0, t1) = s.range();
+                            t >= t0 - 1e-9 && t <= t1 + 1e-9
+                        })
+                        .or(track.spans.last())?;
+                    if matches!(span, TrackSpan::Follow { .. }) {
+                        return None;
+                    }
+                    Self::span_pose(std::slice::from_ref(span), &[], t)
+                };
+                let eligible = |t: f64| -> Option<Vector3<f64>> {
+                    if !lane.value_at(t) {
+                        return None;
+                    }
+                    let pose = pose_at(t)?;
+                    let local = inv
+                        .transform_point(&nalgebra::Point3::from(pose.translation.vector));
+                    (local.x.abs() <= half.x
+                        && local.y.abs() <= half.y
+                        && local.z.abs() <= half.z)
+                        .then_some(pose.translation.vector)
+                };
+                let mut open: Option<(f64, f64)> = None;
+                let mut t = 0.0;
+                while t + WINDOW <= self.duration + 1e-9 {
+                    let arrested = match (eligible(t), eligible(t + WINDOW)) {
+                        (Some(p0), Some(p1)) => {
+                            eligible(t + WINDOW / 2.0).is_some()
+                                && (p1 - p0).dot(&dir) < RATIO * speed * WINDOW
+                        }
+                        _ => false,
+                    };
+                    if arrested {
+                        match &mut open {
+                            Some((_, end)) => *end = t + WINDOW,
+                            None => open = Some((t, t + WINDOW)),
+                        }
+                    } else if let Some((s0, s1)) = open.take() {
+                        stalls.push(Stall {
+                            object: track.name.clone(),
+                            device: device.name.clone(),
+                            start: s0,
+                            end: s1,
+                        });
+                    }
+                    t += STEP;
+                }
+                if let Some((s0, s1)) = open {
+                    stalls.push(Stall {
+                        object: track.name.clone(),
+                        device: device.name.clone(),
+                        start: s0,
+                        end: s1,
+                    });
+                }
+            }
+        }
+        stalls.sort_by(|x, y| {
+            x.start
+                .partial_cmp(&y.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        stalls
     }
 }
 
@@ -912,6 +1151,22 @@ impl Scene {
         &self,
         names: &[&str],
         options: &RolloutOptions,
+    ) -> Result<SequenceTimeline, SeqError> {
+        self.simulate_sequences_with(names, options, None)
+    }
+
+    /// [`simulate_sequences`](Self::simulate_sequences) with an injected
+    /// physics backend: obstacles marked dynamic fall, collide and settle
+    /// under the engine while everything else runs today's scan loop
+    /// (design-physics.md). `None` — and a scene with no dynamic obstacle
+    /// — reproduces the kinematic bake bit for bit. The engine name lands
+    /// on [`SequenceTimeline::physics`]; a physics bake is deterministic
+    /// per machine and build, not cross-platform bit-identical.
+    pub fn simulate_sequences_with(
+        &self,
+        names: &[&str],
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
     ) -> Result<SequenceTimeline, SeqError> {
         if names.is_empty() {
             return Err(SeqError::Validation {
@@ -949,7 +1204,7 @@ impl Scene {
                     message,
                 })?;
         }
-        Rollout::new(self.clone(), sequences, options.clone()).run()
+        Rollout::new(self.clone(), sequences, options.clone(), backend).run()
     }
 
     /// [`simulate_sequences`](Self::simulate_sequences) under a named
@@ -963,8 +1218,21 @@ impl Scene {
         scenario: Option<&str>,
         options: &RolloutOptions,
     ) -> Result<SequenceTimeline, SeqError> {
+        self.simulate_sequences_scenario_with(names, scenario, options, None)
+    }
+
+    /// The scenario variant with an injected physics backend — scenario
+    /// deltas apply to the snapshot first, so a scenario can move (or
+    /// re-mark) the very obstacles physics then owns.
+    pub fn simulate_sequences_scenario_with(
+        &self,
+        names: &[&str],
+        scenario: Option<&str>,
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Result<SequenceTimeline, SeqError> {
         let Some(scenario) = scenario.filter(|s| *s != crate::seq::BASELINE_SCENARIO) else {
-            return self.simulate_sequences(names, options);
+            return self.simulate_sequences_with(names, options, backend);
         };
         let mut snapshot = self.clone();
         snapshot
@@ -973,7 +1241,7 @@ impl Scene {
                 step: None,
                 message: e.to_string(),
             })?;
-        let mut timeline = snapshot.simulate_sequences(names, options)?;
+        let mut timeline = snapshot.simulate_sequences_with(names, options, backend)?;
         timeline.scenario = Some(scenario.to_string());
         Ok(timeline)
     }
@@ -1222,6 +1490,82 @@ fn flatten(steps: &[Step]) -> Vec<FlatStep> {
     out
 }
 
+/// The physics side of one rollout: the injected backend plus the bodies
+/// it mirrors. Built by `init_physics` from the authored
+/// `Obstacle::physics` properties and `RolloutOptions::physics`.
+struct PhysicsRuntime {
+    backend: Box<dyn PhysicsBackend>,
+    /// Substeps per scan tick (physics dt = `options.dt / substeps`).
+    substeps: u32,
+    dynamics: Vec<DynamicBody>,
+    /// The kinematic mirror of everything else: every other enabled
+    /// obstacle and every robot link with geometry. Poses are supplied on
+    /// change (substep-interpolated), so a paddle on an axis, a grasped
+    /// part, an AGV body or a moving arm all push dynamic bodies with
+    /// real contact velocities. An unmoved mirror body costs nothing.
+    kinematics: Vec<KinematicBody>,
+    /// Display name per body, `BodyId`-indexed: the obstacle's own name,
+    /// or `robot/link` for an arm part — what contact episodes report.
+    names: Vec<String>,
+    /// Touch episodes still open, keyed by the canonical `(a, b)` id pair.
+    open_contacts: std::collections::HashMap<(u32, u32), OpenContact>,
+    /// Closed touch episodes, in closing order (sorted by start at bake
+    /// end, where the still-open ones join them).
+    contacts: Vec<ContactSpan>,
+}
+
+/// A touch that has begun and not yet ended.
+struct OpenContact {
+    start: f64,
+    position: nalgebra::Point3<f64>,
+    peak_force: f64,
+}
+
+/// One physics-dynamic obstacle and its track-building state.
+struct DynamicBody {
+    /// Obstacle name (the track name, like every object track).
+    name: String,
+    /// Obstacle index (indices are stable during a rollout).
+    index: usize,
+    id: botrail_physics::BodyId,
+    /// Pose after the previous tick's stepping (initially the authored
+    /// pose) — the sample a waking body's span starts from.
+    last_pose: Isometry3<f64>,
+    /// The pose one tick before that — what seeds the release velocity
+    /// when a grasped part is detached mid-motion.
+    prev_pose: Isometry3<f64>,
+    /// Whether an open `Sampled` span is accumulating this body's motion.
+    moving: bool,
+    /// Physics owns the pose. `false` while the part is attached
+    /// (grasped): the FK moves it, and physics is supplied its pose like
+    /// any kinematic mirror body until detach hands it back — with the
+    /// carrier's velocity.
+    owned: bool,
+}
+
+/// One kinematically mirrored body and the last pose supplied for it.
+struct KinematicBody {
+    source: KinSource,
+    id: botrail_physics::BodyId,
+    last_pose: Isometry3<f64>,
+}
+
+enum KinSource {
+    /// An obstacle (by index — stable during a rollout).
+    Obstacle(usize),
+    /// A robot link (FK world pose).
+    Link { robot: usize, link: usize },
+}
+
+/// Linear + spherical-linear pose interpolation, for substep-granular
+/// kinematic supply (same math as a `Sampled` span's evaluation).
+fn interp_pose(a: &Isometry3<f64>, b: &Isometry3<f64>, f: f64) -> Isometry3<f64> {
+    Isometry3::from_parts(
+        nalgebra::Translation3::from(a.translation.vector.lerp(&b.translation.vector, f)),
+        a.rotation.slerp(&b.rotation, f),
+    )
+}
+
 struct Rollout {
     world: Scene,
     /// The concurrently-running programs, in the order given to
@@ -1249,6 +1593,15 @@ struct Rollout {
     /// and load) — what its riding robots are checked against the rest of
     /// the world *not* being.
     moving: Vec<(String, Vec<String>)>,
+
+    /// The physics world, when this bake runs one (`None` reproduces the
+    /// purely kinematic bake bit for bit). Built by `init_physics`.
+    physics: Option<PhysicsRuntime>,
+    /// Names of physics-dynamic obstacles — the bodies whose pose the
+    /// engine owns. Zone captures (conveyor advection, deck trays, lift
+    /// cargo, sinks) skip these; empty when `physics` is off, so the
+    /// kinematic bake never changes. Populated by `init_physics`.
+    dynamic_names: Vec<String>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -1384,6 +1737,11 @@ enum DeviceRuntime {
         /// final tick consumes exactly the remainder.
         remaining: Option<f64>,
         lane: usize,
+        /// The belt-surface velocity this tick actually ran at (`None`
+        /// while stopped) — what the advection used, recorded so the
+        /// physics zone drives the very same motion, partial advance
+        /// ticks included. Written every tick by the device advance.
+        surface: Option<Vector3<f64>>,
     },
     Axis {
         name: String,
@@ -1677,7 +2035,12 @@ fn build_legs(
 }
 
 impl Rollout {
-    fn new(world: Scene, sequences: Vec<Sequence>, options: RolloutOptions) -> Self {
+    fn new(
+        world: Scene,
+        sequences: Vec<Sequence>,
+        options: RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Self {
         // Signal lanes: internal relays, then sensor inputs, then device
         // outputs — all recorded as edge tracks for the timing chart.
         let mut signals: Vec<BoolTrack> = world
@@ -1861,6 +2224,7 @@ impl Rollout {
                             running: *running,
                             remaining: None,
                             lane,
+                            surface: None,
                         }
                     }
                     DeviceKind::LinearAxis {
@@ -2186,6 +2550,16 @@ impl Rollout {
             devices,
             forced,
             moving: Vec::new(),
+            physics: backend.map(|backend| PhysicsRuntime {
+                backend,
+                substeps: 0,
+                dynamics: Vec::new(),
+                kinematics: Vec::new(),
+                names: Vec::new(),
+                open_contacts: std::collections::HashMap::new(),
+                contacts: Vec::new(),
+            }),
+            dynamic_names: Vec::new(),
             objects,
             vehicles: Vec::new(),
             signals,
@@ -2224,6 +2598,7 @@ impl Rollout {
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
+        self.init_physics()?;
         self.update_sensors();
         // Seed every program's edge memory from the evaluated startup
         // state: a sensor already tripped at t = 0 is a level, not an
@@ -2300,6 +2675,410 @@ impl Rollout {
         }
     }
 
+    /// Builds the physics world, when a backend was injected: collects
+    /// the dynamic obstacles, validates that no kinematic machinery
+    /// claims them, lowers the scene into a [`botrail_physics::WorldDesc`]
+    /// and resets the backend. Without a backend this is a no-op, and the
+    /// bake is today's kinematic one, bit for bit.
+    fn init_physics(&mut self) -> Result<(), SeqError> {
+        use botrail_physics::{BodyDesc, BodyId, BodyKind, WorldDesc};
+        let Some(mut phys) = self.physics.take() else {
+            return Ok(());
+        };
+        let err = |message: String| SeqError::Validation {
+            step: None,
+            message,
+        };
+        // The engine-owned set. Disabled obstacles are outside collision
+        // everywhere, physics included.
+        let dynamic: Vec<String> = self
+            .world
+            .obstacles()
+            .iter()
+            .filter(|o| {
+                o.enabled
+                    && o.physics
+                        .as_ref()
+                        .is_some_and(|p| p.kind == BodyKind::Dynamic)
+            })
+            .map(|o| o.name.clone())
+            .collect();
+        if dynamic.is_empty() {
+            // Nothing for the engine to own: the timeline still names the
+            // engine it ran under, but no world is built and no step runs.
+            self.physics = Some(phys);
+            return Ok(());
+        }
+        let is_dynamic = |name: &str| dynamic.iter().any(|d| d == name);
+        // A dynamic body has exactly one pose owner. A device that moves
+        // listed obstacles *rigidly by name* would be a second owner —
+        // still an authoring error. (Grasping is fine: attach hands the
+        // body to the arm kinematically, detach hands it back with the
+        // carrier's velocity; a conveyor reaches it through contact.)
+        for device in self.world.devices() {
+            let listed: Vec<&String> = match &device.kind {
+                DeviceKind::LinearAxis { objects, .. } => objects.iter().collect(),
+                DeviceKind::Vehicle { body, .. } => body.iter().collect(),
+                DeviceKind::Lift { car, .. } => car.iter().collect(),
+                DeviceKind::Source { pool, .. } => pool.iter().collect(),
+                DeviceKind::Conveyor { .. } | DeviceKind::Sink { .. } => Vec::new(),
+            };
+            if let Some(name) = listed.into_iter().find(|n| is_dynamic(n)) {
+                return Err(err(format!(
+                    "device `{}` drives `{name}`, which is a physics-dynamic \
+                     obstacle; a dynamic body has one pose owner — remove it \
+                     from the device, or author it static",
+                    device.name
+                )));
+            }
+        }
+        // Lower the scene. Dynamic obstacles are the engine's (a grasped
+        // one starts as a kinematic mirror until its detach); every other
+        // enabled obstacle and every robot link with geometry becomes a
+        // *kinematic mirror* — its pose is supplied on change, so an axis
+        // paddle, an advected box, a grasped part or a sweeping arm all
+        // meet dynamic bodies with real contact velocities. An unmoved
+        // mirror body is indistinguishable from static scenery.
+        let opts = self.options.physics.clone().unwrap_or_default();
+        let mut desc = WorldDesc::new();
+        desc.gravity = Vector3::new(opts.gravity[0], opts.gravity[1], opts.gravity[2]);
+        let mut dynamics = Vec::new();
+        let mut kinematics = Vec::new();
+        let mut names = Vec::new();
+        for (i, o) in self.world.obstacles().iter().enumerate() {
+            if !o.enabled {
+                continue;
+            }
+            // Resolution fills the mass default from the part identity
+            // (`mass_kg`): a catalog workpiece knows what it weighs, so
+            // marking it dynamic needs no re-typing. Explicit `mass=`
+            // still wins; group identities are a later story — a group's
+            // mass is the whole subtree's.
+            let props = self
+                .world
+                .resolved_body_props(&o.name)
+                .unwrap_or_default();
+            let id = BodyId(desc.bodies.len() as u32);
+            names.push(o.name.clone());
+            if props.kind == BodyKind::Dynamic {
+                let attached = self.world.attachment(&o.name).is_some();
+                desc.bodies.push(BodyDesc {
+                    kind: if attached {
+                        BodyKind::Kinematic
+                    } else {
+                        BodyKind::Dynamic
+                    },
+                    pose: o.pose,
+                    parts: self.world.obstacle_colliders()[i].parts().to_vec(),
+                    props,
+                });
+                dynamics.push(DynamicBody {
+                    name: o.name.clone(),
+                    index: i,
+                    id,
+                    last_pose: o.pose,
+                    prev_pose: o.pose,
+                    moving: false,
+                    owned: !attached,
+                });
+            } else {
+                desc.bodies.push(BodyDesc {
+                    kind: BodyKind::Kinematic,
+                    pose: o.pose,
+                    parts: self.world.obstacle_colliders()[i].parts().to_vec(),
+                    props,
+                });
+                kinematics.push(KinematicBody {
+                    source: KinSource::Obstacle(i),
+                    id,
+                    last_pose: o.pose,
+                });
+            }
+        }
+        for (r, sr) in self.world.robots().iter().enumerate() {
+            let poses = self.world.link_poses_for(r);
+            for (link, pose) in poses.iter().enumerate() {
+                let parts = sr.collider().link_parts(link);
+                if parts.is_empty() {
+                    continue;
+                }
+                let id = BodyId(desc.bodies.len() as u32);
+                names.push(format!("{}/{}", sr.name, sr.model.links[link].name));
+                desc.bodies.push(BodyDesc {
+                    kind: BodyKind::Kinematic,
+                    pose: *pose,
+                    parts: parts.to_vec(),
+                    props: botrail_physics::BodyProps::default(),
+                });
+                kinematics.push(KinematicBody {
+                    source: KinSource::Link { robot: r, link },
+                    id,
+                    last_pose: *pose,
+                });
+            }
+        }
+        // Every conveyor becomes a surface-velocity zone, in device
+        // order — the same authored box, driving contacts instead of
+        // advecting origins (design-physics.md 判断 D7). `step_physics`
+        // mirrors the per-tick belt state into it by the same ordering.
+        for device in self.world.devices() {
+            if let DeviceKind::Conveyor {
+                zone_pose,
+                zone_size,
+                velocity,
+                running,
+            } = &device.kind
+            {
+                desc.zones.push(botrail_physics::SurfaceVelocityZone {
+                    pose: *zone_pose,
+                    half_extents: zone_size / 2.0,
+                    velocity: *velocity,
+                    active: *running,
+                });
+            }
+        }
+        if std::env::var("BT_PHYS_DEBUG").is_ok() {
+            for (k, bd) in desc.bodies.iter().enumerate() {
+                eprintln!(
+                    "LOWER body {k}: kind={:?} pos=({:+.3},{:+.3},{:+.3}) parts={}",
+                    bd.kind,
+                    bd.pose.translation.x,
+                    bd.pose.translation.y,
+                    bd.pose.translation.z,
+                    bd.parts.len()
+                );
+            }
+        }
+        phys.backend.reset(&desc).map_err(|e| err(e.to_string()))?;
+        phys.substeps = opts.substeps.max(1);
+        phys.dynamics = dynamics;
+        phys.kinematics = kinematics;
+        phys.names = names;
+        self.dynamic_names = dynamic;
+        self.physics = Some(phys);
+        Ok(())
+    }
+
+    /// One scan tick of physics: substeps, then pose read-back and track
+    /// building. Runs at the end of `advance_world`, after every
+    /// kinematic actor moved, so `update_sensors` reads the settled
+    /// world. Motion accumulates as `Sampled` spans; a body the engine
+    /// puts to sleep folds into a `Hold` until something wakes it.
+    fn step_physics(&mut self) {
+        let Some(mut phys) = self.physics.take() else {
+            return;
+        };
+        if phys.dynamics.is_empty() {
+            self.physics = Some(phys);
+            return;
+        }
+        let dt = self.options.dt;
+        // Mirror each belt's tick state into its zone (device order =
+        // zone order, fixed at lowering): the very velocity the advection
+        // ran with, so both transport modes see one belt.
+        let mut zone = 0usize;
+        for device in &self.devices {
+            if let DeviceRuntime::Conveyor { surface, .. } = device {
+                match surface {
+                    Some(v) => phys.backend.set_zone(zone, *v, true),
+                    None => phys.backend.set_zone(zone, Vector3::zeros(), false),
+                }
+                zone += 1;
+            }
+        }
+        // Kinematic supply: whatever the tick moved — links along their
+        // motions, device-driven scenery, advected boxes, grasped parts —
+        // is fed to its mirror body, substep-interpolated so contacts see
+        // the true velocities. Unmoved mirrors are skipped (their engine
+        // velocity is already zero).
+        let mut supplied: Vec<(botrail_physics::BodyId, Isometry3<f64>, Isometry3<f64>)> =
+            Vec::new();
+        let link_poses: Vec<Vec<Isometry3<f64>>> = (0..self.world.robots().len())
+            .map(|r| self.world.link_poses_for(r))
+            .collect();
+        for kin in &mut phys.kinematics {
+            let current = match kin.source {
+                KinSource::Obstacle(i) => self.world.obstacles()[i].pose,
+                KinSource::Link { robot, link } => link_poses[robot][link],
+            };
+            if current != kin.last_pose {
+                supplied.push((kin.id, kin.last_pose, current));
+                kin.last_pose = current;
+            }
+        }
+        // A grasped dynamic body is a mirror too, for now: the FK moves
+        // it, and `prev_pose` keeps one tick of history so its detach can
+        // hand the carrier's velocity back to the engine.
+        for body in &mut phys.dynamics {
+            if body.owned {
+                continue;
+            }
+            let current = self.world.obstacles()[body.index].pose;
+            if current != body.last_pose {
+                supplied.push((body.id, body.last_pose, current));
+            }
+            body.prev_pose = body.last_pose;
+            body.last_pose = current;
+        }
+        if std::env::var("BT_PHYS_DEBUG").is_ok() && !supplied.is_empty() {
+            for (id, from, to) in &supplied {
+                eprintln!(
+                    "SUPPLY t={:.2} id={:?} from=({:+.3},{:+.3},{:+.3}) to=({:+.3},{:+.3},{:+.3})",
+                    self.t,
+                    id,
+                    from.translation.x,
+                    from.translation.y,
+                    from.translation.z,
+                    to.translation.x,
+                    to.translation.y,
+                    to.translation.z
+                );
+            }
+        }
+        let sub = dt / phys.substeps as f64;
+        for k in 1..=phys.substeps {
+            let f = k as f64 / phys.substeps as f64;
+            for (id, from, to) in &supplied {
+                phys.backend.set_kinematic_pose(*id, interp_pose(from, to, f));
+            }
+            phys.backend.step(sub);
+        }
+        let t = self.t;
+        for body in &mut phys.dynamics {
+            if !body.owned {
+                // The FK owns its pose and the attach machinery its track
+                // (a Follow span) — nothing to read back.
+                continue;
+            }
+            let pose = phys.backend.body_pose(body.id);
+            let sleeping = phys.backend.is_sleeping(body.id);
+            if pose != body.last_pose {
+                self.world
+                    .set_obstacle_pose(&body.name, pose)
+                    .expect("dynamic obstacle exists");
+            }
+            let moved = (pose.translation.vector - body.last_pose.translation.vector).norm()
+                > 1e-6
+                || pose.rotation.angle_to(&body.last_pose.rotation) > 1e-6;
+            if body.moving {
+                let track = self
+                    .objects
+                    .iter_mut()
+                    .find(|tr| tr.name == body.name)
+                    .expect("moving body has a track");
+                match track.spans.last_mut() {
+                    Some(TrackSpan::Sampled { poses, .. }) => poses.push(pose),
+                    _ => unreachable!("moving physics body ends in a sampled span"),
+                }
+                if sleeping {
+                    track.spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
+                    body.moving = false;
+                }
+            } else if moved {
+                // Wake: close whatever rest span is open at `t - dt` and
+                // start sampling from the pose the body left.
+                let track = self.object_track_at(&body.name, body.last_pose, t - dt);
+                if let Some(open) = track.spans.last_mut() {
+                    open.extend_to(t - dt);
+                }
+                track.spans.push(TrackSpan::Sampled {
+                    t0: t - dt,
+                    dt,
+                    poses: vec![body.last_pose, pose],
+                });
+                body.moving = true;
+            }
+            body.prev_pose = body.last_pose;
+            body.last_pose = pose;
+        }
+        // Contact episodes: begins open them at this tick's clock, force
+        // reports raise the running peak, ends close them into spans.
+        let tick_contacts = phys.backend.drain_contacts();
+        let key = |a: botrail_physics::BodyId, b: botrail_physics::BodyId| {
+            (a.0.min(b.0), a.0.max(b.0))
+        };
+        for (a, b, p) in tick_contacts.started {
+            phys.open_contacts.entry(key(a, b)).or_insert(OpenContact {
+                start: t,
+                position: nalgebra::Point3::from(p),
+                peak_force: 0.0,
+            });
+        }
+        for (a, b, f) in tick_contacts.forces {
+            if let Some(open) = phys.open_contacts.get_mut(&key(a, b)) {
+                if f > open.peak_force {
+                    open.peak_force = f;
+                }
+            }
+        }
+        for (a, b) in tick_contacts.stopped {
+            let (ka, kb) = key(a, b);
+            if let Some(open) = phys.open_contacts.remove(&(ka, kb)) {
+                phys.contacts.push(ContactSpan {
+                    a: phys.names[ka as usize].clone(),
+                    b: phys.names[kb as usize].clone(),
+                    start: open.start,
+                    end: t,
+                    position: open.position,
+                    peak_force: open.peak_force,
+                });
+            }
+        }
+        self.physics = Some(phys);
+    }
+
+    /// Grasp handoff for a physics-dynamic obstacle: the arm owns the
+    /// pose now, so the engine's body turns kinematic and is supplied the
+    /// FK ride like any mirror body (design-physics.md §3).
+    fn physics_attach(&mut self, object: &str) {
+        let Some(phys) = self.physics.as_mut() else {
+            return;
+        };
+        let Some(body) = phys.dynamics.iter_mut().find(|b| b.name == object) else {
+            return;
+        };
+        body.owned = false;
+        body.moving = false;
+        body.prev_pose = body.last_pose;
+        phys.backend
+            .set_body_kind(body.id, botrail_physics::BodyKind::Kinematic, None);
+    }
+
+    /// Release handoff: the engine takes the pose back — seeded with the
+    /// carrier's velocity from the last tick of the ride, so a part let
+    /// go mid-motion flies on instead of stopping dead.
+    fn physics_detach(&mut self, object: &str) {
+        let dt = self.options.dt;
+        let Some(phys) = self.physics.as_mut() else {
+            return;
+        };
+        let Some(body) = phys.dynamics.iter_mut().find(|b| b.name == object) else {
+            return;
+        };
+        let pose = self
+            .world
+            .obstacles()
+            .iter()
+            .find(|o| o.name == body.name)
+            .map(|o| o.pose)
+            .expect("detached obstacle exists");
+        let linear = (body.last_pose.translation.vector - body.prev_pose.translation.vector) / dt;
+        let delta = body.last_pose.rotation * body.prev_pose.rotation.inverse();
+        let angular = delta
+            .axis_angle()
+            .map(|(axis, angle)| axis.into_inner() * (angle / dt))
+            .unwrap_or_else(Vector3::zeros);
+        body.owned = true;
+        body.moving = false;
+        body.prev_pose = pose;
+        body.last_pose = pose;
+        phys.backend.set_body_kind(
+            body.id,
+            botrail_physics::BodyKind::Dynamic,
+            Some(botrail_physics::Velocity { linear, angular }),
+        );
+    }
+
     /// Advances every robot's joints and every device by one scan period,
     /// then verifies the robots stayed clear of each other.
     fn advance_world(&mut self) -> Result<(), SeqError> {
@@ -2364,6 +3143,7 @@ impl Rollout {
                     running,
                     remaining,
                     lane,
+                    surface,
                     ..
                 } => {
                     let speed = velocity.norm();
@@ -2394,11 +3174,19 @@ impl Rollout {
                     } else {
                         None
                     };
+                    // What the physics zone will drive this tick — the
+                    // same (possibly partial) velocity the advection uses.
+                    *surface = tick_velocity;
                     let Some(tick_velocity) = tick_velocity else {
                         continue;
                     };
                     for obstacle in self.world.obstacles() {
                         if attached.iter().any(|a| a == &obstacle.name) {
+                            continue;
+                        }
+                        // A physics-dynamic part is the engine's: the belt
+                        // reaches it through contact (P2), never advection.
+                        if self.dynamic_names.iter().any(|d| d == &obstacle.name) {
                             continue;
                         }
                         let local = zone_pose.inverse().transform_point(&nalgebra::Point3::from(
@@ -2510,6 +3298,11 @@ impl Rollout {
                 } => {
                     for obstacle in self.world.obstacles() {
                         if attached.iter().any(|a| a == &obstacle.name) {
+                            continue;
+                        }
+                        // A sink teleports what it captures; a physics-
+                        // dynamic part stays the engine's.
+                        if self.dynamic_names.iter().any(|d| d == &obstacle.name) {
                             continue;
                         }
                         let local = zone_pose.inverse().transform_point(&nalgebra::Point3::from(
@@ -2756,6 +3549,10 @@ impl Rollout {
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
         self.check_robot_collisions()?;
+        // Physics last: every kinematic actor is where this tick put it,
+        // so the substeps integrate against the tick-true world, and the
+        // written-back dynamic poses are what `update_sensors` reads next.
+        self.step_physics();
         Ok(())
     }
 
@@ -2910,10 +3707,7 @@ impl Rollout {
             .expect("teleported obstacle exists");
         let track = self.object_track_at(name, from, t);
         if let Some(open) = track.spans.last_mut() {
-            let end = open.end_mut();
-            if *end < t {
-                *end = t;
-            }
+            open.extend_to(t);
         }
         track.spans.push(if stowed {
             TrackSpan::Stowed {
@@ -3138,10 +3932,7 @@ impl Rollout {
             }
             _ => {
                 if let Some(open) = track.spans.last_mut() {
-                    let end = open.end_mut();
-                    if *end < t - dt {
-                        *end = t - dt;
-                    }
+                    open.extend_to(t - dt);
                 }
                 track.spans.push(TrackSpan::Linear {
                     t0: t - dt,
@@ -3190,6 +3981,7 @@ impl Rollout {
                                 !mv.body.iter().any(|b| b == &o.name)
                                     && self.world.attachment(&o.name).is_none()
                                     && !advected.iter().any(|n| n == &o.name)
+                                    && !self.dynamic_names.iter().any(|d| d == &o.name)
                                     && inside_zone(&zone, half, &o.pose)
                             })
                             .map(|o| o.name.clone())
@@ -3360,7 +4152,7 @@ impl Rollout {
                 if let Some(track) = self.objects.iter_mut().find(|o| &o.name == name) {
                     if let Some(open) = track.spans.last_mut() {
                         if matches!(open, TrackSpan::Follow { .. }) {
-                            *open.end_mut() = t;
+                            open.set_end(t);
                         }
                     }
                 }
@@ -3379,10 +4171,7 @@ impl Rollout {
             carried.push((name.clone(), offset));
             let track = self.object_track_at(name, pose, t);
             if let Some(open) = track.spans.last_mut() {
-                let end = open.end_mut();
-                if *end < t {
-                    *end = t;
-                }
+                open.extend_to(t);
             }
             track.spans.push(TrackSpan::Follow {
                 t0: t,
@@ -3475,6 +4264,11 @@ impl Rollout {
                         || carried(&other.name)
                         || (walks && other.walkable)
                         || self.world.attachment(&other.name).is_some()
+                        // A physics-dynamic part touching the machine is
+                        // the engine's business — a deck load rides by
+                        // friction, a bumped part gets pushed. Contact is
+                        // the mechanism there, not an aisle fault.
+                        || self.dynamic_names.iter().any(|d| d == &other.name)
                     {
                         continue;
                     }
@@ -3612,6 +4406,7 @@ impl Rollout {
                 !car.iter().any(|c| c == &o.name)
                     && !aboard_bodies.iter().any(|b| b == &o.name)
                     && self.world.attachment(&o.name).is_none()
+                    && !self.dynamic_names.iter().any(|d| d == &o.name)
                     && inside_zone(&zone, &zone_half, &o.pose)
             })
             .map(|o| o.name.clone())
@@ -4302,10 +5097,7 @@ impl Rollout {
                 let rest = rest_pose.expect("attach_obstacle validated the obstacle");
                 let track = self.object_track_at(object, rest, t);
                 if let Some(open) = track.spans.last_mut() {
-                    let end = open.end_mut();
-                    if *end < t {
-                        *end = t;
-                    }
+                    open.extend_to(t);
                 }
                 track.spans.push(TrackSpan::Follow {
                     t0: t,
@@ -4322,6 +5114,7 @@ impl Rollout {
                         latch.frozen = true;
                     }
                 }
+                self.physics_attach(object);
             }
             Action::Detach { object } => {
                 // Sync the carrier so the object freezes where it truly is.
@@ -4346,12 +5139,10 @@ impl Rollout {
                 let t = self.t;
                 let track = self.object_track_at(object, pose, t);
                 if let Some(open) = track.spans.last_mut() {
-                    let end = open.end_mut();
-                    if *end < t {
-                        *end = t;
-                    }
+                    open.extend_to(t);
                 }
                 track.spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
+                self.physics_detach(object);
             }
             Action::Track {
                 robot,
@@ -4744,7 +5535,7 @@ impl Rollout {
                             }
                             Some(_) => {
                                 if let Some(open) = spans.last_mut() {
-                                    *open.end_mut() = duration;
+                                    open.set_end(duration);
                                 }
                             }
                             None => {}
@@ -4756,7 +5547,7 @@ impl Rollout {
             .collect();
         for track in self.objects.iter_mut().chain(self.vehicles.iter_mut()) {
             if let Some(open) = track.spans.last_mut() {
-                *open.end_mut() = duration;
+                open.set_end(duration);
             }
         }
         SequenceTimeline {
@@ -4767,12 +5558,37 @@ impl Rollout {
                 .map(|p| p.sequence.name.clone())
                 .collect(),
             scenario: None,
+            physics: self.physics.as_ref().map(|p| p.backend.name().to_string()),
             robots,
             objects: self.objects,
             vehicles: self.vehicles,
             signals: self.signals,
             step_spans: self.step_spans,
             branches: self.branches,
+            contacts: self
+                .physics
+                .map(|phys| {
+                    let names = phys.names;
+                    let mut contacts = phys.contacts;
+                    // Episodes still touching at the horn close here.
+                    contacts.extend(phys.open_contacts.into_iter().map(|((a, b), open)| {
+                        ContactSpan {
+                            a: names[a as usize].clone(),
+                            b: names[b as usize].clone(),
+                            start: open.start,
+                            end: duration,
+                            position: open.position,
+                            peak_force: open.peak_force,
+                        }
+                    }));
+                    contacts.sort_by(|x, y| {
+                        x.start
+                            .partial_cmp(&y.start)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    contacts
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -12476,5 +13292,799 @@ mod biped_tests {
         assert!(err.contains("needs 5 or 6 DOF"), "{err}");
         let _ = UnitQuaternion::<f64>::identity();
         let _: Point3<f64> = Point3::origin();
+    }
+
+}
+
+/// Scene-level physics bakes (design-physics.md P1): a dynamic part falls,
+/// settles and sleeps; the bake is deterministic; the props are inert
+/// without a backend; kinematic machinery cannot claim a dynamic body.
+#[cfg(test)]
+mod physics_tests {
+    use super::*;
+    use crate::seq::{Condition, Device, DeviceKind, Sequence, Step};
+    use botrail_model::Geometry;
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    // ==================== physics (design-physics.md P1) ====================
+
+    fn physics_scene() -> Scene {
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(2.0, 2.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, -0.05),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.05, 0.03),
+                },
+                Isometry3::translation(0.0, 0.0, 1.0),
+            )
+            .unwrap();
+        scene
+            .set_obstacle_physics(
+                "part",
+                Some(botrail_physics::BodyProps {
+                    mass: Some(0.2),
+                    ..botrail_physics::BodyProps::dynamic()
+                }),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "settle".into(),
+            steps: vec![step(
+                "wait",
+                vec![],
+                Condition::Elapsed { seconds: 2.5 },
+            )],
+        });
+        scene
+    }
+
+    fn rapier() -> Option<Box<dyn botrail_physics::PhysicsBackend>> {
+        Some(Box::new(botrail_physics_rapier::RapierBackend::new()))
+    }
+
+    #[test]
+    fn a_dynamic_part_falls_and_settles_under_physics() {
+        let scene = physics_scene();
+        let timeline = scene
+            .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        let track = timeline
+            .objects
+            .iter()
+            .find(|o| o.name == "part")
+            .expect("dynamic part has a track");
+        // Motion from the very start: the first span samples the fall.
+        assert!(
+            matches!(track.spans.first(), Some(TrackSpan::Sampled { t0, .. }) if *t0 == 0.0),
+            "first span: {:?}",
+            track.spans.first().map(std::mem::discriminant)
+        );
+        // The engine put it to sleep on the floor: the track ends in a
+        // hold at the settled pose.
+        let last = track.spans.last().expect("non-empty track");
+        assert!(
+            matches!(last, TrackSpan::Hold { .. }),
+            "track should end settled (asleep)"
+        );
+        let pose = SequenceTimeline::object_pose(track, &[], timeline.duration).unwrap();
+        assert!(
+            (pose.translation.z - 0.015).abs() < 2e-3,
+            "settled z = {}",
+            pose.translation.z
+        );
+        assert!(pose.translation.vector.xy().norm() < 0.05);
+        // The floor never moved, so it never grew a track.
+        assert!(!timeline.objects.iter().any(|o| o.name == "floor"));
+        // The landing was recorded: a part×floor episode opening at the
+        // impact (analytic fall from 1 m ≈ 0.45 s), with a real force
+        // behind it (the impact peak dwarfs the 2 N resting weight).
+        let touch = timeline
+            .contacts
+            .iter()
+            .find(|c| (c.a == "part" && c.b == "floor") || (c.a == "floor" && c.b == "part"))
+            .expect("landing is a contact episode");
+        assert!(
+            (0.35..0.6).contains(&touch.start),
+            "landed at t = {}",
+            touch.start
+        );
+        assert!(touch.peak_force > 2.0, "peak {} N", touch.peak_force);
+        assert!(touch.position.z.abs() < 0.05, "impact near the floor top");
+        // And the settle instant is queryable: it is the trailing hold.
+        let settled = timeline.settled_at("part").expect("part settled");
+        assert!(
+            matches!(track.spans.last(), Some(TrackSpan::Hold { t0, .. }) if *t0 == settled)
+        );
+        assert_eq!(timeline.settled_at("floor"), None);
+    }
+
+    #[test]
+    fn physics_bake_is_deterministic_run_to_run() {
+        let scene = physics_scene();
+        let bake = || {
+            scene
+                .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
+                .unwrap()
+        };
+        let (a, b) = (bake(), bake());
+        let (ta, tb) = (
+            a.objects.iter().find(|o| o.name == "part").unwrap(),
+            b.objects.iter().find(|o| o.name == "part").unwrap(),
+        );
+        assert_eq!(ta.spans.len(), tb.spans.len());
+        for t in [0.1, 0.3, 0.45, 1.0, a.duration] {
+            let (pa, pb) = (
+                SequenceTimeline::object_pose(ta, &[], t).unwrap(),
+                SequenceTimeline::object_pose(tb, &[], t).unwrap(),
+            );
+            // Bitwise: same machine, same build, same world → same bake.
+            assert_eq!(pa.translation.vector, pb.translation.vector, "at t = {t}");
+            assert_eq!(pa.rotation.coords, pb.rotation.coords, "at t = {t}");
+        }
+    }
+
+    #[test]
+    fn physics_props_are_inert_without_a_backend() {
+        let scene = physics_scene();
+        let timeline = scene
+            .simulate_sequences(&["settle"], &RolloutOptions::default())
+            .unwrap();
+        // No engine: the marked part is today's static obstacle — nothing
+        // moves, nothing is tracked, and the bake says so.
+        assert_eq!(timeline.physics, None);
+        assert!(timeline.objects.is_empty());
+    }
+
+    #[test]
+    fn a_backend_without_dynamic_bodies_steps_nothing() {
+        let mut scene = physics_scene();
+        scene.set_obstacle_physics("part", None).unwrap();
+        let timeline = scene
+            .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        // The bake still names the engine it ran under, but the world is
+        // untouched — kinematically identical to a plain bake.
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        assert!(timeline.objects.is_empty());
+    }
+
+    #[test]
+    fn a_device_driving_a_dynamic_body_is_rejected() {
+        let mut scene = physics_scene();
+        scene.upsert_device(Device {
+            name: "axis".into(),
+            kind: DeviceKind::LinearAxis {
+                objects: vec!["part".into()],
+                axis: nalgebra::Unit::new_normalize(Vector3::x()),
+                speed: 0.1,
+                position: 0.0,
+                range: (0.0, 1.0),
+            },
+        });
+        let err = scene
+            .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("physics-dynamic"), "{err}");
+        // Without physics the same cell bakes: the props are inert.
+        scene
+            .simulate_sequences(&["settle"], &RolloutOptions::default())
+            .unwrap();
+    }
+
+    /// A belt cell: bed slab (top at z = 0.7), a stopper across the far
+    /// end, a conveyor zone spanning the run, a dynamic part at the near
+    /// end, and a presence sensor at the stopper watching the part.
+    fn belt_scene() -> Scene {
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "bed",
+                Geometry::Box {
+                    size: Vector3::new(2.2, 0.3, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, 0.65),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "stopper",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.3, 0.1),
+                },
+                Isometry3::translation(0.9, 0.0, 0.75),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.08, 0.06),
+                },
+                Isometry3::translation(-0.8, 0.0, 0.76),
+            )
+            .unwrap();
+        scene
+            .set_obstacle_physics(
+                "part",
+                Some(botrail_physics::BodyProps {
+                    mass: Some(0.3),
+                    material: botrail_physics::PhysicsMaterial {
+                        friction: 0.6,
+                        ..Default::default()
+                    },
+                    ..botrail_physics::BodyProps::dynamic()
+                }),
+            )
+            .unwrap();
+        // The zone covers the carry surface but leaves the bed and the
+        // stopper origins OUT: the advection captures by origin-in-zone,
+        // indiscriminately ([[conveyor-zone-advection-trap]]) — and the
+        // physics mirror faithfully reproduces whatever it moves, so a
+        // stopper swallowed by the zone rides its own belt away.
+        scene.upsert_device(Device {
+            name: "conv".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: Isometry3::translation(-0.125, 0.0, 0.815),
+                zone_size: Vector3::new(1.95, 0.3, 0.27),
+                velocity: Vector3::new(0.3, 0.0, 0.0),
+                running: false,
+            },
+        });
+        scene
+            .upsert_sensor(crate::seq::Sensor {
+                name: "at_stop".into(),
+                kind: SensorKind::Zone {
+                    pose: Isometry3::translation(0.8, 0.0, 0.78),
+                    size: Vector3::new(0.12, 0.3, 0.12),
+                },
+                watch: crate::seq::SensorWatch::Objects(vec!["part".into()]),
+                mount: None,
+            })
+            .unwrap();
+        scene
+    }
+
+    /// The whole P2 story in one bake: the program starts the belt, the
+    /// part grips it by friction and cruises at belt speed, presses the
+    /// stopper, the presence sensor sees it arrive, the program stops the
+    /// belt on that signal, and the part settles. A physics event driving
+    /// a PLC transition — the existing sensor → SFC chain, fed by contact.
+    #[test]
+    fn a_conveyed_part_trips_the_sensor_and_the_program_advances() {
+        let mut scene = belt_scene();
+        scene.upsert_sequence(Sequence {
+            name: "run".into(),
+            steps: vec![
+                step(
+                    "feed",
+                    vec![Action::Device {
+                        device: "conv".into(),
+                        command: crate::seq::DeviceCommand::Start,
+                    }],
+                    // Presence is overlap, so this fires as the part's
+                    // leading face enters the zone, before the stopper.
+                    Condition::Signal {
+                        name: "at_stop".into(),
+                        value: true,
+                    },
+                ),
+                // Line practice: run on so the part seats against the
+                // stopper — held long enough that the arrest is a full
+                // stall window for the diagnosis below.
+                step("seat", vec![], Condition::Elapsed { seconds: 2.0 }),
+                step(
+                    "hold",
+                    vec![Action::Device {
+                        device: "conv".into(),
+                        command: crate::seq::DeviceCommand::Stop,
+                    }],
+                    // Sleep latency is ~2 s (rapier's damped countdown),
+                    // so the settle tail has to outlast it.
+                    Condition::Elapsed { seconds: 2.5 },
+                ),
+            ],
+        });
+        let timeline = scene
+            .simulate_sequences_with(&["run"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        let track = timeline
+            .objects
+            .iter()
+            .find(|o| o.name == "part")
+            .expect("part is tracked");
+        // Cruise phase: carried at the belt's 0.3 m/s (grip transient is
+        // long over by t = 2 s; the stopper is still seconds away).
+        let x = |t: f64| {
+            SequenceTimeline::object_pose(track, &[], t)
+                .unwrap()
+                .translation
+                .x
+        };
+        let cruise = (x(4.0) - x(2.0)) / 2.0;
+        assert!(
+            (cruise - 0.3).abs() < 0.03,
+            "cruise speed {cruise}, belt is 0.3 m/s"
+        );
+        // The sensor tripped (the part reached the stopper zone), and the
+        // program took the transition it guards.
+        let lane = timeline
+            .signals
+            .iter()
+            .find(|s| s.name == "at_stop")
+            .expect("sensor lane exists");
+        let rise = lane
+            .edges
+            .iter()
+            .find(|(_, v)| *v)
+            .map(|(t, _)| *t)
+            .expect("sensor tripped");
+        assert!(
+            timeline
+                .step_spans
+                .iter()
+                .any(|s| s.name == "seat" && (s.start - rise).abs() < 0.05),
+            "the program advanced on the sensor"
+        );
+        // Seated against the stopper: the part's leading face at the
+        // stopper's near face (x = 0.88), give or take contact slop.
+        let settled = x(timeline.duration);
+        assert!(
+            (settled + 0.05 - 0.88).abs() < 0.01,
+            "settled center x = {settled}"
+        );
+        // And the belt stopped, so the part fell asleep into a hold.
+        assert!(matches!(track.spans.last(), Some(TrackSpan::Hold { .. })));
+        // The press is a recorded episode: part×stopper, opening as the
+        // part arrives, still closed only by the horn.
+        let press = timeline
+            .contacts
+            .iter()
+            .find(|c| {
+                (c.a == "part" && c.b == "stopper") || (c.a == "stopper" && c.b == "part")
+            })
+            .expect("stopper press is a contact episode");
+        assert!(press.start > rise - 1.0 && press.start < rise + 1.5);
+        assert!(press.peak_force > 0.0);
+        // And the arrest is a diagnosable stall: the belt drove under the
+        // seated part for the rest of the seat phase.
+        let stalls = timeline.conveyor_stalls(&scene);
+        let stall = stalls
+            .iter()
+            .find(|s| s.object == "part" && s.device == "conv")
+            .expect("seated part stalls on the running belt");
+        assert!(
+            stall.end > stall.start + 0.9,
+            "stall [{}, {}]",
+            stall.start,
+            stall.end
+        );
+    }
+
+    /// A belt that never starts is scenery: the part lands on it, stays
+    /// where it landed, and sleeps.
+    #[test]
+    fn a_stopped_belt_holds_its_part() {
+        let mut scene = belt_scene();
+        scene.upsert_sequence(Sequence {
+            name: "idle".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 3.0 })],
+        });
+        let timeline = scene
+            .simulate_sequences_with(&["idle"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        let track = timeline.objects.iter().find(|o| o.name == "part").unwrap();
+        let pose = SequenceTimeline::object_pose(track, &[], timeline.duration).unwrap();
+        assert!(
+            (pose.translation.x + 0.8).abs() < 5e-3,
+            "drifted to x = {}",
+            pose.translation.x
+        );
+        assert!(matches!(track.spans.last(), Some(TrackSpan::Hold { .. })));
+    }
+
+    /// A one-joint "pusher": a paddle spinning about z at 0.24 m reach,
+    /// mounted so the paddle blade sweeps just above a floor slab — the
+    /// smallest robot that can shove a part. Base at z = 0.5 (floor top).
+    fn pusher_scene() -> Scene {
+        const PUSHER: &str = r#"
+        <robot name="pusher">
+          <link name="base">
+            <visual><geometry><box size="0.08 0.08 0.1"/></geometry></visual>
+          </link>
+          <link name="paddle">
+            <visual>
+              <origin xyz="0.2 0 0"/>
+              <geometry><box size="0.24 0.04 0.05"/></geometry>
+            </visual>
+          </link>
+          <joint name="spin" type="revolute">
+            <parent link="base"/><child link="paddle"/>
+            <origin xyz="0 0 0.05"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3.1" upper="3.1" effort="10" velocity="10"/>
+          </joint>
+        </robot>
+        "#;
+        let model = botrail_model::RobotModel::from_urdf_str(PUSHER).unwrap();
+        let mut scene = Scene::with_base(
+            std::sync::Arc::new(model),
+            Isometry3::translation(0.0, 0.0, 0.5),
+        );
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(2.0, 2.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, 0.45),
+            )
+            .unwrap();
+        scene
+    }
+
+    fn dynamic_box(scene: &mut Scene, name: &str, x: f64, y: f64, z: f64) {
+        scene
+            .add_obstacle(
+                name,
+                Geometry::Box {
+                    size: Vector3::new(0.06, 0.06, 0.06),
+                },
+                Isometry3::translation(x, y, z),
+            )
+            .unwrap();
+        scene
+            .set_obstacle_physics(
+                name,
+                Some(botrail_physics::BodyProps {
+                    mass: Some(0.2),
+                    material: botrail_physics::PhysicsMaterial {
+                        friction: 0.6,
+                        ..Default::default()
+                    },
+                    ..botrail_physics::BodyProps::dynamic()
+                }),
+            )
+            .unwrap();
+    }
+
+    /// The arm's links are kinematic mirrors: a ramped sweep meets a part
+    /// that has already settled *and fallen asleep*, wakes it through
+    /// contact, and shoves it across the floor — deliberate contact is a
+    /// guarded ramp move, exactly the vocabulary welding approaches use.
+    #[test]
+    fn a_ramped_sweep_pushes_a_sleeping_part() {
+        let mut scene = pusher_scene();
+        // In the paddle's sweep band (radius ~0.08–0.32), off to -40°.
+        let (x0, y0) = (0.24 * 0.766, -0.24 * 0.643);
+        dynamic_box(&mut scene, "part", x0, y0, 0.531);
+        scene.upsert_sequence(Sequence {
+            name: "shove".into(),
+            steps: vec![
+                // Long enough for the part to settle and *sleep* first.
+                step("settle", vec![], Condition::Elapsed { seconds: 2.5 }),
+                step(
+                    "sweep",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("spin".into(), -1.4)],
+                        duration: 1.0,
+                    }],
+                    Condition::Done,
+                ),
+                step("rest", vec![], Condition::Elapsed { seconds: 2.5 }),
+            ],
+        });
+        let timeline = scene
+            .simulate_sequences_with(&["shove"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        let track = timeline.objects.iter().find(|o| o.name == "part").unwrap();
+        // Asleep before the sweep starts...
+        let sweep = timeline
+            .step_spans
+            .iter()
+            .find(|s| s.name == "sweep")
+            .unwrap()
+            .start;
+        let before = SequenceTimeline::object_pose(track, &[], sweep).unwrap();
+        assert!(
+            matches!(
+                track.spans.iter().find(|sp| {
+                    let (t0, t1) = sp.range();
+                    sweep > t0 && sweep < t1
+                }),
+                Some(TrackSpan::Hold { .. })
+            ),
+            "part should be asleep (Hold) when the sweep starts"
+        );
+        // ...then shoved: displaced well clear of where it slept, still
+        // on the floor (pushed, not batted into orbit or through it).
+        let after = SequenceTimeline::object_pose(track, &[], timeline.duration).unwrap();
+        let moved = (after.translation.vector - before.translation.vector).xy().norm();
+        assert!(moved > 0.05, "pushed {moved} m");
+        assert!(
+            (after.translation.z - 0.53).abs() < 5e-3,
+            "still on the floor, z = {}",
+            after.translation.z
+        );
+    }
+
+    /// Grasp handoff both ways: while attached the part rides the FK (a
+    /// Follow span — physics is not fighting it), and a release mid-swing
+    /// hands the carrier's velocity back, so the part flies on instead of
+    /// dropping dead. A release at rest drops straight down.
+    #[test]
+    fn detach_inherits_the_carrier_velocity() {
+        let bake = |detach_delay: f64| {
+            let mut scene = pusher_scene();
+            // Carried at an offset *beyond* the blade's 0.32 m reach —
+            // attach is rigid at any offset, and a landing circle outside
+            // the paddle's own keeps the swinging blade from sliding under
+            // its throw and catching it (which it otherwise does).
+            dynamic_box(&mut scene, "part", 0.42, 0.0, 0.605);
+            scene.upsert_sequence(Sequence {
+                name: "throw".into(),
+                steps: vec![
+                    step(
+                        "grab",
+                        vec![Action::Attach {
+                            robot: None,
+                            object: "part".into(),
+                            link: Some("paddle".into()),
+                            touch_links: None,
+                        }],
+                        Condition::Immediately,
+                    ),
+                    step(
+                        "swing",
+                        vec![Action::StartRamp {
+                            robot: None,
+                            targets: vec![("spin".into(), 2.4)],
+                            duration: 1.0,
+                        }],
+                        Condition::Elapsed {
+                            seconds: detach_delay,
+                        },
+                    ),
+                    step(
+                        "release",
+                        vec![Action::Detach {
+                            object: "part".into(),
+                        }],
+                        Condition::Elapsed { seconds: 2.0 },
+                    ),
+                ],
+            });
+            let timeline = scene
+                .simulate_sequences_with(&["throw"], &RolloutOptions::default(), rapier())
+                .unwrap();
+            let track = timeline
+                .objects
+                .iter()
+                .find(|o| o.name == "part")
+                .unwrap()
+                .clone();
+            let release = timeline
+                .step_spans
+                .iter()
+                .find(|s| s.name == "release")
+                .unwrap()
+                .start;
+            let q = timeline.robots[0].trajectory.sample(release);
+            let poses = scene.fk_for(0, &q).unwrap();
+            let at_release = SequenceTimeline::object_pose(&track, &[poses], release).unwrap();
+            let settled = SequenceTimeline::object_pose(&track, &[], timeline.duration).unwrap();
+            (track, at_release, settled)
+        };
+        // Released mid-swing (peak joint speed): the part flies on.
+        let (track, at_release, settled) = bake(0.5);
+        assert!(
+            track.spans.iter().any(|s| matches!(s, TrackSpan::Follow { .. })),
+            "attached ride is a Follow span"
+        );
+        let carried = (settled.translation.vector - at_release.translation.vector)
+            .xy()
+            .norm();
+        assert!(carried > 0.08, "flew {carried} m past the release point");
+        assert!(
+            (settled.translation.z - 0.53).abs() < 5e-3,
+            "landed at ({:+.3}, {:+.3}, {:.3}), released at ({:+.3}, {:+.3}, {:.3})",
+            settled.translation.x,
+            settled.translation.y,
+            settled.translation.z,
+            at_release.translation.x,
+            at_release.translation.y,
+            at_release.translation.z
+        );
+        // Released parked (ramp finished): a straight 5 cm drop.
+        let (_, at_release, settled) = bake(1.3);
+        let carried = (settled.translation.vector - at_release.translation.vector)
+            .xy()
+            .norm();
+        assert!(carried < 0.02, "a parked release drifted {carried} m");
+    }
+
+    /// A dynamic tote on an AGV deck rides by *friction*: the chassis is
+    /// a kinematic mirror with real contact velocities, so the load
+    /// follows the drive — starts, the pivot turn, the stop — and is
+    /// still aboard at the far station.
+    #[test]
+    fn a_deck_load_rides_the_agv_by_friction() {
+        use std::f64::consts::FRAC_PI_2;
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "chassis",
+                Geometry::Box {
+                    size: Vector3::new(0.4, 0.3, 0.2),
+                },
+                Isometry3::translation(0.0, 0.0, 0.1),
+            )
+            .unwrap();
+        dynamic_box(&mut scene, "tote", 0.0, 0.0, 0.235);
+        scene.upsert_device(Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                path: crate::seq::VehiclePath {
+                    waypoints: vec![
+                        nalgebra::Point3::new(0.0, 0.0, 0.0),
+                        nalgebra::Point3::new(2.0, 0.0, 0.0),
+                        nalgebra::Point3::new(2.0, 1.0, 0.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: vec!["chassis".into()],
+                speed: 0.4,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                drive: crate::seq::Drive::Differential {
+                    allow_reverse: false,
+                    max_grade: None,
+                },
+                tray: Some((
+                    Isometry3::translation(0.0, 0.0, 0.25),
+                    Vector3::new(0.35, 0.3, 0.2),
+                )),
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "haul".into(),
+            steps: vec![
+                step(
+                    "go",
+                    vec![Action::Device {
+                        device: "agv".into(),
+                        command: crate::seq::DeviceCommand::Goto {
+                            station: "c".into(),
+                        },
+                    }],
+                    Condition::DeviceDone {
+                        device: "agv".into(),
+                    },
+                ),
+                step("rest", vec![], Condition::Elapsed { seconds: 2.5 }),
+            ],
+        });
+        let timeline = scene
+            .simulate_sequences_with(&["haul"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        let track = timeline.objects.iter().find(|o| o.name == "tote").unwrap();
+        let settled = SequenceTimeline::object_pose(track, &[], timeline.duration).unwrap();
+        // Aboard at the far station: near (2, 1), still at deck height.
+        let offset = (settled.translation.vector - Vector3::new(2.0, 1.0, 0.235))
+            .xy()
+            .norm();
+        assert!(offset < 0.3, "tote ended {offset} m off the parked deck");
+        assert!(
+            (settled.translation.z - 0.235).abs() < 0.01,
+            "tote left the deck, z = {}",
+            settled.translation.z
+        );
+    }
+
+    /// A catalog-identified workpiece knows its own mass: marking it
+    /// dynamic without a `mass=` takes `mass_kg` from the part identity
+    /// instead of the density default — visible here as a ~30× harder
+    /// landing than the identical unidentified geometry (impact scales
+    /// with momentum).
+    #[test]
+    fn a_part_identity_supplies_the_mass_default() {
+        let bake = |identified: bool| {
+            let mut scene = Scene::empty();
+            scene
+                .add_obstacle(
+                    "floor",
+                    Geometry::Box {
+                        size: Vector3::new(2.0, 2.0, 0.1),
+                    },
+                    Isometry3::translation(0.0, 0.0, -0.05),
+                )
+                .unwrap();
+            scene
+                .add_obstacle(
+                    "part",
+                    Geometry::Box {
+                        size: Vector3::new(0.1, 0.05, 0.03),
+                    },
+                    Isometry3::translation(0.0, 0.0, 0.5),
+                )
+                .unwrap();
+            scene
+                .set_obstacle_physics("part", Some(botrail_physics::BodyProps::dynamic()))
+                .unwrap();
+            if identified {
+                let mut part = crate::part::Part::default();
+                part.attributes.insert(
+                    "mass_kg".into(),
+                    crate::part::PartAttr::Number(5.0),
+                );
+                scene
+                    .set_part("part", Some(crate::part::PartTargetKind::Obstacle), part)
+                    .unwrap();
+            }
+            scene.upsert_sequence(Sequence {
+                name: "settle".into(),
+                steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 1.5 })],
+            });
+            let timeline = scene
+                .simulate_sequences_with(
+                    &["settle"],
+                    &RolloutOptions::default(),
+                    rapier(),
+                )
+                .unwrap();
+            timeline
+                .contacts
+                .iter()
+                .find(|c| (c.a == "part") ^ (c.b == "part") && (c.a == "floor") ^ (c.b == "floor"))
+                .expect("landing recorded")
+                .peak_force
+        };
+        // Both scenes need the settle sequence; author it inside `bake`.
+        // (Closure builds it before simulating.)
+        let heavy = bake(true);
+        let light = bake(false);
+        // Density default: 1.5e-4 m³ × 1000 = 0.15 kg vs 5 kg identified.
+        assert!(
+            heavy > 10.0 * light,
+            "peaks: identified {heavy} N vs default {light} N"
+        );
+    }
+
+    #[test]
+    fn sampled_spans_interpolate_between_ticks() {
+        let spans = vec![TrackSpan::Sampled {
+            t0: 0.0,
+            dt: 0.01,
+            poses: vec![Isometry3::translation(0.0, 0.0, 1.0), Isometry3::translation(0.0, 0.0, 0.9), Isometry3::translation(0.0, 0.0, 0.6)],
+        }];
+        let at = |t: f64| SequenceTimeline::span_pose(&spans, &[], t).unwrap().translation.z;
+        assert_eq!(at(0.0), 1.0);
+        assert!((at(0.005) - 0.95).abs() < 1e-12);
+        assert_eq!(at(0.01), 0.9);
+        assert!((at(0.015) - 0.75).abs() < 1e-12);
+        // Past the last sample the pose holds, like every final span.
+        assert_eq!(at(0.5), 0.6);
     }
 }

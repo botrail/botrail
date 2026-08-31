@@ -16,6 +16,7 @@ botrail-kin.workspace = true
 botrail-collide.workspace = true
 botrail-plan.workspace = true
 botrail-traj.workspace = true
+botrail-physics.workspace = true
 nalgebra.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,3 +35,4 @@ ts = ["dep:ts-rs"]
 schema = ["dep:schemars"]
 
 [dev-dependencies]
+botrail-physics-rapier.workspace = true

@@ -2511,6 +2511,17 @@
         "name": {
           "type": "string"
         },
+        "physics": {
+          "description": "Authored physics properties. Absent for ordinary scenery — files\nwritten before this existed simply have none, which is what they\nmeant.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhysicsMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "pose": {
           "description": "World pose.",
           "$ref": "#/$defs/PoseMsg"
@@ -2779,6 +2790,51 @@
             "weight"
           ]
         }
+      ]
+    },
+    "PhysicsMsg": {
+      "description": "Authored physics of an obstacle (design-physics.md). Inert on a\nkinematic bake: absent props — and present ones, when `physics` is not\nrequested — leave the obstacle the static body it always was.",
+      "type": "object",
+      "properties": {
+        "angular_damping": {
+          "type": "number",
+          "format": "double"
+        },
+        "ccd": {
+          "description": "Continuous collision detection, for small fast parts.",
+          "type": "boolean"
+        },
+        "dynamic": {
+          "description": "A dynamic body: gravity, contact and friction own its pose during a\nphysics bake. (Kinematic bodies are rollout-internal — robot links,\ndevice-driven scenery — and never authored on an obstacle.)",
+          "type": "boolean"
+        },
+        "friction": {
+          "type": "number",
+          "format": "double"
+        },
+        "linear_damping": {
+          "type": "number",
+          "format": "double"
+        },
+        "mass": {
+          "description": "Total mass in kg; absent derives it from the collision shape's\nvolume at 1000 kg/m³.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "restitution": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "dynamic",
+        "friction",
+        "restitution",
+        "linear_damping",
+        "angular_damping"
       ]
     },
     "PoseMsg": {

@@ -1,0 +1,14 @@
+[package]
+name = "botrail-physics"
+description = "Engine-independent physics vocabulary for botrail: body properties, a lowered world description, and the backend trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+nalgebra.workspace = true
+parry3d-f64.workspace = true
+thiserror.workspace = true

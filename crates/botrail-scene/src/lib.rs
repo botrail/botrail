@@ -165,6 +165,11 @@ pub struct Obstacle {
     /// map's micron ramp). Drawn by the studio as a colour key. Never
     /// affects collision or planning.
     pub legend: Option<Legend>,
+    /// Authored physics properties. `None` — and any props on a bake run
+    /// *without* a physics backend — leave the obstacle exactly as it
+    /// always was: a static collision body. Only a physics rollout reads
+    /// this (see `rollout::RolloutOptions::physics`).
+    pub physics: Option<botrail_physics::BodyProps>,
 }
 
 /// The two PBR knobs that decide whether a surface reads as bare steel, a
@@ -918,6 +923,7 @@ impl Scene {
             color: None,
             material: None,
             legend: None,
+            physics: None,
         });
         self.obstacle_colliders.push(collider);
         Ok(name)
@@ -946,6 +952,7 @@ impl Scene {
                 color: spec.color,
                 material: spec.material,
                 legend: None,
+                physics: None,
             });
             self.obstacle_colliders.push(collider);
             names.push(name);
@@ -974,6 +981,7 @@ impl Scene {
             color: None,
             material: None,
             legend: None,
+            physics: None,
         });
         self.obstacle_colliders.push(collider);
         name
@@ -1108,6 +1116,53 @@ impl Scene {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].material = material;
         Ok(())
+    }
+
+    /// Sets (or clears) an obstacle's authored physics properties. Inert
+    /// unless a bake runs with a physics backend — a scene full of
+    /// dynamic-marked parts still bakes bit-identically to before when
+    /// `physics` is off (design-physics.md §8).
+    pub fn set_obstacle_physics(
+        &mut self,
+        name: &str,
+        physics: Option<botrail_physics::BodyProps>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].physics = physics;
+        Ok(())
+    }
+
+    /// The authored physics properties of an obstacle, if any.
+    pub fn obstacle_physics(&self, name: &str) -> Result<Option<&botrail_physics::BodyProps>, SceneError> {
+        let index = self.obstacle_index(name)?;
+        Ok(self.obstacles[index].physics.as_ref())
+    }
+
+    /// The obstacle's physics properties as a bake (and the USD export)
+    /// resolves them: the authored props, with the mass default filled
+    /// from the obstacle's part identity (`mass_kg`) when the body is
+    /// dynamic and no explicit mass is set — a catalog workpiece knows
+    /// what it weighs. `None` when no props are authored at all.
+    pub fn resolved_body_props(&self, name: &str) -> Option<botrail_physics::BodyProps> {
+        let obstacle = self.obstacles.iter().find(|o| o.name == name)?;
+        let mut props = obstacle.physics.clone()?;
+        if props.kind == botrail_physics::BodyKind::Dynamic && props.mass.is_none() {
+            if let Some(entry) = self.part(name) {
+                if entry.kind == part::PartTargetKind::Obstacle {
+                    if let Some(kg) = entry
+                        .part
+                        .attributes
+                        .get("mass_kg")
+                        .and_then(part::PartAttr::as_number)
+                    {
+                        if kg.is_finite() && kg > 0.0 {
+                            props.mass = Some(kg);
+                        }
+                    }
+                }
+            }
+        }
+        Some(props)
     }
 
     /// Attaches (or clears) the colour key an obstacle's colours are read
@@ -2066,6 +2121,8 @@ impl Scene {
             duration,
             sequences: Vec::new(),
             scenario: None,
+            physics: None,
+            contacts: Vec::new(),
             robots,
             objects: Vec::new(),
             vehicles: Vec::new(),

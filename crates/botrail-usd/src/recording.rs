@@ -761,6 +761,7 @@ mod tests {
                 track: PoseTrack::Sampled(box_track.clone()),
                 color: None,
                 visible: Vec::new(),
+                physics: None,
             },
             ObjectSpec {
                 name: "table".into(),
@@ -770,6 +771,7 @@ mod tests {
                 track: PoseTrack::Static(Isometry3::translation(0.5, 0.0, -0.01)),
                 color: None,
                 visible: Vec::new(),
+                physics: None,
             },
             // Never moves, only blinks — the carve-stage shape whose whole
             // animation is its visibility window.
@@ -781,6 +783,7 @@ mod tests {
                 track: PoseTrack::Static(Isometry3::translation(0.5, 0.0, 0.02)),
                 color: None,
                 visible: (0..times.len()).map(|k| k >= 12).collect(),
+                physics: None,
             },
         ];
 

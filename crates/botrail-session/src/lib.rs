@@ -685,6 +685,19 @@ pub fn set_obstacle_material(
     Ok(())
 }
 
+/// Sets or clears an obstacle's authored physics properties and
+/// rebroadcasts (the studio shows nothing for them yet, but a saved
+/// project must carry what the scene holds).
+pub fn set_obstacle_physics(
+    host: &impl SessionHost,
+    name: &str,
+    physics: Option<botrail_physics::BodyProps>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_physics(name, physics))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
 /// Attaches or clears an obstacle's colour key and rebroadcasts.
 pub fn set_obstacle_legend(
     host: &impl SessionHost,
@@ -1231,6 +1244,19 @@ pub fn simulate_sequences_and_emit(
     scenario: Option<&str>,
     options: &botrail_scene::rollout::RolloutOptions,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
+    simulate_sequences_and_emit_with(host, names, scenario, options, None)
+}
+
+/// [`simulate_sequences_and_emit`] with an injected physics backend
+/// (design-physics.md): dynamic obstacles run under the engine, and the
+/// timeline says so. `None` is the kinematic bake, bit for bit.
+pub fn simulate_sequences_and_emit_with(
+    host: &impl SessionHost,
+    names: &[&str],
+    scenario: Option<&str>,
+    options: &botrail_scene::rollout::RolloutOptions,
+    backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
     let name = names.join(" + ");
     let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
     let mut snapshot = host.snapshot();
@@ -1241,7 +1267,7 @@ pub fn simulate_sequences_and_emit(
     let result = applied.and_then(|applied| {
         let t0 = host.now_ms();
         let mut result = snapshot
-            .simulate_sequences(names, options)
+            .simulate_sequences_with(names, options, backend)
             .map_err(|e| e.to_string());
         if let Ok(timeline) = &mut result {
             timeline.scenario = applied.map(str::to_string);
@@ -1531,6 +1557,18 @@ pub fn timeline_msg(
                 times: s.edges.iter().map(|(t, _)| *t).collect(),
                 values: s.edges.iter().map(|(_, v)| *v).collect(),
                 kind: s.kind.as_str().to_string(),
+            })
+            .collect(),
+        contacts: timeline
+            .contacts
+            .iter()
+            .map(|c| wire::ContactMsg {
+                a: c.a.clone(),
+                b: c.b.clone(),
+                start: c.start,
+                end: c.end,
+                position: [c.position.x, c.position.y, c.position.z],
+                peak_force: c.peak_force,
             })
             .collect(),
     }

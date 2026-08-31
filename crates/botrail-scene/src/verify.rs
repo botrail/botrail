@@ -153,6 +153,14 @@ fn apply_state(
                     crate::rollout::pivot_pose(from, center, omega * (t.clamp(*t0, *t1) - t0));
                 world.set_obstacle_pose(&track.name, pose)?;
             }
+            span @ TrackSpan::Sampled { .. } => {
+                if entered && world.attachment(&track.name).is_some() {
+                    world.detach_obstacle(&track.name)?;
+                }
+                let pose = SequenceTimeline::span_pose(std::slice::from_ref(span), &[], t)
+                    .expect("sampled span is non-empty");
+                world.set_obstacle_pose(&track.name, pose)?;
+            }
         }
     }
     Ok(())
