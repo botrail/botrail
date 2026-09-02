@@ -48,7 +48,7 @@ removes the pin.
 ## Generated structures come identified
 
 The [standard parts](standard-parts.md) — `bt.parts.fence`, `table`,
-`pedestal`, `conveyor`, `pallet`, `light_curtain` — pin their parts as they
+`pedestal`, `conveyor`, `pallet`, `light_curtain`, `photoelectric` — pin their parts as they
 build: a fence is one line for the panels (its quantity the panel count),
 one for the posts, one for the door; a conveyor's identity sits on the
 device, its body being geometry. Give them `model=` / `manufacturer=` /

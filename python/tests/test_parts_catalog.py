@@ -1264,3 +1264,188 @@ def test_a_pack_can_bring_its_own_drawing(pack: Path, tmp_path: Path) -> None:
     assert hi[2] == pytest.approx(2.0)
     flags = _drawn(scene, tmp_path)
     assert all(flags[n] == (False, True) for n in drawn)
+
+
+# A light curtain is bought by protective height and resolution, and the
+# pair's range goes with the resolution — the finger type reaches less far.
+CURTAIN_MANIFEST = """
+schema_version: '0.1'
+id: acme/curtain/guard/r1
+kind: spec
+category: sensor.light_curtain
+name: Guard Curtain
+manufacturer:
+  name: ACME Safety
+distribution: public
+specs:
+  range_mm: 10000
+  resolution_mm: 14
+  ossd: 2
+configuration:
+  generator: light_curtain
+  params:
+    resolution_mm: {values: [14, 25], default: 25}
+    protective_height_mm: {values: [160, 320, 1200], default: 1200}
+    grade: {values: [advanced, standard], default: standard}
+  components:
+    - role: curtain
+      category: sensor.light_curtain
+      dimensions_mm: {section_w: 32, section_d: 38}
+      variants:
+        - {resolution_mm: 14, protective_height_mm: 160, grade: advanced, part_number: LC-A0160-14, kg: 0.4}
+        - {resolution_mm: 14, protective_height_mm: 160, grade: standard, part_number: LC-B0160-14, kg: 0.4}
+        - {resolution_mm: 25, protective_height_mm: 320, grade: standard, part_number: LC-B0320-25, kg: 0.8}
+        - {resolution_mm: 25, protective_height_mm: 1200, grade: standard, part_number: LC-B1200-25, kg: 3.1}
+        - {resolution_mm: 25, protective_height_mm: 1200, grade: advanced, part_number: LC-A1200-25, kg: 3.1}
+  rules:
+    range_mm_by_resolution: {14: 10000, 25: 20000}
+"""
+
+# A photoelectric sensor is one series sold in several sensing methods:
+# a through-beam pair, a retroreflective one (its reflector a separate
+# article), a diffuse one — and a range per model.
+EYE_MANIFEST = """
+schema_version: '0.1'
+id: acme/eye/e3/r1
+kind: spec
+category: sensor.photoelectric
+name: E3 Eye
+manufacturer:
+  name: ACME Sensing
+distribution: public
+specs:
+  sensing_range_mm: 30000
+  ip_rating: IP67
+configuration:
+  generator: photoelectric
+  params:
+    sensing: {values: [through_beam, retroreflective, diffuse], default: diffuse}
+    sensing_range_mm: {values: [100, 1000, 4000, 15000], default: 1000}
+    output: {values: [NPN, PNP], default: NPN}
+  components:
+    - role: sensor
+      category: sensor.photoelectric
+      dimensions_mm: {width: 10.8, height: 31, depth: 20}
+      variants:
+        - {sensing: through_beam, sensing_range_mm: 15000, output: NPN, part_number: E3-T61, kg: 0.12}
+        - {sensing: through_beam, sensing_range_mm: 15000, output: PNP, part_number: E3-T81, kg: 0.12}
+        - {sensing: retroreflective, sensing_range_mm: 4000, output: NPN, part_number: E3-R61, kg: 0.065}
+        - {sensing: diffuse, sensing_range_mm: 100, output: NPN, part_number: E3-D61, kg: 0.065}
+        - {sensing: diffuse, sensing_range_mm: 1000, output: NPN, part_number: E3-D62, kg: 0.065}
+        - {sensing: diffuse, sensing_range_mm: 1000, output: PNP, part_number: E3-D82, kg: 0.065}
+    - role: reflector
+      category: sensor.photoelectric
+      part_number: E3-REF
+      dimensions_mm: {width: 40.3, height: 59.9, thickness: 7.5}
+"""
+
+
+@pytest.fixture()
+def curtain(tmp_path: Path) -> Path:
+    directory = tmp_path / "curtain"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(CURTAIN_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def eye(tmp_path: Path) -> Path:
+    directory = tmp_path / "eye"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(EYE_MANIFEST)
+    return directory
+
+
+def test_the_light_curtain_is_a_pair_you_can_order(curtain: Path) -> None:
+    """The protective height is what you order, the columns stand that
+    tall in the maker's section, and the BOM row carries the pair's model
+    number, its mass, and the range of the type chosen — what a `range_mm`
+    requirement is checked against."""
+    scene = scene_()
+    built = bt.parts.light_curtain(scene, "lc", frm=(-0.5, 1.0), to=(0.5, 1.0), catalog=curtain)
+    assert built.obstacles == ["lc/column_a", "lc/column_b"] and built.sensors == ["lc"]
+    lo, hi = scene.obstacle_bounds("lc/column_a")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3)) == (0.038, 0.032)   # depth along the beam
+    assert (lo[2], hi[2]) == (pytest.approx(0.0), pytest.approx(1.2))          # the protective height
+    row = rows(scene)["lc"]
+    assert row["model"] == "LC-B1200-25" and row["category"] == "sensor.light_curtain"
+    assert row["attributes"]["mass_kg"] == pytest.approx(3.1)
+    assert row["attributes"]["protective_height_mm"] == pytest.approx(1200.0)
+    assert row["attributes"]["range_mm"] == pytest.approx(20000.0)             # the hand type's, not the series'
+    assert row["attributes"]["ossd"] == pytest.approx(2.0)
+    # A height from the list, a resolution by name, a grade by axis.
+    short = scene_()
+    bt.parts.light_curtain(short, "lc", frm=(0.0, 0.0), to=(1.0, 0.0), catalog=curtain, height=0.32)
+    assert rows(short)["lc"]["model"] == "LC-B0320-25"
+    finger = scene_()
+    bt.parts.light_curtain(finger, "lc", frm=(0.0, 0.0), to=(1.0, 0.0), catalog=curtain,
+                           height=0.16, resolution=14, grade="advanced")
+    assert rows(finger)["lc"]["model"] == "LC-A0160-14"
+    assert rows(finger)["lc"]["attributes"]["range_mm"] == pytest.approx(10000.0)
+    # A height nobody sells, a combination nobody sells, a beam too long.
+    with pytest.raises(ValueError, match="protective_height_mm=500 is not available"):
+        bt.parts.light_curtain(scene_(), "lc", frm=(0.0, 0.0), to=(1.0, 0.0), catalog=curtain, height=0.5)
+    with pytest.raises(ValueError, match="no curtain is sold at"):
+        bt.parts.light_curtain(scene_(), "lc", frm=(0.0, 0.0), to=(1.0, 0.0), catalog=curtain, resolution=14)
+    with pytest.raises(ValueError, match="spans 25000 mm but the curtain's operating range is 20000 mm"):
+        bt.parts.light_curtain(scene_(), "lc", frm=(0.0, 0.0), to=(25.0, 0.0), catalog=curtain)
+
+
+def test_a_hand_written_light_curtain_is_unchanged(curtain: Path) -> None:
+    scene = scene_()
+    built = bt.parts.light_curtain(scene, "lc", frm=(-1.0, -2.0), to=(1.0, -2.0), model="SL-V")
+    lo, hi = scene.obstacle_bounds("lc/column_a")
+    assert (round(hi[0] - lo[0], 3), hi[2]) == (0.04, pytest.approx(1.2))
+    assert rows(scene)["lc"]["model"] == "SL-V" and built.sensors == ["lc"]
+
+
+def test_the_photoelectric_sensor_is_one_series_in_three_methods(eye: Path) -> None:
+    """The default is the diffuse 1 m model: a block behind its lens and a
+    beam to the target, and the BOM row says the model, its mass and the
+    range *of the model chosen* (a `sensing_range_mm` requirement must not
+    be answered with the 30 m the through-beam sibling reaches)."""
+    scene = scene_()
+    built = bt.parts.photoelectric(scene, "eye", frm=(0.0, 0.0, 0.5), to=(0.6, 0.0, 0.5), catalog=eye)
+    assert built.obstacles == ["eye/body"] and built.sensors == ["eye"]
+    lo, hi = scene.obstacle_bounds("eye/body")
+    assert (lo[0], hi[0]) == (pytest.approx(-0.02), pytest.approx(0.0))        # behind the lens
+    assert (round(hi[1] - lo[1], 4), round(hi[2] - lo[2], 3)) == (0.0108, 0.031)
+    row = rows(scene)["eye"]
+    assert row["model"] == "E3-D62" and row["category"] == "sensor.photoelectric"
+    assert row["attributes"]["mass_kg"] == pytest.approx(0.065)
+    assert row["attributes"]["sensing_range_mm"] == pytest.approx(1000.0)
+    assert row["attributes"]["output"] == "NPN" and row["attributes"]["ip_rating"] == "IP67"
+    # A through-beam pair puts the receiver at the far end, looking back.
+    pair = scene_()
+    built = bt.parts.photoelectric(pair, "eye", frm=(0.0, 0.0, 0.5), to=(3.0, 0.0, 0.5), catalog=eye,
+                                   sensing="through_beam", sensing_range_mm=15000, output="PNP")
+    assert built.obstacles == ["eye/body", "eye/receiver"]
+    lo, hi = pair.obstacle_bounds("eye/receiver")
+    assert (lo[0], hi[0]) == (pytest.approx(3.0), pytest.approx(3.02))
+    assert rows(pair)["eye"]["model"] == "E3-T81"
+    # A retroreflective one puts the reflector there — its own line, since
+    # the maker sells it separately.
+    retro = scene_()
+    bt.parts.photoelectric(retro, "eye", frm=(0.0, 0.0, 0.5), to=(2.0, 0.0, 0.5), catalog=eye,
+                           sensing="retroreflective", sensing_range_mm=4000)
+    table = rows(retro)
+    assert table["eye"]["model"] == "E3-R61" and table["eye/reflector"]["model"] == "E3-REF"
+    lo, hi = retro.obstacle_bounds("eye/reflector")
+    assert (lo[0], hi[0]) == (pytest.approx(2.0), pytest.approx(2.0075))
+    # A beam longer than the model reaches, a combination nobody sells.
+    with pytest.raises(ValueError, match="spans 2000 mm but the sensing range is 1000 mm"):
+        bt.parts.photoelectric(scene_(), "eye", frm=(0.0, 0.0, 0.5), to=(2.0, 0.0, 0.5), catalog=eye)
+    with pytest.raises(ValueError, match="no sensor is sold at"):
+        bt.parts.photoelectric(scene_(), "eye", frm=(0.0, 0.0, 0.5), to=(0.05, 0.0, 0.5), catalog=eye,
+                               sensing="retroreflective", sensing_range_mm=100)
+
+
+def test_a_hand_written_photoelectric_sensor_is_one_line(eye: Path) -> None:
+    scene = scene_()
+    built = bt.parts.photoelectric(scene, "eye", frm=(0.0, 0.0, 0.5), to=(0.0, 1.0, 0.5),
+                                   model="PZ-G", manufacturer="ACME Sensing")
+    assert built.obstacles == ["eye/body"]
+    lo, hi = scene.obstacle_bounds("eye/body")
+    assert (lo[1], hi[1]) == (pytest.approx(-0.02), pytest.approx(0.0))        # looking along +y
+    row = rows(scene)["eye"]
+    assert row["model"] == "PZ-G" and row["category"] == "sensor.photoelectric"

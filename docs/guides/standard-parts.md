@@ -21,6 +21,8 @@ bt.parts.table(scene, "table", size=(1.2, 0.8, 0.75), position=(1.0, 0.0), model
 bt.parts.pallet(scene, "pallet", position=(-1.2, 0.0))
 rack = bt.parts.rack(scene, "rack", size=(1.2, 0.6, 1.8), position=(-1.2, 1.2), levels=4)
 bt.parts.light_curtain(scene, "lc", frm=(-1, -2), to=(1, -2), model="SL-V")
+bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
+                       watch=["part"], model="E3Z-D62")
 ```
 
 ## What each generator makes
@@ -34,7 +36,8 @@ bt.parts.light_curtain(scene, "lc", frm=(-1, -2), to=(1, -2), model="SL-V")
 | [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`cabinet`][botrail.parts.cabinet] | `<name>/body`, its plinth as `<name>/base`, the mounting plate standing inside as `<name>/plate` | `<name>/front` (centre of the door face at floor level — where an operator stands) | — | `<name>` (`structure.cabinet`), and with a catalog `<name>/base` and `<name>/plate` (`structure.cabinet.base` / `.plate` — the plinth and the plate are articles of their own) |
 | [`pallet`][botrail.parts.pallet] | bottom boards, blocks, deck boards | `<name>/top` | — | `<name>` (`pallet`, `EPAL 1` by default) |
-| [`light_curtain`][botrail.parts.light_curtain] | two columns | — | the beam sensor `<name>` (trips on the robot) | the *sensor* (`sensor.light_curtain`) |
+| [`light_curtain`][botrail.parts.light_curtain] | two columns, `<name>/column_a|b` | — | the beam sensor `<name>` (trips on the robot) | the *sensor* (`sensor.light_curtain`) — with a catalog the emitter/receiver pair's model number, and the range of the resolution chosen |
+| [`photoelectric`][botrail.parts.photoelectric] | the sensor body `<name>/body` behind its lens; a through-beam pair adds `<name>/receiver`, a retroreflective one `<name>/reflector` | — | the beam sensor `<name>` (trips on `watch`, and on the robot if asked) | the *sensor* (`sensor.photoelectric`), and with a catalog the reflector where the maker sells it separately |
 | [`wall`][botrail.parts.wall] | a pier per solid stretch under `<name>/e{edge}_{i}`, the wall over each opening under `<name>/head/`, a column at each shared corner | `<name>/opening{edge}_{i}` (on the floor at each doorway, facing along the wall) | — | `<name>` (`structure.wall`, carrying the run's length, height and thickness) |
 | [`stairs`][botrail.parts.stairs] | a walkable checker-plate tread per step under `<name>/tread…`, a plate stringer and support leg each side, the handrail under `<name>/handrails/` | `<name>/foot`, `<name>/top` (author the vehicle path's z between them) | — | `<name>` (`structure.stairs`), and with a catalog `<name>/handrails` (`structure.stairs.rail`, qty = 2 sides) |
 

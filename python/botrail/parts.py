@@ -1657,11 +1657,13 @@ def light_curtain(
     frm: Point2,
     to: Point2,
     *,
-    height: float = 1.2,
+    height: Optional[float] = None,
     beam_height: Optional[float] = None,
     column: float = 0.04,
     watch_robot: bool = True,
     watch: Optional[list[str]] = None,
+    catalog: Optional["CatalogRef"] = None,
+    resolution: Optional[float] = None,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
     color: Color = FENCE_POST,
@@ -1670,24 +1672,241 @@ def light_curtain(
     """A light curtain between two floor points: a beam sensor `<name>`
     at `beam_height` (half the `height` by default) that trips on any robot
     link (`watch_robot`) and/or the named objects, and two mounting columns
-    `<name>/column_a|b` of `height`. The part (`sensor.light_curtain`) is
-    pinned on the sensor; the columns are its mounting geometry."""
+    `<name>/column_a|b` of `height` (1.2 m unless given). The part
+    (`sensor.light_curtain`) is pinned on the sensor; the columns are its
+    mounting geometry.
+
+    With `catalog=` — the id of a light-curtain spec pack, or a package
+    directory — a curtain you can order: `height` is the protective height
+    and is matched against the ones sold, `resolution` (mm — the smallest
+    object it must catch: 14 for a finger, 25 for a hand) picks the type,
+    the columns take the maker's section, and the BOM row carries the model
+    number of the emitter/receiver pair and its mass. A beam longer than the
+    curtain's operating range is refused with the numbers — the same
+    `range_mm` a requirement check would ask of it."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("light_curtain")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if height is not None and "protective_height_mm" in params:
+            params["protective_height_mm"] = spec.choose(
+                "protective_height_mm", round(height * 1000.0, 3))
+        if resolution is not None and "resolution_mm" in params:
+            params["resolution_mm"] = spec.choose("resolution_mm", resolution)
+        height = _sized(params, "protective_height_mm", height)
+        manufacturer = manufacturer or spec.manufacturer
+    height = 1.2 if height is None else float(height)
+    if height <= 0:
+        raise ValueError("light_curtain: height must be positive")
+
     (xa, ya), (xb, yb) = (float(frm[0]), float(frm[1])), (float(to[0]), float(to[1]))
+    span = math.hypot(xb - xa, yb - ya)
+    reach: dict = {}
+    if spec is not None:
+        limit = _curtain_range_mm(spec, params)
+        _within_range(spec, span, limit, "the curtain's operating range")
+        if limit is not None:
+            # The range of the type chosen, not the series figure — what a
+            # `range_mm` requirement is checked against.
+            reach = {"range_mm": limit}
     zb = beam_height if beam_height is not None else height / 2
+    # The columns face each other across the beam: the maker's section is
+    # `section_w` across it (the lens face) and `section_d` along it.
+    section = (column, column)
+    if spec is not None:
+        across = _mm(spec.dimension_mm("curtain", "section_w"))
+        along = _mm(spec.dimension_mm("curtain", "section_d"))
+        section = (across or column, along or column)
+    q = _yaw_quat(math.atan2(yb - ya, xb - xa))
     built = Built(name)
     for tag, (px, py) in (("a", (xa, ya)), ("b", (xb, yb))):
         built.obstacles.append(
-            scene.add_box(f"{name}/column_{tag}", size=(column, column, height), position=(px, py, height / 2), color=color)
+            scene.add_box(f"{name}/column_{tag}", size=(section[1], section[0], height),
+                          position=(px, py, height / 2), quaternion=q, color=color)
         )
     scene.add_beam_sensor(name, frm=(xa, ya, zb), to=(xb, yb, zb), watch=watch, watch_robot=watch_robot)
     built.sensors.append(name)
-    scene.set_part(name, kind="sensor", category="sensor.light_curtain", **_identity(model, manufacturer, attributes))
+    if spec is None:
+        scene.set_part(name, kind="sensor", category="sensor.light_curtain", **_identity(model, manufacturer, attributes))
+        return built
+    scene.set_part(
+        name, kind="sensor", category=spec.category("curtain", "sensor.light_curtain"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("curtain", **params), description=spec.name,
+        **{**_recorded(spec, params), **reach, **_kg(spec.mass_kg("curtain", **params)), **attributes},
+    )
+    return built
+
+
+def _curtain_range_mm(spec, params: dict) -> Optional[float]:
+    """How far apart the pair may stand. A curtain's range goes with its
+    resolution (the finger type reaches less far than the hand type), so a
+    pack may carry it per resolution under `rules.range_mm_by_resolution`;
+    otherwise the series figure in `specs.range_mm` applies."""
+    table = spec.rule("range_mm_by_resolution")
+    resolution = params.get("resolution_mm")
+    if isinstance(table, dict) and resolution is not None:
+        for key, value in table.items():
+            try:
+                if abs(float(key) - float(resolution)) < 1e-6:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+    value = spec.specs().get("range_mm")
+    return None if value is None or isinstance(value, str) else float(value)
+
+
+def _within_range(spec, span: float, limit_mm: Optional[float], what: str) -> None:
+    if limit_mm is not None and span * 1000.0 > limit_mm + 1e-6:
+        raise ValueError(
+            f"{spec.id}: the beam spans {span * 1000.0:.0f} mm but {what} is "
+            f"{_plain(limit_mm)} mm"
+        )
+
+
+def _recorded(spec, params: dict) -> dict:
+    """What the BOM row carries besides the model number: the datasheet
+    figures and the axes as chosen — the chosen value wins over the series
+    figure of the same name, so a 1 m diffuse sensor does not answer a
+    requirement with the 30 m its through-beam sibling reaches. Numbers
+    stay numbers, which is what a requirement check compares."""
+    out: dict = {}
+    for key, value in {**spec.specs(), **params}.items():
+        out[key] = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+    return out
+
+
+# ------------------------------------------------------------ photoelectric
+
+# The pale acrylic of a corner-cube reflector.
+REFLECTOR: Color = (0.86, 0.86, 0.80)
+
+
+def photoelectric(
+    scene,
+    name: str,
+    frm: Point3,
+    to: Point3,
+    *,
+    body: Optional[Point3] = None,
+    watch_robot: bool = False,
+    watch: Optional[list[str]] = None,
+    catalog: Optional["CatalogRef"] = None,
+    sensing: Optional[str] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> Built:
+    """A photoelectric sensor: a beam `<name>` from the lens at `frm` to
+    `to` (both in metres, 3D) that trips on the named objects (`watch` — a
+    workpiece arriving on the belt) and/or on any robot link
+    (`watch_robot`), and the sensor body `<name>/body` behind the lens —
+    `body = (depth, width, height)`, the amplifier-in-head block sold by
+    the million (20 x 11 x 31 mm unless given). The part
+    (`sensor.photoelectric`) is pinned on the sensor.
+
+    What stands at `to` follows the sensing method: a through-beam pair
+    puts the receiver `<name>/receiver` there, a retroreflective sensor its
+    reflector `<name>/reflector`, a diffuse one nothing — the beam ends on
+    the target itself.
+
+    With `catalog=` — the id of a photoelectric spec pack, or a package
+    directory — a sensor you can order: `sensing` picks the method the pack
+    sells (`through_beam` / `retroreflective` / `diffuse` / ...), the other
+    axes (`sensing_range_mm`, `output`, ...) are chosen by name, the body
+    takes the maker's dimensions, the BOM row carries the model number and
+    mass, and a reflector the maker sells separately is a line of its own.
+    A beam longer than the sensing range is refused with the numbers — the
+    same `sensing_range_mm` a requirement check would ask of it."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("photoelectric")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if sensing is not None and "sensing" in params:
+            params["sensing"] = spec.choose("sensing", sensing)
+        if body is None:
+            sides = [spec.dimension_mm("sensor", key) for key in ("depth", "width", "height")]
+            if all(side is not None for side in sides):
+                body = (sides[0] / 1000.0, sides[1] / 1000.0, sides[2] / 1000.0)
+        manufacturer = manufacturer or spec.manufacturer
+    method = str(params.get("sensing") or sensing or "diffuse")
+    depth, width, height = (0.02, 0.011, 0.031) if body is None else (float(v) for v in body)
+    if min(depth, width, height) <= 0:
+        raise ValueError("photoelectric: body must be positive")
+
+    (xa, ya, za) = (float(frm[0]), float(frm[1]), float(frm[2]))
+    (xb, yb, zb) = (float(to[0]), float(to[1]), float(to[2]))
+    span = math.sqrt((xb - xa) ** 2 + (yb - ya) ** 2 + (zb - za) ** 2)
+    if span <= 0:
+        raise ValueError("photoelectric: frm and to must be different points")
+    if spec is not None:
+        limit = params.get("sensing_range_mm", spec.specs().get("sensing_range_mm"))
+        limit = None if limit is None or isinstance(limit, str) else float(limit)
+        _within_range(spec, span, limit, "the sensing range")
+    # The body looks along the beam: its lens face is at `frm`, the block
+    # behind it. On the floor plane, since a sensor is mounted level.
+    yaw = math.atan2(yb - ya, xb - xa)
+    q = _yaw_quat(yaw)
+    ux, uy = math.cos(yaw), math.sin(yaw)
+    built = Built(name)
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=(depth, width, height),
+                      position=(xa - ux * depth / 2, ya - uy * depth / 2, za), quaternion=q, color=color)
+    )
+    if method == "through_beam":
+        # The receiver is the same block, looking back at the emitter.
+        built.obstacles.append(
+            scene.add_box(f"{name}/receiver", size=(depth, width, height),
+                          position=(xb + ux * depth / 2, yb + uy * depth / 2, zb), quaternion=q, color=color)
+        )
+    elif method == "retroreflective":
+        plate = [None if spec is None else _mm(spec.dimension_mm("reflector", key))
+                 for key in ("thickness", "width", "height")]
+        thick, wide, tall = plate[0] or 0.008, plate[1] or 0.06, plate[2] or 0.06
+        built.obstacles.append(
+            scene.add_box(f"{name}/reflector", size=(thick, wide, tall),
+                          position=(xb + ux * thick / 2, yb + uy * thick / 2, zb), quaternion=q, color=REFLECTOR)
+        )
+    scene.add_beam_sensor(name, frm=(xa, ya, za), to=(xb, yb, zb), watch=watch, watch_robot=watch_robot)
+    built.sensors.append(name)
+    if spec is None:
+        scene.set_part(name, kind="sensor", category="sensor.photoelectric", **_identity(model, manufacturer, attributes))
+        return built
+    scene.set_part(
+        name, kind="sensor", category=spec.category("sensor", "sensor.photoelectric"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("sensor", **params), description=spec.name,
+        **{**_recorded(spec, params), **_kg(spec.mass_kg("sensor", **params)), **attributes},
+    )
+    if method == "retroreflective" and spec.has_component("reflector"):
+        # Sold separately and required — a line of its own, like a
+        # cabinet's plinth.
+        scene.set_part(
+            f"{name}/reflector", kind="obstacle",
+            category=spec.category("reflector", "sensor.photoelectric"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("reflector", **params),
+            **_kg(spec.mass_kg("reflector", **params)),
+        )
     return built
 
 
 __all__ = [
     "Built", "cabinet", "conveyor", "fence", "light_curtain", "pallet",
-    "pedestal", "rack", "stairs", "table", "wall",
+    "pedestal", "photoelectric", "rack", "stairs", "table", "wall",
 ]
 
 
