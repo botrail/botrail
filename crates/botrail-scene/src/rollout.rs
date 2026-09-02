@@ -651,6 +651,11 @@ pub struct SequenceTimeline {
     /// order — the path the bake took. Script export replays these to
     /// walk the same arms; the spans of untaken arms simply don't exist.
     pub branches: Vec<BranchTaken>,
+    /// Friction-grasp holds a physics bake declared (attach…detach on a
+    /// robot with a gripper drive): the object was never welded — physics
+    /// carried it — and this records who meant to hold what, and where,
+    /// so `grasp_episodes` can measure slip against the intent.
+    pub grasps: Vec<GraspHold>,
     /// Touch episodes of a physics bake, in opening order; empty on a
     /// kinematic bake.
     pub contacts: Vec<ContactSpan>,
@@ -1505,6 +1510,11 @@ struct PhysicsRuntime {
     /// Display name per body, `BodyId`-indexed: the obstacle's own name,
     /// or `robot/link` for an arm part — what contact episodes report.
     names: Vec<String>,
+    /// Motor-driven gripper joints, in `WorldDesc::joints` order: whose
+    /// robot and model joint each one is, and the last commanded target
+    /// (held while no move drives the robot, so the clamp persists after
+    /// the close ramp ends).
+    driven: Vec<DrivenRt>,
     /// Touch episodes still open, keyed by the canonical `(a, b)` id pair.
     open_contacts: std::collections::HashMap<(u32, u32), OpenContact>,
     /// Closed touch episodes, in closing order (sorted by start at bake
@@ -1520,6 +1530,21 @@ struct OpenContact {
 }
 
 /// One physics-dynamic obstacle and its track-building state.
+/// One declared friction hold: attach…detach on a driven gripper. The
+/// object stayed a physics-owned dynamic body throughout — this is the
+/// *intent* (which link meant to carry it, at what relative pose), the
+/// yardstick slip is measured against.
+#[derive(Debug, Clone)]
+pub struct GraspHold {
+    pub object: String,
+    pub robot: usize,
+    pub link: usize,
+    /// `link ← object` captured at the attach instant.
+    pub offset: Isometry3<f64>,
+    pub start: f64,
+    pub end: f64,
+}
+
 struct DynamicBody {
     /// Obstacle name (the track name, like every object track).
     name: String,
@@ -1542,6 +1567,16 @@ struct DynamicBody {
 }
 
 /// One kinematically mirrored body and the last pose supplied for it.
+/// One driven joint's rollout-side state.
+struct DrivenRt {
+    robot: usize,
+    /// Model joint index (actuated, or a mimic follower driven with its
+    /// source).
+    joint: usize,
+    /// Last commanded target, in the joint's own coordinate.
+    cmd: f64,
+}
+
 struct KinematicBody {
     source: KinSource,
     id: botrail_physics::BodyId,
@@ -1600,6 +1635,9 @@ struct Rollout {
     /// cargo, sinks) skip these; empty when `physics` is off, so the
     /// kinematic bake never changes. Populated by `init_physics`.
     dynamic_names: Vec<String>,
+    /// Friction holds (attach on a driven gripper under physics),
+    /// open and closed; the horn closes the stragglers.
+    friction_holds: Vec<GraspHold>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -2554,9 +2592,11 @@ impl Rollout {
                 dynamics: Vec::new(),
                 kinematics: Vec::new(),
                 names: Vec::new(),
+                driven: Vec::new(),
                 open_contacts: std::collections::HashMap::new(),
                 contacts: Vec::new(),
             }),
+            friction_holds: Vec::new(),
             dynamic_names: Vec::new(),
             objects,
             vehicles: Vec::new(),
@@ -2766,6 +2806,7 @@ impl Rollout {
                     pose: o.pose,
                     parts: self.world.obstacle_colliders()[i].parts().to_vec(),
                     props,
+                    group: 0,
                 });
                 dynamics.push(DynamicBody {
                     name: o.name.clone(),
@@ -2782,6 +2823,7 @@ impl Rollout {
                     pose: o.pose,
                     parts: self.world.obstacle_colliders()[i].parts().to_vec(),
                     props,
+                    group: 0,
                 });
                 kinematics.push(KinematicBody {
                     source: KinSource::Obstacle(i),
@@ -2790,8 +2832,39 @@ impl Rollout {
                 });
             }
         }
+        let mut driven_rt: Vec<DrivenRt> = Vec::new();
+        // Welds for fixed-jointed finger links, collected per robot but
+        // appended after EVERY robot's motored joints — the rollout
+        // addresses motors as `joints[0..driven_rt.len()]`.
+        let mut welds: Vec<botrail_physics::JointDesc> = Vec::new();
         for (r, sr) in self.world.robots().iter().enumerate() {
+            let model = &sr.model;
+            // A gripper drive's joints (declared actuated + their mimic
+            // followers) and the finger links their motion carries — those
+            // links go DYNAMIC, moved by force-capped motors, not mirrors.
+            let mut driven_joints: Vec<(usize, botrail_physics::JointMotor)> = Vec::new();
+            let mut finger_links: std::collections::HashSet<usize> = Default::default();
+            if let Some(drive) = self.world.gripper_drive(r) {
+                for (k, &ji) in drive.joints.iter().enumerate() {
+                    driven_joints.push((ji, drive.motors[k]));
+                }
+                for (mi, mj) in model.joints.iter().enumerate() {
+                    if let Some(m) = mj.mimic {
+                        if let Some(pos) = drive.joints.iter().position(|&d| d == m.source_joint)
+                        {
+                            driven_joints.push((mi, drive.motors[pos]));
+                        }
+                    }
+                }
+                for &(ji, _) in &driven_joints {
+                    for l in self.world.link_subtree(r, model.joints[ji].child_link) {
+                        finger_links.insert(l);
+                    }
+                }
+            }
+
             let poses = self.world.link_poses_for(r);
+            let mut body_of: std::collections::HashMap<usize, BodyId> = Default::default();
             for (link, pose) in poses.iter().enumerate() {
                 let parts = sr.collider().link_parts(link);
                 if parts.is_empty() {
@@ -2799,19 +2872,171 @@ impl Rollout {
                 }
                 let id = BodyId(desc.bodies.len() as u32);
                 names.push(format!("{}/{}", sr.name, sr.model.links[link].name));
+                body_of.insert(link, id);
+                // A link's authored contact material (a fingertip's rubber
+                // pad) rides its body; everything else stays default —
+                // a dynamic finger's mass comes from its shape at the
+                // default density, the same rule an obstacle follows.
+                let mut props = botrail_physics::BodyProps::default();
+                if let Some(material) = self.world.link_material(r, link) {
+                    props.material = material;
+                }
+                let finger = finger_links.contains(&link);
+                if finger {
+                    props.kind = BodyKind::Dynamic;
+                    // A mesh-derived finger weighs grams; rapier's contact
+                    // stiffness scales with the pair's masses, so the drive
+                    // gives each finger body a real moving mass
+                    // (`GripperDrive::finger_mass`) or the clamp cannot
+                    // develop whatever the motor cap says.
+                    let floor = self
+                        .world
+                        .gripper_drive(r)
+                        .map(|d| d.finger_mass)
+                        .unwrap_or(0.0);
+                    let shape_mass = botrail_collide::parts_volume(parts)
+                        * botrail_physics::DEFAULT_DENSITY;
+                    props.mass = Some(shape_mass.max(floor));
+                }
                 desc.bodies.push(BodyDesc {
-                    kind: BodyKind::Kinematic,
+                    kind: if finger {
+                        BodyKind::Dynamic
+                    } else {
+                        BodyKind::Kinematic
+                    },
                     pose: *pose,
                     parts: parts.to_vec(),
-                    props: botrail_physics::BodyProps::default(),
+                    props,
+                    // One robot's links never collide with each other in
+                    // the physics world (a dynamic finger must not fight
+                    // its own palm mirror); kinematic-kinematic pairs were
+                    // never solved anyway, so this changes nothing for an
+                    // undriven robot.
+                    group: r as u32 + 1,
                 });
-                kinematics.push(KinematicBody {
-                    source: KinSource::Link { robot: r, link },
-                    id,
-                    last_pose: *pose,
+                if !finger {
+                    kinematics.push(KinematicBody {
+                        source: KinSource::Link { robot: r, link },
+                        id,
+                        last_pose: *pose,
+                    });
+                }
+            }
+
+            // The driven joints themselves: each connects its child's
+            // dynamic body to the nearest ancestor body, walking up
+            // through fixed joints (a geometry-less frame between palm
+            // and finger folds into the anchor).
+            for &(ji, motor) in &driven_joints {
+                let joint = &model.joints[ji];
+                let Some(&child) = body_of.get(&joint.child_link) else {
+                    return Err(err(format!(
+                        "driven joint `{}` moves a link with no collision geometry                          (`{}`) — a friction drive needs a real finger body",
+                        joint.name, model.links[joint.child_link].name
+                    )));
+                };
+                let mut anchor = joint.origin;
+                let mut cur = joint.parent_link;
+                let parent = loop {
+                    if let Some(&id) = body_of.get(&cur) {
+                        break id;
+                    }
+                    let Some(pj) = model.links[cur].parent_joint else {
+                        return Err(err(format!(
+                            "driven joint `{}` hangs under links with no collision                              geometry all the way to the root",
+                            joint.name
+                        )));
+                    };
+                    let pjoint = &model.joints[pj];
+                    if pjoint.q_index.is_some() || pjoint.mimic.is_some() {
+                        return Err(err(format!(
+                            "driven joint `{}`: the geometry-less chain above it moves                              (`{}`) — give `{}` collision geometry",
+                            joint.name, pjoint.name, model.links[cur].name
+                        )));
+                    }
+                    anchor = pjoint.origin * anchor;
+                    cur = pjoint.parent_link;
+                };
+                desc.joints.push(botrail_physics::JointDesc {
+                    parent,
+                    child,
+                    kind: crate::grasp::joint_kind(model, ji),
+                    local1: anchor,
+                    local2: Isometry3::identity(),
+                    axis: joint.axis.into_inner(),
+                    // Mimic followers track a formula, not their own
+                    // (informational) limits.
+                    limits: if joint.mimic.is_none() {
+                        joint.limits.as_ref().map(|l| (l.lower, l.upper))
+                    } else {
+                        None
+                    },
+                    motor,
+                });
+                driven_rt.push(DrivenRt {
+                    robot: r,
+                    joint: ji,
+                    cmd: model.joint_value(ji, self.robots[r].q.as_slice()),
+                });
+            }
+
+            // The rest of the finger subtree: fixed-jointed links with
+            // geometry (an outer finger bar, a rubber pad) became dynamic
+            // bodies too — weld each to its nearest bodied ancestor so it
+            // rides its knuckle. Without this they are free bodies and
+            // simply fall out of the hand (the 2F-85 measured exactly
+            // that: pads dangling, knuckles doing the touching).
+            let mut finger_order: Vec<usize> = finger_links.iter().copied().collect();
+            finger_order.sort_unstable();
+            for link in finger_order {
+                let Some(&child) = body_of.get(&link) else {
+                    continue; // geometry-less frame, nothing to weld
+                };
+                let Some(pj) = model.links[link].parent_joint else {
+                    continue;
+                };
+                if model.joints[pj].q_index.is_some() || model.joints[pj].mimic.is_some() {
+                    continue; // a motored joint owns this body
+                }
+                let mut anchor = model.joints[pj].origin;
+                let mut cur = model.joints[pj].parent_link;
+                let parent = loop {
+                    if let Some(&id) = body_of.get(&cur) {
+                        break id;
+                    }
+                    let Some(ppj) = model.links[cur].parent_joint else {
+                        return Err(err(format!(
+                            "finger link `{}` hangs under links with no collision                              geometry all the way to the root",
+                            model.links[link].name
+                        )));
+                    };
+                    let pjoint = &model.joints[ppj];
+                    if pjoint.q_index.is_some() || pjoint.mimic.is_some() {
+                        return Err(err(format!(
+                            "finger link `{}`: the geometry-less chain above it moves                              (`{}`) — give `{}` collision geometry",
+                            model.links[link].name, pjoint.name, model.links[cur].name
+                        )));
+                    }
+                    anchor = pjoint.origin * anchor;
+                    cur = pjoint.parent_link;
+                };
+                welds.push(botrail_physics::JointDesc {
+                    parent,
+                    child,
+                    kind: botrail_physics::JointKind::Fixed,
+                    local1: anchor,
+                    local2: Isometry3::identity(),
+                    axis: nalgebra::Vector3::x(),
+                    limits: None,
+                    motor: botrail_physics::JointMotor {
+                        stiffness: 0.0,
+                        damping: 0.0,
+                        max_force: 0.0,
+                    },
                 });
             }
         }
+        desc.joints.extend(welds);
         // Every conveyor becomes a surface-velocity zone, in device
         // order — the same authored box, driving contacts instead of
         // advecting origins (design-physics.md 判断 D7). `step_physics`
@@ -2835,12 +3060,22 @@ impl Rollout {
         if std::env::var("BT_PHYS_DEBUG").is_ok() {
             for (k, bd) in desc.bodies.iter().enumerate() {
                 eprintln!(
-                    "LOWER body {k}: kind={:?} pos=({:+.3},{:+.3},{:+.3}) parts={}",
+                    "LOWER body {k} `{}`: kind={:?} group={} pos=({:+.3},{:+.3},{:+.3}) parts={}",
+                    names.get(k).map(String::as_str).unwrap_or("?"),
                     bd.kind,
+                    bd.group,
                     bd.pose.translation.x,
                     bd.pose.translation.y,
                     bd.pose.translation.z,
                     bd.parts.len()
+                );
+            }
+            for (k, j) in desc.joints.iter().enumerate() {
+                eprintln!(
+                    "LOWER joint {k}: parent={:?} child={:?} kind={:?} axis=({:+.2},{:+.2},{:+.2}) cap={} local1_t=({:+.4},{:+.4},{:+.4}) local1_q=({:+.4},{:+.4},{:+.4},{:+.4})",
+                    j.parent, j.child, j.kind, j.axis.x, j.axis.y, j.axis.z, j.motor.max_force,
+                    j.local1.translation.x, j.local1.translation.y, j.local1.translation.z,
+                    j.local1.rotation.w, j.local1.rotation.i, j.local1.rotation.j, j.local1.rotation.k
                 );
             }
         }
@@ -2849,6 +3084,7 @@ impl Rollout {
         phys.dynamics = dynamics;
         phys.kinematics = kinematics;
         phys.names = names;
+        phys.driven = driven_rt;
         self.dynamic_names = dynamic;
         self.physics = Some(phys);
         Ok(())
@@ -2930,6 +3166,38 @@ impl Rollout {
                 );
             }
         }
+        // Motor targets for driven gripper joints: while a move COMMANDS
+        // this joint — its plan actually varies the value (mimics through
+        // their formula) — the command follows the plan. Otherwise the
+        // last command HOLDS. The distinction matters twice: on idle
+        // ticks, and during moves that carry the fingers as constants —
+        // those constants are the *read-back* stall positions, so
+        // re-commanding them would silently cancel the overtravel a close
+        // ramp built and the clamp would decay to a kiss.
+        fn plan_commands(mv: &ActiveMove, model: &botrail_model::RobotModel, joint: usize) -> bool {
+            match mv {
+                ActiveMove::Ramp { from, to, .. } => {
+                    (model.joint_value(joint, from) - model.joint_value(joint, to)).abs() > 1e-9
+                }
+                ActiveMove::Traj { traj, .. } => {
+                    let v0 = model.joint_value(joint, &traj.positions[0]);
+                    traj.positions
+                        .iter()
+                        .any(|q| (model.joint_value(joint, q) - v0).abs() > 1e-9)
+                }
+            }
+        }
+        for k in 0..phys.driven.len() {
+            let (robot, joint) = (phys.driven[k].robot, phys.driven[k].joint);
+            if let Some(active) = &self.robots[robot].active {
+                let model = &self.world.robots()[robot].model;
+                if plan_commands(active, model, joint) {
+                    phys.driven[k].cmd = model.joint_value(joint, self.robots[robot].q.as_slice());
+                }
+            }
+            let cmd = phys.driven[k].cmd;
+            phys.backend.set_joint_target(k, cmd);
+        }
         let sub = dt / phys.substeps as f64;
         for k in 1..=phys.substeps {
             let f = k as f64 / phys.substeps as f64;
@@ -2938,6 +3206,35 @@ impl Rollout {
                     .set_kinematic_pose(*id, interp_pose(from, to, f));
             }
             phys.backend.step(sub);
+        }
+        // Read the driven joints back: the baked track carries where the
+        // fingers really stopped (a stalled close, a slipping hold), not
+        // the command. Driven robots bake tick by tick, gait-style — a
+        // move's pre-baked future would freeze the fingers at their
+        // commanded values.
+        if !phys.driven.is_empty() {
+            let t = self.t;
+            let mut touched = vec![false; self.robots.len()];
+            for (k, d) in phys.driven.iter().enumerate() {
+                let model = &self.world.robots()[d.robot].model;
+                if let Some(qi) = model.joints[d.joint].q_index {
+                    self.robots[d.robot].q[qi] = phys.backend.joint_position(k);
+                    touched[d.robot] = true;
+                }
+            }
+            for (r, touched) in touched.into_iter().enumerate() {
+                if !touched {
+                    continue;
+                }
+                let q = self.robots[r].q.clone();
+                self.world
+                    .set_joint_positions_for(r, q.clone())
+                    .expect("driven q keeps the robot's DOF");
+                let rt = &mut self.robots[r];
+                rt.truncate_after(t);
+                let zeros = vec![0.0; q.len()];
+                rt.append_waypoint(t, q, zeros);
+            }
         }
         let t = self.t;
         for body in &mut phys.dynamics {
@@ -5070,6 +5367,48 @@ impl Rollout {
                 self.world
                     .set_joint_positions_for(r, self.robots[r].q.clone())
                     .map_err(|e| err(e.to_string()))?;
+                // On a driven gripper under physics, attach is a HOLD
+                // DECLARATION, not a weld: the object stays a dynamic
+                // body and friction carries it (or fails to — that is
+                // the point). The declaration records the intent the
+                // report measures slip against.
+                let friction = self
+                    .physics
+                    .as_ref()
+                    .is_some_and(|p| p.driven.iter().any(|d| d.robot == r))
+                    && self.dynamic_names.iter().any(|n| n == object);
+                if friction {
+                    let model = &self.world.robots()[r].model;
+                    let anchor = match link.as_deref() {
+                        Some(l) => model
+                            .link_index(l)
+                            .ok_or_else(|| err(format!("unknown link `{l}`")))?,
+                        None => model.default_tcp_link(),
+                    };
+                    let obstacle = self
+                        .world
+                        .obstacles()
+                        .iter()
+                        .find(|o| &o.name == object)
+                        .map(|o| o.pose)
+                        .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
+                    let offset = self.world.link_poses_for(r)[anchor].inverse() * obstacle;
+                    self.friction_holds.push(GraspHold {
+                        object: object.clone(),
+                        robot: r,
+                        link: anchor,
+                        offset,
+                        start: self.t,
+                        end: f64::NAN,
+                    });
+                    // Grasping the tracked part ends the chase here too.
+                    if let Some(latch) = &mut self.robots[r].tracking {
+                        if &latch.object == object {
+                            latch.frozen = true;
+                        }
+                    }
+                    return Ok(());
+                }
                 // The pose the object rested at until this instant — a
                 // freshly created track must tile [0, duration], so the
                 // pre-grasp interval becomes a Hold at this pose.
@@ -5111,6 +5450,16 @@ impl Rollout {
                 self.physics_attach(object);
             }
             Action::Detach { object } => {
+                // A friction hold just closes its declaration — physics
+                // owned the object the whole time, nothing changes hands.
+                if let Some(hold) = self
+                    .friction_holds
+                    .iter_mut()
+                    .find(|h| &h.object == object && h.end.is_nan())
+                {
+                    hold.end = self.t;
+                    return Ok(());
+                }
                 // Sync the carrier so the object freezes where it truly is.
                 let carrier = self
                     .world
@@ -5544,6 +5893,12 @@ impl Rollout {
                 open.set_end(duration);
             }
         }
+        // Friction holds still open at the horn were held to the end.
+        for hold in &mut self.friction_holds {
+            if hold.end.is_nan() {
+                hold.end = duration;
+            }
+        }
         SequenceTimeline {
             duration,
             sequences: self
@@ -5559,6 +5914,7 @@ impl Rollout {
             signals: self.signals,
             step_spans: self.step_spans,
             branches: self.branches,
+            grasps: std::mem::take(&mut self.friction_holds),
             contacts: self
                 .physics
                 .map(|phys| {

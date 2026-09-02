@@ -181,11 +181,18 @@ pub fn from_catalog(
     let tcp = resolve("tcp_default", manifest.tcp_default.as_deref());
     let flange = resolve("flange_frame", manifest.flange_frame.as_deref());
     let mount = resolve("mount_frame", manifest.mount_frame.as_deref());
+    let grasp: Vec<usize> = manifest
+        .grasp_frames
+        .iter()
+        .filter_map(|f| resolve("grasp_frames", Some(f)))
+        .collect();
     model.tcp_link = tcp;
     model.flange_link = flange;
     model.mount_link = mount;
+    model.grasp_links = grasp;
 
     let link_name = |i: usize| model.links[i].name.clone();
+    let grasp_names = model.grasp_links.iter().map(|&i| link_name(i)).collect();
     let inner = std::mem::replace(&mut model.source, RobotSource::UrdfXml(String::new()));
     model.source = RobotSource::Catalog {
         id: entry.id,
@@ -193,6 +200,7 @@ pub fn from_catalog(
         tcp: tcp.map(link_name),
         flange: flange.map(link_name),
         mount: mount.map(link_name),
+        grasp: grasp_names,
         meta: manifest.meta,
         inner: Box::new(inner),
     };
@@ -334,6 +342,9 @@ struct ManifestBits {
     /// convention: scan plane XY, 0° along +X — botrail's own lidar
     /// frame, so no rotation fix on import).
     lidar_frames: Vec<String>,
+    /// Grasp-surface frames a gripper/hand package declares — the
+    /// fingertips a grasp is meant to happen between.
+    grasp_frames: Vec<String>,
     /// Maker / product / category / numeric specs — what a bill of
     /// materials names the package by.
     meta: CatalogMeta,
@@ -398,6 +409,7 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         mount_frame: frame("mount_frame"),
         camera_frames: frame_list("camera_frames"),
         lidar_frames: frame_list("lidar_frames"),
+        grasp_frames: frame_list("grasp_frames"),
         meta: CatalogMeta {
             manufacturer: text_at(&["manufacturer", "name"]),
             product: text_at(&["name"]),

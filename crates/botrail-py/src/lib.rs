@@ -214,6 +214,19 @@ impl Robot {
             .map(|i| self.inner.links[i].name.clone())
     }
 
+    /// Declared grasp-surface frames (catalog `frames.grasp_frames`): the
+    /// fingertips of a hand, the pads of a gripper — where the product
+    /// says it holds things. Empty when the source declares none; after
+    /// `attach_tool` the mounted tool's ride along.
+    #[getter]
+    fn grasp_frames(&self) -> Vec<String> {
+        self.inner
+            .grasp_links
+            .iter()
+            .map(|&i| self.inner.links[i].name.clone())
+            .collect()
+    }
+
     /// Solves inverse kinematics. With `quaternion=None` only the position
     /// is matched. `link` defaults to the TCP link, `seed` to the neutral
     /// configuration. When the seeded solve does not converge, up to
@@ -1465,6 +1478,106 @@ impl Scene {
     /// Detaches an obstacle; its pose freezes where the robot holds it.
     fn detach(&self, name: &str) -> PyResult<()> {
         self.hub.detach_obstacle(name).map_err(scene_err)
+    }
+
+    /// Solves the joint values that close the robot's gripper on obstacle
+    /// `name`, to a signed `clearance` from its surface (the default is
+    /// half a millimetre of overtravel — measured to report contact
+    /// reliably under physics without disturbing the part). Returns
+    /// `{joint: value}`, ready to hand to `bt.seq.ramp`.
+    ///
+    /// Pose the grasp first — the solve runs at the current configuration
+    /// and the part's current pose, the same contract as `attach`. Drive
+    /// joints default to every actuated joint below the tool mount (mimic
+    /// followers close with their drivers); a limitless drive joint needs
+    /// its fully-closed value in `closed`.
+    #[pyo3(signature = (name, robot = None, joints = None, closed = None, clearance = None))]
+    fn grasp_close<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        robot: Option<&str>,
+        joints: Option<Vec<String>>,
+        closed: Option<std::collections::HashMap<String, f64>>,
+        clearance: Option<f64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let index = self.resolve_robot(robot)?;
+        let closed: Option<Vec<(String, f64)>> =
+            closed.map(|m| m.into_iter().collect());
+        let solved = self
+            .hub
+            .grasp_close(
+                index,
+                name,
+                joints.as_deref(),
+                closed.as_deref(),
+                clearance.unwrap_or(botrail_scene::grasp::DEFAULT_CLEARANCE),
+            )
+            .map_err(scene_err)?;
+        let out = PyDict::new(py);
+        for (joint, value) in solved {
+            out.set_item(joint, value)?;
+        }
+        Ok(out)
+    }
+
+    /// Sets a robot link's contact material for physics bakes — the
+    /// name-keyed sibling of `set_physics`, for the surface the robot
+    /// brings to a contact (a fingertip's rubber pad). Inert without a
+    /// physics backend; links keep the engine default (friction 0.5,
+    /// restitution 0) unless set.
+    #[pyo3(signature = (link, friction = None, restitution = None, robot = None))]
+    fn set_link_material(
+        &self,
+        link: &str,
+        friction: Option<f64>,
+        restitution: Option<f64>,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .set_link_material(index, link, friction, restitution)
+            .map_err(scene_err)
+    }
+
+    /// Declares a force-limited drive on the robot's gripper joints
+    /// (design-grasping.md G3). Under `physics=True` the driven fingers
+    /// become dynamic bodies moved by force-capped position motors: a
+    /// grasped part is held by *friction*, so a too-weak cap or a
+    /// too-fast carry slips for real, and `grasp_report()` reads the slip
+    /// back. Without a physics backend the declaration is inert.
+    ///
+    /// * `joints` — driven actuated joints; default derives every
+    ///   actuated joint below the tool mount (mimics follow either way).
+    /// * `max_force` — per-joint force cap in N (prismatic) / N·m
+    ///   (revolute); default is each joint's URDF effort limit.
+    /// * `stiffness`, `damping` — motor gains; the defaults saturate the
+    ///   cap within ~a millimetre and bound the free speed.
+    /// * `finger_mass` — mass floor per driven finger body, kg (default
+    ///   0.2, a finger-plus-carriage moving mass). The engine's contact
+    ///   stiffness scales with the pair's masses, so a mesh-derived
+    ///   few-gram finger cannot develop a newton-scale clamp.
+    #[pyo3(signature = (joints = None, max_force = None, stiffness = None, damping = None, finger_mass = None, robot = None))]
+    fn set_gripper_drive(
+        &self,
+        joints: Option<Vec<String>>,
+        max_force: Option<f64>,
+        stiffness: Option<f64>,
+        damping: Option<f64>,
+        finger_mass: Option<f64>,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .set_gripper_drive(
+                index,
+                joints.as_deref(),
+                max_force,
+                stiffness,
+                damping,
+                finger_mass,
+            )
+            .map_err(scene_err)
     }
 
     /// Attached obstacles as `(object, link)` name pairs.
@@ -6064,6 +6177,181 @@ impl SequenceTimeline {
                 d.set_item("device", stall.device)?;
                 d.set_item("start", stall.start)?;
                 d.set_item("end", stall.end)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Every grasp this bake performed — one dict per attach…release
+    /// stretch, annotated from the physics contact record and checked
+    /// against what numbers are at hand. Fields: `object`, `robot`,
+    /// `link`, `start`, `end`, `held_to_end`, `touched` (tool link →
+    /// peak contact force N around the attach; empty on a kinematic
+    /// bake), `released_touching` (the release happened inside the
+    /// squeeze — author "open, then detach"), `mass_kg` (as the bake
+    /// resolved it; `None` without physics authoring), `max_accel`
+    /// (largest carry acceleration, m/s²), `slip_m` (how far the part
+    /// strayed from riding its carrier — friction holds under a gripper
+    /// drive only, `None` on welds), and `checks`:
+    ///
+    /// * `touch` — at least `min_touches` distinct tool links touching at
+    ///   the attach (`skip` on a kinematic bake).
+    /// * `release` — `warn` when released inside the squeeze.
+    /// * `payload` — grasped mass ≤ `payload_kg`, when both are known.
+    /// * `grip_force` — `grip_force_n × mu × touching surfaces ≥ mass ×
+    ///   (g + max_accel) × safety_factor`, when force, mu, and mass are
+    ///   known (on a kinematic bake two surfaces are assumed).
+    /// * `hold` — a friction hold's measured `slip_m` stays within
+    ///   `max_slip_m` (`skip` on welds and kinematic bakes).
+    ///
+    /// The numbers default from what the cell already knows: a catalog
+    /// gripper welded on with `attach_tool` supplies `grip_force_n` (its
+    /// `grip_force_min_n` — the weakest stated setting — else
+    /// `grip_force_max_n`) and `payload_kg` from its own specs, and `mu`
+    /// defaults to the most slippery authored pairing of the touching
+    /// links' materials and the part's (min rule — conservative for a
+    /// holding check). Explicit arguments always win; the values used are
+    /// reported back as `grip_force_n` / `payload_limit_kg` / `mu`.
+    #[pyo3(signature = (min_touches = 2, grip_force_n = None, mu = None, payload_kg = None, safety_factor = 2.0, max_slip_m = 0.01))]
+    #[allow(clippy::too_many_arguments)]
+    fn grasp_report<'py>(
+        &self,
+        py: Python<'py>,
+        min_touches: usize,
+        grip_force_n: Option<f64>,
+        mu: Option<f64>,
+        payload_kg: Option<f64>,
+        safety_factor: f64,
+        max_slip_m: f64,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let physics = self.inner.physics.is_some();
+        self.inner
+            .grasp_episodes(&self.scene)
+            .into_iter()
+            .map(|ep| {
+                let robot_index = self
+                    .scene
+                    .robots()
+                    .iter()
+                    .position(|r| r.name == ep.robot);
+                let tool_specs = robot_index
+                    .map(|r| botrail_scene::grasp::gripper_tool_specs(&self.scene, r))
+                    .unwrap_or_default();
+                let spec = |key: &str| {
+                    tool_specs
+                        .iter()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| *value)
+                };
+                let grip_force_n = grip_force_n
+                    .or_else(|| spec("grip_force_min_n"))
+                    .or_else(|| spec("grip_force_max_n"));
+                let payload_kg = payload_kg.or_else(|| spec("payload_kg"));
+                let mu = mu.or_else(|| {
+                    if ep.touched.is_empty() {
+                        return None;
+                    }
+                    let r = robot_index?;
+                    let sr = &self.scene.robots()[r];
+                    let part_mu = self
+                        .scene
+                        .resolved_body_props(&ep.object)
+                        .map(|p| p.material.friction)
+                        .unwrap_or(0.5);
+                    let finger_mu = ep
+                        .touched
+                        .iter()
+                        .map(|(link, _)| {
+                            sr.model
+                                .link_index(link)
+                                .and_then(|i| self.scene.link_material(r, i))
+                                .map(|m| m.friction)
+                                .unwrap_or(0.5)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    Some(part_mu.min(finger_mu))
+                });
+                let d = PyDict::new(py);
+                d.set_item("object", &ep.object)?;
+                d.set_item("robot", &ep.robot)?;
+                d.set_item("link", &ep.link)?;
+                d.set_item("start", ep.start)?;
+                d.set_item("end", ep.end)?;
+                d.set_item("held_to_end", ep.held_to_end)?;
+                let touched = PyDict::new(py);
+                for (link, force) in &ep.touched {
+                    touched.set_item(link, force)?;
+                }
+                d.set_item("touched", touched)?;
+                d.set_item("released_touching", ep.released_touching)?;
+                d.set_item("mass_kg", ep.mass_kg)?;
+                d.set_item("max_accel", ep.max_accel)?;
+                d.set_item("slip_m", ep.slip_max)?;
+                // The numbers the checks actually used (argument, else
+                // catalog/scene derived, else None = check skipped).
+                d.set_item("grip_force_n", grip_force_n)?;
+                d.set_item("payload_limit_kg", payload_kg)?;
+                d.set_item("mu", mu)?;
+
+                let checks = PyDict::new(py);
+                checks.set_item(
+                    "touch",
+                    if !physics {
+                        "skip"
+                    } else if ep.touched.len() >= min_touches {
+                        "pass"
+                    } else {
+                        "fail"
+                    },
+                )?;
+                checks.set_item(
+                    "release",
+                    if ep.held_to_end {
+                        "skip"
+                    } else if ep.released_touching {
+                        "warn"
+                    } else {
+                        "pass"
+                    },
+                )?;
+                checks.set_item(
+                    "payload",
+                    match (payload_kg, ep.mass_kg) {
+                        (Some(limit), Some(mass)) => {
+                            if mass <= limit {
+                                "pass"
+                            } else {
+                                "fail"
+                            }
+                        }
+                        _ => "skip",
+                    },
+                )?;
+                checks.set_item(
+                    "grip_force",
+                    match (grip_force_n, mu, ep.mass_kg) {
+                        (Some(force), Some(mu), Some(mass)) => {
+                            let surfaces = if physics { ep.touched.len() } else { 2 };
+                            let held = force * mu * surfaces as f64;
+                            let required = mass * (9.81 + ep.max_accel) * safety_factor;
+                            if held >= required {
+                                "pass"
+                            } else {
+                                "fail"
+                            }
+                        }
+                        _ => "skip",
+                    },
+                )?;
+                checks.set_item(
+                    "hold",
+                    match ep.slip_max {
+                        Some(slip) if slip <= max_slip_m => "pass",
+                        Some(_) => "fail",
+                        None => "skip",
+                    },
+                )?;
+                d.set_item("checks", checks)?;
                 Ok(d)
             })
             .collect()

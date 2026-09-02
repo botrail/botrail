@@ -67,6 +67,10 @@ pub enum RobotSourceMsg {
         flange: Option<String>,
         #[serde(default)]
         mount: Option<String>,
+        /// Grasp-surface frames (`frames.grasp_frames`), reapplied on
+        /// rebuild. Absent in older files.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grasp: Vec<String>,
         /// Manifest identity (maker, product name, category, numeric
         /// specs) — what the BOM names the package by. Absent in files
         /// written before parts existed; those lines then show the id only.
@@ -112,6 +116,7 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             tcp,
             flange,
             mount,
+            grasp,
             meta,
             inner,
         } => RobotSourceMsg::Catalog {
@@ -120,6 +125,7 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             tcp: tcp.clone(),
             flange: flange.clone(),
             mount: mount.clone(),
+            grasp: grasp.clone(),
             manufacturer: meta.manufacturer.clone(),
             product: meta.product.clone(),
             category: meta.category.clone(),
@@ -166,6 +172,7 @@ pub fn model_from_source(
             tcp,
             flange,
             mount,
+            grasp,
             manufacturer,
             product,
             category,
@@ -185,6 +192,7 @@ pub fn model_from_source(
             if let Some(mount) = mount {
                 model.mount_link = model.link_index(mount);
             }
+            model.grasp_links = grasp.iter().filter_map(|g| model.link_index(g)).collect();
             let inner_source = std::mem::replace(
                 &mut model.source,
                 botrail_model::RobotSource::UrdfXml(String::new()),
@@ -195,6 +203,7 @@ pub fn model_from_source(
                 tcp: tcp.clone(),
                 flange: flange.clone(),
                 mount: mount.clone(),
+                grasp: grasp.clone(),
                 meta: botrail_model::CatalogMeta {
                     manufacturer: manufacturer.clone(),
                     product: product.clone(),
@@ -245,6 +254,41 @@ pub struct ProjectRobotMsg {
     /// for a robot bolted to the floor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<RobotMountMsg>,
+    /// Per-link contact materials for physics bakes (`set_link_material`) —
+    /// a fingertip's rubber pad. Absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_materials: Vec<LinkMaterialMsg>,
+    /// Force-limited gripper drive (`set_gripper_drive`), the friction-
+    /// grasp declaration. Absent in older files and for undriven robots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gripper_drive: Option<GripperDriveMsg>,
+}
+
+/// A gripper drive as a project carries it: the declaration, re-resolved
+/// against the model on load (empty `joints` = derived from the tool
+/// mount, `None` numbers = the kind-scaled defaults).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GripperDriveMsg {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_force: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stiffness: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finger_mass: Option<f64>,
+}
+
+/// One link's authored contact material.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LinkMaterialMsg {
+    pub link: String,
+    pub friction: f64,
+    pub restitution: f64,
 }
 
 /// A robot riding a vehicle (`Scene::mount_robot`): the device, where the
@@ -510,6 +554,8 @@ impl ProjectFile {
                         base_pose: identity_pose(),
                         joint_positions: v1.joint_positions,
                         mount: None,
+                        link_materials: Vec::new(),
+                        gripper_drive: None,
                     }],
                     obstacles: v1.obstacles,
                     motions: v1.motions,
@@ -605,6 +651,27 @@ impl Scene {
                         offset: PoseMsg::from(&m.offset),
                         gait: m.gait.as_ref().map(gait_msg),
                         spin: m.spin.clone(),
+                    }),
+                    link_materials: r
+                        .model
+                        .links
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, link)| {
+                            let m = r.link_materials().get(i).copied().flatten()?;
+                            Some(LinkMaterialMsg {
+                                link: link.name.clone(),
+                                friction: m.friction,
+                                restitution: m.restitution,
+                            })
+                        })
+                        .collect(),
+                    gripper_drive: r.gripper_drive.as_ref().map(|d| GripperDriveMsg {
+                        joints: d.named.clone(),
+                        max_force: d.max_force,
+                        stiffness: d.stiffness,
+                        damping: d.damping,
+                        finger_mass: Some(d.finger_mass),
                     }),
                 })
                 .collect(),
@@ -920,6 +987,30 @@ impl Scene {
             self.set_robot_base_pose_for(i, (&robot_msg.base_pose).into());
             self.set_joint_positions_for(i, robot_msg.joint_positions.clone())
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
+        }
+        for (i, robot_msg) in project.robots.iter().enumerate() {
+            for m in &robot_msg.link_materials {
+                let name = self.robots()[i].name.clone();
+                self.set_link_material(i, &m.link, Some(m.friction), Some(m.restitution))
+                    .map_err(|e| {
+                        ProjectError::Incompatible(format!("robot `{name}` link material: {e}"))
+                    })?;
+            }
+            if let Some(drive) = &robot_msg.gripper_drive {
+                let name = self.robots()[i].name.clone();
+                let joints = (!drive.joints.is_empty()).then_some(drive.joints.as_slice());
+                self.set_gripper_drive(
+                    i,
+                    joints,
+                    drive.max_force,
+                    drive.stiffness,
+                    drive.damping,
+                    drive.finger_mass,
+                )
+                    .map_err(|e| {
+                        ProjectError::Incompatible(format!("robot `{name}` gripper drive: {e}"))
+                    })?;
+            }
         }
         self.set_scenarios(
             project
@@ -2436,12 +2527,14 @@ mod tests {
             &mut model.source,
             botrail_model::RobotSource::UrdfXml(String::new()),
         );
+        model.grasp_links = vec![model.link_index("tool0").unwrap()];
         model.source = botrail_model::RobotSource::Catalog {
             id: "franka/fr/fr3/r1".into(),
             revision: "deadbeef".into(),
             tcp: None,
             flange: None,
             mount: None,
+            grasp: vec!["tool0".into()],
             meta: botrail_model::CatalogMeta {
                 manufacturer: Some("Franka Robotics".into()),
                 product: Some("FR3".into()),
@@ -2468,6 +2561,9 @@ mod tests {
         );
         let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
         assert_eq!(reloaded.bom(), bom);
+        // Grasp frames ride the provenance record and resolve on reload.
+        let rm = &reloaded.robots()[0].model;
+        assert_eq!(rm.grasp_links, vec![rm.link_index("tool0").unwrap()]);
         // Files written before the identity fields existed still load;
         // the line then carries the id and revision only.
         let mut old: serde_json::Value = serde_json::from_str(&json).unwrap();

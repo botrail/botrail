@@ -68,6 +68,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "payload_kg": ("payload_kg",),
     "reach_mm": ("reach_mm",),
     "stroke_mm": ("stroke_mm", "opening_mm"),
+    # A hand's widest opening across its grasp surfaces — the multifinger
+    # analogue of a parallel gripper's stroke (design-grasping.md G2).
+    "aperture_mm": ("aperture_mm",),
+    # Holding force the grasp must apply; answered by the gripper's stated
+    # capability (max first; a min-only figure still answers conservatively).
+    "grip_force_n": ("grip_force_max_n", "grip_force_min_n"),
     "sensing_range_mm": ("sensing_range_mm", "range_mm", "max_range_mm"),
     "fov_deg": ("fov_h_deg", "hfov_deg", "fov_deg"),
     "resolution_h_px": ("resolution_h_px",),
@@ -832,7 +838,10 @@ class _Cell:
             reqs.append(Requirement("payload_kg", _round(heaviest[1], 3), basis=f"grasps {heaviest[0]} {_fmt(heaviest[1])} kg"))
         if unknown and heaviest is None:
             notes.append(f"payload not derived — {', '.join(unknown)} have no mass_kg")
-        if category.startswith("gripper.parallel"):
+        mechanical = category.startswith(("gripper.parallel", "gripper.multifinger"))
+        if mechanical:
+            # The part must fit in the opening: a parallel gripper's stroke,
+            # a hand's aperture — same derivation, category-named key.
             widest: Optional[tuple[str, float]] = None
             for obj in grasped:
                 extent = self.extent_of(obj)
@@ -842,13 +851,34 @@ class _Cell:
                 if widest is None or side > widest[1]:
                     widest = (obj, side)
             if widest is not None:
+                key = (
+                    "aperture_mm"
+                    if category.startswith("gripper.multifinger")
+                    else "stroke_mm"
+                )
                 reqs.append(
                     Requirement(
-                        "stroke_mm",
+                        key,
                         _round(widest[1] * 1000.0, 1),
                         basis=f"smallest side of {widest[0]} ({widest[1] * 1000.0:.0f} mm)",
                     )
                 )
+        if mechanical and heaviest is not None:
+            # Static holding force with the assumptions written down:
+            # F × μ × surfaces ≥ m g × SF, at μ 0.5, two friction surfaces,
+            # safety factor 2 (the baked timeline's grasp_report re-checks
+            # with the cell's real μ and carry acceleration).
+            required = heaviest[1] * 9.81 * 2.0 / (0.5 * 2.0)
+            reqs.append(
+                Requirement(
+                    "grip_force_n",
+                    _round(required, 1),
+                    basis=(
+                        f"holding {heaviest[0]} {_fmt(heaviest[1])} kg: "
+                        "m·g × SF 2 / (μ 0.5 × 2 surfaces)"
+                    ),
+                )
+            )
         return reqs, notes
 
     def _sensor(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:

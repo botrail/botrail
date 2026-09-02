@@ -488,6 +488,44 @@ fn parts_intersect(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> bool {
 /// Pairs farther apart than this are skipped in distance queries (meters).
 const DISTANCE_PREDICTION: f64 = 100.0;
 
+/// Signed clearance between two part sets in world poses: the smallest
+/// `contact().dist` over all shape pairs — positive is the closest gap,
+/// negative the deepest penetration. `None` when either set is empty or
+/// everything is farther than [`DISTANCE_PREDICTION`]. The unclamped
+/// sibling of [`parts_distance`], for callers that steer *into* contact
+/// (a gripper closing to a chosen overtravel) instead of away from it.
+pub fn parts_signed_distance(
+    pose_a: &Isometry3<f64>,
+    a: &[(Pose, SharedShape)],
+    pose_b: &Isometry3<f64>,
+    b: &[(Pose, SharedShape)],
+) -> Option<f64> {
+    let (pa, pb) = (to_parry_pose(pose_a), to_parry_pose(pose_b));
+    let mut min = None;
+    for (la, sa) in a {
+        let wa = pa * *la;
+        for (lb, sb) in b {
+            let wb = pb * *lb;
+            if let Ok(Some(c)) =
+                query::contact(&wa, sa.as_ref(), &wb, sb.as_ref(), DISTANCE_PREDICTION)
+            {
+                min = Some(min.map_or(c.dist, |m: f64| m.min(c.dist)));
+            }
+        }
+    }
+    min
+}
+
+/// Total solid volume of a part set (m³) — the sum of each shape's
+/// unit-density mass, exactly how the physics adapter spreads an authored
+/// mass over parts. Exposed so mass estimates elsewhere agree with it.
+pub fn parts_volume(parts: &[(Pose, SharedShape)]) -> f64 {
+    parts
+        .iter()
+        .map(|(_, shape)| shape.mass_properties(1.0).mass())
+        .sum()
+}
+
 fn parts_distance(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> Option<f64> {
     let mut min = None;
     for (la, sa) in a {

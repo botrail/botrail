@@ -10,6 +10,7 @@ pub mod carve;
 pub mod coat;
 pub mod gait;
 pub mod gcode;
+pub mod grasp;
 pub mod handshake;
 pub mod iomap;
 pub mod layout;
@@ -74,6 +75,8 @@ pub enum SceneError {
     UnknownLidar(String),
     #[error("{0}")]
     BadLidar(String),
+    #[error("{0}")]
+    BadGrasp(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
     #[error("unknown scenario `{0}`")]
@@ -291,6 +294,12 @@ pub struct SceneRobot {
     /// Vehicle this robot rides on, if any: its base is then derived from
     /// that vehicle's frame rather than set directly.
     pub mount: Option<crate::seq::RobotMount>,
+    /// Per-link contact material for physics bakes (`set_link_material`),
+    /// indexed like `model.links`; `None` links use the engine default.
+    link_materials: Vec<Option<botrail_physics::PhysicsMaterial>>,
+    /// Force-limited gripper drive (`set_gripper_drive`) — under a
+    /// physics bake the driven fingers go dynamic and hold by friction.
+    pub(crate) gripper_drive: Option<crate::grasp::GripperDrive>,
 }
 
 impl SceneRobot {
@@ -314,6 +323,8 @@ impl SceneRobot {
         }
         (
             SceneRobot {
+                link_materials: vec![None; model.links.len()],
+                gripper_drive: None,
                 name,
                 model,
                 base,
@@ -337,6 +348,11 @@ impl SceneRobot {
 
     pub fn collider(&self) -> &RobotCollider {
         &self.collider
+    }
+
+    /// Per-link authored contact materials, indexed like `model.links`.
+    pub fn link_materials(&self) -> &[Option<botrail_physics::PhysicsMaterial>] {
+        &self.link_materials
     }
 
     /// Intra-robot allowed collision matrix.
@@ -1141,6 +1157,42 @@ impl Scene {
         Ok(self.obstacles[index].physics.as_ref())
     }
 
+    /// Sets a robot link's contact material for physics bakes — the
+    /// name-keyed sibling of `set_physics`, for the surface the robot
+    /// brings to a contact: a fingertip's rubber pad, a steel pusher.
+    /// Inert without a physics backend; links without an authored
+    /// material keep the engine default.
+    pub fn set_link_material(
+        &mut self,
+        robot: usize,
+        link: &str,
+        friction: Option<f64>,
+        restitution: Option<f64>,
+    ) -> Result<(), SceneError> {
+        let sr = &mut self.robots[robot];
+        let index = sr
+            .model
+            .link_index(link)
+            .ok_or_else(|| SceneError::UnknownLink(link.to_string()))?;
+        let material = sr.link_materials[index].get_or_insert_with(Default::default);
+        if let Some(friction) = friction {
+            material.friction = friction;
+        }
+        if let Some(restitution) = restitution {
+            material.restitution = restitution;
+        }
+        Ok(())
+    }
+
+    /// A robot link's authored contact material, if any.
+    pub fn link_material(
+        &self,
+        robot: usize,
+        link: usize,
+    ) -> Option<botrail_physics::PhysicsMaterial> {
+        self.robots[robot].link_materials.get(link).copied().flatten()
+    }
+
     /// The obstacle's physics properties as a bake (and the USD export)
     /// resolves them: the authored props, with the mass default filled
     /// from the obstacle's part identity (`mass_kg`) when the body is
@@ -1261,15 +1313,24 @@ impl Scene {
             Some(names) => {
                 let mut indices = Vec::with_capacity(names.len());
                 for l in names {
-                    indices.push(
-                        model
-                            .link_index(l)
-                            .ok_or_else(|| SceneError::UnknownLink(l.to_string()))?,
-                    );
+                    match model.link_index(l) {
+                        Some(index) => indices.push(index),
+                        // The one named group: `"tool"` exempts the whole
+                        // tool subtree — mount, fingers, everything a close
+                        // brings against the part. A model that really has
+                        // a link called `tool` keeps the literal meaning
+                        // (the arm above resolved it).
+                        None if l == "tool" => {
+                            indices.extend(self.link_subtree(robot, model.tool_mount_link()));
+                        }
+                        None => return Err(SceneError::UnknownLink(l.to_string())),
+                    }
                 }
                 if !indices.contains(&link) {
                     indices.push(link);
                 }
+                indices.sort_unstable();
+                indices.dedup();
                 indices
             }
             None => self.link_subtree(robot, link),
@@ -2126,6 +2187,7 @@ impl Scene {
             scenario: None,
             physics: None,
             contacts: Vec::new(),
+            grasps: Vec::new(),
             robots,
             objects: Vec::new(),
             vehicles: Vec::new(),

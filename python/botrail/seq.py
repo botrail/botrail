@@ -17,7 +17,7 @@ starts a motion or ramp waits for it (``done()``); anything else moves on
 """
 
 import json
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Union
 
 Action = Dict[str, Any]
 Condition = Dict[str, Any]
@@ -62,16 +62,20 @@ def ramp(
 def attach(
     obj: str,
     link: Optional[str] = None,
-    touch_links: Optional[Iterable[str]] = None,
+    touch_links: Union[str, Iterable[str], None] = None,
     robot: Optional[str] = None,
 ) -> Action:
     """Grasp: rigidly attach an obstacle at its current relative pose.
-    ``robot`` names the carrying instance (required with several robots)."""
+    ``robot`` names the carrying instance (required with several robots).
+    ``touch_links="tool"`` exempts the whole tool subtree — palm and
+    fingers — which a closed gripper needs (the default exempts only the
+    anchor link's own chain)."""
     action: Action = {"type": "attach", "object": obj}
     if link is not None:
         action["link"] = link
     if touch_links is not None:
-        action["touch_links"] = list(touch_links)
+        links = [touch_links] if isinstance(touch_links, str) else list(touch_links)
+        action["touch_links"] = links
     if robot is not None:
         action["robot"] = robot
     return action

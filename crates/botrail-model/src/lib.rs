@@ -192,6 +192,9 @@ pub enum RobotSource {
         /// Mounting face declared by the manifest (`frames.mount_frame`),
         /// reapplied on rebuild.
         mount: Option<String>,
+        /// Grasp-surface frames declared by the manifest
+        /// (`frames.grasp_frames`), reapplied on rebuild.
+        grasp: Vec<String>,
         /// What the package *is* commercially (maker, product name,
         /// category, headline specs) — the manifest's identity fields, kept
         /// so a bill of materials can name the machine without re-reading
@@ -279,6 +282,11 @@ pub struct RobotModel {
     /// `frames.mount_frame`). [`RobotModel::attach_tool`] uses it when
     /// `mount` is omitted, falling back to the tool's root link.
     pub mount_link: Option<usize>,
+    /// Declared grasp-surface frames (catalog `frames.grasp_frames`):
+    /// fingertips of a hand, the pads of a gripper — where the product
+    /// says it holds things. Advisory metadata for authoring; empty when
+    /// the source declares none.
+    pub grasp_links: Vec<usize>,
 }
 
 impl RobotModel {
@@ -383,10 +391,34 @@ impl RobotModel {
     /// deepest frame a *pose* fully describes — joints below it (a gripper's)
     /// move parts of the tool relative to each other, so servoing a link
     /// below the mount lets a solver spend the grip as if it were a DOF.
+    ///
+    /// A leaf with no moving joint above it is base furniture, not a tool
+    /// leaf — ROS-convention stub frames (`base`, `world`) hang off the
+    /// root by fixed joints, and counting them would drag the "common
+    /// ancestor of all leaves" down to the base link. They are ignored
+    /// (unless the whole model is fixed, where they are all there is).
     pub fn tool_mount_link(&self) -> usize {
-        let leaves: Vec<usize> = (0..self.links.len())
+        let moving = |mut link: usize| loop {
+            match self.links[link].parent_joint {
+                Some(ji) => {
+                    let j = &self.joints[ji];
+                    if j.q_index.is_some() || j.mimic.is_some() {
+                        return true;
+                    }
+                    link = j.parent_link;
+                }
+                None => return false,
+            }
+        };
+        let mut leaves: Vec<usize> = (0..self.links.len())
             .filter(|link| !self.joints.iter().any(|j| j.parent_link == *link))
+            .filter(|&link| moving(link))
             .collect();
+        if leaves.is_empty() {
+            leaves = (0..self.links.len())
+                .filter(|link| !self.joints.iter().any(|j| j.parent_link == *link))
+                .collect();
+        }
         let Some((first, rest)) = leaves.split_first() else {
             return self.root_link;
         };
@@ -699,6 +731,7 @@ impl RobotModel {
             tcp_link: None,
             flange_link: None,
             mount_link: None,
+            grasp_links: Vec::new(),
         })
     }
 
@@ -837,6 +870,15 @@ impl RobotModel {
         // stays what it was, so pre-assembled tool stacks remain mountable.
         model.flange_link = tool.flange_link.map(|i| i + link_offset);
         model.mount_link = self.mount_link;
+        // Grasp surfaces accumulate: the base keeps whatever it declared
+        // (usually nothing on an arm) and the tool's ride along remapped —
+        // a hand bolted on still knows its fingertips.
+        model.grasp_links = self
+            .grasp_links
+            .iter()
+            .copied()
+            .chain(tool.grasp_links.iter().map(|i| i + link_offset))
+            .collect();
         Ok(model)
     }
 }
@@ -1314,6 +1356,35 @@ mod tests {
         assert_eq!(tool.dof(), 1);
         // The composite records how it was built.
         assert!(matches!(combined.source, RobotSource::Composite { .. }));
+    }
+
+    /// Grasp-surface frames declared on a tool (catalog `grasp_frames`)
+    /// ride along the weld remapped — the composite still knows its
+    /// fingertips.
+    #[test]
+    fn attach_tool_carries_grasp_links_along() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let mut tool = RobotModel::from_urdf_str(TOOL).unwrap();
+        tool.grasp_links = vec![
+            tool.link_index("finger_l").unwrap(),
+            tool.link_index("finger_r").unwrap(),
+        ];
+        let combined = arm
+            .attach_tool(
+                &tool,
+                Some("tool"),
+                Some("mount_plate"),
+                Isometry3::identity(),
+                None,
+                None,
+            )
+            .unwrap();
+        let names: Vec<&str> = combined
+            .grasp_links
+            .iter()
+            .map(|&l| combined.links[l].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["finger_l", "finger_r"]);
     }
 
     #[test]

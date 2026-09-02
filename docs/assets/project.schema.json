@@ -1876,6 +1876,46 @@
         }
       ]
     },
+    "GripperDriveMsg": {
+      "description": "A gripper drive as a project carries it: the declaration, re-resolved\nagainst the model on load (empty `joints` = derived from the tool\nmount, `None` numbers = the kind-scaled defaults).",
+      "type": "object",
+      "properties": {
+        "damping": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "finger_mass": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "joints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_force": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "stiffness": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
     "IoBinding": {
       "description": "One point wired to one channel. `(point, node)` is the key: a signal\nfanning out to two controllers is two bindings.",
       "type": "object",
@@ -2399,6 +2439,28 @@
         "at"
       ]
     },
+    "LinkMaterialMsg": {
+      "description": "One link's authored contact material.",
+      "type": "object",
+      "properties": {
+        "friction": {
+          "type": "number",
+          "format": "double"
+        },
+        "link": {
+          "type": "string"
+        },
+        "restitution": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "link",
+        "friction",
+        "restitution"
+      ]
+    },
     "Logic": {
       "type": "string",
       "enum": [
@@ -2873,11 +2935,29 @@
           "description": "World pose of the robot's root link.",
           "$ref": "#/$defs/PoseMsg"
         },
+        "gripper_drive": {
+          "description": "Force-limited gripper drive (`set_gripper_drive`), the friction-\ngrasp declaration. Absent in older files and for undriven robots.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GripperDriveMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "joint_positions": {
           "type": "array",
           "items": {
             "type": "number",
             "format": "double"
+          }
+        },
+        "link_materials": {
+          "description": "Per-link contact materials for physics bakes (`set_link_material`) —\na fingertip's rubber pad. Absent in older files.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LinkMaterialMsg"
           }
         },
         "mount": {
@@ -3026,6 +3106,13 @@
                 "null"
               ],
               "default": null
+            },
+            "grasp": {
+              "description": "Grasp-surface frames (`frames.grasp_frames`), reapplied on\nrebuild. Absent in older files.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             "id": {
               "type": "string"

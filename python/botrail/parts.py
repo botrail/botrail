@@ -1,6 +1,6 @@
 """Standard structures, generated from parameters: fences, walls, tables,
-pedestals, racks, conveyor bodies, pallets, light curtains, stairs — the
-scenery every cell has and nobody wants to model.
+pedestals, racks, conveyor bodies, pallets, light curtains, stairs, control
+cabinets — the scenery every cell has and nobody wants to model.
 
 Each generator composes the ordinary scene API — `add_box`, `add_frame`,
 `add_conveyor`, `add_beam_sensor`, `set_part` — so what it builds is plain
@@ -54,6 +54,9 @@ WOOD: Color = (0.52, 0.36, 0.18)
 # 縞鋼板 — the bright non-slip plate a stair tread is made of, and the
 # safety colour its handrail is painted (both linear RGB, like the rest).
 CHECKER_PLATE: Color = (0.50, 0.52, 0.53)
+# The light beige a control cabinet is painted (Munsell 5Y7/1, the colour
+# the big Japanese enclosure series ship in).
+CABINET: Color = (0.58, 0.56, 0.49)
 SAFETY_ORANGE: Color = (0.91, 0.36, 0.02)
 BELT: Color = (0.10, 0.10, 0.11)
 # The two surfaces a building is made of: painted plasterboard, and the
@@ -979,6 +982,188 @@ def pedestal(
     return built
 
 
+# ------------------------------------------------------------------- cabinet
+
+
+def cabinet(
+    scene,
+    name: str,
+    size: Optional[Point3] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    base: Optional[bool] = None,
+    plate: Optional[bool] = None,
+    base_height: Optional[float] = None,
+    yaw: float = 0.0,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = CABINET,
+    **attributes,
+) -> Built:
+    """A control cabinet: `size = (width, depth, height)` standing at
+    `position` (its centre, x, y[, floor z]), door face on -Y before `yaw`.
+    Adds the frame `<name>/front` at the centre of the door face at floor
+    level — where an operator stands, and what a maintenance-space check
+    will measure from — and pins the enclosure (`structure.cabinet`).
+
+    The panel builder's customisation is what this generator carries: the
+    *enclosure* is the article (what is inside it is other people's BOM
+    lines), and the plinth base and the mounting plate are articles of their
+    own. `base=` stands the body on its plinth (`<name>/base`), `plate=`
+    stands the mounting plate inside (`<name>/plate`) — each is one more
+    line on the BOM when a catalog names it.
+
+    With `catalog=` — the id of a cabinet spec pack, or a package directory —
+    an enclosure you can order: width, depth and height are matched against
+    the sizes that are sold, the BOM row carries the article number they
+    compose into, and base and plate default to whatever the pack sells
+    (pass `base=False` / `plate=False` to leave them out). A combination
+    nobody sells is refused by the pack's mass table.
+
+    `detail="full"` (the default with a catalog) draws the door leaves and
+    their handles — or the pack's own drawing (`trim:`) — as decoration that
+    never collides. The massing stays the body (and its plinth)."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("cabinet")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
+        if base is None:
+            base = spec.has_component("base")
+        if plate is None:
+            plate = spec.has_component("plate")
+        if "base_height_mm" in spec.params():
+            # The plinth height is an ordering axis of its own (a base is
+            # sold 50 or 100 mm tall) — validated like any other dimension.
+            if base_height is not None:
+                params["base_height_mm"] = spec.choose(
+                    "base_height_mm", round(base_height * 1000.0, 3))
+            base_height = _sized(params, "base_height_mm", base_height)
+        elif base_height is None and spec.has_component("base"):
+            base_height = _mm(spec.dimension_mm("base", "height", 100.0))
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    if size is None:
+        raise ValueError("cabinet: size is required without a catalog")
+    base = False if base is None else base
+    plate = False if plate is None else plate
+    base_height = 0.1 if base_height is None else base_height
+    w, d, h = (float(v) for v in size)
+    if min(w, d, h) <= 0:
+        raise ValueError("cabinet: size must be positive")
+    if base and base_height <= 0:
+        raise ValueError("cabinet: base_height must be positive")
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+    built = Built(name)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
+    plinth = base_height if base else 0.0
+    if base:
+        built.obstacles.append(
+            scene.add_box(f"{name}/base", size=(w, d, plinth),
+                          position=(x, y, z0 + plinth / 2), quaternion=q, color=DARK_STEEL)
+        )
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=(w, d, h),
+                      position=(x, y, z0 + plinth + h / 2), quaternion=q, color=color)
+    )
+    if plate:
+        # The mounting plate stands against the back wall, inside the
+        # enclosure — massing like the body (it is steel you ordered), and
+        # enclosed by it, so it never collides with anything the body does
+        # not.
+        thick = 0.0023 if spec is None else (_mm(spec.dimension_mm("plate", "thickness", 2.3)) or 0.0023)
+        pw = None if spec is None else _mm(spec.dimension_mm("plate", "width"))
+        ph = None if spec is None else _mm(spec.dimension_mm("plate", "height"))
+        pw = pw if pw is not None else max(w - 0.15, w * 0.5)
+        ph = ph if ph is not None else max(h - 0.25, h * 0.5)
+        px, py = world(0.0, d / 2 - 0.05)
+        built.obstacles.append(
+            scene.add_box(f"{name}/plate", size=(pw, thick, ph),
+                          position=(px, py, z0 + plinth + h / 2), quaternion=q, color=STEEL)
+        )
+
+    fx, fy = world(0.0, -d / 2)
+    scene.add_frame(f"{name}/front", position=(fx, fy, z0), quaternion=q)
+    built.frames.append(f"{name}/front")
+
+    if mode == "full":
+        drawn = _load_trim(
+            scene, built, spec, "body", f"{name}/trim/shell", (x, y, z0), q,
+            width=w, depth=d, height=h, base=plinth,
+        )
+        if drawn:
+            for part in ["body"] + (["base"] if base else []) + (["plate"] if plate else []):
+                scene.set_obstacle_visible(f"{name}/{part}", False)
+        else:
+            # Door leaves a shade proud of the face, and a flat handle on
+            # each — one door on a narrow body, a pair from a metre up (the
+            # generic look; a pack's own drawing knows its real split).
+            doors = 2 if w >= 1.0 else 1
+            leaf_t, gap = 0.004, 0.01
+            leaf_w = (w - gap * (doors + 1)) / doors
+            zc = z0 + plinth + h / 2
+            for i in range(doors):
+                off = -w / 2 + gap + leaf_w / 2 + i * (leaf_w + gap)
+                px, py = world(off, -(d / 2 + leaf_t / 2))
+                _trim(scene, built, f"{name}/trim/door{i}", (leaf_w, leaf_t, h - 2 * gap),
+                      (px, py, zc), q, color)
+                # The handle sits by the leaf's swinging edge: the meeting
+                # edge of a pair, the lock side of a single door.
+                edge = off + (leaf_w / 2 - 0.05) * (1 if doors == 1 or i == 0 else -1)
+                hx, hy = world(edge, -(d / 2 + leaf_t + 0.008))
+                _trim(scene, built, f"{name}/trim/handle{i}", (0.025, 0.016, 0.14),
+                      (hx, hy, zc), q, DARK_STEEL)
+
+    if spec is None:
+        scene.set_part(name, kind="group", category="structure.cabinet",
+                       **_identity(model, manufacturer, attributes))
+        return built
+
+    if not base:
+        # No plinth ordered — its axis has nothing to say on the BOM.
+        params.pop("base_height_mm", None)
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("body", "structure.cabinet"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("body", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("body", **params)), **attributes},
+    )
+    if base and spec.has_component("base"):
+        scene.set_part(
+            f"{name}/base", kind="obstacle",
+            category=spec.category("base", "structure.cabinet.base"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("base", **params),
+            **_kg(spec.mass_kg("base", **params)),
+        )
+    if plate and spec.has_component("plate"):
+        scene.set_part(
+            f"{name}/plate", kind="obstacle",
+            category=spec.category("plate", "structure.cabinet.plate"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("plate", **params),
+            **_kg(spec.mass_kg("plate", **params)),
+        )
+    return built
+
+
 # ---------------------------------------------------------------------- rack
 
 
@@ -1501,8 +1686,8 @@ def light_curtain(
 
 
 __all__ = [
-    "Built", "conveyor", "fence", "light_curtain", "pallet", "pedestal",
-    "rack", "stairs", "table", "wall",
+    "Built", "cabinet", "conveyor", "fence", "light_curtain", "pallet",
+    "pedestal", "rack", "stairs", "table", "wall",
 ]
 
 

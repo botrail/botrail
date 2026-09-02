@@ -62,6 +62,8 @@ class Robot:
         max_iters: int = 100,
         restarts: Optional[int] = None,
     ) -> IkResult: ...
+    @property
+    def grasp_frames(self) -> list[str]: ...
     def attach_tool(
         self,
         tool: "Robot",
@@ -223,6 +225,30 @@ class Scene:
         linear_damping: Optional[float] = None,
         angular_damping: Optional[float] = None,
         ccd: Optional[bool] = None,
+    ) -> None: ...
+    def set_link_material(
+        self,
+        link: str,
+        friction: Optional[float] = None,
+        restitution: Optional[float] = None,
+        robot: Optional[str] = None,
+    ) -> None: ...
+    def grasp_close(
+        self,
+        name: str,
+        robot: Optional[str] = None,
+        joints: Optional[list[str]] = None,
+        closed: Optional[dict[str, float]] = None,
+        clearance: Optional[float] = None,
+    ) -> dict[str, float]: ...
+    def set_gripper_drive(
+        self,
+        joints: Optional[list[str]] = None,
+        max_force: Optional[float] = None,
+        stiffness: Optional[float] = None,
+        damping: Optional[float] = None,
+        finger_mass: Optional[float] = None,
+        robot: Optional[str] = None,
     ) -> None: ...
     def set_obstacle_legend(
         self,
@@ -991,6 +1017,15 @@ class SequenceTimeline:
     def contacts(self) -> list[dict[str, Any]]: ...
     def settled_at(self, name: str) -> Optional[float]: ...
     def conveyor_stalls(self) -> list[dict[str, Any]]: ...
+    def grasp_report(
+        self,
+        min_touches: int = 2,
+        grip_force_n: Optional[float] = None,
+        mu: Optional[float] = None,
+        payload_kg: Optional[float] = None,
+        safety_factor: float = 2.0,
+        max_slip_m: float = 0.01,
+    ) -> list[dict[str, Any]]: ...
     @property
     def branches(self) -> list[tuple[str, str, int]]: ...
     def to_script(

@@ -1894,6 +1894,7 @@ mod tests {
             sequences: vec!["s".into()],
             scenario: None,
             physics: None,
+            grasps: Vec::new(),
             contacts: vec![],
             robots: vec![track(ramp_to)],
             objects: vec![],

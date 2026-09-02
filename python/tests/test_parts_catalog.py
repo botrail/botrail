@@ -378,6 +378,76 @@ configuration:
         per_mm: {height_mm: 0.05}
 """
 
+# A control cabinet: the enclosure is the article, the plinth base and the
+# mounting plate are articles of their own, and a size nobody sells has no
+# row in the mass table.
+CABINET_MANIFEST = """
+schema_version: '0.1'
+id: acme/panel/enclosure/r1
+kind: spec
+category: structure.cabinet
+name: Panel Enclosure
+manufacturer:
+  name: ACME Panels
+distribution: public
+mechanical:
+  footprint_mm: [800, 600]
+  height_mm: 2200
+  mass_kg: 150.0
+  mount: floor
+specs:
+  ip_rating: IP55
+configuration:
+  generator: cabinet
+  params:
+    width_mm:
+      values: [600, 800, 1000]
+      default: 800
+    height_mm:
+      values: [1600, 2100]
+      default: 2100
+    depth_mm:
+      values: [400, 600]
+      default: 600
+    base_height_mm:
+      values: [50, 100]
+      default: 100
+  components:
+    - role: body
+      category: structure.cabinet
+      part_number: PE{depth_mm_code}-{width_mm_code}{height_mm_code}
+      codes:
+        depth_mm: {400: "40", 600: "60"}
+        width_mm: {600: "6", 800: "8", 1000: "10"}
+        height_mm: {1600: "16", 2100: "21"}
+      mass:
+        table:
+          - {width_mm: 600, height_mm: 1600, depth_mm: 400, kg: 84.0}
+          - {width_mm: 800, height_mm: 2100, depth_mm: 600, kg: 150.0}
+          - {width_mm: 1000, height_mm: 2100, depth_mm: 600, kg: 176.0}
+    - role: base
+      category: structure.cabinet.base
+      part_number: PB-{width_mm_code}{depth_mm_code}{base_height_mm_code}
+      codes:
+        width_mm: {600: "6", 800: "8", 1000: "10"}
+        depth_mm: {400: "40", 600: "60"}
+        base_height_mm: {50: "05", 100: "10"}
+      mass:
+        base_kg: 2.0
+        per_mm: {width_mm: 0.008}
+    - role: plate
+      category: structure.cabinet.plate
+      part_number: PP-{width_mm_code}{height_mm_code}
+      dimensions_mm: {thickness: 2.3}
+      codes:
+        width_mm: {600: "6", 800: "8", 1000: "10"}
+        height_mm: {1600: "16", 2100: "21"}
+      mass:
+        base_kg: 0.0
+        per_m2_kg: 18.0
+        area: [width_mm, height_mm]
+"""
+
 RING = [(-1.2, -0.6), (1.2, -0.6), (1.2, 1.0), (-1.2, 1.0)]
 
 
@@ -436,6 +506,14 @@ def pillar(tmp_path: Path) -> Path:
     directory = tmp_path / "pillar"
     directory.mkdir()
     (directory / "manifest.yaml").write_text(PILLAR_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def enclosure(tmp_path: Path) -> Path:
+    directory = tmp_path / "enclosure"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(CABINET_MANIFEST)
     return directory
 
 
@@ -950,6 +1028,78 @@ def test_a_stand_cut_to_order_still_names_one_article(tmp_path: Path) -> None:
         bt.parts.pedestal(scene_(), "ped", 1.4, (0.0, 0.0), catalog=directory)
 
 
+def test_the_cabinet_names_the_enclosure_and_its_articles(enclosure: Path) -> None:
+    """A control cabinet is customised the way the maker sells it: a size
+    from the matrix, a plinth base and a mounting plate as articles of their
+    own. Three lines, each with the number you would order it by — what is
+    *inside* the cabinet is other people's BOM lines."""
+    scene = scene_()
+    built = bt.parts.cabinet(scene, "cab", catalog=enclosure, position=(1.0, 0.5))
+    # The massing: plinth, body on top of it, plate standing inside.
+    massing = sorted(n for n in built.obstacles if "/trim/" not in n)
+    assert massing == ["cab/base", "cab/body", "cab/plate"]
+    lo, hi = scene.obstacle_bounds("cab/body")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3)) == (0.8, 0.6)
+    assert (lo[2], hi[2]) == (pytest.approx(0.1), pytest.approx(2.2))   # on its plinth
+    # The door-face frame, floor level — where an operator stands.
+    assert built.frames[:1] == ["cab/front"]
+    fx, fy, fz = scene.frame("cab/front")[0]
+    assert (fx, fy, fz) == (pytest.approx(1.0), pytest.approx(0.2), pytest.approx(0.0))
+    # Three orderable lines: enclosure + base + plate.
+    table = rows(scene)
+    body, plinth, mount = table["cab"], table["cab/base"], table["cab/plate"]
+    assert body["model"] == "PE60-821" and body["qty"] == 1
+    assert body["attributes"]["mass_kg"] == pytest.approx(150.0)
+    assert body["attributes"]["width_mm"] == "800" and body["attributes"]["ip_rating"] == "IP55"
+    assert plinth["model"] == "PB-86010"
+    assert plinth["attributes"]["mass_kg"] == pytest.approx(8.4)        # 2.0 + 0.008 x 800
+    assert mount["model"] == "PP-821"
+    assert mount["attributes"]["mass_kg"] == pytest.approx(30.24)       # 0.8 x 2.1 x 18
+    # A width nobody sells is refused with the ones that are.
+    with pytest.raises(ValueError, match="width_mm=700 is not available — choose from 600 / 800 / 1000"):
+        bt.parts.cabinet(scene_(), "cab", (0.7, 0.6, 2.1), (0.0, 0.0), catalog=enclosure)
+    # The plinth height is an axis of its own: 50 or 100 mm, in the number.
+    low = scene_()
+    bt.parts.cabinet(low, "cab", catalog=enclosure, position=(0.0, 0.0), base_height=0.05)
+    assert rows(low)["cab/base"]["model"] == "PB-86005"
+    lo, hi = low.obstacle_bounds("cab/body")
+    assert lo[2] == pytest.approx(0.05)
+    with pytest.raises(ValueError, match="base_height_mm=70 is not available"):
+        bt.parts.cabinet(scene_(), "cab", catalog=enclosure, position=(0.0, 0.0), base_height=0.07)
+    # Leave the articles out and their lines go with them.
+    bare = scene_()
+    built = bt.parts.cabinet(bare, "cab", catalog=enclosure, position=(0.0, 0.0),
+                             base=False, plate=False)
+    assert sorted(n for n in built.obstacles if "/trim/" not in n) == ["cab/body"]
+    assert {n for n in rows(bare) if n.startswith("cab")} == {"cab"}
+    lo, hi = bare.obstacle_bounds("cab/body")
+    assert (lo[2], hi[2]) == (pytest.approx(0.0), pytest.approx(2.1))   # straight on the floor
+
+
+def test_a_cabinet_size_nobody_sells_is_stopped_by_the_mass_table(enclosure: Path) -> None:
+    """The axes are independent but the sold sizes are not a full grid — the
+    hole in the mass table is what stops a combination nobody sells."""
+    with pytest.raises(ValueError, match="no mass row for body"):
+        bt.parts.cabinet(scene_(), "cab", (0.6, 0.6, 2.1), (0.0, 0.0), catalog=enclosure)
+    # The same size with the depth it is sold in is fine.
+    scene = scene_()
+    bt.parts.cabinet(scene, "cab", (0.6, 0.4, 1.6), (0.0, 0.0), catalog=enclosure)
+    assert rows(scene)["cab"]["model"] == "PE40-616"
+
+
+def test_a_hand_written_cabinet_is_one_line(enclosure: Path) -> None:
+    """Without a catalog the cabinet works like every hand-written part: a
+    box (no plinth, no plate, no trim) and one line saying what it is."""
+    scene = scene_()
+    built = bt.parts.cabinet(scene, "cab", (0.5, 0.4, 1.2), (0.0, 0.0),
+                             model="PNL-500", manufacturer="ACME Panels")
+    assert built.obstacles == ["cab/body"] and built.frames == ["cab/front"]
+    row = rows(scene)["cab"]
+    assert row["model"] == "PNL-500" and row["category"] == "structure.cabinet"
+    with pytest.raises(ValueError, match="size is required without a catalog"):
+        bt.parts.cabinet(scene_(), "cab")
+
+
 # -------------------------------------------------------------------- detail
 
 
@@ -962,12 +1112,14 @@ def _drawn(scene, tmp_path: Path) -> dict:
 
 
 def test_full_detail_draws_the_machine_without_changing_what_it_hits(
-    pack: Path, belt: Path, shelving: Path, stand: Path, pillar: Path, tmp_path: Path
+    pack: Path, belt: Path, shelving: Path, stand: Path, pillar: Path,
+    enclosure: Path, tmp_path: Path
 ) -> None:
     """`detail="full"` is decoration: a mesh panel gets its frame and wire, a
     conveyor its rollers and drive, a rack its beams and braces, a stand its
-    rails and feet — all of it out of collision, with the massing underneath
-    untouched. How a cell looks never changes how it verifies."""
+    rails and feet, a cabinet its doors and handles — all of it out of
+    collision, with the massing underneath untouched. How a cell looks never
+    changes how it verifies."""
     def build(mode: str):
         scene = scene_()
         bt.parts.fence(scene, "fence", path=RING, catalog=pack, door=(0, 1), detail=mode)
@@ -975,6 +1127,7 @@ def test_full_detail_draws_the_machine_without_changing_what_it_hits(
         bt.parts.rack(scene, "rack", catalog=shelving, position=(2.0, 2.0), detail=mode)
         bt.parts.table(scene, "bench", catalog=stand, position=(-2.0, 2.0), detail=mode)
         bt.parts.pedestal(scene, "ped", catalog=pillar, position=(-2.0, -2.0), detail=mode)
+        bt.parts.cabinet(scene, "cab", catalog=enclosure, position=(2.0, -2.0), detail=mode)
         return scene
 
     plain, full = build("plain"), build("full")
@@ -993,6 +1146,7 @@ def test_full_detail_draws_the_machine_without_changing_what_it_hits(
     assert {
         "fence/trim/e0_0/frame_t", "conv/trim/drive", "rack/trim/brace_l",
         "bench/trim/rail0", "bench/trim/foot0", "ped/trim/gusset0",
+        "cab/trim/door0", "cab/trim/handle0",
     } <= set(trim)
 
 

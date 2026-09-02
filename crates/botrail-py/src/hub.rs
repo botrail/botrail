@@ -567,6 +567,44 @@ impl SceneHub {
         botrail_session::attach_obstacle_to(self, robot, name, link, touch_links)
     }
 
+    /// Pure query — no broadcast: the scene is read at its current pose.
+    pub fn grasp_close(
+        &self,
+        robot: usize,
+        object: &str,
+        joints: Option<&[String]>,
+        closed: Option<&[(String, f64)]>,
+        clearance: f64,
+    ) -> Result<Vec<(String, f64)>, SceneError> {
+        self.with_scene(|scene| scene.grasp_close(robot, object, joints, closed, clearance))
+    }
+
+    /// Physics-only annotation — nothing visual changes, so no broadcast.
+    pub fn set_link_material(
+        &self,
+        robot: usize,
+        link: &str,
+        friction: Option<f64>,
+        restitution: Option<f64>,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| scene.set_link_material(robot, link, friction, restitution))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_gripper_drive(
+        &self,
+        robot: usize,
+        joints: Option<&[String]>,
+        max_force: Option<f64>,
+        stiffness: Option<f64>,
+        damping: Option<f64>,
+        finger_mass: Option<f64>,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| {
+            scene.set_gripper_drive(robot, joints, max_force, stiffness, damping, finger_mass)
+        })
+    }
+
     pub fn detach_obstacle(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::detach_obstacle(self, name)
     }

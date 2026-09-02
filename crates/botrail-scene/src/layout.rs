@@ -1862,6 +1862,7 @@ mod tests {
             tcp: None,
             flange: None,
             mount: None,
+            grasp: Vec::new(),
             meta: botrail_model::CatalogMeta {
                 specs: vec![("reach_mm".into(), 850.0)],
                 ..Default::default()

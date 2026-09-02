@@ -115,6 +115,54 @@ pub struct BodyDesc {
     /// with the collision checker.
     pub parts: Vec<(PartPose, SharedShape)>,
     pub props: BodyProps,
+    /// Self-collision group: bodies sharing a nonzero group never collide
+    /// with each other. The lowering gives every link of one robot the
+    /// same group, so a dynamic finger doesn't fight its own palm mirror —
+    /// for all-kinematic robots this changes nothing (kinematic pairs are
+    /// never solved). `0` (the default) collides with everything.
+    pub group: u32,
+}
+
+/// The kinematic kind of a driven joint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JointKind {
+    Revolute,
+    Prismatic,
+    /// A weld: all six axes locked, no motor. What ties a fixed-jointed
+    /// link inside a finger subtree (an outer finger bar, a rubber pad)
+    /// to its moving carrier once both are dynamic bodies.
+    Fixed,
+}
+
+/// A force-capped position motor: the drive of a gripper finger. The
+/// realized clamp at rest is what the contact develops at the standing
+/// penetration the commanded overtravel buys; `max_force` is the ceiling
+/// (N for prismatic, N·m for revolute), which is also what a too-heavy
+/// load defeats.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointMotor {
+    pub stiffness: f64,
+    pub damping: f64,
+    pub max_force: f64,
+}
+
+/// One driven joint of the lowered world, connecting two of its bodies.
+/// Anchors give the joint frame on each body (`local1` on `parent`,
+/// `local2` on `child`); `axis` is the free axis in the joint frame.
+/// [`JointKind::Fixed`] welds ignore `axis`, `limits` and `motor`, and
+/// must come AFTER every motored joint in [`WorldDesc::joints`] — the
+/// rollout addresses motored joints by index.
+#[derive(Clone)]
+pub struct JointDesc {
+    pub parent: BodyId,
+    pub child: BodyId,
+    pub kind: JointKind,
+    pub local1: Isometry3<f64>,
+    pub local2: Isometry3<f64>,
+    pub axis: Vector3<f64>,
+    /// Position limits `(lower, upper)`; `None` leaves the axis unbounded.
+    pub limits: Option<(f64, f64)>,
+    pub motor: JointMotor,
 }
 
 /// A conveyor's contract with the physics world: contact points inside
@@ -144,6 +192,9 @@ pub struct WorldDesc {
     pub gravity: Vector3<f64>,
     pub bodies: Vec<BodyDesc>,
     pub zones: Vec<SurfaceVelocityZone>,
+    /// Driven joints (a friction-grasp gripper's fingers), in authoring
+    /// order; [`PhysicsBackend::set_joint_target`] addresses them by index.
+    pub joints: Vec<JointDesc>,
 }
 
 impl WorldDesc {
@@ -152,6 +203,7 @@ impl WorldDesc {
             gravity: Vector3::new(0.0, 0.0, -9.81),
             bodies: Vec::new(),
             zones: Vec::new(),
+            joints: Vec::new(),
         }
     }
 }
@@ -218,4 +270,13 @@ pub trait PhysicsBackend: Send {
     /// Takes the contact events accumulated since the last drain (the
     /// substeps of one scan tick, in practice).
     fn drain_contacts(&mut self) -> TickContacts;
+
+    /// Supplies a driven joint's position target for the next step(s).
+    /// `joint` indexes [`WorldDesc::joints`].
+    fn set_joint_target(&mut self, joint: usize, position: f64);
+
+    /// Current position of a driven joint (its coordinate along/about the
+    /// joint axis) — what the rollout writes back into the baked track so
+    /// a stalled finger plays back where it really stopped.
+    fn joint_position(&self, joint: usize) -> f64;
 }

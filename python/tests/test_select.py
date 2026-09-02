@@ -379,5 +379,17 @@ def test_catalog_robot_and_tool_rows() -> None:
     assert grip["payload_kg"].value == pytest.approx(2.3) and grip["payload_kg"].provided == 5.0
     # 85 mm of stroke cannot open past the carton's smallest side.
     assert grip["stroke_mm"].value == 150 and grip["stroke_mm"].status == "short"
-    assert req["ur5e/tool"].minimum == {"payload_kg": 2.3, "stroke_mm": 150.0}
-    assert [f.code for f in req.findings() if f.target == "ur5e/tool"] == ["spec_short"]
+    # Holding force: m·g × SF 2 / (μ 0.5 × 2 surfaces) = 2.3 × 19.62 N.
+    assert grip["grip_force_n"].value == pytest.approx(45.1)
+    assert req["ur5e/tool"].minimum == {
+        "payload_kg": 2.3,
+        "stroke_mm": 150.0,
+        "grip_force_n": 45.1,
+    }
+    # spec_short: the 150 mm carton beats the 85 mm stroke. No
+    # spec_unknown: the published 2F-85 row carries the grip-force flat
+    # mirrors (packed at build time, republished 2026-09-02), so the
+    # grip_force_n requirement finds its number.
+    assert [f.code for f in req.findings() if f.target == "ur5e/tool"] == [
+        "spec_short",
+    ]
