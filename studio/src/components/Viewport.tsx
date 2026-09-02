@@ -12,7 +12,7 @@ import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
-import { ContactFlashView } from "./ContactFlashView";
+import { ContactMarkerView } from "./ContactMarkerView";
 import { SensorView } from "./SensorView";
 import { CameraView } from "./CameraView";
 import { LidarView } from "./LidarView";
@@ -198,8 +198,9 @@ export function Viewport() {
           <WasmStageView />
           <ObstacleView />
           {/* Aids the camera pass hides: sensor volumes, camera gizmos,
-              guide paths, toolpath overlays, transform gizmos. Process
-              light (flash/spray/trace) stays — a camera would see it. */}
+              guide paths, toolpath overlays, contact markers, transform
+              gizmos. Process light (flash/spray/trace) stays — a camera
+              would see it. */}
           <Aid>
             <SensorView />
           </Aid>
@@ -210,7 +211,9 @@ export function Viewport() {
             <LidarView />
           </Aid>
           <FlashView />
-          <ContactFlashView />
+          <Aid>
+            <ContactMarkerView />
+          </Aid>
           <SprayView />
           <Aid>
             <VehiclePathView />

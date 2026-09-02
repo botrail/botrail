@@ -448,6 +448,32 @@ configuration:
         area: [width_mm, height_mm]
 """
 
+# An article number that cannot be composed from the axes — the pack lists
+# the sold combinations instead, each with the number it is sold under.
+AX_MANIFEST = """
+schema_version: '0.1'
+id: acme/ax/steel-box/r1
+kind: spec
+category: structure.cabinet
+name: AX Steel Box
+manufacturer:
+  name: ACME Boxes
+distribution: public
+configuration:
+  generator: cabinet
+  params:
+    width_mm: {values: [600, 800], default: 800}
+    height_mm: {values: [800, 1000], default: 1000}
+    depth_mm: {values: [300, 400], default: 300}
+  components:
+    - role: body
+      category: structure.cabinet
+      variants:
+        - {width_mm: 600, height_mm: 800, depth_mm: 400, part_number: AX 1059.000, kg: 35.5}
+        - {width_mm: 800, height_mm: 1000, depth_mm: 300, part_number: AX 1180.000, kg: 49.7}
+        - {width_mm: 800, height_mm: 1000, depth_mm: 400, part_number: AX 1181.000, kg: 56.0}
+"""
+
 RING = [(-1.2, -0.6), (1.2, -0.6), (1.2, 1.0), (-1.2, 1.0)]
 
 
@@ -1098,6 +1124,28 @@ def test_a_hand_written_cabinet_is_one_line(enclosure: Path) -> None:
     assert row["model"] == "PNL-500" and row["category"] == "structure.cabinet"
     with pytest.raises(ValueError, match="size is required without a catalog"):
         bt.parts.cabinet(scene_(), "cab")
+
+
+def test_a_variant_table_is_the_article_list(tmp_path: Path) -> None:
+    """Some article numbers cannot be composed from the axes (Rittal's
+    1050.000 is 500x500x210 — a plain running number). The pack lists each
+    sold combination with its number and weight instead, and a combination
+    it does not list is refused as *not sold*, not as a missing mass row."""
+    directory = tmp_path / "axbox"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(AX_MANIFEST)
+    scene = scene_()
+    bt.parts.cabinet(scene, "box", catalog=directory, position=(0.0, 2.0, 1.2))
+    row = rows(scene)["box"]
+    assert row["model"] == "AX 1180.000"
+    assert row["attributes"]["mass_kg"] == pytest.approx(49.7)
+    # Another sold combination, sized explicitly (width, depth, height).
+    scene2 = scene_()
+    bt.parts.cabinet(scene2, "box", (0.6, 0.4, 0.8), (1.0, 0.0, 1.2), catalog=directory)
+    assert rows(scene2)["box"]["model"] == "AX 1059.000"
+    # Every axis value is legal on its own; the combination is what is not sold.
+    with pytest.raises(ValueError, match="no body is sold at width_mm=600 x height_mm=1000 x depth_mm=300"):
+        bt.parts.cabinet(scene_(), "box", (0.6, 0.3, 1.0), (0.0, 0.0), catalog=directory)
 
 
 # -------------------------------------------------------------------- detail

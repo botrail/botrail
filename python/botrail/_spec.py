@@ -219,8 +219,33 @@ class Spec:
         rules = self.config.get("rules") or {}
         return rules.get(key, default)
 
+    def variant_row(self, role: str, values: dict) -> Optional[dict]:
+        """The `variants` table row for these values — None when the part has
+        no table, and **an error when the combination is not sold**. A variant
+        table lists what the maker actually sells (and, where the article
+        numbers cannot be composed from the axes — Rittal's 1050.000 is
+        500x500x210 — the number each row is sold under)."""
+        component = self.component(role)
+        rows = component.get("variants")
+        if not isinstance(rows, list) or not rows:
+            return None
+        axes = [key for key in rows[0] if key not in ("part_number", "kg")]
+        for row in rows:
+            if all(axis in values and _same(values[axis], row[axis]) for axis in axes):
+                return row
+        wanted = " x ".join(
+            f"{axis}={_plain(values[axis])}" for axis in axes if axis in values
+        )
+        raise ValueError(
+            f"{self.id}: no {role} is sold at {wanted} — "
+            f"the pack lists {len(rows)} combinations"
+        )
+
     def part_number(self, role: str, **values: Any) -> str:
         component = self.component(role)
+        row = self.variant_row(role, values)
+        if row is not None and "part_number" in row:
+            return str(row["part_number"])
         template = component.get("part_number")
         if not template:
             return ""
@@ -254,6 +279,9 @@ class Spec:
         return codes
 
     def mass_kg(self, role: str, **values: Any) -> Optional[float]:
+        row = self.variant_row(role, values)
+        if row is not None and "kg" in row:
+            return float(row["kg"])
         mass = self.component(role).get("mass")
         if not isinstance(mass, dict):
             return None

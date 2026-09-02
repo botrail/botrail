@@ -442,7 +442,7 @@ export interface StudioState {
     /** Scenario the bake ran under; null = the unmodified scene. */
     scenario: string | null;
     /** Touch episodes of a physics bake (empty on a kinematic one) —
-     * what the contact flashes pop from during playback. */
+     * what the contact markers annotate during playback. */
     contacts: ContactMsg[];
   } | null;
   /** The USD recording behind the current playback, when there is one. */

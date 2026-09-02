@@ -1262,7 +1262,9 @@ pub struct TimelineMsg {
 
 /// One touch episode of a physics bake (see `rollout::ContactSpan`):
 /// what touched what, when, where it began, and how hard at the peak.
-/// The studio flashes episode starts during playback.
+/// The studio marks episode starts during playback with a flat
+/// annotation ring (the gizmo idiom — a touch is a fact to point at,
+/// not a light source).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ContactMsg {

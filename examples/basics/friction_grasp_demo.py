@@ -15,9 +15,13 @@ contact facts around that weld. Here the weld is gone:
   real, and `tl.grasp_report()` grows a measured `slip_m` and a `hold`
   check.
 
-Two bakes of the same taught cycle: the stock drive (the knuckle's own
-effort limit) carries the part; a feeble 0.05 N*m cap loses it on the
-way up. Same authoring — the physics decides.
+Two bakes of the same taught cycle: a feeble 0.18 N*m cap closes the
+hand — it even carries the fingers' own weight, just barely — but the
+squeeze it buys is a couple of newtons, and the lift loses the part
+back onto its stand. The stock drive (the knuckle's own effort limit)
+carries it to the plate. Same authoring — the physics decides. The
+stock bake runs LAST on purpose: the studio replays the most recent
+bake, so `--studio` opens on the cycle that works.
 
 Teaching notes, both measured on the catalog 2F-85:
 
@@ -146,17 +150,24 @@ def show(tl, label):
     return rep
 
 
+# The feeble hand first: redeclaring the drive replaces it, the taught
+# sequence is untouched. 0.18 N*m at the knuckle still closes the
+# fingers (below ~0.15 they cannot even hold their own weight and the
+# hand visibly dangles — that reads as a broken robot, not a weak grip),
+# but the squeeze it buys is a couple of newtons, under what 0.35 kg
+# needs at this carry's 2 m/s2 peak.
+scene.set_gripper_drive(max_force=0.18)
+feeble = scene.simulate_sequence("cycle", physics=True, max_duration=60.0)
+rep = show(feeble, "feeble drive (max_force = 0.18 N*m)")
+assert rep["checks"]["hold"] == "fail" and not rep["_on_plate"]
+
+# The stock drive, baked LAST: the studio replays the latest bake, so a
+# connected (or --studio) viewer sees the cycle that works, and the USD
+# below exports it.
+scene.set_gripper_drive()
 timeline = scene.simulate_sequence("cycle", physics=True, max_duration=60.0)
 rep = show(timeline, "stock drive (cap = knuckle effort limit)")
 assert rep["checks"]["hold"] == "pass" and rep["_on_plate"]
-
-# Same taught cycle, feeble hand: redeclaring the drive replaces it — the
-# sequence is untouched. 0.05 N*m at the knuckle is a few newtons at the
-# pads, under what 0.35 kg needs at this carry's 2 m/s2 peak.
-scene.set_gripper_drive(max_force=0.05)
-feeble = scene.simulate_sequence("cycle", physics=True, max_duration=60.0)
-rep = show(feeble, "feeble drive (max_force = 0.05 N*m)")
-assert rep["checks"]["hold"] == "fail" and not rep["_on_plate"]
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 out = args[0] if args else "friction_grasp.usda"
