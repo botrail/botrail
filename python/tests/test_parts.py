@@ -284,9 +284,11 @@ def test_sequence_demo_bom_is_complete() -> None:
     ]
 
     # The catalog writes the rest: the belt and its stands, the rack and its
-    # shelves, and the guarding down to a line per panel width. The guard is
-    # two runs of one product, so its groups share the rows — a merged row
-    # carries both names.
+    # shelves, the guarding down to a line per panel width, the control
+    # cabinet as three articles (body, plinth base, mounting plate), and the
+    # light curtain over the vehicle gate. The guard is two runs of one
+    # product, so its groups share the rows — a merged row carries both
+    # names.
     ordered = {
         name: row
         for row in bom.rows
@@ -295,20 +297,24 @@ def test_sequence_demo_bom_is_complete() -> None:
     }
     assert set(ordered) == {
         "conv", "conv/stands", "rack", "rack/shelves",
+        "cabinet", "cabinet/base", "cabinet/plate", "gate_curtain",
         "fence/east", "fence/east/posts", "fence/west", "fence/west/posts",
         "fence/west/door",
         *(f"fence/east/panels/w{mm}" for mm in (1500, 1000, 800, 300, 200)),
         *(f"fence/west/panels/w{mm}" for mm in (1500, 400, 300, 200)),
     }
     # The part numbers spell out what was ordered: 3.8 m x 400 mm of belt,
-    # a 900 x 450 x 1800 bay, an 800 mm door in a 2 m guard.
+    # a 900 x 450 x 1800 bay, an 800 mm door in a 2 m guard, a 600 x 400 x
+    # 1600 enclosure, a body-resolution curtain at a 925 mm height.
     assert ordered["conv"]["model"] == "BCU-400-3800"
     assert ordered["rack"]["model"] == "MR-900x450x1800"
     assert ordered["fence/west/door"]["model"] == "MGD-2000x800"
+    assert ordered["cabinet"]["model"] == "FZ40-616"
+    assert ordered["gate_curtain"]["model"] == "GL-R22L"
     assert all("@" in row["catalog"] for row in ordered.values())  # id@revision
     assert ordered["conv"]["qty"] == 1
     assert ordered["fence/east/posts"]["qty"] == 18  # both runs, one row
 
     # Typed masses plus the ones the packages computed from the sizes.
-    assert bom.total("mass_kg") == pytest.approx(18 + 120 + 25 + 378.26)
+    assert bom.total("mass_kg") == pytest.approx(18 + 120 + 25 + 494.7)
 

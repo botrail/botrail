@@ -242,8 +242,12 @@ def test_golden_sequence_demo() -> None:
     scene = build_scene()
     sd.build_cycle(scene)
     table = points_by_label(scene)
-    assert set(table) == {("beam_pick", "input"), ("carrying", "output"), ("conv", "output")}
-    assert {p.host for p in table.values()} == {"<panda>"}
+    assert set(table) == {("beam_pick", "input"), ("carrying", "output"),
+                          ("conv", "output"), ("gate_curtain", "input")}
+    assert {p.host for k, p in table.items() if k[0] != "gate_curtain"} == {"<panda>"}
+    # The gate's light curtain: an authored safety input this program never
+    # reads — on the list with no host, like any reserve point.
+    assert table[("gate_curtain", "input")].host is None
     assert table[("carrying", "output")].source == "signal:write-only"
     assert scene.io_report().findings == []
 
@@ -261,14 +265,15 @@ def test_golden_dual_cell_demo() -> None:
     real = {k: p for k, p in table.items() if p.status != "cosmetic"}
     assert set(real) == {
         ("beam_ahead", "input"), ("beam_pick", "input"),
-        ("zone_near", "input"), ("zone_far", "input"),
+        ("zone_near", "input"), ("zone_far", "input"), ("gate_curtain", "input"),
         ("carrying_near", "output"), ("carrying_far", "output"),
         ("conv", "output"),
         ("near.start", "output"), ("near.done", "input"), ("near.program", "output"),
         ("far.start", "output"), ("far.done", "input"), ("far.program", "output"),
     }
-    assert {p.host for k, p in real.items() if k[0] != "zone_near"} == {"<cell>"}
-    assert real[("zone_near", "input")].host is None  # authored, read by nobody
+    unread = ("zone_near", "gate_curtain")  # authored, read by nobody
+    assert {p.host for k, p in real.items() if k[0] not in unread} == {"<cell>"}
+    assert all(real[(label, "input")].host is None for label in unread)
     assert {k[0] for k, p in table.items() if p.status == "cosmetic"} == {
         "cartons", "cleats", "carton_out", "cleat_out"
     }
@@ -288,10 +293,13 @@ def test_golden_agv_cell_demo() -> None:
     assert set(table) == {
         ("agv", "input"), ("agv.dispatch", "output"), ("agv.station", "output"),
         ("dock_occupied", "input"), ("gate_zone", "input"), ("tray_loaded", "input"),
+        ("gate_curtain", "input"),
     }
     # One arm driven → everything sits on the robot's own controller and
-    # `panda` gets no handshake points.
-    assert {p.host for p in table.values()} == {"<panda>"}
+    # `panda` gets no handshake points. The gate's light curtain is the
+    # exception: an authored safety input this program never reads.
+    assert {p.host for k, p in table.items() if k[0] != "gate_curtain"} == {"<panda>"}
+    assert table[("gate_curtain", "input")].host is None
     assert table[("agv.station", "output")].kind == "Word"
     # The cell's belt is a catalog conveyor that came with the factory scene,
     # and this program never commands it — an info line, not a point.

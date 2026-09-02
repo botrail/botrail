@@ -1,7 +1,8 @@
 """`examples/engineering/equipment_cell_demo.py` — a cell whose scenery is ordered.
 
-The fence, the conveyor and the rack come from the model catalog, so what
-this pins is the part the catalog is responsible for: every line of the bill
+The fence, the conveyor, the rack and the control panel come from the model
+catalog, so what this pins is the part the catalog is responsible for: every
+line of the bill
 names a product and the revision it came from, the counts follow the layout
 rules the packages carry, and the detail those packages are drawn with stays
 out of collision.
@@ -47,11 +48,12 @@ def test_every_catalog_line_is_something_you_could_order(scene: bt.Scene) -> Non
         assert row["model"] and row["manufacturer"]
         assert "@" in row["catalog"]
         assert row["qty"] >= 1
-    # The three packages, and nothing else, are what the scenery came from.
+    # The four packages, and nothing else, are what the scenery came from.
     assert {row["catalog"].split("/r1@")[0] for row in catalogued} == {
         "botrail/fence/mesh-guard",
         "botrail/conveyor/belt-unit",
         "botrail/rack/medium-shelf",
+        "rittal/vx25/base",
     }
 
 

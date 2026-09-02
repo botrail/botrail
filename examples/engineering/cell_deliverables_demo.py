@@ -40,10 +40,13 @@ def furnish(scene: bt.Scene, fence_pitch: float = FENCE_PITCH) -> None:
     piece of equipment *is* (`set_part`) — the identity the BOM, the layout
     labels and the report are derived from. Nothing here changes the
     cycle."""
-    # The controller cabinet stands in the corner (the body of the `UR`
-    # I/O node — one line on the BOM, so the box itself carries no part);
-    # the reject chute is a bin west of the arm.
-    scene.add_box("cabinet", size=(0.5, 0.4, 1.2), position=(-0.9, 0.75, 0.6))
+    # The control cabinet stands in the corner, ordered from the catalog:
+    # the enclosure is an article of its own (body, plinth base, mounting
+    # plate — three lines with masses and part numbers), and the UR
+    # controller it houses keeps its own line as the `UR` I/O node below.
+    # The reject chute is a bin west of the arm.
+    bt.parts.cabinet(scene, "cabinet", catalog="nito/fz/standard",
+                     size=(0.6, 0.4, 1.6), position=(-0.85, 0.72), base_height=0.1)
     scene.add_box("chute", size=(0.3, 0.3, 0.4), position=(-0.55, 0.05, 0.2))
     scene.set_part("chute", model="BIN-30", category="bin")
     # A fence around the cell — panels of `fence_pitch` along each side, a

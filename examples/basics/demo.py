@@ -4,13 +4,14 @@ The robot is NVIDIA's official Isaac Sim Franka asset (USD articulation);
 the first run downloads it (~10 MB) into the botrail cache.
 
 The cell comes from two places, which is how a real one is put together.
-The *layout* — floor, pedestal, pallet, cabinet, the goods on the line and
-the poses the motions are taught to — is the hand-authored USD layer next
-to this script. The *standard products* — the belt, the rack, the guarding
-— are ordered from the model catalog below: they are bought to size, so
-what is written here is a length and a number of levels, the generator
-refuses a size nobody sells, and every one of them lands on the bill of
-materials with the part number you would order it by.
+The *layout* — floor, pedestal, pallet, the goods on the line and the
+poses the motions are taught to — is the hand-authored USD layer next to
+this script. The *standard products* — the belt, the rack, the guarding,
+the control cabinet, the light curtain over the vehicle gate — are ordered
+from the model catalog below: they are bought to size, so what is written
+here is a length and a number of levels, the generator refuses a size
+nobody sells, and every one of them lands on the bill of materials with
+the part number you would order it by.
 
 Run with:  python examples/basics/demo.py
 
@@ -59,7 +60,7 @@ def fetch_franka() -> Path:
 
 # ------------------------------------------------------- standard products
 
-# Three catalog packages. Each one is a *spec pack*: no fixed mesh, but the
+# Five catalog packages. Each one is a *spec pack*: no fixed mesh, but the
 # sizes that are sold, the rules that govern them (how far apart a stand may
 # stand, how close two shelves may be), the part numbers and the mass — plus
 # a parametric drawing expanded to the size at hand, so a mesh panel is drawn
@@ -67,6 +68,8 @@ def fetch_franka() -> Path:
 CONVEYOR = "botrail/conveyor/belt-unit"
 RACK = "botrail/rack/medium-shelf"
 FENCE = "botrail/fence/mesh-guard"
+CABINET = "nito/fz/standard"
+CURTAIN = "keyence/gl-r/series"
 
 # The guard around the 4 m cell. It is not a loop but two open runs, because
 # two things cross the perimeter and a run of panels can only stop at its
@@ -105,6 +108,22 @@ def equip_cell(scene: bt.Scene) -> None:
             scene.add_box(f"{rack.name}/stock/l{level}_{i}", size=size,
                           position=(x, y + across, z + size[2] / 2), color=colour)
 
+    # The control cabinet, in the corner between the rack and the east
+    # fence. An enclosure is a bought thing too: written here is the size
+    # wanted, and the maker's matrix answers FZ40-616 — the body, its
+    # plinth base and its mounting plate, three article numbers on the
+    # bill. The stack light on its roof is drawn by hand: no catalog
+    # package sells one yet.
+    bt.parts.cabinet(scene, "cabinet", size=(0.6, 0.4, 1.6), position=(1.65, 1.55),
+                     catalog=CABINET, base_height=0.1)
+    for part, radius, length, z, colour in (
+        ("mast", 0.018, 0.12, 1.76, (0.033, 0.038, 0.047)),
+        ("green", 0.038, 0.07, 1.855, (0.023, 0.332, 0.061)),
+        ("amber", 0.038, 0.07, 1.925, (0.686, 0.323, 0.005)),
+        ("red", 0.038, 0.07, 1.995, (0.578, 0.018, 0.012)),
+    ):
+        scene.add_cylinder(f"stack_light/{part}", radius, length, (1.45, 1.55, z), color=colour)
+
     # 2 m of mesh guarding, in the two runs the openings leave, with the
     # personnel door on the south wall by the corner — off the walkway,
     # where somebody would actually walk in, and well clear of the gate the
@@ -116,6 +135,21 @@ def equip_cell(scene: bt.Scene) -> None:
                    closed=False)
     bt.parts.fence(scene, "fence/west", path=GUARD_WEST, catalog=FENCE, height=2.0,
                    closed=False, door=(1, 0))
+
+    # The vehicle gate is the opening the fence cannot close, so it is
+    # watched instead: a safety light curtain across it, bought the way the
+    # fence is. Body resolution (45 mm) and 925 mm are the nearest height
+    # the series sells for a driveway, and GL-R22L is the line on the bill;
+    # a span longer than the pair's operating range would be refused here
+    # with the numbers. The columns stand just inside the posts, so the
+    # 940 mm the vehicle needs stays clear, and the field is modelled as
+    # one beam at shin height — low enough that a vehicle driving through
+    # reads as an interruption, the way the real curtain's bottom beams
+    # would (the muting that lets it pass anyway is not modelled). The
+    # belt's opening keeps its plain window: a curtain there would trip on
+    # every passing carton.
+    bt.parts.light_curtain(scene, "gate_curtain", (-0.5, -1.92), (0.5, -1.92),
+                           catalog=CURTAIN, resolution=45, height=0.925, beam_height=0.3)
 
 
 def build_scene(name: str = None) -> bt.Scene:

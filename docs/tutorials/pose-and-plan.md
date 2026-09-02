@@ -67,15 +67,17 @@ the layout file, not in the program, is what makes the next part work.
 
 ## The equipment, ordered
 
-What that layer does *not* model is the belt, the rack and the guarding. Those
-are standard products bought to size, so they come from the
-[model catalog](../guides/robots.md#the-model-catalog) instead — three
+What that layer does *not* model is the belt, the rack, the guarding, the
+control cabinet or the light curtain over the vehicle gate. Those are
+standard products bought to size, so they come from the
+[model catalog](../guides/robots.md#the-model-catalog) instead — five
 products, each ordered by a [generator](../guides/standard-parts.md) handed a
 catalog id (the guard takes two calls, because two things cross the perimeter
-and each opening breaks the run):
+and each opening breaks the run; the curtain then watches the gate opening
+the fence cannot close):
 
 ```python
---8<-- "examples/basics/demo.py:91:118"
+--8<-- "examples/basics/demo.py:94:152"
 ```
 
 Each one is checked against what the package actually sells: ask the fence for
@@ -103,7 +105,7 @@ axis along the approach. IK, though, solves for a link. So a taught pose is
 backed off along the tool axis to the hand frame first:
 
 ```python
---8<-- "examples/basics/demo.py:142:169"
+--8<-- "examples/basics/demo.py:176:203"
 ```
 
 `teach_grasp` is the scripted form of dragging the studio's TCP gizmo: solve

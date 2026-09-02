@@ -178,7 +178,7 @@ def main() -> None:
             page.wait_for_selector(".timeline-bands", timeout=20000)
             page.evaluate("window.__CAM = {pos: [2.2, -4.6, 3.9], look: [-0.1, -1.2, 0.2]}")
             # Let the playhead reach the handover: the arm over the deck, the
-            # gate zone lit, all four lanes populated.
+            # gate zone lit, the signal lanes populated.
             time.sleep(20.5)
             page.screenshot(path=OUT / "vehicle.png")
             print("wrote vehicle.png")

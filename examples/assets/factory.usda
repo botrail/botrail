@@ -1,14 +1,15 @@
 #usda 1.0
 (
     doc = """A small pick-and-place work cell for the botrail demo: the floor
-and its markings, a pedestal-mounted robot, a pallet build station, a control
-cabinet, and the goods and taught poses of the line. Z-up, meters.
+and its markings, a pedestal-mounted robot, a pallet build station, and the
+goods and taught poses of the line. Z-up, meters.
 
 This layer is the *layout* — where things stand and what a motion is taught
 to. The standard products in the cell are not modelled here: the belt, the
-rack and the guarding are ordered from the model catalog in demo.py, so
-their sizes are ones that are sold and every one of them lands on the bill
-of materials with a part number.
+rack, the guarding, the control cabinet and the gate's light curtain are
+ordered from the model catalog in demo.py, so their sizes are ones that are
+sold and every one of them lands on the bill of materials with a part
+number.
 
 Colours are `primvars:displayColor`, which USD defines in *linear* space, so
 the numbers here are darker than the sRGB swatch they represent (concrete
@@ -764,103 +765,10 @@ def Xform "World"
     }
 
     # ------------------------------------------------------------- controls
-
-    def Xform "Cabinet"
-    {
-        color3f[] primvars:displayColor = [(0.205, 0.235, 0.275)]
-        double3 xformOp:translate = (1.7, 1.55, 0)
-        uniform token[] xformOpOrder = ["xformOp:translate"]
-
-        def Cube "Plinth"
-        {
-            double size = 1
-            color3f[] primvars:displayColor = [(0.144, 0.162, 0.195)]
-            double3 xformOp:translate = (0, 0, 0.05)
-            float3 xformOp:scale = (0.62, 0.32, 0.1)
-            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-        }
-
-        def Cube "Body"
-        {
-            double size = 1
-            double3 xformOp:translate = (0, 0, 0.75)
-            float3 xformOp:scale = (0.6, 0.3, 1.3)
-            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-        }
-
-        # Door face, standing 5 mm proud so the seam reads.
-        def Cube "Door"
-        {
-            double size = 1
-            color3f[] primvars:displayColor = [(0.392, 0.429, 0.479)]
-            double3 xformOp:translate = (0, -0.1525, 0.76)
-            float3 xformOp:scale = (0.54, 0.005, 1.2)
-            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-        }
-
-        def Cube "Hmi"
-        {
-            double size = 1
-            color3f[] primvars:displayColor = [(0.012, 0.014, 0.019)]
-            double3 xformOp:translate = (0, -0.158, 1.12)
-            float3 xformOp:scale = (0.3, 0.008, 0.22)
-            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-        }
-
-        def Cylinder "Handle"
-        {
-            double radius = 0.012
-            double height = 0.16
-            uniform token axis = "Z"
-            color3f[] primvars:displayColor = [(0.474, 0.503, 0.552)]
-            double3 xformOp:translate = (0.23, -0.165, 0.72)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
-        }
-
-        # Stack light: the cell's state at a glance.
-        def Xform "SignalTower"
-        {
-            def Cylinder "Mast"
-            {
-                double radius = 0.018
-                double height = 0.12
-                uniform token axis = "Z"
-                color3f[] primvars:displayColor = [(0.033, 0.038, 0.047)]
-                double3 xformOp:translate = (-0.2, 0, 1.46)
-                uniform token[] xformOpOrder = ["xformOp:translate"]
-            }
-
-            def Cylinder "LampGreen"
-            {
-                double radius = 0.038
-                double height = 0.07
-                uniform token axis = "Z"
-                color3f[] primvars:displayColor = [(0.023, 0.332, 0.061)]
-                double3 xformOp:translate = (-0.2, 0, 1.555)
-                uniform token[] xformOpOrder = ["xformOp:translate"]
-            }
-
-            def Cylinder "LampAmber"
-            {
-                double radius = 0.038
-                double height = 0.07
-                uniform token axis = "Z"
-                color3f[] primvars:displayColor = [(0.686, 0.323, 0.005)]
-                double3 xformOp:translate = (-0.2, 0, 1.625)
-                uniform token[] xformOpOrder = ["xformOp:translate"]
-            }
-
-            def Cylinder "LampRed"
-            {
-                double radius = 0.038
-                double height = 0.07
-                uniform token axis = "Z"
-                color3f[] primvars:displayColor = [(0.578, 0.018, 0.012)]
-                double3 xformOp:translate = (-0.2, 0, 1.695)
-                uniform token[] xformOpOrder = ["xformOp:translate"]
-            }
-        }
-    }
+    #
+    # The control cabinet itself is a standard product now — demo.py orders
+    # it (and the stack light beside it draws) from the catalog side, so
+    # this layer keeps only the cable duct that serves it.
 
     # Cable duct from the cabinet toward the cell.
     def Xform "CableDuct"

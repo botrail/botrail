@@ -1669,12 +1669,15 @@ def light_curtain(
     color: Color = FENCE_POST,
     **attributes,
 ) -> Built:
-    """A light curtain between two floor points: a beam sensor `<name>`
-    at `beam_height` (half the `height` by default) that trips on any robot
-    link (`watch_robot`) and/or the named objects, and two mounting columns
-    `<name>/column_a|b` of `height` (1.2 m unless given). The part
-    (`sensor.light_curtain`) is pinned on the sensor; the columns are its
-    mounting geometry.
+    """A light curtain between two floor points: two mounting columns
+    `<name>/column_a|b` of `height` (1.2 m unless given), and a beam sensor
+    `<name>` at `beam_height` (half the `height` by default) spanning the
+    gap between their lens faces — pulled in off the column centres, so the
+    curtain is not born tripped by its own housings. With the defaults it
+    trips on anything that enters the field, robot links and objects alike;
+    `watch=[...]` with `watch_robot=False` narrows it to the named objects,
+    `watch=[]` to robot links alone. The part (`sensor.light_curtain`) is
+    pinned on the sensor; the columns are its mounting geometry.
 
     With `catalog=` — the id of a light-curtain spec pack, or a package
     directory — a curtain you can order: `height` is the protective height
@@ -1730,7 +1733,22 @@ def light_curtain(
             scene.add_box(f"{name}/column_{tag}", size=(section[1], section[0], height),
                           position=(px, py, height / 2), quaternion=q, color=color)
         )
-    scene.add_beam_sensor(name, frm=(xa, ya, zb), to=(xb, yb, zb), watch=watch, watch_robot=watch_robot)
+    # The field spans the gap between the lens faces, not the column
+    # centres: the sensor watches anything in the field — its own posts
+    # included — and a beam threaded through them would read tripped
+    # forever. The beam is a capsule whose cap reaches its radius past the
+    # endpoint, so the pull-in is half the housing plus that radius.
+    inset = section[1] / 2 + 0.005 + 1e-3
+    if span <= 2 * inset:
+        raise ValueError(
+            f"light_curtain: the columns stand {span * 1e3:.0f} mm apart — inside "
+            f"their own {section[1] * 1e3:.0f} mm housings, leaving no field between them"
+        )
+    ux, uy = (xb - xa) / span, (yb - ya) / span
+    scene.add_beam_sensor(
+        name, frm=(xa + ux * inset, ya + uy * inset, zb),
+        to=(xb - ux * inset, yb - uy * inset, zb), watch=watch, watch_robot=watch_robot,
+    )
     built.sensors.append(name)
     if spec is None:
         scene.set_part(name, kind="sensor", category="sensor.light_curtain", **_identity(model, manufacturer, attributes))

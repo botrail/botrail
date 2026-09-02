@@ -1,10 +1,11 @@
 """The scenery, ordered from the catalog.
 
 A cell is mostly things nobody designs: a fence around it, a conveyor
-through it, a rack beside it. They are standard products bought to size —
-you pick a panel width, a belt length, a number of shelf levels — and until
-now the numbers behind them were typed into the scene by hand, which is how
-a bill of materials ends up quoting a panel that was never built.
+through it, a rack beside it, a control panel at the door. They are
+standard products bought to size — you pick a panel width, a belt length,
+a number of shelf levels, an enclosure's three dimensions — and until now
+the numbers behind them were typed into the scene by hand, which is how a
+bill of materials ends up quoting a panel that was never built.
 
 Here every piece of that scenery comes from the model catalog. Each
 generator is handed a catalog id instead of a model string, and from the
@@ -39,6 +40,7 @@ ASSETS = Path(__file__).parents[1] / "assets"
 FENCE = "botrail/fence/mesh-guard"
 CONVEYOR = "botrail/conveyor/belt-unit"
 RACK = "botrail/rack/medium-shelf"
+CABINET = "rittal/vx25/base"
 
 # The fence runs around the cell; the door is the second bay of the south
 # edge. Panels are not placed here — the catalog's widths are, and the
@@ -71,6 +73,15 @@ def build() -> bt.Scene:
     bt.parts.rack(scene, "rack", catalog=RACK, position=(-1.0, -1.0), levels=4)
 
     bt.parts.fence(scene, "fence", path=CELL, catalog=FENCE, height=2.0, door=(0, 1))
+
+    # The control panel stands outside the fence, west of the door, its own
+    # door to the aisle — an operator works it without entering the cell.
+    # An enclosure is bought on three axes at once, and not every corner of
+    # the matrix exists: 800 x 600 x 2000 is a size Rittal welds
+    # (VX 8806000, one line, mounting plate riding along), while 2200 tall
+    # at 400 deep is nobody's product, and asking for it stops here.
+    bt.parts.cabinet(scene, "panel", catalog=CABINET, size=(0.8, 0.6, 2.0),
+                     position=(-1.1, -1.95))
     return scene
 
 

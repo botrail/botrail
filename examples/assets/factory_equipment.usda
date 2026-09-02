@@ -669,6 +669,105 @@ def Xform "World"
                 }
             }
         }
+        def Xform "cabinet"
+        {
+            def Cube "base"
+            {
+                double size = 1.0
+                float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                double3 xformOp:translate = (1.65, 1.55, 0.05)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                double3 xformOp:scale = (0.6, 0.4, 0.1)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                color3f[] primvars:displayColor = [(0.20000000298023224, 0.20999999344348907, 0.23000000417232513)]
+            }
+            def Cube "body"
+            {
+                double size = 1.0
+                float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                double3 xformOp:translate = (1.65, 1.55, 0.9)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                double3 xformOp:scale = (0.6, 0.4, 1.6)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                color3f[] primvars:displayColor = [(0.5799999833106995, 0.5600000023841858, 0.49000000953674316)]
+            }
+            def Cube "plate"
+            {
+                double size = 1.0
+                float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                double3 xformOp:translate = (1.65, 1.7000000000000002, 0.9)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                double3 xformOp:scale = (0.44999999999999996, 0.0023, 1.35)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                color3f[] primvars:displayColor = [(0.41999998688697815, 0.4399999976158142, 0.4699999988079071)]
+            }
+            def Xform "trim"
+            {
+                def Cube "door0"
+                {
+                    double size = 1.0
+                    float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                    double3 xformOp:translate = (1.65, 1.348, 0.9)
+                    quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                    double3 xformOp:scale = (0.58, 0.004, 1.58)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                    color3f[] primvars:displayColor = [(0.5799999833106995, 0.5600000023841858, 0.49000000953674316)]
+                }
+                def Cube "handle0"
+                {
+                    double size = 1.0
+                    float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                    double3 xformOp:translate = (1.89, 1.338, 0.9)
+                    quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                    double3 xformOp:scale = (0.025, 0.016, 0.14)
+                    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                    color3f[] primvars:displayColor = [(0.20000000298023224, 0.20999999344348907, 0.23000000417232513)]
+                }
+            }
+        }
+        def Xform "stack_light"
+        {
+            def Cylinder "mast"
+            {
+                double radius = 0.018
+                double height = 0.12
+                float3[] extent = [(-0.017999999225139618, -0.017999999225139618, -0.05999999865889549), (0.017999999225139618, 0.017999999225139618, 0.05999999865889549)]
+                double3 xformOp:translate = (1.45, 1.55, 1.76)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+                color3f[] primvars:displayColor = [(0.032999999821186066, 0.03799999877810478, 0.04699999839067459)]
+            }
+            def Cylinder "green"
+            {
+                double radius = 0.038
+                double height = 0.07
+                float3[] extent = [(-0.03799999877810478, -0.03799999877810478, -0.03500000014901161), (0.03799999877810478, 0.03799999877810478, 0.03500000014901161)]
+                double3 xformOp:translate = (1.45, 1.55, 1.855)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+                color3f[] primvars:displayColor = [(0.023000000044703484, 0.3319999873638153, 0.061000000685453415)]
+            }
+            def Cylinder "amber"
+            {
+                double radius = 0.038
+                double height = 0.07
+                float3[] extent = [(-0.03799999877810478, -0.03799999877810478, -0.03500000014901161), (0.03799999877810478, 0.03799999877810478, 0.03500000014901161)]
+                double3 xformOp:translate = (1.45, 1.55, 1.925)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+                color3f[] primvars:displayColor = [(0.6859999895095825, 0.3230000138282776, 0.004999999888241291)]
+            }
+            def Cylinder "red"
+            {
+                double radius = 0.038
+                double height = 0.07
+                float3[] extent = [(-0.03799999877810478, -0.03799999877810478, -0.03500000014901161), (0.03799999877810478, 0.03799999877810478, 0.03500000014901161)]
+                double3 xformOp:translate = (1.45, 1.55, 1.995)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+                color3f[] primvars:displayColor = [(0.578000009059906, 0.017999999225139618, 0.012000000104308128)]
+            }
+        }
         def Xform "fence"
         {
             def Xform "east"
@@ -3284,6 +3383,29 @@ def Xform "World"
                         }
                     }
                 }
+            }
+        }
+        def Xform "gate_curtain"
+        {
+            def Cube "column_a"
+            {
+                double size = 1.0
+                float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                double3 xformOp:translate = (-0.5, -1.92, 0.4625)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                double3 xformOp:scale = (0.038, 0.032, 0.925)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                color3f[] primvars:displayColor = [(0.1599999964237213, 0.17000000178813934, 0.1899999976158142)]
+            }
+            def Cube "column_b"
+            {
+                double size = 1.0
+                float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+                double3 xformOp:translate = (0.5, -1.92, 0.4625)
+                quatd xformOp:orient = (1.0, 0.0, 0.0, 0.0)
+                double3 xformOp:scale = (0.038, 0.032, 0.925)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+                color3f[] primvars:displayColor = [(0.1599999964237213, 0.17000000178813934, 0.1899999976158142)]
             }
         }
     }

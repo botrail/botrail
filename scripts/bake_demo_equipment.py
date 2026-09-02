@@ -1,6 +1,6 @@
 """Regenerates ``examples/assets/factory_equipment.usda`` — the demo cell's
-catalog equipment (the belt, the rack, the guarding and its stock) baked to
-a static USD layer.
+catalog equipment (the belt, the rack, the guarding, the control cabinet,
+the gate's light curtain and the stock) baked to a static USD layer.
 
 The hand-authored layout layer ``factory.usda`` deliberately carries no
 standard products: ``examples/basics/demo.py`` orders them from the model

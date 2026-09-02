@@ -7,9 +7,9 @@
 | Min clearance | 0.239 m at 4.59 s (baseline) |
 | Footprint | 2.46 × 1.66 m (4.1 m²), height 1.80 m |
 | I/O | 4 points (2 DI, 2 DO), 0 unbound, 0 finding(s) |
-| BOM | 8 lines, 0 unidentified, mass_kg 144 |
+| BOM | 11 lines, 0 unidentified, mass_kg 258 |
 | Scenarios | 2/3 passed |
-| Deliverables | 10 files hashed |
+| Deliverables | 11 files hashed |
 
 ## Cycle `baseline`
 
@@ -83,7 +83,7 @@ Branches taken: pick/judge → arm 1.
 
 ## Bill of materials
 
-8 lines, 0 unidentified.
+11 lines, 0 unidentified.
 
 | category | qty |
 |---|---|
@@ -92,11 +92,14 @@ Branches taken: pick/judge → arm 1.
 | robot | 1 |
 | robot_controller | 1 |
 | sensor.photoelectric | 1 |
+| structure.cabinet | 1 |
+| structure.cabinet.base | 1 |
+| structure.cabinet.plate | 1 |
 | structure.door | 1 |
 | structure.fence | 7 |
 | structure.fence.post | 8 |
 
-Totals: mass_kg = 144.
+Totals: mass_kg = 258.
 
 
 ## Footprint
@@ -108,13 +111,14 @@ x -1.23 … 1.23 m, y -0.63 … 1.03 m — 2.46 × 1.66 m, 4.08 m², tallest ite
 
 | file | bytes | sha256 |
 |---|---|---|
-| docs/assets/deliverables/cell.botrail | 24534 | 17c80b6294e63418d2a34d2e61bb9ad8ca09ae8d4dc25935e6861adf6229f7b6 |
-| docs/assets/deliverables/cell.py | 11544 | 96e008c3797bcbca4eb027de9e0cb76bfeb875d5fb9f67fc282f8ba53a8ad6fe |
-| docs/assets/deliverables/cell_bom.csv | 412 | 6a14b49558a47f6aa8ff8479463b241df8c240cb2e78a674ba5c481fa447a18f |
-| docs/assets/deliverables/cell_bom.md | 671 | dfcb2a209816105a5972e00f65f2a198c8554b1fc8553082d09af0fec5a69f7f |
-| docs/assets/deliverables/cell_io.csv | 484 | f19f8a948e1778a41142209d68489783625ed9505d3804336050bfe1aad7fc2d |
-| docs/assets/deliverables/cell_topology.mmd | 421 | a88549a0bb2f8ea31c57399127d4b6082016f4513b1cd58bb8bd6ff4618bd097 |
-| docs/assets/deliverables/cell_layout.svg | 4818 | ce23b533db392f7d6613687b481d9c6247d96541be2994ec80706d71a4b0c0ca |
-| docs/assets/deliverables/cell_layout.dxf | 7374 | 6239a3debcf902346d00dba17eb5010f97303a10847f6405b884decc5c249e93 |
-| docs/assets/deliverables/cell_cycle.usda | 590838 | dd8071f69704c9aa97778761fa6bb2cc1bb023d24e2edc18929923a32ac58b41 |
-| docs/assets/deliverables/pick_cell.script | 1209 | 1bd8db12bf396c71610900df19f1e8bf2d1dc6b22bf30811d2fcca7e5c4264d2 |
+| ../../docs/assets/deliverables/cell.botrail | 28669 | 8b3e860e3d86b268544d2a6368aac87a72486c4eb8c9b94588e01e36363416c7 |
+| ../../docs/assets/deliverables/cell.py | 13750 | e425ba7152ba78d1c79914ed9eb7973cd975c9af0a7c32d011d6f5c6846c9517 |
+| ../../docs/assets/deliverables/cell_bom.csv | 1166 | 6b908a8a8fafee0dc907e3c6ebb565eefbdb693512f48c556aa7c7685f23f5a9 |
+| ../../docs/assets/deliverables/cell_bom.md | 1717 | 7db9a68217597f7b9de052c82f11068db04bf25e111c4150640b8b3546dfe7e2 |
+| ../../docs/assets/deliverables/cell_io.csv | 484 | f19f8a948e1778a41142209d68489783625ed9505d3804336050bfe1aad7fc2d |
+| ../../docs/assets/deliverables/cell_topology.mmd | 421 | a88549a0bb2f8ea31c57399127d4b6082016f4513b1cd58bb8bd6ff4618bd097 |
+| ../../docs/assets/deliverables/cell.plcopen.xml | 13834 | a4bb95528a67dacf382224c77626184a0a84e8d0f23b43babef5172710c5c685 |
+| ../../docs/assets/deliverables/cell_layout.svg | 5442 | 8c83f6fe067cfc3b08f34c937f75b54bb2452f1c1acd7df3d54e65538d0767ae |
+| ../../docs/assets/deliverables/cell_layout.dxf | 8586 | 4b1821cc07be3ba0e97ba9f68b46b794571f9d11709abc60a1378cbd3a9b954d |
+| ../../docs/assets/deliverables/cell_cycle.usda | 593339 | d3a29a464c69fa00dfbf4973dd8411fdd4eadbb099ef4bbd014d58610626149a |
+| ../../docs/assets/deliverables/pick_cell.script | 1209 | 1bd8db12bf396c71610900df19f1e8bf2d1dc6b22bf30811d2fcca7e5c4264d2 |
