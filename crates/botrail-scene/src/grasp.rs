@@ -88,7 +88,10 @@ fn default_damping(kind: botrail_physics::JointKind, max_force: f64) -> f64 {
     }
 }
 
-pub(crate) fn joint_kind(model: &botrail_model::RobotModel, ji: usize) -> botrail_physics::JointKind {
+pub(crate) fn joint_kind(
+    model: &botrail_model::RobotModel,
+    ji: usize,
+) -> botrail_physics::JointKind {
     match model.joints[ji].joint_type {
         botrail_model::JointType::Prismatic => botrail_physics::JointKind::Prismatic,
         _ => botrail_physics::JointKind::Revolute,
@@ -296,8 +299,8 @@ impl Scene {
             // (the second finger of a coupled gripper).
             let mut moved: Vec<usize> = Vec::new();
             for (ji, j) in model.joints.iter().enumerate() {
-                let driven = group.contains(&ji)
-                    || j.mimic.is_some_and(|m| group.contains(&m.source_joint));
+                let driven =
+                    group.contains(&ji) || j.mimic.is_some_and(|m| group.contains(&m.source_joint));
                 if driven {
                     moved.extend(self.link_subtree(robot, j.child_link));
                 }
@@ -305,7 +308,10 @@ impl Scene {
             moved.sort_unstable();
             moved.dedup();
             moved.retain(|&l| !sr.collider().link_parts(l).is_empty());
-            let names: Vec<&str> = group.iter().map(|&ji| model.joints[ji].name.as_str()).collect();
+            let names: Vec<&str> = group
+                .iter()
+                .map(|&ji| model.joints[ji].name.as_str())
+                .collect();
             if moved.is_empty() {
                 return bad(format!(
                     "the links driven by `{}` carry no collision geometry",
@@ -578,9 +584,8 @@ impl SequenceTimeline {
                         scene
                             .obstacle_index(&name)
                             .map(|i| {
-                                botrail_collide::parts_volume(
-                                    scene.obstacle_colliders()[i].parts(),
-                                ) * botrail_physics::DEFAULT_DENSITY
+                                botrail_collide::parts_volume(scene.obstacle_colliders()[i].parts())
+                                    * botrail_physics::DEFAULT_DENSITY
                             })
                             .unwrap_or(0.0)
                     })
@@ -817,7 +822,13 @@ mod tests {
         // A single-chain model's tool mount is its tip, so the drive is
         // named explicitly — the derivation error says exactly that.
         let solved = scene
-            .grasp_close(0, "part", Some(&["curl".to_string()]), None, DEFAULT_CLEARANCE)
+            .grasp_close(
+                0,
+                "part",
+                Some(&["curl".to_string()]),
+                None,
+                DEFAULT_CLEARANCE,
+            )
             .unwrap();
         assert_eq!(solved[0].0, "curl");
         // First touch: the 10 mm-thick finger meets the box's -x face
@@ -1131,10 +1142,21 @@ mod tests {
             )
             .unwrap();
         // Rubber pads: the friction the hold lives on.
-        scene.set_link_material(0, "finger_l", Some(0.9), None).unwrap();
-        scene.set_link_material(0, "finger_r", Some(0.9), None).unwrap();
         scene
-            .set_gripper_drive(0, Some(&["drive".to_string()]), Some(max_force), None, None, None)
+            .set_link_material(0, "finger_l", Some(0.9), None)
+            .unwrap();
+        scene
+            .set_link_material(0, "finger_r", Some(0.9), None)
+            .unwrap();
+        scene
+            .set_gripper_drive(
+                0,
+                Some(&["drive".to_string()]),
+                Some(max_force),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         // Friction-drive close: ~2 mm of overtravel is what the contact
         // needs to develop a multi-newton clamp (the rapier spike's

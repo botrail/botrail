@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use botrail_physics::{
-    BodyId, BodyKind, JointKind, JointMotor, PhysicsBackend, PhysicsError, TickContacts,
-    Velocity, WorldDesc, DEFAULT_DENSITY,
+    BodyId, BodyKind, JointKind, JointMotor, PhysicsBackend, PhysicsError, TickContacts, Velocity,
+    WorldDesc, DEFAULT_DENSITY,
 };
 use nalgebra::Isometry3;
 use rapier3d_f64::dynamics::{
@@ -362,8 +362,8 @@ impl PhysicsBackend for RapierBackend {
         for desc in &world.joints {
             let x = nalgebra::Vector3::x_axis();
             let axis = nalgebra::Unit::new_normalize(desc.axis);
-            let align = nalgebra::UnitQuaternion::rotation_between_axis(&x, &axis)
-                .unwrap_or_else(|| {
+            let align =
+                nalgebra::UnitQuaternion::rotation_between_axis(&x, &axis).unwrap_or_else(|| {
                     nalgebra::UnitQuaternion::from_axis_angle(
                         &nalgebra::Vector3::y_axis(),
                         std::f64::consts::PI,
@@ -373,7 +373,9 @@ impl PhysicsBackend for RapierBackend {
             let frame1 = to_pose(&(desc.local1 * align));
             let frame2 = to_pose(&(desc.local2 * align));
             let (mask, axis) = match desc.kind {
-                JointKind::Prismatic => (JointAxesMask::LOCKED_PRISMATIC_AXES, Some(JointAxis::LinX)),
+                JointKind::Prismatic => {
+                    (JointAxesMask::LOCKED_PRISMATIC_AXES, Some(JointAxis::LinX))
+                }
                 JointKind::Revolute => (JointAxesMask::LOCKED_REVOLUTE_AXES, Some(JointAxis::AngX)),
                 // A weld: everything locked, nothing motored.
                 JointKind::Fixed => (JointAxesMask::LOCKED_FIXED_AXES, None),
@@ -521,7 +523,8 @@ impl PhysicsBackend for RapierBackend {
         };
         let (stiffness, damping, cap) = (dj.motor.stiffness, dj.motor.damping, dj.motor.max_force);
         if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
-            j.data.set_motor_position(axis, position, stiffness, damping);
+            j.data
+                .set_motor_position(axis, position, stiffness, damping);
             j.data.set_motor_max_force(axis, cap);
         }
     }
@@ -561,7 +564,7 @@ mod tests {
                 pose: Isometry3::translation(0.0, 0.0, -0.05),
                 parts: vec![(Pose::identity(), SharedShape::cuboid(2.0, 2.0, 0.05))],
                 props: BodyProps::default(),
-            group: 0,
+                group: 0,
             });
         }
         world.bodies.push(BodyDesc {
@@ -771,7 +774,7 @@ mod tests {
                     SharedShape::cuboid(pad_half, 0.015, 0.015),
                 )],
                 props: BodyProps::default(),
-            group: 0,
+                group: 0,
             });
         }
         let mut backend = RapierBackend::new();
@@ -799,8 +802,8 @@ mod tests {
             }
         };
         run(start, goal, 50, &mut contacts); // 0.5 s close
-        // Hold closed for 0.5 s — the window between "closed" and "attach"
-        // never lasts longer in a real sequence.
+                                             // Hold closed for 0.5 s — the window between "closed" and "attach"
+                                             // never lasts longer in a real sequence.
         run(goal, goal, 50, &mut contacts);
         let pose = backend.body_pose(BodyId(1));
         let moved = (pose.translation.vector - Vector3::new(0.0, 0.0, part_half)).norm();
@@ -813,7 +816,10 @@ mod tests {
     #[test]
     fn kinematic_finger_squeeze_touches_without_ejecting() {
         let (contacts, moved, _) = close_fingers(-0.0005);
-        assert!(contacts >= 2, "expected both pads to report contact, got {contacts}");
+        assert!(
+            contacts >= 2,
+            "expected both pads to report contact, got {contacts}"
+        );
         assert!(moved < 2e-3, "squeeze displaced the part {} m", moved);
     }
 
@@ -827,8 +833,15 @@ mod tests {
     #[test]
     fn kinematic_finger_near_miss_still_reports_contact() {
         let (contacts, moved, _) = close_fingers(0.0002);
-        assert!(contacts >= 2, "expected predictive contacts, got {contacts}");
-        assert!(moved < 3e-3, "a non-touching close displaced the part {} m", moved);
+        assert!(
+            contacts >= 2,
+            "expected predictive contacts, got {contacts}"
+        );
+        assert!(
+            moved < 3e-3,
+            "a non-touching close displaced the part {} m",
+            moved
+        );
     }
 
     /// The friction-grasp mechanism (design-grasping.md G3 spike): a
@@ -859,11 +872,13 @@ mod tests {
         let mut multibody_joints = MultibodyJointSet::new();
 
         // Floor and a 40 mm part resting on it.
-        let floor = bodies.insert(RigidBodyBuilder::fixed().pose(to_pose(
-            &Isometry3::translation(0.0, 0.0, -0.05),
-        )));
+        let floor = bodies.insert(
+            RigidBodyBuilder::fixed().pose(to_pose(&Isometry3::translation(0.0, 0.0, -0.05))),
+        );
         colliders.insert_with_parent(
-            ColliderBuilder::cuboid(0.5, 0.5, 0.05).friction(0.6).build(),
+            ColliderBuilder::cuboid(0.5, 0.5, 0.05)
+                .friction(0.6)
+                .build(),
             floor,
             &mut bodies,
         );
@@ -896,8 +911,11 @@ mod tests {
         for side in [-1.0f64, 1.0] {
             let x0 = side * 0.05;
             let finger = bodies.insert(
-                RigidBodyBuilder::dynamic()
-                    .pose(to_pose(&Isometry3::translation(x0, 0.0, palm_z - 0.045))),
+                RigidBodyBuilder::dynamic().pose(to_pose(&Isometry3::translation(
+                    x0,
+                    0.0,
+                    palm_z - 0.045,
+                ))),
             );
             colliders.insert_with_parent(
                 ColliderBuilder::cuboid(0.005, 0.015, 0.035)
@@ -944,14 +962,14 @@ mod tests {
         let hooks = ();
         let events = ();
         let step = |bodies: &mut RigidBodySet,
-                        colliders: &mut rapier3d_f64::geometry::ColliderSet,
-                        impulse_joints: &mut ImpulseJointSet,
-                        multibody_joints: &mut MultibodyJointSet,
-                        islands: &mut IslandManager,
-                        broad: &mut BroadPhaseBvh,
-                        narrow: &mut NarrowPhase,
-                        ccd: &mut CCDSolver,
-                        pipeline: &mut PhysicsPipeline| {
+                    colliders: &mut rapier3d_f64::geometry::ColliderSet,
+                    impulse_joints: &mut ImpulseJointSet,
+                    multibody_joints: &mut MultibodyJointSet,
+                    islands: &mut IslandManager,
+                    broad: &mut BroadPhaseBvh,
+                    narrow: &mut NarrowPhase,
+                    ccd: &mut CCDSolver,
+                    pipeline: &mut PhysicsPipeline| {
             pipeline.step(
                 Vector::new(0.0, 0.0, -9.81),
                 &params,
@@ -1014,9 +1032,7 @@ mod tests {
         for k in 0..600 {
             let t = (k as f64 + 1.0) / 400.0;
             let z = palm_z + lift * t.min(1.0);
-            bodies[palm].set_next_kinematic_position(to_pose(&Isometry3::translation(
-                0.0, 0.0, z,
-            )));
+            bodies[palm].set_next_kinematic_position(to_pose(&Isometry3::translation(0.0, 0.0, z)));
             step(
                 &mut bodies,
                 &mut colliders,
@@ -1350,7 +1366,10 @@ mod tests {
         let part = backend.body_pose(BodyId(1)).translation.z;
         for id in [2u32, 3, 4] {
             let p = backend.body_pose(BodyId(id)).translation;
-            eprintln!("after lift body {id}: ({:+.4}, {:+.4}, {:+.4})", p.x, p.y, p.z);
+            eprintln!(
+                "after lift body {id}: ({:+.4}, {:+.4}, {:+.4})",
+                p.x, p.y, p.z
+            );
         }
         let contacts = backend.drain_contacts();
         let mut peak = 0.0f64;

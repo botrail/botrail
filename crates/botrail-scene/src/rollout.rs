@@ -2850,8 +2850,7 @@ impl Rollout {
                 }
                 for (mi, mj) in model.joints.iter().enumerate() {
                     if let Some(m) = mj.mimic {
-                        if let Some(pos) = drive.joints.iter().position(|&d| d == m.source_joint)
-                        {
+                        if let Some(pos) = drive.joints.iter().position(|&d| d == m.source_joint) {
                             driven_joints.push((mi, drive.motors[pos]));
                         }
                     }
@@ -2894,8 +2893,8 @@ impl Rollout {
                         .gripper_drive(r)
                         .map(|d| d.finger_mass)
                         .unwrap_or(0.0);
-                    let shape_mass = botrail_collide::parts_volume(parts)
-                        * botrail_physics::DEFAULT_DENSITY;
+                    let shape_mass =
+                        botrail_collide::parts_volume(parts) * botrail_physics::DEFAULT_DENSITY;
                     props.mass = Some(shape_mass.max(floor));
                 }
                 desc.bodies.push(BodyDesc {

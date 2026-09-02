@@ -1502,8 +1502,7 @@ impl Scene {
         clearance: Option<f64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let index = self.resolve_robot(robot)?;
-        let closed: Option<Vec<(String, f64)>> =
-            closed.map(|m| m.into_iter().collect());
+        let closed: Option<Vec<(String, f64)>> = closed.map(|m| m.into_iter().collect());
         let solved = self
             .hub
             .grasp_close(
@@ -6229,11 +6228,7 @@ impl SequenceTimeline {
             .grasp_episodes(&self.scene)
             .into_iter()
             .map(|ep| {
-                let robot_index = self
-                    .scene
-                    .robots()
-                    .iter()
-                    .position(|r| r.name == ep.robot);
+                let robot_index = self.scene.robots().iter().position(|r| r.name == ep.robot);
                 let tool_specs = robot_index
                     .map(|r| botrail_scene::grasp::gripper_tool_specs(&self.scene, r))
                     .unwrap_or_default();

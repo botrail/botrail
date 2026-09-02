@@ -1007,9 +1007,9 @@ impl Scene {
                     drive.damping,
                     drive.finger_mass,
                 )
-                    .map_err(|e| {
-                        ProjectError::Incompatible(format!("robot `{name}` gripper drive: {e}"))
-                    })?;
+                .map_err(|e| {
+                    ProjectError::Incompatible(format!("robot `{name}` gripper drive: {e}"))
+                })?;
             }
         }
         self.set_scenarios(

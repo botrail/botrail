@@ -1190,7 +1190,11 @@ impl Scene {
         robot: usize,
         link: usize,
     ) -> Option<botrail_physics::PhysicsMaterial> {
-        self.robots[robot].link_materials.get(link).copied().flatten()
+        self.robots[robot]
+            .link_materials
+            .get(link)
+            .copied()
+            .flatten()
     }
 
     /// The obstacle's physics properties as a bake (and the USD export)
