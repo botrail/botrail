@@ -21,7 +21,7 @@ same column. The keys, and the attribute names that answer them
 | requirement            | derived from                                               | answered by                                  |
 |------------------------|------------------------------------------------------------|----------------------------------------------|
 | `payload_kg`           | tool mass + the heaviest part the robot grasps; parts riding a vehicle's deck at start | `payload_kg`                                 |
-| `reach_mm`             | the farthest taught target from the base, plus a margin    | `reach_mm`                                   |
+| `reach_mm`             | the farthest taught target from the base, plus a margin; the table of a machining centre (or the spindle of a lathe) in the cell, through its opening | `reach_mm`                                   |
 | `stroke_mm`            | the smallest side of the grasped parts (parallel gripper)  | `stroke_mm`, `opening_mm`                    |
 | `sensing_range_mm`     | a beam sensor's span                                       | `sensing_range_mm`, `range_mm`, `max_range_mm` |
 | `range_mm`             | a light curtain's span / an area sensor's half-diagonal    | `range_mm`, `max_range_mm`, `sensing_range_mm` |
@@ -819,6 +819,33 @@ class _Cell:
                     basis=f"farthest taught target {farthest:.2f} m from the base ({where}), +{margin:.0%}",
                 )
             )
+        # A machine tool in the cell asks for reach before anything is
+        # taught: its table, through its side opening, from this base.
+        # Only a machine within an arm's length of the base is this
+        # robot's to serve (a second machine across the hall is not).
+        base_pose = self.scene.robot_base_pose_of(name)[0]
+        for row in self.scene.bom().rows:
+            category = str(row.get("category") or "")
+            if category.startswith("machine_tool.vmc"):
+                frame, what, through = "table", "the table", "its side opening"
+            elif category.startswith("machine_tool.lathe"):
+                frame, what, through = "spindle", "the spindle", "its front opening"
+            else:
+                continue
+            machine = str((row.get("names") or [""])[0])
+            target = self.scene.frames.get(f"{machine}/{frame}")
+            if target is None:
+                continue
+            distance = _dist(target[0], base_pose)
+            if distance > 3.0:
+                continue
+            reqs.append(
+                Requirement(
+                    "reach_mm",
+                    _round(distance * 1000.0 * (1.0 + margin), 1),
+                    basis=f"{what} of `{machine}` {distance:.2f} m from the base, through {through}, +{margin:.0%}",
+                )
+            )
         ridden = self.vehicle_of(name)
         if ridden is not None:
             # The machine is the robot (legs, or a whole airframe): what the
@@ -1284,8 +1311,10 @@ class _Cell:
 
 
 def _kind_hint(category: str) -> str:
-    if category.startswith(("conveyor", "axis", "vehicle")):
+    if category.startswith(("conveyor", "axis", "vehicle", "machine_tool.door")):
         return "device"
+    if category.startswith("hmi.button"):
+        return "sensor"
     if category == "sensor.camera":
         return "camera"
     if category == "sensor.lidar":

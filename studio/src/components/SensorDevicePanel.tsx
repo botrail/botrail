@@ -138,6 +138,7 @@ export function SensorDevicePanel() {
         speed: 0.2,
         position: 0,
         range: [0, 0.5],
+        stops: [],
       },
     });
     selectDevice(name);
@@ -628,6 +629,14 @@ function DeviceForm({ device }: { device: DeviceMsg }) {
           value={kind.range[1]}
           onCommit={(hi) => commit({ ...kind, range: [kind.range[0], hi] })}
         />
+        {kind.stops.length > 0 && (
+          <div className="field num-field">
+            <span className="field-label">stops</span>
+            <span className="obstacle-pos">
+              {kind.stops.map((s) => `${s.name} @ ${s.at}`).join(", ")}
+            </span>
+          </div>
+        )}
         {remove}
       </div>
     );

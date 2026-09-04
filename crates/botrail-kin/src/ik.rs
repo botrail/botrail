@@ -160,13 +160,40 @@ fn clamp_to_limits(model: &RobotModel, q: &mut [f64]) {
     }
 }
 
+/// Which actuated columns move `link`: the joints on its chain to the
+/// root, a mimic joint counted under its source's column. Everything
+/// else — a gripper's fingers when the flange is the target — is off the
+/// chain, and the solver leaves it exactly where the seed put it: no
+/// centering pull (its Jacobian column is zero, so the whole column would
+/// otherwise sit in the null space and drift to mid-range), no restart
+/// re-seed, no singularity kick.
+fn chain_columns(model: &RobotModel, link: usize) -> Vec<bool> {
+    let mut mask = vec![false; model.dof()];
+    let mut li = link;
+    while let Some(ji) = model.links[li].parent_joint {
+        let driver = match &model.joints[ji].mimic {
+            Some(m) => m.source_joint,
+            None => ji,
+        };
+        if let Some(col) = model.joints[driver].q_index {
+            mask[col] = true;
+        }
+        li = model.joints[ji].parent_link;
+    }
+    mask
+}
+
 /// Normalized pull toward each limited joint's mid-range, in [-1, 1] per
-/// joint; joints without limits (continuous) contribute nothing. `None`
-/// when no joint has limits — there is no center to steer toward.
-fn centering_direction(model: &RobotModel, q: &[f64]) -> Option<DVector<f64>> {
+/// joint on the chain (`mask`); joints without limits (continuous) and
+/// joints off the chain contribute nothing. `None` when no joint has a
+/// center to steer toward.
+fn centering_direction(model: &RobotModel, q: &[f64], mask: &[bool]) -> Option<DVector<f64>> {
     let mut z = DVector::zeros(q.len());
     let mut any = false;
     for (i, &ji) in model.actuated_joints.iter().enumerate() {
+        if !mask[i] {
+            continue;
+        }
         if let Some(l) = model.joints[ji].limits {
             let half = 0.5 * (l.upper - l.lower);
             if half > 1e-9 {
@@ -180,12 +207,13 @@ fn centering_direction(model: &RobotModel, q: &[f64]) -> Option<DVector<f64>> {
 }
 
 /// The objective the null-space term descends: sum of squared normalized
-/// offsets from mid-range over the limited joints.
-fn centering_measure(model: &RobotModel, q: &[f64]) -> f64 {
+/// offsets from mid-range over the limited joints on the chain.
+fn centering_measure(model: &RobotModel, q: &[f64], mask: &[bool]) -> f64 {
     q.iter()
         .zip(&model.actuated_joints)
-        .map(|(qi, &ji)| match model.joints[ji].limits {
-            Some(l) => {
+        .zip(mask)
+        .map(|((qi, &ji), &on)| match model.joints[ji].limits {
+            Some(l) if on => {
                 let half = 0.5 * (l.upper - l.lower);
                 if half > 1e-9 {
                     let mid = 0.5 * (l.upper + l.lower);
@@ -194,7 +222,7 @@ fn centering_measure(model: &RobotModel, q: &[f64]) -> f64 {
                     0.0
                 }
             }
-            None => 0.0,
+            _ => 0.0,
         })
         .sum()
 }
@@ -292,12 +320,18 @@ pub fn solve_ik(
     }
     let score = |r: &IkResult| r.pos_error + options.orientation_weight * r.rot_error;
     let (lower, upper) = model.sampling_bounds();
+    let mask = chain_columns(model, link);
     for restart in 0..options.restarts {
         let seed: Vec<f64> = lower
             .iter()
             .zip(&upper)
-            .map(|(lo, hi)| {
-                if restart == 0 {
+            .zip(seed)
+            .zip(&mask)
+            .map(|(((lo, hi), &given), &on)| {
+                if !on {
+                    // Off the chain: the seed's value is the answer.
+                    given
+                } else if restart == 0 {
                     // The centered configuration first: it is the analytic
                     // antidote to a seed clamped against its limits.
                     0.5 * (lo + hi)
@@ -334,6 +368,7 @@ fn solve_attempt(
         IkMode::Axis => 5,
     };
     let lambda2 = options.damping * options.damping;
+    let mask = chain_columns(model, link);
 
     let mut q = seed.to_vec();
     clamp_to_limits(model, &mut q);
@@ -364,7 +399,7 @@ fn solve_attempt(
         let replace = match &best {
             None => true,
             Some(b) if converged && b.converged => {
-                centering_measure(model, &q) < centering_measure(model, &b.q)
+                centering_measure(model, &q, &mask) < centering_measure(model, &b.q, &mask)
             }
             Some(b) if converged != b.converged => converged,
             Some(b) => score < b.pos_error + options.orientation_weight * b.rot_error,
@@ -427,8 +462,10 @@ fn solve_attempt(
             // dq = 0): kick the configuration to break the symmetry, then
             // keep iterating. Checked before the null-space term so the
             // secondary objective cannot mask a stalled task.
-            for qi in q.iter_mut() {
-                *qi += 0.05 * jitter_unit(rng);
+            for (qi, &on) in q.iter_mut().zip(&mask) {
+                if on {
+                    *qi += 0.05 * jitter_unit(rng);
+                }
             }
             clamp_to_limits(model, &mut q);
             continue;
@@ -442,7 +479,7 @@ fn solve_attempt(
         // moves a redundant arm toward mid-range.
         let mut ns_step = 0.0;
         if options.null_space_gain > 0.0 {
-            if let Some(z) = centering_direction(model, &q) {
+            if let Some(z) = centering_direction(model, &q, &mask) {
                 let ns = project_to_null_space(jac, &z);
                 ns_step = options.null_space_gain * ns.norm();
                 dq.axpy(options.null_space_gain, &ns, 1.0);
@@ -532,6 +569,67 @@ mod tests {
         <origin xyz="1 0 0"/>
       </joint>
     </robot>"#;
+
+    /// Planar 2R with a gripper finger branching off the tool link: the
+    /// finger is actuated, limited (0..0.8), and moves nothing the solver
+    /// is asked to place.
+    const ARM_WITH_FINGER: &str = r#"
+    <robot name="fingered">
+      <link name="base"/><link name="link1"/><link name="link2"/><link name="tool"/><link name="finger"/>
+      <joint name="q1" type="revolute">
+        <parent link="base"/><child link="link1"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3" upper="3" effort="1" velocity="1"/>
+      </joint>
+      <joint name="q2" type="revolute">
+        <parent link="link1"/><child link="link2"/>
+        <origin xyz="1 0 0"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3" upper="3" effort="1" velocity="1"/>
+      </joint>
+      <joint name="tip" type="fixed">
+        <parent link="link2"/><child link="tool"/>
+        <origin xyz="1 0 0"/>
+      </joint>
+      <joint name="finger_joint" type="revolute">
+        <parent link="tool"/><child link="finger"/>
+        <axis xyz="0 1 0"/>
+        <limit lower="0" upper="0.8" effort="1" velocity="1"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn joints_off_the_chain_stay_where_the_seed_put_them() {
+        // A shut gripper must not open (toward mid-range) because the
+        // flange was asked to move: the finger's Jacobian column is zero,
+        // so the whole column lies in the task null space and the
+        // centering term would pull it to 0.4 — every cartesian step of a
+        // straight-line move, until the fingers let go of the part.
+        let model = RobotModel::from_urdf_str(ARM_WITH_FINGER).unwrap();
+        let tool = model.link_index("tool").unwrap();
+        let finger = model.joint_index("finger_joint").unwrap();
+        let col = model.joints[finger].q_index.unwrap();
+        let target =
+            Isometry3::from_parts(Translation3::new(1.2, 0.8, 0.0), UnitQuaternion::identity());
+        let options = IkOptions {
+            mode: IkMode::Position,
+            ..IkOptions::default()
+        };
+        for shut in [0.0, 0.8] {
+            let mut seed = vec![0.3, 0.3, 0.0];
+            seed[col] = shut;
+            let result = solve_ik(&model, tool, &target, &seed, &options).unwrap();
+            assert!(result.converged);
+            assert_eq!(result.q[col], shut, "the finger drifted off its seed");
+        }
+        // Restarts re-seed the chain only: an unreachable target still
+        // hands back the finger as it was.
+        let far =
+            Isometry3::from_parts(Translation3::new(5.0, 0.0, 0.0), UnitQuaternion::identity());
+        let result = solve_ik(&model, tool, &far, &[0.3, 0.3, 0.8], &options).unwrap();
+        assert!(!result.converged);
+        assert_eq!(result.q[col], 0.8);
+    }
 
     #[test]
     fn jacobian_folds_mimic_joints_into_their_source() {
@@ -874,11 +972,12 @@ mod tests {
         let a = solve_ik(&model, tool, &target, &seed, &plain).unwrap();
         let b = solve_ik(&model, tool, &target, &seed, &centered).unwrap();
         assert!(a.converged && b.converged);
+        let mask = chain_columns(&model, tool);
         assert!(
-            centering_measure(&model, &b.q) < centering_measure(&model, &a.q),
+            centering_measure(&model, &b.q, &mask) < centering_measure(&model, &a.q, &mask),
             "spin centering did not improve: {} vs {}",
-            centering_measure(&model, &b.q),
-            centering_measure(&model, &a.q)
+            centering_measure(&model, &b.q, &mask),
+            centering_measure(&model, &a.q, &mask)
         );
         // The task itself is untouched by the secondary objective.
         let reached = forward_kinematics(&model, &b.q).unwrap()[tool];

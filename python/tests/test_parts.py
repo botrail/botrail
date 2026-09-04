@@ -95,7 +95,7 @@ def test_set_part_resolves_the_kind_and_needs_one_when_ambiguous() -> None:
         scene.set_part("belt", model="GVL-1200")
     assert scene.set_part("belt", kind="device", manufacturer="MISUMI", model="GVL-1200") == "device"
     assert scene.set_part("belt", kind="obstacle", model="belt slab") == "obstacle"
-    with pytest.raises(ValueError, match="not a robot, device"):
+    with pytest.raises(ValueError, match="not a robot, tool, device"):
         scene.set_part("nothing", model="x")
     with pytest.raises(ValueError, match="no sensor named"):
         scene.set_part("table_a", kind="sensor", model="x")
@@ -318,3 +318,34 @@ def test_sequence_demo_bom_is_complete() -> None:
     # Typed masses plus the ones the packages computed from the sizes.
     assert bom.total("mass_kg") == pytest.approx(18 + 120 + 25 + 494.7)
 
+
+
+# ------------------------------------------------------------------ tools
+
+
+def test_a_tool_in_the_stack_can_be_pinned_by_its_row_name() -> None:
+    """A tool welded on from a URDF string has no catalog identity; the
+    row the BOM gives it (`<robot>/tool`) is where that identity is
+    pinned — and a catalog tool's row takes a pin as the last word."""
+    bracket = bt.tools.multi_tool("hand", [bt.tools.Pin("pusher")])
+    arm = bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
+    scene = bt.Scene(arm.attach_tool(bracket, flange=arm.tcp_link))
+    rows = rows_by_names(scene.bom())
+    assert rows[("simple_arm/tool",)]["category"] == "tool"
+    assert [row["names"][0] for row in scene.bom().unidentified()] == ["simple_arm", "simple_arm/tool"]
+    with pytest.raises(ValueError, match="not a robot, tool, device"):
+        scene.set_part("simple_arm/tool9", model="X")
+    with pytest.raises(ValueError, match="no tool named"):
+        scene.set_part("simple_arm/tool9", kind="tool", model="X")
+    assert scene.set_part("simple_arm/tool", category="tool.multi", manufacturer="ACME", model="MPH-3", mass_kg=0.3) == "tool"
+    row = rows_by_names(scene.bom())[("simple_arm/tool",)]
+    assert (row["category"], row["manufacturer"], row["model"], row["attributes"]["mass_kg"]) == ("tool.multi", "ACME", "MPH-3", 0.3)
+    assert [r["names"][0] for r in scene.bom().unidentified()] == ["simple_arm"]
+    # The pin rides a rename of the robot, and round-trips through the project.
+    scene.rename_robot("simple_arm", "arm")
+    assert scene.part("arm/tool") is not None and scene.part("simple_arm/tool") is None
+    assert ("arm/tool",) in rows_by_names(scene.bom())
+    code = "\n".join(line for line in scene.generate_python().splitlines() if "bt.studio(" not in line)
+    ns: dict = {}
+    exec(compile(code, "gen", "exec"), ns)  # noqa: S102 - the generated script is the round trip
+    assert rows_by_names(ns["scene"].bom())[("arm/tool",)]["model"] == "MPH-3"

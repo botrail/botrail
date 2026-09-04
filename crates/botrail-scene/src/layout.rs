@@ -750,13 +750,28 @@ impl Scene {
                     objects,
                     axis,
                     range,
+                    position,
                     ..
                 } => {
-                    // Travel arrow through the driven objects' centre.
+                    // Travel arrow through the driven objects' centre, and
+                    // the objects' outlines at the far end of the travel —
+                    // where a door leaf stands open, a slide sits extended:
+                    // the envelope a plan has to keep clear.
                     let mut pts = Vec::new();
+                    let mut outlines: Vec<LayoutShape> = Vec::new();
                     for name in objects {
+                        let Some(i) = self.obstacles().iter().position(|o| &o.name == name) else {
+                            continue;
+                        };
+                        let o = &self.obstacles()[i];
+                        if !o.visible {
+                            continue;
+                        }
                         if let Some((lo, hi)) = self.obstacle_bounds(name) {
                             pts.push([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]);
+                        }
+                        if let Some((shape, _)) = primitive_footprint(&o.geometry, &o.pose) {
+                            outlines.push(shape);
                         }
                     }
                     if pts.is_empty() {
@@ -769,8 +784,34 @@ impl Scene {
                     }
                     let a = a.normalize();
                     let (lo, hi) = *range;
-                    let from = [c[0] + a.x * lo, c[1] + a.y * lo];
-                    let to = [c[0] + a.x * hi, c[1] + a.y * hi];
+                    // The objects stand at `position` along the axis; the
+                    // ends of the travel are offsets from there.
+                    let far = if (hi - position).abs() >= (lo - position).abs() {
+                        hi - position
+                    } else {
+                        lo - position
+                    };
+                    if far.abs() > 1e-6 {
+                        for shape in outlines {
+                            let moved = LayoutShape::Polygon {
+                                points: shape_points(&shape)
+                                    .into_iter()
+                                    .map(|p| [p[0] + a.x * far, p[1] + a.y * far])
+                                    .collect(),
+                            };
+                            for p in shape_points(&moved) {
+                                footprint.include(p);
+                            }
+                            items.push(LayoutItem {
+                                layer: LayoutLayer::Device,
+                                name: device.name.clone(),
+                                shape: moved,
+                                dashed: true,
+                            });
+                        }
+                    }
+                    let from = [c[0] + a.x * (lo - position), c[1] + a.y * (lo - position)];
+                    let to = [c[0] + a.x * (hi - position), c[1] + a.y * (hi - position)];
                     footprint.include(from);
                     footprint.include(to);
                     items.push(LayoutItem {

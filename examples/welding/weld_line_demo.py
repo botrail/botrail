@@ -515,7 +515,7 @@ def build_station_program(scene: bt.Scene, st: str, poses: dict,
                     actions=[bt.seq.set_signal(f"{st}_arc", True)],
                     transition=bt.seq.elapsed(ws.WELD_T))
             sq.step(f"{spot}_release", actions=[
-                bt.seq.ramp({ws.GUN: ws.GUN_OPEN}, ws.SQUEEZE_T, robot=arm)
+                bt.seq.ramp({ws.GUN: ws.GUN_TRAVEL}, ws.SQUEEZE_T, robot=arm)
                 for arm in arms
             ] + [bt.seq.set_signal(f"{st}_arc", False)]
               + [bt.seq.start(f"src_mark_{arm}_s{index + 1}")

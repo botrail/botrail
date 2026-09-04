@@ -108,6 +108,28 @@ sq.step("open_door", actions=[bt.seq.move_to("door", 0.6)],
 The axis moves its listed obstacles along `axis` at `speed`, clamped to
 `range`; `device_done` is the in-position condition.
 
+Name its positions and the axis reads like the door it is:
+
+```python
+scene.add_linear_axis("door", objects=["door_panel"], axis=(0, 0, 1), speed=0.4,
+                      range=(0.0, 0.6), stops={"closed": 0.0, "open": 0.6})
+sq.step("open_door", actions=[bt.seq.move_to("door", "open")],
+        transition=bt.seq.device_done("door"))
+sq.step("start", transition=bt.seq.signal("door/closed"))   # the interlock
+```
+
+Every stop is a read-only input lane `<axis>/<stop>` — ON while the axis
+stands at it, off between stops (MTConnect's *unlatched*) — the limit
+switch an interlock waits on, and a DI on the [I/O list](io-map.md).
+
+What the axis drives is checked against every robot each tick, the way
+two arms are checked against each other: a leaf closing on an arm still
+inside is a `DeviceCollision` error at that instant, naming the device,
+the obstacle, the robot and the link. The cure is the interlock — the
+robot reports itself clear before the door is commanded — not a
+different door. A lift's car is checked the same way against every robot
+that is not riding it.
+
 ## Vehicles
 
 The fifth device is a guided transport vehicle: it drives an authored path

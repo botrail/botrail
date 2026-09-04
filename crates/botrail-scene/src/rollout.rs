@@ -171,6 +171,24 @@ pub enum SeqError {
         /// The margin the foot radius needs.
         need: f64,
     },
+    /// A device moved one of its obstacles into a robot: a door leaf
+    /// closing on an arm still inside, a lift car rising into a wrist.
+    /// The tick check for what a device drives, mirroring the vehicle's:
+    /// the device's move is authored, so the cure is an interlock on the
+    /// device's own lanes (its stops, its done) making the robot leave
+    /// first — or the robot's pose.
+    #[error(
+        "device `{device}` moves `{object}` into robot `{robot}` (link `{link}`) at \
+         t = {t:.3}s; hold the device until the robot is clear (wait on its lanes) \
+         or re-teach the pose"
+    )]
+    DeviceCollision {
+        t: f64,
+        device: String,
+        object: String,
+        robot: String,
+        link: String,
+    },
     /// A travelling vehicle's body met a robot that is not its passenger.
     #[error(
         "vehicle `{vehicle}`: `{body}` hits robot `{robot}` (link `{link}`) at \
@@ -268,6 +286,11 @@ pub struct StepSpan {
 /// rollout, or a post-bake synthesis) so consumers — the studio's timing
 /// chart folds device lanes away, the I/O map classifies inputs — never
 /// have to guess it back from the name.
+/// How close to a named stop an axis must stand for the stop's lane to be
+/// ON. The last tick of a move lands exactly on the target, so this is
+/// float dust, not slack.
+pub const STOP_TOL: f64 = 1e-6;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneKind {
     /// An internal relay (`define_signal`), or a lane synthesized after
@@ -1787,6 +1810,9 @@ enum DeviceRuntime {
         position: f64,
         target: f64,
         lane: usize,
+        /// Named stops: `(name, position, lane)` — the lane is ON while
+        /// the axis stands within [`STOP_TOL`] of the stop.
+        stops: Vec<(String, f64, usize)>,
     },
     Source {
         name: String,
@@ -2268,6 +2294,7 @@ impl Rollout {
                         axis,
                         speed,
                         position,
+                        stops,
                         ..
                     } => {
                         signals.push(BoolTrack {
@@ -2275,6 +2302,20 @@ impl Rollout {
                             edges: vec![(0.0, false)],
                             kind: LaneKind::Device,
                         });
+                        // A stop's lane is a read-only input, like a
+                        // sensor's: ON from t = 0 when the axis starts on it.
+                        let stops = stops
+                            .iter()
+                            .map(|(stop, at)| {
+                                let lane = signals.len();
+                                signals.push(BoolTrack {
+                                    name: format!("{}/{}", device.name, stop),
+                                    edges: vec![(0.0, (position - at).abs() <= STOP_TOL)],
+                                    kind: LaneKind::Sensor,
+                                });
+                                (stop.clone(), *at, lane)
+                            })
+                            .collect();
                         DeviceRuntime::Axis {
                             name: device.name.clone(),
                             objects: objects.clone(),
@@ -2283,6 +2324,7 @@ impl Rollout {
                             position: *position,
                             target: *position,
                             lane,
+                            stops,
                         }
                     }
                     DeviceKind::Source {
@@ -3411,6 +3453,9 @@ impl Rollout {
             .map(|a| a.object.clone())
             .collect();
         let mut moved: Vec<(String, Isometry3<f64>, Vector3<f64>)> = Vec::new();
+        // What each axis and lift drove this tick — `(device, obstacles,
+        // vehicles riding it)` — for the tick check against the robots.
+        let mut device_moves: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         // (source device index, object) pairs a sink caught this tick.
         let mut returned: Vec<(usize, String)> = Vec::new();
         let mut lane_updates: Vec<(usize, bool)> = Vec::new();
@@ -3493,11 +3538,13 @@ impl Rollout {
                     }
                 }
                 DeviceRuntime::Axis {
+                    name: axis_name,
                     objects,
                     axis,
                     speed,
                     position,
                     target,
+                    stops,
                     ..
                 } => {
                     let remaining = *target - *position;
@@ -3506,10 +3553,14 @@ impl Rollout {
                     }
                     let step = remaining.abs().min(*speed * dt) * remaining.signum();
                     *position += step;
+                    for (_, at, lane) in stops.iter() {
+                        lane_updates.push((*lane, (*position - at).abs() <= STOP_TOL));
+                    }
                     let delta = *axis * step;
                     // Span velocity from the actual per-tick displacement so
                     // the (partial) arrival tick samples exactly.
                     let velocity = *axis * (step / dt);
+                    let mut driven = Vec::new();
                     for name in objects.iter() {
                         if attached.iter().any(|a| a == name) {
                             continue;
@@ -3518,8 +3569,10 @@ impl Rollout {
                             let mut pose = o.pose;
                             pose.translation.vector += delta;
                             moved.push((name.clone(), pose, velocity));
+                            driven.push(name.clone());
                         }
                     }
+                    device_moves.push((axis_name.clone(), driven, Vec::new()));
                     // Arrival closes the axis's moving lane on this tick.
                     if (*target - *position).abs() < 1e-12 {
                         lane_updates.push((
@@ -3532,6 +3585,7 @@ impl Rollout {
                     }
                 }
                 DeviceRuntime::Lift {
+                    name: lift_name,
                     car,
                     axis,
                     speed,
@@ -3553,6 +3607,7 @@ impl Rollout {
                     // like the axis: the (partial) arrival tick samples
                     // exactly.
                     let velocity = *axis * (step / dt);
+                    let mut driven = Vec::new();
                     for member in car.iter().chain(cargo_objects.iter()) {
                         if attached.iter().any(|a| a == member) {
                             continue;
@@ -3561,8 +3616,11 @@ impl Rollout {
                             let mut pose = o.pose;
                             pose.translation.vector += delta;
                             moved.push((member.clone(), pose, velocity));
+                            driven.push(member.clone());
                         }
                     }
+                    // The car against every robot that is not riding it.
+                    device_moves.push((lift_name.clone(), driven, cargo_vehicles.clone()));
                     let arriving = (*target - *position).abs() < 1e-12;
                     for vehicle in cargo_vehicles.iter() {
                         lift_shifts.push((
@@ -3839,6 +3897,7 @@ impl Rollout {
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
         self.check_robot_collisions()?;
+        self.check_device_collisions(&device_moves)?;
         // Physics last: every kinematic actor is where this tick put it,
         // so the substeps integrate against the tick-true world, and the
         // written-back dynamic poses are what `update_sensors` reads next.
@@ -3888,6 +3947,47 @@ impl Rollout {
                         robot: self.world.robots()[r].name.clone(),
                         part,
                         obstacle,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The tick check for what a device drives: every obstacle an axis or
+    /// a lift moved this tick, against the links (and held parts) of every
+    /// robot that is not riding that device — the door closing on an arm
+    /// still inside, the car rising into a wrist. Only what moved is
+    /// asked about, so the cost is the driven bodies, not the scene;
+    /// contact allowances apply as everywhere else.
+    fn check_device_collisions(
+        &self,
+        moves: &[(String, Vec<String>, Vec<String>)],
+    ) -> Result<(), SeqError> {
+        for (device, objects, riders) in moves {
+            if objects.is_empty() {
+                continue;
+            }
+            for r in 0..self.world.robots().len() {
+                let rides = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .is_some_and(|m| riders.iter().any(|v| v == &m.device));
+                if rides {
+                    continue;
+                }
+                if let Some((link, object)) = self
+                    .world
+                    .robot_contacts_among(r, objects)
+                    .into_iter()
+                    .next()
+                {
+                    return Err(SeqError::DeviceCollision {
+                        t: self.t,
+                        device: device.clone(),
+                        object,
+                        robot: self.world.robots()[r].name.clone(),
+                        link,
                     });
                 }
             }
@@ -5620,6 +5720,26 @@ impl Rollout {
                         DeviceCommand::MoveTo(goal),
                     ) => {
                         *target = *goal;
+                        if (*target - *position).abs() > 1e-9 {
+                            lane_update = Some((*lane, true));
+                        }
+                    }
+                    (
+                        DeviceRuntime::Axis {
+                            position,
+                            target,
+                            lane,
+                            stops,
+                            ..
+                        },
+                        DeviceCommand::MoveToStop(stop),
+                    ) => {
+                        let goal = stops
+                            .iter()
+                            .find(|(n, _, _)| n == stop)
+                            .map(|(_, at, _)| *at)
+                            .ok_or_else(|| err(format!("axis `{device}` has no stop `{stop}`")))?;
+                        *target = goal;
                         if (*target - *position).abs() > 1e-9 {
                             lane_update = Some((*lane, true));
                         }
@@ -8476,6 +8596,7 @@ mod device_tests {
                 speed: 0.5,
                 position: 0.0,
                 range: (0.0, 0.4),
+                stops: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -8522,6 +8643,155 @@ mod device_tests {
         // The moving lane pulses during travel only.
         let lane = tl.signals.iter().find(|s| s.name == "lift").unwrap();
         assert!(lane.value_at(0.3) && !lane.value_at(tl.duration));
+    }
+
+    /// Named stops: `move_to` by name drives the axis there, and each stop
+    /// is a read-only lane — ON at the stop, off between stops.
+    #[test]
+    fn linear_axis_named_stops_are_lanes_and_targets() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "door",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(0.6, 0.0, 0.2),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "lift".into(),
+            kind: DeviceKind::LinearAxis {
+                objects: vec!["door".into()],
+                axis: Unit::new_normalize(Vector3::z()),
+                speed: 0.5,
+                position: 0.0,
+                range: (0.0, 0.4),
+                stops: vec![("closed".into(), 0.0), ("open".into(), 0.3)],
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "open".into(),
+            steps: vec![
+                step(
+                    "raise",
+                    vec![Action::Device {
+                        device: "lift".into(),
+                        command: DeviceCommand::MoveToStop("open".into()),
+                    }],
+                    Condition::DeviceDone {
+                        device: "lift".into(),
+                    },
+                ),
+                // The stop lane is what a program waits on.
+                step(
+                    "at_open",
+                    vec![],
+                    Condition::Signal {
+                        name: "lift/open".into(),
+                        value: true,
+                    },
+                ),
+                step("hold", vec![], Condition::Elapsed { seconds: 0.1 }),
+            ],
+        });
+        let options = RolloutOptions::default();
+        let tl = scene.simulate_sequence("open", &options).unwrap();
+        let closed = tl.signals.iter().find(|s| s.name == "lift/closed").unwrap();
+        let open = tl.signals.iter().find(|s| s.name == "lift/open").unwrap();
+        assert!(closed.value_at(0.0) && !open.value_at(0.0));
+        assert!(
+            !closed.value_at(0.3) && !open.value_at(0.3),
+            "between stops both are off"
+        );
+        assert!(open.value_at(tl.duration) && !closed.value_at(tl.duration));
+        assert!(matches!(closed.kind, LaneKind::Sensor));
+        let track = &tl.objects[0];
+        let poses = scene
+            .fk(&tl.robots[0].trajectory.sample(tl.duration))
+            .unwrap();
+        let end = SequenceTimeline::object_pose(track, std::slice::from_ref(&poses), tl.duration)
+            .unwrap();
+        assert!(
+            (end.translation.z - 0.5).abs() < 1e-12,
+            "{}",
+            end.translation.z
+        );
+        // A stop the axis does not have is refused up front.
+        scene.upsert_sequence(Sequence {
+            name: "bad".into(),
+            steps: vec![step(
+                "go",
+                vec![Action::Device {
+                    device: "lift".into(),
+                    command: DeviceCommand::MoveToStop("ajar".into()),
+                }],
+                Condition::DeviceDone {
+                    device: "lift".into(),
+                },
+            )],
+        });
+        let err = scene.simulate_sequence("bad", &options).unwrap_err();
+        assert!(err.to_string().contains("no stop `ajar`"), "{err}");
+    }
+
+    /// What an axis drives is checked against the robots every tick: a
+    /// door closing on an arm is a `DeviceCollision` naming both sides.
+    #[test]
+    fn a_device_driving_its_load_into_a_robot_is_an_error() {
+        let mut scene = sample_scene();
+        // A leaf that starts 0.3 m past the tool and slides onto it.
+        let tcp = scene.robot().default_tcp_link();
+        let tip = scene.fk(scene.joint_positions()).unwrap()[tcp]
+            .translation
+            .vector;
+        scene
+            .add_obstacle(
+                "leaf",
+                Geometry::Box {
+                    size: Vector3::new(0.05, 0.3, 0.3),
+                },
+                iso(tip.x + 0.3, tip.y, tip.z),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "door".into(),
+            kind: DeviceKind::LinearAxis {
+                objects: vec!["leaf".into()],
+                axis: Unit::new_normalize(-Vector3::x()),
+                speed: 0.5,
+                position: 0.0,
+                range: (0.0, 0.3),
+                stops: vec![("open".into(), 0.0), ("closed".into(), 0.3)],
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "shut".into(),
+            steps: vec![step(
+                "close",
+                vec![Action::Device {
+                    device: "door".into(),
+                    command: DeviceCommand::MoveToStop("closed".into()),
+                }],
+                Condition::DeviceDone {
+                    device: "door".into(),
+                },
+            )],
+        });
+        let err = scene
+            .simulate_sequence("shut", &RolloutOptions::default())
+            .unwrap_err();
+        match &err {
+            SeqError::DeviceCollision {
+                t, device, object, ..
+            } => {
+                assert_eq!((device.as_str(), object.as_str()), ("door", "leaf"));
+                // 0.3 m of travel at 0.5 m/s, the contact before the end.
+                assert!(*t > 0.0 && *t < 0.6, "t = {t}");
+            }
+            other => panic!("expected DeviceCollision, got {other}"),
+        }
+        assert!(err.to_string().contains("moves `leaf` into robot"), "{err}");
     }
 
     /// A zone sensor watching the robot (light curtain) fires when a ramp
@@ -11774,6 +12044,7 @@ mod parallel_program_tests {
                 speed: 0.1,
                 position: 0.0,
                 range: (0.0, 1.0),
+                stops: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -13820,6 +14091,7 @@ mod physics_tests {
                 speed: 0.1,
                 position: 0.0,
                 range: (0.0, 1.0),
+                stops: Vec::new(),
             },
         });
         let err = scene

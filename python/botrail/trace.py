@@ -18,6 +18,12 @@ columns (`time`/`signal`/`tag`/`state` are accepted too; values `1/0`,
 `true/false`, `on/off`, `high/low`) or a dict built any other way. Only
 signals present on both sides are compared; the rest are listed, not
 judged.
+
+A machine tool logs in MTConnect rather than as a PLC trend:
+`read_mtconnect` reads an `MTConnectStreams` document's events
+(`Execution`, `DoorState`, `ChuckState`, `EmergencyStop`, …) as levels on
+the bake's lanes, and `to_mtconnect` writes the bake back out in the same
+vocabulary — the expected stream, for the agent's operator to compare.
 """
 
 from __future__ import annotations
@@ -25,7 +31,9 @@ from __future__ import annotations
 import csv
 import io as _io
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -351,3 +359,182 @@ def to_csv(trace: Trace) -> str:
 
 
 __all__ = ["Trace", "TraceDiff", "SignalDiff", "load", "diff", "from_timeline", "to_csv"]
+
+
+# ------------------------------------------------------------- MTConnect
+
+#: How an MTConnect event's value reads as a level, by data item type
+#: (MTConnect Part 3, Observation Information Model). Types not listed
+#: read `ACTIVE` / `ON` / `TRUE` / `CLOSED` / `TRIGGERED` / `1` as high.
+MTCONNECT_LEVELS: dict[str, dict[str, bool]] = {
+    "Execution": {"ACTIVE": True},
+    "EmergencyStop": {"TRIGGERED": True, "ARMED": False},
+    "ChuckState": {"CLOSED": True, "OPEN": False, "UNLATCHED": False},
+    "PowerState": {"ON": True, "OFF": False},
+    "ControllerMode": {"AUTOMATIC": True},
+    "Availability": {"AVAILABLE": True},
+    "PartDetect": {"PRESENT": True, "NOT_PRESENT": False},
+}
+_HIGH = {"ACTIVE", "ON", "TRUE", "CLOSED", "TRIGGERED", "1", "HIGH", "PRESENT"}
+#: `DoorState` is three-valued: OPEN, CLOSED, or UNLATCHED — neither end
+#: confirmed. It reads onto two lanes, the closed switch and the open one.
+DOOR_STATES = {"OPEN": (False, True), "CLOSED": (True, False), "UNLATCHED": (False, False)}
+
+Items = dict[str, Union[str, tuple[str, str]]]
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _mtc_time(text: str) -> datetime:
+    text = text.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    stamp = datetime.fromisoformat(text)
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def _seconds(t0: Union[str, float, datetime, None], stamp: datetime, first: datetime) -> float:
+    if t0 is None:
+        origin = first
+    elif isinstance(t0, datetime):
+        origin = t0 if t0.tzinfo else t0.replace(tzinfo=timezone.utc)
+    elif isinstance(t0, str):
+        origin = _mtc_time(t0)
+    else:
+        return (stamp - first).total_seconds() + float(t0)
+    return (stamp - origin).total_seconds()
+
+
+def read_mtconnect(source: Union[str, Path], items: Items, *, t0: Union[str, float, datetime, None] = None) -> Trace:
+    """A trace from an MTConnect `MTConnectStreams` document (a file path
+    or the XML text — the agent's `/current` or `/sample` response).
+
+    `items` says which observations are which lanes: each key is a data
+    item's `dataItemId`, its `name`, or its type (`Execution`,
+    `EmergencyStop`, …) and each value the bake's lane name — or, for
+    `DoorState`, a `(closed_lane, open_lane)` pair, since a door reports
+    OPEN, CLOSED or UNLATCHED (neither end confirmed). Levels follow the
+    standard's vocabulary (`MTCONNECT_LEVELS`): `Execution ACTIVE` is the
+    machine running, `EmergencyStop TRIGGERED` the E-stop in, `ChuckState
+    CLOSED` the clamp made. `UNAVAILABLE` observations are skipped.
+
+    Times are seconds from the first matched observation, or from `t0`
+    (an ISO 8601 stamp, a `datetime`, or a number of seconds the first
+    observation sits at). Samples and conditions are not read — the diff
+    compares levels."""
+    text = source if (isinstance(source, str) and source.lstrip().startswith("<")) else Path(source).read_text()
+    root = ET.fromstring(text)
+    found: list[tuple[datetime, str, str]] = []  # (stamp, key, value)
+    for el in root.iter():
+        tag = _local(el.tag)
+        key = None
+        for candidate in (el.get("dataItemId"), el.get("name"), tag):
+            if candidate is not None and candidate in items:
+                key = candidate
+                break
+        if key is None or el.get("timestamp") is None:
+            continue
+        value = (el.text or "").strip()
+        if not value or value.upper() == "UNAVAILABLE":
+            continue
+        found.append((_mtc_time(el.get("timestamp")), key, value))
+    if not found:
+        return Trace()
+    found.sort(key=lambda f: f[0])
+    first = found[0][0]
+    signals: dict[str, list[Edge]] = {}
+    for stamp, key, value in found:
+        t = _seconds(t0, stamp, first)
+        lane = items[key]
+        state = value.upper()
+        if isinstance(lane, tuple):
+            closed, opened = DOOR_STATES.get(state, (False, False))
+            signals.setdefault(lane[0], []).append((t, closed))
+            signals.setdefault(lane[1], []).append((t, opened))
+            continue
+        table = MTCONNECT_LEVELS.get(_mtc_type(root, key))
+        level = table.get(state, False) if table is not None else state in _HIGH
+        signals.setdefault(lane, []).append((t, level))
+    for samples in signals.values():
+        samples.sort()
+    return Trace(signals)
+
+
+def _mtc_type(root: ET.Element, key: str) -> str:
+    """The element type an `items` key stands for — the key itself when it
+    is a type, else the tag of the element carrying it as id or name."""
+    if key in MTCONNECT_LEVELS or key == "DoorState":
+        return key
+    for el in root.iter():
+        if el.get("dataItemId") == key or el.get("name") == key:
+            return _local(el.tag)
+    return key
+
+
+def to_mtconnect(trace: Union[Trace, object], items: Items, *, start: str = "2000-01-01T00:00:00Z",
+                 device: str = "machine") -> str:
+    """A minimal `MTConnectStreams` document of `trace` (a `Trace`, or a
+    `SequenceTimeline` — the bake's lanes) in the standard's vocabulary,
+    with `items` read the other way round: the lane under each key is
+    written as that data item — `Execution` as ACTIVE / READY, `DoorState`
+    as OPEN / CLOSED / UNLATCHED from its two lanes, `EmergencyStop` as
+    TRIGGERED / ARMED, `ChuckState` as CLOSED / OPEN, anything else as
+    ON / OFF. Stamps run from `start` at the trace's seconds. The expected
+    stream, to lay beside the machine's own."""
+    if not isinstance(trace, Trace):
+        trace = from_timeline(trace)
+    origin = _mtc_time(start)
+    events: list[tuple[float, str, str]] = []  # (t, key, value)
+    for key, lane in items.items():
+        if isinstance(lane, tuple):
+            times = sorted({t for name in lane for t, _ in trace.signals.get(name, [])})
+            for t in times:
+                closed, opened = (_level_at(trace, lane[0], t), _level_at(trace, lane[1], t))
+                state = "CLOSED" if closed and not opened else "OPEN" if opened and not closed else "UNLATCHED"
+                events.append((t, key, state))
+            continue
+        for t, level in trace.signals.get(lane, []):
+            events.append((t, key, _mtc_word(key, level)))
+    events.sort(key=lambda e: (e[0], e[1]))
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<MTConnectStreams xmlns="urn:mtconnect.org:MTConnectStreams:2.0">',
+        f'<Header creationTime="{start}" sender="botrail" instanceId="1" version="2.0.0" bufferSize="131072" '
+        f'nextSequence="{len(events) + 1}" firstSequence="1" lastSequence="{max(len(events), 1)}"/>',
+        f'<Streams><DeviceStream name="{device}" uuid="{device}"><ComponentStream component="Controller" '
+        f'name="controller" componentId="cont"><Events>',
+    ]
+    for n, (t, key, value) in enumerate(events, start=1):
+        stamp = (origin + timedelta(seconds=t)).isoformat().replace("+00:00", "Z")
+        # A key that is a standard type is written as that element; any
+        # other key is a data item id on a generic event.
+        tag = key if key in MTCONNECT_LEVELS or key == "DoorState" else "Event"
+        lines.append(f'<{tag} dataItemId="{key}" timestamp="{stamp}" sequence="{n}">{value}</{tag}>')
+    lines.append("</Events></ComponentStream></DeviceStream></Streams></MTConnectStreams>")
+    return "\n".join(lines) + "\n"
+
+
+def _level_at(trace: Trace, name: str, t: float) -> bool:
+    level = False
+    for t1, v in sorted(trace.signals.get(name, [])):
+        if t1 <= t + 1e-9:
+            level = v
+        else:
+            break
+    return level
+
+
+def _mtc_word(kind: str, level: bool) -> str:
+    words = {
+        "Execution": ("ACTIVE", "READY"),
+        "EmergencyStop": ("TRIGGERED", "ARMED"),
+        "ChuckState": ("CLOSED", "OPEN"),
+        "PowerState": ("ON", "OFF"),
+        "ControllerMode": ("AUTOMATIC", "MANUAL"),
+        "Availability": ("AVAILABLE", "UNAVAILABLE"),
+        "PartDetect": ("PRESENT", "NOT_PRESENT"),
+    }
+    high, low = words.get(kind, ("ON", "OFF"))
+    return high if level else low

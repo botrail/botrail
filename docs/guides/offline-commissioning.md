@@ -52,14 +52,19 @@ fieldbus handshake, a job number). Instances are one per robot and kind
 (`panda_motion`, `panda_attach`); the motion's name comes in as a STRING.
 
 **Variables** are the points of the [derived I/O map](io-map.md), declared
-once as resource globals — `BOOL` for contacts and coils, `REAL` for
+once as configuration globals — `BOOL` for contacts and coils, `REAL` for
 speeds and positions, `INT` for station and program words — with the
 signal's initial value, and with `AT %IX0.0`-style addresses where the
 binding lands on a PLC-family node (`plc`, `safety_plc`, `remote_io`).
 Points bound on a robot controller get no address: they are the robot's
 own I/O. Each program declares what it uses as `VAR_EXTERNAL`; the
-configuration instantiates every program in one cyclic task
-(`task_interval_ms`, default 10). Names are IEC identifiers
+configuration instantiates every program in a cyclic task
+(`task_interval_ms`, default 10) on **one resource per controller** — a
+single `plc` resource when the programs share a host, one named after
+each host (`vmc_cnc`, `arm`) when the I/O map places them on several, so
+a machine's program is handed to the machine builder's IDE on its own
+and a handshake signal stays one variable both sides see. Names are IEC
+identifiers
 (`beam pick` → `beam_pick`, `far.done` → `far_done`), the same names the
 robot script export uses.
 
@@ -126,3 +131,24 @@ recording. The repository does not include a logger — the controllers'
 tools are better at that — and it does not include an online link on
 purpose. The comparison is the deliverable: it says, by name and by
 second, where the machine and the design parted.
+
+A machine tool logs in **MTConnect** rather than as a PLC trend — the
+agent's `/sample` response is an `MTConnectStreams` document of events in
+the standard's vocabulary. [`bt.trace.read_mtconnect`][botrail.trace.read_mtconnect]
+reads it onto the bake's lanes:
+
+```python
+items = hs.mtconnect_items()      # {"Execution": "vmc/running", "DoorState": (closed, open), ...}
+trace = bt.trace.read_mtconnect("sample.xml", items)
+d = tl.diff(trace, align_on=hs.signal("running"))
+```
+
+`items` maps a data item — by `dataItemId`, `name`, or type — to a lane;
+`Execution ACTIVE` reads as the machine running, `EmergencyStop
+TRIGGERED` as the E-stop in, `ChuckState CLOSED` as the clamp made, and
+`DoorState` onto two lanes at once (OPEN, CLOSED, or UNLATCHED — neither
+end confirmed — which is exactly what the two limit switches say). A
+[`Handshake`][botrail.tending.Handshake] knows its own items.
+[`bt.trace.to_mtconnect`][botrail.trace.to_mtconnect] writes the bake out
+in the same vocabulary — the expected stream, to lay beside the
+machine's own.

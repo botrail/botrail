@@ -3,11 +3,11 @@
 Everything a robot cell is delivered as comes out of the *same* script here:
 the layout sheet (SVG for the review, DXF for the 2D CAD the plant uses),
 the bill of materials, the I/O list and controller topology, the control
-logic as PLCopen XML for the PLC IDE, the robot program, the baked cycle as
-USD, the portable project and its Python, and a
-cell report that gathers the numbers (cycle time, clearance, I/O counts,
-scenario matrix, BOM totals, footprint) with the SHA-256 of every file it
-lists. None of these are typed in beside the model — each is *derived* from
+logic as PLCopen XML for the PLC IDE and the interlock table beside it, the
+robot program, the baked cycle as USD, the portable project and its Python,
+and a cell report that gathers the numbers (cycle time, clearance, I/O
+counts, scenario matrix, BOM totals, footprint) with the SHA-256 of every
+file it lists. None of these are typed in beside the model — each is *derived* from
 the scene, so a layout edit that costs a second, adds a panel or moves a
 sensor shows up in the report, the drawing and the list at once, and they
 can never disagree with each other or with the simulation that verified
@@ -97,6 +97,7 @@ def deliver(scene: bt.Scene, out: Path) -> bt.CellReport:
     write("cell_io.csv", scene.export_io_list)                      # I/O list for the electrical drawing
     write("cell_topology.mmd", scene.export_topology)               # controller topology
     write("cell.plcopen.xml", lambda p: scene.export_plcopen(p, name="pick cell"))  # the logic, for the PLC IDE
+    write("cell_interlocks.md", scene.export_interlocks)               # every output against the condition that admits it
     write("cell_layout.svg", lambda p: scene.export_layout(p, scale=200, title="pick cell"))  # plan view for the review
     write("cell_layout.dxf", lambda p: scene.export_layout(p, title="pick cell"))  # plan view for the 2D CAD
     write("cell_cycle.usda", lambda p: baseline.export_usd(p, fps=30.0))  # the baked cycle

@@ -415,3 +415,37 @@ def test_plan_while_driving_is_rejected_but_a_ramp_is_not(scene: bt.Scene) -> No
     )
     with pytest.raises(ValueError, match="cannot start while `amr` is driving"):
         sq.simulate()
+
+
+def test_linear_axis_named_stops_are_lanes_and_a_leaf_closing_on_the_arm_is_an_error(scene: bt.Scene) -> None:
+    scene.set_joint_positions([0.0] * 6)
+    scene.add_box("door", (0.1, 0.1, 0.1), (0.6, 0.0, 0.2))
+    with pytest.raises(ValueError, match="outside the axis range"):
+        scene.add_linear_axis("lift", objects=["door"], axis=(0, 0, 1), speed=0.5, range=(0.0, 0.4),
+                              stops={"open": 0.9})
+    scene.add_linear_axis("lift", objects=["door"], axis=(0, 0, 1), speed=0.5, range=(0.0, 0.4),
+                          stops={"closed": 0.0, "open": 0.3})
+    sq = scene.sequence("open")
+    sq.step("raise", actions=[bt.seq.move_to("lift", "open")], transition=bt.seq.device_done("lift"))
+    sq.step("at_open", transition=bt.seq.signal("lift/open"))
+    sq.step("hold", transition=bt.seq.elapsed(0.1))
+    tl = sq.simulate()
+    closed, opened = tl.signal("lift/closed"), tl.signal("lift/open")
+    assert closed.value_at(0.0) and not opened.value_at(0.0)
+    assert not closed.value_at(0.3) and not opened.value_at(0.3)
+    assert opened.value_at(tl.duration) and closed.kind == "sensor"
+    p_end, _ = tl.object_pose("door", tl.duration)
+    assert abs(p_end[2] - 0.5) < 1e-9
+    # The stops are on the I/O list as inputs, read by the program.
+    points = {(p.name, p.direction): p for p in scene.io_points()}
+    assert ("lift/open", "input") in points and points[("lift/open", "input")].kind == "DI"
+    assert 'stops={"closed": 0, "open": 0.3}' in scene.generate_python()
+    # A leaf driven onto the tool: the tick check names both sides.
+    tip, _ = scene.link_pose(scene.robot.tcp_link)
+    scene.add_box("leaf", (0.05, 0.3, 0.3), (tip[0] + 0.3, tip[1], tip[2]))
+    scene.add_linear_axis("gate", objects=["leaf"], axis=(-1, 0, 0), speed=0.5, range=(0.0, 0.3),
+                          stops={"open": 0.0, "closed": 0.3})
+    shut = scene.sequence("shut")
+    shut.step("close", actions=[bt.seq.move_to("gate", "closed")], transition=bt.seq.device_done("gate"))
+    with pytest.raises(ValueError, match="device `gate` moves `leaf` into robot"):
+        shut.simulate()

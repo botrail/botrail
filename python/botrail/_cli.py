@@ -152,7 +152,7 @@ def cmd_simulate(args) -> int:
     return 1 if failed else 0
 
 
-EXPORTS = ("project", "python", "bom", "io", "topology", "plc", "layout", "usd", "script", "report")
+EXPORTS = ("project", "python", "bom", "io", "topology", "plc", "interlocks", "layout", "usd", "script", "report")
 
 
 def cmd_export(args) -> int:
@@ -191,6 +191,9 @@ def cmd_export(args) -> int:
         write(f"{stem}_topology.mmd", scene.export_topology)
     if "plc" in wanted and scene.sequence_names:
         write(f"{stem}.plcopen.xml", lambda p: scene.export_plcopen(p, name=args.title or stem))
+    if "interlocks" in wanted and scene.sequence_names:
+        write(f"{stem}_interlocks.md", scene.export_interlocks)
+        write(f"{stem}_interlocks.csv", scene.export_interlocks)
     if "layout" in wanted:
         write(f"{stem}_layout.svg", lambda p: scene.export_layout(p, scale=args.scale, title=args.title))
         write(f"{stem}_layout.dxf", lambda p: scene.export_layout(p, title=args.title))
@@ -381,7 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
     p.set_defaults(func=cmd_simulate)
 
-    p = sub.add_parser("export", help="write the document set (project, python, bom, io, topology, plc, layout, usd, script, report)")
+    p = sub.add_parser("export", help="write the document set (project, python, bom, io, topology, plc, interlocks, layout, usd, script, report)")
     p.add_argument("cell")
     p.add_argument("--out", required=True, help="output directory")
     p.add_argument("--name", help="file stem (default: the cell file's stem)")

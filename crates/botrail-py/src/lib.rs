@@ -2311,7 +2311,18 @@ impl Scene {
     /// Adds a linear axis (door / lifter / indexer) moving the listed
     /// obstacles along `axis` at `speed`, positioned within `range` by
     /// `bt.seq.move_to`; await it with `bt.seq.device_done`.
-    #[pyo3(signature = (name, objects, axis, speed, range, position = 0.0))]
+    ///
+    /// `stops` names positions along the axis (`{"closed": 0.0, "open":
+    /// 0.76}`): `bt.seq.move_to(name, "open")` drives to one, and each is
+    /// a read-only input lane `<name>/<stop>` — ON while the axis stands
+    /// at it, off between stops — the limit switch an interlock waits on
+    /// (`bt.seq.signal("door/closed")`), and a DI on the I/O list.
+    ///
+    /// What the axis drives is checked against every robot each tick: a
+    /// leaf closing on an arm still inside is a `DeviceCollision` error
+    /// naming the device, the obstacle, the robot and the link.
+    #[pyo3(signature = (name, objects, axis, speed, range, position = 0.0, stops = None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_linear_axis(
         &self,
         name: &str,
@@ -2320,6 +2331,7 @@ impl Scene {
         speed: f64,
         range: [f64; 2],
         position: f64,
+        stops: Option<std::collections::BTreeMap<String, f64>>,
     ) -> PyResult<()> {
         let axis = nalgebra::Unit::try_new(nalgebra::Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
             .ok_or_else(|| PyValueError::new_err("axis must be a nonzero vector"))?;
@@ -2327,6 +2339,21 @@ impl Scene {
             return Err(PyValueError::new_err(format!(
                 "speed must be positive, got {speed}"
             )));
+        }
+        let mut named = Vec::new();
+        for (stop, at) in stops.unwrap_or_default() {
+            if stop.is_empty() || stop.contains('/') {
+                return Err(PyValueError::new_err(format!(
+                    "stop name {stop:?} must be non-empty and contain no `/`"
+                )));
+            }
+            if !at.is_finite() || at < range[0] - 1e-9 || at > range[1] + 1e-9 {
+                return Err(PyValueError::new_err(format!(
+                    "stop {stop:?} at {at} is outside the axis range [{}, {}]",
+                    range[0], range[1]
+                )));
+            }
+            named.push((stop, at));
         }
         self.hub.upsert_device(botrail_scene::seq::Device {
             name: name.to_string(),
@@ -2336,6 +2363,7 @@ impl Scene {
                 speed,
                 position,
                 range: (range[0], range[1]),
+                stops: named,
             },
         });
         Ok(())
@@ -2844,7 +2872,9 @@ impl Scene {
     // ------------------------------------------------------------- parts
 
     /// Pins a part — what the thing *is* commercially — to a resident or
-    /// group by name: a robot, a device, a sensor, an I/O node, an
+    /// group by name: a robot, a tool in its stack (by its BOM row name,
+    /// `arm/tool`, `arm/tool2` — the identity of a made bracket, or the
+    /// last word on a catalog one), a device, a sensor, an I/O node, an
     /// obstacle, or an obstacle group (everything under `name/` — an
     /// imported subtree, a generated fence). Identity is optional and
     /// free-form: `catalog` (`"id"` or `"id@revision"` or `(id,
@@ -2852,8 +2882,8 @@ impl Scene {
     /// `"structure.fence"`, ...), `description`, `qty` (how many the
     /// target stands for), and any further keywords or `attributes={...}`
     /// as free attributes (numbers are summed by `bom().total(key)`,
-    /// text is carried). Pass `kind=` (`"robot"`, `"device"`, `"sensor"`,
-    /// `"io_node"`, `"obstacle"`, `"group"`) when a name lives in several
+    /// text is carried). Pass `kind=` (`"robot"`, `"tool"`, `"device"`,
+    /// `"sensor"`, `"io_node"`, `"obstacle"`, `"group"`) when a name lives in several
     /// name spaces. Re-pinning replaces. Returns the kind resolved. The
     /// BOM (`bom()`) is derived from these plus the catalog identity of
     /// robots and tools.
@@ -2878,8 +2908,8 @@ impl Scene {
             None => None,
             Some(text) => Some(PartTargetKind::parse(text).ok_or_else(|| {
                 PyValueError::new_err(format!(
-                    "set_part: unknown kind {text:?} — use \"robot\", \"device\", \"sensor\", \
-                     \"io_node\", \"obstacle\" or \"group\""
+                    "set_part: unknown kind {text:?} — use \"robot\", \"tool\", \"device\", \
+                     \"sensor\", \"io_node\", \"obstacle\" or \"group\""
                 ))
             })?),
         };
@@ -3006,6 +3036,36 @@ impl Scene {
         let text = self.plcopen(sequences, name, cycle, task_interval_ms)?;
         std::fs::write(&path, text)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    // -------------------------------------------------- interlock table
+
+    /// The interlock table over `sequences` (every sequence by default):
+    /// one row per output a step switches — a signal, a device command, a
+    /// robot motion or ramp, a grasp — with the condition that admits the
+    /// step (the previous step's transition, an arm's condition, the
+    /// cycle's last transition for a first step), the steps it follows and
+    /// the inputs the condition reads, each classified (sensor, signal,
+    /// device lane, device, robot), a signal traced to the program and
+    /// step that writes it, an address where the host has it bound. The
+    /// control designer's interlock sheet, derived rather than typed.
+    #[pyo3(signature = (sequences = None))]
+    fn interlocks(&self, sequences: Option<Vec<String>>) -> PyResult<InterlockTable> {
+        let scene = self.hub.authored_snapshot();
+        let refs: Option<Vec<&str>> = sequences
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        let inner = scene
+            .interlock_table(refs.as_deref())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(InterlockTable { inner })
+    }
+
+    /// Writes `interlocks()` to `path`; the format follows the extension
+    /// (`.md`, `.csv`, `.json`).
+    #[pyo3(signature = (path, sequences = None))]
+    fn export_interlocks(&self, path: PathBuf, sequences: Option<Vec<String>>) -> PyResult<()> {
+        self.interlocks(sequences)?.save(path, None)
     }
 
     // ------------------------------------------------------ layout sheet
@@ -7431,10 +7491,93 @@ impl IoPoint {
 }
 
 /// One lint finding of the I/O map.
+/// The interlock table `Scene.interlocks()` derives: `rows` are plain
+/// dicts (`program`, `host`, `step`, `kind`, `target`, `output`,
+/// `condition`, `after`, `inputs`); `to_markdown()` / `to_csv()` render
+/// the same rows for people and spreadsheets.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct InterlockTable {
+    inner: botrail_scene::interlock::InterlockTable,
+}
+
+#[pymethods]
+impl InterlockTable {
+    /// The program set the table was taken over.
+    #[getter]
+    fn sequences(&self) -> Vec<String> {
+        self.inner.sequences.clone()
+    }
+
+    /// One dict per output: `program`, `host`, `step`, `kind`, `target`,
+    /// `output`, `condition`, `after` (the predecessor steps) and `inputs`
+    /// (`name`, `kind`, `written_by`, `address`).
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let value = serde_json::to_value(&self.inner.rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        json_to_py(py, &value)
+    }
+
+    /// Why hosts and addresses are missing, when the I/O map could not be
+    /// derived; `None` when it could.
+    #[getter]
+    fn io_error(&self) -> Option<String> {
+        self.inner.io_error.clone()
+    }
+
+    fn to_markdown(&self) -> String {
+        self.inner.to_markdown()
+    }
+
+    fn to_csv(&self) -> String {
+        self.inner.to_csv()
+    }
+
+    fn to_json(&self) -> String {
+        self.inner.to_json()
+    }
+
+    /// Writes the table to `path`; the format follows the extension
+    /// (`.md`, `.csv`, `.json`) unless `format` says otherwise.
+    #[pyo3(signature = (path, format = None))]
+    fn save(&self, path: PathBuf, format: Option<&str>) -> PyResult<()> {
+        let format = match format {
+            Some(f) => f.to_string(),
+            None => match path.extension().and_then(|e| e.to_str()) {
+                Some("md") | Some("markdown") => "md".to_string(),
+                Some("csv") => "csv".to_string(),
+                Some("json") => "json".to_string(),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "InterlockTable.save: unknown format {other:?} — use .md, .csv or .json"
+                    )))
+                }
+            },
+        };
+        let text = match format.as_str() {
+            "md" | "markdown" => self.inner.to_markdown(),
+            "csv" => self.inner.to_csv(),
+            "json" => self.inner.to_json(),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "InterlockTable.save: unknown format {other:?} — use md, csv or json"
+                )))
+            }
+        };
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.rows.len()
+    }
+}
+
 /// The cell report `Scene.cell_report()` gathers: robots, cycles, I/O,
-/// scenarios, BOM totals, footprint, deliverable digests. Every section
-/// is a plain dict / list (JSON-shaped); `to_markdown()` renders the same
-/// data for people.
+/// scenarios, machines, BOM totals, footprint, deliverable digests. Every
+/// section is a plain dict / list (JSON-shaped); `to_markdown()` renders
+/// the same data for people.
 #[pyclass(frozen, module = "botrail._core")]
 #[derive(Clone)]
 struct CellReport {
@@ -7489,6 +7632,14 @@ impl CellReport {
     #[getter]
     fn scenarios(&self, py: Python<'_>) -> PyResult<PyObject> {
         self.section(py, "scenarios")
+    }
+
+    /// The machine tools: `name`, `category`, `manufacturer`, `model`,
+    /// `catalog`, `door` (`name`, `drive`, `stroke_mm`, `speed`, `lanes`,
+    /// `driven`), `buttons`, `controller`, `programs`.
+    #[getter]
+    fn machines(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "machines")
     }
 
     /// BOM totals: `rows`, `unidentified`, `by_category`, `totals`.
@@ -8651,6 +8802,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IoReport>()?;
     m.add_class::<IoMap>()?;
     m.add_class::<Bom>()?;
+    m.add_class::<InterlockTable>()?;
     m.add_class::<CellReport>()?;
     m.add_class::<ToolpathReport>()?;
     m.add_class::<FeedReport>()?;

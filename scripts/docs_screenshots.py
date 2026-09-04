@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "examples" / d)
-                for d in ("basics", "export", "legged", "vehicles", "welding")]
+                for d in ("basics", "export", "legged", "machining", "vehicles", "welding")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
@@ -28,6 +28,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 from sequence_demo import BOX, TOUCH, build_cycle  # noqa: E402
 import agv_cell_demo  # noqa: E402
 import legged_patrol_demo  # noqa: E402
+import machine_tending_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -281,6 +282,56 @@ def main() -> None:
             time.sleep(6.0)   # into the first index: moving high, wires lit
             page.screenshot(path=OUT / "topology.png")
             print("wrote topology.png")
+            server.stop()
+
+        if want("machine_tending"):
+            # ---- the tending cell: the arm through the side door, mid-unload,
+            # the door's and the buttons' lanes below ---------------------------
+            scene, hs, tl = machine_tending_demo.bake()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(3.0)
+            scene.simulate_sequences(["tend", hs.program], max_duration=240.0)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            # The grasp on the finished part, the door slid to its open end.
+            t = tl.step_span("tend/grip").end
+            scene.set_joint_positions(list(tl.sample(t, robot="arm")), robot="arm")
+            for name in scene.obstacle_names:
+                if name.startswith("vmc/side_door/"):
+                    try:
+                        scene.set_obstacle_pose(name, *tl.object_pose(name, t))
+                    except ValueError:
+                        pass  # the door's rails stay put; only the leaf and its trim ride the axis
+            page.evaluate("window.__CAM = {pos: [3.6, -3.2, 2.6], look: [0.6, -0.4, 1.0]}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "machine_tending.png")
+            print("wrote machine_tending.png")
+            server.stop()
+
+        if want("machine_tending_hand"):
+            # ---- the multi-purpose hand: the fork on the handle, the door
+            # half open, the gripper and the pin hanging clear -------------
+            scene, hs, tl = machine_tending_demo.bake()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(3.0)
+            # The baked cycle arrives with the connection and plays; a pose
+            # set live would be overwritten by the next frame, so the studio
+            # is paused and its own seek bar put mid-slide — arm and leaf
+            # sampled together from the tracks.
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            span = tl.step_span("tend/slide_open")
+            t = (span.start + span.end) / 2
+            bands = page.locator(".timeline-bands").bounding_box()
+            page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+            page.evaluate("window.__CAM = {pos: [2.4, -1.9, 1.9], look: [0.9, -0.3, 1.1]}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "machine_tending_hand.png")
+            print("wrote machine_tending_hand.png")
             server.stop()
 
         browser.close()

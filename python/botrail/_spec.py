@@ -180,6 +180,32 @@ class Spec:
         rel = self.component(role).get("trim")
         return None if not rel else self.directory / str(rel)
 
+    @property
+    def mechanical(self) -> dict:
+        """The pack's `mechanical` section — footprint, height, mass, mount,
+        and for a machine the `envelope` a tending cell verifies against."""
+        value = self.manifest.get("mechanical") or {}
+        return value if isinstance(value, dict) else {}
+
+    def envelope(self, *keys: str, default: Any = None) -> Any:
+        """A value from `mechanical.envelope` by path —
+        `envelope("doors", "side", "width_mm")` — or `default` where the pack
+        does not carry it (the generator's own figure then stands)."""
+        node: Any = self.mechanical.get("envelope") or {}
+        for key in keys:
+            if not isinstance(node, dict) or key not in node:
+                return default
+            node = node[key]
+        return default if node is None else node
+
+    @property
+    def interface(self) -> Optional[dict]:
+        """The machine's control interface as the pack states it — a
+        template name and a signal table (data; the behaviour is authored
+        by `bt.tending.<template>`) — or `None` for a plain structure."""
+        value = self.manifest.get("interface")
+        return value if isinstance(value, dict) else None
+
     def specs(self) -> dict:
         """The datasheet numbers a generator does not use but a bill should
         carry — a rack's load per level, an ingress rating."""

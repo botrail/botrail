@@ -56,10 +56,13 @@ prints the [cell report](../guides/layout-and-report.md#the-cell-report).
 ## `botrail export <cell> --out DIR`
 
 Writes the document set — pick with `--project --python --bom --io
---topology --layout --usd --script --report`, or `--all` (the default when
-nothing is picked). Files are named after the cell (`--name` overrides the
-stem): `<stem>.botrail`, `<stem>.py`, `<stem>_bom.csv|.md`, `<stem>_io.csv`,
-`<stem>_topology.mmd`, `<stem>_layout.svg|.dxf` (`--scale` for the SVG),
+--topology --plc --interlocks --layout --usd --script --report`, or `--all`
+(the default when nothing is picked). Files are named after the cell
+(`--name` overrides the stem): `<stem>.botrail`, `<stem>.py`,
+`<stem>_bom.csv|.md`, `<stem>_io.csv`, `<stem>_topology.mmd`,
+`<stem>.plcopen.xml`, `<stem>_interlocks.md|.csv` (the [interlock
+table](../guides/io-map.md#the-interlock-table)), `<stem>_layout.svg|.dxf`
+(`--scale` for the SVG),
 `<stem>_<cycle>.usda` per baked cycle (`--fps`), `<stem>.script` (the robot
 program — a warning on stderr when the dialect cannot take the cell, e.g. a
 7-axis arm), and `<stem>_report.md|.json` last, with the digests of

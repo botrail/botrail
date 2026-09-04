@@ -32,6 +32,7 @@ which program, and which channel each point lands on (see
 | an internal signal that is only ever read | a **DI candidate** — an external contact (a gauge verdict, a selector switch, an E-stop healthy signal) | ④ |
 | a device commanded `start`/`stop` | a **DO** run coil; `advance` → `name.index` DO; `goto` → `name.dispatch` DO + `name.station` Word; `move_to` → `name.position` Word; `set_speed` → `name.speed` AO | ⑤ |
 | a device awaited with `device_done` | a **DI** (in position / arrived) | ⑤ |
+| a linear axis with named `stops` | a **DI** per stop, `<axis>/<stop>` — the limit switch at that end, read like a sensor | ⑤ |
 | a `Source` / `Sink` magazine | a *cosmetic* row — presentation, not counted, not linted | ⑤ |
 | a robot driven (`motion` / `ramp` / `toolpath`) by a program that does **not** live on that robot's own controller | `robot.start` DO + `robot.done` DI on the driving host; a `robot.program` Word when the program picks among several motions | ⑥ |
 | a program that only reads `robot_done("x")` from another host | `x.done` DI on the reader's host | ⑥ |
@@ -92,7 +93,11 @@ scene.declare_io("door_ch1", role="input", kind="safe_di", safety=True, pair="do
   safety module off a controller — its channels then take that
   controller's points. `channels=` is a list of dicts; the `bt.io`
   templates build them (`di8/do8/di16/do16(base=…)`, `safe_di8`, `word`,
-  `ao`, `ur_standard()`), and address dialects live there, in Python:
+  `ao`, `ur_standard()`), a catalog product brings its own
+  (`bt.io.from_catalog("universal_robots/ur/ur5e/r1")` reads the package's
+  `electrical.io` — the controller's channel table, or the template it
+  names; `bt.parts.remote_io(catalog=…)` builds a station's node the same
+  way), and address dialects live there, in Python:
   `base="%IX0.0"` counts byte.bit (IEC; Siemens `I0.0` / `Q0.0` the same
   way, `bt.io.siemens("di", 16)`), `bt.io.melsec("di", 16, "X10")` counts
   hex for the Q / iQ-R series (`octal=True` for FX: `X10 … X17, X20`),
@@ -460,6 +465,39 @@ The weld line's third placement reads, in part:
 and the `st1_done` block shows the pulse the station raises and resets in
 consecutive scans — `24.630–24.640 s` — which is the kind of thing a PLC
 programmer wants to know before the FAT, not during it.
+
+## The interlock table
+
+The other sheet a control designer keeps by hand — *what may not happen
+unless what* — is a projection of the sequences themselves:
+
+```python
+table = scene.interlocks()                     # or scene.interlocks(["vmc"])
+table.rows[0]["condition"]                     # '(RISING(vmc/panel/cycle_start) AND vmc/side_door/closed AND …)'
+scene.export_interlocks("cell_interlocks.md")  # .md / .csv / .json
+```
+
+One row per **output** a step switches — a signal written, a device
+command, a robot motion or ramp started, a grasp or release — with the
+**condition that admits the step**: the previous step's transition, an
+arm's condition for the first step of a branch, the OR of the arms' exits
+at a rejoin, and for a program's first step the cycle's last transition
+(`START OR …`). Conditions read as ST over scene names — `NOT mat`,
+`RISING(vmc/panel/unclamp)`, `INPOS(vmc/side_door)`, `T >= 20 s`,
+`DONE(enter)`, `IDLE(arm)`. Every input the condition reads is classified
+(sensor, signal, device lane, device, robot); a signal carries the
+`program/step` that writes it, so a handshake between two controllers
+reads across the table — the machine's `cycle_start` row names the
+robot-side step that pressed the button, the robot's `to_unclamp` row the
+machine's steps that drop `running`. Where the host has the point bound,
+the row carries `node.channel [address]`.
+
+The table is derived, not typed: it cannot drift from the SFC the PLCopen
+file carries or from the bake. `botrail export --interlocks` writes it
+with the document set, and the [machine tending](machine-tending.md#handing-over)
+guide shows the three guards a machining centre's program is written
+with — front door shut before the side door opens, the side door
+confirmed shut and no E-stop before a start — as its rows.
 
 ## In the studio
 

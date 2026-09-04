@@ -56,10 +56,18 @@ from the scene's parts (see [Parts and the BOM](../../guides/parts-and-bom.md)).
 
 ::: botrail.Bom
 
+## InterlockTable
+
+Returned by [`Scene.interlocks`][botrail.Scene.interlocks]: every output a
+step switches against the condition that admits the step (see
+[The interlock table](../../guides/io-map.md#the-interlock-table)).
+
+::: botrail.InterlockTable
+
 ## CellReport
 
 Returned by [`Scene.cell_report`][botrail.Scene.cell_report]: cycles, I/O,
-scenarios, BOM totals, footprint and deliverable digests in one page (see
-[Layout sheet and cell report](../../guides/layout-and-report.md)).
+scenarios, machines, BOM totals, footprint and deliverable digests in one
+page (see [Layout sheet and cell report](../../guides/layout-and-report.md)).
 
 ::: botrail.CellReport

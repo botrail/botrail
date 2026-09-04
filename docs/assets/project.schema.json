@@ -1160,7 +1160,7 @@
           ]
         },
         {
-          "description": "Moves the listed obstacles along `axis` within `range`.",
+          "description": "Moves the listed obstacles along `axis` within `range`; `stops`\nare its named positions (each a `<axis>/<stop>` input lane).",
           "type": "object",
           "properties": {
             "axis": {
@@ -1198,6 +1198,13 @@
             "speed": {
               "type": "number",
               "format": "double"
+            },
+            "stops": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/LiftStopMsg"
+              }
             }
           },
           "required": [
@@ -2719,6 +2726,11 @@
           "description": "A LiDAR scanner (the purchasable `sensor.lidar` article).",
           "type": "string",
           "const": "lidar"
+        },
+        {
+          "description": "An end-effector in a robot's tool stack, by the name its BOM row\ncarries (`<robot>/tool`, `<robot>/tool2`, `<robot>/tool/tool3` for\na tool that is itself a stack). A catalog tool brings its own\nidentity; a made one — a bracket welded on from a URDF string —\ngets it pinned here.",
+          "type": "string",
+          "const": "tool"
         }
       ]
     },

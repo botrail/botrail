@@ -948,7 +948,10 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
     // ---- programs ----------------------------------------------------------
     let mut stubs: BTreeSet<&'static str> = BTreeSet::new();
     let mut pous = String::new();
-    let mut instances_xml = String::new();
+    // Program instances per controller, in first-seen order: a cell whose
+    // programs run on two hosts (the robot's PLC and the machine's CNC)
+    // exports one resource per host, so each side's IDE takes its own.
+    let mut resources: Vec<(String, String)> = Vec::new();
     for name in &names {
         let sequence = scene
             .sequences()
@@ -1054,12 +1057,15 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
             elements.join(""),
             cdata(&format!("botrail sequence `{name}`"))
         );
-        let _ = write!(
-            instances_xml,
+        let instance = format!(
             "<pouInstance name=\"{}_inst\" typeName=\"{}\"/>",
             xml_attr(&program),
             xml_attr(&program)
         );
+        match resources.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, xml)) => xml.push_str(&instance),
+            None => resources.push((host.clone(), instance)),
+        }
         // Every used variable that is not a derived point becomes a global
         // too (a fallback identifier), typed BOOL.
         for var in externals {
@@ -1133,11 +1139,29 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
         out,
         "<types><dataTypes/><pous>{stub_pous}{pous}</pous></types>"
     );
+    // Resources: `plc` for a single controller (the export of old); one per
+    // host otherwise, named after it (`<cell>` → `plc`, `vmc/cnc` →
+    // `vmc_cnc`). The globals are shared at the configuration level — a
+    // handshake signal is one variable both sides see.
+    let mut resources_xml = String::new();
+    let single = resources.len() <= 1;
+    for (host, instances_xml) in &resources {
+        let resource = if single || host == iomap::CELL_HOST {
+            "plc".to_string()
+        } else {
+            ident(host.trim_matches(['<', '>']))
+        };
+        let _ = write!(
+            resources_xml,
+            "<resource name=\"{}\"><task name=\"main\" interval=\"T#{}ms\" priority=\"0\">{instances_xml}</task></resource>",
+            xml_attr(&resource),
+            options.task_interval_ms
+        );
+    }
     let _ = writeln!(
         out,
-        "<instances><configurations><configuration name=\"{}\"><resource name=\"plc\"><task name=\"main\" interval=\"T#{}ms\" priority=\"0\">{instances_xml}</task><globalVars>{globals_xml}</globalVars></resource></configuration></configurations></instances>",
-        xml_attr(&ident(&options.name)),
-        options.task_interval_ms
+        "<instances><configurations><configuration name=\"{}\">{resources_xml}<globalVars>{globals_xml}</globalVars></configuration></configurations></instances>",
+        xml_attr(&ident(&options.name))
     );
     out.push_str("</project>\n");
     Ok(out)

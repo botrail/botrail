@@ -12,6 +12,7 @@ pub mod gait;
 pub mod gcode;
 pub mod grasp;
 pub mod handshake;
+pub mod interlock;
 pub mod iomap;
 pub mod layout;
 pub mod motion;

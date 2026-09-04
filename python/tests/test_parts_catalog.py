@@ -1449,3 +1449,573 @@ def test_a_hand_written_photoelectric_sensor_is_one_line(eye: Path) -> None:
     assert (lo[1], hi[1]) == (pytest.approx(-0.02), pytest.approx(0.0))        # looking along +y
     row = rows(scene)["eye"]
     assert row["model"] == "PZ-G" and row["category"] == "sensor.photoelectric"
+
+
+# A proximity switch: a thread size, shielded or not, and the few
+# millimetres it reaches — one series, the range a function of the size.
+PROX_MANIFEST = """
+schema_version: '0.1'
+id: acme/prox/e2/r1
+kind: spec
+category: sensor.proximity
+name: E2 Switch
+manufacturer:
+  name: ACME Sensing
+distribution: public
+specs:
+  sensing_range_mm: 16
+configuration:
+  generator: proximity
+  params:
+    size: {values: [M8, M12], default: M12}
+    shield: {values: [shielded, unshielded], default: shielded}
+    sensing_range_mm: {values: [4, 8, 9, 16], default: 9}
+    output: {values: [PNP, NPN], default: PNP}
+  components:
+    - role: sensor
+      category: sensor.proximity
+      variants:
+        - {size: M8, shield: shielded, sensing_range_mm: 4, output: PNP, part_number: E2-X4B8, kg: 0.085}
+        - {size: M8, shield: unshielded, sensing_range_mm: 8, output: PNP, part_number: E2-X8MB8, kg: 0.085}
+        - {size: M12, shield: shielded, sensing_range_mm: 9, output: PNP, part_number: E2-X9B12, kg: 0.095}
+        - {size: M12, shield: shielded, sensing_range_mm: 9, output: NPN, part_number: E2-X9C12, kg: 0.095}
+        - {size: M12, shield: unshielded, sensing_range_mm: 16, output: PNP, part_number: E2-X16MB12, kg: 0.095}
+  rules:
+    body_mm_by_size: {M8: [8, 38], M12: [12, 47]}
+"""
+
+# A power supply is one series sold by rating; the box grows with it.
+PSU_MANIFEST = """
+schema_version: '0.1'
+id: acme/psu/s8/r1
+kind: spec
+category: power_supply
+name: S8 Supply
+manufacturer:
+  name: ACME Power
+distribution: public
+specs:
+  output_v: 24
+  output_a: 20
+electrical:
+  power: {output_v: 24, output_a: 10, output_w: 240, rail: DIN35}
+configuration:
+  generator: power_supply
+  params:
+    output_a: {values: [2.5, 10, 20], default: 10}
+  components:
+    - role: unit
+      category: power_supply
+      variants:
+        - {output_a: 2.5, part_number: S8-060, kg: 0.25}
+        - {output_a: 10, part_number: S8-240, kg: 0.7}
+        - {output_a: 20, part_number: S8-480, kg: 1.15}
+  rules:
+    size_mm_by_output_a: {2.5: [32, 90, 90], 10: [38, 122, 124], 20: [60, 122, 124]}
+"""
+
+# A remote I/O station: a coupler and as many terminal units as ordered,
+# the logic picking the unit models.
+RIO_MANIFEST = """
+schema_version: '0.1'
+id: acme/rio/nx/r1
+kind: spec
+category: io.remote
+name: NX Station
+manufacturer:
+  name: ACME Control
+distribution: public
+electrical:
+  supply: {voltage_v: 24}
+  bus: [ethercat]
+  io:
+    channels:
+      - {id: DI0, kind: di, port: 0}
+      - {id: DO0, kind: do, port: 0}
+configuration:
+  generator: remote_io
+  params:
+    logic: {values: [PNP, NPN], default: PNP}
+    di_units: {min: 0, max: 4, step: 1, default: 1}
+    do_units: {min: 0, max: 4, step: 1, default: 1}
+  components:
+    - role: coupler
+      category: io.remote
+      part_number: NX-C
+      dimensions_mm: {width: 46, height: 100, depth: 71}
+      mass: {base_kg: 0.17}
+    - role: di
+      category: io.remote
+      dimensions_mm: {width: 12, height: 100, depth: 71, points: 16}
+      variants:
+        - {logic: PNP, part_number: NX-ID-P, kg: 0.065}
+        - {logic: NPN, part_number: NX-ID-N, kg: 0.065}
+    - role: do
+      category: io.remote
+      dimensions_mm: {width: 12, height: 100, depth: 71, points: 16}
+      variants:
+        - {logic: PNP, part_number: NX-OD-P, kg: 0.07}
+        - {logic: NPN, part_number: NX-OD-N, kg: 0.07}
+"""
+
+
+@pytest.fixture()
+def prox(tmp_path: Path) -> Path:
+    directory = tmp_path / "prox"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(PROX_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def psu(tmp_path: Path) -> Path:
+    directory = tmp_path / "psu"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(PSU_MANIFEST)
+    return directory
+
+
+@pytest.fixture()
+def rio(tmp_path: Path) -> Path:
+    directory = tmp_path / "rio"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(RIO_MANIFEST)
+    return directory
+
+
+def test_the_proximity_switch_reaches_as_far_as_its_model_does(prox: Path) -> None:
+    """The beam is the model's sensing range, the barrel the thread size,
+    and the row records the range chosen — not the series figure."""
+    scene = scene_()
+    built = bt.parts.proximity(scene, "prox", frm=(0.0, 0.0, 0.5), catalog=prox)
+    assert built.obstacles == ["prox/body"] and built.sensors == ["prox"]
+    lo, hi = scene.obstacle_bounds("prox/body")
+    assert (lo[0], hi[0]) == (pytest.approx(-0.047), pytest.approx(0.0))   # M12 x 47 behind the face
+    assert round(hi[1] - lo[1], 3) == 0.012
+    row = rows(scene)["prox"]
+    assert row["model"] == "E2-X9B12" and row["category"] == "sensor.proximity"
+    assert row["attributes"]["sensing_range_mm"] == pytest.approx(9.0)
+    assert row["attributes"]["mass_kg"] == pytest.approx(0.095)
+    # The axes by name; a barrel standing on end when it looks down.
+    small = scene_()
+    bt.parts.proximity(small, "prox", frm=(0.0, 0.0, 0.5), direction=(0.0, 0.0, -1.0), catalog=prox,
+                       size="M8", sensing_range_mm=4)
+    lo, hi = small.obstacle_bounds("prox/body")
+    assert (lo[2], hi[2]) == (pytest.approx(0.5), pytest.approx(0.538))
+    assert rows(small)["prox"]["model"] == "E2-X4B8"
+    with pytest.raises(ValueError, match="no sensor is sold at"):
+        bt.parts.proximity(scene_(), "prox", frm=(0.0, 0.0, 0.5), catalog=prox, size="M8", sensing_range_mm=16)
+
+
+def test_the_power_supply_is_ordered_by_rating(psu: Path) -> None:
+    """The rating chosen sizes the box and lands on the row as `output_a` —
+    what the cell's `current_a` total is checked against."""
+    scene = scene_()
+    built = bt.parts.power_supply(scene, "psu", position=(0.0, 0.0, 0.5), catalog=psu)
+    assert built.obstacles == ["psu/body"]
+    lo, hi = scene.obstacle_bounds("psu/body")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3), round(hi[2] - lo[2], 3)) == (0.038, 0.122, 0.124)
+    assert lo[2] == pytest.approx(0.5)
+    row = rows(scene)["psu"]
+    assert row["model"] == "S8-240" and row["category"] == "power_supply"
+    assert row["attributes"]["output_a"] == pytest.approx(10.0)
+    assert row["attributes"]["output_v"] == pytest.approx(24.0)
+    assert row["attributes"]["mass_kg"] == pytest.approx(0.7)
+    big = scene_()
+    bt.parts.power_supply(big, "psu", position=(0.0, 0.0, 0.0), catalog=psu, output_a=20)
+    assert rows(big)["psu"]["model"] == "S8-480"
+    assert rows(big)["psu"]["attributes"]["output_a"] == pytest.approx(20.0)
+    with pytest.raises(ValueError, match="output_a=5 is not available"):
+        bt.parts.power_supply(scene_(), "psu", position=(0.0, 0.0, 0.0), catalog=psu, output_a=5)
+
+
+def test_the_remote_io_station_counts_its_points(rio: Path) -> None:
+    """A coupler plus the units ordered: one I/O node with a channel per
+    point, the coupler as the part, every unit its own line — merged by
+    model with the quantity summed."""
+    scene = scene_()
+    built = bt.parts.remote_io(scene, "rio", position=(0.0, 0.0, 0.5), catalog=rio, di_units=2, do_units=1)
+    assert built.obstacles == ["rio/coupler", "rio/di0", "rio/di1", "rio/do0"] and built.nodes == ["rio"]
+    lo, hi = scene.obstacle_bounds("rio/coupler")
+    assert (lo[0], hi[0]) == (pytest.approx(-0.023), pytest.approx(0.023))
+    lo, hi = scene.obstacle_bounds("rio/do0")
+    assert (lo[0], hi[0]) == (pytest.approx(0.047), pytest.approx(0.059))   # after the two DI units
+    table = rows(scene)
+    assert table["rio"]["model"] == "NX-C" and table["rio"]["category"] == "io.remote"
+    assert table["rio"]["attributes"]["di"] == pytest.approx(32.0)
+    assert table["rio"]["attributes"]["do"] == pytest.approx(16.0)
+    assert table["rio/di0"]["model"] == "NX-ID-P" and table["rio/di0"]["qty"] == 2
+    assert table["rio/do0"]["model"] == "NX-OD-P" and table["rio/do0"]["qty"] == 1
+    npn = scene_()
+    bt.parts.remote_io(npn, "rio", position=(0.0, 0.0, 0.5), catalog=rio, logic="NPN", di_units=0)
+    assert rows(npn)["rio/do0"]["model"] == "NX-OD-N"
+    assert "rio/di0" not in rows(npn)
+    with pytest.raises(ValueError, match="di_units=9 is out of range"):
+        bt.parts.remote_io(scene_(), "rio", position=(0.0, 0.0, 0.5), catalog=rio, di_units=9)
+    built.remove(scene)
+    assert "rio" not in rows(scene)
+
+
+def test_io_channels_come_from_the_catalog(rio: Path, tmp_path: Path) -> None:
+    """`bt.io.from_catalog` reads the manifest's electrical layer: the
+    channels listed, or the template it names."""
+    chans = bt.io.from_catalog(rio)
+    assert chans == [{"id": "DI0", "kind": "di", "port": 0}, {"id": "DO0", "kind": "do", "port": 0}]
+    assert bt.io.electrical(rio)["bus"] == ["ethercat"]
+    ur = tmp_path / "ur"
+    ur.mkdir()
+    (ur / "manifest.yaml").write_text("id: acme/arm/ur/r1\nelectrical:\n  io:\n    standard: ur\n")
+    assert bt.io.from_catalog(ur) == bt.io.ur_standard()
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "manifest.yaml").write_text("id: acme/arm/bare/r1\n")
+    with pytest.raises(ValueError, match="no electrical.io.channels"):
+        bt.io.from_catalog(bare)
+
+
+# ------------------------------------------------------------ machine tending
+
+VMC_MANIFEST = """
+schema_version: '0.1'
+id: fanuc/robodrill/alpha-d21mib5-plus/r1
+kind: spec
+category: machine_tool.vmc
+name: ROBODRILL α-D21MiB5 Plus
+manufacturer:
+  name: FANUC
+distribution: public
+specs:
+  travel_x_mm: 500
+  mass_kg: 2000
+mechanical:
+  footprint_mm: [1615, 2108]
+  height_mm: 2137
+  mass_kg: 2000
+  mount: floor
+  envelope:
+    table: {size_mm: [650, 400], height_mm: 900}
+    head: {nose_to_table_mm: [250, 580]}
+    chamber_mm: 1300
+    doors:
+      front: {width_mm: 730, height_mm: 869, sill_mm: 827, kind: sliding}
+      side: {width_mm: 705, height_mm: 869, sill_mm: 827, kind: sliding, travel_mm: 760}
+configuration:
+  generator: machine_tool
+  params:
+    column_mm: {values: [0, 100, 200], default: 0}
+    side_door: {values: [air, servo], default: servo}
+    door_side: {values: [left, right], default: right}
+  components:
+    - role: body
+      category: machine_tool.vmc
+      part_number: "α-D21MiB5 Plus"
+      mass: {base_kg: 2000.0}
+    - role: side_door
+      category: machine_tool.door
+      variants:
+        - {side_door: air, part_number: "Side auto door (air cylinder)", kg: 80.0}
+        - {side_door: servo, part_number: "Side auto door (servo)", kg: 80.0}
+    - role: panel
+      category: hmi.panel
+      part_number: "iHMI operator panel"
+    - role: button
+      category: hmi.button
+      part_number: "iHMI panel switch"
+    - role: estop
+      category: hmi.button
+      part_number: "Emergency stop switch (panel)"
+  behavior:
+    door_open_s_air: 2.0
+    door_open_s_servo: 0.8
+interface:
+  template: fanuc_ri2
+  signals:
+    - {id: SI9_6, role: input, meaning: side_door_closed}
+    - {id: M60, role: mcode, meaning: service_request}
+"""
+
+BUTTON_BOX_MANIFEST = """
+schema_version: '0.1'
+id: botrail/hmi/button-box-22/r1
+kind: spec
+category: hmi.panel
+name: 22 mm Pushbutton Box
+manufacturer:
+  name: botrail
+distribution: public
+configuration:
+  generator: operator_panel
+  params:
+    positions: {values: [2, 4, 6], default: 4}
+  components:
+    - role: box
+      category: hmi.panel
+      variants:
+        - {positions: 2, part_number: "BB22-2", kg: 0.9}
+        - {positions: 4, part_number: "BB22-4", kg: 1.4}
+        - {positions: 6, part_number: "BB22-6", kg: 1.9}
+      dimensions_mm: {thickness: 30, pitch: 45, proud: 10}
+    - role: button
+      category: hmi.button
+      part_number: "PB22-{positions}"
+      dimensions_mm: {cap: 28.5, travel: 2.6}
+      mass: {base_kg: 0.0, per_mm: {positions: 0.04}}
+    - role: estop
+      category: hmi.button
+      part_number: "ES22-40"
+      mass: {base_kg: 0.09}
+  rules:
+    size_mm_by_positions: {"2": [160, 110], "4": [200, 160], "6": [250, 160]}
+"""
+
+VISE_MANIFEST = """
+schema_version: '0.1'
+id: botrail/fixture/vise-125/r1
+kind: spec
+category: fixture.vise
+name: Precision Machine Vise
+manufacturer:
+  name: botrail
+distribution: public
+configuration:
+  generator: vise
+  params:
+    jaw_width_mm: {values: [100, 125, 160], default: 125}
+  components:
+    - role: vise
+      category: fixture.vise
+      variants:
+        - {jaw_width_mm: 100, part_number: "VQ-100", kg: 8.0}
+        - {jaw_width_mm: 125, part_number: "VQ-125", kg: 12.0}
+        - {jaw_width_mm: 160, part_number: "VQ-160", kg: 21.0}
+      dimensions_mm: {jaw_height: 45, jaw_thickness: 30, body_height: 60, body_length: 360}
+  rules:
+    max_opening_mm_by_jaw: {"100": 120, "125": 150, "160": 200}
+"""
+
+
+LATHE_MANIFEST = """
+schema_version: '0.1'
+id: haas/st/st-10/r1
+kind: spec
+category: machine_tool.lathe
+name: ST-10
+manufacturer:
+  name: Haas
+distribution: public
+specs:
+  chuck_mm: 165
+  mass_kg: 3585
+mechanical:
+  footprint_mm: [3200, 1780]
+  height_mm: 2060
+  mass_kg: 3585
+  mount: floor
+  envelope:
+    spindle: {x_mm: -550, depth_mm: 500, height_mm: 1050}
+    turret: {x_mm: 400, y_mm: 400, z_mm: 450}
+    chamber_depth_mm: 1000
+    doors:
+      front: {width_mm: 900, height_mm: 700, sill_mm: 800, kind: sliding, travel_mm: 950}
+configuration:
+  generator: lathe
+  params:
+    front_door: {values: [air, servo], default: air}
+  components:
+    - role: body
+      category: machine_tool.lathe
+      part_number: "ST-10"
+      mass: {base_kg: 3585.0}
+    - role: front_door
+      category: machine_tool.door
+      variants:
+        - {front_door: air, part_number: "Auto door (air)", kg: 60.0}
+        - {front_door: servo, part_number: "Auto door (servo)", kg: 65.0}
+    - role: panel
+      category: hmi.panel
+      part_number: "Pendant"
+    - role: button
+      category: hmi.button
+      part_number: "Pendant key"
+    - role: estop
+      category: hmi.button
+      part_number: "Pendant E-stop"
+  behavior:
+    door_open_s_air: 1.9
+    door_open_s_servo: 1.2
+interface:
+  template: haas_autodoor
+  signals:
+    - {id: M80, role: mcode, meaning: door_open}
+"""
+
+CHUCK_MANIFEST = """
+schema_version: '0.1'
+id: botrail/fixture/chuck-3j/r1
+kind: spec
+category: fixture.chuck
+name: Three-Jaw Power Chuck
+manufacturer:
+  name: botrail
+distribution: public
+configuration:
+  generator: chuck
+  params:
+    diameter_mm: {values: [165, 210, 254], default: 165}
+  components:
+    - role: body
+      category: fixture.chuck
+      variants:
+        - {diameter_mm: 165, part_number: "PC-06", kg: 22.0}
+        - {diameter_mm: 210, part_number: "PC-08", kg: 38.0}
+        - {diameter_mm: 254, part_number: "PC-10", kg: 60.0}
+  rules:
+    max_opening_mm_by_diameter: {"165": 52, "210": 75, "254": 91}
+"""
+
+def _pack(tmp_path: Path, name: str, manifest: str) -> Path:
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(manifest)
+    return directory
+
+
+def test_a_machine_tool_is_ordered_from_its_envelope_pack(tmp_path: Path) -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    pack = _pack(tmp_path, "vmc", VMC_MANIFEST)
+    vmc = bt.parts.machine_tool(scene, "vmc", catalog=pack, column_mm=100, side_door="air", door_side="left")
+    # The envelope: body from the footprint plus the column, the opening,
+    # the table at 0.90, the head at nose-to-table max.
+    assert scene.obstacle_bounds("vmc/shell/top")[1][2] == pytest.approx(2.237)
+    lo, hi = scene.obstacle_bounds("vmc/side_door/leaf")
+    assert hi[0] < scene.obstacle_bounds("vmc/shell/far")[0][0]      # the door on the left
+    assert hi[1] - lo[1] == pytest.approx(0.705 + 0.10)
+    assert scene.obstacle_bounds("vmc/table")[1][2] == pytest.approx(0.90)
+    assert scene.obstacle_bounds("vmc/head")[0][2] == pytest.approx(1.48)
+    assert vmc.door_travel == pytest.approx(0.76) and vmc.door == "vmc/side_door"
+    # The interface rides on the built machine, and the template checks it.
+    assert vmc.interface["template"] == "fanuc_ri2"
+    hs = bt.tending.fanuc_ri2(scene, vmc, cycle_s=1.0)
+    assert hs.template == "fanuc_ri2"
+    # An air door runs its 760 mm in the published 2 s.
+    sq = scene.sequence("door")
+    sq.step("open", actions=[bt.seq.move_to(vmc.door, "open")], transition=bt.seq.device_done(vmc.door))
+    tl = scene.simulate_sequence("door")
+    assert tl.signal("vmc/side_door/open").rising_edges()[0] == pytest.approx(2.0, abs=0.02)
+    # The bill: every article with the pack's number and the catalog id.
+    by = rows(scene)
+    assert (by["vmc"]["model"], by["vmc"]["manufacturer"]) == ("α-D21MiB5 Plus", "FANUC")
+    assert by["vmc"]["catalog"].startswith("fanuc/robodrill/alpha-d21mib5-plus/r1")
+    assert by["vmc"]["attributes"]["column_mm"] == "100" and by["vmc"]["attributes"]["mass_kg"] == 2000
+    assert by["vmc/side_door"]["model"] == "Side auto door (air cylinder)"
+    assert by["vmc/panel"]["model"] == "iHMI operator panel"
+    # A drive nobody sells is refused with the ones that are.
+    with pytest.raises(ValueError, match="side_door=hydraulic is not available"):
+        bt.parts.machine_tool(scene, "vmc2", catalog=pack, side_door="hydraulic")
+    # The panel's switches carry the pack's names; no side door at all is
+    # `door=None` — outside what the pack sells, so nothing is ordered for it.
+    assert by["vmc/panel/estop"]["model"] == "Emergency stop switch (panel)"
+    assert by["vmc/panel/cycle_start"]["model"] == "iHMI panel switch"
+    assert by["vmc/panel/cycle_start"]["catalog"].startswith("fanuc/robodrill/") and by["vmc/panel/cycle_start"]["qty"] == 3
+    alone = scene_()
+    alone.set_robot_base_pose((4.0, 0.0, 0.0))
+    plain = bt.parts.machine_tool(alone, "vmc3", catalog=pack, door=None)
+    assert plain.door is None and plain.door_lanes is None and "vmc3/shell/near" in plain.obstacles
+    # A door a robot slides is the pack's leaf without its drive: the
+    # opening, the sill and the stroke stand, the limit switches read the
+    # loose leaf, and no drive is ordered — the row keeps the catalog id.
+    byhand = scene_()
+    byhand.set_robot_base_pose((4.0, 0.0, 0.0))
+    loose = bt.parts.machine_tool(byhand, "vmc4", catalog=pack, door="manual")
+    assert loose.door is None and loose.door_lanes == ("vmc4/side_door/closed", "vmc4/side_door/open")
+    assert loose.door_travel == pytest.approx(0.76) and "vmc4/side_door/leaf" in loose.obstacles
+    row = rows(byhand)["vmc4/side_door"]
+    assert row["catalog"].startswith("fanuc/robodrill/") and row["attributes"]["drive"] == "manual"
+    assert not row.get("model")
+    assert "side_door" not in rows(alone)["vmc3"]["attributes"]
+    assert not any(row["category"] == "machine_tool.door" for row in alone.bom().rows)
+
+
+def test_a_pushbutton_box_is_ordered_by_its_positions(tmp_path: Path) -> None:
+    scene = scene_()
+    pack = _pack(tmp_path, "box", BUTTON_BOX_MANIFEST)
+    panel = bt.parts.operator_panel(scene, "hmi", (0.0, 0.6, 1.0), catalog=pack,
+                                    buttons=("cycle_start", "clamp", "unclamp", "estop"))
+    # A 4-position box: 200 x 160 face, 45 mm pitch, 2.6 mm of travel.
+    lo, hi = scene.obstacle_bounds("hmi/plate")
+    assert (hi[0] - lo[0], hi[2] - lo[2]) == pytest.approx((0.20, 0.16))
+    (ax, _, _), _ = scene.frame("hmi/cycle_start")
+    (bx, _, _), _ = scene.frame("hmi/clamp")
+    assert bx - ax == pytest.approx(0.045)
+    by = rows(scene)
+    assert (by["hmi"]["model"], by["hmi"]["attributes"]["mass_kg"]) == ("BB22-4", 1.4)
+    # The buttons merge into one line of the pack's article, the E-stop is its own.
+    button_rows = [r for r in scene.bom().rows if r["category"] == "hmi.button"]
+    assert sorted((r["model"], r["qty"]) for r in button_rows) == [("ES22-40", 1), ("PB22-4", 3)]
+    assert all(r["catalog"].startswith("botrail/hmi/button-box-22/r1") for r in button_rows)
+    with pytest.raises(ValueError, match="positions=3 is not available"):
+        bt.parts.operator_panel(scene, "hmi2", (0.0, 1.6, 1.0), catalog=pack, buttons=("a", "b", "c"))
+    assert panel.sensors == ["hmi/cycle_start", "hmi/clamp", "hmi/unclamp", "hmi/estop"]
+
+
+def test_a_vise_is_ordered_by_its_jaw_width(tmp_path: Path) -> None:
+    scene = scene_()
+    pack = _pack(tmp_path, "vise", VISE_MANIFEST)
+    bt.parts.vise(scene, "vise", (1.0, 0.5, 0.9), catalog=pack, jaw_width=0.160, opening=0.18)
+    fixed = scene.obstacle_bounds("vise/jaw_fixed")
+    assert fixed[1][0] - fixed[0][0] == pytest.approx(0.16)
+    assert fixed[1][2] - fixed[0][2] == pytest.approx(0.045)      # the pack's jaw height
+    by = rows(scene)
+    assert (by["vise"]["model"], by["vise"]["attributes"]["mass_kg"], by["vise"]["attributes"]["max_opening_mm"]) == ("VQ-160", 21.0, 200)
+    # An opening past what that jaw width allows, and a width nobody sells.
+    with pytest.raises(ValueError, match="opens 150 mm at most"):
+        bt.parts.vise(scene, "v2", (2.0, 0.5, 0.9), catalog=pack, opening=0.18)
+    with pytest.raises(ValueError, match="jaw_width_mm=140 is not available"):
+        bt.parts.vise(scene, "v3", (3.0, 0.5, 0.9), catalog=pack, jaw_width=0.14)
+
+
+def test_a_lathe_and_a_chuck_are_ordered_from_their_packs(tmp_path: Path) -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((-0.55, -3.0, 0.0))
+    pack = _pack(tmp_path, "lathe", LATHE_MANIFEST)
+    lathe = bt.parts.lathe(scene, "lathe", catalog=pack, front_door="servo")
+    # The envelope from the pack: body, opening, spindle, stroke.
+    assert scene.obstacle_bounds("lathe/rear")[1][2] == pytest.approx(2.06)
+    lo, hi = scene.obstacle_bounds("lathe/front_door/leaf")
+    assert hi[0] - lo[0] == pytest.approx(1.0) and (lo[2], hi[2]) == pytest.approx((0.75, 1.55))
+    (sp, _), _ = scene.frame("lathe/spindle"), None
+    assert sp == pytest.approx((-0.55, -0.89 + 0.06 + 0.50, 1.05), abs=1e-6)
+    assert lathe.door == "lathe/front_door" and lathe.door_travel == pytest.approx(0.95)
+    assert lathe.interface["template"] == "haas_autodoor"
+    # A servo door runs its 950 mm in the published 1.2 s.
+    sq = scene.sequence("door")
+    sq.step("open", actions=[bt.seq.move_to(lathe.door, "open")], transition=bt.seq.device_done(lathe.door))
+    tl = scene.simulate_sequence("door")
+    assert tl.signal("lathe/front_door/open").rising_edges()[0] == pytest.approx(1.2, abs=0.02)
+    # The template the pack states runs on it; the other is refused.
+    hs = bt.tending.haas_autodoor(scene, lathe, cycle_s=1.0)
+    assert hs.template == "haas_autodoor" and hs.signal("door_open") == "lathe/front_door/open"
+    with pytest.raises(ValueError, match="speaks `haas_autodoor`"):
+        bt.tending.fanuc_ri2(scene, lathe)
+    by = rows(scene)
+    assert by["lathe"]["catalog"].startswith("haas/st/st-10/r1") and by["lathe"]["model"] == "ST-10"
+    assert by["lathe/front_door"]["model"] == "Auto door (servo)"
+    assert by["lathe/panel/estop"]["model"] == "Pendant E-stop"
+    # A door a robot slides: the pack's leaf, no drive ordered.
+    other = scene_()
+    other.set_robot_base_pose((-0.55, -3.0, 0.0))
+    loose = bt.parts.lathe(other, "lathe", catalog=pack, door="manual")
+    assert loose.door is None and loose.door_lanes == ("lathe/front_door/closed", "lathe/front_door/open")
+    assert not rows(other)["lathe/front_door"].get("model")
+    # The chuck: its diameter matched against the ones sold, the maximum
+    # opening from the pack; a size nobody sells is refused with the list.
+    cpack = _pack(tmp_path, "chuck", CHUCK_MANIFEST)
+    chuck = bt.parts.chuck(other, "chuck", *other.frame("lathe/spindle"), catalog=cpack, diameter=0.210, opening=0.070)
+    row = rows(other)["chuck"]
+    assert row["model"] == "PC-08" and row["attributes"]["mass_kg"] == 38 and row["attributes"]["max_opening_mm"] == 75
+    assert chuck.frames == ["chuck/face"]
+    with pytest.raises(ValueError, match="diameter_mm=200 is not available"):
+        bt.parts.chuck(other, "c2", (0.0, 3.0, 1.0), catalog=cpack, diameter=0.200)
+    with pytest.raises(ValueError, match="past the 52 mm maximum opening"):
+        bt.parts.chuck(other, "c3", (0.0, 3.0, 1.0), catalog=cpack, opening=0.060)

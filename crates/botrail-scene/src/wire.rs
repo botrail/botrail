@@ -804,13 +804,16 @@ pub enum DeviceKindMsg {
         velocity: [f64; 3],
         running: bool,
     },
-    /// Moves the listed obstacles along `axis` within `range`.
+    /// Moves the listed obstacles along `axis` within `range`; `stops`
+    /// are its named positions (each a `<axis>/<stop>` input lane).
     LinearAxis {
         objects: Vec<String>,
         axis: [f64; 3],
         speed: f64,
         position: f64,
         range: [f64; 2],
+        #[serde(default)]
+        stops: Vec<LiftStopMsg>,
     },
     /// Feeds parked carriers onto the line every `interval` seconds.
     Source {
@@ -2350,12 +2353,20 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 speed,
                 position,
                 range,
+                stops,
             } => DeviceKindMsg::LinearAxis {
                 objects: objects.clone(),
                 axis: [axis.x, axis.y, axis.z],
                 speed: *speed,
                 position: *position,
                 range: [range.0, range.1],
+                stops: stops
+                    .iter()
+                    .map(|(name, at)| LiftStopMsg {
+                        name: name.clone(),
+                        at: *at,
+                    })
+                    .collect(),
             },
             DeviceKind::Source {
                 pool,
@@ -2478,6 +2489,7 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 speed,
                 position,
                 range,
+                stops,
             } => DeviceKind::LinearAxis {
                 objects: objects.clone(),
                 axis: nalgebra::Unit::try_new(Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
@@ -2485,6 +2497,7 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 speed: *speed,
                 position: *position,
                 range: (range[0], range[1]),
+                stops: stops.iter().map(|s| (s.name.clone(), s.at)).collect(),
             },
             DeviceKindMsg::Source {
                 pool,

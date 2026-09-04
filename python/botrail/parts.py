@@ -1,6 +1,7 @@
 """Standard structures, generated from parameters: fences, walls, tables,
 pedestals, racks, conveyor bodies, pallets, light curtains, stairs, control
-cabinets — the scenery every cell has and nobody wants to model.
+cabinets, a machining centre with its door, its panel and a vise — the
+scenery every cell has and nobody wants to model.
 
 Each generator composes the ordinary scene API — `add_box`, `add_frame`,
 `add_conveyor`, `add_beam_sensor`, `set_part` — so what it builds is plain
@@ -36,7 +37,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Union
 
 if TYPE_CHECKING:
     from ._spec import CatalogRef
@@ -76,10 +77,13 @@ class Built:
     frames: list[str] = field(default_factory=list)
     devices: list[str] = field(default_factory=list)
     sensors: list[str] = field(default_factory=list)
+    nodes: list[str] = field(default_factory=list)
 
     def remove(self, scene) -> None:
         """Takes everything this generator added out of the scene (parts go
         with their residents)."""
+        for name in self.nodes:
+            scene.remove_io_node(name)
         for name in self.sensors:
             scene.remove_sensor(name)
         for name in self.devices:
@@ -1922,9 +1926,323 @@ def photoelectric(
     return built
 
 
+# ---------------------------------------------------------------- proximity
+
+
+def proximity(
+    scene,
+    name: str,
+    frm: Point3,
+    direction: Point3 = (1.0, 0.0, 0.0),
+    *,
+    sensing_range: Optional[float] = None,
+    body: Optional[tuple[float, float]] = None,
+    watch: Optional[list[str]] = None,
+    watch_robot: bool = False,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    **attributes,
+) -> Built:
+    """An inductive proximity switch: a beam `<name>` from the sensing face
+    at `frm`, `sensing_range` along `direction` — the few millimetres a
+    metal target must come within (4 mm unless given) — and the threaded
+    barrel `<name>/body` behind the face, `body = (diameter, length)` in
+    metres (an M12 x 47 mm barrel unless given). The beam trips on the
+    named objects (`watch`) and/or on any robot link. The part
+    (`sensor.proximity`) is pinned on the sensor.
+
+    With `catalog=` — the id of a proximity-switch spec pack, or a package
+    directory — a switch you can order: the pack's axes (`size` M8/M12/M18/
+    M30, `shield`, `output`, `contact`, `connection` …) are chosen by name,
+    the sensing range is the model's (`sensing_range_mm`), the barrel takes
+    the size the pack lists for the thread (`rules.body_mm_by_size`), and
+    the BOM row carries the model number and mass."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("proximity")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if sensing_range is not None and "sensing_range_mm" in params:
+            params["sensing_range_mm"] = spec.choose(
+                "sensing_range_mm", round(sensing_range * 1000.0, 3))
+        sensing_range = _sized(params, "sensing_range_mm", sensing_range)
+        if body is None:
+            body = _body_by_size(spec, params.get("size"))
+        manufacturer = manufacturer or spec.manufacturer
+    sensing_range = 0.004 if sensing_range is None else float(sensing_range)
+    diameter, length = (0.012, 0.047) if body is None else (float(body[0]), float(body[1]))
+    if sensing_range <= 0 or min(diameter, length) <= 0:
+        raise ValueError("proximity: sensing_range and body must be positive")
+
+    dx, dy, dz = (float(direction[0]), float(direction[1]), float(direction[2]))
+    norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if norm <= 0:
+        raise ValueError("proximity: direction must not be zero")
+    ux, uy, uz = dx / norm, dy / norm, dz / norm
+    xa, ya, za = float(frm[0]), float(frm[1]), float(frm[2])
+    to = (xa + ux * sensing_range, ya + uy * sensing_range, za + uz * sensing_range)
+    built = Built(name)
+    centre = (xa - ux * length / 2, ya - uy * length / 2, za - uz * length / 2)
+    if abs(uz) > 0.9:
+        # Looking up or down: the barrel stands on end.
+        size, q = (diameter, diameter, length), None
+    else:
+        size, q = (length, diameter, diameter), _yaw_quat(math.atan2(uy, ux))
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=size, position=centre, quaternion=q, color=color)
+    )
+    scene.add_beam_sensor(name, frm=(xa, ya, za), to=to, watch=watch, watch_robot=watch_robot)
+    built.sensors.append(name)
+    if spec is None:
+        scene.set_part(name, kind="sensor", category="sensor.proximity", **_identity(model, manufacturer, attributes))
+        return built
+    scene.set_part(
+        name, kind="sensor", category=spec.category("sensor", "sensor.proximity"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("sensor", **params), description=spec.name,
+        **{**_recorded(spec, params), **_kg(spec.mass_kg("sensor", **params)), **attributes},
+    )
+    return built
+
+
+def _body_by_size(spec, size) -> Optional[tuple[float, float]]:
+    """The barrel a thread size stands for — `rules.body_mm_by_size`
+    (`{M12: [12, 47]}`, diameter and length), or the `sensor` component's
+    fixed dimensions where a pack sells one size."""
+    table = spec.rule("body_mm_by_size")
+    if isinstance(table, dict) and size is not None:
+        entry = table.get(str(size))
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            return float(entry[0]) / 1000.0, float(entry[1]) / 1000.0
+    diameter = _mm(spec.dimension_mm("sensor", "diameter"))
+    length = _mm(spec.dimension_mm("sensor", "length"))
+    return (diameter, length) if diameter is not None and length is not None else None
+
+
+# ------------------------------------------------------------- power supply
+
+
+def power_supply(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    size: Optional[Point3] = None,
+    yaw: float = 0.0,
+    catalog: Optional["CatalogRef"] = None,
+    output_a: Optional[float] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    **attributes,
+) -> Built:
+    """A DIN-rail power supply: the box `<name>/body`, `size = (width,
+    depth, height)`, standing on `position` (the centre of its foot — on a
+    rail inside a cabinet), turned by `yaw`. The part (`power_supply`)
+    carries `output_v` / `output_a`, which is what `scene.check()` sums the
+    cell's `current_a` against.
+
+    With `catalog=` — the id of a power-supply spec pack, or a package
+    directory — a unit you can order: `output_a` is matched against the
+    ratings sold, the box takes the size the pack lists for that rating
+    (`rules.size_mm_by_output_a`, width / depth / height), and the BOM row
+    carries the model number, its mass and its rating."""
+    spec = None
+    params: dict = {}
+    rating: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("power_supply")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if output_a is not None and "output_a" in params:
+            params["output_a"] = spec.choose("output_a", output_a)
+        if size is None:
+            size = _size_by_rating(spec, params.get("output_a"))
+        power = (spec.manifest.get("electrical") or {}).get("power") or {}
+        for key in ("output_v", "output_a", "output_w"):
+            if isinstance(power.get(key), (int, float)):
+                rating[key] = float(power[key])
+        manufacturer = manufacturer or spec.manufacturer
+    if size is None:
+        size = (0.04, 0.12, 0.12)
+    w, d, h = (float(v) for v in size)
+    if min(w, d, h) <= 0:
+        raise ValueError("power_supply: size must be positive")
+    x, y, z0 = float(position[0]), float(position[1]), float(position[2])
+    built = Built(name)
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=(w, d, h), position=(x, y, z0 + h / 2),
+                      quaternion=_yaw_quat(yaw), color=color)
+    )
+    if spec is None:
+        scene.set_part(name, kind="group", category="power_supply", **_identity(model, manufacturer, attributes))
+        return built
+    scene.set_part(
+        name, kind="group", category=spec.category("unit", "power_supply"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("unit", **params), description=spec.name,
+        **{**rating, **_recorded(spec, params), **_kg(spec.mass_kg("unit", **params)), **attributes},
+    )
+    return built
+
+
+def _size_by_rating(spec, output_a) -> Optional[Point3]:
+    """The box a rating comes in — `rules.size_mm_by_output_a` (`{10: [38,
+    122, 124]}`, width / depth / height), or the `unit` component's fixed
+    dimensions where a pack sells one size."""
+    table = spec.rule("size_mm_by_output_a")
+    if isinstance(table, dict) and output_a is not None:
+        for key, entry in table.items():
+            try:
+                same = abs(float(key) - float(output_a)) < 1e-6
+            except (TypeError, ValueError):
+                same = False
+            if same and isinstance(entry, (list, tuple)) and len(entry) == 3:
+                return (float(entry[0]) / 1000.0, float(entry[1]) / 1000.0, float(entry[2]) / 1000.0)
+    sides = [_mm(spec.dimension_mm("unit", key)) for key in ("width", "depth", "height")]
+    if any(side is None for side in sides):
+        return None
+    return (sides[0], sides[1], sides[2])  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------- remote I/O
+
+
+def remote_io(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    di_units: Optional[int] = None,
+    do_units: Optional[int] = None,
+    points_per_unit: int = 16,
+    uplink=None,
+    place: Optional[str] = None,
+    yaw: float = 0.0,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> Built:
+    """A remote I/O station on a DIN rail: the bus coupler `<name>/coupler`
+    and its DI / DO terminal units `<name>/di{i}` / `<name>/do{i}` side by
+    side from `position` (the centre of the coupler's foot; the units run
+    along local +X, turned by `yaw`), and the I/O node `<name>`
+    (`kind="remote_io"`, hung off `uplink` the way `add_io_node` takes it)
+    with a channel per point — `DI0…` and `DO0…`. The coupler is the part
+    (`io.remote`); each unit is a BOM line of its own.
+
+    With `catalog=` — the id of a remote-I/O spec pack, or a package
+    directory — a station you can order: `di_units` / `do_units` are matched
+    against what the pack sells, `logic` (PNP / NPN) picks the unit models,
+    the coupler and the units take the maker's widths and point counts, and
+    every line carries its model number and mass."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("remote_io")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        for given, key in ((di_units, "di_units"), (do_units, "do_units")):
+            if given is not None and key in params:
+                params[key] = spec.choose(key, given)
+        di_units = int(params["di_units"]) if "di_units" in params else di_units
+        do_units = int(params["do_units"]) if "do_units" in params else do_units
+        manufacturer = manufacturer or spec.manufacturer
+    di_units = 1 if di_units is None else int(di_units)
+    do_units = 1 if do_units is None else int(do_units)
+    if di_units < 0 or do_units < 0 or points_per_unit <= 0:
+        raise ValueError("remote_io: unit counts must not be negative")
+
+    def dims(role: str, default: tuple[float, float, float]) -> tuple[float, float, float]:
+        if spec is None:
+            return default
+        sides = [_mm(spec.dimension_mm(role, key)) for key in ("width", "depth", "height")]
+        return tuple(  # type: ignore[return-value]
+            side if side is not None else fallback for side, fallback in zip(sides, default)
+        )
+
+    def points(role: str) -> int:
+        if spec is None:
+            return points_per_unit
+        value = spec.dimension_mm(role, "points", points_per_unit)
+        return int(value) if value else points_per_unit
+
+    coupler = dims("coupler", (0.046, 0.071, 0.100))
+    di_size = dims("di", (0.012, coupler[1], coupler[2]))
+    do_size = dims("do", (0.012, coupler[1], coupler[2]))
+    di_points, do_points = points("di"), points("do")
+
+    x, y, z0 = float(position[0]), float(position[1]), float(position[2])
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+    built = Built(name)
+    cursor = 0.0  # along local +X from the coupler's left edge
+
+    def place_box(label: str, size: tuple[float, float, float]) -> str:
+        nonlocal cursor
+        dx = cursor - coupler[0] / 2 + size[0] / 2
+        made = scene.add_box(f"{name}/{label}", size=size,
+                             position=(x + c * dx, y + s * dx, z0 + size[2] / 2), quaternion=q, color=color)
+        built.obstacles.append(made)
+        cursor += size[0]
+        return made
+
+    place_box("coupler", coupler)
+    di_names = [place_box(f"di{i}", di_size) for i in range(di_units)]
+    do_names = [place_box(f"do{i}", do_size) for i in range(do_units)]
+
+    from .io import channels as _channels
+
+    logic = str(params["logic"]).lower() if params.get("logic") is not None else None
+    chans = (_channels("di", di_units * di_points, "DI", logic=logic)
+             + _channels("do", do_units * do_points, "DO", logic=logic))
+    coupler_model = model or (spec.part_number("coupler", **params) if spec is not None else None)
+    scene.add_io_node(name, kind="remote_io", uplink=uplink, channels=chans, place=place, model=coupler_model)
+    built.nodes.append(name)
+    counts = {"di": float(di_units * di_points), "do": float(do_units * do_points)}
+    if spec is None:
+        scene.set_part(name, kind="io_node", category="io.remote",
+                       **{**counts, **_identity(model, manufacturer, attributes)})
+        return built
+    scene.set_part(
+        name, kind="io_node", category=spec.category("coupler", "io.remote"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=coupler_model, description=spec.name,
+        **{**_recorded(spec, params), **counts, **_kg(spec.mass_kg("coupler", **params)), **attributes},
+    )
+    for role, names in (("di", di_names), ("do", do_names)):
+        if not names or not spec.has_component(role):
+            continue
+        for unit in names:
+            scene.set_part(
+                unit, kind="obstacle", category=spec.category(role, "io.remote"), qty=1,
+                catalog=spec.catalog_ref, manufacturer=manufacturer,
+                model=spec.part_number(role, **params), **_kg(spec.mass_kg(role, **params)),
+            )
+    return built
+
+
 __all__ = [
     "Built", "cabinet", "conveyor", "fence", "light_curtain", "pallet",
-    "pedestal", "photoelectric", "rack", "stairs", "table", "wall",
+    "pedestal", "photoelectric", "power_supply", "proximity", "rack",
+    "remote_io", "stairs", "table", "wall",
 ]
 
 
@@ -2389,4 +2707,1337 @@ def wall(
             **attributes,
         }),
     )
+    return built
+
+
+# ------------------------------------------------------------- machine tool
+
+# The two-tone a compact machining centre is painted: light enclosure,
+# dark window glass, the maker's accent band, cast-iron bed and table.
+MACHINE_SHELL: Color = (0.62, 0.63, 0.62)
+MACHINE_WINDOW: Color = (0.05, 0.06, 0.07)
+MACHINE_ACCENT: Color = (0.80, 0.55, 0.03)
+MACHINE_BED: Color = (0.24, 0.25, 0.27)
+TABLE_STEEL: Color = (0.46, 0.47, 0.49)
+
+# 22 mm pushbutton caps in the IEC 60073 colours (linear RGB), and what a
+# machine-tool panel's buttons are called.
+BUTTON_COLORS: dict[str, Color] = {
+    "green": (0.02, 0.35, 0.06),
+    "red": (0.55, 0.02, 0.02),
+    "yellow": (0.75, 0.55, 0.02),
+    "blue": (0.02, 0.10, 0.45),
+    "white": (0.80, 0.80, 0.78),
+    "black": (0.02, 0.02, 0.02),
+}
+BUTTON_BY_NAME = {
+    "cycle_start": "green", "start": "green",
+    "feed_hold": "red", "stop": "red", "estop": "red",
+    "reset": "blue", "clamp": "yellow", "unclamp": "yellow", "door": "white",
+}
+# The ISO 22 mm pushbutton: cap over the bezel, operating travel, actuating
+# force — and the ø40 mushroom head of an emergency stop.
+BUTTON_CAP = 0.0285
+BUTTON_TRAVEL = 0.0026
+BUTTON_FORCE_N = 3.8
+ESTOP_CAP = 0.040
+ESTOP_FORCE_N = 44.0
+
+# A CNC lathe as the envelopes a tending cell verifies against: the Haas
+# ST-10 of the public spec pages is the default (machinetoolindex.com and
+# dealers' listings, 2026-09: 6.5 in / 165 mm chuck, 44 mm bar, 419 mm
+# swing, 200 x 406 mm travels, 3585 kg; overall 126 x 70 x 81 in — 3.20 x
+# 1.78 x 2.06 m). What no public page prints — the front opening, the
+# spindle's height and its depth behind the door — are design values
+# (`LATHE_APERTURE`, `LATHE_SPINDLE`), the first to replace from a drawing.
+LATHE_SIZE = (3.20, 1.78, 2.06)
+LATHE_APERTURE = (0.90, 0.70, 0.80)     # the front door opening: width, height, sill
+LATHE_SPINDLE = (-0.55, 0.50, 1.05)     # chuck face: x from the body centre, depth behind the front wall, height
+LATHE_CHAMBER = 1.00                    # the work area's depth
+LATHE_CHUCK = 0.165                     # 6.5 in
+LATHE_TURRET = (0.40, 0.40, 0.45)       # the turret's envelope, right of the chuck
+
+# The α-D21MiB5 Plus (FANUC ROBODRILL) figures the generator defaults to,
+# transcribed from the public catalogue (design-machine-tending.md §3.2):
+# body, the side auto-door opening of the X500 machine with its sill and
+# stroke, table, the spindle nose to table at Z max, and the wide front
+# door. The table height above the floor is not published — 0.90 m is an
+# assumption, and the one figure to replace when the maker's drawing is
+# at hand.
+VMC_SIZE: Point3 = (1.615, 2.108, 2.137)
+VMC_APERTURE: Point3 = (0.705, 0.869, 0.827)
+VMC_FRONT_DOOR: Point3 = (0.730, 0.869, 0.827)
+VMC_TABLE: Point3 = (0.650, 0.400, 0.900)
+VMC_EXCHANGE: Point2 = (0.250, 0.0)
+VMC_HEAD_CLEARANCE = 0.580
+VMC_CHAMBER = 1.30
+# A servo door runs an 800 mm stroke in 0.8 s where an air cylinder takes
+# 2 s (FANUC's published comparison) — the speeds a drive defaults to.
+DOOR_SPEED = {"servo": 1.0, "air": 0.4}
+DOOR_DRIVES = ("manual", "air", "servo")
+# "Not given": the generator's (or the pack's) own figure applies.
+_DEFAULT = object()
+
+
+def _rotate(q, v):
+    """`v` turned by the quaternion `q` (x, y, z, w)."""
+    qx, qy, qz, qw = q
+    vx, vy, vz = v
+    # t = 2 q × v ; v' = v + w t + q × t
+    tx, ty, tz = 2 * (qy * vz - qz * vy), 2 * (qz * vx - qx * vz), 2 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + (qy * tz - qz * ty),
+        vy + qw * ty + (qz * tx - qx * tz),
+        vz + qw * tz + (qx * ty - qy * tx),
+    )
+
+
+@dataclass
+class MachineTool(Built):
+    """What `machine_tool` built, plus the names a tending program
+    addresses: the side door's axis (`door`, `None` for a manual door or
+    none), what rides on that door (`door_objects` — the leaf and its
+    trim, for a robot that slides it by hand), its end-of-travel lanes
+    (`door_lanes` = closed, open — the axis's stop lanes, or two zone
+    sensors on a loose leaf), the stroke and the world direction it opens
+    along (`door_travel`, `door_axis`), the front door's closed switch and
+    the E-stop lane the machine's program is guarded by (`front_door_lane`,
+    `estop`), the operator panel's `Built` and the button sensors on it."""
+
+    door: Optional[str] = None
+    door_travel: float = 0.0
+    door_axis: Point3 = (0.0, 1.0, 0.0)
+    door_objects: list[str] = field(default_factory=list)
+    door_lanes: Optional[tuple[str, str]] = None
+    #: The front door's closed switch (`<name>/front_door/closed`), `None`
+    #: without a front door — the lane the side door's opening is guarded
+    #: by (the two doors are never open together).
+    front_door_lane: Optional[str] = None
+    #: The panel's E-stop lane (`<name>/panel/estop`), `None` without one —
+    #: what every start is guarded by.
+    estop: Optional[str] = None
+    panel: Optional[Built] = None
+    buttons: list[str] = field(default_factory=list)
+    #: The control interface the catalog pack states (`template` and a
+    #: signal table) — what `bt.tending` checks its template against.
+    interface: Optional[dict] = None
+
+
+def operator_panel(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    yaw: float = 0.0,
+    tilt: float = 0.0,
+    size: Point2 = (0.30, 0.22),
+    thickness: float = 0.03,
+    buttons: Sequence[str] = ("cycle_start", "feed_hold", "reset", "estop"),
+    columns: Optional[int] = None,
+    pitch: float = 0.045,
+    cap: float = BUTTON_CAP,
+    travel: float = BUTTON_TRAVEL,
+    proud: float = 0.010,
+    watch_robots: Optional[list[str]] = None,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    button_model: Union[str, Mapping[str, str], None] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> Built:
+    """An operator panel: a plate `size = (width, height)` centred at
+    `position`, its face toward -Y before `yaw`, tilted up toward the
+    operator by `tilt`, with a grid of 22 mm pushbuttons on it.
+
+    A button is three things. A cap (decoration — drawn, never collided),
+    a **zone sensor** `<name>/<button>` the size of the cap and as deep as
+    the button's operating travel, sitting *inside* the cap face — so a
+    tool that touches the cap reads nothing and one that pushes it in the
+    2.6 mm a 22 mm actuator travels turns the input on, for as long as it
+    is held — and two frames: `<name>/<button>` on the cap face and
+    `<name>/<button>/press` the travel below it, both with +Z pointing
+    into the panel, which is where a pressing tool aims its approach axis.
+    Nothing moves: the stroke is a depth, and the input is the meaning.
+    A neighbouring button's zone is the check that a wide tool did not
+    press two.
+
+    Cap colours follow the name (`cycle_start` green, `feed_hold` red,
+    `reset` blue, …) and `estop` is drawn as the ø40 mushroom head with
+    its collar; each button's sensor is pinned as an `hmi.button` with the
+    head size, travel and actuating force, the panel itself as an
+    `hmi.panel`. By default any robot link trips a button;
+    `watch_robots=[...]` narrows it to the arms named.
+
+    With `catalog=` — the id of a pushbutton-box spec pack, or a package
+    directory — a box you can order: the number of buttons is matched
+    against the sizes sold (the box's face follows), the pitch, the cap
+    and the travel come from the pack, and the box, its buttons and the
+    E-stop land on the bill with their article numbers."""
+    names = [str(b) for b in buttons]
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("operator_panel")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if "positions" in params:
+            params["positions"] = spec.choose("positions", len(names))
+            faces = spec.rule("size_mm_by_positions") or {}
+            face = faces.get(str(params["positions"])) or faces.get(params["positions"])
+            if face:
+                size = (float(face[0]) / 1000.0, float(face[1]) / 1000.0)
+        thickness = _mm(spec.dimension_mm("box", "thickness", thickness * 1000.0)) or thickness
+        pitch = _mm(spec.dimension_mm("box", "pitch", pitch * 1000.0)) or pitch
+        proud = _mm(spec.dimension_mm("box", "proud", proud * 1000.0)) or proud
+        cap = _mm(spec.dimension_mm("button", "cap", cap * 1000.0)) or cap
+        travel = _mm(spec.dimension_mm("button", "travel", travel * 1000.0)) or travel
+        manufacturer = manufacturer or spec.manufacturer
+    if len(set(names)) != len(names):
+        raise ValueError("operator_panel: button names must be distinct")
+    if not names:
+        raise ValueError("operator_panel: at least one button")
+    w, h = float(size[0]), float(size[1])
+    if min(w, h, thickness, pitch, cap, travel, proud) <= 0:
+        raise ValueError("operator_panel: sizes must be positive")
+    cols = int(columns) if columns is not None else min(len(names), 4)
+    rows_ = -(-len(names) // cols)
+    if (cols - 1) * pitch + cap > w + 1e-9 or (rows_ - 1) * pitch + cap > h + 1e-9:
+        raise ValueError(
+            f"operator_panel: {len(names)} buttons at {pitch * 1e3:.0f} mm pitch need a face "
+            f"{((cols - 1) * pitch + cap) * 1e3:.0f} x {((rows_ - 1) * pitch + cap) * 1e3:.0f} mm; "
+            f"the panel is {w * 1e3:.0f} x {h * 1e3:.0f}"
+        )
+
+    x, y, z = (float(v) for v in position)
+    # Local: the face is the -Y side of the plate; tilt turns it upward
+    # about the plate's own X (`_mul_quat(outer, inner)` — the inner
+    # rotation is about the outer's rotated axes).
+    q = _mul_quat(_yaw_quat(yaw), _pitch_quat(-float(tilt)))
+    q_press = _mul_quat(q, _pitch_quat(-math.pi / 2))   # +Z into the panel
+    q_cap = _mul_quat(q, _pitch_quat(math.pi / 2))      # a cylinder's +Z out of it
+
+    def world(lx: float, ly: float, lz: float) -> Point3:
+        dx, dy, dz = _rotate(q, (lx, ly, lz))
+        return (x + dx, y + dy, z + dz)
+
+    built = Built(name)
+    built.obstacles.append(
+        scene.add_box(f"{name}/plate", size=(w, thickness, h), position=(x, y, z), quaternion=q, color=color)
+    )
+    face = -thickness / 2
+    scene.add_frame(name, position=world(0.0, face, 0.0), quaternion=q_press)
+    built.frames.append(name)
+
+    if watch_robots is None:
+        watch: dict = {"watch": [], "watch_robot": True}
+    else:
+        watch = {"watch": [], "watch_robots": list(watch_robots)}
+    models = (
+        {b: button_model for b in names} if isinstance(button_model, str)
+        else dict(button_model or {})
+    )
+    if spec is not None:
+        # The pack's articles: one for the buttons of the box, one for the
+        # E-stop — so identical buttons merge into a line with a count.
+        for button in names:
+            role = "estop" if button == "estop" else "button"
+            if spec.has_component(role):
+                models.setdefault(button, spec.part_number(role, **params))
+    for i, button in enumerate(names):
+        col, row = i % cols, i // cols
+        u = (col - (cols - 1) / 2) * pitch
+        v = ((rows_ - 1) / 2 - row) * pitch
+        estop = button == "estop"
+        radius = (ESTOP_CAP if estop else cap) / 2
+        height = proud * 2.5 if estop else proud
+        colour = BUTTON_COLORS[BUTTON_BY_NAME.get(button, "black")]
+        if estop:
+            _trim_cylinder(scene, built, f"{name}/{button}/collar", 0.030, 0.003,
+                           world(u, face - 0.0015, v), q_cap, BUTTON_COLORS["yellow"])
+        _trim_cylinder(scene, built, f"{name}/{button}/cap", radius, height,
+                       world(u, face - height / 2, v), q_cap, colour)
+        # The zone sits behind the cap face, as deep as the stroke.
+        zone = f"{name}/{button}"
+        scene.add_zone_sensor(
+            zone, position=world(u, face - height + travel / 2, v),
+            size=(2 * radius, travel, 2 * radius), quaternion=q, **watch,
+        )
+        built.sensors.append(zone)
+        scene.add_frame(zone, position=world(u, face - height, v), quaternion=q_press)
+        scene.add_frame(f"{zone}/press", position=world(u, face - height + travel, v), quaternion=q_press)
+        built.frames.extend([zone, f"{zone}/press"])
+        figures = {
+            "head_mm": 40.0 if estop else 22.0,
+            "cap_mm": round(2 * radius * 1e3, 1),
+            "travel_mm": round(travel * 1e3, 2),
+            "force_n": ESTOP_FORCE_N if estop else BUTTON_FORCE_N,
+            "actuator": "mushroom" if estop else "flush",
+            "color": BUTTON_BY_NAME.get(button, "black"),
+        }
+        role = "estop" if estop else "button"
+        if spec is not None and spec.has_component(role):
+            scene.set_part(
+                zone, kind="sensor", category=spec.category(role, "hmi.button"), qty=1,
+                catalog=spec.catalog_ref, manufacturer=manufacturer, model=models.get(button),
+                **{**figures, **_kg(spec.mass_kg(role, positions=1))},
+            )
+        else:
+            scene.set_part(
+                zone, kind="sensor", category="hmi.button",
+                **_identity(models.get(button), manufacturer if models.get(button) else None, figures),
+            )
+    if spec is None or not spec.has_component("box"):
+        scene.set_part(
+            name, kind="group", category="hmi.panel",
+            **_identity(model, manufacturer, {"buttons": float(len(names)), **attributes}),
+        )
+        return built
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("box", "hmi.panel"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("box", **params), description=spec.name,
+        **{**recorded, "buttons": float(len(names)), **_kg(spec.mass_kg("box", **params)), **attributes},
+    )
+    return built
+
+
+def vise(
+    scene,
+    name: str,
+    position: Point2 | Point3,
+    *,
+    yaw: float = 0.0,
+    jaw_width: float = 0.125,
+    opening: float = 0.060,
+    max_opening: float = 0.150,
+    jaw_height: float = 0.040,
+    jaw_thickness: float = 0.030,
+    body_height: float = 0.060,
+    body_length: float = 0.360,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = TABLE_STEEL,
+    **attributes,
+) -> Built:
+    """A machine vise standing on a table top at `position` (x, y[, the
+    table's top z]): the body, a fixed jaw and a moving jaw set `opening`
+    apart, the jaws clamping along local Y (the fixed jaw on +Y, the
+    screw end trailing off to -Y) before `yaw`. Adds the frame
+    `<name>/jaw` at the centre of the jaw floor between the jaws — where
+    the workpiece sits, `jaw_width` wide along X and `opening` across — and
+    pins the vise (`fixture.vise`).
+
+    Clamping is a signal, not a motion: the jaws stand where the part
+    goes and the cell's program says when it is held (a machine-tending
+    handshake's `clamp` — see `bt.tending`). An `opening` beyond
+    `max_opening` is refused with the numbers, the way a size nobody
+    sells is.
+
+    With `catalog=` — the id of a vise spec pack, or a package directory —
+    a vise you can order: `jaw_width` is matched against the ones sold,
+    the jaw and body figures and the maximum opening come from the pack,
+    and the BOM row carries its article number and mass."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("vise")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if "jaw_width_mm" in params:
+            params["jaw_width_mm"] = spec.choose("jaw_width_mm", round(jaw_width * 1000.0, 3))
+            jaw_width = params["jaw_width_mm"] / 1000.0
+            limits = spec.rule("max_opening_mm_by_jaw") or {}
+            limit = limits.get(str(_plain(params["jaw_width_mm"]))) or limits.get(params["jaw_width_mm"])
+            if limit is not None:
+                max_opening = float(limit) / 1000.0
+        jaw_height = _mm(spec.dimension_mm("vise", "jaw_height", jaw_height * 1000.0)) or jaw_height
+        jaw_thickness = _mm(spec.dimension_mm("vise", "jaw_thickness", jaw_thickness * 1000.0)) or jaw_thickness
+        body_height = _mm(spec.dimension_mm("vise", "body_height", body_height * 1000.0)) or body_height
+        body_length = _mm(spec.dimension_mm("vise", "body_length", body_length * 1000.0)) or body_length
+        manufacturer = manufacturer or spec.manufacturer
+    if not 0 < opening <= max_opening + 1e-9:
+        raise ValueError(
+            f"vise: a {jaw_width * 1e3:.0f} mm vise opens {max_opening * 1e3:.0f} mm at most, "
+            f"not {opening * 1e3:.0f}"
+        )
+    if min(jaw_width, jaw_height, jaw_thickness, body_height, body_length) <= 0:
+        raise ValueError("vise: sizes must be positive")
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
+    built = Built(name)
+    back = opening / 2 + jaw_thickness + 0.02        # the body's +Y end
+    bx, by = world(0.0, back - body_length / 2)
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=(jaw_width + 0.02, body_length, body_height),
+                      position=(bx, by, z0 + body_height / 2), quaternion=q, color=color)
+    )
+    for tag, sign in (("fixed", 1.0), ("moving", -1.0)):
+        jx, jy = world(0.0, sign * (opening / 2 + jaw_thickness / 2))
+        built.obstacles.append(
+            scene.add_box(f"{name}/jaw_{tag}", size=(jaw_width, jaw_thickness, jaw_height),
+                          position=(jx, jy, z0 + body_height + jaw_height / 2), quaternion=q,
+                          color=DARK_STEEL)
+        )
+    scene.add_frame(f"{name}/jaw", position=(x, y, z0 + body_height), quaternion=q)
+    built.frames.append(f"{name}/jaw")
+    figures = {
+        "jaw_width_mm": round(jaw_width * 1e3, 1),
+        "opening_mm": round(opening * 1e3, 1),
+        "max_opening_mm": round(max_opening * 1e3, 1),
+    }
+    if spec is None:
+        scene.set_part(
+            name, kind="group", category="fixture.vise",
+            **_identity(model, manufacturer, {**figures, **attributes}),
+        )
+        return built
+    scene.set_part(
+        name, kind="group", category=spec.category("vise", "fixture.vise"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("vise", **params), description=spec.name,
+        **{**_recorded(spec, params), **figures, **_kg(spec.mass_kg("vise", **params)), **attributes},
+    )
+    return built
+
+
+
+def chuck(
+    scene,
+    name: str,
+    position: Point3,
+    quaternion: Optional[tuple[float, float, float, float]] = None,
+    *,
+    diameter: float = LATHE_CHUCK,
+    length: float = 0.085,
+    jaws: int = 3,
+    jaw_height: float = 0.030,
+    jaw_width: float = 0.025,
+    opening: float = 0.050,
+    max_opening: Optional[float] = None,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> Built:
+    """A lathe chuck: a `diameter` body `length` long with its face at
+    `position`, its axis the +Z of `quaternion` (pass a lathe's
+    `<name>/spindle` frame — `bt.parts.chuck(scene, "chuck",
+    *scene.frame("lathe/spindle"))`), and `jaws` jaw blocks standing
+    `jaw_height` off the face around a part of `opening` diameter — the
+    gripping diameter, so a robot loading a part along the axis meets
+    the jaws where they are. Frame `<name>/face`: the face centre, +Z out
+    along the spindle axis (a load comes in along -Z). Part: `fixture.chuck`
+    with the diameter, the opening and the jaw count; with `catalog=` the
+    diameter is matched against the ones sold and the maximum opening
+    comes from the pack."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("chuck")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if "diameter_mm" in params:
+            params["diameter_mm"] = spec.choose("diameter_mm", round(diameter * 1000.0, 3))
+            diameter = float(params["diameter_mm"]) / 1000.0
+        by_diameter = spec.rule("max_opening_mm_by_diameter") or {}
+        if max_opening is None and by_diameter:
+            key = str(_plain(params.get("diameter_mm", round(diameter * 1000.0, 3))))
+            if key in by_diameter:
+                max_opening = float(by_diameter[key]) / 1000.0
+        manufacturer = manufacturer or spec.manufacturer
+    if min(diameter, length, jaw_height, jaw_width, opening) <= 0 or jaws < 2:
+        raise ValueError("chuck: sizes must be positive and jaws at least 2")
+    if opening + 2 * jaw_width > diameter + 1e-9:
+        raise ValueError(
+            f"chuck: a {opening * 1e3:.0f} mm opening with {jaw_width * 1e3:.0f} mm jaws does not fit a "
+            f"{diameter * 1e3:.0f} mm chuck"
+        )
+    if max_opening is not None and opening > max_opening + 1e-9:
+        raise ValueError(f"chuck: {opening * 1e3:.0f} mm is past the {max_opening * 1e3:.0f} mm maximum opening")
+    q = quaternion or (0.0, 0.0, 0.0, 1.0)
+    px, py, pz = (float(v) for v in position)
+    axis = _rotate(q, (0.0, 0.0, 1.0))
+    built = Built(name)
+    # The body, its face at `position`, behind it along the axis.
+    bx, by, bz = (px - axis[i] * length / 2 for i in range(3))
+    body = scene.add_cylinder(f"{name}/body", radius=diameter / 2, length=length, position=(bx, by, bz),
+                              quaternion=q, color=color)
+    built.obstacles.append(body)
+    # The jaws around the opening, `jaw_height` proud of the face.
+    r = opening / 2 + jaw_width / 2
+    for k in range(jaws):
+        theta = math.pi / 2 + 2 * math.pi * k / jaws
+        local = (r * math.cos(theta), r * math.sin(theta), jaw_height / 2)
+        wx, wy, wz = _rotate(q, local)
+        spin = (0.0, 0.0, math.sin(theta / 2), math.cos(theta / 2))
+        jaw = scene.add_box(f"{name}/jaw{k}", size=(jaw_width, jaw_width, jaw_height),
+                            position=(px + wx, py + wy, pz + wz), quaternion=_mul_quat(q, spin), color=color)
+        built.obstacles.append(jaw)
+    scene.add_frame(f"{name}/face", position=(px, py, pz), quaternion=q)
+    built.frames.append(f"{name}/face")
+    figures = {"diameter_mm": round(diameter * 1000.0, 1), "opening_mm": round(opening * 1000.0, 1),
+               "jaws": float(jaws)}
+    if max_opening is not None:
+        figures["max_opening_mm"] = round(max_opening * 1000.0, 1)
+    if spec is None:
+        scene.set_part(name, kind="group", category="fixture.chuck", qty=1,
+                       **_identity(model, manufacturer, {**figures, **attributes}))
+        return built
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("body", "fixture.chuck"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("body", **params), description=spec.name,
+        **{**recorded, **figures, **_kg(spec.mass_kg("body", **params)), **attributes},
+    )
+    return built
+
+def machine_tool(
+    scene,
+    name: str,
+    size: Optional[Point3] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    yaw: float = 0.0,
+    aperture: Optional[Point3] = None,
+    door: Union[str, None, object] = _DEFAULT,
+    door_side: Union[str, object] = _DEFAULT,
+    door_travel: Optional[float] = None,
+    door_speed: Optional[float] = None,
+    front_door: Union[Point3, None, object] = _DEFAULT,
+    chamber: Optional[float] = None,
+    table: Optional[Point3] = None,
+    exchange: Optional[Point2] = None,
+    head_clearance: Optional[float] = None,
+    panel: Optional[str] = "front",
+    buttons: Optional[Sequence[str]] = None,
+    panel_pitch: float = 0.045,
+    wall: float = 0.06,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = MACHINE_SHELL,
+    **attributes,
+) -> MachineTool:
+    """A vertical machining centre as the envelopes a tending cell
+    verifies against — not its shape. `size = (width, depth, height)`
+    stands at `position` (its centre, x, y[, floor z]), front face on -Y
+    before `yaw`. Without arguments it is the FANUC ROBODRILL
+    α-D21MiB5 Plus of the public catalogue (`VMC_*` above): change any
+    figure and the envelopes, the frames and the BOM line change together.
+
+    What it puts in the scene, all of it collision-checked:
+
+    * the enclosure — bed, side walls, roof, the rear column block (the
+      last `depth - chamber` of the body), and a front wall around the
+      front door opening (`front_door = (width, height, sill)`), with its
+      leaf standing closed;
+    * the **table** `table = (width, depth, top height)` at the exchange
+      position (`exchange = (x, y)` offset from the chamber centre, x
+      toward the door side — a table that traverses to the door is what
+      a tending robot reaches), and the spindle head above it from
+      `head_clearance` (nose to table at Z max) to the roof;
+    * the **side door**: an opening `aperture = (width, height, sill)` in
+      the `door_side` wall and a leaf that slides toward the rear by
+      `door_travel`. `door="servo"` / `"air"` make it a linear axis
+      `<name>/side_door` with the stops `closed` and `open`
+      (`bt.seq.move_to(door, "open")` opens it, `move_to(door, "closed")`
+      closes; the speed comes from the drive — `door_speed` overrides),
+      and the rollout checks the leaf against every robot each tick: a
+      door closing on an arm is a `DeviceCollision` by name.
+      `door="manual"` leaves the leaf loose, for a robot that takes the
+      handle (`bt.seq.attach` the `door_objects` and run a
+      `cartesian_line`); `door=None` builds a plain wall. Either way the
+      lanes `<name>/side_door/closed` and `/open` read the leaf at its
+      ends of travel — the axis's stop lanes, or two zone sensors on a
+      loose leaf — the limit switches a door interlock is written from;
+    * an **operator panel** (`operator_panel`) with `buttons` at
+      `panel_pitch`, on the front face (`panel="front"`) or on the
+      door-side wall ahead of the opening (`panel="door"`, where a robot
+      at the door reaches it); `panel=None` leaves it off.
+
+    Frames: `<name>/table` (centre of the table top), `<name>/entry` (the
+    side opening's centre, 150 mm outside the door leaf — where a robot
+    waits), `<name>/door/side/handle` (the leaf's handle, +Z into the
+    leaf), and the panel's `<name>/panel/<button>[/press]`.
+
+    Refused rather than clipped, like a wall plan that does not close: an
+    opening that does not fit its wall, a leaf whose stroke runs off the
+    body, a spindle head that would stand through the roof.
+
+    `detail="full"` adds the windows, the door rails, the accent band and
+    the stack light — drawn, never collided. The part is pinned on the
+    group (`machine_tool.vmc`), the side door as `<name>/side_door`
+    (`machine_tool.door`, with its drive and stroke), the panel and its
+    buttons by `operator_panel`.
+
+    With `catalog=` — the id of a machine-tool spec pack, or a package
+    directory — a machine you can order: the body, the openings, the
+    table and the head come from the pack's `mechanical.envelope`, the
+    options it sells (`column_mm`, `side_door`, `door_side`) are chosen
+    by name and refused when nobody sells them, the door's speed follows
+    the drive's published time, every article lands on the bill with its
+    number, and the pack's `interface` (its handshake template and
+    signal table) rides on the returned `MachineTool` for `bt.tending`."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("machine_tool")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        # The door and its side are options the pack sells: the caller's
+        # choice is matched against them, the pack's default stands otherwise.
+        if "side_door" in params:
+            sold = [str(_plain(v)) for v in (spec.params()["side_door"].get("values") or [])]
+            if door is None:
+                # No side door at all — outside what the pack sells, so
+                # the option is simply not ordered.
+                params.pop("side_door")
+            elif door == "manual" and "manual" not in sold:
+                # The leaf without a drive: the pack's opening, sill and
+                # stroke stand, and no door drive is ordered — a robot
+                # that takes the handle is the drive.
+                params.pop("side_door")
+            else:
+                if door is not _DEFAULT:
+                    params["side_door"] = spec.choose("side_door", str(door))
+                chosen = params["side_door"]
+                door = None if chosen in (None, "none") else str(chosen)
+        if "door_side" in params:
+            if door_side is not _DEFAULT:
+                params["door_side"] = spec.choose("door_side", door_side)
+            door_side = str(params["door_side"])
+        column = float(params.get("column_mm") or 0.0) / 1000.0
+        mech = spec.mechanical
+        if size is None and mech.get("footprint_mm") and mech.get("height_mm"):
+            fp = mech["footprint_mm"]
+            size = (float(fp[0]) / 1000.0, float(fp[1]) / 1000.0, float(mech["height_mm"]) / 1000.0 + column)
+        side = spec.envelope("doors", "side")
+        if aperture is None and isinstance(side, dict):
+            aperture = (side["width_mm"] / 1000.0, side["height_mm"] / 1000.0, side["sill_mm"] / 1000.0)
+            if door_travel is None and side.get("travel_mm") is not None:
+                door_travel = float(side["travel_mm"]) / 1000.0
+        front = spec.envelope("doors", "front")
+        if front_door is _DEFAULT and isinstance(front, dict):
+            front_door = (front["width_mm"] / 1000.0, front["height_mm"] / 1000.0, front["sill_mm"] / 1000.0)
+        table_env = spec.envelope("table")
+        if table is None and isinstance(table_env, dict) and table_env.get("size_mm"):
+            tw_mm, td_mm = table_env["size_mm"]
+            table = (float(tw_mm) / 1000.0, float(td_mm) / 1000.0,
+                     float(table_env.get("height_mm") or VMC_TABLE[2] * 1000.0) / 1000.0)
+        nose = spec.envelope("head", "nose_to_table_mm")
+        if head_clearance is None and isinstance(nose, (list, tuple)) and len(nose) == 2:
+            head_clearance = float(nose[1]) / 1000.0
+        if chamber is None and spec.envelope("chamber_mm") is not None:
+            chamber = float(spec.envelope("chamber_mm")) / 1000.0
+        if door_speed is None and door in ("air", "servo"):
+            open_s = spec.behavior(f"door_open_s_{door}")
+            if isinstance(open_s, (int, float)) and open_s > 0 and door_travel is not None:
+                door_speed = float(door_travel) / float(open_s)
+        manufacturer = manufacturer or spec.manufacturer
+    if front_door is _DEFAULT:
+        front_door = VMC_FRONT_DOOR
+    if door is _DEFAULT:
+        door = "servo"
+    if door_side is _DEFAULT:
+        door_side = "right"
+    if door is not None and door not in DOOR_DRIVES:
+        raise ValueError(f"machine_tool: door must be one of {DOOR_DRIVES} or None, not {door!r}")
+    if door_side not in ("left", "right"):
+        raise ValueError(f"machine_tool: door_side is 'left' or 'right', not {door_side!r}")
+    if panel not in (None, "front", "door"):
+        raise ValueError(f"machine_tool: panel is 'front', 'door' or None, not {panel!r}")
+    mode = _detail(detail, spec is not None)
+    w, d, h = (float(v) for v in (size or VMC_SIZE))
+    aw, ah, sill = (float(v) for v in (aperture or VMC_APERTURE))
+    tw, td, th = (float(v) for v in (table or VMC_TABLE))
+    ex, ey = (float(v) for v in (exchange or VMC_EXCHANGE))
+    hc = VMC_HEAD_CLEARANCE if head_clearance is None else float(head_clearance)
+    cd = VMC_CHAMBER if chamber is None else float(chamber)
+    t = float(wall)
+    if door is not None and aw < min(tw, td) - 1e-9:
+        raise ValueError(
+            f"machine_tool: a {aw * 1e3:.0f} mm side opening is narrower than the table's "
+            f"{min(tw, td) * 1e3:.0f} mm short side — nothing on the table passes it"
+        )
+    if min(w, d, h, aw, ah, sill, tw, td, th, hc, cd, t) <= 0:
+        raise ValueError("machine_tool: sizes must be positive")
+    if cd + 2 * t > d:
+        raise ValueError(
+            f"machine_tool: a {cd:.2f} m chamber does not fit a {d:.2f} m deep body"
+        )
+    travel = aw + 0.055 if door_travel is None else float(door_travel)
+    speed = door_speed if door_speed is not None else DOOR_SPEED.get(door or "", 0.0)
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+    sx = 1.0 if door_side == "right" else -1.0
+    y0 = -d / 2                       # the front face
+    y_r = y0 + t + cd                 # where the rear column block begins
+    ls = t + cd                       # the side walls' length
+    yc_wall = (y0 + y_r) / 2
+    y_c = y0 + t + cd / 2             # the chamber's centre
+    inner = w / 2 - t
+    leaf_t, over = 0.04, 0.05
+    half = aw / 2 + over
+    plate = 0.05
+
+    # Refused before anything is placed: a plan that does not fit is not
+    # a smaller machine.
+    if door is not None:
+        if sill + ah > h - t + 1e-9:
+            raise ValueError(
+                f"machine_tool: the side opening tops out at {(sill + ah) * 1e3:.0f} mm, "
+                f"through a {h * 1e3:.0f} mm body"
+            )
+        if (y_c - aw / 2) - y0 < t or y_r - (y_c + aw / 2) < 0:
+            raise ValueError(
+                f"machine_tool: a {aw * 1e3:.0f} mm side opening does not fit the "
+                f"{cd * 1e3:.0f} mm chamber"
+            )
+        if y_c + half + travel > d / 2 + 1e-9:
+            raise ValueError(
+                f"machine_tool: a {travel * 1e3:.0f} mm door stroke runs the leaf off the "
+                f"{d * 1e3:.0f} mm body"
+            )
+        if door != "manual" and speed <= 0:
+            raise ValueError("machine_tool: door_speed must be positive")
+    elif panel == "door":
+        raise ValueError("machine_tool: panel='door' needs a side door to stand beside")
+    if front_door is not None:
+        fw, fh, fs = (float(v) for v in front_door)
+        if fw > w - 2 * t + 1e-9 or fs + fh > h - t + 1e-9:
+            raise ValueError(
+                f"machine_tool: a {fw * 1e3:.0f} x {fh * 1e3:.0f} mm front opening on a "
+                f"{fs * 1e3:.0f} mm sill does not fit a {w * 1e3:.0f} x {h * 1e3:.0f} mm front"
+            )
+    tx_, ty_ = sx * ex, y_c + ey
+    if abs(tx_) + tw / 2 > inner + 1e-9 or ty_ - td / 2 < y0 + t - 1e-9 or ty_ + td / 2 > y_r + 1e-9:
+        raise ValueError(
+            f"machine_tool: the table ({tw * 1e3:.0f} x {td * 1e3:.0f} mm) at the exchange "
+            f"offset ({ex * 1e3:.0f}, {ey * 1e3:.0f}) stands into the enclosure"
+        )
+    if th + hc > h - t - 1e-9:
+        raise ValueError(
+            f"machine_tool: the spindle head retracted to {(th + hc) * 1e3:.0f} mm stands "
+            f"through a {h * 1e3:.0f} mm roof"
+        )
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
+    def box(tag: str, sz: Point3, at: Point3, colour: Color = color, group: str = "shell") -> str:
+        px, py = world(at[0], at[1])
+        made = scene.add_box(f"{name}/{group}/{tag}" if group else f"{name}/{tag}",
+                             size=sz, position=(px, py, z0 + at[2]), quaternion=q, color=colour)
+        built.obstacles.append(made)
+        return made
+
+    built = MachineTool(name)
+
+    # ---- the enclosure --------------------------------------------------
+    bed_h = min(0.60, th - 0.10)
+    box("bed", (w - 2 * t, cd, bed_h), (0.0, y_c, bed_h / 2), MACHINE_BED, group="")
+    box("column", (w, d - ls, h), (0.0, (y_r + d / 2) / 2, h / 2), color, group="")
+    box("top", (w, ls, t), (0.0, yc_wall, h - t / 2))
+    box("far", (t, ls, h), (-sx * (w / 2 - t / 2), yc_wall, h / 2))
+    # The door-side wall, around the opening (or solid, without a door).
+    if door is None:
+        box("near", (t, ls, h), (sx * (w / 2 - t / 2), yc_wall, h / 2))
+    else:
+        front_pier = (y_c - aw / 2) - y0
+        rear_pier = y_r - (y_c + aw / 2)
+        xw = sx * (w / 2 - t / 2)
+        box("near_sill", (t, ls, sill), (xw, yc_wall, sill / 2))
+        box("near_head", (t, ls, h - sill - ah), (xw, yc_wall, (sill + ah + h) / 2))
+        box("near_front", (t, front_pier, ah), (xw, y0 + front_pier / 2, sill + ah / 2))
+        if rear_pier > 1e-9:
+            box("near_rear", (t, rear_pier, ah), (xw, y_r - rear_pier / 2, sill + ah / 2))
+    # The front wall, around the front door opening (or solid).
+    if front_door is None:
+        box("front", (w, t, h), (0.0, y0 + t / 2, h / 2))
+    else:
+        yf = y0 + t / 2
+        box("front_sill", (w, t, fs), (0.0, yf, fs / 2))
+        box("front_head", (w, t, h - fs - fh), (0.0, yf, (fs + fh + h) / 2))
+        pier = (w - fw) / 2
+        for tag, sign in (("front_left", -1.0), ("front_right", 1.0)):
+            box(tag, (pier, t, fh), (sign * (w / 2 - pier / 2), yf, fs + fh / 2))
+        front_leaf = box("leaf", (fw + 0.10, leaf_t, fh + 0.10), (0.0, y0 - 0.01 - leaf_t / 2, fs + fh / 2),
+                         color, group="front_door")
+        # The front door's closed switch: a sliver the shut leaf overlaps
+        # by 5 mm at its left edge — the confirmation the machine's program
+        # reads before it opens the side door (never both at once).
+        lx, ly = world(-(fw + 0.10) / 2 - 0.005, y0 - 0.01 - leaf_t / 2)
+        lane = f"{name}/front_door/closed"
+        scene.add_zone_sensor(lane, position=(lx, ly, z0 + fs + 0.10), size=(0.02, leaf_t + 0.02, 0.20),
+                              quaternion=q, watch=[front_leaf])
+        built.sensors.append(lane)
+        built.front_door_lane = lane
+        scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end="closed")
+        if mode == "full":
+            wx, wy = world(0.0, y0 - 0.01 - leaf_t - 0.0025)
+            _trim(scene, built, f"{name}/front_door/window", (fw - 0.10, 0.005, fh - 0.30),
+                  (wx, wy, z0 + fs + fh / 2 + 0.05), q, MACHINE_WINDOW)
+
+    # ---- the table at the exchange position, and the head over it -------
+    box("saddle", (min(tw * 0.7, 0.45), min(td * 1.4, 0.55), th - plate - bed_h),
+        (tx_, ty_, (bed_h + th - plate) / 2), MACHINE_BED, group="")
+    box("table", (tw, td, plate), (tx_, ty_, th - plate / 2), TABLE_STEEL, group="")
+    box("head", (0.32, 0.42, h - t - th - hc), (0.0, y_c, (th + hc + h - t) / 2), MACHINE_BED, group="")
+    tx, ty = world(tx_, ty_)
+    scene.add_frame(f"{name}/table", position=(tx, ty, z0 + th), quaternion=q)
+    built.frames.append(f"{name}/table")
+
+    # ---- the side door ----------------------------------------------------
+    if door is not None:
+        xl = sx * (w / 2 + 0.01 + leaf_t / 2)
+        zl = sill + ah / 2
+        leaf = box("leaf", (leaf_t, 2 * half, ah + 2 * over), (xl, y_c, zl), color, group="side_door")
+        built.door_objects.append(leaf)
+        # The handle: a vertical bar standing 90 mm off the leaf's outer
+        # face at its front edge, 200 mm above the sill — decoration a
+        # gripper closes on (never collided), and far enough out for one
+        # to close on it with its knuckles clear of the leaf. The frame
+        # is the bar's centre, +Z into the leaf.
+        xh = xl + sx * (leaf_t / 2 + 0.090)
+        yh = y_c - aw / 2
+        zh = sill + 0.20
+        hx, hy = world(xh, yh)
+        built.door_objects.append(
+            _trim(scene, built, f"{name}/side_door/handle", (0.02, 0.02, 0.14), (hx, hy, z0 + zh), q, DARK_STEEL)
+        )
+        for i, dz in enumerate((-0.05, 0.05)):
+            px, py = world(xl + sx * (leaf_t / 2 + 0.045), yh)
+            built.door_objects.append(
+                _trim(scene, built, f"{name}/side_door/stub{i}", (0.090, 0.016, 0.016),
+                      (px, py, z0 + zh + dz), q, DARK_STEEL)
+            )
+        q_handle = _mul_quat(q, _slope_quat(-sx * math.pi / 2))
+        scene.add_frame(f"{name}/door/side/handle", position=(hx, hy, z0 + zh), quaternion=q_handle)
+        built.frames.append(f"{name}/door/side/handle")
+        if mode == "full":
+            wx, wy = world(xl + sx * (leaf_t / 2 + 0.0025), y_c)
+            built.door_objects.append(
+                _trim(scene, built, f"{name}/side_door/window", (0.005, aw - 0.10, ah - 0.30),
+                      (wx, wy, z0 + zl + 0.05), q, MACHINE_WINDOW)
+            )
+            for tag, dz in (("rail_top", ah / 2 + over + 0.02), ("rail_bottom", -(ah / 2 + over + 0.02))):
+                rx, ry = world(sx * (w / 2 + 0.01 + leaf_t / 2), y_c + travel / 2)
+                _trim(scene, built, f"{name}/side_door/{tag}", (0.015, 2 * half + travel, 0.03),
+                      (rx, ry, z0 + zl + dz), q, DARK_STEEL)
+        built.door_travel = travel
+        built.door_axis = (-s, c, 0.0)
+        if door != "manual":
+            # A driven door is an axis with two named stops: their lanes
+            # `<axis>/closed` and `<axis>/open` are the limit switches an
+            # interlock waits on, and what the axis drives is checked
+            # against every robot each tick.
+            axis = f"{name}/side_door"
+            scene.add_linear_axis(axis, objects=list(built.door_objects), axis=(-s, c, 0.0),
+                                  speed=float(speed), range=(0.0, travel), position=0.0,
+                                  stops={"closed": 0.0, "open": travel})
+            built.devices.append(axis)
+            built.door = axis
+            built.door_lanes = (f"{axis}/closed", f"{axis}/open")
+        else:
+            # A loose leaf has no axis to read: two zone sensors, a sliver
+            # the leaf overlaps by 5 mm at each end of its stroke, are the
+            # closed and open limit switches.
+            lanes = []
+            for tag, yz in (("closed", y_c - half - 0.005), ("open", y_c + travel + half + 0.005)):
+                zx, zy = world(xl, yz)
+                lane = f"{name}/side_door/{tag}"
+                scene.add_zone_sensor(lane, position=(zx, zy, z0 + zl), size=(leaf_t + 0.02, 0.02, 0.20),
+                                      quaternion=q, watch=[leaf])
+                built.sensors.append(lane)
+                lanes.append(lane)
+                scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end=tag)
+            built.door_lanes = (lanes[0], lanes[1])
+        ex_, ey_ = world(sx * (w / 2 + 0.01 + leaf_t + 0.15), y_c)
+        scene.add_frame(f"{name}/entry", position=(ex_, ey_, z0 + zl), quaternion=q)
+        built.frames.append(f"{name}/entry")
+
+    # ---- the operator panel -------------------------------------------------
+    if panel is not None:
+        keys = tuple(buttons) if buttons is not None else ("cycle_start", "feed_hold", "reset", "estop")
+        # A pack that names its panel's switches names the buttons too.
+        button_models = {}
+        if spec is not None:
+            for button in keys:
+                role = "estop" if button == "estop" else "button"
+                if spec.has_component(role):
+                    button_models[button] = spec.part_number(role, **params)
+        if panel == "front":
+            px, py = world(sx * (w / 2 - 0.35), y0 - 0.015 - 0.005)
+            made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.35), yaw=yaw, tilt=0.35,
+                                  buttons=keys, pitch=panel_pitch, button_model=button_models or None,
+                                  manufacturer=manufacturer if button_models else None)
+        else:
+            gap = (y_c - aw / 2) - y0
+            width = min(0.24, gap - 0.04)
+            px, py = world(sx * (w / 2 + 0.015 + 0.005), y0 + gap / 2)
+            made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.30), yaw=yaw + sx * math.pi / 2,
+                                  size=(width, 0.22), buttons=keys, columns=2, pitch=panel_pitch,
+                                  button_model=button_models or None,
+                                  manufacturer=manufacturer if button_models else None)
+        built.panel = made
+        built.buttons = list(made.sensors)
+        if f"{name}/panel/estop" in built.buttons:
+            built.estop = f"{name}/panel/estop"
+        built.obstacles.extend(made.obstacles)
+        built.frames.extend(made.frames)
+        built.sensors.extend(made.sensors)
+        if spec is not None and button_models:
+            # The switches are the machine's own articles: their rows
+            # link to the machine's pack, like the panel's.
+            for button in made.sensors:
+                part = scene.part(button) or {}
+                scene.set_part(
+                    button, kind="sensor", category=part.get("category") or "hmi.button",
+                    catalog=spec.catalog_ref, manufacturer=part.get("manufacturer"),
+                    model=part.get("model"), qty=int(part.get("qty") or 1),
+                    attributes=dict(part.get("attributes") or {}),
+                )
+
+    if mode == "full":
+        bx, by = world(0.0, y0 - 0.005)
+        _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + h - 0.10), q, MACHINE_ACCENT)
+        mx, my = world(sx * (w / 2 - 0.15), y0 + 0.15)
+        _trim_cylinder(scene, built, f"{name}/trim/mast", 0.012, 0.10, (mx, my, z0 + h + 0.05), q, DARK_STEEL)
+        for i, (tag, colour) in enumerate((("green", (0.023, 0.332, 0.061)), ("amber", (0.686, 0.323, 0.005)),
+                                           ("red", (0.578, 0.018, 0.012)))):
+            _trim_cylinder(scene, built, f"{name}/trim/light_{tag}", 0.03, 0.06,
+                           (mx, my, z0 + h + 0.13 + 0.06 * i), q, colour)
+
+    # ---- the identity ---------------------------------------------------------
+    figures = {
+        "footprint_mm": f"{w * 1e3:.0f}x{d * 1e3:.0f}",
+        "height_mm": round(h * 1e3, 1),
+        "table_mm": f"{tw * 1e3:.0f}x{td * 1e3:.0f}",
+    }
+    door_figures = {
+        "drive": door,
+        "opening_mm": f"{aw * 1e3:.0f}x{ah * 1e3:.0f}",
+        "stroke_mm": round(travel * 1e3, 1),
+        **({"open_s": round(travel / speed, 3)} if built.door else {}),
+    }
+    if spec is None:
+        scene.set_part(
+            name, kind="group", category="machine_tool.vmc",
+            **_identity(model, manufacturer, {**figures, **attributes}),
+        )
+        if door is not None:
+            # The door is one article — the axis where it is driven (so
+            # the device row *is* the door on the bill), the leaf group
+            # when it is pulled by hand.
+            scene.set_part(
+                built.door or f"{name}/side_door",
+                kind="device" if built.door else "group", category="machine_tool.door",
+                **door_figures,
+            )
+        return built
+    built.interface = spec.interface
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("body", "machine_tool.vmc"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("body", **params), description=spec.name,
+        **{**recorded, **figures, **_kg(spec.mass_kg("body", **params)), **attributes},
+    )
+    if door is not None and spec.has_component("side_door"):
+        if "side_door" in params:
+            ordered = dict(model=spec.part_number("side_door", **params),
+                           **_kg(spec.mass_kg("side_door", **params)))
+        else:
+            ordered = {}  # the leaf, loose: no drive on the bill
+        scene.set_part(
+            built.door or f"{name}/side_door",
+            kind="device" if built.door else "group",
+            category=spec.category("side_door", "machine_tool.door"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            **{**door_figures, **ordered},
+        )
+    if built.panel is not None and spec.has_component("panel"):
+        scene.set_part(
+            f"{name}/panel", kind="group", category=spec.category("panel", "hmi.panel"), qty=1,
+            catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("panel", **params), buttons=float(len(built.buttons)),
+        )
+    return built
+
+
+def lathe(
+    scene,
+    name: str,
+    size: Optional[Point3] = None,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    yaw: float = 0.0,
+    aperture: Optional[Point3] = None,
+    door: Union[str, None, object] = _DEFAULT,
+    door_travel: Optional[float] = None,
+    door_speed: Optional[float] = None,
+    spindle: Optional[Point3] = None,
+    chamber: Optional[float] = None,
+    turret: Optional[Point3] = None,
+    tailstock: bool = False,
+    panel: Optional[str] = "front",
+    buttons: Optional[Sequence[str]] = None,
+    panel_pitch: float = 0.045,
+    wall: float = 0.06,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = MACHINE_SHELL,
+    **attributes,
+) -> MachineTool:
+    """A CNC lathe as the envelopes a tending cell verifies against —
+    the turning counterpart of `machine_tool`. `size = (length, depth,
+    height)` stands at `position`, front face on -Y before `yaw`, the
+    spindle axis along the length (+X toward the tailstock). Without
+    arguments it is the Haas ST-10 of the public spec pages (`LATHE_*`
+    above); the front opening, the spindle's height and depth are design
+    values, the first to replace when the drawing is at hand.
+
+    What it puts in the scene, all of it collision-checked:
+
+    * the enclosure — bed, the rear block behind the `chamber`, roof, end
+      walls, and the **front wall around the door opening**
+      `aperture = (width, height, sill)`, centred on the spindle;
+    * the **headstock** and the **spindle nose** at
+      `spindle = (x from the body centre, depth behind the front wall's
+      inner face, height)`, the **turret** envelope `turret = (x, y, z
+      size)` right of it at spindle height, and a tailstock block at the
+      far end when `tailstock=True` — the chuck is a part of its own
+      (`bt.parts.chuck(scene, "chuck", *scene.frame("<name>/spindle"))`);
+    * the **front door**: a leaf that slides toward the tailstock end by
+      `door_travel`. `door="servo"` / `"air"` make it a linear axis
+      `<name>/front_door` with the stops `closed` and `open`, checked
+      against every robot each tick; `door="manual"` (the default) leaves
+      the leaf loose for a robot that takes the handle; `door=None`
+      builds a solid front. Either way the lanes `<name>/front_door/closed`
+      and `/open` read the leaf at its ends of travel;
+    * an **operator panel** on the front face, right of the opening
+      (`panel="front"`; `None` leaves it off).
+
+    Frames: `<name>/spindle` (the spindle nose centre, +Z out along the
+    axis toward the tailstock — a load comes in along -Z),
+    `<name>/entry` (the opening's centre, 150 mm outside the leaf),
+    `<name>/door/front/handle` (+Z into the leaf), the panel's.
+
+    The returned `MachineTool` names the door axis, its lanes, the stroke
+    and its world direction, the panel and its buttons, the E-stop lane —
+    what `bt.tending` and a teach read. A lathe has the one door, so its
+    `front_door_lane` is `None` and no door-exclusivity guard applies.
+    Refused rather than clipped: an opening that does not fit the front,
+    a stroke that runs the leaf off the body, a spindle outside the
+    chamber.
+
+    With `catalog=` a lathe spec pack's `mechanical.envelope`
+    (`doors.front`, `spindle`, `turret`, `chamber_depth_mm`) and the door
+    drive it sells (`front_door`) stand in for the figures, its articles
+    land on the bill, and its `interface` rides on the result."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("lathe")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if "front_door" in params:
+            sold = [str(_plain(v)) for v in (spec.params()["front_door"].get("values") or [])]
+            if door is None:
+                params.pop("front_door")
+            elif door == "manual" and "manual" not in sold:
+                params.pop("front_door")
+            else:
+                if door is not _DEFAULT:
+                    params["front_door"] = spec.choose("front_door", str(door))
+                chosen = params["front_door"]
+                door = None if chosen in (None, "none") else str(chosen)
+        mech = spec.mechanical
+        if size is None and mech.get("footprint_mm") and mech.get("height_mm"):
+            fp = mech["footprint_mm"]
+            size = (float(fp[0]) / 1000.0, float(fp[1]) / 1000.0, float(mech["height_mm"]) / 1000.0)
+        front = spec.envelope("doors", "front")
+        if aperture is None and isinstance(front, dict):
+            aperture = (front["width_mm"] / 1000.0, front["height_mm"] / 1000.0, front["sill_mm"] / 1000.0)
+        if door_travel is None and isinstance(front, dict) and front.get("travel_mm"):
+            door_travel = float(front["travel_mm"]) / 1000.0
+        sp = spec.envelope("spindle")
+        if spindle is None and isinstance(sp, dict):
+            spindle = (sp["x_mm"] / 1000.0, sp["depth_mm"] / 1000.0, sp["height_mm"] / 1000.0)
+        tr = spec.envelope("turret")
+        if turret is None and isinstance(tr, dict):
+            turret = (tr["x_mm"] / 1000.0, tr["y_mm"] / 1000.0, tr["z_mm"] / 1000.0)
+        if chamber is None and spec.envelope("chamber_depth_mm") is not None:
+            chamber = float(spec.envelope("chamber_depth_mm")) / 1000.0
+        if door not in (None, _DEFAULT, "manual") and door_speed is None:
+            open_s = spec.behavior(f"door_open_s_{door}")
+            if isinstance(open_s, (int, float)) and open_s > 0 and door_travel is not None:
+                door_speed = float(door_travel) / float(open_s)
+        manufacturer = manufacturer or spec.manufacturer
+    if door is _DEFAULT:
+        door = "manual"
+    if door is not None and door not in DOOR_DRIVES:
+        raise ValueError(f"lathe: door must be one of {DOOR_DRIVES} or None, not {door!r}")
+    if panel not in (None, "front"):
+        raise ValueError(f"lathe: panel is 'front' or None, not {panel!r}")
+    mode = _detail(detail, spec is not None)
+    w, d, h = (float(v) for v in (size or LATHE_SIZE))
+    aw, ah, sill = (float(v) for v in (aperture or LATHE_APERTURE))
+    sx_, sd, sz_ = (float(v) for v in (spindle or LATHE_SPINDLE))
+    tw, td, th = (float(v) for v in (turret or LATHE_TURRET))
+    cd = LATHE_CHAMBER if chamber is None else float(chamber)
+    t = float(wall)
+    if min(w, d, h, aw, ah, sill, sd, sz_, tw, td, th, cd, t) <= 0:
+        raise ValueError("lathe: sizes must be positive")
+    if cd + 2 * t > d:
+        raise ValueError(f"lathe: a {cd:.2f} m chamber does not fit a {d:.2f} m deep body")
+    travel = aw + 0.055 if door_travel is None else float(door_travel)
+    speed = door_speed if door_speed is not None else DOOR_SPEED.get(door or "", 0.0)
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+    y0 = -d / 2                       # the front face
+    y_r = y0 + t + cd                 # where the rear block begins
+    y_c = y0 + t + cd / 2             # the chamber's centre (depth)
+    y_s = y0 + t + sd                 # the spindle nose's depth
+    leaf_t, over = 0.04, 0.05
+    half = aw / 2 + over
+    x_c = sx_                         # the opening is centred on the spindle
+
+    # Refused before anything is placed: a plan that does not fit is not
+    # a smaller machine.
+    if door is not None:
+        if sill + ah > h - t + 1e-9:
+            raise ValueError(
+                f"lathe: the front opening tops out at {(sill + ah) * 1e3:.0f} mm, through a {h * 1e3:.0f} mm body"
+            )
+        if x_c - aw / 2 < -w / 2 + t - 1e-9 or x_c + aw / 2 > w / 2 - t + 1e-9:
+            raise ValueError(
+                f"lathe: a {aw * 1e3:.0f} mm front opening centred at x = {x_c * 1e3:.0f} mm does not fit "
+                f"the {w * 1e3:.0f} mm front"
+            )
+        if x_c + half + travel > w / 2 + 1e-9:
+            raise ValueError(
+                f"lathe: a {travel * 1e3:.0f} mm door stroke runs the leaf off the {w * 1e3:.0f} mm body"
+            )
+        if door != "manual" and speed <= 0:
+            raise ValueError("lathe: door_speed must be positive")
+    if abs(sx_) > w / 2 - t - 1e-9 or sd > cd - 1e-9 or sz_ > h - t - 1e-9:
+        raise ValueError(
+            f"lathe: the spindle at ({sx_ * 1e3:.0f}, {sd * 1e3:.0f}, {sz_ * 1e3:.0f}) mm stands outside the chamber"
+        )
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
+    def box(tag: str, sz: Point3, at: Point3, colour: Color = color, group: str = "shell") -> str:
+        px, py = world(at[0], at[1])
+        made = scene.add_box(f"{name}/{group}/{tag}" if group else f"{name}/{tag}",
+                             size=sz, position=(px, py, z0 + at[2]), quaternion=q, color=colour)
+        built.obstacles.append(made)
+        return made
+
+    built = MachineTool(name)
+
+    # ---- the enclosure ----------------------------------------------------
+    bed_h = min(0.60, sz_ - 0.25)
+    box("bed", (w - 2 * t, cd, bed_h), (0.0, y_c, bed_h / 2), MACHINE_BED, group="")
+    box("rear", (w, d - t - cd, h), (0.0, (y_r + d / 2) / 2, h / 2), color, group="")
+    box("top", (w, t + cd, t), (0.0, (y0 + y_r) / 2, h - t / 2))
+    for tag, sign in (("left", -1.0), ("right", 1.0)):
+        box(tag, (t, t + cd, h), (sign * (w / 2 - t / 2), (y0 + y_r) / 2, h / 2))
+    # The front wall, around the door opening (or solid).
+    if door is None:
+        box("front", (w, t, h), (0.0, y0 + t / 2, h / 2))
+    else:
+        yf = y0 + t / 2
+        box("front_sill", (w, t, sill), (0.0, yf, sill / 2))
+        box("front_head", (w, t, h - sill - ah), (0.0, yf, (sill + ah + h) / 2))
+        left_pier = (x_c - aw / 2) + w / 2
+        right_pier = w / 2 - (x_c + aw / 2)
+        if left_pier > 1e-9:
+            box("front_left", (left_pier, t, ah), (-w / 2 + left_pier / 2, yf, sill + ah / 2))
+        if right_pier > 1e-9:
+            box("front_right", (right_pier, t, ah), (w / 2 - right_pier / 2, yf, sill + ah / 2))
+
+    # ---- the spindle, the turret, the tailstock ----------------------------
+    head_w = min(0.45, (w / 2 + x_c) - t - 0.05)
+    box("headstock", (head_w, cd * 0.6, sz_ + 0.30 - bed_h),
+        (x_c - head_w / 2 - 0.02, y_s + cd * 0.1, (bed_h + sz_ + 0.30) / 2), MACHINE_BED, group="")
+    box("turret", (tw, td, th), (x_c + 0.20 + tw / 2, y_s + 0.15, sz_), MACHINE_BED, group="")
+    if tailstock:
+        box("tailstock", (0.25, 0.30, 0.35), (w / 2 - t - 0.25, y_s, sz_ - 0.05), MACHINE_BED, group="")
+    spx, spy = world(x_c, y_s)
+    # +Z of the spindle frame along the axis toward the tailstock (+X
+    # before yaw): a quarter turn about Y, then the machine's yaw.
+    spin_q = _mul_quat(q, (0.0, math.sin(math.pi / 4), 0.0, math.cos(math.pi / 4)))
+    scene.add_frame(f"{name}/spindle", position=(spx, spy, z0 + sz_), quaternion=spin_q)
+    built.frames.append(f"{name}/spindle")
+
+    # ---- the front door -----------------------------------------------------
+    if door is not None:
+        yl = y0 - 0.01 - leaf_t / 2
+        zl = sill + ah / 2
+        leaf = box("leaf", (2 * half, leaf_t, ah + 2 * over), (x_c, yl, zl), color, group="front_door")
+        built.door_objects.append(leaf)
+        # The handle: a bar 90 mm off the leaf at its tailstock-side edge,
+        # sill + 200 — where a hand (or a fork) takes it. +Z into the leaf
+        # is +Y before yaw: a quarter turn about X the other way.
+        hx_, hy_ = x_c + half - 0.10, yl - leaf_t / 2 - 0.09
+        handle_q = _mul_quat(q, (-math.sin(math.pi / 4), 0.0, 0.0, math.cos(math.pi / 4)))
+        wx, wy = world(hx_, hy_)
+        scene.add_frame(f"{name}/door/front/handle", position=(wx, wy, z0 + sill + 0.20), quaternion=handle_q)
+        built.frames.append(f"{name}/door/front/handle")
+        if mode == "full":
+            _trim(scene, built, f"{name}/front_door/handle", (0.02, 0.02, 0.14), (wx, wy, z0 + sill + 0.20), q, DARK_STEEL)
+            for i, dz in enumerate((-0.06, 0.06)):
+                sx2, sy2 = world(hx_, yl - leaf_t / 2 - 0.045)
+                _trim(scene, built, f"{name}/front_door/stub{i}", (0.016, 0.090, 0.016),
+                      (sx2, sy2, z0 + sill + 0.20 + dz), q, DARK_STEEL)
+            wx2, wy2 = world(x_c, yl - leaf_t / 2 - 0.0025)
+            _trim(scene, built, f"{name}/front_door/window", (aw - 0.10, 0.005, ah - 0.30),
+                  (wx2, wy2, z0 + zl + 0.05), q, MACHINE_WINDOW)
+            for tag, dz in (("rail_top", ah / 2 + over + 0.02), ("rail_bottom", -(ah / 2 + over + 0.02))):
+                rx, ry = world(x_c + travel / 2, yl)
+                _trim(scene, built, f"{name}/front_door/{tag}", (2 * half + travel, 0.015, 0.03),
+                      (rx, ry, z0 + zl + dz), q, DARK_STEEL)
+        built.door_travel = travel
+        built.door_axis = (c, s, 0.0)
+        if door != "manual":
+            axis = f"{name}/front_door"
+            scene.add_linear_axis(axis, objects=list(built.door_objects), axis=(c, s, 0.0),
+                                  speed=float(speed), range=(0.0, travel), position=0.0,
+                                  stops={"closed": 0.0, "open": travel})
+            built.devices.append(axis)
+            built.door = axis
+            built.door_lanes = (f"{axis}/closed", f"{axis}/open")
+        else:
+            lanes = []
+            for tag, xz in (("closed", x_c - half - 0.005), ("open", x_c + travel + half + 0.005)):
+                zx, zy = world(xz, yl)
+                lane = f"{name}/front_door/{tag}"
+                scene.add_zone_sensor(lane, position=(zx, zy, z0 + zl), size=(0.02, leaf_t + 0.02, 0.20),
+                                      quaternion=q, watch=[leaf])
+                built.sensors.append(lane)
+                lanes.append(lane)
+                scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end=tag)
+            built.door_lanes = (lanes[0], lanes[1])
+        ex_, ey_ = world(x_c, y0 - 0.01 - leaf_t - 0.15)
+        scene.add_frame(f"{name}/entry", position=(ex_, ey_, z0 + zl), quaternion=q)
+        built.frames.append(f"{name}/entry")
+
+    # ---- the operator panel ------------------------------------------------
+    if panel is not None:
+        keys = tuple(buttons) if buttons is not None else ("cycle_start", "feed_hold", "reset", "estop")
+        button_models = {}
+        if spec is not None:
+            for button in keys:
+                role = "estop" if button == "estop" else "button"
+                if spec.has_component(role):
+                    button_models[button] = spec.part_number(role, **params)
+        # Right of the opening, clear of the leaf's travel — the pendant's
+        # place on a slant-bed lathe.
+        clear = x_c + half + (travel if door is not None else 0.0) + 0.25
+        px_ = min(w / 2 - 0.25, clear)
+        px, py = world(px_, y0 - 0.015 - 0.005)
+        made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.35), yaw=yaw, tilt=0.35,
+                              buttons=keys, columns=2 if len(keys) >= 4 else None, pitch=panel_pitch,
+                              button_model=button_models or None,
+                              manufacturer=manufacturer if button_models else None)
+        built.panel = made
+        built.buttons = list(made.sensors)
+        if f"{name}/panel/estop" in built.buttons:
+            built.estop = f"{name}/panel/estop"
+        built.obstacles.extend(made.obstacles)
+        built.frames.extend(made.frames)
+        built.sensors.extend(made.sensors)
+        if spec is not None and button_models:
+            for button in made.sensors:
+                part = scene.part(button) or {}
+                scene.set_part(
+                    button, kind="sensor", category=part.get("category") or "hmi.button",
+                    catalog=spec.catalog_ref, manufacturer=part.get("manufacturer"),
+                    model=part.get("model"), qty=int(part.get("qty") or 1),
+                    attributes=dict(part.get("attributes") or {}),
+                )
+
+    if mode == "full":
+        # The accent band along the roof edge, as on the machining centre.
+        bx_, by_ = world(0.0, y0 - 0.0025)
+        _trim(scene, built, f"{name}/trim/band", (w, 0.005, 0.06), (bx_, by_, z0 + h - 0.10), q, MACHINE_ACCENT)
+
+    figures = {
+        "length_mm": round(w * 1000.0, 1), "depth_mm": round(d * 1000.0, 1), "height_mm": round(h * 1000.0, 1),
+        "opening_w_mm": round(aw * 1000.0, 1), "opening_h_mm": round(ah * 1000.0, 1),
+        "spindle_height_mm": round(sz_ * 1000.0, 1),
+    }
+    door_figures = {"drive": door or "none", "stroke_mm": round(travel * 1000.0, 1)}
+    if door not in (None, "manual"):
+        door_figures["open_s"] = round(travel / speed, 3)
+    if spec is None:
+        scene.set_part(
+            name, kind="group", category="machine_tool.lathe", qty=1,
+            **_identity(model, manufacturer, {**figures, **attributes}),
+        )
+        if door is not None:
+            scene.set_part(built.door or f"{name}/front_door", kind="device" if built.door else "group",
+                           category="machine_tool.door", **door_figures)
+        return built
+    built.interface = spec.interface
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    scene.set_part(
+        name, kind="group", category=spec.category("body", "machine_tool.lathe"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("body", **params), description=spec.name,
+        **{**recorded, **figures, **_kg(spec.mass_kg("body", **params)), **attributes},
+    )
+    if door is not None and spec.has_component("front_door"):
+        ordered = (dict(model=spec.part_number("front_door", **params), **_kg(spec.mass_kg("front_door", **params)))
+                   if "front_door" in params else {})
+        scene.set_part(built.door or f"{name}/front_door", kind="device" if built.door else "group",
+                       category=spec.category("front_door", "machine_tool.door"), qty=1,
+                       catalog=spec.catalog_ref, manufacturer=manufacturer, **{**door_figures, **ordered})
+    if built.panel is not None and spec.has_component("panel"):
+        scene.set_part(f"{name}/panel", kind="group", category=spec.category("panel", "hmi.panel"), qty=1,
+                       catalog=spec.catalog_ref, manufacturer=manufacturer,
+                       model=spec.part_number("panel", **params), buttons=float(len(built.buttons)))
     return built

@@ -65,6 +65,23 @@ the scene, and a tool welded on with `attach_tool` is its own line. A part
 pinned to the robot's instance name overlays that (a description, a price,
 a different category); it does not replace it.
 
+## Tools in the stack
+
+A tool welded onto the robot with `attach_tool` is a line of its own,
+named by its place in the stack — `arm/tool` for the first, `arm/tool2`
+for the next, `arm/tool/tool3` for one riding a tool that is itself a
+stack. A catalog tool brings its identity; one made from a URDF string
+(a `bt.tools.multi_tool` bracket, say) does not, and gets it pinned by
+that row name:
+
+```python
+scene.set_part("arm/tool", kind="tool", category="tool.multi",
+               catalog="botrail/hand/mph3/r1", manufacturer="botrail", model="MPH-3", mass_kg=0.3)
+```
+
+The pin follows the robot through a rename and rides the project; on a
+catalog tool's row it is the last word.
+
 ## The bill of materials
 
 [`Scene.bom`][botrail.Scene.bom] lists every piece of **equipment** the scene

@@ -75,13 +75,17 @@ derived.
 | `cycles` | the timelines you pass | duration, step spans, robot busy time and utilization, the branches taken, and the tightest clearance re-scanned against the scene each timeline was baked from (`clearance_dt`, `None` to skip) |
 | `io` | the [I/O map](io-map.md) | point counts by kind and status, node usage, lint findings |
 | `scenarios` | a `ScenarioRuns` | the matrix — which scenario completed at what cycle, which stalled and why |
+| `machines` | the parts, devices, sensors and nodes | every machine tool (`machine_tool.*` part): its door — an axis the machine drives or a loose leaf — with drive, stroke and end-of-travel lanes, the panel's buttons, and the controller hosting its program |
 | `bom` | the [BOM](parts-and-bom.md) | line count, unidentified count, quantity per category, numeric totals |
 | `footprint` | the layout | the plan-view extent |
 | `deliverables` | the paths you pass | size and SHA-256 of every file — the evidence that the drawing, the list and the program are one cell |
 
 Pass the cycles as a `{name: timeline}` dict, a list, or a single
 `SequenceTimeline`; a `ScenarioRuns` passed as `scenarios=` fills the matrix
-and, when no timelines are given, supplies the cycles too. Every section is
+and, when no timelines are given, supplies the cycles too. The matrix is
+the FAT sheet's verdict column: a fault authored as a scenario (a stuck
+switch, an open wire, the E-stop in) either lets the cycle through or
+stalls it, and the row says which and at what step. Every section is
 a plain dict or list — `report.cycles[0]["duration"]`,
 `report.footprint["area"]`, `report.io["unbound"]` — and the report renders
 the same data as Markdown (`to_markdown()` / `save("…md")`) or JSON
@@ -110,4 +114,7 @@ the I/O list byte-identical; adding a fence panel changes the BOM too. The
 repository's own tests pin exactly that
 ([`python/tests/test_deliverables.py`](https://github.com/botrail/botrail/blob/main/python/tests/test_deliverables.py)),
 and the [Hand over the cell](../tutorials/hand-over.md) tutorial writes the
-whole set from one script.
+whole set from one script. The set has a control-design half too — the
+[I/O list, the handshake spec, the interlock table](io-map.md#the-interlock-table)
+and the [PLCopen file](offline-commissioning.md) — derived from the same
+sequences the bake ran.

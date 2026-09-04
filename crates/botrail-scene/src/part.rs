@@ -177,6 +177,12 @@ pub enum PartTargetKind {
     /// A LiDAR scanner (the purchasable `sensor.lidar` article).
     Lidar,
     IoNode,
+    /// An end-effector in a robot's tool stack, by the name its BOM row
+    /// carries (`<robot>/tool`, `<robot>/tool2`, `<robot>/tool/tool3` for
+    /// a tool that is itself a stack). A catalog tool brings its own
+    /// identity; a made one — a bracket welded on from a URDF string —
+    /// gets it pinned here.
+    Tool,
 }
 
 impl PartTargetKind {
@@ -190,6 +196,7 @@ impl PartTargetKind {
             PartTargetKind::Camera => "camera",
             PartTargetKind::Lidar => "lidar",
             PartTargetKind::IoNode => "io_node",
+            PartTargetKind::Tool => "tool",
         }
     }
 
@@ -203,6 +210,7 @@ impl PartTargetKind {
             "camera" => PartTargetKind::Camera,
             "lidar" => PartTargetKind::Lidar,
             "io_node" => PartTargetKind::IoNode,
+            "tool" => PartTargetKind::Tool,
             _ => return None,
         })
     }
@@ -510,6 +518,9 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     if scene.io_map().nodes.iter().any(|n| n.name == target) {
         hits.push(PartTargetKind::IoNode);
     }
+    if tool_row_names(scene).iter().any(|n| n == target) {
+        hits.push(PartTargetKind::Tool);
+    }
     let prefix = format!("{target}/");
     let exact = scene.obstacles().iter().any(|o| o.name == target);
     let group = scene
@@ -526,9 +537,29 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     hits
 }
 
+/// The names the BOM gives the tools welded onto every robot — what a
+/// `PartTargetKind::Tool` part is pinned to.
+fn tool_row_names(scene: &Scene) -> Vec<String> {
+    let mut names = Vec::new();
+    for robot in &scene.robots {
+        let mut rows = Vec::new();
+        let mut tools = 0;
+        robot_lines(
+            &robot.model.source,
+            &robot.name,
+            "robot",
+            &mut tools,
+            &mut rows,
+        );
+        names.extend(rows.into_iter().skip(1).flat_map(|row| row.names));
+    }
+    names
+}
+
 fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
     match kind {
         PartTargetKind::Robot => scene.robot_index(target).is_some(),
+        PartTargetKind::Tool => tool_row_names(scene).iter().any(|n| n == target),
         PartTargetKind::Device => scene.devices().iter().any(|d| d.name == target),
         PartTargetKind::Sensor => scene.sensors().iter().any(|s| s.name == target),
         PartTargetKind::Camera => scene.cameras().iter().any(|c| c.name == target),
@@ -714,8 +745,8 @@ impl Scene {
                     [one] => *one,
                     [] => {
                         return Err(SceneError::BadPart(format!(
-                            "`{target}` is not a robot, device, sensor, camera, lidar, I/O node, \
-                             obstacle or obstacle group in this scene"
+                            "`{target}` is not a robot, tool, device, sensor, camera, lidar, \
+                             I/O node, obstacle or obstacle group in this scene"
                         )))
                     }
                     many => {
@@ -790,9 +821,16 @@ impl Scene {
 
     /// Follows a robot rename.
     pub(crate) fn rename_part_target(&mut self, kind: PartTargetKind, old: &str, new: &str) {
+        let prefix = format!("{old}/");
         for entry in &mut self.parts {
             if entry.kind == kind && entry.target == old {
                 entry.target = new.to_string();
+            } else if kind == PartTargetKind::Robot
+                && entry.kind == PartTargetKind::Tool
+                && entry.target.starts_with(&prefix)
+            {
+                // The tools ride the robot's name: `arm/tool` follows `arm`.
+                entry.target = format!("{new}/{}", &entry.target[prefix.len()..]);
             }
         }
     }
@@ -826,6 +864,17 @@ impl Scene {
             if let Some(part) = explicit(PartTargetKind::Robot, &robot.name) {
                 if let Some(first) = robot_rows.first_mut() {
                     first.apply(part);
+                }
+            }
+            // The tools after it, each by its row name: a pinned part is
+            // the identity of a made tool, or the last word on a catalog one.
+            for row in robot_rows.iter_mut().skip(1) {
+                if let Some(part) = row
+                    .names
+                    .first()
+                    .and_then(|n| explicit(PartTargetKind::Tool, n))
+                {
+                    row.apply(part);
                 }
             }
             lines.extend(robot_rows);

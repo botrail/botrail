@@ -19,9 +19,10 @@ ls deliverables/
 ```
 
 ```text
-cell.botrail        cell_bom.csv     cell_io.csv       cell_report.json  pick_cell.script
-cell.plcopen.xml    cell_bom.md      cell_layout.dxf   cell_report.md
-cell.py             cell_cycle.usda  cell_layout.svg   cell_topology.mmd
+cell.botrail        cell_bom.csv     cell_interlocks.md  cell_report.json  pick_cell.script
+cell.plcopen.xml    cell_bom.md      cell_io.csv         cell_report.md
+cell.py             cell_cycle.usda  cell_layout.dxf     cell_topology.mmd
+                                     cell_layout.svg
 ```
 
 ## The cell

@@ -393,3 +393,30 @@ def test_catalog_robot_and_tool_rows() -> None:
     assert [f.code for f in req.findings() if f.target == "ur5e/tool"] == [
         "spec_short",
     ]
+
+
+def test_a_machine_tool_asks_the_arm_for_reach_before_anything_is_taught() -> None:
+    """The opening decides the arm: a machine's table, through its side
+    door, is a reach requirement on the robot beside it — no taught pose
+    needed — and a machine across the hall is not this robot's."""
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"), base_position=(1.4, -0.35, 0.0))
+    bt.parts.machine_tool(scene, "vmc", model="VMC-1", manufacturer="ACME")
+    bt.parts.machine_tool(scene, "far", position=(9.0, 0.0), model="VMC-2", manufacturer="ACME")
+    line = scene.requirements()["simple_arm"]
+    reach = [r for r in line.requirements if r.key == "reach_mm"]
+    assert len(reach) == 1 and "the table of `vmc`" in reach[0].basis
+    (tx, ty, tz), _ = scene.frame("vmc/table")
+    distance = ((tx - 1.4) ** 2 + (ty + 0.35) ** 2 + tz ** 2) ** 0.5
+    assert reach[0].value == pytest.approx(distance * 1000.0 * 1.1, abs=0.2)
+
+
+def test_a_lathe_asks_for_reach_to_its_spindle() -> None:
+    # The turning counterpart: the spindle nose, through the front door.
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"), base_position=(-0.55, -1.7, 0.0))
+    bt.parts.lathe(scene, "lathe", model="ST-10", manufacturer="Haas")
+    line = scene.requirements()["simple_arm"]
+    reach = [r for r in line.requirements if r.key == "reach_mm"]
+    assert len(reach) == 1 and "the spindle of `lathe`" in reach[0].basis and "front opening" in reach[0].basis
+    (sx, sy, sz), _ = scene.frame("lathe/spindle")
+    distance = ((sx + 0.55) ** 2 + (sy + 1.7) ** 2 + sz ** 2) ** 0.5
+    assert reach[0].value == pytest.approx(distance * 1000.0 * 1.1, abs=0.2)

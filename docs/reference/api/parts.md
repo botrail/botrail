@@ -1,8 +1,8 @@
 # Standard parts (`bt.parts`)
 
 Generators for the structures every cell has — fences, walls, tables,
-pedestals, racks, conveyor bodies, pallets, light curtains, stairs — built
-from ordinary residents
+pedestals, racks, conveyor bodies, pallets, light curtains, stairs, a
+machining centre with its door and panel — built from ordinary residents
 (boxes, frames, a device or a sensor) with their [part](../../guides/parts-and-bom.md)
 identity pinned, so the BOM counts them and the layout sheet labels them.
 See [Standard parts and CAD geometry](../../guides/standard-parts.md).

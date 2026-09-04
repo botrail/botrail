@@ -170,6 +170,62 @@ def merge(*groups: Iterable[Channel]) -> list:
     return out
 
 
+# ---------------------------------------------------------------- catalog
+
+_CHANNEL_KEYS = ("id", "kind", "port", "address", "voltage", "logic")
+
+
+def from_catalog(ref, revision: Optional[str] = None) -> list:
+    """The channels a catalog product declares — a controller's, a remote
+    I/O station's, a robot controller's — read from its package manifest
+    (`electrical.io`, the catalog's electrical layer). `ref` is a catalog id
+    (downloaded like `Robot.from_catalog`), an `(id, revision)` pair, or a
+    path to a package directory. A manifest that names a known template
+    instead of listing channels (`standard: ur`) gets that template, so
+    `bt.io.ur_standard()` and the UR5e package agree.
+
+        scene.add_io_node("UR", kind="robot_controller", robots=["arm"],
+                          channels=bt.io.from_catalog("universal_robots/ur/ur5e/r1"))
+    """
+    manifest = _catalog_manifest(ref, revision)
+    io = (manifest.get("electrical") or {}).get("io") or {}
+    rows = io.get("channels") or []
+    if rows:
+        return [{k: row[k] for k in _CHANNEL_KEYS if row.get(k) is not None} for row in rows]
+    standard = io.get("standard")
+    if standard == "ur":
+        return ur_standard()
+    raise ValueError(
+        f"{manifest.get('id', ref)}: no electrical.io.channels in the manifest"
+        + (f" and no template for standard {standard!r}" if standard else "")
+    )
+
+
+def electrical(ref, revision: Optional[str] = None) -> dict:
+    """The whole `electrical:` section of a catalog product's manifest —
+    supply, output, io, bus, connector, power — as plain dicts."""
+    return dict(_catalog_manifest(ref, revision).get("electrical") or {})
+
+
+def _catalog_manifest(ref, revision: Optional[str]) -> dict:
+    id_or_path, rev = ref if isinstance(ref, tuple) else (ref, revision)
+    path = Path(str(id_or_path))
+    if path.is_dir():
+        directory = path
+    elif path.is_file():
+        directory = path.parent
+    else:
+        from . import catalog_package
+
+        directory = Path(catalog_package(str(id_or_path), revision=rev))
+    import yaml
+
+    data = yaml.safe_load((directory / "manifest.yaml").read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{directory}: manifest.yaml is not a mapping")
+    return data
+
+
 # ------------------------------------------------------------------ faults
 
 

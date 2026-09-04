@@ -1466,6 +1466,47 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
         }
     }
 
+    // ---- ① an axis's stop lanes: limit switches, read like sensors ------
+    for device in scene.devices() {
+        let DeviceKind::LinearAxis { stops, .. } = &device.kind else {
+            continue;
+        };
+        for (stop, _) in stops {
+            let name = format!("{}/{}", device.name, stop);
+            if role_of(&name) == Some(DeclRole::Exclude) {
+                continue;
+            }
+            let readers = by_host(
+                usages
+                    .iter()
+                    .filter_map(|u| u.reads.get(&name).map(|s| (u.host.as_str(), s.as_slice()))),
+            );
+            if readers.is_empty() {
+                b.point(
+                    &name,
+                    None,
+                    IoDirection::Input,
+                    None,
+                    ChannelKind::Di,
+                    IoSource::Sensor,
+                    PointStatus::Unbound,
+                );
+            }
+            for (host, steps) in readers {
+                let p = b.point(
+                    &name,
+                    None,
+                    IoDirection::Input,
+                    Some(&host),
+                    ChannelKind::Di,
+                    IoSource::Sensor,
+                    PointStatus::Unbound,
+                );
+                p.readers.extend(steps);
+            }
+        }
+    }
+
     // ---- ②③④ internal signals ---------------------------------------------
     for signal in scene.signals() {
         let name = &signal.name;

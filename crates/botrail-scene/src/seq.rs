@@ -251,12 +251,18 @@ pub enum DeviceKind {
     },
     /// Moves the listed obstacles along `axis` at `speed`, positioned by
     /// `MoveTo` commands within `range`; `DeviceDone` means in-position.
+    /// `stops` are named positions along the axis (a door's `closed` and
+    /// `open`): [`DeviceCommand::MoveToStop`] drives to one, and each is a
+    /// read-only input lane `<axis>/<stop>` — ON while the axis stands at
+    /// it, the limit switch a door interlock is written from. Between
+    /// stops every lane is off (MTConnect's UNLATCHED).
     LinearAxis {
         objects: Vec<String>,
         axis: Unit<Vector3<f64>>,
         speed: f64,
         position: f64,
         range: (f64, f64),
+        stops: Vec<(String, f64)>,
     },
     /// Feeds parked objects onto the line, one every `interval` seconds
     /// while running. Its running state is recorded as an output-signal
@@ -1587,7 +1593,13 @@ impl Scene {
 
     /// Is `name` readable as a signal (internal relay or sensor input)?
     fn signal_readable(&self, name: &str) -> bool {
-        self.signals.iter().any(|s| s.name == name) || self.sensors.iter().any(|s| s.name == name)
+        self.signals.iter().any(|s| s.name == name)
+            || self.sensors.iter().any(|s| s.name == name)
+            || self.devices.iter().any(|d| {
+                // An axis's stop lanes read like sensors: `<axis>/<stop>`.
+                matches!(&d.kind, DeviceKind::LinearAxis { stops, .. }
+                    if stops.iter().any(|(stop, _)| format!("{}/{}", d.name, stop) == name))
+            })
     }
 
     /// Resolves an action's robot reference to a scene index. `None` means
@@ -2468,9 +2480,21 @@ impl Scene {
                             Ok(())
                         }
                     }
-                    (DeviceKind::LinearAxis { .. }, _) => {
-                        Err(format!("axis `{device}` only takes move_to commands"))
+                    (DeviceKind::LinearAxis { stops, .. }, DeviceCommand::MoveToStop(stop)) => {
+                        if stops.iter().any(|(n, _)| n == stop) {
+                            Ok(())
+                        } else {
+                            let known: Vec<String> =
+                                stops.iter().map(|(n, _)| format!("`{n}`")).collect();
+                            Err(format!(
+                                "axis `{device}` has no stop `{stop}` (stops: {})",
+                                if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                            ))
+                        }
                     }
+                    (DeviceKind::LinearAxis { .. }, _) => Err(format!(
+                        "axis `{device}` only takes move_to commands (a position, or one of its stops)"
+                    )),
                     (DeviceKind::Lift { stops, .. }, DeviceCommand::MoveToStop(stop)) => {
                         if stops.iter().any(|(n, _)| n == stop) {
                             Ok(())
@@ -2488,7 +2512,8 @@ impl Scene {
                          bt.seq.move_to({device:?}, \"2F\")"
                     )),
                     (_, DeviceCommand::MoveToStop(_)) => Err(format!(
-                        "`{device}` is not a lift; move_to with a stop name drives a lift"
+                        "`{device}` is not a lift or an axis with named stops; move_to with a \
+                         stop name drives one of those"
                     )),
                 }
             }

@@ -172,9 +172,15 @@ def test_generated_structures_round_trip_through_the_project(tmp_path: Path) -> 
     bt.parts.fence(scene, "fence", path=[(-1, -1), (1, -1), (1, 1), (-1, 1)], model="ST20")
     bt.parts.pedestal(scene, "ped", height=0.4, position=(0, 0))
     bt.parts.conveyor(scene, "conv", length=1.5, width=0.3, position=(0, 0.8, 0.6), model="GVL")
+    # A machine tool brings a device, sensors with turned zones, and a
+    # panel of pinned buttons — the whole of it comes back.
+    vmc = bt.parts.machine_tool(scene, "vmc", position=(4.0, 0.0), yaw=0.3, model="VMC")
+    bt.tending.fanuc_ri2(scene, vmc, cycle_s=1.0)
     scene.save_project(tmp_path / "cell.botrail")
     again = bt.Scene.load_project(tmp_path / "cell.botrail")
     assert again.bom().rows == scene.bom().rows
+    assert again.device_names == scene.device_names and again.sensor_names == scene.sensor_names
+    assert again.sequence_names == scene.sequence_names
     # Poses round-trip through JSON with float noise, so compare the
     # rendered sheet (rounded to a tenth of a pixel) and the extents.
     assert again.layout("svg") == scene.layout("svg")
@@ -249,3 +255,254 @@ def test_rack_stacks_shelves_and_puts_a_frame_on_each() -> None:
     assert scene.bom().total("mass_kg") is None
     built.remove(scene)
     assert scene.obstacle_names == [] and scene.frames == {} and scene.parts() == []
+
+
+# ------------------------------------------------------------ machine tool
+
+
+def test_machine_tool_stands_the_envelopes_a_tending_cell_verifies_against() -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    vmc = bt.parts.machine_tool(scene, "vmc", model="α-D21MiB5 Plus", manufacturer="FANUC", mass_kg=2000)
+    # The ROBODRILL figures, as boxes: the side opening 705 wide from the
+    # 827 sill, the piers around it, the table top at 0.90 shifted 250 mm
+    # to the door, the spindle head from nose-to-table 580 up to the roof.
+    lo, hi = scene.obstacle_bounds("vmc/shell/near_front")
+    assert hi[0] - lo[0] == pytest.approx(0.06) and (lo[2], hi[2]) == pytest.approx((0.827, 1.696))
+    lo, hi = scene.obstacle_bounds("vmc/shell/near_rear")
+    front = scene.obstacle_bounds("vmc/shell/near_front")[1][1]
+    assert lo[1] - front == pytest.approx(0.705)
+    assert scene.obstacle_bounds("vmc/shell/near_head")[0][2] == pytest.approx(1.696)
+    lo, hi = scene.obstacle_bounds("vmc/table")
+    assert (hi[2], hi[0] - lo[0], hi[1] - lo[1]) == pytest.approx((0.90, 0.65, 0.40))
+    assert (lo[0] + hi[0]) / 2 == pytest.approx(0.25)
+    assert scene.obstacle_bounds("vmc/head")[0][2] == pytest.approx(0.90 + 0.58)
+    (tx, _ty, tz), _ = scene.frame("vmc/table")
+    assert (tx, tz) == pytest.approx((0.25, 0.90))
+    # The leaf stands proud of the wall, over the opening; the handle
+    # frame aims +Z into it; `entry` waits 150 mm outside the leaf.
+    lo, hi = scene.obstacle_bounds("vmc/side_door/leaf")
+    assert lo[0] > scene.obstacle_bounds("vmc/shell/near_sill")[1][0]
+    assert (hi[1] - lo[1], hi[2] - lo[2]) == pytest.approx((0.805, 0.969))
+    (hx, _, _), hq = scene.frame("vmc/door/side/handle")
+    assert hx > hi[0]
+    assert bt.parts._rotate(hq, (0.0, 0.0, 1.0)) == pytest.approx((-1.0, 0.0, 0.0))
+    assert scene.frame("vmc/entry")[0][0] == pytest.approx(hi[0] + 0.15)
+    # A servo door: a linear axis over the leaf and its trim, 760 mm of
+    # stroke at the published 0.8 m / 0.8 s, with `closed` and `open` as
+    # named stops — their lanes are the limit switches, not sensors.
+    assert vmc.door == "vmc/side_door" and vmc.door in scene.device_names
+    assert vmc.door_travel == pytest.approx(0.76) and vmc.door_axis == pytest.approx((0.0, 1.0, 0.0))
+    assert vmc.door_objects[0] == "vmc/side_door/leaf" and "vmc/side_door/handle" in vmc.door_objects
+    assert vmc.door_lanes == ("vmc/side_door/closed", "vmc/side_door/open")
+    assert vmc.panel is not None and vmc.buttons == [f"vmc/panel/{b}" for b in ("cycle_start", "feed_hold", "reset", "estop")]
+    # The front door's closed switch and the E-stop: the lanes the
+    # machine's program is guarded by.
+    assert vmc.front_door_lane == "vmc/front_door/closed" and vmc.estop == "vmc/panel/estop"
+    assert vmc.sensors == [vmc.front_door_lane, *vmc.buttons]
+    assert rows(scene)["vmc/front_door/closed"]["category"] == "sensor.limit_switch"
+    sq = scene.sequence("door")
+    sq.step("open", actions=[bt.seq.move_to(vmc.door, "open")], transition=bt.seq.device_done(vmc.door))
+    sq.step("hold", transition=bt.seq.elapsed(0.1))
+    tl = scene.simulate_sequence("door")
+    assert tl.signal("vmc/side_door/closed").value_at(0.0) and not tl.signal("vmc/side_door/open").value_at(0.0)
+    assert tl.signal("vmc/side_door/open").value_at(tl.duration) and not tl.signal("vmc/side_door/closed").value_at(tl.duration)
+    assert tl.signal("vmc/side_door/open").rising_edges()[0] == pytest.approx(0.76, abs=0.02)
+    assert tl.object_pose("vmc/side_door/handle", tl.duration)[0][1] - scene.frame("vmc/door/side/handle")[0][1] == pytest.approx(0.76)
+    # The bill: the machine, the door as the axis it is driven by, the
+    # panel, its buttons with the 22 mm figures, the limit switches.
+    by = rows(scene)
+    assert (by["vmc"]["category"], by["vmc"]["model"], by["vmc"]["attributes"]["table_mm"]) == ("machine_tool.vmc", "α-D21MiB5 Plus", "650x400")
+    door = by["vmc/side_door"]
+    assert (door["category"], door["attributes"]["drive"], door["attributes"]["stroke_mm"], door["attributes"]["open_s"]) == ("machine_tool.door", "servo", 760, 0.76)
+    assert by["vmc/panel"]["category"] == "hmi.panel"
+    start, estop = by["vmc/panel/cycle_start"], by["vmc/panel/estop"]
+    assert (start["category"], start["attributes"]["travel_mm"], start["attributes"]["force_n"]) == ("hmi.button", 2.6, 3.8)
+    assert (estop["attributes"]["head_mm"], estop["attributes"]["force_n"], estop["attributes"]["actuator"]) == (40, 44, "mushroom")
+    assert "vmc/side_door/closed" not in by   # the stops are the axis's, not articles
+    vmc.remove(scene)
+    assert scene.obstacle_names == [] and scene.device_names == [] and scene.sensor_names == []
+    assert scene.frames == {} and scene.parts() == []
+
+
+def test_machine_tool_variants_manual_door_and_no_door() -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    # A manual door: the leaf is loose (no axis), so two zone sensors read
+    # it at its ends — the limit switches, on the bill.
+    vmc = bt.parts.machine_tool(scene, "vmc", door="manual", panel="door", buttons=("cycle_start", "clamp"))
+    assert vmc.door is None and scene.device_names == [] and vmc.door_travel == pytest.approx(0.76)
+    assert rows(scene)["vmc/side_door"]["attributes"]["drive"] == "manual"
+    assert vmc.door_lanes == ("vmc/side_door/closed", "vmc/side_door/open")
+    assert set(vmc.door_lanes) <= set(vmc.sensors)
+    assert rows(scene)["vmc/side_door/closed"]["category"] == "sensor.limit_switch"
+    # The panel beside the door faces the way the door does (+X).
+    (_, _, _), q = scene.frame("vmc/panel/cycle_start/press")
+    assert bt.parts._rotate(q, (0.0, 0.0, 1.0)) == pytest.approx((-1.0, 0.0, 0.0), abs=1e-9)
+    for name in vmc.door_objects:
+        (x, y, z), qq = scene.obstacle_pose(name)
+        scene.set_obstacle_pose(name, (x, y + vmc.door_travel, z), qq)
+    sq = scene.sequence("look")
+    sq.step("hold", transition=bt.seq.elapsed(0.05))
+    tl = scene.simulate_sequence("look")
+    assert tl.signal("vmc/side_door/open").value_at(0.0) and not tl.signal("vmc/side_door/closed").value_at(0.0)
+    # The front door stands shut: its switch reads made. No E-stop on this
+    # panel, so no E-stop lane.
+    assert tl.signal("vmc/front_door/closed").value_at(0.0) and vmc.estop is None
+    vmc.remove(scene)
+    # No side door at all: a solid wall, no lanes, no handle, and the left
+    # side — the front door's switch is the only sensor left.
+    vmc = bt.parts.machine_tool(scene, "vmc", door=None, panel=None)
+    assert vmc.door_lanes is None and vmc.panel is None and "vmc/shell/near" in vmc.obstacles
+    assert "vmc/entry" not in vmc.frames and scene.sensor_names == ["vmc/front_door/closed"]
+    vmc.remove(scene)
+    assert scene.sensor_names == []
+    # Without a front door there is no switch either.
+    vmc = bt.parts.machine_tool(scene, "vmc", door=None, panel=None, front_door=None)
+    assert vmc.front_door_lane is None and scene.sensor_names == []
+    vmc.remove(scene)
+    vmc = bt.parts.machine_tool(scene, "vmc", door="air", door_side="left")
+    _lo, hi = scene.obstacle_bounds("vmc/side_door/leaf")
+    assert hi[0] < scene.obstacle_bounds("vmc/shell/far")[0][0]
+    assert rows(scene)["vmc/side_door"]["attributes"]["open_s"] == pytest.approx(0.76 / 0.4)
+
+
+def test_machine_tool_refuses_what_does_not_fit() -> None:
+    scene = scene_()
+    with pytest.raises(ValueError, match="does not fit"):
+        bt.parts.machine_tool(scene, "vmc", aperture=(1.4, 0.869, 0.827))
+    with pytest.raises(ValueError, match="through a"):
+        bt.parts.machine_tool(scene, "vmc", aperture=(0.705, 1.5, 0.827))
+    with pytest.raises(ValueError, match="off the"):
+        bt.parts.machine_tool(scene, "vmc", door_travel=1.2)
+    with pytest.raises(ValueError, match="into the enclosure"):
+        bt.parts.machine_tool(scene, "vmc", exchange=(0.6, 0.0))
+    with pytest.raises(ValueError, match="roof"):
+        bt.parts.machine_tool(scene, "vmc", head_clearance=1.5)
+    with pytest.raises(ValueError, match="panel='door'"):
+        bt.parts.machine_tool(scene, "vmc", door=None, panel="door")
+    with pytest.raises(ValueError, match="door must be"):
+        bt.parts.machine_tool(scene, "vmc", door="hydraulic")
+    assert scene.obstacle_names == []
+
+
+def test_operator_panel_button_reads_a_press_and_only_that_button() -> None:
+    scene = scene_()
+    # Three buttons in a row facing the arm; the arm's tool tip is a
+    # 30 x 80 x 40 box, 40 mm past its TCP.
+    panel = bt.parts.operator_panel(scene, "hmi", (0.0, 0.42, 0.55), buttons=("a", "b", "c"), columns=3,
+                                    model="XALK", manufacturer="ACME", button_model="XB4BA31")
+    assert panel.sensors == ["hmi/a", "hmi/b", "hmi/c"]
+    assert set(panel.frames) == {"hmi", "hmi/a", "hmi/a/press", "hmi/b", "hmi/b/press", "hmi/c", "hmi/c/press"}
+    (cx, cy, cz), q = scene.frame("hmi/b")
+    (px, py, pz), _ = scene.frame("hmi/b/press")
+    # +Z into the panel; the press frame 2.6 mm deeper than the cap face.
+    assert bt.parts._rotate(q, (0.0, 0.0, 1.0)) == pytest.approx((0.0, 1.0, 0.0), abs=1e-9)
+    assert (px - cx, py - cy, pz - cz) == pytest.approx((0.0, 0.0026, 0.0))
+    by = rows(scene)
+    assert (by["hmi"]["category"], by["hmi"]["model"]) == ("hmi.panel", "XALK")
+    assert (by["hmi/a"]["category"], by["hmi/a"]["model"], by["hmi/a"]["qty"]) == ("hmi.button", "XB4BA31", 3)
+
+    def held_at(depth: float) -> dict:
+        target = (px, py - 0.04 - depth, pz)
+        ik = scene.set_tcp_target(target, q)
+        assert ik.converged, ik
+        sq = scene.sequence("hold")
+        sq.step("hold", transition=bt.seq.elapsed(0.05))
+        tl = scene.simulate_sequence("hold")
+        return {b: tl.signal(f"hmi/{b}").value_at(0.0) for b in "abc"}
+
+    # Touching the cap reads nothing; pushed in to the press frame, `b` is
+    # on and its neighbours are not.
+    assert held_at(0.0026) == {"a": False, "b": False, "c": False}
+    assert held_at(0.0) == {"a": False, "b": True, "c": False}
+    panel.remove(scene)
+    assert scene.sensor_names == [] and scene.obstacle_names == [] and scene.frames == {}
+
+
+def test_vise_frames_the_jaw_floor_and_refuses_a_wide_opening() -> None:
+    scene = scene_()
+    vise = bt.parts.vise(scene, "vise", (1.0, 0.5, 0.9), opening=0.054, model="VQ-125", manufacturer="ACME")
+    assert vise.obstacles == ["vise/body", "vise/jaw_fixed", "vise/jaw_moving"] and vise.frames == ["vise/jaw"]
+    (x, y, z), _ = scene.frame("vise/jaw")
+    assert (x, y, z) == pytest.approx((1.0, 0.5, 0.96))
+    fixed, moving = scene.obstacle_bounds("vise/jaw_fixed"), scene.obstacle_bounds("vise/jaw_moving")
+    assert fixed[0][1] - moving[1][1] == pytest.approx(0.054)
+    assert fixed[0][2] == pytest.approx(0.96) and fixed[1][2] == pytest.approx(1.0)
+    assert scene.obstacle_bounds("vise/body")[0][2] == pytest.approx(0.9)
+    by = rows(scene)
+    assert (by["vise"]["category"], by["vise"]["model"], by["vise"]["attributes"]["opening_mm"]) == ("fixture.vise", "VQ-125", 54)
+    with pytest.raises(ValueError, match="opens 150 mm at most"):
+        bt.parts.vise(scene, "wide", (0.0, 0.0), opening=0.2)
+    vise.remove(scene)
+    assert scene.obstacle_names == []
+
+
+def test_lathe_and_chuck_stand_the_turning_envelopes() -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    lathe = bt.parts.lathe(scene, "lathe", model="ST-10", manufacturer="Haas", mass_kg=3585)
+    # The ST-10 figures as boxes: a 3.20 m body, the front opening 900 wide
+    # from the 800 sill, the spindle nose 550 mm left of centre at 1.05 m,
+    # half a metre behind the front wall.
+    lo, hi = scene.obstacle_bounds("lathe/rear")
+    assert hi[0] - lo[0] == pytest.approx(3.20) and hi[2] == pytest.approx(2.06)
+    lo, hi = scene.obstacle_bounds("lathe/front_door/leaf")
+    assert hi[0] - lo[0] == pytest.approx(0.90 + 0.10) and (lo[2], hi[2]) == pytest.approx((0.75, 1.55))
+    (sp, sq), _ = scene.frame("lathe/spindle"), None
+    assert sp == pytest.approx((-0.55, -0.89 + 0.06 + 0.50, 1.05), abs=1e-6)
+    assert bt.parts._rotate(sq, (0.0, 0.0, 1.0)) == pytest.approx((1.0, 0.0, 0.0), abs=1e-9)
+    # A manual front door: loose leaf, two limit switches, the handle at
+    # the tailstock-side edge with +Z into the leaf, the entry in front.
+    assert lathe.door is None and lathe.door_lanes == ("lathe/front_door/closed", "lathe/front_door/open")
+    assert lathe.door_axis == pytest.approx((1.0, 0.0, 0.0)) and lathe.door_travel == pytest.approx(0.955)
+    assert lathe.front_door_lane is None and lathe.estop == "lathe/panel/estop"
+    (hp, hq) = scene.frame("lathe/door/front/handle")
+    assert bt.parts._rotate(hq, (0.0, 0.0, 1.0)) == pytest.approx((0.0, 1.0, 0.0), abs=1e-9) and hp[1] < lo[1]
+    (ep, _), _ = scene.frame("lathe/entry"), None
+    assert ep[0] == pytest.approx(-0.55) and ep[1] < hp[1]
+    # The chuck on the spindle: its body behind the face, three jaws proud
+    # of it around a 50 mm part, its face frame +Z along the spindle.
+    chuck = bt.parts.chuck(scene, "chuck", *scene.frame("lathe/spindle"), opening=0.050,
+                           model="HO-6", manufacturer="Kitagawa", mass_kg=22)
+    assert chuck.obstacles == ["chuck/body", "chuck/jaw0", "chuck/jaw1", "chuck/jaw2"] and chuck.frames == ["chuck/face"]
+    lo, hi = scene.obstacle_bounds("chuck/body")
+    assert hi[0] == pytest.approx(-0.55, abs=1e-6) and lo[0] == pytest.approx(-0.635, abs=1e-6)
+    assert hi[2] - lo[2] == pytest.approx(0.165, abs=1e-6)
+    for k in range(3):
+        lo, hi = scene.obstacle_bounds(f"chuck/jaw{k}")
+        assert lo[0] == pytest.approx(-0.55, abs=1e-6) and hi[0] == pytest.approx(-0.52, abs=1e-6)
+        r = math.hypot((lo[1] + hi[1]) / 2 - sp[1], (lo[2] + hi[2]) / 2 - sp[2])
+        assert r == pytest.approx(0.025 + 0.0125, abs=1e-6)
+    (fp, fq) = scene.frame("chuck/face")
+    assert fp == pytest.approx(sp) and bt.parts._rotate(fq, (0.0, 0.0, 1.0)) == pytest.approx((1.0, 0.0, 0.0), abs=1e-9)
+    # The bill: the lathe, its door with the stroke, the chuck with its
+    # diameter and opening; the machine program templates take it as is.
+    by = rows(scene)
+    assert by["lathe"]["category"] == "machine_tool.lathe" and by["lathe"]["model"] == "ST-10"
+    assert by["lathe/front_door"]["attributes"]["drive"] == "manual"
+    assert by["lathe/front_door"]["attributes"]["stroke_mm"] == pytest.approx(955.0)
+    assert (by["chuck"]["category"], by["chuck"]["attributes"]["diameter_mm"], by["chuck"]["attributes"]["opening_mm"]) == (
+        "fixture.chuck", 165.0, 50.0)
+    hs = bt.tending.manual(scene, lathe, cycle_s=1.0, buttons=("cycle_start", "feed_hold", "reset"))
+    assert hs.signal("door_closed") == "lathe/front_door/closed" and "front_door_closed" not in hs.signals
+    # Refused: an opening that runs past the front, a stroke off the body,
+    # a spindle outside the chamber, a chuck opening its jaws cannot span.
+    with pytest.raises(ValueError, match="does not fit the"):
+        bt.parts.lathe(scene, "l2", aperture=(2.5, 0.7, 0.8))
+    with pytest.raises(ValueError, match="runs the leaf off"):
+        bt.parts.lathe(scene, "l3", door_travel=2.0)
+    with pytest.raises(ValueError, match="outside the chamber"):
+        bt.parts.lathe(scene, "l4", spindle=(-0.55, 1.5, 1.05))
+    with pytest.raises(ValueError, match="does not fit a"):
+        bt.parts.chuck(scene, "c2", (0.0, 2.0, 1.0), opening=0.20)
+    # A servo door is an axis with two stops; no door is a solid front.
+    other = scene_()
+    other.set_robot_base_pose((4.0, 0.0, 0.0))
+    driven = bt.parts.lathe(other, "lathe", door="servo", panel=None)
+    assert driven.door == "lathe/front_door" and other.device_names == ["lathe/front_door"]
+    assert driven.door_lanes == ("lathe/front_door/closed", "lathe/front_door/open")
+    assert rows(other)["lathe/front_door"]["attributes"]["open_s"] == pytest.approx(0.955)
+    driven.remove(other)
+    solid = bt.parts.lathe(other, "lathe", door=None, panel=None)
+    assert solid.door_lanes is None and "lathe/shell/front" in solid.obstacles and other.sensor_names == []

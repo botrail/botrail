@@ -139,10 +139,16 @@ SPOT_X = {"up": (-1.50, -0.75, 0.15), "dn": (1.50, 0.75, -0.15)}
 # into the gun body — measured, not assumed.
 CLEAR = 0.10
 
-# Gun stroke: open enough to travel with the tab in the throat, squeezed to
-# electrode contact (the taught plane leaves ~5 mm of gap a side).
+# Gun stroke: parked wide open at ready, half the 260 mm stroke to come
+# onto the body and travel between spots (wider, the moving electrode's
+# arm brushes the neighbouring flank as the gun comes onto the first
+# spot), squeezed to electrode contact (the taught plane leaves ~5 mm of
+# gap a side). The travel opening is set on every taught pose by hand:
+# IK is asked for the electrode tip, and a joint off that chain keeps
+# whatever it was seeded with.
 GUN = "electrode_joint"
 GUN_OPEN = 0.25
+GUN_TRAVEL = 0.13
 # Measured against the tab, not chosen: the moving electrode reaches the
 # sheet at 0.055, so the cycle stops 5 mm short of it. A rollout counts
 # electrode-on-sheet as a collision, which is the one part of a real weld
@@ -584,10 +590,13 @@ def solve(scene: bt.Scene, robot: str, pos, quat, label: str) -> list:
     result = scene.set_tcp_target(pos, quat, robot=robot, max_iters=200)
     if not result.converged:
         raise SystemExit(f"teaching failed at {robot} {label}: {result.pos_error:.3e}")
+    q = list(scene.joint_positions_of(robot))
+    q[-1] = GUN_TRAVEL
+    scene.set_joint_positions(q, robot=robot)
     collisions = scene.check_collisions()
     if collisions:
         raise SystemExit(f"taught pose collides at {robot} {label}: {collisions}")
-    return list(scene.joint_positions_of(robot))
+    return q
 
 
 def teach(scene: bt.Scene, station: Station, riders: list) -> dict:
@@ -691,7 +700,7 @@ def build_sequence(scene: bt.Scene, poses: dict, riders: list) -> str:
                          for role in roles],
                 transition=bt.seq.elapsed(WELD_T))
         sq.step(f"{spot}_release", actions=[
-            bt.seq.ramp({GUN: GUN_OPEN}, SQUEEZE_T, robot=arm) for arm in arms
+            bt.seq.ramp({GUN: GUN_TRAVEL}, SQUEEZE_T, robot=arm) for arm in arms
         ] + [bt.seq.set_signal(f"arc_{role}", False) for role in roles]
           + [bt.seq.start(f"src_mark_{arm}_s{index + 1}") for arm in arms])
         sq.step(f"{spot}_withdraw", actions=[

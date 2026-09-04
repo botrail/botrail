@@ -5,7 +5,7 @@ import type { PoseMsg } from "./PoseMsg";
 import type { VehiclePathMsg } from "./VehiclePathMsg";
 import type { VehicleTrayMsg } from "./VehicleTrayMsg";
 
-export type DeviceKindMsg = { "kind": "conveyor", zone_pose: PoseMsg, zone_size: [number, number, number], velocity: [number, number, number], running: boolean, } | { "kind": "linear_axis", objects: Array<string>, axis: [number, number, number], speed: number, position: number, range: [number, number], } | { "kind": "source", pool: Array<string>, park: PoseMsg, pitch: [number, number, number], pose: PoseMsg, interval: number, running: boolean, } | { "kind": "sink", zone_pose: PoseMsg, zone_size: [number, number, number], source: string, } | { "kind": "vehicle", path: VehiclePathMsg, body: Array<string>, speed: number, turn_speed: number, start: string, 
+export type DeviceKindMsg = { "kind": "conveyor", zone_pose: PoseMsg, zone_size: [number, number, number], velocity: [number, number, number], running: boolean, } | { "kind": "linear_axis", objects: Array<string>, axis: [number, number, number], speed: number, position: number, range: [number, number], stops: Array<LiftStopMsg>, } | { "kind": "source", pool: Array<string>, park: PoseMsg, pitch: [number, number, number], pose: PoseMsg, interval: number, running: boolean, } | { "kind": "sink", zone_pose: PoseMsg, zone_size: [number, number, number], source: string, } | { "kind": "vehicle", path: VehiclePathMsg, body: Array<string>, speed: number, turn_speed: number, start: string, 
 /**
  * May it drive a leg backwards instead of turning around for it?
  */

@@ -139,6 +139,40 @@ pub struct FootprintSummary {
     pub height: f64,
 }
 
+/// A machine tool in the cell — an equipment group whose part is a
+/// `machine_tool.*` category — with the door, the panel and the
+/// controller a tending cell hands over against.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MachineSummary {
+    pub name: String,
+    pub category: String,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub catalog: Option<String>,
+    /// The side door, when the machine has one.
+    pub door: Option<DoorSummary>,
+    /// The panel's buttons (zone sensors under `<machine>/panel/`).
+    pub buttons: Vec<String>,
+    /// The I/O node under the machine's name (`<machine>/cnc`) and the
+    /// programs it hosts.
+    pub controller: Option<String>,
+    pub programs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DoorSummary {
+    pub name: String,
+    /// `manual`, `air`, `servo` — from the door's part attributes.
+    pub drive: Option<String>,
+    pub stroke_mm: Option<f64>,
+    /// Axis speed (m/s) when the door is a device.
+    pub speed: Option<f64>,
+    /// The end-of-travel lanes an interlock reads (`…/closed`, `…/open`).
+    pub lanes: Vec<String>,
+    /// `true` when the door is a linear axis the machine drives.
+    pub driven: bool,
+}
+
 /// A file written from the same source as this report, with its digest —
 /// the evidence that the drawing, the list and the program are one cell.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -160,6 +194,7 @@ pub struct CellReport {
     /// Why the I/O map could not be derived, when it could not.
     pub io_error: Option<String>,
     pub scenarios: Vec<ScenarioRow>,
+    pub machines: Vec<MachineSummary>,
     pub bom: BomSummary,
     pub footprint: FootprintSummary,
     pub deliverables: Vec<Deliverable>,
@@ -293,10 +328,110 @@ impl Scene {
             io,
             io_error,
             scenarios: input.scenarios,
+            machines: self.machine_summaries(),
             bom: bom_summary,
             footprint,
             deliverables: input.deliverables,
         }
+    }
+
+    /// The machine tools of the cell: every part pinned with a
+    /// `machine_tool.*` category on a group, with its door (a device the
+    /// machine drives, or a loose leaf with limit switches), its panel
+    /// buttons and the controller hosting its program.
+    fn machine_summaries(&self) -> Vec<MachineSummary> {
+        use crate::seq::DeviceKind;
+        let text = |attrs: &std::collections::BTreeMap<String, crate::part::PartAttr>,
+                    key: &str|
+         -> Option<String> {
+            attrs.get(key).map(|a| match a {
+                crate::part::PartAttr::Text(t) => t.clone(),
+                crate::part::PartAttr::Number(n) => num(*n),
+            })
+        };
+        let number = |attrs: &std::collections::BTreeMap<String, crate::part::PartAttr>,
+                      key: &str|
+         -> Option<f64> {
+            attrs.get(key).and_then(|a| match a {
+                crate::part::PartAttr::Number(n) => Some(*n),
+                crate::part::PartAttr::Text(t) => t.parse().ok(),
+            })
+        };
+        let mut out = Vec::new();
+        for entry in self.parts() {
+            let category = match &entry.part.category {
+                Some(c) if c.starts_with("machine_tool.") && !c.starts_with("machine_tool.door") => {
+                    c.clone()
+                }
+                _ => continue,
+            };
+            let name = entry.target.clone();
+            let prefix = format!("{name}/");
+            // The door: the part row under the machine with a door
+            // category, then the device or the limit switches behind it.
+            let door = self
+                .parts()
+                .iter()
+                .find(|p| {
+                    p.target.starts_with(&prefix)
+                        && p.part
+                            .category
+                            .as_deref()
+                            .is_some_and(|c| c.starts_with("machine_tool.door"))
+                })
+                .map(|p| {
+                    let device = self.devices().iter().find(|d| d.name == p.target);
+                    let (speed, mut lanes) = match device.map(|d| &d.kind) {
+                        Some(DeviceKind::LinearAxis { speed, stops, .. }) => (
+                            Some(*speed),
+                            stops
+                                .iter()
+                                .map(|(stop, _)| format!("{}/{stop}", p.target))
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => (None, Vec::new()),
+                    };
+                    if lanes.is_empty() {
+                        lanes = self
+                            .sensors()
+                            .iter()
+                            .filter(|s| s.name.starts_with(&format!("{}/", p.target)))
+                            .map(|s| s.name.clone())
+                            .collect();
+                    }
+                    DoorSummary {
+                        name: p.target.clone(),
+                        drive: text(&p.part.attributes, "drive"),
+                        stroke_mm: number(&p.part.attributes, "stroke_mm"),
+                        speed,
+                        lanes,
+                        driven: device.is_some(),
+                    }
+                });
+            let buttons: Vec<String> = self
+                .sensors()
+                .iter()
+                .filter(|s| s.name.starts_with(&format!("{prefix}panel/")))
+                .map(|s| s.name.clone())
+                .collect();
+            let node = self
+                .io_map()
+                .nodes
+                .iter()
+                .find(|n| n.name.starts_with(&prefix) && !n.programs.is_empty());
+            out.push(MachineSummary {
+                name,
+                category,
+                manufacturer: entry.part.manufacturer.clone(),
+                model: entry.part.model.clone(),
+                catalog: entry.part.catalog.as_ref().map(|c| c.id.clone()),
+                door,
+                buttons,
+                controller: node.map(|n| n.name.clone()),
+                programs: node.map(|n| n.programs.clone()).unwrap_or_default(),
+            });
+        }
+        out
     }
 }
 
@@ -647,6 +782,56 @@ impl CellReport {
                         format!("**failed** — {}", s.error.as_deref().unwrap_or(""))
                     },
                     s.duration.map(|d| format!("{d:.2}")).unwrap_or_default()
+                );
+            }
+        }
+
+        // ---- machines --------------------------------------------------
+        if !self.machines.is_empty() {
+            out.push_str(
+                "\n## Machines\n\n| machine | door | stroke | drive | lanes | buttons | controller |\n|---|---|---|---|---|---|---|\n",
+            );
+            for m in &self.machines {
+                let ident = [m.manufacturer.as_deref(), m.model.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let machine = if ident.is_empty() {
+                    m.name.clone()
+                } else {
+                    format!("{} ({ident})", m.name)
+                };
+                let (door, stroke, drive, lanes) = match &m.door {
+                    Some(d) => (
+                        if d.driven {
+                            format!("{} (axis{})", d.name, d.speed.map(|v| format!(", {v:.2} m/s")).unwrap_or_default())
+                        } else {
+                            format!("{} (loose leaf)", d.name)
+                        },
+                        d.stroke_mm.map(|s| format!("{} mm", num(s))).unwrap_or_else(|| "—".to_string()),
+                        d.drive.clone().unwrap_or_else(|| "—".to_string()),
+                        if d.lanes.is_empty() { "—".to_string() } else { d.lanes.join(", ") },
+                    ),
+                    None => ("—".to_string(), "—".to_string(), "—".to_string(), "—".to_string()),
+                };
+                let buttons = if m.buttons.is_empty() {
+                    "—".to_string()
+                } else {
+                    m.buttons
+                        .iter()
+                        .map(|b| b.rsplit('/').next().unwrap_or(b).to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let controller = match &m.controller {
+                    Some(c) if !m.programs.is_empty() => format!("{c} ({})", m.programs.join(", ")),
+                    Some(c) => c.clone(),
+                    None => "—".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "| {machine} | {door} | {stroke} | {drive} | {lanes} | {buttons} | {controller} |"
                 );
             }
         }
