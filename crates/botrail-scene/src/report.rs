@@ -360,7 +360,9 @@ impl Scene {
         let mut out = Vec::new();
         for entry in self.parts() {
             let category = match &entry.part.category {
-                Some(c) if c.starts_with("machine_tool.") && !c.starts_with("machine_tool.door") => {
+                Some(c)
+                    if c.starts_with("machine_tool.") && !c.starts_with("machine_tool.door") =>
+                {
                     c.clone()
                 }
                 _ => continue,
@@ -805,15 +807,30 @@ impl CellReport {
                 let (door, stroke, drive, lanes) = match &m.door {
                     Some(d) => (
                         if d.driven {
-                            format!("{} (axis{})", d.name, d.speed.map(|v| format!(", {v:.2} m/s")).unwrap_or_default())
+                            format!(
+                                "{} (axis{})",
+                                d.name,
+                                d.speed.map(|v| format!(", {v:.2} m/s")).unwrap_or_default()
+                            )
                         } else {
                             format!("{} (loose leaf)", d.name)
                         },
-                        d.stroke_mm.map(|s| format!("{} mm", num(s))).unwrap_or_else(|| "—".to_string()),
+                        d.stroke_mm
+                            .map(|s| format!("{} mm", num(s)))
+                            .unwrap_or_else(|| "—".to_string()),
                         d.drive.clone().unwrap_or_else(|| "—".to_string()),
-                        if d.lanes.is_empty() { "—".to_string() } else { d.lanes.join(", ") },
+                        if d.lanes.is_empty() {
+                            "—".to_string()
+                        } else {
+                            d.lanes.join(", ")
+                        },
                     ),
-                    None => ("—".to_string(), "—".to_string(), "—".to_string(), "—".to_string()),
+                    None => (
+                        "—".to_string(),
+                        "—".to_string(),
+                        "—".to_string(),
+                        "—".to_string(),
+                    ),
                 };
                 let buttons = if m.buttons.is_empty() {
                     "—".to_string()

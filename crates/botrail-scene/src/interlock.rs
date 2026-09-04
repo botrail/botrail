@@ -228,9 +228,9 @@ fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool)>) {
         }
     };
     match c {
-        Condition::Signal { name, .. } | Condition::Rising { name } | Condition::Falling { name } => {
-            push(out, (name.clone(), false, false))
-        }
+        Condition::Signal { name, .. }
+        | Condition::Rising { name }
+        | Condition::Falling { name } => push(out, (name.clone(), false, false)),
         Condition::DeviceDone { device } => push(out, (device.clone(), true, false)),
         Condition::RobotDone { robot } => push(out, (robot.clone(), false, true)),
         Condition::All(cs) | Condition::Any(cs) => {
@@ -335,7 +335,11 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 let robot = robot_of_motion(motion)
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default();
-                out.push((OutputKind::Motion, motion.clone(), format!("motion {motion}{robot}")));
+                out.push((
+                    OutputKind::Motion,
+                    motion.clone(),
+                    format!("motion {motion}{robot}"),
+                ));
             }
             Action::StartRamp { robot, targets, .. } => {
                 let joints: Vec<String> = targets
@@ -367,9 +371,11 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 object.clone(),
                 format!("track {object}{}", with_robot(robot)),
             )),
-            Action::Detach { object } => {
-                out.push((OutputKind::Release, object.clone(), format!("detach {object}")))
-            }
+            Action::Detach { object } => out.push((
+                OutputKind::Release,
+                object.clone(),
+                format!("detach {object}"),
+            )),
             Action::Untrack { robot } => out.push((
                 OutputKind::Release,
                 robot.clone().unwrap_or_default(),
@@ -437,11 +443,10 @@ impl Scene {
                 return None;
             };
             let b = d.io.bindings.get(i)?;
-            let address = d
-                .io
-                .node(&b.node)
-                .and_then(|n| n.channels.iter().find(|c| c.id == b.channel))
-                .and_then(|c| c.address.clone());
+            let address =
+                d.io.node(&b.node)
+                    .and_then(|n| n.channels.iter().find(|c| c.id == b.channel))
+                    .and_then(|c| c.address.clone());
             Some(match address {
                 Some(a) => format!("{}.{} [{a}]", b.node, b.channel),
                 None => format!("{}.{}", b.node, b.channel),
@@ -795,7 +800,9 @@ mod tests {
         assert_eq!(done.output, "done := TRUE");
         let md = table.to_markdown();
         assert!(md.contains("| release | signal `go := TRUE` | `NOT mat` | wait_clear |"));
-        assert!(table.to_csv().starts_with("program,host,step,kind,target,output,condition,after,inputs\n"));
+        assert!(table
+            .to_csv()
+            .starts_with("program,host,step,kind,target,output,condition,after,inputs\n"));
     }
 
     #[test]
@@ -855,7 +862,10 @@ mod tests {
         // The rejoin: either arm's exit — the step's timer, or the empty
         // arm's own condition.
         assert_eq!(by_step("end").condition, "T >= 1 s OR TRUE");
-        assert_eq!(by_step("end").after, vec!["pass".to_string(), "check".to_string()]);
+        assert_eq!(
+            by_step("end").after,
+            vec!["pass".to_string(), "check".to_string()]
+        );
         assert_eq!(
             scene.interlock_table(Some(&["nope"])).unwrap_err(),
             InterlockError::UnknownSequence("nope".to_string())
