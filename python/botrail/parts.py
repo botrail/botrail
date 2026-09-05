@@ -133,7 +133,7 @@ def _detail(mode: Optional[str], has_catalog: bool) -> str:
 
 def _load_trim(
     scene, built: Built, spec, role: str, prefix: str, position: Point3,
-    quaternion=None, **args,
+    quaternion=None, *, parameters=None, **args,
 ) -> bool:
     """Draw a part from the file the catalog ships for it, expanded to this
     size. Everything it adds is decoration, the same as `_trim`. Returns
@@ -144,7 +144,8 @@ def _load_trim(
     before = set(scene.frames)
     names = scene.load_urdf(
         str(path), prefix=prefix, position=position, quaternion=quaternion,
-        args={key: repr(float(value)) for key, value in args.items()}, frames=False,
+        args={key: str(value) if isinstance(value, str) else repr(float(value))
+              for key, value in {**(parameters or {}), **args}.items()}, frames=False,
     )
     for name in names:
         scene.set_obstacle_enabled(name, False)
@@ -465,6 +466,12 @@ def fence(
         post_depth, frame_mm, wire_mm, aperture = None, 30.0, 5.0, 0.049
     if height <= 0 or post <= 0:
         raise ValueError("fence: height and post must be positive")
+    # height remains the orderable PANEL height. Posts reach its upper edge;
+    # both collision and decoration start the panel above the catalog floor gap.
+    floor_gap = 0.0 if spec is None else float(spec.rule("floor_gap_mm", 0.0) or 0.0) / 1000.0
+    if not math.isfinite(floor_gap) or floor_gap < 0:
+        raise ValueError("fence: floor_gap_mm must be finite and non-negative")
+    post_height = height + floor_gap
     if spec is None and (panel_pitch is not None and panel_pitch <= 0):
         raise ValueError("fence: panel_pitch must be positive")
     pitch_hint = 1.0 if panel_pitch is None else panel_pitch
@@ -478,14 +485,16 @@ def fence(
     # Posts at every distinct corner (a closed loop shares its ends).
     for i, (x, y) in enumerate(pts):
         pname = scene.add_box(
-            f"{name}/posts/c{i}", size=(post, post, height), position=(x, y, height / 2), color=post_color
+            f"{name}/posts/c{i}", size=(post, post, post_height),
+            position=(x, y, post_height / 2), color=post_color
         )
         built.obstacles.append(pname)
         posts += 1
         if mode == "full":
             drawn = _load_trim(
                 scene, built, spec, "post", f"{name}/trim/c{i}", (x, y, 0.0), None,
-                height=height, section_w=post, section_d=post_depth or post, square=1.0,
+                height=post_height, section_w=post, section_d=post_depth or post, square=1.0,
+                parameters=params,
             )
             if drawn:
                 scene.set_obstacle_visible(pname, False)
@@ -511,7 +520,7 @@ def fence(
             oname = scene.add_box(
                 oname,
                 size=(width, panel_thickness, height),
-                position=(x0 + ux * along, y0 + uy * along, height / 2),
+                position=(x0 + ux * along, y0 + uy * along, floor_gap + height / 2),
                 quaternion=_yaw_quat(yaw),
                 color=panel_color,
             )
@@ -524,14 +533,14 @@ def fence(
                 px, py = x0 + ux * along, y0 + uy * along
                 drawn = _load_trim(
                     scene, built, spec, "door" if is_door else "panel", prefix,
-                    (px, py, 0.0), _yaw_quat(yaw),
+                    (px, py, floor_gap), _yaw_quat(yaw), parameters=params,
                     width=width, height=height, thickness=panel_thickness,
                     frame=frame_mm / 1000.0, wire=wire_mm / 1000.0, aperture=aperture,
                     handle=1.0 if is_door else 0.0,
                 )
                 if not drawn:
                     _mesh_panel(
-                        scene, built, prefix, (px, py, height / 2),
+                        scene, built, prefix, (px, py, floor_gap + height / 2),
                         (width, panel_thickness, height), yaw,
                         frame=frame_mm / 1000.0, wire=wire_mm / 1000.0, aperture=aperture,
                         wire_color=panel_color,
@@ -540,7 +549,7 @@ def fence(
                         grip = width / 2 - frame_mm / 1000.0 * 2
                         _trim(scene, built, f"{prefix}/handle",
                               (frame_mm / 1000.0 * 3, panel_thickness * 2, wire_mm / 500.0),
-                              (x0 + ux * (along + grip), y0 + uy * (along + grip), height / 2),
+                              (x0 + ux * (along + grip), y0 + uy * (along + grip), floor_gap + height / 2),
                               _yaw_quat(yaw), FENCE_FRAME)
             if is_door:
                 door_width_mm = round(width * 1000)
@@ -555,10 +564,10 @@ def fence(
                 px, py = x0 + ux * joints[i], y0 + uy * joints[i]
                 # A post between panels stands along the run, so it can be the
                 # section the catalog actually sells (60 x 40, not 60 square).
-                section = (post, post_depth or post, height)
+                section = (post, post_depth or post, post_height)
                 pname = scene.add_box(
                     f"{name}/posts/e{e}_{i}", size=section,
-                    position=(px, py, height / 2),
+                    position=(px, py, post_height / 2),
                     quaternion=_yaw_quat(yaw) if post_depth else None,
                     color=post_color,
                 )
@@ -567,7 +576,7 @@ def fence(
                 if mode == "full":
                     drawn = _load_trim(
                         scene, built, spec, "post", f"{name}/trim/p{e}_{i}", (px, py, 0.0),
-                        _yaw_quat(yaw), height=height, section_w=post,
+                        _yaw_quat(yaw), height=post_height, section_w=post, parameters=params,
                         section_d=post_depth or post, square=0.0,
                     )
                     if drawn:
@@ -1086,6 +1095,15 @@ def cabinet(
         scene.add_box(f"{name}/body", size=(w, d, h),
                       position=(x, y, z0 + plinth + h / 2), quaternion=q, color=color)
     )
+    # Optional conservative top envelope for lifting eyes. It is present in
+    # plain and full modes alike; the authored rings remain decoration.
+    lifting = 0.0 if spec is None else (spec.dimension_mm("body", "lifting_eye_height", 0.0) or 0.0) / 1000.0
+    if not math.isfinite(lifting) or lifting < 0:
+        raise ValueError("cabinet: lifting_eye_height must be finite and non-negative")
+    if lifting > 0:
+        built.obstacles.append(scene.add_box(
+            f"{name}/lifting_clearance", size=(w, d, lifting),
+            position=(x, y, z0 + plinth + h + lifting / 2), quaternion=q, color=STEEL))
     if plate:
         # The mounting plate stands against the back wall, inside the
         # enclosure — massing like the body (it is steel you ordered), and
@@ -1109,11 +1127,13 @@ def cabinet(
     if mode == "full":
         drawn = _load_trim(
             scene, built, spec, "body", f"{name}/trim/shell", (x, y, z0), q,
-            width=w, depth=d, height=h, base=plinth,
+            width=w, depth=d, height=h, base=plinth, parameters=params,
         )
         if drawn:
             for part in ["body"] + (["base"] if base else []) + (["plate"] if plate else []):
                 scene.set_obstacle_visible(f"{name}/{part}", False)
+            if lifting > 0:
+                scene.set_obstacle_visible(f"{name}/lifting_clearance", False)
         else:
             # Door leaves a shade proud of the face, and a flat handle on
             # each — one door on a narrow body, a pair from a metre up (the
@@ -1469,12 +1489,41 @@ def conveyor(
                       quaternion=q, color=BELT)
     )
     nx, ny = -dy, dx  # across the belt
+    rail_rise = 0.04 if spec is None else float(spec.dimension_mm("unit", "rail_rise", 40.0)) / 1000.0
+    if not math.isfinite(rail_rise) or rail_rise < 0:
+        raise ValueError("conveyor: rail_rise must be finite and non-negative")
     for side, s in (("rail_l", 1.0), ("rail_r", -1.0)):
         ox, oy = nx * s * (width / 2 + rail / 2), ny * s * (width / 2 + rail / 2)
         built.obstacles.append(
-            scene.add_box(f"{name}/{side}", size=(length, rail, belt_thickness + 0.04),
-                          position=(x + ox, y + oy, z - belt_thickness / 2 + 0.02), quaternion=q, color=color)
+            scene.add_box(f"{name}/{side}", size=(length, rail, belt_thickness + rail_rise),
+                          position=(x + ox, y + oy, z - belt_thickness / 2 + rail_rise / 2), quaternion=q, color=color)
         )
+    # A center-drive envelope is opt-in data, not a brand check. These three
+    # dimensions must be supplied together; old packs retain their massing.
+    drive_dims = [] if spec is None else [spec.dimension_mm("unit", key)
+                                         for key in ("drive_length", "drive_drop", "drive_overhang")]
+    has_drive = bool(drive_dims) and any(value is not None for value in drive_dims)
+    if has_drive:
+        if any(value is None or not math.isfinite(value) or value <= 0 for value in drive_dims):
+            raise ValueError("conveyor: drive_length, drive_drop and drive_overhang must all be positive")
+        dl, dh, overhang = [value / 1000.0 for value in drive_dims]
+        if dl > length or dh + belt_thickness > z:
+            raise ValueError("conveyor: drive envelope exceeds the machine length or available height")
+        built.obstacles.append(scene.add_box(
+            f"{name}/drive", size=(dl, width + 2 * rail + overhang, dh),
+            position=(x - nx * overhang / 2, y - ny * overhang / 2, z - belt_thickness - dh / 2),
+            quaternion=q, color=color))
+    tension_after = None if spec is None else spec.dimension_mm("unit", "mid_tension_after_length")
+    has_tension = tension_after is not None and length * 1000 > tension_after
+    if has_tension:
+        tl = spec.dimension_mm("unit", "mid_tension_length")
+        td = spec.dimension_mm("unit", "mid_tension_drop")
+        if any(v is None or not math.isfinite(v) or v <= 0 for v in (tension_after, tl, td)):
+            raise ValueError("conveyor: mid-tension dimensions must be positive and finite")
+        built.obstacles.append(scene.add_box(
+            f"{name}/mid_tension", size=(tl / 1000, width + 2 * rail, td / 1000),
+            position=(x + dx * length / 4, y + dy * length / 4, z - belt_thickness - td / 2000),
+            quaternion=q, color=color))
     stands = 0
     if legs and z - belt_thickness > leg:
         h = z - belt_thickness
@@ -1486,7 +1535,10 @@ def conveyor(
         # Legacy inset: a leg's width in from each end. With a catalog the
         # stands sit flush with the belt ends (half a leg in) and spread
         # evenly, so the outermost pair stays under the pulleys.
-        run = length - (2 * leg if spec is None else leg)
+        inset = None if spec is None else spec.dimension_mm("stand", "inset")
+        if inset is not None and (not math.isfinite(inset) or inset < leg * 500 or inset * 2 >= length * 1000):
+            raise ValueError("conveyor: stand inset must leave room for the supports")
+        run = length - (2 * leg if spec is None else leg) if inset is None else length - 2 * inset / 1000.0
         for i in range(count):
             along = -run / 2 + (run * i / (count - 1) if count > 1 else 0.0)
             ex, ey = dx * along, dy * along
@@ -1504,7 +1556,7 @@ def conveyor(
                 drawn = _load_trim(
                     scene, built, spec, "stand", f"{name}/trim/s{stands}",
                     (x + ex, y + ey, 0.0), q,
-                    height=z, belt_thickness=belt_thickness, width=width, leg=leg,
+                    height=z, belt_thickness=belt_thickness, width=width, leg=leg, parameters=params,
                 )
                 if drawn:
                     for pname in pair:
@@ -1521,11 +1573,15 @@ def conveyor(
             stands += 1
     if mode == "full" and _load_trim(
         scene, built, spec, "unit", f"{name}/trim/unit", (x, y, 0.0), q,
-        length=length, width=width, height=z, belt_thickness=belt_thickness, rail=rail,
+        length=length, width=width, height=z, belt_thickness=belt_thickness, rail=rail, parameters=params,
     ):
         # The pack draws the whole body — the massing keeps collision only.
         for part in ("belt", "rail_l", "rail_r"):
             scene.set_obstacle_visible(f"{name}/{part}", False)
+        if has_drive:
+            scene.set_obstacle_visible(f"{name}/drive", False)
+        if has_tension:
+            scene.set_obstacle_visible(f"{name}/mid_tension", False)
     elif mode == "full":
         # The rollers the belt runs on, and the drive under the outfeed end.
         # A nose roller is about as thick as the frame it sits in.

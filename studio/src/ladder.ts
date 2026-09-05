@@ -95,6 +95,8 @@ function buildNet(cond: ConditionMsg, timers: TimerAlloc): Net {
       return contactNet("no", "done", cond);
     case "robot_done":
       return contactNet("no", `${cond.robot}.done`, cond);
+    case "group_done":
+      return contactNet("no", `${cond.robot}/${cond.group}.done`, cond);
     case "device_done":
       return contactNet("no", `${cond.device}.done`, cond);
     case "signal":

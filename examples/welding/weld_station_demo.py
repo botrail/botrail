@@ -39,11 +39,17 @@ two or three. The welded tabs are authored here rather than in the asset for
 the same reason a real plant owns its weld schedule: the body is geometry,
 the spots are process.
 
-Run with:  python examples/welding/weld_station_demo.py [out.usda] [--clash]
+Install the demo's mesh reader with: pip install trimesh
+Run with:  python examples/welding/weld_station_demo.py [out.usda] [--clash] [--studio]
+With --studio, opens the interactive studio after exporting (Ctrl-C to stop).
+The --clash diagnostic exits without exporting or opening the studio.
 """
 
+import hashlib
 import math
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import botrail as bt
@@ -75,8 +81,10 @@ def other_role(role: str) -> str:
 # differs (`r2` is the narrower, official 259°), and this cell stays well
 # inside it.
 ARM = "fanuc/r2000ic/r2000ic-165f/r2"
+# r4 changes the gun envelope and needs a new collision-verified transfer
+# path. Keep the taught r2 until both welding demos pass their frame sweeps.
 GUN_ID = "botrail/weld/weld-gun-x1/r2"
-BODY_ID = "botrail/body/biw-sedan/r7"
+BODY_ID = "botrail/body/biw-sedan/r8"
 SHELL = "/World/Line/body/shell"
 
 # --- line geometry -------------------------------------------------------
@@ -323,6 +331,39 @@ class Station:
         return (x, y, z - CLEAR)
 
 
+def body_display_mesh(package: Path) -> Path:
+    """Read the public visual asset, not the builder's private STL filename.
+
+    add_mesh currently accepts STL/OBJ only. Cache an OBJ of the GLB by
+    its content hash; keep geometry/normals and the demos' explicit STEEL
+    material. Neither the catalog cache nor authored assets are rewritten.
+    """
+    source = package / "visual/model.glb"
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    cache = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache/botrail")
+    dest = cache / "demo-meshes" / f"biw-shell-v1-{digest}.obj"
+    if dest.is_file():
+        return dest
+    try:
+        import trimesh
+    except ImportError as exc:
+        raise RuntimeError("The welding demos need trimesh: pip install trimesh") from exc
+    mesh = trimesh.load(source, force="mesh", process=False)
+    if not len(mesh.faces):
+        raise ValueError(f"empty BIW display mesh: {source}")
+    obj = mesh.export(file_type="obj", include_normals=True,
+                      include_texture=False, include_color=False)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=dest.parent, suffix=".obj", delete=False) as f:
+        temporary = Path(f.name)
+        f.write(obj)
+    try:
+        temporary.replace(dest)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return dest
+
+
 def body_meshes() -> tuple:
     """The catalog body, as `(display shell, [(collision name, mesh path)])`.
 
@@ -337,8 +378,7 @@ def body_meshes() -> tuple:
     pieces = sorted((package / "collision").glob("*.stl"))
     if not pieces:
         raise SystemExit(f"catalog package {BODY_ID} ships no collision meshes")
-    shell = package / "sources" / "_derived" / "biw__biw_shell.stl"
-    return (shell if shell.exists() else None,
+    return (body_display_mesh(package),
             [(f"/World/Line/body/{p.stem.split('__')[-1]}", p) for p in pieces])
 
 
@@ -835,6 +875,9 @@ def main() -> None:
     for w in warnings:
         print(f"warning: {w}")
     print(f"exported to {out} — view with: usdview {out}")
+
+    if "--studio" in sys.argv:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

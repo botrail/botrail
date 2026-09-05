@@ -39,7 +39,8 @@ What is on it, layer by layer (the DXF layer names in capitals):
   extents so a 20 m floor does not shrink the cell to a stamp.
 * **ROBOT** / **REACH** — each robot's base as a mark, and, when the robot came
   from the [catalog](robots.md#the-model-catalog) with a `reach_mm`, its reach
-  as a dashed circle.
+  as a dashed circle. A dual-arm robot gets a circle per arm, centred on the
+  arm's own base — the arm's `reach_mm` when it was mounted from the catalog.
 * **DEVICE** — conveyor and sink zones (dashed, with the direction of travel),
   a linear axis's travel, a vehicle's route with its stations.
 * **SENSOR** — zone boxes and beams.
@@ -73,7 +74,7 @@ derived.
 | section | from | what |
 |---|---|---|
 | `robots` | the scene | name, DOF, base position, catalog identity and reach when known |
-| `cycles` | the timelines you pass | duration, step spans, robot busy time and utilization, the branches taken, and the tightest clearance re-scanned against the scene each timeline was baked from (`clearance_dt`, `None` to skip) |
+| `cycles` | the timelines you pass | duration, step spans, robot busy time and utilization (a row per arm under a dual-arm robot's own), the branches taken, and the tightest clearance re-scanned against the scene each timeline was baked from (`clearance_dt`, `None` to skip) |
 | `io` | the [I/O map](io-map.md) | point counts by kind and status, node usage, lint findings |
 | `scenarios` | a `ScenarioRuns` | the matrix — which scenario completed at what cycle, which stalled and why |
 | `machines` | the parts, devices, sensors and nodes | every machine tool (`machine_tool.*` part): its door — an axis the machine drives or a loose leaf — with drive, stroke and end-of-travel lanes, the panel's buttons, and the controller hosting its program |

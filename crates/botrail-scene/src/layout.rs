@@ -20,7 +20,7 @@
 use nalgebra::{Isometry3, Point3};
 use serde::Serialize;
 
-use botrail_model::{Geometry, RobotSource};
+use botrail_model::{Geometry, MountRole, RobotSource};
 
 use crate::part::PartTargetKind;
 use crate::seq::{DeviceKind, SensorKind};
@@ -624,7 +624,7 @@ impl Scene {
         }
 
         // ---- robots ----------------------------------------------------
-        for robot in self.robots() {
+        for (index, robot) in self.robots().iter().enumerate() {
             let base = robot.base_pose().translation.vector;
             let at = [base.x, base.y];
             footprint.include(at);
@@ -650,7 +650,31 @@ impl Scene {
                 });
             }
             if options.reach {
-                if let Some(reach) = catalog_reach_m(&robot.model.source) {
+                let groups = robot.model.groups();
+                if groups.len() > 1 {
+                    // A dual-arm robot: one circle per arm, centred on the
+                    // arm's base link — the robot's own base is its torso,
+                    // and a reach is quoted per arm.
+                    let poses = self.link_poses_for(index);
+                    for group in &groups {
+                        let Some(reach) = group_reach_m(&robot.model.source, &group.name) else {
+                            continue;
+                        };
+                        let p = poses[group.base].translation.vector;
+                        let at = [p.x, p.y];
+                        footprint.include([at[0] - reach, at[1] - reach]);
+                        footprint.include([at[0] + reach, at[1] + reach]);
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Reach,
+                            name: format!("{}/{}", robot.name, group.name),
+                            shape: LayoutShape::Circle {
+                                center: at,
+                                radius: reach,
+                            },
+                            dashed: true,
+                        });
+                    }
+                } else if let Some(reach) = catalog_reach_m(&robot.model.source) {
                     footprint.include([at[0] - reach, at[1] - reach]);
                     footprint.include([at[0] + reach, at[1] + reach]);
                     items.push(LayoutItem {
@@ -1255,6 +1279,25 @@ impl Scene {
             title: String::new(),
         };
         self.layout(&options).footprint
+    }
+}
+
+/// The reach of one arm of a robot in metres: the arm's own catalog
+/// `reach_mm` when it was mounted from the catalog (`Robot.dual_arm`,
+/// `mount(role="arm")`), else the product's — a dual-arm product quotes
+/// its reach per arm.
+fn group_reach_m(source: &RobotSource, group: &str) -> Option<f64> {
+    match source {
+        RobotSource::Composite {
+            base,
+            tool,
+            role: MountRole::Arm,
+            group: Some(name),
+            ..
+        } if name == group => catalog_reach_m(tool).or_else(|| group_reach_m(base, group)),
+        RobotSource::Composite { base, .. } => group_reach_m(base, group),
+        RobotSource::Catalog { .. } => catalog_reach_m(source),
+        _ => None,
     }
 }
 
@@ -1904,6 +1947,7 @@ mod tests {
             flange: None,
             mount: None,
             grasp: Vec::new(),
+            arms: Vec::new(),
             meta: botrail_model::CatalogMeta {
                 specs: vec![("reach_mm".into(), 850.0)],
                 ..Default::default()
@@ -1972,5 +2016,59 @@ mod tests {
             ("env/World/Pedestal".into(), "Pedestal".into())
         );
         assert_eq!(unit("table"), ("table".into(), "table".into()));
+    }
+
+    #[test]
+    fn each_arm_of_a_dual_arm_robot_gets_its_own_reach_circle() {
+        // Two catalog arms (850 mm reach) on a bare body, 0.3 m apart.
+        let mut arm = RobotModel::from_urdf_str(URDF).unwrap();
+        let inner = std::mem::replace(&mut arm.source, RobotSource::UrdfXml(String::new()));
+        arm.source = RobotSource::Catalog {
+            id: "acme/arm/r1".into(),
+            revision: "sha".into(),
+            tcp: None,
+            flange: None,
+            mount: None,
+            grasp: Vec::new(),
+            arms: Vec::new(),
+            meta: botrail_model::CatalogMeta {
+                specs: vec![("reach_mm".into(), 850.0)],
+                ..Default::default()
+            },
+            inner: Box::new(inner),
+        };
+        let pair = RobotModel::dual_arm(
+            None,
+            &arm,
+            &arm,
+            None,
+            Isometry3::translation(0.0, 0.3, 0.0),
+            None,
+            Isometry3::translation(0.0, -0.3, 0.0),
+        )
+        .unwrap();
+        assert_eq!(pair.groups().len(), 2);
+        let scene = Scene::new(Arc::new(pair));
+        let sheet = scene.layout(&LayoutOptions::default());
+        let mut circles: Vec<(String, [f64; 2], f64)> = sheet
+            .items
+            .iter()
+            .filter(|i| i.layer == LayoutLayer::Reach)
+            .filter_map(|i| match i.shape {
+                LayoutShape::Circle { center, radius } => Some((i.name.clone(), center, radius)),
+                _ => None,
+            })
+            .collect();
+        circles.sort_by(|a, b| a.0.cmp(&b.0));
+        let robot = &scene.robots()[0].name;
+        assert_eq!(circles.len(), 2, "{circles:?}");
+        assert_eq!(circles[0].0, format!("{robot}/left"));
+        assert!((circles[0].1[1] - 0.3).abs() < 1e-9 && (circles[0].2 - 0.85).abs() < 1e-9);
+        assert_eq!(circles[1].0, format!("{robot}/right"));
+        assert!((circles[1].1[1] + 0.3).abs() < 1e-9 && (circles[1].2 - 0.85).abs() < 1e-9);
+        // Both circles widen the footprint: 0.6 m between the bases plus
+        // a reach either side.
+        assert!((sheet.footprint.width() - 1.7).abs() < 1e-9);
+        assert!((sheet.footprint.depth() - 2.3).abs() < 1e-9);
     }
 }

@@ -141,10 +141,13 @@ function linkLabel(link: string): string {
 
 function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
   const { geometry, pose, name } = obstacle;
-  // Attach grasps with the panel-selected robot at its TCP link.
+  // Attach grasps with the panel-selected robot (arm) at its TCP link.
   const selectedRobot = useStudioStore((s) => s.selectedRobot);
   const tcpLink = useStudioStore(
     (s) => robotByName(s.robots, s.selectedRobot)?.tcpLink ?? null,
+  );
+  const selectedGroup = useStudioStore(
+    (s) => robotByName(s.robots, s.selectedRobot)?.selectedGroup ?? null,
   );
   const commit = (g: GeometryMsg) => sendUpdateObstacleGeometry(name, g);
 
@@ -217,7 +220,7 @@ function ObstacleForm({ obstacle }: { obstacle: ObstacleMsg }) {
             disabled={selectedRobot === null}
             onClick={() =>
               selectedRobot !== null &&
-              sendAttachObstacle(name, selectedRobot, tcpLink)
+              sendAttachObstacle(name, selectedRobot, tcpLink, selectedGroup)
             }
           >
             Attach to {tcpLink ? linkLabel(tcpLink) : "TCP"}

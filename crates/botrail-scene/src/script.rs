@@ -53,6 +53,12 @@ pub struct SequenceIo {
     /// `robot_done` wait on this robot is the idle test a blocking
     /// controller has already passed, so it lowers to nothing.
     pub self_robot: Option<String>,
+    /// The arm the program runs, when a dual-arm robot is exported per
+    /// arm (`group=`). Set by the lowering.
+    pub self_group: Option<String>,
+    /// The robot's other arms: partner controllers whose idle contacts a
+    /// `robot_done` wait reads, keyed `<robot>/<arm>`. Set by the lowering.
+    pub partner_groups: Vec<String>,
 }
 
 pub use crate::iomap::IoPort;
@@ -77,6 +83,8 @@ impl SequenceIo {
             inputs: lift(inputs),
             outputs: lift(outputs),
             self_robot: None,
+            self_group: None,
+            partner_groups: Vec::new(),
         }
     }
 }
@@ -97,18 +105,23 @@ pub struct SequenceProgram {
 ///
 /// `scene` must be the snapshot the timeline was baked against (the Python
 /// timeline carries it); `sequence` may be `None` when the timeline was
-/// rolled from a single program. Errors are authoring-level messages:
-/// unmapped signals, inexpressible steps, or a timeline that no longer
-/// matches the sequence.
+/// rolled from a single program. `group` picks the arm of a dual-arm
+/// robot: the program then carries that arm's joints only, its own
+/// motions and ramps, and reads the other arms' idle contacts where the
+/// sequence waits on them (a dual-arm robot with `group` unset is an
+/// error — one controller program per arm). Errors are authoring-level
+/// messages: unmapped signals, inexpressible steps, or a timeline that no
+/// longer matches the sequence.
 pub fn sequence_program(
     scene: &Scene,
     timeline: &SequenceTimeline,
     sequence: Option<&str>,
     io: &SequenceIo,
     options: &ProgramOptions,
+    group: Option<&str>,
 ) -> Result<SequenceProgram, String> {
     let label = timeline.scenario.as_deref().unwrap_or("baseline");
-    merged_sequence_program(scene, &[(label, timeline)], sequence, io, options)
+    merged_sequence_program(scene, &[(label, timeline)], sequence, io, options, group)
 }
 
 /// Lowers one sequence from a *set* of rolled timelines — a scenario
@@ -131,6 +144,7 @@ pub fn merged_sequence_program(
     sequence: Option<&str>,
     io: &SequenceIo,
     options: &ProgramOptions,
+    group: Option<&str>,
 ) -> Result<SequenceProgram, String> {
     let Some((_, first)) = timelines.first() else {
         return Err("no timelines to export".to_string());
@@ -164,13 +178,52 @@ pub fn merged_sequence_program(
              side: export_plcopen)"
         ));
     }
+    let model = &scene.robots()[robot].model;
+    // A dual-arm robot is one controller program per arm: the program
+    // carries that arm's joints, and the other arms are partner
+    // controllers to it.
+    let groups = model.groups();
+    let arm_names = || {
+        groups
+            .iter()
+            .map(|g| format!("`{}`", g.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let arm = match group {
+        Some(name) => Some(model.group_index(name).ok_or_else(|| {
+            format!(
+                "robot `{robot_name}` has no arm `{name}` (arms: {})",
+                arm_names()
+            )
+        })?),
+        None if groups.len() > 1 => {
+            return Err(format!(
+                "robot `{robot_name}` has several arms ({}) — pass group= to export \
+                 one arm's controller program",
+                arm_names()
+            ))
+        }
+        None => None,
+    };
+    let columns: Option<Vec<usize>> = arm.map(|g| groups[g].joints.clone());
     let io = SequenceIo {
         self_robot: Some(robot_name.clone()),
+        self_group: arm.map(|g| groups[g].name.clone()),
+        partner_groups: arm
+            .map(|g| {
+                groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != g)
+                    .map(|(_, other)| other.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..io.clone()
     };
     let io = &io;
 
-    let model = &scene.robots()[robot].model;
     let limits = crate::motion::traj_limits(model);
     if options.speed_scale <= 0.0 || options.tcp_speed <= 0.0 || options.tcp_accel <= 0.0 {
         return Err("speed scale, tcp speed, and tcp acceleration must be positive".to_string());
@@ -204,7 +257,10 @@ pub fn merged_sequence_program(
 
     let mut lowering = Lowering {
         io,
+        scene,
         model,
+        arm,
+        columns: columns.clone(),
         blend_radius: options.blend_radius,
         joint_velocity: fold_min(&limits.velocity) * options.speed_scale,
         joint_acceleration: fold_min(&limits.acceleration) * options.speed_scale,
@@ -220,9 +276,12 @@ pub fn merged_sequence_program(
     let mut commands = Vec::new();
     let mut local_q = lowering.sources[0].cur_q.clone();
     if options.move_to_start {
+        // The first move this program emits (an arm's program skips the
+        // other arm's records).
         if let Some(start) = lowering.sources[0]
             .planned
-            .first()
+            .iter()
+            .find(|p| lowering.touches_arm(p))
             .and_then(|p| p.segments.first())
             .and_then(|s| s.waypoints.first())
         {
@@ -263,18 +322,39 @@ pub fn merged_sequence_program(
         return Err(format!("sequence `{name}` lowers to no commands"));
     }
 
+    if let Some(cols) = &columns {
+        slice_commands(&mut commands, cols);
+    }
+    let joint_names = model.actuated_joint_names();
     Ok(SequenceProgram {
         program: Program {
             name: name.to_string(),
-            joint_names: model
-                .actuated_joint_names()
-                .iter()
-                .map(|n| n.to_string())
-                .collect(),
+            joint_names: match &columns {
+                Some(cols) => cols.iter().map(|&i| joint_names[i].to_string()).collect(),
+                None => joint_names.iter().map(|n| n.to_string()).collect(),
+            },
             commands,
         },
         warnings: lowering.warnings,
     })
+}
+
+/// An arm's program carries the arm's joints only: every move target
+/// narrowed to its columns, nested branch bodies included.
+fn slice_commands(commands: &mut [Command], columns: &[usize]) {
+    for command in commands {
+        match command {
+            Command::MoveJoint { q, .. } | Command::MoveLinear { q, .. } => {
+                *q = columns.iter().map(|&i| q[i]).collect();
+            }
+            Command::Select { arms } => {
+                for arm in arms {
+                    slice_commands(&mut arm.body, columns);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// One timeline's cursors: its planned moves and branch decisions, both
@@ -346,7 +426,12 @@ impl<'a> Source<'a> {
 /// and the divergent-rejoin flag a following straight-line move trips).
 struct Lowering<'a> {
     io: &'a SequenceIo,
+    scene: &'a Scene,
     model: &'a botrail_model::RobotModel,
+    /// The arm this program is for (a dual-arm robot), as a group index.
+    arm: Option<usize>,
+    /// That arm's joint columns; `None` carries every joint.
+    columns: Option<Vec<usize>>,
     blend_radius: f64,
     joint_velocity: f64,
     joint_acceleration: f64,
@@ -368,6 +453,59 @@ struct Lowering<'a> {
 }
 
 impl<'a> Lowering<'a> {
+    /// A motion (or toolpath) is this program's unless it names another
+    /// arm; a whole-robot motion is every arm's.
+    fn motion_is_ours(&self, motion: &str) -> bool {
+        let Some(arm) = self.arm else {
+            return true;
+        };
+        match self.scene.motions().iter().find(|m| m.name == motion) {
+            Some(m) => m.group.is_none_or(|g| g == arm),
+            // A toolpath: whole-robot until toolpaths learn arms.
+            None => true,
+        }
+    }
+
+    /// Whether a planned record is this program's to emit: everything
+    /// for a whole-robot program; for an arm's, its own motions and the
+    /// ramps that move its joints.
+    fn touches_arm(&self, record: &PlannedMove) -> bool {
+        let Some(cols) = &self.columns else {
+            return true;
+        };
+        match &record.motion {
+            Some(motion) => self.motion_is_ours(motion),
+            None => record.segments.first().is_some_and(|s| {
+                s.waypoints.len() >= 2
+                    && cols
+                        .iter()
+                        .any(|&i| (s.waypoints[0][i] - s.waypoints[1][i]).abs() > 1e-12)
+            }),
+        }
+    }
+
+    /// Whether a ramp moves any joint of this program's arm.
+    fn ramp_is_ours(&self, targets: &[(String, f64)]) -> bool {
+        let Some(cols) = &self.columns else {
+            return true;
+        };
+        targets.iter().any(|(joint, _)| {
+            self.model
+                .joint_index(joint)
+                .and_then(|ji| self.model.joints[ji].q_index)
+                .is_some_and(|q| cols.contains(&q))
+        })
+    }
+
+    /// An action addressed to another arm of this robot — the other
+    /// controller's business, not this program's.
+    fn is_other_arm(&self, group: &Option<String>) -> bool {
+        match (self.io.self_group.as_deref(), group.as_deref()) {
+            (Some(own), Some(named)) => own != named,
+            _ => false,
+        }
+    }
+
     /// Lowers a step list. `active` are the sources whose decision path
     /// runs through this list (they consume their cursors here);
     /// `emitting` is the one whose records become commands — `None` on a
@@ -526,7 +664,6 @@ impl<'a> Lowering<'a> {
             | Action::StartToolpath {
                 toolpath: motion, ..
             } => {
-                *started_move = true;
                 let mut record = None;
                 for &i in active {
                     let consumed = self.sources[i].next_planned(Some(motion), label)?;
@@ -534,6 +671,12 @@ impl<'a> Lowering<'a> {
                         record = Some(consumed);
                     }
                 }
+                // The other arm's motion: its record is consumed (the
+                // rollout fired it), its moves are not this program's.
+                if !self.motion_is_ours(motion) {
+                    return Ok(());
+                }
+                *started_move = true;
                 let Some(record) = record else {
                     return Err(format!(
                         "{label}: motion `{motion}` lies on an arm no exported \
@@ -584,7 +727,6 @@ impl<'a> Lowering<'a> {
             Action::StartRamp {
                 targets, duration, ..
             } => {
-                *started_move = true;
                 let mut record = None;
                 for &i in active {
                     let consumed = self.sources[i].next_planned(None, label)?;
@@ -592,6 +734,10 @@ impl<'a> Lowering<'a> {
                         record = Some(consumed);
                     }
                 }
+                if !self.ramp_is_ours(targets) {
+                    return Ok(());
+                }
+                *started_move = true;
                 let (from, to, duration) = match record {
                     Some(record) => {
                         let waypoints = &record.segments[0].waypoints;
@@ -651,6 +797,7 @@ impl<'a> Lowering<'a> {
                     });
                 }
             }
+            Action::Attach { group, .. } if self.is_other_arm(group) => {}
             Action::Attach { object, .. } => {
                 out.push(Command::Comment {
                     text: format!(
@@ -664,6 +811,8 @@ impl<'a> Lowering<'a> {
                     text: format!("detach {object} (simulation release)"),
                 });
             }
+            Action::Track { group, .. } | Action::Untrack { group, .. }
+                if self.is_other_arm(group) => {}
             Action::Track { .. } | Action::Untrack { .. } => {
                 return Err(format!(
                     "{label}: conveyor tracking cannot be exported — the \
@@ -758,7 +907,7 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
             Action::StartRamp { robot, .. }
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
-            | Action::Untrack { robot }
+            | Action::Untrack { robot, .. }
             | Action::StartToolpath { robot, .. } => scene.resolve_seq_robot(robot)?,
             _ => return Ok(()),
         };
@@ -806,6 +955,59 @@ pub fn driven_robot_name(
 /// A condition as a digital-input snapshot test — what branch guards
 /// (and compound level waits) lower to. Timers and edges have no
 /// snapshot form and are refused with guidance.
+/// The idle contact of a partner arm's controller: input `<robot>/<arm>`.
+fn arm_idle_test(
+    io: &SequenceIo,
+    robot: &str,
+    arm: &str,
+    label: &str,
+) -> Result<DigitalTest, String> {
+    let key = format!("{robot}/{arm}");
+    io.inputs
+        .get(&key)
+        .map(|port| DigitalTest::Input {
+            port: port.port,
+            value: !port.invert,
+        })
+        .ok_or_else(|| {
+            format!(
+                "{label}: `robot_done({robot}, group={arm})` needs that arm's controller's \
+                 idle contact on an input — bind `{key}.done` (bind_input) or pass \
+                 inputs={{\"{key}\": <port>}}"
+            )
+        })
+}
+
+/// What an idle wait on the program's own robot reads in an arm's
+/// program: nothing for its own arm (a blocking controller is idle by
+/// construction), the partner contacts for the others — every other arm
+/// when the wait names the whole robot. `None` when there is nothing to
+/// wait on, which is always the case for a whole-robot program.
+fn own_robot_idle(
+    io: &SequenceIo,
+    robot: &str,
+    group: Option<&str>,
+    label: &str,
+) -> Result<Option<DigitalTest>, String> {
+    let Some(own) = io.self_group.as_deref() else {
+        return Ok(None);
+    };
+    let partners: Vec<&str> = match group {
+        Some(named) if named == own => Vec::new(),
+        Some(named) => vec![named],
+        None => io.partner_groups.iter().map(String::as_str).collect(),
+    };
+    let tests = partners
+        .into_iter()
+        .map(|arm| arm_idle_test(io, robot, arm, label))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(match tests.len() {
+        0 => None,
+        1 => tests.into_iter().next(),
+        _ => Some(DigitalTest::AllOf(tests)),
+    })
+}
+
 fn digital_test(
     condition: &Condition,
     io: &SequenceIo,
@@ -842,9 +1044,16 @@ fn digital_test(
                 )
             }),
         // The program's own robot is idle by the time a blocking
-        // controller reads the guard — like `Done`.
-        Condition::RobotDone { robot } if io.self_robot.as_deref() == Some(robot.as_str()) => {
-            Ok(DigitalTest::Always)
+        // controller reads the guard — like `Done`. In an arm's program
+        // the other arms are partner controllers, read on inputs.
+        Condition::RobotDone { robot } | Condition::GroupDone { robot, .. }
+            if io.self_robot.as_deref() == Some(robot.as_str()) =>
+        {
+            let group = match condition {
+                Condition::GroupDone { group, .. } => Some(group.as_str()),
+                _ => None,
+            };
+            Ok(own_robot_idle(io, robot, group, label)?.unwrap_or(DigitalTest::Always))
         }
         Condition::RobotDone { robot } => io
             .inputs
@@ -860,6 +1069,7 @@ fn digital_test(
                      inputs={{\"{robot}\": <port>}}"
                 )
             }),
+        Condition::GroupDone { robot, group } => arm_idle_test(io, robot, group, label),
         Condition::All(conditions) => Ok(DigitalTest::AllOf(
             conditions
                 .iter()
@@ -1016,8 +1226,25 @@ fn lower_condition(
             });
         }
         // The program's own robot: a blocking controller is idle here by
-        // construction — nothing to wait on (same as `Done`).
-        Condition::RobotDone { robot } if io.self_robot.as_deref() == Some(robot.as_str()) => {}
+        // construction — nothing to wait on (same as `Done`). An arm's
+        // program still waits on the other arms' controllers.
+        Condition::RobotDone { robot } | Condition::GroupDone { robot, .. }
+            if io.self_robot.as_deref() == Some(robot.as_str()) =>
+        {
+            let group = match condition {
+                Condition::GroupDone { group, .. } => Some(group.as_str()),
+                _ => None,
+            };
+            if let Some(test) = own_robot_idle(io, robot, group, label)? {
+                concurrency_warning(warnings, "the partner wait");
+                push_wait(test, commands);
+            }
+        }
+        Condition::GroupDone { robot, group } => {
+            let test = arm_idle_test(io, robot, group, label)?;
+            concurrency_warning(warnings, "the partner wait");
+            push_wait(test, commands);
+        }
         Condition::RobotDone { robot } => {
             let port = io.inputs.get(robot).ok_or_else(|| {
                 format!(
@@ -1162,6 +1389,7 @@ mod tests {
                             object: "part".into(),
                             link: None,
                             touch_links: None,
+                            group: None,
                         },
                     ],
                     Condition::Elapsed { seconds: 0.4 },
@@ -1184,6 +1412,7 @@ mod tests {
             None,
             &io(&[("part_here", 3)], &[("vacuum", 1)]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
 
@@ -1250,6 +1479,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         let moves: Vec<_> = out
@@ -1295,6 +1525,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         // A wait-only sequence drives no robot — that error comes first
@@ -1331,6 +1562,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("vacuum") && err.contains("outputs="), "{err}");
@@ -1365,6 +1597,7 @@ mod tests {
             None,
             &io(&[("part_here", 0)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("timer"), "{err}");
@@ -1400,6 +1633,7 @@ mod tests {
             None,
             &io(&[("part_here", 0), ("abort", 4)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         assert!(out
@@ -1450,6 +1684,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
@@ -1543,6 +1778,7 @@ mod tests {
             None,
             &io(&[("ok", 1), ("ng", 2)], &[("vacuum", 3)]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         let select = out
@@ -1661,8 +1897,15 @@ mod tests {
         let wiring = io(&[("ok", 1), ("ng", 2)], &[]);
 
         // One bake alone cannot carry the other arm's motion.
-        let err =
-            sequence_program(&scene, &base, None, &wiring, &ProgramOptions::default()).unwrap_err();
+        let err = sequence_program(
+            &scene,
+            &base,
+            None,
+            &wiring,
+            &ProgramOptions::default(),
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("never planned"), "{err}");
 
         // The pair merges: each arm's moves come from the bake that took
@@ -1673,6 +1916,7 @@ mod tests {
             None,
             &wiring,
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         let arms = out
@@ -1706,6 +1950,7 @@ mod tests {
             None,
             &wiring,
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         let arms = out
@@ -1780,6 +2025,7 @@ mod tests {
             None,
             &io(&[("ok", 1), ("ng", 2)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("diverged before the branch"), "{err}");
@@ -1916,6 +2162,7 @@ mod tests {
             None,
             &io(&[("ok", 1), ("ng", 2)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         assert!(
@@ -1969,6 +2216,7 @@ mod tests {
             None,
             &io(&[("ok", 1), ("ng", 2)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("never planned"), "{err}");
@@ -2020,6 +2268,7 @@ mod tests {
             Some("s"),
             &io(&[("pulse", 2)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap();
         let waits: Vec<(u32, bool)> = out
@@ -2082,6 +2331,7 @@ mod tests {
             Some("s"),
             &io(&[("pulse", 2)], &[]),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("latch the edge"), "{err}");
@@ -2099,12 +2349,16 @@ mod tests {
                         robot: None,
                         object: "part".into(),
                         link: None,
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.1 },
                 ),
                 step(
                     "release",
-                    vec![Action::Untrack { robot: None }],
+                    vec![Action::Untrack {
+                        robot: None,
+                        group: None,
+                    }],
                     Condition::Immediately,
                 ),
             ],
@@ -2118,6 +2372,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("tracking"), "{err}");
@@ -2170,6 +2425,7 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("per-robot programs"), "{err}");
@@ -2197,6 +2453,7 @@ mod tests {
             Some("other"),
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("not part of this rollout"), "{err}");
@@ -2227,8 +2484,199 @@ mod tests {
             None,
             &SequenceIo::default(),
             &ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("re-simulate"), "{err}");
+    }
+
+    /// The dual-arm fixture with a left-arm motion and a right-arm ramp
+    /// fired together, then a wait on each arm.
+    fn dual_cell() -> (Scene, String) {
+        use crate::motion::{Segment, SegmentKind};
+        use crate::seq::{Action, Condition, Sequence, Step};
+        use botrail_model::RobotModel;
+        use std::sync::Arc;
+        let urdf = include_str!("../../../examples/assets/dual_arm_test.urdf");
+        let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(urdf).unwrap()));
+        let robot = scene.robots()[0].name.clone();
+        let q = {
+            let model = &scene.robots()[0].model;
+            model.joints[model.joint_index("left_shoulder").unwrap()]
+                .q_index
+                .unwrap()
+        };
+        let mut goal = scene.joint_positions().to_vec();
+        goal[q] = 1.0;
+        scene
+            .add_segment_in_group(
+                0,
+                Some("left"),
+                "left_reach",
+                Segment {
+                    kind: SegmentKind::Joint,
+                    goal_positions: goal,
+                    constraints: vec![],
+                },
+            )
+            .unwrap();
+        scene.set_sequences(vec![Sequence {
+            name: "both".into(),
+            steps: vec![
+                Step {
+                    name: "go".into(),
+                    actions: vec![
+                        Action::StartMotion {
+                            motion: "left_reach".into(),
+                        },
+                        Action::StartRamp {
+                            robot: None,
+                            targets: vec![("right_elbow".into(), 0.8)],
+                            duration: 0.5,
+                        },
+                    ],
+                    transition: Condition::GroupDone {
+                        robot: robot.clone(),
+                        group: "right".into(),
+                    },
+                    select: Vec::new(),
+                },
+                Step {
+                    name: "both".into(),
+                    actions: vec![],
+                    transition: Condition::RobotDone {
+                        robot: robot.clone(),
+                    },
+                    select: Vec::new(),
+                },
+            ],
+        }]);
+        (scene, robot)
+    }
+
+    #[test]
+    fn an_arm_exports_its_own_controller_program() {
+        let (scene, robot) = dual_cell();
+        let tl = scene
+            .simulate_sequence("both", &RolloutOptions::default())
+            .unwrap();
+        let joints = |out: &SequenceProgram| -> Vec<Vec<f64>> {
+            out.program
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    Command::MoveJoint { q, .. } => Some(q.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // A dual-arm robot is one controller program per arm.
+        let err = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[], &[]),
+            &ProgramOptions::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("several arms"), "{err}");
+        let err = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[], &[]),
+            &ProgramOptions::default(),
+            Some("tail"),
+        )
+        .unwrap_err();
+        assert!(err.contains("no arm `tail`"), "{err}");
+
+        // The left program waits on the right arm's controller: an input.
+        let err = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &io(&[], &[]),
+            &ProgramOptions::default(),
+            Some("left"),
+        )
+        .unwrap_err();
+        assert!(err.contains(&format!("{robot}/right")), "{err}");
+        let wiring = io(&[(&format!("{robot}/right"), 4)], &[]);
+        let out = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &wiring,
+            &ProgramOptions::default(),
+            Some("left"),
+        )
+        .unwrap();
+        assert_eq!(
+            out.program.joint_names,
+            ["left_shoulder", "left_elbow", "left_wrist", "left_finger"]
+        );
+        let moves = joints(&out);
+        assert!(moves.iter().all(|q| q.len() == 4), "{moves:?}");
+        assert!((moves.last().unwrap()[0] - 1.0).abs() < 1e-9, "{moves:?}");
+        // The ramp was the right arm's: no move of its own here, but the
+        // partner wait (twice: the group wait, then the whole-robot wait).
+        let waits = out
+            .program
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Command::WaitDigitalIn {
+                        port: 4,
+                        value: true
+                    }
+                )
+            })
+            .count();
+        assert_eq!(waits, 2, "{:?}", out.program.commands);
+
+        // The right program: the ramp, sliced to the right arm; its own
+        // arm's wait is nothing, the whole-robot wait reads the left arm.
+        let wiring = io(&[(&format!("{robot}/left"), 5)], &[]);
+        let out = sequence_program(
+            &scene,
+            &tl,
+            None,
+            &wiring,
+            &ProgramOptions::default(),
+            Some("right"),
+        )
+        .unwrap();
+        assert_eq!(
+            out.program.joint_names,
+            [
+                "right_shoulder",
+                "right_elbow",
+                "right_wrist",
+                "right_finger"
+            ]
+        );
+        let moves = joints(&out);
+        assert!(moves.iter().all(|q| q.len() == 4), "{moves:?}");
+        assert!((moves.last().unwrap()[1] - 0.8).abs() < 1e-9, "{moves:?}");
+        let waits = out
+            .program
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Command::WaitDigitalIn {
+                        port: 5,
+                        value: true
+                    }
+                )
+            })
+            .count();
+        assert_eq!(waits, 1, "{:?}", out.program.commands);
     }
 }

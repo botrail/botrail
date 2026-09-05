@@ -320,6 +320,7 @@ mod tests {
                         object: "held".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),

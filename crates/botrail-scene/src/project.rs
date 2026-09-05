@@ -42,6 +42,22 @@ pub enum ProjectError {
     Scene(String),
 }
 
+/// One arm of a dual-arm catalog package (`frames.arms[]`), as the
+/// project keeps it to redeclare the planning group on rebuild.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CatalogArmMsg {
+    pub name: String,
+    /// The arm's TCP link.
+    pub tip: String,
+    /// The arm's actuated joints as the manifest lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joints: Vec<String>,
+    /// The arm's tool-mounting face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flange: Option<String>,
+}
+
 /// Where a project robot comes from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -71,6 +87,11 @@ pub enum RobotSourceMsg {
         /// rebuild. Absent in older files.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         grasp: Vec<String>,
+        /// The arms of a dual-arm package (`frames.arms[]`), reapplied as
+        /// planning groups on rebuild. Absent for single-arm packages and
+        /// in older files.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        arms: Vec<CatalogArmMsg>,
         /// Manifest identity (maker, product name, category, numeric
         /// specs) — what the BOM names the package by. Absent in files
         /// written before parts existed; those lines then show the id only.
@@ -84,8 +105,9 @@ pub enum RobotSourceMsg {
         specs: Vec<(String, f64)>,
         inner: Box<RobotSourceMsg>,
     },
-    /// A tool welded onto a base robot (`Robot.attach_tool`): both part
-    /// sources plus the weld parameters, so loading re-runs the attach.
+    /// A part welded onto a base robot (`Robot.attach_tool`,
+    /// `Robot.mount`): both part sources plus the weld parameters, so
+    /// loading re-runs the attach.
     Composite {
         base: Box<RobotSourceMsg>,
         tool: Box<RobotSourceMsg>,
@@ -96,7 +118,109 @@ pub enum RobotSourceMsg {
         tcp: Option<String>,
         #[serde(default)]
         prefix: Option<String>,
+        /// `tool` (an end-effector on an arm, the default) or `arm` (a
+        /// manipulator bolted to a body — `Robot.mount` / `Robot.dual_arm`).
+        #[serde(default, skip_serializing_if = "MountRoleMsg::is_tool")]
+        role: MountRoleMsg,
+        /// The group addressed (a tool's arm) or created (a mounted arm).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
+}
+
+/// What a welded part is to its composite (see
+/// [`botrail_model::MountRole`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MountRoleMsg {
+    #[default]
+    Tool,
+    Arm,
+}
+
+impl MountRoleMsg {
+    fn is_tool(&self) -> bool {
+        *self == MountRoleMsg::Tool
+    }
+}
+
+impl From<botrail_model::MountRole> for MountRoleMsg {
+    fn from(role: botrail_model::MountRole) -> Self {
+        match role {
+            botrail_model::MountRole::Tool => MountRoleMsg::Tool,
+            botrail_model::MountRole::Arm => MountRoleMsg::Arm,
+        }
+    }
+}
+
+impl From<MountRoleMsg> for botrail_model::MountRole {
+    fn from(role: MountRoleMsg) -> Self {
+        match role {
+            MountRoleMsg::Tool => botrail_model::MountRole::Tool,
+            MountRoleMsg::Arm => botrail_model::MountRole::Arm,
+        }
+    }
+}
+
+/// A declared planning group (`Robot.define_group`), by names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GroupSpecMsg {
+    pub name: String,
+    /// The link a motion of the group places.
+    pub tip: String,
+    /// The actuated joints it drives.
+    pub joints: Vec<String>,
+    /// This arm's tool-mounting face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flange: Option<String>,
+}
+
+impl From<&botrail_model::GroupSpec> for GroupSpecMsg {
+    fn from(spec: &botrail_model::GroupSpec) -> Self {
+        GroupSpecMsg {
+            name: spec.name.clone(),
+            tip: spec.tip.clone(),
+            joints: spec.joints.clone(),
+            flange: spec.flange.clone(),
+        }
+    }
+}
+
+impl From<&GroupSpecMsg> for botrail_model::GroupSpec {
+    fn from(msg: &GroupSpecMsg) -> Self {
+        botrail_model::GroupSpec {
+            name: msg.name.clone(),
+            tip: msg.tip.clone(),
+            joints: msg.joints.clone(),
+            flange: msg.flange.clone(),
+        }
+    }
+}
+
+/// Whether rebuilding `source` declares groups by itself — an arm mounted
+/// on a body, a tool attached to a named arm — so a project need not
+/// spell them out again.
+fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
+    match source {
+        botrail_model::RobotSource::Composite {
+            base,
+            tool,
+            role,
+            group,
+            ..
+        } => {
+            *role == botrail_model::MountRole::Arm
+                || group.is_some()
+                || source_declares_groups(base)
+                || source_declares_groups(tool)
+        }
+        botrail_model::RobotSource::Catalog { arms, inner, .. } => {
+            !arms.is_empty() || source_declares_groups(inner)
+        }
+        _ => false,
+    }
 }
 
 /// [`RobotSourceMsg`] from a model's provenance record.
@@ -117,6 +241,7 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             flange,
             mount,
             grasp,
+            arms,
             meta,
             inner,
         } => RobotSourceMsg::Catalog {
@@ -126,6 +251,15 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             flange: flange.clone(),
             mount: mount.clone(),
             grasp: grasp.clone(),
+            arms: arms
+                .iter()
+                .map(|a| CatalogArmMsg {
+                    name: a.name.clone(),
+                    tip: a.tip.clone(),
+                    joints: a.joints.clone(),
+                    flange: a.flange.clone(),
+                })
+                .collect(),
             manufacturer: meta.manufacturer.clone(),
             product: meta.product.clone(),
             category: meta.category.clone(),
@@ -140,6 +274,8 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             offset,
             tcp,
             prefix,
+            role,
+            group,
         } => RobotSourceMsg::Composite {
             base: Box::new(robot_source_msg(base)),
             tool: Box::new(robot_source_msg(tool)),
@@ -148,8 +284,30 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             offset: PoseMsg::from(offset),
             tcp: tcp.clone(),
             prefix: prefix.clone(),
+            role: (*role).into(),
+            group: group.clone(),
         },
     }
+}
+
+/// Restores the planning groups a project declares on a rebuilt model
+/// (`Robot.define_group`); a message without any leaves the model's own
+/// (derived, or produced by its source) in place.
+pub fn apply_declared_groups(
+    model: &mut botrail_model::RobotModel,
+    msg: &ProjectRobotMsg,
+) -> Result<(), ProjectError> {
+    if msg.groups.is_empty() {
+        return Ok(());
+    }
+    model.declared_groups = msg
+        .groups
+        .iter()
+        .map(botrail_model::GroupSpec::from)
+        .collect();
+    model
+        .validate_groups()
+        .map_err(|e| ProjectError::Robot(e.to_string()))
 }
 
 /// Rebuilds a robot model from its persisted source. `import_usd` supplies
@@ -173,6 +331,7 @@ pub fn model_from_source(
             flange,
             mount,
             grasp,
+            arms,
             manufacturer,
             product,
             category,
@@ -193,6 +352,18 @@ pub fn model_from_source(
                 model.mount_link = model.link_index(mount);
             }
             model.grasp_links = grasp.iter().filter_map(|g| model.link_index(g)).collect();
+            // The package's arms, as planning groups again.
+            for arm in arms {
+                let joints: Vec<&str> = arm.joints.iter().map(String::as_str).collect();
+                model = model
+                    .define_group(
+                        &arm.name,
+                        &arm.tip,
+                        (!joints.is_empty()).then_some(joints.as_slice()),
+                        arm.flange.as_deref(),
+                    )
+                    .map_err(|e| ProjectError::Robot(format!("catalog arm `{}`: {e}", arm.name)))?;
+            }
             let inner_source = std::mem::replace(
                 &mut model.source,
                 botrail_model::RobotSource::UrdfXml(String::new()),
@@ -204,6 +375,15 @@ pub fn model_from_source(
                 flange: flange.clone(),
                 mount: mount.clone(),
                 grasp: grasp.clone(),
+                arms: arms
+                    .iter()
+                    .map(|a| botrail_model::CatalogArm {
+                        name: a.name.clone(),
+                        tip: a.tip.clone(),
+                        joints: a.joints.clone(),
+                        flange: a.flange.clone(),
+                    })
+                    .collect(),
                 meta: botrail_model::CatalogMeta {
                     manufacturer: manufacturer.clone(),
                     product: product.clone(),
@@ -222,17 +402,30 @@ pub fn model_from_source(
             offset,
             tcp,
             prefix,
+            role,
+            group,
         } => {
             let base = model_from_source(base, import_usd)?;
             let tool = model_from_source(tool, import_usd)?;
-            base.attach_tool(
-                &tool,
-                Some(flange),
-                Some(mount),
-                offset.into(),
-                tcp.as_deref(),
-                prefix.as_deref(),
-            )
+            match role {
+                MountRoleMsg::Tool => base.attach_tool(
+                    &tool,
+                    Some(flange),
+                    Some(mount),
+                    offset.into(),
+                    tcp.as_deref(),
+                    prefix.as_deref(),
+                    group.as_deref(),
+                ),
+                MountRoleMsg::Arm => base.mount(
+                    &tool,
+                    flange,
+                    offset.into(),
+                    prefix.as_deref(),
+                    botrail_model::MountRole::Arm,
+                    group.as_deref(),
+                ),
+            }
             .map_err(|e| ProjectError::Robot(e.to_string()))
         }
     }
@@ -262,6 +455,11 @@ pub struct ProjectRobotMsg {
     /// grasp declaration. Absent in older files and for undriven robots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gripper_drive: Option<GripperDriveMsg>,
+    /// Declared planning groups (`Robot.define_group`): the arms of a
+    /// dual-arm robot, by name. Absent when the groups are derived from
+    /// the tree or the source produces them itself (a mounted arm).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupSpecMsg>,
 }
 
 /// A gripper drive as a project carries it: the declaration, re-resolved
@@ -563,6 +761,7 @@ impl ProjectFile {
                         mount: None,
                         link_materials: Vec::new(),
                         gripper_drive: None,
+                        groups: Vec::new(),
                     }],
                     obstacles: v1.obstacles,
                     motions: v1.motions,
@@ -681,6 +880,15 @@ impl Scene {
                         damping: d.damping,
                         finger_mass: Some(d.finger_mass),
                     }),
+                    groups: if source_declares_groups(&r.model.source) {
+                        Vec::new()
+                    } else {
+                        r.model
+                            .declared_groups
+                            .iter()
+                            .map(GroupSpecMsg::from)
+                            .collect()
+                    },
                 })
                 .collect(),
             obstacles: self
@@ -770,12 +978,13 @@ impl Scene {
     pub fn from_project(project: &ProjectFile) -> Result<Scene, ProjectError> {
         let mut models = Vec::with_capacity(project.robots.len());
         for robot_msg in &project.robots {
-            let robot = model_from_source(&robot_msg.source, &|_, _| {
+            let mut robot = model_from_source(&robot_msg.source, &|_, _| {
                 Err(
                     "USD-sourced robot: re-import it via the USD importer, then apply_project"
                         .to_string(),
                 )
             })?;
+            apply_declared_groups(&mut robot, robot_msg)?;
             models.push(Arc::new(robot));
         }
         let mut scene = Scene::empty();
@@ -903,11 +1112,8 @@ impl Scene {
         self.set_attachments(attachments);
         let mut motions = Vec::with_capacity(project.motions.len());
         for msg in &project.motions {
-            motions.push(motion_from_msg(self, msg).map_err(|name| {
-                ProjectError::Incompatible(format!(
-                    "motion `{}` references unknown robot `{name}`",
-                    msg.name
-                ))
+            motions.push(motion_from_msg(self, msg).map_err(|what| {
+                ProjectError::Incompatible(format!("motion `{}` references {what}", msg.name))
             })?);
         }
         self.set_motions(motions);
@@ -1151,6 +1357,14 @@ fn is_identity_pose(pose: &PoseMsg) -> bool {
 /// The `, robot="…"` kwarg selecting robot `i` — empty for single-robot
 /// projects, where the implicit default keeps the script identical to the
 /// pre-multi-robot output.
+/// `, group="left"` for an action addressed to one arm, else nothing.
+fn group_kwarg(group: &Option<String>) -> String {
+    match group {
+        Some(name) => format!(", group={name:?}"),
+        None => String::new(),
+    }
+}
+
 fn robot_kwarg(project: &ProjectFile, i: usize) -> String {
     // A hand-edited file can carry robot-addressed entries with no robots
     // left; the generator degrades to the implicit form rather than panic.
@@ -1214,6 +1428,8 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             offset,
             tcp,
             prefix,
+            role,
+            group,
         } => {
             emit_robot_build(out, base, var, konst);
             let tool_var = format!("{var}_tool");
@@ -1226,15 +1442,33 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
                     py_tuple(&offset.quaternion)
                 ));
             }
-            if let Some(tcp) = tcp {
-                kwargs.push_str(&format!(", tcp={tcp:?}"));
+            match role {
+                MountRoleMsg::Tool => {
+                    if let Some(tcp) = tcp {
+                        kwargs.push_str(&format!(", tcp={tcp:?}"));
+                    }
+                    if let Some(prefix) = prefix {
+                        kwargs.push_str(&format!(", prefix={prefix:?}"));
+                    }
+                    if let Some(group) = group {
+                        kwargs.push_str(&format!(", group={group:?}"));
+                    }
+                    out.push_str(&format!(
+                        "{var} = {var}.attach_tool({tool_var}, flange={flange:?}, mount={mount:?}{kwargs})\n"
+                    ));
+                }
+                MountRoleMsg::Arm => {
+                    if let Some(prefix) = prefix {
+                        kwargs.push_str(&format!(", prefix={prefix:?}"));
+                    }
+                    if let Some(group) = group {
+                        kwargs.push_str(&format!(", group={group:?}"));
+                    }
+                    out.push_str(&format!(
+                        "{var} = {var}.mount({tool_var}, at={flange:?}{kwargs})\n"
+                    ));
+                }
             }
-            if let Some(prefix) = prefix {
-                kwargs.push_str(&format!(", prefix={prefix:?}"));
-            }
-            out.push_str(&format!(
-                "{var} = {var}.attach_tool({tool_var}, flange={flange:?}, mount={mount:?}{kwargs})\n"
-            ));
         }
     }
 }
@@ -1264,6 +1498,19 @@ pub fn generate_python(project: &ProjectFile) -> String {
             format!("URDF_{}", i + 1)
         };
         emit_robot_build(&mut out, &robot_msg.source, &var, &konst);
+        for g in &robot_msg.groups {
+            let joints: Vec<String> = g.joints.iter().map(|j| format!("{j:?}")).collect();
+            let flange = match &g.flange {
+                Some(f) => format!(", flange={f:?}"),
+                None => String::new(),
+            };
+            out.push_str(&format!(
+                "{var} = {var}.define_group({:?}, tip={:?}, joints=[{}]{flange})\n",
+                g.name,
+                g.tip,
+                joints.join(", ")
+            ));
+        }
         let mut kwargs = String::new();
         // The instance name is always spelled out: a renamed robot is
         // referred to by that name everywhere after this line — its part,
@@ -1405,6 +1652,9 @@ pub fn generate_python(project: &ProjectFile) -> String {
                         py_tuple(max)
                     )),
                 }
+            }
+            if let Some(group) = &motion.group {
+                extras.push_str(&format!(", group={group:?}"));
             }
             out.push_str(&format!(
                 "scene.add_segment({:?}, goal={}, kind={:?}{}{})\n",
@@ -1697,6 +1947,13 @@ pub fn generate_python(project: &ProjectFile) -> String {
             crate::wire::SensorWatchMsg::Robots { names } => {
                 let items: Vec<String> = names.iter().map(|n| format!("{n:?}")).collect();
                 format!(", watch=[], watch_robots=[{}]", items.join(", "))
+            }
+            crate::wire::SensorWatchMsg::Groups { groups } => {
+                let items: Vec<String> = groups
+                    .iter()
+                    .map(|g| format!("({:?}, {:?})", g.robot, g.group))
+                    .collect();
+                format!(", watch=[], watch_groups=[{}]", items.join(", "))
             }
             crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
         };
@@ -2163,6 +2420,7 @@ fn py_action(action: &ActionMsg) -> String {
             object,
             link,
             touch_links,
+            group,
         } => {
             let mut extras = String::new();
             if let Some(link) = link {
@@ -2173,6 +2431,7 @@ fn py_action(action: &ActionMsg) -> String {
                 extras.push_str(&format!(", touch_links=[{}]", names.join(", ")));
             }
             extras.push_str(&robot_kwarg(robot));
+            extras.push_str(&group_kwarg(group));
             format!("bt.seq.attach({object:?}{extras})")
         }
         ActionMsg::Detach { object } => format!("bt.seq.detach({object:?})"),
@@ -2180,17 +2439,32 @@ fn py_action(action: &ActionMsg) -> String {
             robot,
             object,
             link,
+            group,
         } => match link {
             Some(link) => format!(
-                "bt.seq.track({object:?}, link={link:?}{})",
-                robot_kwarg(robot)
+                "bt.seq.track({object:?}, link={link:?}{}{})",
+                robot_kwarg(robot),
+                group_kwarg(group)
             ),
-            None => format!("bt.seq.track({object:?}{})", robot_kwarg(robot)),
+            None => format!(
+                "bt.seq.track({object:?}{}{})",
+                robot_kwarg(robot),
+                group_kwarg(group)
+            ),
         },
-        ActionMsg::Untrack { robot } => match robot {
-            Some(name) => format!("bt.seq.untrack(robot={name:?})"),
-            None => "bt.seq.untrack()".to_string(),
-        },
+        ActionMsg::Untrack { robot, group } => {
+            let mut kwargs = match robot {
+                Some(name) => format!("robot={name:?}"),
+                None => String::new(),
+            };
+            if let Some(group) = group {
+                if !kwargs.is_empty() {
+                    kwargs.push_str(", ");
+                }
+                kwargs.push_str(&format!("group={group:?}"));
+            }
+            format!("bt.seq.untrack({kwargs})")
+        }
         ActionMsg::Set { signal, value } => format!(
             "bt.seq.set_signal({signal:?}, {})",
             if *value { "True" } else { "False" }
@@ -2225,6 +2499,9 @@ pub(crate) fn py_condition(condition: &ConditionMsg) -> String {
         ConditionMsg::Immediately => "bt.seq.immediately()".to_string(),
         ConditionMsg::Done => "bt.seq.done()".to_string(),
         ConditionMsg::RobotDone { robot } => format!("bt.seq.robot_done({robot:?})"),
+        ConditionMsg::GroupDone { robot, group } => {
+            format!("bt.seq.robot_done({robot:?}, group={group:?})")
+        }
         ConditionMsg::Elapsed { seconds } => format!("bt.seq.elapsed({seconds})"),
         ConditionMsg::Signal { name, value } => format!(
             "bt.seq.signal({name:?}, {})",
@@ -2567,6 +2844,7 @@ mod tests {
             flange: None,
             mount: None,
             grasp: vec!["tool0".into()],
+            arms: Vec::new(),
             meta: botrail_model::CatalogMeta {
                 manufacturer: Some("Franka Robotics".into()),
                 product: Some("FR3".into()),

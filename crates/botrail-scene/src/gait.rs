@@ -401,6 +401,7 @@ impl ResolvedGait {
 /// as a leg that flips or wanders mid-stride.
 fn leg_ik(mode: IkMode) -> IkOptions {
     IkOptions {
+        joint_mask: None,
         mode,
         max_iters: 100,
         tol_pos: 5e-7,

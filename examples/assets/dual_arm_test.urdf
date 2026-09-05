@@ -1,0 +1,218 @@
+<?xml version="1.0"?>
+<!-- A primitive-only dual-arm body used by the botrail tests and examples:
+     a fixed torso carrying two 3-DOF arms, each ending in a 1-DOF finger
+     (its twin follows as a mimic). No mesh assets, so it works straight
+     from a checkout. Arms mount at the shoulders (y = +/-0.20, z = 0.60)
+     and hang down at zero, elbows folding forward (+x). -->
+<robot name="dual_arm_test">
+
+  <link name="body">
+    <visual>
+      <origin xyz="0 0 0.35"/>
+      <geometry><box size="0.20 0.30 0.70"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.35"/>
+      <geometry><box size="0.20 0.30 0.70"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ===================================================== left arm === -->
+  <joint name="left_mount" type="fixed">
+    <parent link="body"/>
+    <child link="left_base"/>
+    <origin xyz="0 0.20 0.60"/>
+  </joint>
+  <link name="left_base"/>
+
+  <joint name="left_shoulder" type="revolute">
+    <parent link="left_base"/>
+    <child link="left_upper"/>
+    <origin xyz="0 0.05 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="left_upper">
+    <visual>
+      <origin xyz="0 0 -0.15"/>
+      <geometry><cylinder radius="0.03" length="0.30"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.15"/>
+      <geometry><cylinder radius="0.03" length="0.30"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="left_elbow" type="revolute">
+    <parent link="left_upper"/>
+    <child link="left_fore"/>
+    <origin xyz="0 0 -0.30"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="left_fore">
+    <visual>
+      <origin xyz="0 0 -0.125"/>
+      <geometry><cylinder radius="0.025" length="0.25"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.125"/>
+      <geometry><cylinder radius="0.025" length="0.25"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="left_wrist" type="revolute">
+    <parent link="left_fore"/>
+    <child link="left_hand"/>
+    <origin xyz="0 0 -0.25"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.0" upper="3.0" effort="10" velocity="3.0"/>
+  </joint>
+  <link name="left_hand">
+    <visual>
+      <origin xyz="0 0 -0.02"/>
+      <geometry><box size="0.06 0.08 0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.02"/>
+      <geometry><box size="0.06 0.08 0.04"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="left_finger" type="revolute">
+    <parent link="left_hand"/>
+    <child link="left_finger_a"/>
+    <origin xyz="0 0.03 -0.04"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0" upper="0.8" effort="5" velocity="2.0"/>
+  </joint>
+  <link name="left_finger_a">
+    <visual>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="left_finger_b" type="revolute">
+    <parent link="left_hand"/>
+    <child link="left_finger_b_link"/>
+    <origin xyz="0 -0.03 -0.04"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="0" upper="0.8" effort="5" velocity="2.0"/>
+    <mimic joint="left_finger"/>
+  </joint>
+  <link name="left_finger_b_link">
+    <visual>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ==================================================== right arm === -->
+  <joint name="right_mount" type="fixed">
+    <parent link="body"/>
+    <child link="right_base"/>
+    <origin xyz="0 -0.20 0.60"/>
+  </joint>
+  <link name="right_base"/>
+
+  <joint name="right_shoulder" type="revolute">
+    <parent link="right_base"/>
+    <child link="right_upper"/>
+    <origin xyz="0 -0.05 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="right_upper">
+    <visual>
+      <origin xyz="0 0 -0.15"/>
+      <geometry><cylinder radius="0.03" length="0.30"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.15"/>
+      <geometry><cylinder radius="0.03" length="0.30"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="right_elbow" type="revolute">
+    <parent link="right_upper"/>
+    <child link="right_fore"/>
+    <origin xyz="0 0 -0.30"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="right_fore">
+    <visual>
+      <origin xyz="0 0 -0.125"/>
+      <geometry><cylinder radius="0.025" length="0.25"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.125"/>
+      <geometry><cylinder radius="0.025" length="0.25"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="right_wrist" type="revolute">
+    <parent link="right_fore"/>
+    <child link="right_hand"/>
+    <origin xyz="0 0 -0.25"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.0" upper="3.0" effort="10" velocity="3.0"/>
+  </joint>
+  <link name="right_hand">
+    <visual>
+      <origin xyz="0 0 -0.02"/>
+      <geometry><box size="0.06 0.08 0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.02"/>
+      <geometry><box size="0.06 0.08 0.04"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="right_finger" type="revolute">
+    <parent link="right_hand"/>
+    <child link="right_finger_a"/>
+    <origin xyz="0 0.03 -0.04"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0" upper="0.8" effort="5" velocity="2.0"/>
+  </joint>
+  <link name="right_finger_a">
+    <visual>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="right_finger_b" type="revolute">
+    <parent link="right_hand"/>
+    <child link="right_finger_b_link"/>
+    <origin xyz="0 -0.03 -0.04"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="0" upper="0.8" effort="5" velocity="2.0"/>
+    <mimic joint="right_finger"/>
+  </joint>
+  <link name="right_finger_b_link">
+    <visual>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.03"/>
+      <geometry><box size="0.01 0.01 0.06"/></geometry>
+    </collision>
+  </link>
+
+</robot>

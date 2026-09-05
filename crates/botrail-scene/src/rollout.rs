@@ -88,6 +88,24 @@ pub enum SeqError {
         link_a: String,
         link_b: String,
     },
+    /// Two arms of one robot met while both were driving. Each plan froze
+    /// the other arm where it stood when its motion started, so this is
+    /// the robot-robot case within one machine: the cycle needs an
+    /// interlock (`robot_done(group=)`, a zone on one arm) so one arm
+    /// waits for the other.
+    #[error(
+        "arms `{group_a}` and `{group_b}` of `{robot}` collide at t = {t:.3}s \
+         ({links}); add an interlock (robot_done(group=) / a zone sensor \
+         on one arm) so one arm waits for the other"
+    )]
+    GroupCollision {
+        t: f64,
+        robot: String,
+        group_a: String,
+        group_b: String,
+        /// `link_a × link_b`, the pair that met (a carried part by name).
+        links: String,
+    },
     /// A travelling vehicle's body met the environment. Travel is authored,
     /// not planned, so this is the aisle check failing: widen the aisle,
     /// move the shelf, or re-teach the path.
@@ -280,6 +298,10 @@ pub struct StepSpan {
     pub sequence: String,
     /// Flat-step index within `sequence` (the [`flatten`] pre-order).
     pub step: usize,
+    /// For a robot move span: the arm (planning group) the move drove,
+    /// when the robot has several. `None` for step spans and for moves on
+    /// a single-group robot.
+    pub group: Option<String>,
 }
 
 /// Where a signal lane comes from. Set where the lane is built (the
@@ -1284,11 +1306,21 @@ struct RobotRuntime {
     /// Previous tick's nominal, so a tracked solve can warm-start from the
     /// previous *command* plus the nominal increment.
     q_nom_prev: Vec<f64>,
-    /// The in-flight motion/ramp, for per-tick joint sampling. One slot —
-    /// matching the "one driver per robot per step" rule.
-    active: Option<ActiveMove>,
-    /// Conveyor tracking: the latched part and the offset it has built up.
-    tracking: Option<TrackLatch>,
+    /// The in-flight motions/ramps, for per-tick joint sampling. Each
+    /// owns the joints it drives and no two in flight share one — the
+    /// "one driver per joint" rule, checked when a move starts.
+    active: Vec<ActiveMove>,
+    /// Whether the bake runs tick by tick: two moves in flight at once
+    /// cannot both bake ahead (each pre-baked sample holds every joint),
+    /// so from the first overlap on, the robot bakes per tick until every
+    /// move has ended.
+    tick_bake: bool,
+    /// The commanded joints at the start of this tick, before any driver
+    /// wrote to them — what a tracked solve measures its velocity from.
+    q_prev: Vec<f64>,
+    /// Tracks in progress, one per arm: the latched part and the offset
+    /// it has built up.
+    tracking: Vec<TrackLatch>,
     // Accumulating baked track.
     times: Vec<f64>,
     positions: Vec<Vec<f64>>,
@@ -1327,17 +1359,24 @@ impl RobotRuntime {
         }
     }
 
-    /// Re-bakes what the in-flight move still has to do after `t`.
+    /// Re-bakes what the in-flight move still has to do after `t`. A robot
+    /// baking tick by tick (two moves in flight) has nothing to re-bake:
+    /// its ticks carry on.
     fn rebake_active_tail(&mut self, t: f64) {
-        let Some(active) = &self.active else { return };
-        let tail: Vec<(f64, Vec<f64>, Vec<f64>)> = match active {
-            ActiveMove::Ramp {
+        if self.tick_bake {
+            return;
+        }
+        let [active] = self.active.as_slice() else {
+            return;
+        };
+        let tail: Vec<(f64, Vec<f64>, Vec<f64>)> = match &active.kind {
+            MoveKind::Ramp {
                 start,
                 duration,
                 to,
                 ..
             } => vec![(start + duration, to.clone(), vec![0.0; to.len()])],
-            ActiveMove::Traj { start, traj } => (0..traj.times.len())
+            MoveKind::Traj { start, traj } => (0..traj.times.len())
                 .map(|i| {
                     (
                         start + traj.times[i],
@@ -1358,6 +1397,13 @@ impl RobotRuntime {
     /// settling after arrival).
     fn walking(&self) -> bool {
         self.gait.as_ref().is_some_and(|g| g.plan.is_some())
+    }
+
+    /// The in-flight move driving any of `joints`, if one does.
+    fn driver_of(&self, joints: &[usize]) -> Option<&ActiveMove> {
+        self.active
+            .iter()
+            .find(|active| active.owned.iter().any(|j| joints.contains(j)))
     }
 }
 
@@ -1671,8 +1717,18 @@ struct Rollout {
     branches: Vec<BranchTaken>,
 }
 
-/// The motion currently driving the joints, sampled per scan tick.
-enum ActiveMove {
+/// A motion currently driving joints, sampled per scan tick.
+struct ActiveMove {
+    /// The q indices this move drives — a planned motion's group, a
+    /// ramp's targets. Every other joint keeps its value.
+    owned: Vec<usize>,
+    /// What the move is, for conflict messages: the motion or toolpath
+    /// name, or `ramp`.
+    label: String,
+    kind: MoveKind,
+}
+
+enum MoveKind {
     Traj {
         start: f64,
         traj: JointTrajectory,
@@ -1686,10 +1742,12 @@ enum ActiveMove {
 }
 
 impl ActiveMove {
+    /// The move's own view of every joint at `t`; only `owned` entries
+    /// are meant.
     fn sample(&self, t: f64) -> Vec<f64> {
-        match self {
-            ActiveMove::Traj { start, traj } => traj.sample(t - start),
-            ActiveMove::Ramp {
+        match &self.kind {
+            MoveKind::Traj { start, traj } => traj.sample(t - start),
+            MoveKind::Ramp {
                 start,
                 duration,
                 from,
@@ -1705,9 +1763,9 @@ impl ActiveMove {
 
     /// Absolute end time of this move.
     fn end(&self) -> f64 {
-        match self {
-            ActiveMove::Traj { start, traj } => start + traj.duration(),
-            ActiveMove::Ramp {
+        match &self.kind {
+            MoveKind::Traj { start, traj } => start + traj.duration(),
+            MoveKind::Ramp {
                 start, duration, ..
             } => start + duration,
         }
@@ -1722,6 +1780,7 @@ impl ActiveMove {
 /// own self-motion drift on top (a deliberate bias would belong to the
 /// authoring layer, not the per-tick follow).
 const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
+    joint_mask: None,
     mode: botrail_kin::IkMode::Pose,
     max_iters: 100,
     tol_pos: 1e-7,
@@ -1739,6 +1798,11 @@ const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
 struct TrackLatch {
     object: String,
     link: usize,
+    /// The arm following (`None` = the whole robot), and the joints the
+    /// per-tick solve may spend — the other arm's stay where their own
+    /// driver put them.
+    group: Option<usize>,
+    joints: Vec<usize>,
     origin: Isometry3<f64>,
     offset: Isometry3<f64>,
     frozen: bool,
@@ -1755,6 +1819,9 @@ struct SensorRuntime {
     /// What re-resolves the sensor's frame each tick.
     anchor: SensorAnchor,
     watch: SensorWatch,
+    /// For a `Groups` watch: the links of each named arm, `(robot,
+    /// links)`, resolved once.
+    arms: Vec<(usize, Vec<usize>)>,
     /// Index of this sensor's lane in the signal tracks.
     lane: usize,
     /// Vision/field only: ray-test each candidate's origin against the
@@ -2250,11 +2317,25 @@ impl Rollout {
                     edges: vec![(0.0, false)],
                     kind: LaneKind::Sensor,
                 });
+                let arms = match &sensor.watch {
+                    SensorWatch::Groups(pairs) => pairs
+                        .iter()
+                        .filter_map(|(robot, group)| {
+                            let r = world.robot_index(robot)?;
+                            let model = &world.robots()[r].model;
+                            let g = model.group_index(group)?;
+                            let base = model.groups()[g].base;
+                            Some((r, world.link_subtree(r, base)))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 SensorRuntime {
                     collider,
                     pose,
                     anchor,
                     watch: sensor.watch.clone(),
+                    arms,
                     lane,
                     occlusion,
                     exclude,
@@ -2577,9 +2658,11 @@ impl Rollout {
                     velocities: vec![vec![0.0; q.len()]],
                     q_nom: q.clone(),
                     q_nom_prev: q.clone(),
+                    q_prev: q.clone(),
                     q,
-                    active: None,
-                    tracking: None,
+                    active: Vec::new(),
+                    tick_bake: false,
+                    tracking: Vec::new(),
                     moves: Vec::new(),
                     planned: Vec::new(),
                     base: sr.mount.as_ref().map(|_| Vec::new()),
@@ -3216,11 +3299,11 @@ impl Rollout {
         // re-commanding them would silently cancel the overtravel a close
         // ramp built and the clamp would decay to a kiss.
         fn plan_commands(mv: &ActiveMove, model: &botrail_model::RobotModel, joint: usize) -> bool {
-            match mv {
-                ActiveMove::Ramp { from, to, .. } => {
+            match &mv.kind {
+                MoveKind::Ramp { from, to, .. } => {
                     (model.joint_value(joint, from) - model.joint_value(joint, to)).abs() > 1e-9
                 }
-                ActiveMove::Traj { traj, .. } => {
+                MoveKind::Traj { traj, .. } => {
                     let v0 = model.joint_value(joint, &traj.positions[0]);
                     traj.positions
                         .iter()
@@ -3230,11 +3313,13 @@ impl Rollout {
         }
         for k in 0..phys.driven.len() {
             let (robot, joint) = (phys.driven[k].robot, phys.driven[k].joint);
-            if let Some(active) = &self.robots[robot].active {
-                let model = &self.world.robots()[robot].model;
-                if plan_commands(active, model, joint) {
-                    phys.driven[k].cmd = model.joint_value(joint, self.robots[robot].q.as_slice());
-                }
+            let model = &self.world.robots()[robot].model;
+            if self.robots[robot]
+                .active
+                .iter()
+                .any(|active| plan_commands(active, model, joint))
+            {
+                phys.driven[k].cmd = model.joint_value(joint, self.robots[robot].q.as_slice());
             }
             let cmd = phys.driven[k].cmd;
             phys.backend.set_joint_target(k, cmd);
@@ -3419,12 +3504,35 @@ impl Rollout {
         // Joints follow each robot's in-flight motion/ramp, in scene order
         // (attached obstacles are re-synced by set_joint_positions_for).
         for (r, rt) in self.robots.iter_mut().enumerate() {
-            let Some(active) = &rt.active else { continue };
-            rt.q_nom = active.sample(t);
-            // Under a track the commanded joints are solved in
-            // `follow_tracked_parts`, once this tick's part motion is known.
-            if rt.tracking.is_none() {
-                let mut q = rt.q_nom.clone();
+            rt.q_prev = rt.q.clone();
+            if rt.active.is_empty() {
+                continue;
+            }
+            // Every in-flight move drives the joints it owns; the rest of
+            // the nominal configuration stays where its last driver left it.
+            let mut q_nom = rt.q_nom.clone();
+            for active in &rt.active {
+                let sample = active.sample(t);
+                for &qi in &active.owned {
+                    q_nom[qi] = sample[qi];
+                }
+            }
+            rt.q_nom = q_nom;
+            // Under a track the tracked arm's commanded joints are solved
+            // in `follow_tracked_parts`, once this tick's part motion is
+            // known; every other joint follows the nominal here.
+            let tracked: Vec<usize> = rt
+                .tracking
+                .iter()
+                .flat_map(|latch| latch.joints.iter().copied())
+                .collect();
+            if tracked.len() < rt.q.len() {
+                let mut q = rt.q.clone();
+                for (qi, value) in q.iter_mut().enumerate() {
+                    if !tracked.contains(&qi) {
+                        *value = rt.q_nom[qi];
+                    }
+                }
                 // While the legs walk they are the gait's: a ramp alongside
                 // the drive moves the rest of the robot (`advance_gaits`).
                 if let Some(gr) = rt.gait.as_ref() {
@@ -3438,9 +3546,21 @@ impl Rollout {
                 self.world
                     .set_joint_positions_for(r, rt.q.clone())
                     .expect("sampled q has robot DOF");
+                // Two moves in flight bake tick by tick (a tracked or
+                // walking robot already does, on its own path).
+                if rt.tick_bake && rt.tracking.is_empty() && !rt.walking() {
+                    let velocity: Vec<f64> =
+                        rt.q.iter()
+                            .zip(&rt.q_prev)
+                            .map(|(now, before)| (now - before) / dt)
+                            .collect();
+                    let q = rt.q.clone();
+                    rt.append_waypoint(t, q, velocity);
+                }
             }
-            if t >= active.end() - 1e-9 {
-                rt.active = None;
+            rt.active.retain(|active| t < active.end() - 1e-9);
+            if rt.active.is_empty() {
+                rt.tick_bake = false;
             }
         }
 
@@ -3897,6 +4017,7 @@ impl Rollout {
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
         self.check_robot_collisions()?;
+        self.check_group_collisions()?;
         self.check_device_collisions(&device_moves)?;
         // Physics last: every kinematic actor is where this tick put it,
         // so the substeps integrate against the tick-true world, and the
@@ -4127,84 +4248,105 @@ impl Rollout {
     }
 
     fn follow_tracked_part(&mut self, r: usize) -> Result<(), SeqError> {
-        let Some(latch) = &self.robots[r].tracking else {
+        if self.robots[r].tracking.is_empty() {
             return Ok(());
-        };
-        let (object, link, origin, frozen) =
-            (latch.object.clone(), latch.link, latch.origin, latch.frozen);
-        // Failures here happen during the world advance, between program
-        // scans — attribute them to the program that latched the track.
-        self.current = latch.program;
-        // A grasped part is carried by the robot itself, so following it
-        // would chase its own tail: the offset it had at the grasp stands.
-        let offset = if frozen {
-            latch.offset
-        } else {
-            let pose = self
+        }
+        let dof = self.robots[r].q.len();
+        for index in 0..self.robots[r].tracking.len() {
+            let latch = &self.robots[r].tracking[index];
+            let (object, link, origin, frozen, joints) = (
+                latch.object.clone(),
+                latch.link,
+                latch.origin,
+                latch.frozen,
+                latch.joints.clone(),
+            );
+            // Failures here happen during the world advance, between
+            // program scans — attribute them to the program that latched
+            // the track.
+            self.current = latch.program;
+            // A grasped part is carried by the robot itself, so following it
+            // would chase its own tail: the offset it had at the grasp stands.
+            let offset = if frozen {
+                latch.offset
+            } else {
+                let pose = self
+                    .world
+                    .obstacles()
+                    .iter()
+                    .find(|o| o.name == object)
+                    .map(|o| o.pose)
+                    .ok_or_else(|| SeqError::Action {
+                        step: self.cur_step(),
+                        name: self.cur_step_name(),
+                        message: format!("tracked obstacle `{object}` disappeared"),
+                    })?;
+                let offset = pose * origin.inverse();
+                self.robots[r].tracking[index].offset = offset;
+                offset
+            };
+
+            let rt = &self.robots[r];
+            let nominal = self
                 .world
-                .obstacles()
-                .iter()
-                .find(|o| o.name == object)
-                .map(|o| o.pose)
-                .ok_or_else(|| SeqError::Action {
+                .fk_for(r, &rt.q_nom)
+                .expect("q_nom has robot DOF")[link];
+            let target = offset * nominal;
+            // Warm start from what the arm did last tick plus this tick's
+            // nominal increment: the solve then only absorbs one scan
+            // period of part motion (and joints the offset cannot touch —
+            // the gripper, the other arm — stay where they are).
+            let seed: Vec<f64> = (0..dof)
+                .map(|qi| {
+                    if joints.contains(&qi) {
+                        rt.q[qi] + (rt.q_nom[qi] - rt.q_nom_prev[qi])
+                    } else {
+                        rt.q[qi]
+                    }
+                })
+                .collect();
+            let options = botrail_kin::IkOptions {
+                joint_mask: (joints.len() < dof).then(|| {
+                    let mut mask = vec![false; dof];
+                    for &qi in &joints {
+                        mask[qi] = true;
+                    }
+                    mask
+                }),
+                ..TRACK_IK
+            };
+            let result = self
+                .world
+                .solve_ik_world_for(r, link, &target, &seed, &options)
+                .expect("seed has robot DOF");
+            if !result.converged {
+                return Err(SeqError::Action {
                     step: self.cur_step(),
                     name: self.cur_step_name(),
-                    message: format!("tracked obstacle `{object}` disappeared"),
-                })?;
-            let offset = pose * origin.inverse();
-            if let Some(latch) = &mut self.robots[r].tracking {
-                latch.offset = offset;
+                    message: format!(
+                        "tracking `{object}`: the part ran out of reach at t = {:.2}s \
+                         ({:.3} mm / {:.4} rad short after {} iterations)",
+                        self.t,
+                        result.pos_error * 1e3,
+                        result.rot_error,
+                        result.iters
+                    ),
+                });
             }
-            offset
-        };
-
-        let rt = &self.robots[r];
-        let nominal = self
-            .world
-            .fk_for(r, &rt.q_nom)
-            .expect("q_nom has robot DOF")[link];
-        let target = offset * nominal;
-        // Warm start from what the robot did last tick plus this tick's
-        // nominal increment: the solve then only absorbs one scan period of
-        // part motion (and joints the offset cannot touch — the gripper —
-        // follow the nominal exactly).
-        let seed: Vec<f64> =
-            rt.q.iter()
-                .zip(&rt.q_nom)
-                .zip(&rt.q_nom_prev)
-                .map(|((commanded, nominal), previous)| commanded + (nominal - previous))
-                .collect();
-        let result = self
-            .world
-            .solve_ik_world_for(r, link, &target, &seed, &TRACK_IK)
-            .expect("seed has robot DOF");
-        if !result.converged {
-            return Err(SeqError::Action {
-                step: self.cur_step(),
-                name: self.cur_step_name(),
-                message: format!(
-                    "tracking `{object}`: the part ran out of reach at t = {:.2}s \
-                     ({:.3} mm / {:.4} rad short after {} iterations)",
-                    self.t,
-                    result.pos_error * 1e3,
-                    result.rot_error,
-                    result.iters
-                ),
-            });
+            self.robots[r].q = result.q;
         }
         let rt = &mut self.robots[r];
-        let previous = rt.q.clone();
-        rt.q = result.q;
         rt.q_nom_prev = rt.q_nom.clone();
         self.world
             .set_joint_positions_for(r, rt.q.clone())
             .expect("solved q has robot DOF");
         // The move's own waypoints know nothing about the offset, so a
-        // tracked tick bakes itself (velocities by difference).
+        // tracked tick bakes itself (velocities by difference from the
+        // tick's start).
         let dt = self.options.dt;
         let velocity =
             rt.q.iter()
-                .zip(&previous)
+                .zip(&rt.q_prev)
                 .map(|(now, before)| (now - before) / dt)
                 .collect();
         let (t, q) = (self.t, rt.q.clone());
@@ -4256,23 +4398,97 @@ impl Rollout {
         Ok(())
     }
 
+    /// Two arms of one robot, both driving, must not meet. Each plan froze
+    /// the other arm where it stood, so a clash here is what the
+    /// robot-robot tick check catches between machines: a missing
+    /// interlock. Priced only where two drivers are in flight on a robot
+    /// with several arms — a single-arm robot's self-collisions are the
+    /// planner's business.
+    fn check_group_collisions(&self) -> Result<(), SeqError> {
+        for (r, rt) in self.robots.iter().enumerate() {
+            if rt.active.len() + rt.tracking.len() < 2 {
+                continue;
+            }
+            let model = &self.world.robots()[r].model;
+            let groups = model.groups();
+            if groups.len() < 2 {
+                continue;
+            }
+            let group_of = |id: botrail_collide::ColliderId| -> Option<usize> {
+                match id {
+                    botrail_collide::ColliderId::Link { link, .. } => model.group_for_link(link),
+                    botrail_collide::ColliderId::Obstacle(k) => self
+                        .world
+                        .attachment(&self.world.obstacles()[k].name)
+                        .and_then(|a| model.group_for_link(a.link)),
+                    botrail_collide::ColliderId::Attached(_) => None,
+                }
+            };
+            let name_of = |id: botrail_collide::ColliderId| -> String {
+                match id {
+                    botrail_collide::ColliderId::Link { link, .. } => {
+                        model.links[link].name.clone()
+                    }
+                    botrail_collide::ColliderId::Obstacle(k) => {
+                        self.world.obstacles()[k].name.clone()
+                    }
+                    botrail_collide::ColliderId::Attached(_) => "attached".to_string(),
+                }
+            };
+            for pair in self.world.check_self_collisions_for(r) {
+                // Two different arms, both of them arms: one arm folding
+                // onto itself, or brushing the body it hangs off, is its
+                // own move's business — the planner's for a motion, the
+                // author's for a ramp — not the two arms meeting.
+                let (Some(ga), Some(gb)) = (group_of(pair.a), group_of(pair.b)) else {
+                    continue;
+                };
+                if ga == gb {
+                    continue;
+                }
+                return Err(SeqError::GroupCollision {
+                    t: self.t,
+                    robot: self.world.robots()[r].name.clone(),
+                    group_a: groups[ga].name.clone(),
+                    group_b: groups[gb].name.clone(),
+                    links: format!("{} × {}", name_of(pair.a), name_of(pair.b)),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Latches robot `r` onto `object`: from here its nominal poses ride
     /// the part's motion.
-    fn latch_track(&mut self, r: usize, object: &str, link: Option<&str>) -> Result<(), SeqError> {
+    fn latch_track(
+        &mut self,
+        r: usize,
+        object: &str,
+        link: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<(), SeqError> {
         let err = |message: String| SeqError::Action {
             step: self.cur_step(),
             name: self.cur_step_name(),
             message,
         };
         let model = &self.world.robots()[r].model;
-        let link = match link {
-            Some(name) => model
-                .link_index(name)
-                .ok_or_else(|| err(format!("unknown link `{name}`")))?,
-            // The wrist, not the fingertip: a pose says nothing about the
-            // grip, so the solver must not be able to spend it.
-            None => model.tool_mount_link(),
+        let named = match link {
+            Some(name) => Some(
+                model
+                    .link_index(name)
+                    .ok_or_else(|| err(format!("unknown link `{name}`")))?,
+            ),
+            None => None,
         };
+        let g = self
+            .world
+            .resolve_group(r, group, named)
+            .map_err(|e| err(e.to_string()))?;
+        // The wrist, not the fingertip: a pose says nothing about the
+        // grip, so the solver must not be able to spend it.
+        let link = named.unwrap_or_else(|| self.world.group_tool_mount(r, g));
+        let joints = self.world.group_joints(r, g);
         let origin = self
             .world
             .obstacles()
@@ -4281,13 +4497,19 @@ impl Rollout {
             .map(|o| o.pose)
             .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
         let rt = &mut self.robots[r];
-        rt.q_nom = rt.q.clone();
-        rt.q_nom_prev = rt.q.clone();
+        // The tracked arm's nominal re-bases onto where it stands; the
+        // other arm's nominal is its own driver's business.
+        for &qi in &joints {
+            rt.q_nom[qi] = rt.q[qi];
+            rt.q_nom_prev[qi] = rt.q[qi];
+        }
         let program = self.current;
-        rt.tracking = Some(TrackLatch {
+        rt.tracking.push(TrackLatch {
             program,
             object: object.to_string(),
             link,
+            group: g,
+            joints,
             origin,
             offset: Isometry3::identity(),
             frozen: false,
@@ -4295,13 +4517,111 @@ impl Rollout {
         Ok(())
     }
 
-    /// Drops robot `r`'s track; the robot keeps the configuration it is in,
-    /// so the nominal frame is re-based onto it (releasing never moves the
-    /// robot).
-    fn release_track(&mut self, r: usize) {
+    /// Drops robot `r`'s track (the named arm's, or its only one); the
+    /// robot keeps the configuration it is in, so the nominal frame is
+    /// re-based onto it (releasing never moves the robot).
+    fn release_track(&mut self, r: usize, group: Option<&str>) -> Result<(), SeqError> {
+        let err = |message: String| SeqError::Action {
+            step: self.cur_step(),
+            name: self.cur_step_name(),
+            message,
+        };
+        let index = match group {
+            Some(name) => {
+                let g = self.world.robots()[r]
+                    .model
+                    .group_index(name)
+                    .ok_or_else(|| err(format!("unknown group `{name}`")))?;
+                self.robots[r]
+                    .tracking
+                    .iter()
+                    .position(|latch| latch.group == Some(g))
+                    .ok_or_else(|| err(format!("`{name}` has no active track")))?
+            }
+            None => match self.robots[r].tracking.len() {
+                0 => return Err(err("untrack without an active track".to_string())),
+                1 => 0,
+                _ => {
+                    return Err(err(
+                        "the robot tracks with several arms; name the group to release".to_string(),
+                    ))
+                }
+            },
+        };
         let rt = &mut self.robots[r];
-        rt.tracking = None;
-        rt.q_nom = rt.q.clone();
+        let latch = rt.tracking.remove(index);
+        for qi in latch.joints {
+            rt.q_nom[qi] = rt.q[qi];
+        }
+        Ok(())
+    }
+
+    /// A grasp by robot `r` at `anchor` ends the chase of any of its arms
+    /// that was tracking `object` *with that hand* — the part moves with
+    /// the robot now, so the offset it had at the grasp stands. An arm
+    /// following a part the other hand holds keeps following.
+    fn freeze_tracks_on(&mut self, r: usize, object: &str, anchor: usize) {
+        let model = self.world.robots()[r].model.clone();
+        let drivers: Vec<usize> = model
+            .driving_joints(anchor)
+            .into_iter()
+            .filter_map(|ji| model.joints[ji].q_index)
+            .collect();
+        for latch in &mut self.robots[r].tracking {
+            if latch.object == object && drivers.iter().any(|qi| latch.joints.contains(qi)) {
+                latch.frozen = true;
+            }
+        }
+    }
+
+    /// Refuses a move that would drive a joint another in-flight move
+    /// already drives: the one-driver-per-joint rule, deterministic
+    /// where the old single slot silently dropped one of the two.
+    fn claim_joints(&self, r: usize, owned: &[usize], label: &str) -> Result<(), SeqError> {
+        if let Some(active) = self.robots[r].driver_of(owned) {
+            let model = &self.world.robots()[r].model;
+            let shared = owned
+                .iter()
+                .find(|j| active.owned.contains(j))
+                .map(|&qi| model.joints[model.actuated_joints[qi]].name.clone())
+                .unwrap_or_default();
+            return Err(SeqError::Action {
+                step: self.cur_step(),
+                name: self.cur_step_name(),
+                message: format!(
+                    "`{label}` cannot start: joint `{shared}` of `{}` is driven by `{}` until \
+                     t = {:.2}s; wait for it first (done, or robot_done with group=)",
+                    self.world.robots()[r].name,
+                    active.label,
+                    active.end()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// The arm a motion drives, named — for the timeline's robot lanes,
+    /// only where the robot has several arms to tell apart.
+    fn move_group_label(&self, r: usize, motion: &crate::motion::Motion) -> Option<String> {
+        let model = &self.world.robots()[r].model;
+        if model.groups().len() < 2 {
+            return None;
+        }
+        crate::motion::motion_group(model, motion).map(|g| g.name)
+    }
+
+    /// The single arm every one of `joints` belongs to, named — a ramp's
+    /// lane on a dual-arm robot. `None` when the robot has one arm or the
+    /// joints straddle several.
+    fn joints_group_label(&self, r: usize, joints: &[usize]) -> Option<String> {
+        let groups = self.world.robots()[r].model.groups();
+        if groups.len() < 2 {
+            return None;
+        }
+        groups
+            .into_iter()
+            .find(|g| joints.iter().all(|j| g.joints.contains(j)))
+            .map(|g| g.name)
     }
 
     /// Extends (or opens) a constant-velocity span covering this tick.
@@ -4828,7 +5148,10 @@ impl Rollout {
         let needs_links = self.sensors.iter().any(|s| {
             matches!(
                 s.watch,
-                SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::All
+                SensorWatch::Robot
+                    | SensorWatch::Robots(_)
+                    | SensorWatch::Groups(_)
+                    | SensorWatch::All
             ) || matches!(s.anchor, SensorAnchor::Link { .. })
         });
         let link_poses = needs_links.then(|| self.world.all_link_poses());
@@ -4856,9 +5179,12 @@ impl Rollout {
             let watch_objects: Option<&[String]> = match &sensor.watch {
                 SensorWatch::Objects(names) => Some(names),
                 SensorWatch::AllObjects | SensorWatch::All => None,
-                SensorWatch::Robot | SensorWatch::Robots(_) => Some(&[]),
+                SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::Groups(_) => Some(&[]),
             };
-            if !matches!(sensor.watch, SensorWatch::Robot | SensorWatch::Robots(_)) {
+            if !matches!(
+                sensor.watch,
+                SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::Groups(_)
+            ) {
                 for (target, (obstacle, collider)) in self
                     .world
                     .obstacles()
@@ -4887,7 +5213,19 @@ impl Rollout {
                 }
             }
             if !value {
-                if let (
+                if let (Some(poses), SensorWatch::Groups(_)) = (&link_poses, &sensor.watch) {
+                    // Only the named arms' links: the interlock zone that
+                    // sees one arm of a dual-arm robot and not the other.
+                    value = sensor.arms.iter().any(|(robot, links)| {
+                        botrail_collide::links_intersect(
+                            self.world.robots()[*robot].collider(),
+                            &poses[*robot],
+                            links,
+                            &sensor.collider,
+                            &pose,
+                        )
+                    });
+                } else if let (
                     Some(poses),
                     SensorWatch::Robot | SensorWatch::Robots(_) | SensorWatch::All,
                 ) = (&link_poses, &sensor.watch)
@@ -5050,8 +5388,18 @@ impl Rollout {
             Condition::RobotDone { robot } => self
                 .world
                 .robot_index(robot)
-                .map(|r| self.robots[r].active.is_none())
+                .map(|r| self.robots[r].active.is_empty())
                 .unwrap_or(true),
+            Condition::GroupDone { robot, group } => match self.world.robot_index(robot) {
+                Some(r) => match self.world.robots()[r].model.group_index(group) {
+                    Some(g) => {
+                        let joints = self.world.group_joints(r, Some(g));
+                        self.robots[r].driver_of(&joints).is_none()
+                    }
+                    None => true,
+                },
+                None => true,
+            },
             Condition::Elapsed { seconds } => {
                 self.t - self.programs[self.current].entered_at >= seconds - 1e-9
             }
@@ -5114,6 +5462,7 @@ impl Rollout {
             end: self.t,
             sequence: program.sequence.name.clone(),
             step: program.step,
+            group: None,
         });
         let step = self.programs[self.current].step;
         for action in self.programs[self.current].flat[step].actions.clone() {
@@ -5204,13 +5553,38 @@ impl Rollout {
                         message: e.to_string(),
                     })?;
                 let traj = planned.trajectory;
+                // The joints this motion drives — its arm's, or every
+                // joint — and the arm's name for the timeline lane.
+                let (owned, group) = {
+                    let found = self
+                        .world
+                        .motions()
+                        .iter()
+                        .find(|m| &m.name == motion)
+                        .expect("planned just now");
+                    (
+                        self.world.motion_joints(found),
+                        self.move_group_label(owner, found),
+                    )
+                };
+                self.claim_joints(owner, &owned, motion)?;
+                // A second driver on this robot — another move, or an arm
+                // tracking a part: a pre-baked future holds every joint,
+                // so from here the robot bakes tick by tick.
+                let concurrent = !self.robots[owner].active.is_empty()
+                    || !self.robots[owner].tracking.is_empty();
                 let rt = &mut self.robots[owner];
-                for i in 0..traj.times.len() {
-                    rt.append_waypoint(
-                        self.t + traj.times[i],
-                        traj.positions[i].clone(),
-                        traj.velocities[i].clone(),
-                    );
+                if concurrent {
+                    rt.truncate_after(self.t);
+                    rt.tick_bake = true;
+                } else {
+                    for i in 0..traj.times.len() {
+                        rt.append_waypoint(
+                            self.t + traj.times[i],
+                            traj.positions[i].clone(),
+                            traj.velocities[i].clone(),
+                        );
+                    }
                 }
                 let end = self.t + traj.duration();
                 rt.planned.push(PlannedMove {
@@ -5229,12 +5603,17 @@ impl Rollout {
                     end,
                     sequence: self.programs[self.current].sequence.name.clone(),
                     step: step_index,
+                    group,
                 });
                 // Joints follow the trajectory tick by tick (advance_world),
                 // so mid-motion sensors see the true robot state.
-                rt.active = Some(ActiveMove::Traj {
-                    start: self.t,
-                    traj,
+                rt.active.push(ActiveMove {
+                    owned,
+                    label: motion.clone(),
+                    kind: MoveKind::Traj {
+                        start: self.t,
+                        traj,
+                    },
                 });
             }
             Action::StartToolpath { robot, toolpath } => {
@@ -5322,13 +5701,23 @@ impl Rollout {
                         tcp_speed: sample.feed.or(self.options.toolpath.rapid_speed),
                     });
                 }
+                // A toolpath drives every joint of its robot.
+                let owned: Vec<usize> = (0..self.world.robots()[r].model.dof()).collect();
+                self.claim_joints(r, &owned, toolpath)?;
+                let concurrent =
+                    !self.robots[r].active.is_empty() || !self.robots[r].tracking.is_empty();
                 let rt = &mut self.robots[r];
-                for i in 0..traj.times.len() {
-                    rt.append_waypoint(
-                        self.t + traj.times[i],
-                        traj.positions[i].clone(),
-                        traj.velocities[i].clone(),
-                    );
+                if concurrent {
+                    rt.truncate_after(self.t);
+                    rt.tick_bake = true;
+                } else {
+                    for i in 0..traj.times.len() {
+                        rt.append_waypoint(
+                            self.t + traj.times[i],
+                            traj.positions[i].clone(),
+                            traj.velocities[i].clone(),
+                        );
+                    }
                 }
                 let end = self.t + traj.duration();
                 // Spraying intervals in timeline time: the interval *into*
@@ -5376,10 +5765,15 @@ impl Rollout {
                     end,
                     sequence: self.programs[self.current].sequence.name.clone(),
                     step: step_index,
+                    group: None,
                 });
-                rt.active = Some(ActiveMove::Traj {
-                    start: self.t,
-                    traj,
+                rt.active.push(ActiveMove {
+                    owned,
+                    label: toolpath.clone(),
+                    kind: MoveKind::Traj {
+                        start: self.t,
+                        traj,
+                    },
                 });
             }
             Action::StartRamp {
@@ -5394,24 +5788,32 @@ impl Rollout {
                     .as_ref()
                     .map(|m| m.device.clone())
                     .unwrap_or_default();
-                let rt = &mut self.robots[r];
-                let walking = rt.walking();
-                let owned: Vec<usize> = rt
-                    .gait
-                    .as_ref()
-                    .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
-                    .unwrap_or_default();
-                let mut goal = rt.q_nom.clone();
-                for (joint, value) in targets {
+                let mut driven = Vec::with_capacity(targets.len());
+                for (joint, _) in targets {
                     let ji = model
                         .joint_index(joint)
                         .ok_or_else(|| err(format!("unknown joint `{joint}`")))?;
                     let qi = model.joints[ji]
                         .q_index
                         .ok_or_else(|| err(format!("joint `{joint}` is not actuated")))?;
+                    driven.push(qi);
+                }
+                self.claim_joints(r, &driven, "ramp")?;
+                let group = self.joints_group_label(r, &driven);
+                let concurrent =
+                    !self.robots[r].active.is_empty() || !self.robots[r].tracking.is_empty();
+                let rt = &mut self.robots[r];
+                let walking = rt.walking();
+                let legs: Vec<usize> = rt
+                    .gait
+                    .as_ref()
+                    .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
+                    .unwrap_or_default();
+                let mut goal = rt.q_nom.clone();
+                for ((joint, value), &qi) in targets.iter().zip(&driven) {
                     // A leg mid-walk has one driver, the gait: a ramp on it
                     // would fight the footfalls. Standing, the legs are free.
-                    if walking && owned.contains(&qi) {
+                    if walking && legs.contains(&qi) {
                         return Err(err(format!(
                             "joint `{joint}` is driven by the gait while `{vehicle}` walks; \
                              ramp it after device_done"
@@ -5423,8 +5825,12 @@ impl Rollout {
                 // A tracked ramp cannot bake ahead — its poses are carried
                 // by a part that has not moved yet — so it bakes per tick.
                 // Nor can one alongside a walk: the legs bake tick by tick,
-                // and the ramp's samples ride with them.
-                if rt.tracking.is_none() && !walking {
+                // and the ramp's samples ride with them. Nor alongside
+                // another move: the robot bakes tick by tick from here.
+                if concurrent {
+                    rt.truncate_after(self.t);
+                    rt.tick_bake = true;
+                } else if rt.tracking.is_empty() && !walking {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
@@ -5448,12 +5854,17 @@ impl Rollout {
                     end,
                     sequence: self.programs[self.current].sequence.name.clone(),
                     step: step_index,
+                    group,
                 });
-                rt.active = Some(ActiveMove::Ramp {
-                    start: self.t,
-                    duration: *duration,
-                    from: rt.q_nom.clone(),
-                    to: goal,
+                rt.active.push(ActiveMove {
+                    owned: driven,
+                    label: "ramp".to_string(),
+                    kind: MoveKind::Ramp {
+                        start: self.t,
+                        duration: *duration,
+                        from: rt.q_nom.clone(),
+                        to: goal,
+                    },
                 });
             }
             Action::Attach {
@@ -5461,6 +5872,7 @@ impl Rollout {
                 object,
                 link,
                 touch_links,
+                group,
             } => {
                 let r = self.action_robot(robot)?;
                 self.world
@@ -5482,7 +5894,13 @@ impl Rollout {
                         Some(l) => model
                             .link_index(l)
                             .ok_or_else(|| err(format!("unknown link `{l}`")))?,
-                        None => model.default_tcp_link(),
+                        None => {
+                            let g = self
+                                .world
+                                .resolve_group(r, group.as_deref(), None)
+                                .map_err(|e| err(e.to_string()))?;
+                            self.world.group_tip(r, g)
+                        }
                     };
                     let obstacle = self
                         .world
@@ -5501,11 +5919,7 @@ impl Rollout {
                         end: f64::NAN,
                     });
                     // Grasping the tracked part ends the chase here too.
-                    if let Some(latch) = &mut self.robots[r].tracking {
-                        if &latch.object == object {
-                            latch.frozen = true;
-                        }
-                    }
+                    self.freeze_tracks_on(r, object, anchor);
                     return Ok(());
                 }
                 // The pose the object rested at until this instant — a
@@ -5518,7 +5932,13 @@ impl Rollout {
                     .find(|o| &o.name == object)
                     .map(|o| o.pose);
                 self.world
-                    .attach_obstacle_to(r, object, link.as_deref(), touch_links.as_deref())
+                    .attach_obstacle_in_group(
+                        r,
+                        group.as_deref(),
+                        object,
+                        link.as_deref(),
+                        touch_links.as_deref(),
+                    )
                     .map_err(|e| err(e.to_string()))?;
                 let attachment = self
                     .world
@@ -5540,12 +5960,9 @@ impl Rollout {
                 });
                 // Grasping the tracked part ends the chase: it moves with
                 // the robot now, so the offset it had at the grasp stands
-                // (which is what keeps the lift straight).
-                if let Some(latch) = &mut self.robots[r].tracking {
-                    if &latch.object == object {
-                        latch.frozen = true;
-                    }
-                }
+                // (which is what keeps the lift straight). Another arm
+                // tracking it keeps following — that is the two-handed hold.
+                self.freeze_tracks_on(r, object, attachment.link);
                 self.physics_attach(object);
             }
             Action::Detach { object } => {
@@ -5590,16 +6007,17 @@ impl Rollout {
                 robot,
                 object,
                 link,
+                group,
             } => {
                 let r = self.action_robot(robot)?;
                 self.world
                     .set_joint_positions_for(r, self.robots[r].q.clone())
                     .map_err(|e| err(e.to_string()))?;
-                self.latch_track(r, object, link.as_deref())?;
+                self.latch_track(r, object, link.as_deref(), group.as_deref())?;
             }
-            Action::Untrack { robot } => {
+            Action::Untrack { robot, group } => {
                 let r = self.action_robot(robot)?;
-                self.release_track(r);
+                self.release_track(r, group.as_deref())?;
             }
             Action::Set { signal, value } => {
                 let t = self.t;
@@ -6123,14 +6541,14 @@ impl ActiveMove {
     /// gait does to a move that outlives the walk: the legs it left at
     /// the stance must not be yanked back to where the move sampled them.
     fn pin_joints(&mut self, joints: &[usize], values: &[f64]) {
-        match self {
-            ActiveMove::Ramp { from, to, .. } => {
+        match &mut self.kind {
+            MoveKind::Ramp { from, to, .. } => {
                 for &qi in joints {
                     from[qi] = values[qi];
                     to[qi] = values[qi];
                 }
             }
-            ActiveMove::Traj { traj, .. } => {
+            MoveKind::Traj { traj, .. } => {
                 for i in 0..traj.positions.len() {
                     for &qi in joints {
                         traj.positions[i][qi] = values[qi];
@@ -6181,15 +6599,17 @@ impl Rollout {
         };
         // A ramp still moving a leg would be walked over mid-way.
         let ramp_driving = |qi: usize| -> bool {
-            matches!(
-                &self.robots[r].active,
-                Some(ActiveMove::Ramp {
-                    start,
-                    duration,
-                    from,
-                    to,
-                }) if start + duration > t + 1e-9 && from[qi] != to[qi]
-            )
+            self.robots[r].active.iter().any(|active| {
+                matches!(
+                    &active.kind,
+                    MoveKind::Ramp {
+                        start,
+                        duration,
+                        from,
+                        to,
+                    } if start + duration > t + 1e-9 && from[qi] != to[qi]
+                )
+            })
         };
         let model = self.world.robots()[r].model.clone();
         for leg in &gr.gait.legs {
@@ -6606,7 +7026,7 @@ impl Rollout {
             gr.plan = None;
             // A move that outlives the walk keeps the legs where the walk
             // left them, and its remaining samples go back on the bake.
-            if let Some(active) = rt.active.as_mut() {
+            for active in &mut rt.active {
                 active.pin_joints(&owned, &rest);
             }
             rt.rebake_active_tail(t);
@@ -7884,6 +8304,7 @@ pub(crate) mod tests {
                             object: "part".into(),
                             link: None,
                             touch_links: None,
+                            group: None,
                         }],
                         Condition::Immediately,
                     )]),
@@ -7995,6 +8416,7 @@ pub(crate) mod tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -8084,6 +8506,7 @@ pub(crate) mod tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9183,6 +9606,7 @@ mod multi_actor_tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.2 },
                 ),
@@ -9200,6 +9624,7 @@ mod multi_actor_tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.2 },
                 ),
@@ -9291,6 +9716,7 @@ mod multi_actor_tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9301,6 +9727,7 @@ mod multi_actor_tests {
                         object: "box".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9416,6 +9843,7 @@ mod tracking_tests {
                         robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9476,6 +9904,7 @@ mod tracking_tests {
                         robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9495,6 +9924,7 @@ mod tracking_tests {
                         object: "part".into(),
                         link: Some("tool".into()),
                         touch_links: Some(vec!["tool".into()]),
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9509,7 +9939,10 @@ mod tracking_tests {
                 ),
                 step(
                     "release",
-                    vec![Action::Untrack { robot: None }],
+                    vec![Action::Untrack {
+                        robot: None,
+                        group: None,
+                    }],
                     Condition::Immediately,
                 ),
             ],
@@ -9553,13 +9986,17 @@ mod tracking_tests {
                         robot: None,
                         object: "part".into(),
                         link: Some("tool".into()),
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
                 step("follow", vec![], Condition::Elapsed { seconds: 0.5 }),
                 step(
                     "release",
-                    vec![Action::Untrack { robot: None }],
+                    vec![Action::Untrack {
+                        robot: None,
+                        group: None,
+                    }],
                     Condition::Immediately,
                 ),
                 step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
@@ -9625,6 +10062,7 @@ mod tracking_tests {
                         robot: None,
                         object: "part".into(),
                         link: Some("left".into()),
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -9721,6 +10159,7 @@ mod tracking_tests {
             robot: None,
             object: "part".into(),
             link: None,
+            group: None,
         };
         check(
             vec![step(
@@ -9733,7 +10172,10 @@ mod tracking_tests {
         check(
             vec![step(
                 "loose",
-                vec![Action::Untrack { robot: None }],
+                vec![Action::Untrack {
+                    robot: None,
+                    group: None,
+                }],
                 Condition::Immediately,
             )],
             "without an active track",
@@ -9758,6 +10200,7 @@ mod tracking_tests {
                     robot: None,
                     object: "nope".into(),
                     link: None,
+                    group: None,
                 }],
                 Condition::Immediately,
             )],
@@ -11452,6 +11895,7 @@ mod tray_tests {
                         object: "carton".into(),
                         link: None,
                         touch_links: None,
+                        group: None,
                     }],
                     Condition::Immediately,
                 ),
@@ -13310,6 +13754,7 @@ mod gait_tests {
             None,
             &io,
             &botrail_export::ProgramOptions::default(),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("gait"), "{err}");
@@ -14466,6 +14911,7 @@ mod physics_tests {
                             object: "part".into(),
                             link: Some("paddle".into()),
                             touch_links: None,
+                            group: None,
                         }],
                         Condition::Immediately,
                     ),
@@ -14706,5 +15152,522 @@ mod physics_tests {
         assert!((at(0.015) - 0.75).abs() < 1e-12);
         // Past the last sample the pose holds, like every final span.
         assert_eq!(at(0.5), 0.6);
+    }
+}
+
+/// Two arms of one robot: the joint-ownership rules of a dual-arm bake.
+#[cfg(test)]
+mod dual_arm_tests {
+    use super::*;
+    use crate::motion::{Segment, SegmentKind};
+    use crate::seq::{Action, Condition, Sensor, SensorKind, SensorWatch, Sequence, Step};
+    use botrail_model::Geometry;
+    use nalgebra::{Translation3, UnitQuaternion, Vector3};
+    use std::sync::Arc;
+
+    const DUAL: &str = include_str!("../../../examples/assets/dual_arm_test.urdf");
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn dual() -> Scene {
+        Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(DUAL).unwrap(),
+        ))
+    }
+
+    fn qi(scene: &Scene, joint: &str) -> usize {
+        let model = &scene.robots()[0].model;
+        model.joints[model.joint_index(joint).unwrap()]
+            .q_index
+            .unwrap()
+    }
+
+    /// A motion of one arm to the given joint values (everything else at
+    /// the current configuration).
+    fn motion(scene: &mut Scene, name: &str, group: &str, targets: &[(&str, f64)]) {
+        let mut goal = scene.joint_positions().to_vec();
+        for (joint, value) in targets {
+            goal[qi(scene, joint)] = *value;
+        }
+        scene
+            .add_segment_in_group(
+                0,
+                Some(group),
+                name,
+                Segment {
+                    kind: SegmentKind::Joint,
+                    goal_positions: goal,
+                    constraints: vec![],
+                },
+            )
+            .unwrap();
+    }
+
+    fn ramp(joint: &str, value: f64, duration: f64) -> Action {
+        Action::StartRamp {
+            robot: None,
+            targets: vec![(joint.to_string(), value)],
+            duration,
+        }
+    }
+
+    fn group_done(scene: &Scene, group: &str) -> Condition {
+        Condition::GroupDone {
+            robot: scene.robots()[0].name.clone(),
+            group: group.to_string(),
+        }
+    }
+
+    fn bake(scene: &mut Scene, steps: Vec<Step>) -> Result<SequenceTimeline, SeqError> {
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps,
+        });
+        scene.simulate_sequence("s", &RolloutOptions::default())
+    }
+
+    /// The §2.1 breakage, fixed: a left-arm motion and a right-arm ramp
+    /// started in consecutive steps both bake, each arm's `robot_done`
+    /// answers for that arm alone, and the timeline holds both moves.
+    #[test]
+    fn two_arms_drive_at_once_and_each_finishes_on_its_own() {
+        let mut scene = dual();
+        motion(
+            &mut scene,
+            "left_reach",
+            "left",
+            &[("left_shoulder", 1.2), ("left_elbow", -1.0)],
+        );
+        let steps = vec![
+            step(
+                "left",
+                vec![Action::StartMotion {
+                    motion: "left_reach".into(),
+                }],
+                Condition::Immediately,
+            ),
+            step(
+                "right",
+                vec![ramp("right_elbow", 1.0, 0.5)],
+                group_done(&scene, "right"),
+            ),
+            step("wait left", vec![], group_done(&scene, "left")),
+        ];
+        let tl = bake(&mut scene, steps).unwrap();
+        let (ls, le, re) = (
+            qi(&scene, "left_shoulder"),
+            qi(&scene, "left_elbow"),
+            qi(&scene, "right_elbow"),
+        );
+        let end = tl.robots[0].trajectory.sample(tl.duration);
+        assert!(
+            (end[ls] - 1.2).abs() < 1e-9 && (end[le] + 1.0).abs() < 1e-9,
+            "{end:?}"
+        );
+        assert!((end[re] - 1.0).abs() < 1e-9, "{end:?}");
+        // Both moved at once: mid-ramp the ramp is halfway and the motion
+        // is under way.
+        let mid = tl.robots[0].trajectory.sample(0.25);
+        assert!((mid[re] - 0.5).abs() < 1e-6, "{mid:?}");
+        assert!(mid[ls] > 0.05, "{mid:?}");
+        // The right arm's step released at the ramp's end, the left arm's
+        // wait at the motion's end — the cycle is the motion.
+        let spans: Vec<(&str, f64, f64)> = tl
+            .step_spans
+            .iter()
+            .map(|s| (s.name.as_str(), s.start, s.end))
+            .collect();
+        assert!((spans[1].2 - 0.5).abs() < 1e-9, "{spans:?}");
+        assert!(tl.duration > 0.5 + 1e-9 && (spans[2].2 - tl.duration).abs() < 1e-9);
+        let lanes: Vec<(String, Option<String>)> = tl.robots[0]
+            .moves
+            .iter()
+            .map(|m| (m.name.clone(), m.group.clone()))
+            .collect();
+        assert_eq!(
+            lanes,
+            vec![
+                ("left_reach".to_string(), Some("left".to_string())),
+                ("ramp".to_string(), Some("right".to_string())),
+            ]
+        );
+        assert_eq!(
+            crate::handshake::group_busy(&tl, &tl.robots[0].name, "right"),
+            Some(vec![(0.0, 0.5)])
+        );
+    }
+
+    /// The same overlap on one arm is refused where it used to lose a move
+    /// silently: the joint has a driver until the move ends.
+    #[test]
+    fn a_second_driver_on_a_busy_arm_is_refused() {
+        let mut scene = dual();
+        motion(&mut scene, "left_reach", "left", &[("left_shoulder", 1.2)]);
+        let err = bake(
+            &mut scene,
+            vec![
+                step(
+                    "left",
+                    vec![Action::StartMotion {
+                        motion: "left_reach".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "fingers",
+                    vec![ramp("left_finger", 0.5, 0.2)],
+                    Condition::Done,
+                ),
+            ],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, SeqError::Action { .. })
+                && msg.contains("driven by `left_reach`")
+                && msg.contains("left_finger"),
+            "{msg}"
+        );
+        // Whole-robot idle waits for both arms.
+        let mut scene = dual();
+        motion(&mut scene, "left_reach", "left", &[("left_shoulder", 1.2)]);
+        let robot = scene.robots()[0].name.clone();
+        let tl = bake(
+            &mut scene,
+            vec![
+                step(
+                    "left",
+                    vec![Action::StartMotion {
+                        motion: "left_reach".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "right",
+                    vec![ramp("right_elbow", 0.4, 3.0)],
+                    Condition::RobotDone { robot },
+                ),
+            ],
+        )
+        .unwrap();
+        assert!((tl.duration - 3.0).abs() < 1e-9, "{}", tl.duration);
+    }
+
+    /// An arm carrying a plate into the other arm's path while both drive:
+    /// each plan was valid against a frozen partner, so the tick check is
+    /// what catches them meeting, as a group collision naming both arms.
+    #[test]
+    fn arms_meeting_mid_cycle_is_a_group_collision() {
+        let mut scene = dual();
+        // Where the left hand ends up after swinging forward, a plate
+        // reaching across to the right arm's plane.
+        scene
+            .add_obstacle(
+                "plate",
+                Geometry::Box {
+                    size: Vector3::new(0.06, 1.0, 0.02),
+                },
+                iso(-0.33, 0.25, 0.20),
+            )
+            .unwrap();
+        // A small swing plus a long wrist turn: the arm is still driving when
+        // the plate arrives.
+        motion(
+            &mut scene,
+            "right_reach",
+            "right",
+            &[("right_shoulder", 0.3), ("right_wrist", 2.5)],
+        );
+        let err = bake(
+            &mut scene,
+            vec![
+                step(
+                    "left out",
+                    vec![ramp("left_shoulder", 1.2, 2.0)],
+                    Condition::Done,
+                ),
+                step(
+                    "grip",
+                    vec![Action::Attach {
+                        robot: None,
+                        object: "plate".into(),
+                        link: None,
+                        touch_links: None,
+                        group: Some("left".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "right in",
+                    vec![Action::StartMotion {
+                        motion: "right_reach".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "left back",
+                    vec![ramp("left_shoulder", 0.6, 1.0)],
+                    Condition::Done,
+                ),
+            ],
+        )
+        .unwrap_err();
+        match err {
+            SeqError::GroupCollision {
+                t,
+                group_a,
+                group_b,
+                links,
+                ..
+            } => {
+                let mut arms = [group_a, group_b];
+                arms.sort();
+                assert_eq!(arms, ["left".to_string(), "right".to_string()]);
+                assert!(t > 2.0 && t < 3.2, "{t}");
+                assert!(links.contains("plate"), "{links}");
+            }
+            other => panic!("expected a group collision, got {other}"),
+        }
+    }
+
+    /// A two-handed hold: the left hand grasps, the right hand tracks the
+    /// part, and while the left arm carries it the right hand keeps its
+    /// offset from it — the follower rides the leader.
+    #[test]
+    fn an_arm_follows_what_the_other_hand_holds() {
+        let mut scene = dual();
+        scene
+            .add_obstacle(
+                "tray",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                iso(0.0, 0.25, -0.02),
+            )
+            .unwrap();
+        motion(
+            &mut scene,
+            "carry",
+            "left",
+            &[("left_shoulder", 0.8), ("left_elbow", -0.6)],
+        );
+        let tl = bake(
+            &mut scene,
+            vec![
+                step(
+                    "hold",
+                    vec![
+                        Action::Attach {
+                            robot: None,
+                            object: "tray".into(),
+                            link: None,
+                            touch_links: None,
+                            group: Some("left".into()),
+                        },
+                        Action::Track {
+                            robot: None,
+                            object: "tray".into(),
+                            link: None,
+                            group: Some("right".into()),
+                        },
+                    ],
+                    Condition::Immediately,
+                ),
+                step(
+                    "carry",
+                    vec![Action::StartMotion {
+                        motion: "carry".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "let go",
+                    vec![Action::Untrack {
+                        robot: None,
+                        group: Some("right".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+        )
+        .unwrap();
+        let model = scene.robots()[0].model.clone();
+        let right_hand = model.link_index("right_hand").unwrap();
+        let tray = tl.objects.iter().find(|o| o.name == "tray").unwrap();
+        let gap_at = |t: f64| {
+            let q = tl.robots[0].trajectory.sample(t);
+            let poses = scene.fk_for(0, &q).unwrap();
+            let tray_pose =
+                SequenceTimeline::object_pose(tray, std::slice::from_ref(&poses), t).unwrap();
+            (poses[right_hand].translation.vector - tray_pose.translation.vector).norm()
+        };
+        let gap0 = gap_at(0.0);
+        assert!(gap0 > 0.3, "{gap0}");
+        for k in 1..=10 {
+            let t = tl.duration * k as f64 / 10.0;
+            assert!(
+                (gap_at(t) - gap0).abs() < 2e-3,
+                "t = {t}: {} vs {gap0}",
+                gap_at(t)
+            );
+        }
+        // The right arm actually moved to keep up.
+        let end = tl.robots[0].trajectory.sample(tl.duration);
+        assert!(end[qi(&scene, "right_shoulder")].abs() > 0.1, "{end:?}");
+    }
+
+    /// A zone watching one arm ignores the other.
+    #[test]
+    fn a_zone_watching_one_arm_ignores_the_other() {
+        let mut scene = dual();
+        let robot = scene.robots()[0].name.clone();
+        for (name, arm) in [("zone_left", "left"), ("zone_right", "right")] {
+            scene
+                .upsert_sensor(Sensor {
+                    name: name.into(),
+                    kind: SensorKind::Zone {
+                        pose: iso(-0.3, 0.25, 0.3),
+                        size: Vector3::new(0.3, 0.3, 0.3),
+                    },
+                    watch: SensorWatch::Groups(vec![(robot.clone(), arm.into())]),
+                    mount: None,
+                })
+                .unwrap();
+        }
+        motion(&mut scene, "left_reach", "left", &[("left_shoulder", 1.2)]);
+        let tl = bake(
+            &mut scene,
+            vec![step(
+                "left",
+                vec![Action::StartMotion {
+                    motion: "left_reach".into(),
+                }],
+                Condition::Done,
+            )],
+        )
+        .unwrap();
+        let lane = |name: &str| tl.signals.iter().find(|s| s.name == name).unwrap();
+        assert!(
+            lane("zone_left").value_at(tl.duration),
+            "{:?}",
+            lane("zone_left").edges
+        );
+        assert!(
+            !lane("zone_right").value_at(tl.duration),
+            "{:?}",
+            lane("zone_right").edges
+        );
+    }
+
+    /// The authoring rules of a dual-arm sequence, rejected before a bake.
+    #[test]
+    fn arm_rules_are_validated() {
+        let check = |steps: Vec<Step>, needle: &str| {
+            let mut scene = dual();
+            scene
+                .add_obstacle(
+                    "part",
+                    Geometry::Box {
+                        size: Vector3::new(0.04, 0.04, 0.04),
+                    },
+                    iso(0.0, 0.25, -0.02),
+                )
+                .unwrap();
+            motion(&mut scene, "left_reach", "left", &[("left_shoulder", 0.5)]);
+            let err = bake(&mut scene, steps).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, SeqError::Validation { .. }) && msg.contains(needle),
+                "expected `{needle}` in `{msg}`"
+            );
+        };
+        let grasp = |group: &str| Action::Attach {
+            robot: None,
+            object: "part".into(),
+            link: None,
+            touch_links: None,
+            group: Some(group.into()),
+        };
+        let track = |group: &str| Action::Track {
+            robot: None,
+            object: "part".into(),
+            link: None,
+            group: Some(group.into()),
+        };
+        // Following a part in this arm's own hand goes in a circle.
+        check(
+            vec![step(
+                "x",
+                vec![grasp("left"), track("left")],
+                Condition::Immediately,
+            )],
+            "already grasped by this arm",
+        );
+        // Two moves on one arm in one step fight for its joints.
+        check(
+            vec![step(
+                "x",
+                vec![
+                    Action::StartMotion {
+                        motion: "left_reach".into(),
+                    },
+                    ramp("left_elbow", 0.3, 0.2),
+                ],
+                Condition::Done,
+            )],
+            "per robot arm",
+        );
+        // An arm the robot does not have.
+        check(
+            vec![step(
+                "x",
+                vec![],
+                Condition::GroupDone {
+                    robot: "dual_arm_test".into(),
+                    group: "torso".into(),
+                },
+            )],
+            "unknown group",
+        );
+        // Releasing a track that was never latched.
+        check(
+            vec![step(
+                "x",
+                vec![Action::Untrack {
+                    robot: None,
+                    group: Some("right".into()),
+                }],
+                Condition::Immediately,
+            )],
+            "no active track",
+        );
+        // One move per arm in one step is the multi-actor case: fine.
+        let mut scene = dual();
+        motion(&mut scene, "left_reach", "left", &[("left_shoulder", 0.5)]);
+        bake(
+            &mut scene,
+            vec![step(
+                "both",
+                vec![
+                    Action::StartMotion {
+                        motion: "left_reach".into(),
+                    },
+                    ramp("right_elbow", 0.3, 0.2),
+                ],
+                Condition::Done,
+            )],
+        )
+        .unwrap();
     }
 }

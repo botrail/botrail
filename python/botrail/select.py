@@ -66,6 +66,8 @@ __all__ = [
 ALIASES: dict[str, tuple[str, ...]] = {
     "payload_kg": ("payload_kg",),
     "reach_mm": ("reach_mm",),
+    # Arms a dual-arm product must have: the arms the cell's motions use.
+    "arm_count": ("arm_count",),
     "stroke_mm": ("stroke_mm", "opening_mm"),
     # A hand's widest opening across its grasp surfaces — the multifinger
     # analogue of a parallel gripper's stroke (design-grasping.md G2).
@@ -569,6 +571,10 @@ class _Cell:
         head, _, tail = name.rpartition("/")
         if head in self.robots and tail.startswith("tool"):
             return "tool"
+        # An arm of a dual-arm robot assembled from catalog arms is its
+        # own line, sized like a robot.
+        if head in self.robots and tail in self.arms_of(head):
+            return "robot"
         kinds = [k for (t, k) in self.parts if t == name]
         if len(kinds) == 1:
             return kinds[0]
@@ -703,40 +709,79 @@ class _Cell:
             return None
         return (lo[0], lo[1], lo[2]), (hi[0], hi[1], hi[2])
 
-    def grasped_by(self, robot: str) -> list[str]:
-        """Objects the robot holds now or grasps in a counted sequence."""
-        if robot in self._grasps:
-            return self._grasps[robot]
+    def arms_of(self, robot: str) -> list[str]:
+        """The arms (planning groups) of a dual-arm robot; empty for a
+        robot with one."""
+        try:
+            groups = list(self.scene.robot_of(robot).groups)
+        except ValueError:
+            return []
+        return groups if len(groups) > 1 else []
+
+    def robot_and_arm(self, name: str) -> tuple[str, Optional[str]]:
+        """A BOM line `robot/arm` (an arm mounted from the catalog) split
+        into the robot and the arm; any other line is a whole robot."""
+        robot, _, arm = name.rpartition("/")
+        if robot and arm in self.arms_of(robot):
+            return robot, arm
+        return name, None
+
+    def grasped_by(self, robot: str, arm: Optional[str] = None) -> list[str]:
+        """Objects the robot holds now or grasps in a counted sequence —
+        with `arm`, those that arm grasps."""
+        key = robot if arm is None else f"{robot}/{arm}"
+        if key in self._grasps:
+            return self._grasps[key]
+        tip = None
+        if arm is not None:
+            group = self.scene.robot_of(robot).group(arm)
+            tip = group.flange or group.tip
         names: list[str] = []
         for obstacle, entry in self.obstacles.items():
             attached = entry.get("attached_to")
-            if attached and (attached.get("robot") or self.default_robot) == robot:
+            if (
+                attached
+                and (attached.get("robot") or self.default_robot) == robot
+                and (arm is None or attached.get("link") == tip)
+            ):
                 names.append(obstacle)
         for sequence in self.sequences:
             for action in _walk_actions(sequence.get("steps") or []):
                 if action.get("type") == "attach" and (action.get("robot") or self.default_robot) == robot:
+                    if arm is not None and action.get("group") != arm:
+                        continue
                     obj = action.get("object")
                     if obj and obj not in names:
                         names.append(obj)
-        self._grasps[robot] = names
+        self._grasps[key] = names
         return names
 
-    def targets_of(self, robot: str) -> tuple[list[tuple[float, float, float]], str, list[str]]:
+    def targets_of(
+        self, robot: str, arm: Optional[str] = None
+    ) -> tuple[list[tuple[float, float, float]], str, list[str]]:
         """Positions of every taught segment goal of the robot's motions,
         measured at the flange when the robot declares one (a reach spec
-        is quoted to the flange, not past the tool), else at the TCP."""
+        is quoted to the flange, not past the tool), else at the TCP. With
+        `arm`, the motions of that arm (and whole-robot ones), measured at
+        the arm's own flange or tip."""
         notes: list[str] = []
-        link, where = self._flange_link(robot), "flange"
-        if link is None:
-            try:
-                link = self.scene.robot_of(robot).tcp_link
-            except ValueError:
-                link = None
-            where = "TCP"
+        if arm is not None:
+            group = self.scene.robot_of(robot).group(arm)
+            link, where = (group.flange, "flange") if group.flange else (group.tip, "TCP")
+        else:
+            link, where = self._flange_link(robot), "flange"
+            if link is None:
+                try:
+                    link = self.scene.robot_of(robot).tcp_link
+                except ValueError:
+                    link = None
+                where = "TCP"
         targets: list[tuple[float, float, float]] = []
         for motion in self.project.get("motions") or []:
             owner = motion.get("robot") or self.default_robot
             if owner != robot:
+                continue
+            if arm is not None and motion.get("group") not in (None, arm):
                 continue
             for segment in motion.get("segments") or []:
                 q = segment.get("goal_positions")
@@ -789,6 +834,10 @@ class _Cell:
     # ------------------------------------------------------------- rules
 
     def _robot(self, name: str, margin: float) -> tuple[list[Requirement], list[str]]:
+        # A BOM line is a whole robot, or one arm of a dual-arm robot
+        # assembled from catalog arms (`robot/arm`): that arm's tools,
+        # grasps and targets, measured from its own base.
+        robot, arm = self.robot_and_arm(name)
         reqs: list[Requirement] = []
         notes: list[str] = []
         tool_mass, tool_known, has_tool = 0.0, True, False
@@ -799,7 +848,7 @@ class _Cell:
                 tool_known = False
             else:
                 tool_mass += m * int(row.get("qty") or 1)
-        heaviest, unknown = self._heaviest(self.grasped_by(name))
+        heaviest, unknown = self._heaviest(self.grasped_by(robot, arm))
         if (has_tool and tool_known) or heaviest is not None:
             basis: list[str] = []
             if has_tool:
@@ -812,23 +861,50 @@ class _Cell:
             notes.append("payload counts no tool mass — the tool has no mass_kg")
         if unknown:
             notes.append(f"payload counts no mass for {', '.join(unknown)} — give them mass_kg on set_part")
-        targets, where, reach_notes = self.targets_of(name)
-        notes += reach_notes
-        if targets:
-            base = self.scene.robot_base_pose_of(name)[0]
-            farthest = max(_dist(t, base) for t in targets)
+        # Reach is per arm: from the arm's own base, at its own tip. A
+        # dual-arm product (one line, several arms) asks for the farthest
+        # arm's figure; an arm mounted from the catalog is its own line.
+        arms = [arm] if arm is not None else (self.arms_of(robot) or [None])
+        farthest_arm: Optional[tuple[float, str, Optional[str]]] = None
+        for a in arms:
+            targets, where, reach_notes = self.targets_of(robot, a)
+            notes += reach_notes
+            if not targets:
+                continue
+            base = self._arm_base(robot, a)
+            far = max(_dist(t, base) for t in targets)
+            if farthest_arm is None or far > farthest_arm[0]:
+                farthest_arm = (far, where, a)
+        if farthest_arm is not None:
+            far, where, a = farthest_arm
+            whose = "the base" if a is None else f"the {a} arm's base"
             reqs.append(
                 Requirement(
                     "reach_mm",
-                    _round(farthest * 1000.0 * (1.0 + margin), 1),
-                    basis=f"farthest taught target {farthest:.2f} m from the base ({where}), +{margin:.0%}",
+                    _round(far * 1000.0 * (1.0 + margin), 1),
+                    basis=f"farthest taught target {far:.2f} m from {whose} ({where}), +{margin:.0%}",
+                )
+            )
+        if arm is None and self.arms_of(robot):
+            used = sorted(
+                {
+                    str(m.get("group"))
+                    for m in self.project.get("motions") or []
+                    if (m.get("robot") or self.default_robot) == robot and m.get("group")
+                }
+            )
+            reqs.append(
+                Requirement(
+                    "arm_count",
+                    float(len(used) or len(self.arms_of(robot))),
+                    basis=f"arms taught: {', '.join(used)}" if used else "arms of the robot",
                 )
             )
         # A machine tool in the cell asks for reach before anything is
         # taught: its table, through its side opening, from this base.
         # Only a machine within an arm's length of the base is this
         # robot's to serve (a second machine across the hall is not).
-        base_pose = self.scene.robot_base_pose_of(name)[0]
+        base_pose = self._arm_base(robot, arm)
         for row in self.scene.bom().rows:
             category = str(row.get("category") or "")
             if category.startswith("machine_tool.vmc"):
@@ -851,7 +927,7 @@ class _Cell:
                     basis=f"{what} of `{machine}` {distance:.2f} m from the base, through {through}, +{margin:.0%}",
                 )
             )
-        ridden = self.vehicle_of(name)
+        ridden = self.vehicle_of(robot)
         if ridden is not None:
             # The machine is the robot (legs, or a whole airframe): what the
             # cell asks of its vehicle lands on the same line its specs do.
@@ -859,6 +935,14 @@ class _Cell:
             reqs += r
             notes += n
         return reqs, notes
+
+    def _arm_base(self, robot: str, arm: Optional[str]) -> tuple[float, float, float]:
+        """Where reach is measured from: the robot's base, or an arm's
+        base link (rigid on the body, so the current posture will do)."""
+        if arm is None:
+            return self.scene.robot_base_pose_of(robot)[0]
+        group = self.scene.robot_of(robot).group(arm)
+        return self.scene.link_pose(group.base, robot=robot)[0]
 
     def _tool(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:
         robot = name.rpartition("/")[0]

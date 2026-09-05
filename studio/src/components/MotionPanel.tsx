@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { ConstraintMsg, MotionMsg, SegmentKindMsg } from "../protocol";
-import { robotByName, useStudioStore } from "../store";
+import { robotArms, robotByName, useStudioStore } from "../store";
 import { sendAddSegment, sendPlanMotion, sendRemoveSegment } from "../ws";
 import { Section } from "./Section";
 
@@ -13,15 +13,28 @@ const UPRIGHT_CONE: ConstraintMsg = {
   angle: (Math.PI / 180) * 30,
 };
 
-/** `main` for the first robot, `main_<robot>` for the rest; when taken,
- * `motion_2`, `motion_3`, … — whatever is free scene-wide. */
+/** The conventional first motion name: `main` for the first robot,
+ * `main_<robot>` for the rest, with `_<arm>` appended on a dual-arm robot
+ * (`main_left`). */
+function conventionalName(
+  robotName: string,
+  firstRobot: string | undefined,
+  arm: string | null,
+): string {
+  const base = robotName === firstRobot ? "main" : `main_${robotName}`;
+  return arm === null ? base : `${base}_${arm}`;
+}
+
+/** The conventional name when free; when taken, `motion_2`, `motion_3`,
+ * … — whatever is free scene-wide. */
 function freshMotionName(
   motions: MotionMsg[],
   robotName: string,
   firstRobot: string | undefined,
+  arm: string | null,
 ): string {
   const taken = new Set(motions.map((m) => m.name));
-  const base = robotName === firstRobot ? "main" : `main_${robotName}`;
+  const base = conventionalName(robotName, firstRobot, arm);
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) {
     const candidate = `motion_${i}`;
@@ -55,23 +68,43 @@ export function MotionPanel() {
   const firstRobot = robots[0]?.desc.name;
   const multiRobot = robots.length > 1;
   const ownerOf = (m: MotionMsg) => m.robot ?? firstRobot;
+  // On a dual-arm robot a motion drives one arm (or, unnamed, every
+  // joint); new ones drive the selected arm.
+  const dualArm = robotArms(robot.desc).length > 0;
+  const arm = dualArm ? robot.selectedGroup : null;
+  const armOf = (m: MotionMsg) => m.group ?? null;
+  // What a motion row says about its scope: the owner when several
+  // robots share the scene, the arm on a dual-arm robot.
+  const scopeOf = (owner: string | undefined, motionArm: string | null) => {
+    const parts: string[] = [];
+    if (multiRobot) parts.push(owner ?? "?");
+    if (dualArm && owner === robotName) parts.push(motionArm ?? "all joints");
+    return parts.length > 0 ? ` · ${parts.join(" · ")}` : null;
+  };
 
-  // The edit target: the picked motion, else the selected robot's first
-  // motion, else the conventional fresh name (created on the first
+  // The edit target: the picked motion, else the selected robot's (arm's)
+  // first motion, else the conventional fresh name (created on the first
   // waypoint — same implicit-create the server does).
-  const owned = motions.filter((m) => ownerOf(m) === robotName);
+  const owned = motions.filter(
+    (m) => ownerOf(m) === robotName && (!dualArm || armOf(m) === arm),
+  );
   const fallbackName =
-    owned[0]?.name ?? (robotName === firstRobot ? "main" : `main_${robotName}`);
+    owned[0]?.name ?? conventionalName(robotName, firstRobot, arm);
   const motionName = selectedMotion ?? fallbackName;
   const motion = motions.find((m) => m.name === motionName) ?? null;
   const segments = motion?.segments ?? [];
 
   const addSegment = (kind: SegmentKindMsg) => {
-    sendAddSegment(motionName, robotName, {
-      kind,
-      goal_positions: robot.jointPositions.slice(),
-      constraints: upright ? [UPRIGHT_CONE] : [],
-    });
+    sendAddSegment(
+      motionName,
+      robotName,
+      {
+        kind,
+        goal_positions: robot.jointPositions.slice(),
+        constraints: upright ? [UPRIGHT_CONE] : [],
+      },
+      arm,
+    );
   };
 
   const onPlan = () => {
@@ -106,7 +139,11 @@ export function MotionPanel() {
             >
               <span className="obstacle-name">
                 {m.name}
-                {multiRobot && <span className="seq-cond"> · {ownerOf(m)}</span>}
+                {scopeOf(ownerOf(m), armOf(m)) && (
+                  <span className="seq-cond">
+                    {scopeOf(ownerOf(m), armOf(m))}
+                  </span>
+                )}
               </span>
               <span className="seq-cond">{m.segments.length} wp</span>
             </div>
@@ -115,7 +152,9 @@ export function MotionPanel() {
             <div className="obstacle-row selected">
               <span className="obstacle-name">
                 {motionName}
-                {multiRobot && <span className="seq-cond"> · {robotName}</span>}
+                {scopeOf(robotName, arm) && (
+                  <span className="seq-cond">{scopeOf(robotName, arm)}</span>
+                )}
               </span>
               <span className="seq-cond">new</span>
             </div>
@@ -124,7 +163,7 @@ export function MotionPanel() {
         <button
           className="motion-new"
           onClick={() =>
-            selectMotion(freshMotionName(motions, robotName, firstRobot))
+            selectMotion(freshMotionName(motions, robotName, firstRobot, arm))
           }
           title="start another motion (created when its first waypoint lands)"
         >

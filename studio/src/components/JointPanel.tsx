@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 
 import type { JointMsg } from "../protocol";
-import { robotByName, useStudioStore } from "../store";
+import { robotArms, robotByName, useStudioStore } from "../store";
 import { sendJointPositions } from "../ws";
 import { Section } from "./Section";
 
@@ -20,6 +20,23 @@ export function JointPanel() {
       .filter((j) => j.q_index !== null)
       .sort((a, b) => (a.q_index as number) - (b.q_index as number));
   }, [robot]);
+
+  // On a dual-arm robot the q order interleaves the arms (breadth-first);
+  // list the sliders arm by arm instead, anything outside an arm (a
+  // torso) last. A single-arm robot keeps its one flat list.
+  const sections = useMemo<{ title: string | null; joints: JointMsg[] }[]>(() => {
+    if (!robot) return [];
+    const arms = robotArms(robot.desc);
+    if (arms.length === 0) return [{ title: null, joints: dofJoints }];
+    const claimed = new Set(arms.flatMap((g) => g.joints));
+    const out = arms.map((g) => ({
+      title: g.name,
+      joints: dofJoints.filter((j) => g.joints.includes(j.q_index as number)),
+    }));
+    const rest = dofJoints.filter((j) => !claimed.has(j.q_index as number));
+    if (rest.length > 0) out.push({ title: "other", joints: rest });
+    return out;
+  }, [robot, dofJoints]);
 
   // Joints driven by another one: shown as read-out, since commanding
   // them means moving their source.
@@ -57,27 +74,34 @@ export function JointPanel() {
       }
     >
       <div className="joints">
-        {dofJoints.map((joint) => {
-          const qIndex = joint.q_index as number;
-          const [lo, hi] = joint.limits ?? CONTINUOUS_RANGE;
-          const value = robot.jointPositions[qIndex] ?? 0;
-          return (
-            <div className="joint" key={joint.name}>
-              <div className="joint-row">
-                <span className="joint-name">{joint.name}</span>
-                <span className="joint-value">{value.toFixed(3)}</span>
-              </div>
-              <input
-                type="range"
-                min={lo}
-                max={hi}
-                step={0.001}
-                value={value}
-                onChange={(e) => onSlider(qIndex, parseFloat(e.target.value))}
-              />
-            </div>
-          );
-        })}
+        {sections.map(({ title, joints }) => (
+          <Fragment key={title ?? "all"}>
+            {title !== null && <div className="joint-arm">{title}</div>}
+            {joints.map((joint) => {
+              const qIndex = joint.q_index as number;
+              const [lo, hi] = joint.limits ?? CONTINUOUS_RANGE;
+              const value = robot.jointPositions[qIndex] ?? 0;
+              return (
+                <div className="joint" key={joint.name}>
+                  <div className="joint-row">
+                    <span className="joint-name">{joint.name}</span>
+                    <span className="joint-value">{value.toFixed(3)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={lo}
+                    max={hi}
+                    step={0.001}
+                    value={value}
+                    onChange={(e) =>
+                      onSlider(qIndex, parseFloat(e.target.value))
+                    }
+                  />
+                </div>
+              );
+            })}
+          </Fragment>
+        ))}
         {mimicJoints.map((joint) => {
           const mimic = joint.mimic!;
           const source = robot.desc.joints.find((j) => j.name === mimic.joint);

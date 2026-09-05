@@ -5,6 +5,7 @@ import type {
   ContactMsg,
   FlashMsg,
   FrameMsg,
+  GroupMsg,
   ToolpathOverlayMsg,
   IkStatusMsg,
   IoFindingMsg,
@@ -245,11 +246,53 @@ export interface RobotUiState {
   ikStatus: IkStatusMsg | null;
   /** Link the TCP gizmo is attached to. */
   tcpLink: string | null;
+  /** The arm (planning group) the gizmo and panels drive; null on a
+   * single-arm robot, which has nothing to choose. */
+  selectedGroup: string | null;
 }
 
 /** Actuated joints (those with a q_index), in q_index order. */
 function actuatedDof(desc: RobotDescMsg): number {
   return desc.joints.filter((j) => j.q_index !== null).length;
+}
+
+/** The arms of a robot, when it has several to tell apart; a single-arm
+ * robot (one group over its whole DOF) gets no arm UI. */
+export function robotArms(desc: RobotDescMsg): GroupMsg[] {
+  return desc.groups.length > 1 ? desc.groups : [];
+}
+
+/** The tip link of `group`, or null when the robot has no such arm. */
+export function groupTip(
+  desc: RobotDescMsg,
+  group: string | null,
+): string | null {
+  if (group === null) return null;
+  return desc.groups.find((g) => g.name === group)?.tip_link ?? null;
+}
+
+/** The arm a freshly described robot starts on: the one it was on, else
+ * its first. */
+function initialGroup(
+  desc: RobotDescMsg,
+  previous: string | null,
+): string | null {
+  const arms = robotArms(desc);
+  if (arms.length === 0) return null;
+  return arms.some((g) => g.name === previous) ? previous : arms[0].name;
+}
+
+/** `r` switched to arm `group`, its gizmo at that arm's tip; unchanged
+ * when the robot has no such arm or is on it already. */
+function withGroup(r: RobotUiState, group: string): RobotUiState {
+  if (r.selectedGroup === group) return r;
+  if (!robotArms(r.desc).some((g) => g.name === group)) return r;
+  return {
+    ...r,
+    selectedGroup: group,
+    tcpLink: groupTip(r.desc, group) ?? r.tcpLink,
+    ikStatus: null,
+  };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -467,6 +510,8 @@ export interface StudioState {
   /** Reset a robot's DOFs to 0 (clamped into limits when present). */
   resetJoints: (robot: string) => void;
   setTcpLink: (robot: string, link: string) => void;
+  /** Switch a dual-arm robot's gizmo and panels to one of its arms. */
+  setSelectedGroup: (robot: string, group: string) => void;
   setGizmoMode: (mode: GizmoMode) => void;
   /** Focus a robot's TCP (also makes it the panel-selected robot). */
   selectTcp: (robot?: string) => void;
@@ -617,14 +662,27 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         // A re-handshake (e.g. a robot was added) keeps the user's TCP link
         // and selection for robots that survive by name.
         const prev = new Map(s.robots.map((r) => [r.desc.name, r]));
-        const robots = msg.scene.robots.map((desc) => ({
-          desc,
-          jointPositions: new Array(actuatedDof(desc)).fill(0),
-          basePose: desc.base_pose,
-          linkPoses: [],
-          ikStatus: null,
-          tcpLink: prev.get(desc.name)?.tcpLink ?? desc.tcp_link,
-        }));
+        const robots = msg.scene.robots.map((desc): RobotUiState => {
+          const before = prev.get(desc.name);
+          // A dual-arm robot starts on its first arm, the gizmo at that
+          // arm's tip rather than at the robot's deepest leaf.
+          const selectedGroup = initialGroup(
+            desc,
+            before?.selectedGroup ?? null,
+          );
+          return {
+            desc,
+            jointPositions: new Array(actuatedDof(desc)).fill(0),
+            basePose: desc.base_pose,
+            linkPoses: [],
+            ikStatus: null,
+            tcpLink:
+              before?.tcpLink ??
+              groupTip(desc, selectedGroup) ??
+              desc.tcp_link,
+            selectedGroup,
+          };
+        });
         const surviving =
           s.selectedRobot !== null &&
           robots.some((r) => r.desc.name === s.selectedRobot);
@@ -935,6 +993,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
                 basePose: st.base_pose,
                 linkPoses: st.link_poses,
                 ikStatus: st.ik_status,
+                // The solve names the arm it spent; the chips follow it
+                // when the picked link belongs to the other arm.
+                selectedGroup: st.ik_status?.group ?? r.selectedGroup,
               }
             : r;
         }),
@@ -971,9 +1032,35 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
   setTcpLink: (robot, link) =>
     set((s) => ({
+      robots: s.robots.map((r) => {
+        if (r.desc.name !== robot) return r;
+        // Picking an arm's tip picks the arm.
+        const arm = robotArms(r.desc).find((g) => g.tip_link === link);
+        return {
+          ...r,
+          tcpLink: link,
+          ikStatus: null,
+          selectedGroup: arm?.name ?? r.selectedGroup,
+        };
+      }),
+    })),
+  setSelectedGroup: (robot, group) =>
+    set((s) => ({
       robots: s.robots.map((r) =>
-        r.desc.name === robot ? { ...r, tcpLink: link, ikStatus: null } : r,
+        r.desc.name === robot ? withGroup(r, group) : r,
       ),
+      // A motion of the other arm stops being the edit target; the arm's
+      // own first motion (or a fresh name) takes over in the panel.
+      selectedMotion:
+        s.selectedMotion !== null &&
+        s.motions.some(
+          (m) =>
+            m.name === s.selectedMotion &&
+            ((m.robot ?? s.robots[0]?.desc.name) !== robot ||
+              (m.group ?? group) === group),
+        )
+          ? s.selectedMotion
+          : null,
     })),
   setGizmoMode: (mode) => set({ gizmoMode: mode }),
   selectTcp: (robot) =>
@@ -1097,11 +1184,20 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       const owner = motion
         ? (motion.robot ?? s.robots[0]?.desc.name ?? null)
         : null;
+      // A motion of one arm brings that arm's gizmo along.
+      const group = motion?.group ?? null;
+      const robots =
+        owner !== null && group !== null
+          ? s.robots.map((r) =>
+              r.desc.name === owner ? withGroup(r, group) : r,
+            )
+          : s.robots;
       if (owner === null || owner === s.selectedRobot) {
-        return { selectedMotion: name };
+        return { selectedMotion: name, robots };
       }
       return {
         selectedMotion: name,
+        robots,
         selectedRobot: owner,
         selection: retargetSelection(s.selection, owner),
       };

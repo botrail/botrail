@@ -64,12 +64,14 @@ def attach(
     link: Optional[str] = None,
     touch_links: Union[str, Iterable[str], None] = None,
     robot: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> Action:
     """Grasp: rigidly attach an obstacle at its current relative pose.
-    ``robot`` names the carrying instance (required with several robots).
-    ``touch_links="tool"`` exempts the whole tool subtree — palm and
-    fingers — which a closed gripper needs (the default exempts only the
-    anchor link's own chain)."""
+    ``robot`` names the carrying instance (required with several robots);
+    ``group`` names the arm of a dual-arm robot (``link`` then defaults to
+    that arm's tip). ``touch_links="tool"`` exempts the whole tool subtree
+    — palm and fingers — which a closed gripper needs (the default exempts
+    only the anchor link's own chain)."""
     action: Action = {"type": "attach", "object": obj}
     if link is not None:
         action["link"] = link
@@ -78,6 +80,8 @@ def attach(
         action["touch_links"] = links
     if robot is not None:
         action["robot"] = robot
+    if group is not None:
+        action["group"] = group
     return action
 
 
@@ -86,26 +90,39 @@ def detach(obj: str) -> Action:
     return {"type": "detach", "object": obj}
 
 
-def track(obj: str, link: Optional[str] = None, robot: Optional[str] = None) -> Action:
+def track(
+    obj: str,
+    link: Optional[str] = None,
+    robot: Optional[str] = None,
+    group: Optional[str] = None,
+) -> Action:
     """Conveyor tracking: latch onto a moving part. Until :func:`untrack`,
     every commanded pose is carried by the part's motion since this step, so
     poses taught at the station keep meeting the part while it travels — the
     line never has to stop. Grasping the tracked part freezes the offset, so
     the lift after it goes straight up. Planned motions cannot run while
-    tracking; ramps can."""
+    tracking; ramps can. ``group`` names the arm that follows on a dual-arm
+    robot: only its joints are spent, so the other arm may drive on — or
+    carry the very part this one follows (a two-handed hold is one hand
+    grasping and the other tracking)."""
     action: Action = {"type": "track", "object": obj}
     if link is not None:
         action["link"] = link
     if robot is not None:
         action["robot"] = robot
+    if group is not None:
+        action["group"] = group
     return action
 
 
-def untrack(robot: Optional[str] = None) -> Action:
-    """Stop following the tracked part; the robot holds where it stands."""
+def untrack(robot: Optional[str] = None, group: Optional[str] = None) -> Action:
+    """Stop following the tracked part; the robot holds where it stands.
+    ``group`` names the arm whose track to release when several follow."""
     action: Action = {"type": "untrack"}
     if robot is not None:
         action["robot"] = robot
+    if group is not None:
+        action["group"] = group
     return action
 
 
@@ -188,9 +205,12 @@ def done() -> Condition:
     return {"type": "done"}
 
 
-def robot_done(robot: str) -> Condition:
+def robot_done(robot: str, group: Optional[str] = None) -> Condition:
     """The named robot has no motion/ramp in flight — whichever step
-    started it. The idle test interlocks are built from."""
+    started it. The idle test interlocks are built from. ``group`` narrows
+    it to one arm of a dual-arm robot: nothing drives any of its joints."""
+    if group is not None:
+        return {"type": "group_done", "robot": robot, "group": group}
     return {"type": "robot_done", "robot": robot}
 
 

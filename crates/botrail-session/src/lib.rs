@@ -172,7 +172,12 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
                 set_joint_positions_for(host, robot, positions).map_err(|e| e.to_string())
             })
             .map_err(|e| format!("rejected set_joint_positions: {e}")),
-        ClientMessage::SetTcpTarget { robot, link, pose } => {
+        ClientMessage::SetTcpTarget {
+            robot,
+            link,
+            pose,
+            group,
+        } => {
             // Warm-seeded streaming solve: the gizmo sends targets at
             // ~60Hz, so a few iterations per message are enough.
             let options = IkOptions {
@@ -181,7 +186,8 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             };
             resolve_robot(host, &robot)
                 .and_then(|robot| {
-                    set_tcp_target_for(host, robot, &link, &pose, &options).map(|_| ())
+                    set_tcp_target_for(host, robot, &link, &pose, &options, group.as_deref())
+                        .map(|_| ())
                 })
                 .map_err(|e| format!("rejected tcp target: {e}"))
         }
@@ -224,10 +230,18 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             robot,
             link,
             touch_links,
+            group,
         } => resolve_robot(host, &robot)
             .and_then(|robot| {
-                attach_obstacle_to(host, robot, &name, link.as_deref(), touch_links.as_deref())
-                    .map_err(|e| e.to_string())
+                attach_obstacle_to(
+                    host,
+                    robot,
+                    group.as_deref(),
+                    &name,
+                    link.as_deref(),
+                    touch_links.as_deref(),
+                )
+                .map_err(|e| e.to_string())
             })
             .map_err(|e| format!("rejected attach_obstacle: {e}")),
         ClientMessage::DetachObstacle { name } => {
@@ -236,13 +250,25 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::PlanRequest {
             robot,
             goal_positions,
+            group,
         } => {
             let robot =
                 resolve_robot(host, &robot).map_err(|e| format!("rejected plan_request: {e}"))?;
+            // A client that names no group plans the robot's sole group,
+            // or every joint of a robot with several.
+            let group = match group {
+                Some(name) => host
+                    .with_scene(|scene| scene.resolve_group(robot, Some(&name), None))
+                    .map_err(|e| format!("rejected plan_request: {e}"))?,
+                None => {
+                    host.with_scene(|scene| scene.resolve_group(robot, None, None).ok().flatten())
+                }
+            };
             // Failure is reported to clients inside the plan_result.
             let _ = plan_and_emit_for(
                 host,
                 robot,
+                group,
                 &goal_positions,
                 &botrail_plan::PlanOptions::default(),
             );
@@ -252,9 +278,16 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             motion,
             robot,
             segment,
+            group,
         } => resolve_robot(host, &robot)
             .and_then(|robot| {
-                add_segment_for(host, robot, &motion, wire::segment_from_msg(&segment))
+                add_segment_for(
+                    host,
+                    robot,
+                    group.as_deref(),
+                    &motion,
+                    wire::segment_from_msg(&segment),
+                )
             })
             .map_err(|e| format!("rejected add_segment: {e}")),
         ClientMessage::RemoveSegment { motion, index } => remove_segment(host, &motion, index)
@@ -452,16 +485,30 @@ pub fn set_tcp_target_for(
     link: &str,
     pose: &PoseMsg,
     options: &IkOptions,
+    group: Option<&str>,
 ) -> Result<IkResult, String> {
     let (result, state) = host.with_scene(|scene| -> Result<_, String> {
         let index = scene.robots()[robot]
             .model
             .link_index(link)
             .ok_or_else(|| format!("unknown link `{link}`"))?;
+        // The solve spends the arm's joints only: the named group's, or
+        // the one the link hangs off. A link on no arm in particular (a
+        // torso) solves on its chain as before.
+        let group = match group {
+            Some(_) => scene
+                .resolve_group(robot, group, Some(index))
+                .map_err(|e| e.to_string())?,
+            None => scene.resolve_group(robot, None, Some(index)).ok().flatten(),
+        };
+        let options = IkOptions {
+            joint_mask: scene.group_joint_mask(robot, group),
+            ..options.clone()
+        };
         let target: Isometry3<f64> = pose.into();
         let seed = scene.robots()[robot].joint_positions().to_vec();
         let result = scene
-            .solve_ik_world_for(robot, index, &target, &seed, options)
+            .solve_ik_world_for(robot, index, &target, &seed, &options)
             .map_err(|e| e.to_string())?;
         scene
             .set_joint_positions_for(robot, result.q.clone())
@@ -470,6 +517,12 @@ pub fn set_tcp_target_for(
             converged: result.converged,
             pos_error: result.pos_error,
             rot_error: result.rot_error,
+            // Name the arm only where there are several to tell apart.
+            group: group.and_then(|g| {
+                let model = &scene.robots()[robot].model;
+                let groups = model.groups();
+                (groups.len() > 1).then(|| groups[g].name.clone())
+            }),
         };
         Ok((
             result,
@@ -767,11 +820,12 @@ pub fn set_obstacle_geometry(
 pub fn attach_obstacle_to(
     host: &impl SessionHost,
     robot: usize,
+    group: Option<&str>,
     name: &str,
     link: Option<&str>,
     touch_links: Option<&[String]>,
 ) -> Result<(), SceneError> {
-    host.with_scene(|scene| scene.attach_obstacle_to(robot, name, link, touch_links))?;
+    host.with_scene(|scene| scene.attach_obstacle_in_group(robot, group, name, link, touch_links))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -866,10 +920,11 @@ fn emit_motions(host: &impl SessionHost) {
 pub fn add_segment_for(
     host: &impl SessionHost,
     robot: usize,
+    group: Option<&str>,
     motion: &str,
     segment: Segment,
 ) -> Result<(), String> {
-    host.with_scene(|scene| scene.add_segment_for(robot, motion, segment))
+    host.with_scene(|scene| scene.add_segment_in_group(robot, group, motion, segment))
         .map_err(|e| e.to_string())?;
     emit_motions(host);
     Ok(())
@@ -1517,6 +1572,7 @@ pub fn timeline_msg(
                         end: s.end,
                         sequence: s.sequence.clone(),
                         step: s.step,
+                        group: s.group.clone(),
                     })
                     .collect(),
             }
@@ -1537,6 +1593,7 @@ pub fn timeline_msg(
                 end: s.end,
                 sequence: s.sequence.clone(),
                 step: s.step,
+                group: None,
             })
             .collect(),
         branches: timeline
@@ -1578,26 +1635,25 @@ pub fn timeline_msg(
 
 /// Plans robot `robot` from its current configuration to `goal` against a
 /// snapshot of the scene, then time-parameterizes the path; every other
-/// robot is a frozen collision body at its current configuration. Returns
-/// the trajectory, the sparse shortcut path (kept for script export), and
-/// the wall-clock milliseconds spent.
+/// robot is a frozen collision body at its current configuration. `group`
+/// (an index into the robot's groups) confines the search to one arm's
+/// joints; `None` samples every joint. Returns the trajectory, the sparse
+/// shortcut path (kept for script export), and the wall-clock milliseconds
+/// spent.
 pub fn plan_to_for(
     host: &impl SessionHost,
     robot: usize,
+    group: Option<usize>,
     goal: &[f64],
     options: &botrail_plan::PlanOptions,
 ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
     let snapshot = host.snapshot();
     let start = snapshot.robots()[robot].joint_positions().to_vec();
-    let (lower, upper) = snapshot.robots()[robot].model.sampling_bounds();
-    let space = botrail_plan::JointSpace { lower, upper };
 
     let t0 = host.now_ms();
-    let path = {
-        let mut is_valid = |q: &[f64]| snapshot.is_state_valid_for(robot, q);
-        botrail_plan::plan(&space, &start, goal, &mut is_valid, options)
-            .map_err(|e| e.to_string())?
-    };
+    let path = snapshot
+        .plan_joint_path_for(robot, group, &start, goal, options)
+        .map_err(|e| e.to_string())?;
     let limits = traj_limits(&snapshot.robots()[robot].model);
     let traj =
         botrail_traj::time_parameterize(&path, &limits, &botrail_traj::TimingOptions::default())
@@ -1611,10 +1667,11 @@ pub fn plan_to_for(
 pub fn plan_and_emit_for(
     host: &impl SessionHost,
     robot: usize,
+    group: Option<usize>,
     goal: &[f64],
     options: &botrail_plan::PlanOptions,
 ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-    let result = plan_to_for(host, robot, goal, options);
+    let result = plan_to_for(host, robot, group, goal, options);
     let robot_name = host.with_scene(|scene| scene.robots()[robot].name.clone());
     let msg = match &result {
         Ok((traj, path, ms)) => ServerMessage::PlanResult {
@@ -2121,6 +2178,74 @@ mod tests {
             }
             other => panic!("expected state, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn group_addressed_messages_drive_one_arm() {
+        let urdf = include_str!("../../../examples/assets/dual_arm_test.urdf");
+        let model = botrail_model::RobotModel::from_urdf_str(urdf).unwrap();
+        let host = TestHost::from_scene(Scene::new(std::sync::Arc::new(model)));
+        let q_of = |name: &str| {
+            let model = host.scene.borrow().robots()[0].model.clone();
+            model.joints[model.joint_index(name).unwrap()]
+                .q_index
+                .unwrap()
+        };
+        let (ls, le, rs, re) = (
+            q_of("left_shoulder"),
+            q_of("left_elbow"),
+            q_of("right_shoulder"),
+            q_of("right_elbow"),
+        );
+
+        // The gizmo names the arm it drags; the solve names it back and
+        // leaves the other arm alone.
+        handle_client_message(
+            &host,
+            r#"{"type":"set_tcp_target","link":"left_hand","group":"left","pose":{"position":[0.1,0.3,0.2],"quaternion":[0,0,0,1]}}"#,
+        );
+        assert_eq!(host.message_types(), ["state"]);
+        let out = host.out.borrow();
+        let ServerMessage::State { robots, .. } = &out[0] else {
+            panic!("expected state, got {:?}", out[0]);
+        };
+        let status = robots[0].ik_status.as_ref().expect("ik status");
+        assert_eq!(status.group.as_deref(), Some("left"));
+        drop(out);
+        host.with_scene(|scene| {
+            let q = scene.joint_positions();
+            assert!(q[ls].abs() > 1e-6 || q[le].abs() > 1e-6);
+            assert_eq!(q[rs], 0.0);
+            assert_eq!(q[re], 0.0);
+        });
+
+        // A created motion belongs to the named arm.
+        host.out.borrow_mut().clear();
+        let goal = host.with_scene(|scene| scene.joint_positions().to_vec());
+        let goal = serde_json::to_string(&goal).unwrap();
+        handle_client_message(
+            &host,
+            &format!(
+                r#"{{"type":"add_segment","motion":"right_move","group":"right","segment":{{"kind":"joint","goal_positions":{goal},"constraints":[]}}}}"#
+            ),
+        );
+        assert!(host.logs.borrow().is_empty(), "{:?}", host.logs.borrow());
+        host.with_scene(|scene| {
+            let motion = scene
+                .motions()
+                .iter()
+                .find(|m| m.name == "right_move")
+                .unwrap();
+            let group = motion.group.expect("motion names its arm");
+            assert_eq!(scene.robots()[0].model.groups()[group].name, "right");
+        });
+
+        // An unknown arm is rejected and logged.
+        handle_client_message(
+            &host,
+            r#"{"type":"set_tcp_target","link":"left_hand","group":"tail","pose":{"position":[0.1,0.3,0.2],"quaternion":[0,0,0,1]}}"#,
+        );
+        assert_eq!(host.logs.borrow().len(), 1);
     }
 
     #[test]

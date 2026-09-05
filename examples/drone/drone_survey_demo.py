@@ -61,8 +61,11 @@ HERE = Path(__file__).resolve().parent
 
 # ---- what is ordered -------------------------------------------------
 ARM_PACK = "universal_robots/ur12e"                  # 12.5 kg at 1.3 m — the palletizing cobot class
-ADAPTER = "botrail/adapter/flange-plate-ecbpi"       # the plate its manifest requires
-CUP = "botrail/vacuum/vacuum-gripper-ecbpi"          # Schmalz ECBPi, 10 kg
+# This legacy simulation was taught with a three-hole plate and the r1
+# fixture. r3 needs a verified four-hole adapter and declares no payload
+# rating for its authored holder; it is not a drop-in substitute here.
+ADAPTER = "botrail/adapter/flange-plate-ecbpi/r1"
+CUP = "botrail/vacuum/vacuum-gripper-ecbpi/r1"       # legacy simulation, not certified 10 kg hardware
 AIRFRAME = "px4/x500/x500"                           # the inventory drone
 RACK_PACK = "botrail/rack/medium-shelf"
 BELT_PACK = "botrail/conveyor/belt-unit"

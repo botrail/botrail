@@ -204,3 +204,58 @@ Planning with several robots is per-robot with the others frozen as obstacles;
 the sequence rollout then re-checks robot-against-robot every tick. The
 [Two arms, one belt](../tutorials/two-robots.md) tutorial shows the full
 pattern, including the interlocks.
+
+## Arms of one robot
+
+A dual-arm robot — an OpenArm, a YuMi, two UR5e on one torso and one
+controller — is *one* `Robot` whose **planning groups** are its arms. A group
+is a named set of joints with a tip link; a single-arm robot has one group
+covering everything, a dual-arm robot one per arm, and every API that moves a
+robot takes `group=` to say which:
+
+```python
+pair = bt.Robot.dual_arm(ur5e, ur5e,
+                         left_position=(0.0, 0.3, 0.0), left_quaternion=(0, 0, 0, 1),
+                         right_position=(0.0, -0.3, 0.0), right_quaternion=(0, 0, 0, 1))
+pair.groups                        # ['left', 'right']
+pair.group("left").tip             # 'left_tool0'
+pair.group("left").joints          # the six left joints, in q order
+
+scene = bt.Scene(pair)
+scene.set_tcp_target(p, quat, group="left")      # the right arm does not move
+scene.plan_to_pose(p, quat, group="left")        # the right arm is a frozen obstacle
+scene.add_segment("left_pick", goal=q, group="left")
+scene.attach("part", group="left")               # at the left arm's tip
+```
+
+Where the arms come from:
+
+* **The catalog.** A `manipulator.dual_arm` package names its arms
+  (`frames.arms[]` — base, flange, TCP and joints per arm), and
+  `bt.Robot.from_catalog("openarm")` loads with exactly those groups.
+* **The product's description.** A URDF with two arms on a body derives its
+  groups: the branches under the shared body become groups named by their
+  joints' common prefix (`left` / `right` for `left_shoulder…` and
+  `right_shoulder…`). A branch of one joint is a finger, not an arm, and
+  stays with the arm it hangs off.
+* **Two single arms, one robot.** `Robot.dual_arm(left, right, ...)` welds two
+  models to a bare body and names the groups `left` and `right`;
+  `robot.mount(part, ..., role="arm", group="left")` is the general form.
+  Tools go on an arm: `pair.attach_tool(gripper, group="left")`.
+* **Declared.** `robot.define_group("left", tip="left_hand", joints=[...])`
+  overrides the derivation; the joints default to the tip's chain up to the
+  nearest branch.
+
+`group=` may be left off on a robot with one group (everything works as it
+always has) and on a derived dual-arm robot when a link makes the arm clear
+(`plan_to_pose(..., link="left_hand")`); once groups are declared, an
+ambiguous call is an error rather than a guess. `joint_positions` interleaves
+the arms (it is the tree's breadth-first order), so address joints by name or
+through `group("left").joints`.
+
+**Two arms from two robots** is the other way to build a dual-arm cell —
+`scene.add_robot(...)` twice, as above — and the right one when the arms have
+two controllers. The rollout treats the two builds alike: each arm plans on
+its own with the other frozen, and the two are re-checked against each other
+every tick. [Two arms, one robot](../tutorials/dual-arm.md) walks through a
+kitting cell built the single-robot way.

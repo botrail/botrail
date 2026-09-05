@@ -7,6 +7,7 @@
 //! cones/regions; narrow constraints will need projection-based planning
 //! (post-M4, see DESIGN).
 
+use botrail_model::Group;
 use botrail_traj::JointTrajectory;
 use nalgebra::{Isometry3, Vector3};
 use thiserror::Error;
@@ -17,6 +18,8 @@ use crate::Scene;
 pub enum MotionError {
     #[error("unknown motion `{0}`")]
     UnknownMotion(String),
+    #[error("unknown group `{0}`")]
+    UnknownGroup(String),
     #[error("motion `{0}` has no segments")]
     EmptyMotion(String),
     #[error("segment {index} goal expects {expected} joint values, got {got}")]
@@ -85,7 +88,86 @@ pub struct Motion {
     /// are in this robot's DOF order and planning drives this robot (every
     /// other robot is a frozen collision body).
     pub robot: usize,
+    /// The planning group (index into the owner's [`RobotModel::groups`])
+    /// this motion drives — one arm of a dual-arm robot. `None` leaves it
+    /// to the robot: its sole group when it has one, every joint when it
+    /// has several. Goal components outside the group are ignored (those
+    /// joints hold where they are when the motion starts).
+    ///
+    /// [`RobotModel::groups`]: botrail_model::RobotModel::groups
+    pub group: Option<usize>,
     pub segments: Vec<Segment>,
+}
+
+/// The group a motion drives: the one it names, else the robot's sole
+/// group (a declared arm, or the derived whole), else — several groups and
+/// none named — the whole robot (`None`).
+pub fn motion_group(model: &botrail_model::RobotModel, motion: &Motion) -> Option<Group> {
+    let groups = model.groups();
+    match motion.group {
+        Some(g) => groups.into_iter().nth(g),
+        None if groups.len() == 1 => groups.into_iter().next(),
+        None => None,
+    }
+}
+
+/// Plans a collision-free joint path for `robot` from `start` to `goal`
+/// (both full DOF) inside `group`'s joints — every other joint holds its
+/// start value, off the sampled space entirely — or over every joint when
+/// `group` is `None`. `extra` adds the path constraints to the validity
+/// test. A group covering every joint runs the unrestricted search, sample
+/// for sample.
+pub fn plan_joint_path(
+    scene: &Scene,
+    robot: usize,
+    group: Option<&Group>,
+    start: &[f64],
+    goal: &[f64],
+    extra: &mut dyn FnMut(&[f64]) -> bool,
+    options: &botrail_plan::PlanOptions,
+) -> Result<Vec<Vec<f64>>, botrail_plan::PlanError> {
+    let model = &scene.robots()[robot].model;
+    let (lower, upper) = model.sampling_bounds();
+    let group = match group {
+        Some(g) if g.joints.len() < model.dof() => g,
+        _ => {
+            let space = botrail_plan::JointSpace { lower, upper };
+            let mut is_valid = |q: &[f64]| scene.is_state_valid_for(robot, q) && extra(q);
+            return botrail_plan::plan(&space, start, goal, &mut is_valid, options);
+        }
+    };
+    let idx = &group.joints;
+    let pick = |q: &[f64]| idx.iter().map(|&i| q[i]).collect::<Vec<f64>>();
+    let space = botrail_plan::JointSpace {
+        lower: pick(&lower),
+        upper: pick(&upper),
+    };
+    let embed = |sub: &[f64]| {
+        let mut q = start.to_vec();
+        for (k, &i) in idx.iter().enumerate() {
+            q[i] = sub[k];
+        }
+        q
+    };
+    // The arm's plan validates what the arm moves; the rest of the robot
+    // is a frozen obstacle to it.
+    let mut is_valid = |sub: &[f64]| {
+        let q = embed(sub);
+        scene.is_state_valid_for_group(robot, Some(group), &q) && extra(&q)
+    };
+    let path = botrail_plan::plan(&space, &pick(start), &pick(goal), &mut is_valid, options)?;
+    Ok(path.iter().map(|sub| embed(sub)).collect())
+}
+
+/// A per-DOF mask selecting `group`'s joints (an IK option).
+pub fn group_mask(dof: usize, group: &Group) -> Vec<bool> {
+    let mut mask = vec![false; dof];
+    for &i in &group.joints {
+        if i < dof {
+            mask[i] = true;
+        }
+    }
+    mask
 }
 
 /// The joint path a single segment was planned through, before
@@ -189,6 +271,8 @@ fn cartesian_line(
     tcp: usize,
     options: &CartesianOptions,
     index: usize,
+    joint_mask: Option<Vec<bool>>,
+    group: Option<&Group>,
 ) -> Result<Vec<Vec<f64>>, MotionError> {
     let fail = |fraction: f64, reason: &str| MotionError::CartesianFailed {
         index,
@@ -214,6 +298,7 @@ fn cartesian_line(
         max_iters: 50,
         tol_pos: 1e-5,
         tol_rot: 1e-4,
+        joint_mask,
         ..botrail_kin::IkOptions::default()
     };
 
@@ -236,7 +321,7 @@ fn cartesian_line(
         if joint_distance(&ik.q, &q) > options.jump_threshold {
             return Err(fail(u, "configuration jump (IK branch change)"));
         }
-        if !scene.is_state_valid_for(robot, &ik.q) {
+        if !scene.is_state_valid_for_group(robot, group, &ik.q) {
             return Err(fail(u, "collision or joint limit violation"));
         }
         if !constraints_ok(scene, robot, &ik.q, constraints, tcp) {
@@ -248,8 +333,9 @@ fn cartesian_line(
     Ok(path)
 }
 
-/// Plans one segment of robot `robot` from `start_q`; returns the joint
-/// path.
+/// Plans one segment of robot `robot` from `start_q` inside `group` (the
+/// whole robot when `None`); returns the joint path.
+#[allow(clippy::too_many_arguments)]
 fn plan_segment(
     scene: &Scene,
     robot: usize,
@@ -258,6 +344,7 @@ fn plan_segment(
     tcp: usize,
     index: usize,
     plan_options: &botrail_plan::PlanOptions,
+    group: Option<&Group>,
 ) -> Result<Vec<Vec<f64>>, MotionError> {
     let model = &scene.robots()[robot].model;
     if segment.goal_positions.len() != model.dof() {
@@ -272,17 +359,14 @@ fn plan_segment(
     }
     match segment.kind {
         SegmentKind::Joint => {
-            let (lower, upper) = model.sampling_bounds();
-            let space = botrail_plan::JointSpace { lower, upper };
-            let mut is_valid = |q: &[f64]| {
-                scene.is_state_valid_for(robot, q)
-                    && constraints_ok(scene, robot, q, &segment.constraints, tcp)
-            };
-            botrail_plan::plan(
-                &space,
+            let mut extra = |q: &[f64]| constraints_ok(scene, robot, q, &segment.constraints, tcp);
+            plan_joint_path(
+                scene,
+                robot,
+                group,
                 start_q,
                 &segment.goal_positions,
-                &mut is_valid,
+                &mut extra,
                 plan_options,
             )
             .map_err(|source| MotionError::PlanFailed { index, source })
@@ -296,6 +380,8 @@ fn plan_segment(
             tcp,
             &CartesianOptions::default(),
             index,
+            group.map(|g| group_mask(model.dof(), g)),
+            group,
         ),
     }
 }
@@ -333,7 +419,11 @@ pub fn plan_motion(
         return Err(MotionError::EmptyMotion(motion.name.clone()));
     }
     let robot = motion.robot;
-    let tcp = scene.robots()[robot].model.default_tcp_link();
+    let group = motion_group(&scene.robots()[robot].model, motion);
+    let tcp = group
+        .as_ref()
+        .map(|g| g.tip)
+        .unwrap_or_else(|| scene.robots()[robot].model.default_tcp_link());
     let timing = botrail_traj::TimingOptions::default();
 
     let mut current = scene.robots()[robot].joint_positions().to_vec();
@@ -342,7 +432,16 @@ pub fn plan_motion(
     let mut segments = Vec::with_capacity(motion.segments.len());
 
     for (index, segment) in motion.segments.iter().enumerate() {
-        let path = plan_segment(scene, robot, &current, segment, tcp, index, plan_options)?;
+        let path = plan_segment(
+            scene,
+            robot,
+            &current,
+            segment,
+            tcp,
+            index,
+            plan_options,
+            group.as_ref(),
+        )?;
         current = path.last().expect("paths are non-empty").clone();
         let traj = botrail_traj::time_parameterize(&path, limits, &timing)?;
         combined = Some(match combined {
@@ -441,6 +540,7 @@ mod tests {
         let motion = Motion {
             name: "m".into(),
             robot: 0,
+            group: None,
             segments: vec![
                 seg(SegmentKind::Joint, vec![0.6, 0.4, -0.5, 0.2, 0.0, 0.0]),
                 seg(SegmentKind::Joint, vec![-0.4, 0.8, -1.0, 0.0, 0.3, 0.0]),
@@ -478,6 +578,7 @@ mod tests {
         let motion = Motion {
             name: "m".into(),
             robot: 0,
+            group: None,
             segments: vec![
                 seg(SegmentKind::Joint, g1.clone()),
                 seg(SegmentKind::Joint, g2.clone()),
@@ -549,6 +650,8 @@ mod tests {
             tcp,
             &CartesianOptions::default(),
             0,
+            None,
+            None,
         )
         .unwrap();
         // Every follow point's TCP lies on the straight segment (within tol).
@@ -575,6 +678,7 @@ mod tests {
         let motion = Motion {
             name: "descend".into(),
             robot: 0,
+            group: None,
             segments: vec![seg(SegmentKind::CartesianLine, ik.q.clone())],
         };
         let planned = plan_motion(
@@ -621,6 +725,8 @@ mod tests {
             tcp,
             &CartesianOptions::default(),
             0,
+            None,
+            None,
         )
         .unwrap();
         // Every follow point's WORLD TCP lies on the straight world segment.
@@ -659,6 +765,7 @@ mod tests {
         let motion = Motion {
             name: "m".into(),
             robot: 0,
+            group: None,
             segments: vec![Segment {
                 kind: SegmentKind::Joint,
                 goal_positions: vec![FRAC_PI_2, FRAC_PI_2, 0.0, 0.0, 0.0, 0.0],
@@ -695,6 +802,7 @@ mod tests {
         let motion = Motion {
             name: "m".into(),
             robot: 0,
+            group: None,
             segments: vec![Segment {
                 kind: SegmentKind::Joint,
                 goal_positions: vec![0.0; 6],
@@ -744,6 +852,7 @@ mod tests {
         let motion = Motion {
             name: "swing".into(),
             robot: 0,
+            group: None,
             segments: vec![seg(SegmentKind::Joint, goal.clone())],
         };
         let planned = plan_motion(
@@ -774,6 +883,7 @@ mod tests {
         let motion = Motion {
             name: "empty".into(),
             robot: 0,
+            group: None,
             segments: vec![],
         };
         assert!(matches!(
@@ -785,5 +895,186 @@ mod tests {
             ),
             Err(MotionError::EmptyMotion(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use botrail_model::RobotModel;
+    use std::sync::Arc;
+
+    const DUAL: &str = include_str!("../../../examples/assets/dual_arm_test.urdf");
+
+    fn scene() -> Scene {
+        Scene::new(Arc::new(RobotModel::from_urdf_str(DUAL).unwrap()))
+    }
+
+    fn q_index(scene: &Scene, joint: &str) -> usize {
+        let model = &scene.robots()[0].model;
+        model.joints[model.joint_index(joint).unwrap()]
+            .q_index
+            .unwrap()
+    }
+
+    /// Planning one arm's group moves that arm only: the other arm and its
+    /// finger never leave their start values, even when the straight line
+    /// is blocked and the planner has to sample.
+    #[test]
+    fn a_group_plan_holds_every_other_joint() {
+        let mut scene = scene();
+        let model = scene.robots()[0].model.clone();
+        let left = model.group_index("left").unwrap();
+        let start = scene.joint_positions().to_vec();
+        let mut goal = start.clone();
+        goal[q_index(&scene, "left_shoulder")] = 1.2;
+        goal[q_index(&scene, "left_elbow")] = -1.0;
+        // A post in the left hand's straight path: the planner has to lift
+        // the arm over it, so it samples.
+        scene
+            .add_obstacle(
+                "wall",
+                botrail_model::Geometry::Box {
+                    size: Vector3::new(0.05, 0.05, 0.10),
+                },
+                Isometry3::translation(-0.17, 0.25, 0.10),
+            )
+            .unwrap();
+        let options = botrail_plan::PlanOptions::default();
+        let path = scene
+            .plan_joint_path_for(0, Some(left), &start, &goal, &options)
+            .unwrap();
+        assert!(path.len() >= 2);
+        let held: Vec<usize> = (0..model.dof())
+            .filter(|qi| !model.groups()[left].joints.contains(qi))
+            .collect();
+        for q in &path {
+            for &qi in &held {
+                assert_eq!(q[qi], start[qi], "joint {qi} moved during a left-arm plan");
+            }
+        }
+        assert!((path.last().unwrap()[q_index(&scene, "left_shoulder")] - 1.2).abs() < 1e-9);
+    }
+
+    /// A motion that names its group plans in that group; one that names
+    /// none on a robot with several plans every joint (the legacy shape).
+    #[test]
+    fn motions_carry_their_group() {
+        let mut scene = scene();
+        let model = scene.robots()[0].model.clone();
+        let mut goal = scene.joint_positions().to_vec();
+        goal[q_index(&scene, "right_elbow")] = 1.0;
+        goal[q_index(&scene, "left_elbow")] = 1.0;
+        scene
+            .add_segment_in_group(0, Some("right"), "r", seg(goal.clone()))
+            .unwrap();
+        scene
+            .add_segment_in_group(0, None, "both", seg(goal))
+            .unwrap();
+        assert_eq!(scene.motions()[0].group, model.group_index("right"));
+        assert_eq!(scene.motions()[1].group, None);
+        let limits = botrail_traj::Limits::uniform(model.dof(), 2.0, 4.0);
+        let planned = scene
+            .plan_motion("r", &botrail_plan::PlanOptions::default(), &limits)
+            .unwrap();
+        let end = planned.trajectory.positions.last().unwrap();
+        // The right motion ignored the goal's left-elbow component.
+        assert!((end[q_index(&scene, "right_elbow")] - 1.0).abs() < 1e-9);
+        assert_eq!(end[q_index(&scene, "left_elbow")], 0.0);
+        let planned = scene
+            .plan_motion("both", &botrail_plan::PlanOptions::default(), &limits)
+            .unwrap();
+        let end = planned.trajectory.positions.last().unwrap();
+        assert!((end[q_index(&scene, "left_elbow")] - 1.0).abs() < 1e-9);
+        assert!(scene
+            .add_segment_in_group(0, Some("nope"), "x", seg(vec![0.0; 8]))
+            .is_err());
+    }
+
+    fn seg(goal: Vec<f64>) -> Segment {
+        Segment {
+            kind: SegmentKind::Joint,
+            goal_positions: goal,
+            constraints: vec![],
+        }
+    }
+
+    /// Resolution of an unnamed group: a link names its arm; nothing at
+    /// all is the whole robot while the groups are derived, and an error
+    /// once they are declared.
+    #[test]
+    fn unnamed_groups_resolve_by_link_then_by_declaration() {
+        let scene = scene();
+        let model = scene.robots()[0].model.clone();
+        let hand = model.link_index("right_hand").unwrap();
+        assert_eq!(scene.resolve_group(0, None, Some(hand)).unwrap(), Some(1));
+        assert_eq!(scene.resolve_group(0, None, None).unwrap(), None);
+        assert!(scene.resolve_group(0, Some("nope"), None).is_err());
+        let declared = Scene::new(Arc::new(
+            model
+                .define_group("l", "left_hand", None, None)
+                .unwrap()
+                .define_group("r", "right_hand", None, None)
+                .unwrap(),
+        ));
+        assert!(declared.resolve_group(0, None, None).is_err());
+        assert_eq!(declared.resolve_group(0, Some("r"), None).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn an_arms_plan_ignores_contacts_the_other_arm_is_resting_in() {
+        use crate::Scene;
+        let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(DUAL).unwrap()));
+        // The left hand holds a part that still rests in (slightly through)
+        // the shelf it was picked from.
+        use botrail_model::Geometry;
+        use nalgebra::{Isometry3, Vector3};
+        let hand = scene.robots()[0].model.link_index("left_hand").unwrap();
+        let p = scene.link_poses_for(0)[hand].translation.vector;
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.03, 0.03, 0.03),
+                },
+                Isometry3::translation(p.x, p.y, p.z - 0.03),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "shelf",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.02),
+                },
+                Isometry3::translation(p.x, p.y, p.z - 0.055),
+            )
+            .unwrap();
+        scene
+            .attach_obstacle("part", Some("left_hand"), None)
+            .unwrap();
+        let q0 = scene.joint_positions().to_vec();
+        let groups = scene.robots()[0].model.groups();
+        let right = groups.iter().find(|g| g.name == "right").unwrap();
+        // The whole-robot check sees the resting contact; the right arm's
+        // does not — it is nothing the right arm moves.
+        assert!(!scene.is_state_valid_for(0, &q0));
+        assert!(scene.is_state_valid_for_group(0, Some(right), &q0));
+        let model = &scene.robots()[0].model;
+        let qi = model.joints[model.joint_index("right_shoulder").unwrap()]
+            .q_index
+            .unwrap();
+        let mut goal = q0.clone();
+        goal[qi] = 0.6;
+        let path = plan_joint_path(
+            &scene,
+            0,
+            Some(right),
+            &q0,
+            &goal,
+            &mut |_| true,
+            &botrail_plan::PlanOptions::default(),
+        )
+        .expect("the right arm plans past the left arm's resting contact");
+        assert!((path.last().unwrap()[qi] - 0.6).abs() < 1e-9);
     }
 }

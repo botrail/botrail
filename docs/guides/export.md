@@ -147,6 +147,13 @@ the [I/O map](io-map.md): bind the points on a `robot_controller` node
 them up; `inputs=` / `outputs=` dicts still override per key, `io=` projects
 a newer assignment onto an older bake.
 
+A dual-arm robot exports one controller program per arm:
+`tl.export_script("left.script", sequence="left", group="left")` carries the
+left arm's six joints and its own moves; where the program waits on the other
+arm (`robot_done(..., group="right")`), the script reads that controller's
+idle contact on an input keyed `<robot>/<arm>`. Leaving `group=` off a
+dual-arm robot is an error, not a 12-axis program.
+
 ## Python
 
 ```python

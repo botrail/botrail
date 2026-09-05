@@ -22,6 +22,12 @@ trajectory, every time. `seed` selects a *different* deterministic exploration
 — useful when the default seed finds an ugly path — not a way to make it
 reproducible; it already is.
 
+On a dual-arm robot, say which arm: `scene.plan_to_pose(p, quat, group="left")`
+plans the left arm's joints only, with the right arm frozen where it stands —
+an obstacle to the plan, like everything else — and `add_segment(...,
+group="left")` makes a motion the left arm's. A robot with one group needs no
+`group=`; see [arms of one robot](robots.md#arms-of-one-robot).
+
 ## Named motions: waypoint segments
 
 A one-shot plan answers "can it get there". A cell needs *named* motions that

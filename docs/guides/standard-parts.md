@@ -77,7 +77,7 @@ equips the tutorial cell the same way, next to a USD layer that keeps the
 layout and the teach frames.
 
 Where the drawing comes from is the product's business, not the generator's: a
-pack can name a file of primitives per part (`components[].trim`, a URDF or
+pack can name a file of primitives and/or meshes per part (`components[].trim`, a URDF or
 xacro), and the generator expands it to the size at hand with
 [`load_urdf`][botrail._core.Scene.load_urdf] instead of drawing its own
 shapes. One parametric file covers every size a product is sold in, so making
@@ -137,3 +137,35 @@ The [model catalog](robots.md#the-model-catalog) is the same pattern with
 the identity already attached: `Robot.from_catalog` (and
 `catalog_package()` for non-robot packages) brings the maker's mesh *and*
 its manifest, so the BOM line writes itself.
+
+## Series-specific equipment trims
+
+Catalog-backed fence `height` / `height_mm` means **panel height**. A pack's
+`configuration.rules.floor_gap_mm` raises the panel bottom above the floor;
+the posts reach panel height plus that gap. This applies equally to collision
+slabs, full-detail trims and the built-in frame/wire fallback. With no declared
+gap the previous zero-gap behavior is retained. Code relying on the former
+ignored-gap behavior must account for the corrected installed height.
+
+Fence, conveyor and cabinet trims receive the resolved catalog parameters
+(including string choices such as `post_finish`) in addition to their metre
+arguments. Explicit geometry arguments take precedence. A fence panel trim's
+origin is its **bottom center**, already raised by the generator; do not add the
+floor gap again inside the asset. Post trims receive the full installed height.
+
+Optional `components[].dimensions_mm` fields add conservative collision
+envelopes **in both detail modes**, without adding BOM quantities:
+
+| Component | Fields | Effect |
+| --- | --- | --- |
+| conveyor `unit` | `rail_rise` | Rise above belt top; default 40, use 0 for a flat standard frame |
+| conveyor `unit` | `drive_length`, `drive_drop`, `drive_overhang` | Center-drive box below the frame, overhang on local -Y; declare all three together |
+| conveyor `unit` | `mid_tension_after_length`, `mid_tension_length`, `mid_tension_drop` | Long-run tension box at local X = length/4, after the declared length threshold |
+| conveyor `stand` | `inset` | Distance from each belt end to the first/last support center |
+| cabinet `body` | `lifting_eye_height` | Conservative top slab above the enclosure, including any base offset |
+
+These are pack-defined approximations, not vendor-certified mounting or load
+envelopes. Missing fields preserve the previous generator massing. Thin handles,
+fasteners, wire openings and foot covers need not have their own colliders.
+`detail="plain"` hides the detailed geometry; it does not remove the new
+envelopes or change the selected dimensions or BOM.

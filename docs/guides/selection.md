@@ -26,7 +26,8 @@ came from:
 | line kind | requirement | derived from |
 |---|---|---|
 | robot | `payload_kg` | the tool's mass plus the heaviest part the robot grasps (now, or in an `attach` of a counted sequence) |
-| robot | `reach_mm` | the farthest taught segment goal from the base, measured at the flange a catalog robot declares (the TCP for a plain URDF), plus `margin` (10 % by default) |
+| robot | `reach_mm` | the farthest taught segment goal from the base, measured at the flange a catalog robot declares (the TCP for a plain URDF), plus `margin` (10 % by default); per arm on a dual-arm robot, from the arm's own base (an arm mounted from the catalog is its own line, `<robot>/<arm>`) |
+| robot (dual-arm product) | `arm_count` | the arms the cell's motions use |
 | tool (`<robot>/tool`) | `payload_kg` | the heaviest grasped part |
 | tool, `gripper.parallel` | `stroke_mm` | the smallest side of the grasped parts — the least the fingers must open |
 | beam sensor | `sensing_range_mm` | the beam's span |

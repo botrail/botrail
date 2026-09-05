@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "examples" / d)
-                for d in ("basics", "export", "legged", "machining", "vehicles", "welding")]
+                for d in ("basics", "export", "legged", "machining", "multi_robot", "vehicles", "welding")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
@@ -27,6 +27,7 @@ import weld_line_demo  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 from sequence_demo import BOX, TOUCH, build_cycle  # noqa: E402
 import agv_cell_demo  # noqa: E402
+import dual_arm_demo  # noqa: E402
 import legged_patrol_demo  # noqa: E402
 import machine_tending_demo  # noqa: E402
 
@@ -332,6 +333,28 @@ def main() -> None:
             time.sleep(2.0)
             page.screenshot(path=OUT / "machine_tending_hand.png")
             print("wrote machine_tending_hand.png")
+            server.stop()
+
+        if want("dual_arm"):
+            # ---- one robot, two arms: the tray carried with both hands, the
+            # timeline dock with a lane per arm ------------------------------
+            scene, _rig, programs = dual_arm_demo.build("ur5e", carry=True)
+            tl = dual_arm_demo.simulate(scene, programs)
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(3.0)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            span = tl.step_span("left/left carry")
+            t = (span.start + span.end) / 2
+            bands = page.locator(".timeline-bands").bounding_box()
+            page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+            page.evaluate("window.__CAM = {pos: [1.7, -1.3, 1.55], look: [0.35, 0.0, 0.85]}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "dual_arm.png")
+            print("wrote dual_arm.png")
             server.stop()
 
         browser.close()

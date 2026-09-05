@@ -48,9 +48,23 @@ pub struct StepRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RobotUse {
     pub robot: String,
+    /// The arm of a dual-arm robot this row counts; `None` for the
+    /// robot's own row (every arm merged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub busy: f64,
     /// Fraction of the cycle spent moving, 0..1.
     pub utilization: f64,
+}
+
+impl RobotUse {
+    /// `robot`, or `robot/arm` for an arm's row.
+    pub fn label(&self) -> String {
+        match &self.group {
+            Some(group) => format!("{}/{}", self.robot, group),
+            None => self.robot.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -264,10 +278,40 @@ impl Scene {
                     robots: tl
                         .robots
                         .iter()
-                        .map(|r| RobotUse {
-                            robot: r.name.clone(),
-                            busy: tl.busy_seconds(&r.name).unwrap_or(0.0),
-                            utilization: tl.utilization(&r.name).unwrap_or(0.0),
+                        .flat_map(|r| {
+                            let mut rows = vec![RobotUse {
+                                robot: r.name.clone(),
+                                group: None,
+                                busy: tl.busy_seconds(&r.name).unwrap_or(0.0),
+                                utilization: tl.utilization(&r.name).unwrap_or(0.0),
+                            }];
+                            // A dual-arm robot: a row per arm under its own,
+                            // the line-balancing figure between the arms.
+                            let groups = self
+                                .robots()
+                                .iter()
+                                .find(|s| s.name == r.name)
+                                .map(|s| s.model.groups())
+                                .unwrap_or_default();
+                            if groups.len() > 1 {
+                                for group in groups {
+                                    let busy =
+                                        crate::handshake::group_busy(tl, &r.name, &group.name)
+                                            .map(|spans| spans.iter().map(|(s, e)| e - s).sum())
+                                            .unwrap_or(0.0);
+                                    rows.push(RobotUse {
+                                        robot: r.name.clone(),
+                                        group: Some(group.name),
+                                        busy,
+                                        utilization: if tl.duration > 0.0 {
+                                            busy / tl.duration
+                                        } else {
+                                            0.0
+                                        },
+                                    });
+                                }
+                            }
+                            rows
                         })
                         .collect(),
                     clearance: c.clearance.as_ref().map(|cl| ClearanceRow {
@@ -693,7 +737,7 @@ impl CellReport {
                     let _ = writeln!(
                         out,
                         "| {} | {:.2} | {:.0} % |",
-                        r.robot,
+                        r.label(),
                         r.busy,
                         r.utilization * 100.0
                     );
@@ -992,5 +1036,111 @@ mod tests {
         assert_eq!(json["footprint"]["area"], 0.75);
         assert_eq!(json["bom"]["by_category"]["part"], 1);
         assert_eq!(json["deliverables"][0]["sha256"], "abc");
+    }
+
+    /// The dual-arm fixture with a left-arm motion and a right-arm ramp
+    /// fired together, then a wait on each arm.
+    fn dual_cell() -> (Scene, String) {
+        use crate::motion::{Segment, SegmentKind};
+        use crate::seq::{Action, Condition, Sequence, Step};
+        use botrail_model::RobotModel;
+        use std::sync::Arc;
+        let urdf = include_str!("../../../examples/assets/dual_arm_test.urdf");
+        let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(urdf).unwrap()));
+        let robot = scene.robots()[0].name.clone();
+        let q = {
+            let model = &scene.robots()[0].model;
+            model.joints[model.joint_index("left_shoulder").unwrap()]
+                .q_index
+                .unwrap()
+        };
+        let mut goal = scene.joint_positions().to_vec();
+        goal[q] = 1.0;
+        scene
+            .add_segment_in_group(
+                0,
+                Some("left"),
+                "left_reach",
+                Segment {
+                    kind: SegmentKind::Joint,
+                    goal_positions: goal,
+                    constraints: vec![],
+                },
+            )
+            .unwrap();
+        scene.set_sequences(vec![Sequence {
+            name: "both".into(),
+            steps: vec![
+                Step {
+                    name: "go".into(),
+                    actions: vec![
+                        Action::StartMotion {
+                            motion: "left_reach".into(),
+                        },
+                        Action::StartRamp {
+                            robot: None,
+                            targets: vec![("right_elbow".into(), 0.8)],
+                            duration: 0.5,
+                        },
+                    ],
+                    transition: Condition::GroupDone {
+                        robot: robot.clone(),
+                        group: "right".into(),
+                    },
+                    select: Vec::new(),
+                },
+                Step {
+                    name: "both".into(),
+                    actions: vec![],
+                    transition: Condition::RobotDone {
+                        robot: robot.clone(),
+                    },
+                    select: Vec::new(),
+                },
+            ],
+        }]);
+        (scene, robot)
+    }
+
+    #[test]
+    fn a_dual_arm_robot_reports_each_arm() {
+        use crate::rollout::RolloutOptions;
+        let (scene, robot) = dual_cell();
+        let tl = scene
+            .simulate_sequence("both", &RolloutOptions::default())
+            .unwrap();
+        let report = scene.cell_report(CellReportInput {
+            title: None,
+            sequences: None,
+            cycles: vec![CycleInput {
+                name: "both".into(),
+                timeline: &tl,
+                clearance: None,
+            }],
+            scenarios: vec![],
+            deliverables: vec![],
+            ground_z: 0.0,
+        });
+        let rows = &report.cycles[0].robots;
+        let labels: Vec<String> = rows.iter().map(|r| r.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                robot.clone(),
+                format!("{robot}/left"),
+                format!("{robot}/right")
+            ]
+        );
+        // The 0.5 s ramp is the right arm's whole cycle; the left motion
+        // outlasts it; the robot's own row merges both.
+        assert!((rows[2].busy - 0.5).abs() < 1e-9, "{rows:?}");
+        assert!(rows[1].busy > rows[2].busy, "{rows:?}");
+        assert!(rows[0].busy >= rows[1].busy, "{rows:?}");
+        let md = report.to_markdown();
+        assert!(md.contains(&format!("| {robot}/right | 0.50 |")), "{md}");
+        // The robot's own row carries no arm key.
+        let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+        assert!(json["cycles"][0]["robots"][0].get("group").is_none());
+        assert_eq!(json["cycles"][0]["robots"][1]["group"], "left");
     }
 }

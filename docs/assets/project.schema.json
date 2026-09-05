@@ -237,6 +237,13 @@
           "description": "Grasp an obstacle at its current relative pose (instantaneous).",
           "type": "object",
           "properties": {
+            "group": {
+              "description": "The arm that grasps (a dual-arm robot); `link` defaults to its tip.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "link": {
               "type": [
                 "string",
@@ -295,6 +302,13 @@
           "description": "Latch onto a moving part: taught poses ride its motion until the\ntrack is released (conveyor tracking).",
           "type": "object",
           "properties": {
+            "group": {
+              "description": "The arm that follows (a dual-arm robot).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "link": {
               "type": [
                 "string",
@@ -326,6 +340,13 @@
           "description": "Stop following the tracked part (instantaneous).",
           "type": "object",
           "properties": {
+            "group": {
+              "description": "The arm whose track to release (a robot tracking with both).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "robot": {
               "type": [
                 "string",
@@ -691,6 +712,37 @@
         "far"
       ]
     },
+    "CatalogArmMsg": {
+      "description": "One arm of a dual-arm catalog package (`frames.arms[]`), as the\nproject keeps it to redeclare the planning group on rebuild.",
+      "type": "object",
+      "properties": {
+        "flange": {
+          "description": "The arm's tool-mounting face.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joints": {
+          "description": "The arm's actuated joints as the manifest lists them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "tip": {
+          "description": "The arm's TCP link.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "tip"
+      ]
+    },
     "CatalogRef": {
       "description": "A catalog package reference: the id as resolved plus, when known, the\ndataset revision it was fetched at. `revision: None` is a hand-written\nreference that has not been pinned (a part named by its catalog id\nwithout going through `Robot.from_catalog`).",
       "type": "object",
@@ -765,6 +817,27 @@
           "required": [
             "type",
             "robot"
+          ]
+        },
+        {
+          "description": "The named arm of the named robot has no motion/ramp in flight.",
+          "type": "object",
+          "properties": {
+            "group": {
+              "type": "string"
+            },
+            "robot": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "group_done"
+            }
+          },
+          "required": [
+            "type",
+            "robot",
+            "group"
           ]
         },
         {
@@ -1981,6 +2054,54 @@
         }
       }
     },
+    "GroupRefMsg": {
+      "description": "One arm of one robot, by name.",
+      "type": "object",
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "robot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "robot",
+        "group"
+      ]
+    },
+    "GroupSpecMsg": {
+      "description": "A declared planning group (`Robot.define_group`), by names.",
+      "type": "object",
+      "properties": {
+        "flange": {
+          "description": "This arm's tool-mounting face.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joints": {
+          "description": "The actuated joints it drives.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "tip": {
+          "description": "The link a motion of the group places.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "tip",
+        "joints"
+      ]
+    },
     "IoBinding": {
       "description": "One point wired to one channel. `(point, node)` is the key: a signal\nfanning out to two controllers is two bindings.",
       "type": "object",
@@ -2595,6 +2716,13 @@
     "MotionMsg": {
       "type": "object",
       "properties": {
+        "group": {
+          "description": "The planning group (an arm of the owner) the motion drives; `None`\nleaves it to the robot (its sole group, else every joint).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -2616,6 +2744,14 @@
       "required": [
         "name",
         "segments"
+      ]
+    },
+    "MountRoleMsg": {
+      "description": "What a welded part is to its composite (see\n[`botrail_model::MountRole`]).",
+      "type": "string",
+      "enum": [
+        "tool",
+        "arm"
       ]
     },
     "ObstacleMsg": {
@@ -3134,6 +3270,13 @@
             }
           ]
         },
+        "groups": {
+          "description": "Declared planning groups (`Robot.define_group`): the arms of a\ndual-arm robot, by name. Absent when the groups are derived from\nthe tree or the source produces them itself (a mounted arm).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupSpecMsg"
+          }
+        },
         "joint_positions": {
           "type": "array",
           "items": {
@@ -3282,6 +3425,13 @@
           "description": "A catalog package (`Robot.from_catalog`): id + pinned revision for\nprovenance and script export, plus the fetched inner source so\nloading needs no network.",
           "type": "object",
           "properties": {
+            "arms": {
+              "description": "The arms of a dual-arm package (`frames.arms[]`), reapplied as\nplanning groups on rebuild. Absent for single-arm packages and\nin older files.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CatalogArmMsg"
+              }
+            },
             "category": {
               "type": [
                 "string",
@@ -3368,7 +3518,7 @@
           ]
         },
         {
-          "description": "A tool welded onto a base robot (`Robot.attach_tool`): both part\nsources plus the weld parameters, so loading re-runs the attach.",
+          "description": "A part welded onto a base robot (`Robot.attach_tool`,\n`Robot.mount`): both part sources plus the weld parameters, so\nloading re-runs the attach.",
           "type": "object",
           "properties": {
             "base": {
@@ -3376,6 +3526,13 @@
             },
             "flange": {
               "type": "string"
+            },
+            "group": {
+              "description": "The group addressed (a tool's arm) or created (a mounted arm).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "kind": {
               "type": "string",
@@ -3393,6 +3550,10 @@
                 "null"
               ],
               "default": null
+            },
+            "role": {
+              "description": "`tool` (an end-effector on an arm, the default) or `arm` (a\nmanipulator bolted to a body — `Robot.mount` / `Robot.dual_arm`).",
+              "$ref": "#/$defs/MountRoleMsg"
             },
             "tcp": {
               "type": [
@@ -3804,6 +3965,26 @@
           "required": [
             "kind",
             "names"
+          ]
+        },
+        {
+          "description": "Only the named arms' links trip it.",
+          "type": "object",
+          "properties": {
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GroupRefMsg"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "groups"
+            }
+          },
+          "required": [
+            "kind",
+            "groups"
           ]
         },
         {

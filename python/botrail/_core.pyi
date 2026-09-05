@@ -61,9 +61,41 @@ class Robot:
         seed: Optional[list[float]] = None,
         max_iters: int = 100,
         restarts: Optional[int] = None,
+        group: Optional[str] = None,
     ) -> IkResult: ...
     @property
     def grasp_frames(self) -> list[str]: ...
+    @property
+    def groups(self) -> list[str]: ...
+    def group(self, name: str) -> "Group": ...
+    def define_group(
+        self,
+        name: str,
+        tip: str,
+        joints: Optional[list[str]] = None,
+        flange: Optional[str] = None,
+    ) -> "Robot": ...
+    def mount(
+        self,
+        part: "Robot",
+        at: str,
+        offset_position: Optional[tuple[float, float, float]] = None,
+        offset_quaternion: Optional[tuple[float, float, float, float]] = None,
+        prefix: Optional[str] = None,
+        group: Optional[str] = None,
+    ) -> "Robot": ...
+    @staticmethod
+    def dual_arm(
+        left: "Robot",
+        right: "Robot",
+        left_position: Optional[tuple[float, float, float]] = None,
+        left_quaternion: Optional[tuple[float, float, float, float]] = None,
+        right_position: Optional[tuple[float, float, float]] = None,
+        right_quaternion: Optional[tuple[float, float, float, float]] = None,
+        body: Optional["Robot"] = None,
+        left_mount: Optional[str] = None,
+        right_mount: Optional[str] = None,
+    ) -> "Robot": ...
     def attach_tool(
         self,
         tool: "Robot",
@@ -73,7 +105,22 @@ class Robot:
         offset_quaternion: Optional[tuple[float, float, float, float]] = None,
         tcp: Optional[str] = None,
         prefix: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> "Robot": ...
+
+class Group:
+    @property
+    def name(self) -> str: ...
+    @property
+    def joints(self) -> list[str]: ...
+    @property
+    def tip(self) -> str: ...
+    @property
+    def flange(self) -> Optional[str]: ...
+    @property
+    def base(self) -> str: ...
+    @property
+    def derived(self) -> bool: ...
 
 class Scene:
     def __init__(
@@ -133,6 +180,7 @@ class Scene:
         link: Optional[str] = None,
         max_iters: int = 100,
         robot: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> IkResult: ...
     def add_box(
         self,
@@ -281,6 +329,7 @@ class Scene:
         link: Optional[str] = None,
         touch_links: Optional[list[str]] = None,
         robot: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> None: ...
     def detach(self, name: str) -> None: ...
     @property
@@ -497,6 +546,7 @@ class Scene:
         watch_robot: bool = False,
         watch_robots: Optional[list[str]] = None,
         mount: Optional[str] = None,
+        watch_groups: Optional[list[tuple[str, str]]] = None,
     ) -> None: ...
     def add_beam_sensor(
         self,
@@ -508,6 +558,7 @@ class Scene:
         watch_robot: bool = False,
         watch_robots: Optional[list[str]] = None,
         mount: Optional[str] = None,
+        watch_groups: Optional[list[tuple[str, str]]] = None,
     ) -> None: ...
     def add_vision_sensor(
         self,
@@ -833,6 +884,7 @@ class Scene:
         seed: Optional[int] = None,
         broadcast: bool = True,
         robot: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> Trajectory: ...
     def plan_to_pose(
         self,
@@ -843,6 +895,7 @@ class Scene:
         seed: Optional[int] = None,
         broadcast: bool = True,
         robot: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> Trajectory: ...
     def add_segment(
         self,
@@ -856,6 +909,7 @@ class Scene:
             tuple[tuple[float, float, float], tuple[float, float, float]]
         ] = None,
         robot: Optional[str] = None,
+        group: Optional[str] = None,
     ) -> None: ...
     def remove_segment(self, motion: str, index: int) -> None: ...
     def clear_motion(self, motion: str) -> None: ...
@@ -926,10 +980,14 @@ class SequenceTimeline:
         self, robot: Optional[str] = None
     ) -> list[tuple[str, float, float, tuple[float, float, float]]]: ...
     def moves(
-        self, robot: Optional[str] = None
+        self, robot: Optional[str] = None, group: Optional[str] = None
     ) -> list[tuple[str, float, float]]: ...
-    def busy_seconds(self, robot: Optional[str] = None) -> float: ...
-    def utilization(self, robot: Optional[str] = None) -> float: ...
+    def busy_seconds(
+        self, robot: Optional[str] = None, group: Optional[str] = None
+    ) -> float: ...
+    def utilization(
+        self, robot: Optional[str] = None, group: Optional[str] = None
+    ) -> float: ...
     def utilizations(self) -> dict[str, float]: ...
     def vehicle_airborne(self, name: str) -> float: ...
     def robot_busy(self, robot: Optional[str] = None) -> list[tuple[float, float]]: ...
@@ -996,7 +1054,9 @@ class SequenceTimeline:
         self, robot: Optional[str] = None
     ) -> list[tuple[float, float, Optional[str]]]: ...
     def feed_report(self, toolpath: Optional[str] = None) -> "FeedReport": ...
-    def robot_trajectory(self, robot: Optional[str] = None) -> Trajectory: ...
+    def robot_trajectory(
+        self, robot: Optional[str] = None, group: Optional[str] = None
+    ) -> Trajectory: ...
     @property
     def trajectory(self) -> Trajectory: ...
     def export_usd(
@@ -1053,6 +1113,7 @@ class SequenceTimeline:
         move_to_start: bool = True,
         node: Optional[str] = None,
         io: Optional[IoMap] = None,
+        group: Optional[str] = None,
     ) -> str: ...
     def export_script(
         self,
@@ -1069,6 +1130,7 @@ class SequenceTimeline:
         move_to_start: bool = True,
         node: Optional[str] = None,
         io: Optional[IoMap] = None,
+        group: Optional[str] = None,
     ) -> None: ...
 
 class ScenarioRuns:
@@ -1099,6 +1161,7 @@ class ScenarioRuns:
         move_to_start: bool = True,
         node: Optional[str] = None,
         io: Optional[IoMap] = None,
+        group: Optional[str] = None,
     ) -> str: ...
     def export_script(
         self,
@@ -1116,6 +1179,7 @@ class ScenarioRuns:
         move_to_start: bool = True,
         node: Optional[str] = None,
         io: Optional[IoMap] = None,
+        group: Optional[str] = None,
     ) -> None: ...
 
 class Span:

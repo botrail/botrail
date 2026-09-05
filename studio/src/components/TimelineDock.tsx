@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
+import type { StepSpanMsg } from "../protocol";
 import { useStudioStore } from "../store";
 import { sendExportUsd } from "../ws";
 import { chipsForLane } from "./IoOverlay";
@@ -14,6 +15,40 @@ const ROBOT_LANE_COLOR = "#4a8fa5";
  * timelines), and one lane per signal. Rendered only when a sequence
  * timeline is loaded.
  */
+/** One lane of move intervals: a robot, or one arm of a dual-arm robot. */
+interface MoveLane {
+  name: string;
+  moves: StepSpanMsg[];
+}
+
+/** The move lanes of a baked timeline: one per robot, split per arm where
+ * the moves name one (`robot/arm`, or just the arm when the robot is
+ * alone in the scene), unnamed moves on the robot's own. */
+function moveLanes(robots: MoveLane[]): MoveLane[] {
+  const lanes: MoveLane[] = [];
+  const sole = robots.length === 1;
+  for (const robot of robots) {
+    const byArm = new Map<string, StepSpanMsg[]>();
+    for (const move of robot.moves) {
+      const arm = move.group ?? "";
+      const lane = byArm.get(arm);
+      if (lane) lane.push(move);
+      else byArm.set(arm, [move]);
+    }
+    if (byArm.size === 0) {
+      lanes.push({ name: robot.name, moves: [] });
+      continue;
+    }
+    for (const arm of [...byArm.keys()].sort()) {
+      lanes.push({
+        name: arm === "" ? robot.name : sole ? arm : `${robot.name}/${arm}`,
+        moves: byArm.get(arm) ?? [],
+      });
+    }
+  }
+  return lanes;
+}
+
 /** Fraction of the cycle these move intervals cover, overlaps merged —
  * the line-balancing number, shown beside each robot lane so the
  * bottleneck is readable straight off the chart. */
@@ -92,6 +127,10 @@ function SignalLane({
 
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
+  const lanes = useMemo(
+    () => (timeline ? moveLanes(timeline.robots) : []),
+    [timeline],
+  );
   const playback = useStudioStore((s) => s.playback);
   const recording = useStudioStore((s) => s.recording);
   const cameras = useStudioStore((s) => s.cameras);
@@ -304,11 +343,11 @@ export function TimelineDock() {
           ))}
         <div className="timeline-playhead" style={{ left: pct(playbackTime) }} />
       </div>
-      {/* Robot lanes: when several robots run, each gets a band lane of its
-          move intervals (labelled with the motion name). */}
-      {timeline &&
-        timeline.robots.length > 1 &&
-        timeline.robots.map((robot) => (
+      {/* Robot lanes: when several robots (or the arms of one) run, each
+          gets a band lane of its move intervals (labelled with the motion
+          name). */}
+      {lanes.length > 1 &&
+        lanes.map((robot) => (
           <div key={robot.name} className="timeline-lane">
             <span
               className="timeline-lane-name"

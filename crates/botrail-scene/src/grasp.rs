@@ -896,6 +896,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let mut scene = Scene::new(Arc::new(robot));
@@ -1016,6 +1017,7 @@ mod tests {
                         object: "part".into(),
                         link: None,
                         touch_links: Some(vec!["tool".into()]),
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.5 },
                 ),
@@ -1181,6 +1183,7 @@ mod tests {
                         object: "part".into(),
                         link: Some("palm".into()),
                         touch_links: Some(vec!["tool".into()]),
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.3 },
                 ),
@@ -1294,6 +1297,7 @@ mod tests {
                         object: "part".into(),
                         link: None,
                         touch_links: Some(vec!["tool".into()]),
+                        group: None,
                     }],
                     Condition::Elapsed { seconds: 0.3 },
                 ),

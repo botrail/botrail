@@ -82,6 +82,11 @@ export function Viewport() {
       ? (robotByName(s.robots, selection.robot)?.tcpLink ?? null)
       : null,
   );
+  const focusedArm = useStudioStore((s) =>
+    selection.type === "tcp"
+      ? (robotByName(s.robots, selection.robot)?.selectedGroup ?? null)
+      : null,
+  );
 
   // The robot name only disambiguates when several robots share the scene.
   const scope = (robot: string) => (multi ? `${robot} · ` : "");
@@ -102,7 +107,7 @@ export function Viewport() {
               ? `I/O node · ${selection.name}`
               : selection.type === "robot"
                 ? `${scope(selection.robot)}robot base`
-                : `${scope(selection.robot)}TCP · ${focusedTcp ?? "—"}`;
+                : `${scope(selection.robot)}${focusedArm ? `${focusedArm} · ` : ""}TCP · ${focusedTcp ?? "—"}`;
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.

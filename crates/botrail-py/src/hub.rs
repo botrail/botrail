@@ -358,8 +358,9 @@ impl SceneHub {
         link: &str,
         pose: &PoseMsg,
         options: &IkOptions,
+        group: Option<&str>,
     ) -> Result<botrail_kin::IkResult, String> {
-        botrail_session::set_tcp_target_for(self, robot, link, pose, options)
+        botrail_session::set_tcp_target_for(self, robot, link, pose, options, group)
     }
 
     // ------------------------------------------------------------ obstacles
@@ -560,11 +561,12 @@ impl SceneHub {
     pub fn attach_obstacle_to(
         &self,
         robot: usize,
+        group: Option<&str>,
         name: &str,
         link: Option<&str>,
         touch_links: Option<&[String]>,
     ) -> Result<(), SceneError> {
-        botrail_session::attach_obstacle_to(self, robot, name, link, touch_links)
+        botrail_session::attach_obstacle_to(self, robot, group, name, link, touch_links)
     }
 
     /// Pure query — no broadcast: the scene is read at its current pose.
@@ -1353,10 +1355,11 @@ impl SceneHub {
     pub fn add_segment_for(
         &self,
         robot: usize,
+        group: Option<&str>,
         motion: &str,
         segment: botrail_scene::motion::Segment,
     ) -> Result<(), String> {
-        botrail_session::add_segment_for(self, robot, motion, segment)
+        botrail_session::add_segment_for(self, robot, group, motion, segment)
     }
 
     pub fn remove_segment(&self, motion: &str, index: usize) -> Result<(), String> {
@@ -1462,19 +1465,21 @@ impl SceneHub {
     pub fn plan_to_for(
         &self,
         robot: usize,
+        group: Option<usize>,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
     ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-        botrail_session::plan_to_for(self, robot, goal, options)
+        botrail_session::plan_to_for(self, robot, group, goal, options)
     }
 
     pub fn plan_and_broadcast_for(
         &self,
         robot: usize,
+        group: Option<usize>,
         goal: &[f64],
         options: &botrail_plan::PlanOptions,
     ) -> Result<(botrail_traj::JointTrajectory, Vec<Vec<f64>>, f64), String> {
-        botrail_session::plan_and_emit_for(self, robot, goal, options)
+        botrail_session::plan_and_emit_for(self, robot, group, goal, options)
     }
 
     pub fn handle_client_message(&self, text: &str) {

@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use botrail_model::{CatalogMeta, RobotModel, RobotSource};
+use botrail_model::{CatalogArm, CatalogMeta, RobotModel, RobotSource};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict};
@@ -186,10 +186,48 @@ pub fn from_catalog(
         .iter()
         .filter_map(|f| resolve("grasp_frames", Some(f)))
         .collect();
+    // A dual-arm package names its arms: each becomes a planning group,
+    // tipped at the arm's TCP, driving the joints the manifest lists.
+    // Resolved here, while the name lookup is alive; declared below.
+    let mut resolved_arms = Vec::new();
+    for arm in &manifest.arms {
+        let tip = resolve("arms[].tcp_default", Some(&arm.tcp_default)).ok_or_else(|| {
+            err(format!(
+                "catalog `{}`: arm `{}` tips at `{}`, which is not a link",
+                entry.id, arm.name, arm.tcp_default
+            ))
+        })?;
+        let flange = arm
+            .flange_frame
+            .as_deref()
+            .and_then(|f| resolve("arms[].flange_frame", Some(f)));
+        resolved_arms.push((arm.name.clone(), tip, flange, arm.joints.clone()));
+    }
     model.tcp_link = tcp;
     model.flange_link = flange;
     model.mount_link = mount;
     model.grasp_links = grasp;
+
+    let mut arms = Vec::new();
+    for (name, tip, flange, joints) in resolved_arms {
+        let tip = model.links[tip].name.clone();
+        let flange = flange.map(|i| model.links[i].name.clone());
+        let joint_refs: Vec<&str> = joints.iter().map(String::as_str).collect();
+        model = model
+            .define_group(
+                &name,
+                &tip,
+                (!joint_refs.is_empty()).then_some(joint_refs.as_slice()),
+                flange.as_deref(),
+            )
+            .map_err(|e| err(format!("catalog `{}`: arm `{name}`: {e}", entry.id)))?;
+        arms.push(CatalogArm {
+            name,
+            tip,
+            joints,
+            flange,
+        });
+    }
 
     let link_name = |i: usize| model.links[i].name.clone();
     let grasp_names = model.grasp_links.iter().map(|&i| link_name(i)).collect();
@@ -197,6 +235,7 @@ pub fn from_catalog(
     model.source = RobotSource::Catalog {
         id: entry.id,
         revision: sha,
+        arms,
         tcp: tcp.map(link_name),
         flange: flange.map(link_name),
         mount: mount.map(link_name),
@@ -345,9 +384,19 @@ struct ManifestBits {
     /// Grasp-surface frames a gripper/hand package declares — the
     /// fingertips a grasp is meant to happen between.
     grasp_frames: Vec<String>,
+    /// The arms of a dual-arm package (`frames.arms[]`).
+    arms: Vec<ManifestArm>,
     /// Maker / product / category / numeric specs — what a bill of
     /// materials names the package by.
     meta: CatalogMeta,
+}
+
+/// One entry of `frames.arms[]`.
+struct ManifestArm {
+    name: String,
+    tcp_default: String,
+    flange_frame: Option<String>,
+    joints: Vec<String>,
 }
 
 fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
@@ -403,6 +452,37 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             .flatten()
             .unwrap_or_default()
     };
+    // `frames.arms[]`: an arm without a name or a TCP is not an arm.
+    let mut arms = Vec::new();
+    if let Ok(list) = manifest
+        .get_item("frames")
+        .and_then(|frames| frames.get_item("arms"))
+    {
+        if let Ok(iter) = list.try_iter() {
+            for item in iter.flatten() {
+                let text = |key: &str| -> Option<String> {
+                    item.get_item(key)
+                        .ok()
+                        .and_then(|v| v.extract::<Option<String>>().ok())
+                        .flatten()
+                };
+                let (Some(name), Some(tcp_default)) = (text("name"), text("tcp_default")) else {
+                    continue;
+                };
+                arms.push(ManifestArm {
+                    name,
+                    tcp_default,
+                    flange_frame: text("flange_frame"),
+                    joints: item
+                        .get_item("joints")
+                        .ok()
+                        .and_then(|v| v.extract::<Option<Vec<String>>>().ok())
+                        .flatten()
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
     Ok(ManifestBits {
         tcp_default: frame("tcp_default"),
         flange_frame: frame("flange_frame"),
@@ -410,6 +490,7 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         camera_frames: frame_list("camera_frames"),
         lidar_frames: frame_list("lidar_frames"),
         grasp_frames: frame_list("grasp_frames"),
+        arms,
         meta: CatalogMeta {
             manufacturer: text_at(&["manufacturer", "name"]),
             product: text_at(&["name"]),

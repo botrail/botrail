@@ -11,4 +11,8 @@ pos_error: number,
 /**
  * Remaining orientation error (rad).
  */
-rot_error: number, };
+rot_error: number, 
+/**
+ * The arm the solve spent, when the robot has several.
+ */
+group?: string | null, };

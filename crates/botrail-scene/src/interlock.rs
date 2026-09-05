@@ -184,6 +184,7 @@ fn condition_text(c: &Condition, after: Option<&Step>) -> String {
             }
         }
         Condition::RobotDone { robot } => format!("IDLE({robot})"),
+        Condition::GroupDone { robot, group } => format!("IDLE({robot}/{group})"),
         Condition::Elapsed { seconds } => format!("T >= {} s", trim_num(*seconds)),
         Condition::Signal { name, value } => {
             if *value {
@@ -232,7 +233,9 @@ fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool)>) {
         | Condition::Rising { name }
         | Condition::Falling { name } => push(out, (name.clone(), false, false)),
         Condition::DeviceDone { device } => push(out, (device.clone(), true, false)),
-        Condition::RobotDone { robot } => push(out, (robot.clone(), false, true)),
+        Condition::RobotDone { robot } | Condition::GroupDone { robot, .. } => {
+            push(out, (robot.clone(), false, true))
+        }
         Condition::All(cs) | Condition::Any(cs) => {
             for c in cs {
                 condition_inputs(c, out);
@@ -292,25 +295,48 @@ fn walk<'a>(
 }
 
 fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
+    // A dual-arm robot's rows say which arm drives: `robot/arm`. A
+    // single-arm robot is just its name.
+    let arm_label = |robot: usize, group: Option<&str>| -> String {
+        let r = &scene.robots()[robot];
+        match group {
+            Some(g) if r.model.groups().len() > 1 => format!("{}/{}", r.name, g),
+            _ => r.name.clone(),
+        }
+    };
     let robot_of_motion = |motion: &str| -> Option<String> {
         scene
             .motions()
             .iter()
             .find(|m| m.name == motion)
-            .and_then(|m| scene.robots().get(m.robot))
-            .map(|r| r.name.clone())
+            .filter(|m| m.robot < scene.robots().len())
+            .map(|m| {
+                let group = m
+                    .group
+                    .and_then(|g| scene.robots()[m.robot].model.groups().into_iter().nth(g))
+                    .map(|g| g.name);
+                arm_label(m.robot, group.as_deref())
+            })
     };
-    let with_robot = |robot: &Option<String>| -> String {
+    let addressed = |robot: &Option<String>| -> Option<usize> {
         match robot {
-            Some(r) => format!(" ({r})"),
-            None => scene
-                .robots()
-                .first()
-                .filter(|_| scene.robots().len() == 1)
-                .map(|r| format!(" ({})", r.name))
+            Some(name) => scene.robot_index(name),
+            None => (scene.robots().len() == 1).then_some(0),
+        }
+    };
+    let with_arm = |robot: &Option<String>, group: Option<&str>| -> String {
+        match addressed(robot) {
+            Some(i) => format!(" ({})", arm_label(i, group)),
+            None => robot
+                .as_ref()
+                .map(|r| format!(" ({r})"))
                 .unwrap_or_default(),
         }
     };
+    // A ramp's arm: the one every target joint belongs to.
+    let ramp_arm =
+        |robot: &Option<String>, joints: &[&str]| scene.ramp_arm(addressed(robot)?, joints);
+    let with_robot = |robot: &Option<String>| with_arm(robot, None);
     let mut out = Vec::new();
     for action in &step.actions {
         match action {
@@ -346,6 +372,8 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                     .iter()
                     .map(|(j, v)| format!("{j} → {}", trim_num(*v)))
                     .collect();
+                let names: Vec<&str> = targets.iter().map(|(j, _)| j.as_str()).collect();
+                let arm = ramp_arm(robot, &names);
                 out.push((
                     OutputKind::Ramp,
                     targets
@@ -353,7 +381,11 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                         .map(|(j, _)| j.clone())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    format!("ramp {}{}", joints.join(", "), with_robot(robot)),
+                    format!(
+                        "ramp {}{}",
+                        joints.join(", "),
+                        with_arm(robot, arm.as_deref())
+                    ),
                 ));
             }
             Action::StartToolpath { robot, toolpath } => out.push((
@@ -361,25 +393,35 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 toolpath.clone(),
                 format!("toolpath {toolpath}{}", with_robot(robot)),
             )),
-            Action::Attach { robot, object, .. } => out.push((
+            Action::Attach {
+                robot,
+                object,
+                group,
+                ..
+            } => out.push((
                 OutputKind::Grasp,
                 object.clone(),
-                format!("attach {object}{}", with_robot(robot)),
+                format!("attach {object}{}", with_arm(robot, group.as_deref())),
             )),
-            Action::Track { robot, object, .. } => out.push((
+            Action::Track {
+                robot,
+                object,
+                group,
+                ..
+            } => out.push((
                 OutputKind::Grasp,
                 object.clone(),
-                format!("track {object}{}", with_robot(robot)),
+                format!("track {object}{}", with_arm(robot, group.as_deref())),
             )),
             Action::Detach { object } => out.push((
                 OutputKind::Release,
                 object.clone(),
                 format!("detach {object}"),
             )),
-            Action::Untrack { robot } => out.push((
+            Action::Untrack { robot, group } => out.push((
                 OutputKind::Release,
                 robot.clone().unwrap_or_default(),
-                format!("untrack{}", with_robot(robot)),
+                format!("untrack{}", with_arm(robot, group.as_deref())),
             )),
         }
     }
@@ -870,5 +912,69 @@ mod tests {
             scene.interlock_table(Some(&["nope"])).unwrap_err(),
             InterlockError::UnknownSequence("nope".to_string())
         );
+    }
+
+    #[test]
+    fn a_dual_arm_robot_names_the_arm_on_its_rows() {
+        use crate::motion::{Segment, SegmentKind};
+        let urdf = include_str!("../../../examples/assets/dual_arm_test.urdf");
+        let mut scene = Scene::new(Arc::new(RobotModel::from_urdf_str(urdf).unwrap()));
+        let robot = scene.robots()[0].name.clone();
+        scene
+            .add_segment_in_group(
+                0,
+                Some("left"),
+                "left_reach",
+                Segment {
+                    kind: SegmentKind::Joint,
+                    goal_positions: scene.joint_positions().to_vec(),
+                    constraints: vec![],
+                },
+            )
+            .unwrap();
+        scene.set_sequences(vec![Sequence {
+            name: "kit".into(),
+            steps: vec![
+                step(
+                    "reach",
+                    vec![
+                        Action::StartMotion {
+                            motion: "left_reach".into(),
+                        },
+                        Action::StartRamp {
+                            robot: None,
+                            targets: vec![("right_finger".into(), 0.5)],
+                            duration: 0.2,
+                        },
+                    ],
+                    Condition::GroupDone {
+                        robot: robot.clone(),
+                        group: "left".into(),
+                    },
+                ),
+                step(
+                    "grip",
+                    vec![Action::Attach {
+                        robot: None,
+                        object: "part".into(),
+                        link: None,
+                        touch_links: None,
+                        group: Some("right".into()),
+                    }],
+                    Condition::Immediately,
+                ),
+            ],
+        }]);
+        let md = scene.interlock_table(None).unwrap().to_markdown();
+        assert!(
+            md.contains(&format!("motion left_reach ({robot}/left)")),
+            "{md}"
+        );
+        assert!(
+            md.contains(&format!("ramp right_finger → 0.5 ({robot}/right)")),
+            "{md}"
+        );
+        assert!(md.contains(&format!("attach part ({robot}/right)")), "{md}");
+        assert!(md.contains(&format!("IDLE({robot}/left)")), "{md}");
     }
 }

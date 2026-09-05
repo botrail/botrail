@@ -351,7 +351,7 @@ impl<'a> Pou<'a> {
                     started.join(" AND ")
                 }
             }
-            Condition::RobotDone { robot } => {
+            Condition::RobotDone { robot } | Condition::GroupDone { robot, .. } => {
                 if self.remote_done.contains(robot) {
                     self.var(
                         robot,
@@ -539,7 +539,7 @@ impl<'a> Pou<'a> {
                         st_string(object)
                     ));
                 }
-                Action::Untrack { robot } => {
+                Action::Untrack { robot, .. } => {
                     let robot = self.robot_name(robot);
                     let inst = self.instance(
                         format!("{}_untrack", ident(&robot)),

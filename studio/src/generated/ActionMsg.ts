@@ -6,4 +6,16 @@ import type { RampTargetMsg } from "./RampTargetMsg";
  * Robot-addressed actions carry `robot` — the instance name, or `None`
  * for the scene's sole robot (ambiguous, and rejected, with several).
  */
-export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_toolpath", robot: string | null, toolpath: string, } | { "type": "start_ramp", robot: string | null, targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", robot: string | null, object: string, link: string | null, touch_links: Array<string> | null, } | { "type": "detach", object: string, } | { "type": "track", robot: string | null, object: string, link: string | null, } | { "type": "untrack", robot: string | null, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };
+export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_toolpath", robot: string | null, toolpath: string, } | { "type": "start_ramp", robot: string | null, targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", robot: string | null, object: string, link: string | null, touch_links: Array<string> | null, 
+/**
+ * The arm that grasps (a dual-arm robot); `link` defaults to its tip.
+ */
+group?: string | null, } | { "type": "detach", object: string, } | { "type": "track", robot: string | null, object: string, link: string | null, 
+/**
+ * The arm that follows (a dual-arm robot).
+ */
+group?: string | null, } | { "type": "untrack", robot: string | null, 
+/**
+ * The arm whose track to release (a robot tracking with both).
+ */
+group?: string | null, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };

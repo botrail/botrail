@@ -114,6 +114,7 @@ nav:
       - Pick from a moving belt: tutorials/sequence-cell.md
       - Verify the cell in CI: tutorials/verify-in-ci.md
       - Two arms, one belt: tutorials/two-robots.md
+      - Two arms, one robot: tutorials/dual-arm.md
       - Parameter sweeps: tutorials/parameter-sweep.md
       - Export and replay USD: tutorials/replay-usd.md
       - Hand over the cell: tutorials/hand-over.md

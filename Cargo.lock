@@ -2086,9 +2086,9 @@ dependencies = [
 
 [[package]]
 name = "xurdf"
-version = "0.6.4"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b731efdde9a66f73ac0a3b88c4083464b0d5c3de32187b06c1cddd0ec3239fe"
+checksum = "7e4430151f398012a180d26276d6c88ccce115c026ce594cb54188f4579b223b"
 dependencies = [
  "anyhow",
  "indexmap",

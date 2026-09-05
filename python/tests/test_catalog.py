@@ -19,6 +19,9 @@ ARM_R2 = "acme/arm/mini/r2"
 MAXI_ID = "acme/arm/maxi/r1"
 COUPLING_ID = "acme/coupling/plate/r1"
 LOCKED_ID = "acme/arm/locked/r1"
+DUAL_ID = "acme/pair/dual/r1"
+DUAL_URDF = (Path(__file__).resolve().parents[2] / "examples" / "assets" / "dual_arm_test.urdf").read_text()
+
 SHA = "0123abcd0123abcd0123abcd0123abcd0123abcd"
 
 ARM_URDF = """
@@ -141,6 +144,28 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
         "recipe_only",
         {"manifest.yaml": _manifest(LOCKED_ID, distribution="recipe_only")},
         {"urdf": None, "usd": None},
+    )
+    # A dual-arm product: the manifest names its arms, botrail reads them
+    # as planning groups.
+    add(
+        DUAL_ID,
+        "public",
+        {
+            "manifest.yaml": (
+                f"schema_version: '0.1'\nid: {DUAL_ID}\ndistribution: public\n"
+                "name: Pair\nmanufacturer:\n  name: ACME Robotics\ncategory: manipulator.dual_arm\n"
+                "specs:\n  dof: 8\n  arm_count: 2\n  payload_kg: 2.0\n"
+                "frames:\n  base_frame: body\n  arms:\n"
+                "    - name: left\n      base_frame: left_base\n      flange_frame: left_hand\n"
+                "      tcp_default: left_hand\n"
+                "      joints: [left_shoulder, left_elbow, left_wrist, left_finger]\n"
+                "    - name: right\n      base_frame: right_base\n      flange_frame: right_hand\n"
+                "      tcp_default: right_hand\n"
+                "      joints: [right_shoulder, right_elbow, right_wrist, right_finger]\n"
+            ),
+            "urdf/model.urdf": DUAL_URDF,
+        },
+        {"urdf": "urdf/model.urdf", "usd": None},
     )
     (repo / "index.json").write_text(
         json.dumps({"schema_version": "0.1", "generated_at": "2026-08-05", "products": products})
@@ -341,4 +366,36 @@ def test_catalog_identity_reaches_the_bom_and_survives_the_project(
     assert 'scene.set_part("mini", kind="robot", description="handling arm", price=1500000)' in (
         reloaded.generate_python()
     )
+
+
+def test_a_dual_arm_package_loads_with_its_arms_as_groups(
+    catalog: dict, tmp_path: Path
+) -> None:
+    """`frames.arms[]` becomes the robot's planning groups — declared, not
+    derived, so the names are the manifest's and the finger rides with its
+    arm — and they survive the project and the generated script."""
+    pair = bt.Robot.from_catalog("pair")
+    assert pair.groups == ["left", "right"]
+    assert pair.group("left").joints == ["left_shoulder", "left_elbow", "left_wrist", "left_finger"]
+    assert pair.group("left").tip == "left_hand"
+    assert pair.group("right").flange == "right_hand"
+    assert not pair.group("left").derived
+    with pytest.raises(ValueError, match="several arms"):
+        _ = pair.tcp_link
+
+    scene = bt.Scene(pair)
+    scene.add_segment("reach", goal=scene.joint_positions, group="right")
+    path = tmp_path / "pair.botrail"
+    scene.save_project(path)
+    loaded = bt.Scene.load_project(path)
+    assert loaded.robot.groups == ["left", "right"]
+    assert loaded.robot.group("right").joints == pair.group("right").joints
+    src = scene.generate_python()
+    assert 'from_catalog("acme/pair/dual/r1"' in src and 'group="right"' in src
+    ns: dict = {}
+    exec(compile(src.replace("bt.studio(scene)", ""), "<generated>", "exec"), ns)
+    assert ns["scene"].robot.groups == ["left", "right"]
+    # The BOM line carries the arm count the manifest quoted.
+    row = next(r for r in scene.bom().rows if DUAL_ID in str(r.get("catalog", "")) or "pair" in r["names"][0])
+    assert row["attributes"].get("arm_count") == 2
 

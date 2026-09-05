@@ -175,6 +175,26 @@ pub struct RobotDescMsg {
     pub joints: Vec<JointMsg>,
     /// Suggested end-effector link for the TCP gizmo (deepest leaf link).
     pub tcp_link: Option<String>,
+    /// The planning groups — the arms. One for a single-arm robot (its
+    /// whole DOF, tipped at `tcp_link`); one per arm for a dual-arm robot,
+    /// each with its own tip. What `group` on a client message names.
+    #[serde(default)]
+    pub groups: Vec<GroupMsg>,
+}
+
+/// One planning group (an arm) of a robot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct GroupMsg {
+    pub name: String,
+    /// Robot-local DOF indices the group drives, ascending.
+    pub joints: Vec<usize>,
+    /// The link a motion of this group places (its TCP).
+    pub tip_link: String,
+    /// The link the group's chain hangs off.
+    pub base_link: String,
+    /// The arm's tool-mounting face, when declared.
+    pub flange_link: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -284,6 +304,9 @@ pub struct IkStatusMsg {
     pub pos_error: f64,
     /// Remaining orientation error (rad).
     pub rot_error: f64,
+    /// The arm the solve spent, when the robot has several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Per-robot slice of a `state` message.
@@ -553,6 +576,10 @@ pub struct MotionMsg {
     /// Owning robot instance name; `None` means the first robot.
     #[serde(default)]
     pub robot: Option<String>,
+    /// The planning group (an arm of the owner) the motion drives; `None`
+    /// leaves it to the robot (its sole group, else every joint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub segments: Vec<SegmentMsg>,
 }
 
@@ -700,7 +727,20 @@ pub enum SensorWatchMsg {
     Robots {
         names: Vec<String>,
     },
+    /// Only the named arms' links trip it.
+    Groups {
+        groups: Vec<GroupRefMsg>,
+    },
     All,
+}
+
+/// One arm of one robot, by name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GroupRefMsg {
+    pub robot: String,
+    pub group: String,
 }
 
 /// A camera: a named viewpoint with pinhole optics. Presentation only —
@@ -1101,6 +1141,9 @@ pub enum ActionMsg {
         link: Option<String>,
         #[serde(default)]
         touch_links: Option<Vec<String>>,
+        /// The arm that grasps (a dual-arm robot); `link` defaults to its tip.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
     /// Release an obstacle where it is (instantaneous; the carrier is
     /// looked up from the attachment).
@@ -1113,11 +1156,17 @@ pub enum ActionMsg {
         object: String,
         #[serde(default)]
         link: Option<String>,
+        /// The arm that follows (a dual-arm robot).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
     /// Stop following the tracked part (instantaneous).
     Untrack {
         #[serde(default)]
         robot: Option<String>,
+        /// The arm whose track to release (a robot tracking with both).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
     /// Write an internal signal.
     Set { signal: String, value: bool },
@@ -1140,6 +1189,8 @@ pub enum ConditionMsg {
     /// The named robot has no motion/ramp in flight (interlock building
     /// block).
     RobotDone { robot: String },
+    /// The named arm of the named robot has no motion/ramp in flight.
+    GroupDone { robot: String, group: String },
     /// On-delay timer from step entry (TON).
     Elapsed { seconds: f64 },
     /// Level test of a signal.
@@ -1173,6 +1224,10 @@ pub struct StepSpanMsg {
     /// Flat-step index within `sequence` (rollout's pre-order flatten).
     #[serde(default)]
     pub step: usize,
+    /// For a robot move span: the arm (planning group) the move drove,
+    /// when the robot has several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// One resolved selection divergence: which arm `sequence` took at the
@@ -1461,6 +1516,10 @@ pub enum ClientMessage {
         robot: Option<String>,
         link: String,
         pose: PoseMsg,
+        /// The arm to solve with (a dual-arm robot); `None` infers it
+        /// from `link`.
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Places the robot's root link at `pose` (world frame).
     SetRobotBasePose {
@@ -1516,6 +1575,10 @@ pub enum ClientMessage {
         link: Option<String>,
         #[serde(default)]
         touch_links: Option<Vec<String>>,
+        /// The arm that grasps (a dual-arm robot); `link` then defaults
+        /// to its tip.
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Detach an obstacle; its pose freezes where the robot holds it.
     DetachObstacle {
@@ -1528,6 +1591,10 @@ pub enum ClientMessage {
         #[serde(default)]
         robot: Option<String>,
         goal_positions: Vec<f64>,
+        /// The arm to plan (a dual-arm robot); `None` is the robot's sole
+        /// group, or every joint.
+        #[serde(default)]
+        group: Option<String>,
     },
     /// Append a segment (creates the motion when missing).
     AddSegment {
@@ -1537,6 +1604,10 @@ pub enum ClientMessage {
         #[serde(default)]
         robot: Option<String>,
         segment: SegmentMsg,
+        /// The arm a created motion drives (an existing motion keeps
+        /// its arm).
+        #[serde(default)]
+        group: Option<String>,
     },
     RemoveSegment {
         motion: String,
@@ -1757,6 +1828,17 @@ impl SceneDescriptionMsg {
                         }),
                     })
                     .collect();
+                let groups = model
+                    .groups()
+                    .into_iter()
+                    .map(|g| GroupMsg {
+                        name: g.name,
+                        joints: g.joints,
+                        tip_link: model.links[g.tip].name.clone(),
+                        base_link: model.links[g.base].name.clone(),
+                        flange_link: g.flange.map(|i| model.links[i].name.clone()),
+                    })
+                    .collect();
                 RobotDescMsg {
                     name: sr.name.clone(),
                     usd_asset: usd_asset(index),
@@ -1764,6 +1846,7 @@ impl SceneDescriptionMsg {
                     links,
                     joints,
                     tcp_link: Some(model.links[model.default_tcp_link()].name.clone()),
+                    groups,
                 }
             })
             .collect();
@@ -1847,20 +1930,40 @@ pub fn motion_msg(scene: &Scene, motion: &Motion) -> MotionMsg {
         // `None` for the first robot keeps single-robot wire/projects
         // byte-identical to the pre-multi-robot format.
         robot: (motion.robot != 0).then(|| scene.robots()[motion.robot].name.clone()),
+        group: motion.group.and_then(|g| {
+            scene.robots()[motion.robot]
+                .model
+                .groups()
+                .into_iter()
+                .nth(g)
+                .map(|g| g.name)
+        }),
         segments: motion.segments.iter().map(segment_msg).collect(),
     }
 }
 
 /// Converts a wire motion back into a scene motion. An unknown owning robot
-/// name is rejected (`Err` carries the name).
+/// or group is rejected (`Err` says which).
 pub fn motion_from_msg(scene: &Scene, msg: &MotionMsg) -> Result<Motion, String> {
     let robot = match &msg.robot {
-        Some(name) => scene.robot_index(name).ok_or_else(|| name.clone())?,
+        Some(name) => scene
+            .robot_index(name)
+            .ok_or_else(|| format!("unknown robot `{name}`"))?,
         None => 0,
+    };
+    let group = match &msg.group {
+        Some(name) => Some(
+            scene.robots()[robot]
+                .model
+                .group_index(name)
+                .ok_or_else(|| format!("unknown group `{name}`"))?,
+        ),
+        None => None,
     };
     Ok(Motion {
         name: msg.name.clone(),
         robot,
+        group,
         segments: msg.segments.iter().map(segment_from_msg).collect(),
     })
 }
@@ -1912,11 +2015,13 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             object,
             link,
             touch_links,
+            group,
         } => ActionMsg::Attach {
             robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
             touch_links: touch_links.clone(),
+            group: group.clone(),
         },
         Action::Detach { object } => ActionMsg::Detach {
             object: object.clone(),
@@ -1925,13 +2030,16 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             robot,
             object,
             link,
+            group,
         } => ActionMsg::Track {
             robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
+            group: group.clone(),
         },
-        Action::Untrack { robot } => ActionMsg::Untrack {
+        Action::Untrack { robot, group } => ActionMsg::Untrack {
             robot: robot.clone(),
+            group: group.clone(),
         },
         Action::Set { signal, value } => ActionMsg::Set {
             signal: signal.clone(),
@@ -1983,11 +2091,13 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             object,
             link,
             touch_links,
+            group,
         } => Action::Attach {
             robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
             touch_links: touch_links.clone(),
+            group: group.clone(),
         },
         ActionMsg::Detach { object } => Action::Detach {
             object: object.clone(),
@@ -1996,13 +2106,16 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             robot,
             object,
             link,
+            group,
         } => Action::Track {
             robot: robot.clone(),
             object: object.clone(),
             link: link.clone(),
+            group: group.clone(),
         },
-        ActionMsg::Untrack { robot } => Action::Untrack {
+        ActionMsg::Untrack { robot, group } => Action::Untrack {
             robot: robot.clone(),
+            group: group.clone(),
         },
         ActionMsg::Set { signal, value } => Action::Set {
             signal: signal.clone(),
@@ -2032,6 +2145,10 @@ pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
         Condition::RobotDone { robot } => ConditionMsg::RobotDone {
             robot: robot.clone(),
         },
+        Condition::GroupDone { robot, group } => ConditionMsg::GroupDone {
+            robot: robot.clone(),
+            group: group.clone(),
+        },
         Condition::Elapsed { seconds } => ConditionMsg::Elapsed { seconds: *seconds },
         Condition::Signal { name, value } => ConditionMsg::Signal {
             name: name.clone(),
@@ -2057,6 +2174,10 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
         ConditionMsg::Done => Condition::Done,
         ConditionMsg::RobotDone { robot } => Condition::RobotDone {
             robot: robot.clone(),
+        },
+        ConditionMsg::GroupDone { robot, group } => Condition::GroupDone {
+            robot: robot.clone(),
+            group: group.clone(),
         },
         ConditionMsg::Elapsed { seconds } => Condition::Elapsed { seconds: *seconds },
         ConditionMsg::Signal { name, value } => Condition::Signal {
@@ -2182,6 +2303,15 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
             SensorWatch::Robots(names) => SensorWatchMsg::Robots {
                 names: names.clone(),
             },
+            SensorWatch::Groups(groups) => SensorWatchMsg::Groups {
+                groups: groups
+                    .iter()
+                    .map(|(robot, group)| GroupRefMsg {
+                        robot: robot.clone(),
+                        group: group.clone(),
+                    })
+                    .collect(),
+            },
             SensorWatch::All => SensorWatchMsg::All,
         },
     }
@@ -2226,6 +2356,12 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
             SensorWatchMsg::Objects { names } => SensorWatch::Objects(names.clone()),
             SensorWatchMsg::AllObjects => SensorWatch::AllObjects,
             SensorWatchMsg::Robots { names } => SensorWatch::Robots(names.clone()),
+            SensorWatchMsg::Groups { groups } => SensorWatch::Groups(
+                groups
+                    .iter()
+                    .map(|g| (g.robot.clone(), g.group.clone()))
+                    .collect(),
+            ),
             SensorWatchMsg::Robot => SensorWatch::Robot,
             SensorWatchMsg::All => SensorWatch::All,
         },
@@ -3205,6 +3341,57 @@ mod tests {
         assert_eq!(robot["joints"][0]["joint_type"], "revolute");
         assert_eq!(robot["joints"][0]["q_index"], 0);
         assert_eq!(robot["tcp_link"], "tip");
+        // A single-arm robot is one group over its whole DOF, tipped at
+        // the gizmo's default link.
+        assert_eq!(robot["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(robot["groups"][0]["name"], "arm");
+        assert_eq!(robot["groups"][0]["joints"], serde_json::json!([0]));
+        assert_eq!(robot["groups"][0]["tip_link"], "tip");
+        assert_eq!(robot["groups"][0]["flange_link"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn dual_arm_description_names_both_arms() {
+        let urdf = include_str!("../../../examples/assets/dual_arm_test.urdf");
+        let scene = Scene::new(Arc::new(RobotModel::from_urdf_str(urdf).unwrap()));
+        let desc =
+            SceneDescriptionMsg::from_scene(&scene, |_| (String::new(), String::new()), |_| None);
+        let robot = &desc.robots[0];
+        let names: Vec<&str> = robot.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["left", "right"]);
+        assert_eq!(robot.groups[0].tip_link, "left_hand");
+        assert_eq!(robot.groups[1].tip_link, "right_hand");
+        assert_eq!(robot.groups[0].base_link, "left_base");
+        // Each arm drives its own joints; BFS interleaves the arms in q.
+        let all: Vec<usize> = robot
+            .groups
+            .iter()
+            .flat_map(|g| g.joints.iter().copied())
+            .collect();
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len());
+        assert_eq!(
+            sorted.len(),
+            robot.joints.iter().filter(|j| j.q_index.is_some()).count()
+        );
+        // The messages that name an arm default to none of them.
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"set_tcp_target","link":"left_hand","group":"left","pose":{"position":[0,0.3,0.1],"quaternion":[0,0,0,1]}}"#,
+        )
+        .unwrap();
+        let ClientMessage::SetTcpTarget { group, .. } = msg else {
+            panic!("expected set_tcp_target");
+        };
+        assert_eq!(group.as_deref(), Some("left"));
+        let msg: ClientMessage =
+            serde_json::from_str(r#"{"type":"add_segment","motion":"m","segment":{"kind":"joint","goal_positions":[0.0],"constraints":[]}}"#)
+                .unwrap();
+        let ClientMessage::AddSegment { group, .. } = msg else {
+            panic!("expected add_segment");
+        };
+        assert_eq!(group, None);
     }
 
     #[test]
@@ -3221,6 +3408,7 @@ mod tests {
                 end: 0.5,
                 sequence: "a".into(),
                 step: 3,
+                group: None,
             }],
             signals: vec![],
             branches: vec![BranchTakenMsg {
@@ -3312,6 +3500,7 @@ mod tests {
             converged: true,
             pos_error: 0.0,
             rot_error: 0.0,
+            group: None,
         };
         let msg = state_message_with_ik(&scene, Some((1, status)));
         let ServerMessage::State { robots, .. } = &msg else {
@@ -3342,7 +3531,8 @@ mod tests {
             msg,
             ClientMessage::PlanRequest {
                 robot: None,
-                goal_positions: vec![0.5]
+                goal_positions: vec![0.5],
+                group: None,
             }
         );
         // ...and the addressed form carries the instance name.
@@ -3438,6 +3628,7 @@ mod tests {
                 robot: None,
                 link: None,
                 touch_links: None,
+                group: None,
             }
         );
         let msg: ClientMessage = serde_json::from_str(
@@ -3451,6 +3642,7 @@ mod tests {
                 robot: None,
                 link: Some("tip".into()),
                 touch_links: Some(vec!["tip".into()]),
+                group: None,
             }
         );
         let msg: ClientMessage =

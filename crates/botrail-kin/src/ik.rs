@@ -53,6 +53,12 @@ pub struct IkOptions {
     /// is exact, so the secondary objective cannot disturb the task even
     /// near singularities. `0` disables.
     pub null_space_gain: f64,
+    /// Per-DOF mask of the joints the solve may spend, `None` for every
+    /// joint on the chain to the target. A planning group's mask: the
+    /// chain is intersected with it, so a waist shared by two arms stays
+    /// where the seed put it when one arm is solved. Must have one entry
+    /// per DOF.
+    pub joint_mask: Option<Vec<bool>>,
 }
 
 impl Default for IkOptions {
@@ -67,6 +73,7 @@ impl Default for IkOptions {
             max_step: 0.5,
             restarts: 4,
             null_space_gain: 0.1,
+            joint_mask: None,
         }
     }
 }
@@ -167,6 +174,18 @@ fn clamp_to_limits(model: &RobotModel, q: &mut [f64]) {
 /// centering pull (its Jacobian column is zero, so the whole column would
 /// otherwise sit in the null space and drift to mid-range), no restart
 /// re-seed, no singularity kick.
+/// The columns a solve may spend: the chain to `link`, intersected with
+/// the options' joint mask when one is given.
+fn solve_columns(model: &RobotModel, link: usize, options: &IkOptions) -> Vec<bool> {
+    let mut mask = chain_columns(model, link);
+    if let Some(allowed) = &options.joint_mask {
+        for (on, &ok) in mask.iter_mut().zip(allowed) {
+            *on = *on && ok;
+        }
+    }
+    mask
+}
+
 fn chain_columns(model: &RobotModel, link: usize) -> Vec<bool> {
     let mut mask = vec![false; model.dof()];
     let mut li = link;
@@ -313,6 +332,14 @@ pub fn solve_ik(
             got: seed.len(),
         });
     }
+    if let Some(mask) = &options.joint_mask {
+        if mask.len() != model.dof() {
+            return Err(KinError::WrongDof {
+                expected: model.dof(),
+                got: mask.len(),
+            });
+        }
+    }
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut best = solve_attempt(model, link, target, seed, options, &mut rng)?;
     if best.converged {
@@ -320,7 +347,7 @@ pub fn solve_ik(
     }
     let score = |r: &IkResult| r.pos_error + options.orientation_weight * r.rot_error;
     let (lower, upper) = model.sampling_bounds();
-    let mask = chain_columns(model, link);
+    let mask = solve_columns(model, link, options);
     for restart in 0..options.restarts {
         let seed: Vec<f64> = lower
             .iter()
@@ -368,7 +395,7 @@ fn solve_attempt(
         IkMode::Axis => 5,
     };
     let lambda2 = options.damping * options.damping;
-    let mask = chain_columns(model, link);
+    let mask = solve_columns(model, link, options);
 
     let mut q = seed.to_vec();
     clamp_to_limits(model, &mut q);
@@ -417,7 +444,16 @@ fn solve_attempt(
             break;
         }
 
-        let jac_full = jacobian(model, &poses, link);
+        let mut jac_full = jacobian(model, &poses, link);
+        // A masked-out joint on the chain (a waist the group leaves alone)
+        // contributes no column: the step cannot spend it.
+        if options.joint_mask.is_some() {
+            for (col, &on) in mask.iter().enumerate() {
+                if !on {
+                    jac_full.column_mut(col).fill(0.0);
+                }
+            }
+        }
         let mut e = DVector::zeros(task_dim);
         e.fixed_rows_mut::<3>(0).copy_from(&e_pos);
         let jac = match options.mode {
@@ -487,6 +523,15 @@ fn solve_attempt(
         }
         if converged && ns_step < 1e-6 {
             break;
+        }
+        // A masked-out joint does not move, not even by the rounding the
+        // projector leaves behind: the other arm's joints stay bit-exact.
+        if options.joint_mask.is_some() {
+            for (d, &on) in dq.iter_mut().zip(&mask) {
+                if !on {
+                    *d = 0.0;
+                }
+            }
         }
         let step = dq.norm();
         if step > options.max_step {

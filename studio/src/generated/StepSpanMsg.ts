@@ -15,4 +15,9 @@ sequence: string,
 /**
  * Flat-step index within `sequence` (rollout's pre-order flatten).
  */
-step: number, };
+step: number, 
+/**
+ * For a robot move span: the arm (planning group) the move drove,
+ * when the robot has several.
+ */
+group?: string | null, };

@@ -556,6 +556,7 @@ mod tests {
             Isometry3::identity(),
             None,
             None,
+            None,
         )
         .unwrap()
     }

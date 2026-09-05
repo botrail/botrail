@@ -5,4 +5,9 @@ export type MotionMsg = { name: string,
 /**
  * Owning robot instance name; `None` means the first robot.
  */
-robot: string | null, segments: Array<SegmentMsg>, };
+robot: string | null, 
+/**
+ * The planning group (an arm of the owner) the motion drives; `None`
+ * leaves it to the robot (its sole group, else every joint).
+ */
+group?: string | null, segments: Array<SegmentMsg>, };

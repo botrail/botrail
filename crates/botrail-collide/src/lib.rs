@@ -437,6 +437,27 @@ pub fn robot_intersects(
         })
 }
 
+/// [`robot_intersects`] restricted to `links` — the links of one arm.
+pub fn links_intersect(
+    robot: &RobotCollider,
+    link_poses: &[Isometry3<f64>],
+    links: &[usize],
+    collider: &ObstacleCollider,
+    pose: &Isometry3<f64>,
+) -> bool {
+    let p = to_parry_pose(pose);
+    links.iter().any(|&link| {
+        let parts = &robot.links[link];
+        !parts.is_empty()
+            && parts_intersect(
+                &to_parry_pose(&link_poses[link]),
+                parts,
+                &p,
+                &collider.parts,
+            )
+    })
+}
+
 /// Local-frame AABB enclosing every part; `None` when there are none.
 /// Cached at build time — the broad phase transforms it per query instead
 /// of re-measuring shapes.

@@ -189,10 +189,18 @@ impl Robot {
 
     /// Default end-effector link name: the TCP declared by a tool
     /// attachment or catalog manifest when present, otherwise the deepest
-    /// leaf in the kinematic tree.
+    /// leaf in the kinematic tree. A robot declared to have several arms
+    /// has no single TCP — ask `group(name).tip`.
     #[getter]
-    fn tcp_link(&self) -> String {
-        self.inner.links[self.inner.default_tcp_link()].name.clone()
+    fn tcp_link(&self) -> PyResult<String> {
+        let groups = self.inner.groups();
+        if groups.len() > 1 && !self.inner.groups_are_derived() {
+            return Err(PyValueError::new_err(format!(
+                "the robot has several arms ({:?}); use group(name).tip",
+                groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>()
+            )));
+        }
+        Ok(self.inner.links[self.inner.default_tcp_link()].name.clone())
     }
 
     /// Declared tool-mounting face (catalog `frames.flange_frame`; after
@@ -228,6 +236,149 @@ impl Robot {
             .collect()
     }
 
+    /// The planning groups — the arms — by name: what every `group=`
+    /// argument addresses. A single-arm robot has one (`"arm"`, every
+    /// joint, tipped at `tcp_link`); a dual-arm robot has one per arm.
+    /// Declared by the catalog manifest or `define_group`, else read off
+    /// the kinematic tree: each moving branch of a body is a group, tipped
+    /// at the branch's own tool mount rather than at a fingertip.
+    #[getter]
+    fn groups(&self) -> Vec<String> {
+        self.inner.groups().into_iter().map(|g| g.name).collect()
+    }
+
+    /// One planning group: its joints, tip (TCP) link, flange and base.
+    fn group(&self, name: &str) -> PyResult<Group> {
+        let groups = self.inner.groups();
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        let found = groups
+            .iter()
+            .find(|g| g.name == name)
+            .cloned()
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("unknown group `{name}`; groups: {names:?}"))
+            })?;
+        Ok(Group::from_model(&self.inner, found))
+    }
+
+    /// Declares (or redeclares, by name) a planning group and returns the
+    /// robot carrying it; this robot is not modified. `tip` is the link a
+    /// motion of the group places — an arm's TCP. `joints` names the
+    /// actuated joints it drives; omitted, they are the joints on `tip`'s
+    /// chain minus those of any group tipped above it (a waist declared as
+    /// a group of its own stays out of the arm). `flange` names the arm's
+    /// tool-mounting face, which `attach_tool(..., group=)` uses.
+    ///
+    /// The first declaration replaces the derived groups outright: from
+    /// then on the declaration is the truth, and an arm not declared is
+    /// not a group.
+    ///
+    /// ```python
+    /// robot = robot.define_group("left", tip="left_ee_link",
+    ///                            joints=[f"left_joint{i}" for i in range(1, 8)])
+    /// ```
+    #[pyo3(signature = (name, tip, joints = None, flange = None))]
+    fn define_group(
+        &self,
+        name: &str,
+        tip: &str,
+        joints: Option<Vec<String>>,
+        flange: Option<&str>,
+    ) -> PyResult<Robot> {
+        let joints: Option<Vec<&str>> = joints
+            .as_ref()
+            .map(|list| list.iter().map(String::as_str).collect());
+        Ok(Robot {
+            inner: Arc::new(
+                self.inner
+                    .define_group(name, tip, joints.as_deref(), flange)
+                    .map_err(model_err)?,
+            ),
+        })
+    }
+
+    /// Bolts `part` — a manipulator — onto this robot's link `at` as an
+    /// arm of its own, and returns the composite; neither input is
+    /// modified. The part's root goes on `at` at the offset; `prefix`
+    /// namespaces its link and joint names (required when the names
+    /// collide — two of the same arm). The arm becomes a planning group
+    /// named `group` (the prefix without its trailing `_` by default) with
+    /// the part's TCP and flange, so tools then attach per arm:
+    /// `attach_tool(gripper, group="left")`. See `dual_arm` for the
+    /// two-arm shorthand.
+    #[pyo3(signature = (part, at, offset_position = None, offset_quaternion = None, prefix = None, group = None))]
+    fn mount(
+        &self,
+        part: &Robot,
+        at: &str,
+        offset_position: Option<[f64; 3]>,
+        offset_quaternion: Option<[f64; 4]>,
+        prefix: Option<&str>,
+        group: Option<&str>,
+    ) -> PyResult<Robot> {
+        let offset = pose_from(offset_position.unwrap_or([0.0; 3]), offset_quaternion);
+        Ok(Robot {
+            inner: Arc::new(
+                self.inner
+                    .mount(
+                        &part.inner,
+                        at,
+                        offset,
+                        prefix,
+                        botrail_model::MountRole::Arm,
+                        group,
+                    )
+                    .map_err(model_err)?,
+            ),
+        })
+    }
+
+    /// Two arms on one body, as a single robot with the groups `left` and
+    /// `right` (link and joint names prefixed `left_` / `right_`): the
+    /// dual-arm a single controller drives. `body` is the torso the arms
+    /// bolt to — omitted, a bare frame named after the left arm — and
+    /// `left_mount` / `right_mount` name the body links the arm roots go
+    /// on (the body's root by default) at the given poses. Tools then
+    /// attach per arm: `attach_tool(gripper, group="left")`.
+    ///
+    /// ```python
+    /// ur = bt.Robot.from_catalog("ur5e")
+    /// pair = bt.Robot.dual_arm(ur, ur, left_position=(0, 0.3, 0.8), left_quaternion=QL,
+    ///                          right_position=(0, -0.3, 0.8), right_quaternion=QR)
+    /// pair.groups   # ['left', 'right']
+    /// ```
+    #[staticmethod]
+    #[pyo3(signature = (left, right, left_position = None, left_quaternion = None, right_position = None, right_quaternion = None, body = None, left_mount = None, right_mount = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn dual_arm(
+        left: &Robot,
+        right: &Robot,
+        left_position: Option<[f64; 3]>,
+        left_quaternion: Option<[f64; 4]>,
+        right_position: Option<[f64; 3]>,
+        right_quaternion: Option<[f64; 4]>,
+        body: Option<&Robot>,
+        left_mount: Option<&str>,
+        right_mount: Option<&str>,
+    ) -> PyResult<Robot> {
+        let left_at = pose_from(left_position.unwrap_or([0.0; 3]), left_quaternion);
+        let right_at = pose_from(right_position.unwrap_or([0.0; 3]), right_quaternion);
+        Ok(Robot {
+            inner: Arc::new(
+                RobotModel::dual_arm(
+                    body.map(|b| &*b.inner),
+                    &left.inner,
+                    &right.inner,
+                    left_mount,
+                    left_at,
+                    right_mount,
+                    right_at,
+                )
+                .map_err(model_err)?,
+            ),
+        })
+    }
+
     /// Solves inverse kinematics. With `quaternion=None` only the position
     /// is matched. `link` defaults to the TCP link, `seed` to the neutral
     /// configuration. When the seeded solve does not converge, up to
@@ -236,7 +387,10 @@ impl Robot {
     /// the limits) — the same call always returns the same answer. Pass
     /// `restarts=0` to solve strictly from the given seed. Always returns
     /// the best configuration found; check `result.converged`.
-    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100, restarts = None))]
+    /// `group` names the arm to solve with (its tip is the default `link`);
+    /// the joints of any other arm stay at the seed.
+    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100, restarts = None, group = None))]
+    #[allow(clippy::too_many_arguments)]
     fn ik(
         &self,
         position: [f64; 3],
@@ -245,15 +399,17 @@ impl Robot {
         seed: Option<Vec<f64>>,
         max_iters: usize,
         restarts: Option<usize>,
+        group: Option<&str>,
     ) -> PyResult<IkResult> {
         let (target, mode) = ik_target(position, quaternion);
-        let link_index = resolve_link(&self.inner, link)?;
+        let (group, link_index) = resolve_group_link(&self.inner, group, link)?;
         let seed = seed.unwrap_or_else(|| self.inner.neutral_positions());
         let defaults = botrail_kin::IkOptions::default();
         let options = botrail_kin::IkOptions {
             mode,
             max_iters,
             restarts: restarts.unwrap_or(defaults.restarts),
+            joint_mask: group_joint_mask(&self.inner, group),
             ..defaults
         };
         let result = botrail_kin::solve_ik(&self.inner, link_index, &target, &seed, &options)
@@ -285,7 +441,10 @@ impl Robot {
     /// )
     /// ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (tool, flange = None, mount = None, offset_position = None, offset_quaternion = None, tcp = None, prefix = None))]
+    /// On a dual-arm robot, `group` names the arm the tool goes on: its
+    /// declared flange is the default `flange`, and its TCP becomes the
+    /// tool's. Without it, a `flange` on one of the arms says which.
+    #[pyo3(signature = (tool, flange = None, mount = None, offset_position = None, offset_quaternion = None, tcp = None, prefix = None, group = None))]
     fn attach_tool(
         &self,
         tool: &Robot,
@@ -295,12 +454,13 @@ impl Robot {
         offset_quaternion: Option<[f64; 4]>,
         tcp: Option<&str>,
         prefix: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<Robot> {
         let offset = pose_from(offset_position.unwrap_or([0.0; 3]), offset_quaternion);
         Ok(Robot {
             inner: Arc::new(
                 self.inner
-                    .attach_tool(&tool.inner, flange, mount, offset, tcp, prefix)
+                    .attach_tool(&tool.inner, flange, mount, offset, tcp, prefix, group)
                     .map_err(model_err)?,
             ),
         })
@@ -474,8 +634,18 @@ fn sensor_watch(
     watch: Option<Vec<String>>,
     watch_robot: bool,
     watch_robots: Option<Vec<String>>,
+    watch_groups: Option<Vec<(String, String)>>,
 ) -> botrail_scene::seq::SensorWatch {
     use botrail_scene::seq::SensorWatch;
+    if let Some(groups) = watch_groups {
+        // Named arms combined with anything else has no dedicated
+        // variant; watch everything (the superset) rather than silently
+        // dropping one.
+        return match (watch.as_deref(), watch_robot, watch_robots.as_deref()) {
+            (None | Some([]), false, None | Some([])) => SensorWatch::Groups(groups),
+            _ => SensorWatch::All,
+        };
+    }
     if let Some(robots) = watch_robots {
         // Named robots combined with objects or "any robot" has no
         // dedicated variant; watch everything (the superset) rather than
@@ -652,6 +822,141 @@ fn ik_target(
         None => botrail_kin::IkMode::Position,
     };
     ((&pose).into(), mode)
+}
+
+/// A planning group of a robot — an arm: the joints one planned motion
+/// drives and the link it drives to.
+#[pyclass(frozen, module = "botrail._core")]
+struct Group {
+    name: String,
+    joints: Vec<String>,
+    tip: String,
+    flange: Option<String>,
+    base: String,
+    derived: bool,
+}
+
+impl Group {
+    fn from_model(model: &RobotModel, g: botrail_model::Group) -> Self {
+        Group {
+            name: g.name,
+            joints: g
+                .joints
+                .iter()
+                .map(|&qi| model.joints[model.actuated_joints[qi]].name.clone())
+                .collect(),
+            tip: model.links[g.tip].name.clone(),
+            flange: g.flange.map(|i| model.links[i].name.clone()),
+            base: model.links[g.base].name.clone(),
+            derived: g.derived,
+        }
+    }
+}
+
+#[pymethods]
+impl Group {
+    #[getter]
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    /// The actuated joints the group drives, base to tip.
+    #[getter]
+    fn joints(&self) -> Vec<String> {
+        self.joints.clone()
+    }
+
+    /// The link a motion of the group places (its TCP).
+    #[getter]
+    fn tip(&self) -> String {
+        self.tip.clone()
+    }
+
+    /// The arm's tool-mounting face, when declared.
+    #[getter]
+    fn flange(&self) -> Option<String> {
+        self.flange.clone()
+    }
+
+    /// The link the group's chain hangs off.
+    #[getter]
+    fn base(&self) -> String {
+        self.base.clone()
+    }
+
+    /// Read off the kinematic tree rather than declared.
+    #[getter]
+    fn derived(&self) -> bool {
+        self.derived
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Group(name='{}', joints={}, tip='{}'{})",
+            self.name,
+            self.joints.len(),
+            self.tip,
+            if self.derived { ", derived" } else { "" }
+        )
+    }
+}
+
+/// Resolves `group=` / `link=` against a model: the group index (`None`
+/// for the whole robot) and the link to place. A named group's tip is the
+/// default link; a link alone names the arm it hangs off; neither, on a
+/// robot with one group, is that group and its tip — and on a robot with
+/// several, the whole robot while they are merely derived, an error once
+/// they are declared.
+fn resolve_group_link(
+    model: &RobotModel,
+    group: Option<&str>,
+    link: Option<&str>,
+) -> PyResult<(Option<usize>, usize)> {
+    let groups = model.groups();
+    let names = || groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>();
+    let g = match group {
+        Some(name) => Some(model.group_index(name).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown group `{name}`; groups: {:?}", names()))
+        })?),
+        None => None,
+    };
+    match (g, link) {
+        (Some(g), Some(l)) => Ok((Some(g), resolve_link(model, Some(l))?)),
+        (Some(g), None) => Ok((Some(g), groups[g].tip)),
+        (None, Some(l)) => {
+            let li = resolve_link(model, Some(l))?;
+            let g = if groups.len() == 1 {
+                Some(0)
+            } else {
+                model.group_for_link(li)
+            };
+            Ok((g, li))
+        }
+        (None, None) => {
+            if groups.len() == 1 {
+                Ok((Some(0), groups[0].tip))
+            } else if model.groups_are_derived() {
+                Ok((None, model.default_tcp_link()))
+            } else {
+                Err(PyValueError::new_err(format!(
+                    "the robot has several arms ({:?}); pass group=",
+                    names()
+                )))
+            }
+        }
+    }
+}
+
+/// The IK joint mask of a group index (`None` for the whole robot).
+fn group_joint_mask(model: &RobotModel, group: Option<usize>) -> Option<Vec<bool>> {
+    group
+        .and_then(|g| model.groups().into_iter().nth(g))
+        .map(|g| botrail_scene::motion::group_mask(model.dof(), &g))
+}
+
+/// The names of the joints at `q_indices`.
+fn pick_names(names: &[String], q_indices: &[usize]) -> Vec<String> {
+    q_indices.iter().map(|&qi| names[qi].clone()).collect()
 }
 
 /// Result of an IK solve.
@@ -1462,17 +1767,19 @@ impl Scene {
     /// planning, and in playback) and collides as part of the robot.
     /// `link=None` uses the TCP link; `touch_links=None` allows contact
     /// with the link's subtree (the gripper).
-    #[pyo3(signature = (name, link = None, touch_links = None, robot = None))]
+    /// `group` names the arm: `link=None` is then that arm's tip.
+    #[pyo3(signature = (name, link = None, touch_links = None, robot = None, group = None))]
     fn attach(
         &self,
         name: &str,
         link: Option<&str>,
         touch_links: Option<Vec<String>>,
         robot: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
         self.hub
-            .attach_obstacle_to(index, name, link, touch_links.as_deref())
+            .attach_obstacle_to(index, group, name, link, touch_links.as_deref())
             .map_err(scene_err)
     }
 
@@ -1740,7 +2047,10 @@ impl Scene {
     /// a list of obstacle names (default: every obstacle); pass
     /// `watch_robot=True` to sense robot links too (with `watch=[]` for a
     /// robot-only light curtain).
-    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None, mount = None))]
+    /// `watch_groups=[(robot, group), ...]` watches the named arms only —
+    /// the interlock zone that sees one arm of a dual-arm robot and not
+    /// the other.
+    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None, mount = None, watch_groups = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_zone_sensor(
         &self,
@@ -1752,6 +2062,7 @@ impl Scene {
         watch_robot: bool,
         watch_robots: Option<Vec<String>>,
         mount: Option<String>,
+        watch_groups: Option<Vec<(String, String)>>,
     ) -> PyResult<()> {
         self.hub
             .upsert_sensor(botrail_scene::seq::Sensor {
@@ -1760,7 +2071,7 @@ impl Scene {
                     pose: pose_from(position, quaternion),
                     size: nalgebra::Vector3::new(size[0], size[1], size[2]),
                 },
-                watch: sensor_watch(watch, watch_robot, watch_robots),
+                watch: sensor_watch(watch, watch_robot, watch_robots, watch_groups),
                 mount,
             })
             .map_err(scene_err)
@@ -1768,7 +2079,7 @@ impl Scene {
 
     /// Adds a photoelectric beam sensor between two world points, ON while
     /// the beam is interrupted. Watch semantics as in `add_zone_sensor`.
-    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false, watch_robots = None, mount = None))]
+    #[pyo3(signature = (name, frm, to, radius = 0.005, watch = None, watch_robot = false, watch_robots = None, mount = None, watch_groups = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_beam_sensor(
         &self,
@@ -1780,6 +2091,7 @@ impl Scene {
         watch_robot: bool,
         watch_robots: Option<Vec<String>>,
         mount: Option<String>,
+        watch_groups: Option<Vec<(String, String)>>,
     ) -> PyResult<()> {
         self.hub
             .upsert_sensor(botrail_scene::seq::Sensor {
@@ -1789,7 +2101,7 @@ impl Scene {
                     to: nalgebra::Point3::new(to[0], to[1], to[2]),
                     radius,
                 },
-                watch: sensor_watch(watch, watch_robot, watch_robots),
+                watch: sensor_watch(watch, watch_robot, watch_robots, watch_groups),
                 mount,
             })
             .map_err(scene_err)
@@ -1823,7 +2135,7 @@ impl Scene {
                     detect_range,
                     occlusion,
                 },
-                watch: sensor_watch(watch, watch_robot, watch_robots),
+                watch: sensor_watch(watch, watch_robot, watch_robots, None),
                 mount: None,
             })
             .map_err(scene_err)
@@ -1863,7 +2175,7 @@ impl Scene {
                     sector,
                     shadowing,
                 },
-                watch: sensor_watch(watch, watch_robot, watch_robots),
+                watch: sensor_watch(watch, watch_robot, watch_robots, None),
                 mount: None,
             })
             .map_err(scene_err)
@@ -4675,7 +4987,10 @@ impl Scene {
     /// current configuration to `goal` (joint positions in DOF order).
     /// With `broadcast=True` (default) the result is also pushed to
     /// connected studio clients for preview playback.
-    #[pyo3(signature = (goal, max_iters = 10_000, seed = None, broadcast = true, robot = None))]
+    /// `group` names the arm to plan: only its joints are searched, every
+    /// other joint holds. `goal` may then be given in the group's own joint
+    /// order. A robot with one group needs no `group`.
+    #[pyo3(signature = (goal, max_iters = 10_000, seed = None, broadcast = true, robot = None, group = None))]
     fn plan(
         &self,
         goal: Vec<f64>,
@@ -4683,8 +4998,23 @@ impl Scene {
         seed: Option<u64>,
         broadcast: bool,
         robot: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<Trajectory> {
         let index = self.resolve_robot(robot)?;
+        let model = self.hub.robot_model(index);
+        let (group, _) = resolve_group_link(&model, group, None)?;
+        // A goal in the group's own joint order fills in around the
+        // current configuration.
+        let goal = match group.and_then(|g| model.groups().into_iter().nth(g)) {
+            Some(g) if goal.len() == g.joints.len() && goal.len() != model.dof() => {
+                let mut full = self.hub.joint_positions_for(index);
+                for (k, &qi) in g.joints.iter().enumerate() {
+                    full[qi] = goal[k];
+                }
+                full
+            }
+            _ => goal,
+        };
         let mut options = botrail_plan::PlanOptions {
             max_iters,
             ..botrail_plan::PlanOptions::default()
@@ -4693,9 +5023,10 @@ impl Scene {
             options.seed = seed;
         }
         let result = if broadcast {
-            self.hub.plan_and_broadcast_for(index, &goal, &options)
+            self.hub
+                .plan_and_broadcast_for(index, group, &goal, &options)
         } else {
-            self.hub.plan_to_for(index, &goal, &options)
+            self.hub.plan_to_for(index, group, &goal, &options)
         };
         let (traj, path, _) = result.map_err(PyValueError::new_err)?;
         let model = self.hub.robot_model(index);
@@ -4722,7 +5053,12 @@ impl Scene {
     /// `orientation_cone=(axis_local, axis_world, angle_rad)` keeps the tool
     /// axis inside a cone; `position_box=(min, max)` keeps the TCP inside a
     /// world-aligned box. Both apply along the whole segment.
-    #[pyo3(signature = (motion, goal = None, kind = "joint", orientation_cone = None, position_box = None, robot = None))]
+    /// `group` names the arm a new motion drives (an existing motion keeps
+    /// its arm): only that arm's joints move, and goal components outside
+    /// it are ignored. Omitted, the robot's sole group — or every joint of
+    /// a robot with several.
+    #[pyo3(signature = (motion, goal = None, kind = "joint", orientation_cone = None, position_box = None, robot = None, group = None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_segment(
         &self,
         motion: &str,
@@ -4731,6 +5067,7 @@ impl Scene {
         orientation_cone: Option<([f64; 3], [f64; 3], f64)>,
         position_box: Option<([f64; 3], [f64; 3])>,
         robot: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
         let kind = match kind {
@@ -4762,7 +5099,7 @@ impl Scene {
             constraints,
         };
         self.hub
-            .add_segment_for(index, motion, segment)
+            .add_segment_for(index, group, motion, segment)
             .map_err(PyValueError::new_err)
     }
 
@@ -4941,7 +5278,10 @@ impl Scene {
         };
         let mut models = Vec::with_capacity(project.robots.len());
         for robot_msg in &project.robots {
-            let model = botrail_scene::project::model_from_source(&robot_msg.source, &import_usd)
+            let mut model =
+                botrail_scene::project::model_from_source(&robot_msg.source, &import_usd)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            botrail_scene::project::apply_declared_groups(&mut model, robot_msg)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             models.push(Arc::new(model));
         }
@@ -4968,8 +5308,10 @@ impl Scene {
         self.hub.python_code()
     }
 
-    /// IK to the given pose, then plan to the found configuration.
-    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 10_000, seed = None, broadcast = true, robot = None))]
+    /// IK to the given pose, then plan to the found configuration. `group`
+    /// names the arm (its tip is the default `link`, and only its joints
+    /// move); a `link` alone names the arm it hangs off.
+    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 10_000, seed = None, broadcast = true, robot = None, group = None))]
     #[allow(clippy::too_many_arguments)]
     fn plan_to_pose(
         &self,
@@ -4980,10 +5322,11 @@ impl Scene {
         seed: Option<u64>,
         broadcast: bool,
         robot: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<Trajectory> {
         let index = self.resolve_robot(robot)?;
         let model = self.hub.robot_model(index);
-        let link_index = resolve_link(&model, link)?;
+        let (group, link_index) = resolve_group_link(&model, group, link)?;
         let (target, mode) = ik_target(position, quaternion);
         // The target is world-frame; re-express it in the robot base frame
         // for the base-frame solver.
@@ -4991,6 +5334,7 @@ impl Scene {
         let seed_q = self.hub.joint_positions_for(index);
         let options = botrail_kin::IkOptions {
             mode,
+            joint_mask: group_joint_mask(&model, group),
             ..botrail_kin::IkOptions::default()
         };
         let ik = botrail_kin::solve_ik(&model, link_index, &target, &seed_q, &options)
@@ -5001,14 +5345,26 @@ impl Scene {
                 ik.pos_error, ik.rot_error
             )));
         }
-        self.plan(ik.q, max_iters, seed, broadcast, robot)
+        let group_name = group
+            .and_then(|g| model.groups().into_iter().nth(g))
+            .map(|g| g.name);
+        self.plan(
+            ik.q,
+            max_iters,
+            seed,
+            broadcast,
+            robot,
+            group_name.as_deref(),
+        )
     }
 
     /// Solves IK toward the given pose (seeded from the current
     /// configuration), applies the best-effort result to the scene, and
     /// pushes it to connected studio clients. `quaternion=None` matches
     /// position only; `link` defaults to the TCP link.
-    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100, robot = None))]
+    /// `group` names the arm (its tip is the default `link`; only its
+    /// joints move); a `link` alone names the arm it hangs off.
+    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100, robot = None, group = None))]
     fn set_tcp_target(
         &self,
         position: [f64; 3],
@@ -5016,10 +5372,14 @@ impl Scene {
         link: Option<&str>,
         max_iters: usize,
         robot: Option<&str>,
+        group: Option<&str>,
     ) -> PyResult<IkResult> {
         let index = self.resolve_robot(robot)?;
         let model = self.hub.robot_model(index);
-        let link_index = resolve_link(&model, link)?;
+        let (group, link_index) = resolve_group_link(&model, group, link)?;
+        let group_name = group
+            .and_then(|g| model.groups().into_iter().nth(g))
+            .map(|g| g.name);
         let link_name = model.links[link_index].name.clone();
         let pose = botrail_scene::wire::PoseMsg {
             position,
@@ -5036,7 +5396,7 @@ impl Scene {
         };
         let result = self
             .hub
-            .set_tcp_target_for(index, &link_name, &pose, &options)
+            .set_tcp_target_for(index, &link_name, &pose, &options, group_name.as_deref())
             .map_err(PyValueError::new_err)?;
         Ok(IkResult { inner: result })
     }
@@ -5554,6 +5914,24 @@ struct SequenceTimeline {
 }
 
 impl SequenceTimeline {
+    /// Rejects a `group` the robot does not have.
+    fn check_group(&self, index: usize, group: Option<&str>) -> PyResult<()> {
+        if let Some(group) = group {
+            let model = &self.scene.robots()[index].model;
+            if model.group_index(group).is_none() {
+                return Err(PyValueError::new_err(format!(
+                    "unknown group `{group}`; groups: {:?}",
+                    model
+                        .groups()
+                        .iter()
+                        .map(|g| g.name.as_str())
+                        .collect::<Vec<_>>()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolves an optional robot name to `(scene index, track)`. `None`
     /// means the sole robot and is ambiguous when several exist.
     fn track_for(
@@ -5676,32 +6054,46 @@ impl SequenceTimeline {
     }
 
     /// A robot's move intervals as `(label, start, end)` — the intervals a
-    /// motion (by name) or ramp drove it.
-    #[pyo3(signature = (robot = None))]
-    fn moves(&self, robot: Option<&str>) -> PyResult<Vec<(String, f64, f64)>> {
-        Ok(self
-            .track_for(robot)?
-            .1
+    /// motion (by name) or ramp drove it. `group` keeps only the moves of
+    /// one arm of a dual-arm robot.
+    #[pyo3(signature = (robot = None, group = None))]
+    fn moves(&self, robot: Option<&str>, group: Option<&str>) -> PyResult<Vec<(String, f64, f64)>> {
+        let (index, track) = self.track_for(robot)?;
+        self.check_group(index, group)?;
+        Ok(track
             .moves
             .iter()
+            .filter(|s| group.is_none() || s.group.as_deref() == group)
             .map(|s| (s.name.clone(), s.start, s.end))
             .collect())
     }
 
-    /// Seconds a robot spent in motion (overlapping move intervals merged).
-    #[pyo3(signature = (robot = None))]
-    fn busy_seconds(&self, robot: Option<&str>) -> PyResult<f64> {
-        let (_, track) = self.track_for(robot)?;
-        Ok(self.inner.busy_seconds(&track.name).unwrap_or(0.0))
+    /// Seconds a robot spent in motion (overlapping move intervals
+    /// merged); `group` measures one arm of a dual-arm robot.
+    #[pyo3(signature = (robot = None, group = None))]
+    fn busy_seconds(&self, robot: Option<&str>, group: Option<&str>) -> PyResult<f64> {
+        let (index, track) = self.track_for(robot)?;
+        self.check_group(index, group)?;
+        Ok(match group {
+            Some(group) => botrail_scene::handshake::group_busy(&self.inner, &track.name, group)
+                .map(|spans| spans.iter().map(|(s, e)| e - s).sum())
+                .unwrap_or(0.0),
+            None => self.inner.busy_seconds(&track.name).unwrap_or(0.0),
+        })
     }
 
     /// Fraction of the cycle a robot spent moving, 0..1 — the
     /// line-balancing number. The bottleneck is whoever sits near 1, and
-    /// this is what predicts where moving a spot lands the takt.
-    #[pyo3(signature = (robot = None))]
-    fn utilization(&self, robot: Option<&str>) -> PyResult<f64> {
-        let (_, track) = self.track_for(robot)?;
-        Ok(self.inner.utilization(&track.name).unwrap_or(0.0))
+    /// this is what predicts where moving a spot lands the takt. `group`
+    /// measures one arm of a dual-arm robot.
+    #[pyo3(signature = (robot = None, group = None))]
+    fn utilization(&self, robot: Option<&str>, group: Option<&str>) -> PyResult<f64> {
+        let busy = self.busy_seconds(robot, group)?;
+        Ok(if self.inner.duration > 0.0 {
+            busy / self.inner.duration
+        } else {
+            0.0
+        })
     }
 
     /// `{robot: utilization}` for every robot on the timeline.
@@ -6093,21 +6485,52 @@ impl SequenceTimeline {
 
     /// A robot's cycle joint track as a [`Trajectory`] (CSV/JSON export,
     /// joint access). Step boundaries land in `segment_ends`.
-    #[pyo3(signature = (robot = None))]
-    fn robot_trajectory(&self, robot: Option<&str>) -> PyResult<Trajectory> {
+    #[pyo3(signature = (robot = None, group = None))]
+    fn robot_trajectory(&self, robot: Option<&str>, group: Option<&str>) -> PyResult<Trajectory> {
         let (index, track) = self.track_for(robot)?;
         let model = &self.scene.robots()[index].model;
+        let names: Vec<String> = model
+            .actuated_joint_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let full_limits = crate::hub::traj_limits(model);
+        let Some(group) = group else {
+            return Ok(Trajectory {
+                inner: track.trajectory.clone(),
+                joint_names: names,
+                segment_ends: self.inner.step_spans.iter().map(|s| s.end).collect(),
+                segments: Vec::new(),
+                feed_report: None,
+                limits: full_limits,
+            });
+        };
+        // One arm's slice of the cycle track: its joints, in q order.
+        let g = model
+            .groups()
+            .into_iter()
+            .find(|g| g.name == group)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown group `{group}`")))?;
+        let pick = |v: &[f64]| g.joints.iter().map(|&qi| v[qi]).collect::<Vec<f64>>();
         Ok(Trajectory {
-            inner: track.trajectory.clone(),
-            joint_names: model
-                .actuated_joint_names()
-                .iter()
-                .map(|n| n.to_string())
-                .collect(),
+            inner: botrail_traj::JointTrajectory {
+                times: track.trajectory.times.clone(),
+                positions: track.trajectory.positions.iter().map(|q| pick(q)).collect(),
+                velocities: track
+                    .trajectory
+                    .velocities
+                    .iter()
+                    .map(|v| pick(v))
+                    .collect(),
+            },
+            joint_names: pick_names(&names, &g.joints),
             segment_ends: self.inner.step_spans.iter().map(|s| s.end).collect(),
             segments: Vec::new(),
             feed_report: None,
-            limits: crate::hub::traj_limits(model),
+            limits: botrail_traj::Limits {
+                velocity: pick(&full_limits.velocity),
+                acceleration: pick(&full_limits.acceleration),
+            },
         })
     }
 
@@ -6115,7 +6538,7 @@ impl SequenceTimeline {
     /// robots this is ambiguous — name one).
     #[getter]
     fn trajectory(&self) -> PyResult<Trajectory> {
-        self.robot_trajectory(None)
+        self.robot_trajectory(None, None)
     }
 
     /// Bakes the whole cycle to a USD animation layer (see
@@ -6528,7 +6951,8 @@ impl SequenceTimeline {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        group = None))]
     fn to_script(
         &self,
         py: Python<'_>,
@@ -6544,6 +6968,7 @@ impl SequenceTimeline {
         move_to_start: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
+        group: Option<&str>,
     ) -> PyResult<String> {
         let backend = botrail_export::backend(dialect).ok_or_else(|| {
             PyValueError::new_err(format!(
@@ -6573,6 +6998,7 @@ impl SequenceTimeline {
             sequence,
             &io,
             &options,
+            group,
         )
         .map_err(PyValueError::new_err)?;
         for warning in &out.warnings {
@@ -6640,7 +7066,8 @@ impl SequenceTimeline {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        group = None))]
     fn export_script(
         &self,
         py: Python<'_>,
@@ -6657,6 +7084,7 @@ impl SequenceTimeline {
         move_to_start: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
+        group: Option<&str>,
     ) -> PyResult<()> {
         let script = self.to_script(
             py,
@@ -6672,6 +7100,7 @@ impl SequenceTimeline {
             move_to_start,
             node,
             io,
+            group,
         )?;
         std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
@@ -6809,7 +7238,8 @@ impl ScenarioRuns {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None, primary = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None))]
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        group = None))]
     fn to_script(
         &self,
         py: Python<'_>,
@@ -6826,6 +7256,7 @@ impl ScenarioRuns {
         move_to_start: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
+        group: Option<&str>,
     ) -> PyResult<String> {
         if self.runs.is_empty() {
             return Err(PyValueError::new_err(
@@ -6882,6 +7313,7 @@ impl ScenarioRuns {
             sequence,
             &io,
             &options,
+            group,
         )
         .map_err(PyValueError::new_err)?;
         for warning in &out.warnings {
@@ -6908,7 +7340,7 @@ impl ScenarioRuns {
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         primary = None, inputs = None, outputs = None, speed_scale = 1.0,
         blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true,
-        node = None, io = None))]
+        node = None, io = None, group = None))]
     fn export_script(
         &self,
         py: Python<'_>,
@@ -6926,6 +7358,7 @@ impl ScenarioRuns {
         move_to_start: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
+        group: Option<&str>,
     ) -> PyResult<()> {
         let script = self.to_script(
             py,
@@ -6942,6 +7375,7 @@ impl ScenarioRuns {
             move_to_start,
             node,
             io,
+            group,
         )?;
         std::fs::write(&path, script)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
@@ -8878,6 +9312,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Robot>()?;
     m.add_class::<Scene>()?;
     m.add_class::<IkResult>()?;
+    m.add_class::<Group>()?;
     m.add_class::<Trajectory>()?;
     m.add_class::<SequenceTimeline>()?;
     m.add_class::<ScenarioRuns>()?;

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { TransformControls } from "@react-three/drei";
 import * as THREE from "three";
 
-import { robotByName, useStudioStore } from "../store";
+import { groupTip, robotArms, robotByName, useStudioStore } from "../store";
 import { sendTcpTarget } from "../ws";
 
 /**
@@ -17,6 +17,7 @@ export function TcpGizmo() {
   const focusedRobot = selection.type === "tcp" ? selection.robot : null;
   const robot = useStudioStore((s) => robotByName(s.robots, focusedRobot));
   const gizmoMode = useStudioStore((s) => s.gizmoMode);
+  const setSelectedGroup = useStudioStore((s) => s.setSelectedGroup);
 
   const [target, setTarget] = useState<THREE.Group | null>(null);
   const draggingRef = useRef(false);
@@ -47,6 +48,16 @@ export function TcpGizmo() {
   const reachable = ikStatus === null || ikStatus.converged;
   const color = reachable ? "#4da3ff" : "#ff5555";
   const robotName = robot.desc.name;
+  const group = robot.selectedGroup;
+
+  // The other arms of a dual-arm robot: a flat mark at each tip, clicked
+  // to move the gizmo (and the panels) over to that arm.
+  const idleArms = robotArms(robot.desc)
+    .filter((g) => g.name !== group)
+    .map((g) => {
+      const at = robot.desc.links.findIndex((l) => l.name === g.tip_link);
+      return { name: g.name, pose: at >= 0 ? robot.linkPoses[at] : undefined };
+    });
 
   const onDrag = () => {
     // objectChange can also fire on attach/programmatic updates; only
@@ -54,6 +65,9 @@ export function TcpGizmo() {
     if (!target || !draggingRef.current) return;
     sendTcpTarget(robotName, {
       link: tcpLink,
+      // The arm whose tip this is; a hand-picked link elsewhere on the
+      // robot lets the server infer the arm from the link.
+      group: groupTip(robot.desc, group) === tcpLink ? group : null,
       pose: {
         position: [target.position.x, target.position.y, target.position.z],
         quaternion: [
@@ -79,6 +93,28 @@ export function TcpGizmo() {
           />
         </mesh>
       </group>
+      {idleArms.map(
+        ({ name, pose }) =>
+          pose && (
+            <mesh
+              key={name}
+              position={pose.position}
+              renderOrder={10}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelectedGroup(robotName, name);
+              }}
+            >
+              <sphereGeometry args={[0.011, 16, 12]} />
+              <meshBasicMaterial
+                color="#8a97a8"
+                depthTest={false}
+                transparent
+                opacity={0.85}
+              />
+            </mesh>
+          ),
+      )}
       {target && (
         <TransformControls
           object={target}

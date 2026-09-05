@@ -45,6 +45,8 @@ export function conditionLabel(condition: ConditionMsg): string {
       return "done";
     case "robot_done":
       return `${condition.robot} done`;
+    case "group_done":
+      return `${condition.robot}/${condition.group} done`;
     case "elapsed":
       return `${condition.seconds.toFixed(2)}s`;
     case "signal":

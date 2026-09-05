@@ -117,19 +117,25 @@ export function sendJointPositions(robot: string, positions: number[]): void {
   throttledJointPositions(robot, positions);
 }
 
-const throttledTcpTarget = throttledByKey<{ link: string; pose: PoseMsg }>(
-  SEND_INTERVAL_MS,
-  (robot, { link, pose }) =>
-    rawSend({ type: "set_tcp_target", robot, link, pose }),
+const throttledTcpTarget = throttledByKey<{
+  link: string;
+  pose: PoseMsg;
+  group: string | null;
+}>(SEND_INTERVAL_MS, (robot, { link, pose, group }) =>
+  rawSend({ type: "set_tcp_target", robot, link, pose, group }),
 );
 
-/** Ask the server to IK-track a TCP target pose, throttled to ~30 Hz. */
+/**
+ * Ask the server to IK-track a TCP target pose, throttled to ~30 Hz.
+ * `group` names the arm to solve with on a dual-arm robot; null lets the
+ * server infer it from the link.
+ */
 export function sendTcpTarget(
   robot: string,
-  target: { link: string; pose: PoseMsg },
+  target: { link: string; pose: PoseMsg; group?: string | null },
 ): void {
   interact();
-  throttledTcpTarget(robot, target);
+  throttledTcpTarget(robot, { ...target, group: target.group ?? null });
 }
 
 const throttledRobotBasePose = throttledByKey<PoseMsg>(
@@ -195,15 +201,24 @@ export function sendSetObstacleEnabled(name: string, enabled: boolean): void {
 
 /**
  * Attach an obstacle to a robot link at its current relative pose (a
- * grasp). `link = null` lets the server pick the default TCP link; touch
- * links default to the link's subtree (the gripper).
+ * grasp). `link = null` lets the server pick the default TCP link (the
+ * arm's tip when `group` names one); touch links default to the link's
+ * subtree (the gripper).
  */
 export function sendAttachObstacle(
   name: string,
   robot: string,
   link: string | null,
+  group: string | null = null,
 ): void {
-  rawSend({ type: "attach_obstacle", name, robot, link, touch_links: null });
+  rawSend({
+    type: "attach_obstacle",
+    name,
+    robot,
+    link,
+    touch_links: null,
+    group,
+  });
 }
 
 /** Detach an obstacle; its pose freezes where the robot holds it. */
@@ -218,14 +233,16 @@ export function sendRemoveObstacle(name: string): void {
 
 /**
  * Append a waypoint segment to a motion; the server creates the motion if
- * missing, owned by `robot` (an existing motion keeps its owner).
+ * missing, owned by `robot` and driving arm `group` (an existing motion
+ * keeps both).
  */
 export function sendAddSegment(
   motion: string,
   robot: string,
   segment: SegmentMsg,
+  group: string | null = null,
 ): void {
-  rawSend({ type: "add_segment", motion, robot, segment });
+  rawSend({ type: "add_segment", motion, robot, segment, group });
 }
 
 /** Remove the segment at `index` from a motion (sent immediately). */

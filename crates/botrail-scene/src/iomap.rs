@@ -1101,7 +1101,9 @@ fn walk_condition(
             push(&mut u.reads, name.clone(), at);
         }
         Condition::DeviceDone { device } => push(&mut u.device_done, device.clone(), at),
-        Condition::RobotDone { robot } => {
+        // An arm's idle test reads the same controller contact as the
+        // robot's: one controller, one done output.
+        Condition::RobotDone { robot } | Condition::GroupDone { robot, .. } => {
             let index = scene
                 .robot_index(robot)
                 .ok_or_else(|| format!("unknown robot `{robot}`"))?;
@@ -1158,7 +1160,9 @@ fn walk_action(
             entry.1.insert(toolpath.clone());
             u.owns.insert(r);
         }
-        Action::Attach { robot, .. } | Action::Track { robot, .. } | Action::Untrack { robot } => {
+        Action::Attach { robot, .. }
+        | Action::Track { robot, .. }
+        | Action::Untrack { robot, .. } => {
             let r = scene.resolve_seq_robot(robot)?;
             u.owns.insert(r);
         }

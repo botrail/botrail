@@ -81,6 +81,10 @@ pub enum SceneError {
     BadGrasp(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
+    #[error("unknown group `{0}`")]
+    UnknownGroup(String),
+    #[error("{0}")]
+    AmbiguousGroup(String),
     #[error("unknown scenario `{0}`")]
     UnknownScenario(String),
     #[error("{0}")]
@@ -111,6 +115,7 @@ pub enum SceneError {
 fn rename_in_condition(condition: &mut seq::Condition, old: &str, new: &str) {
     match condition {
         seq::Condition::RobotDone { robot } if robot == old => *robot = new.to_string(),
+        seq::Condition::GroupDone { robot, .. } if robot == old => *robot = new.to_string(),
         seq::Condition::All(parts) | seq::Condition::Any(parts) => {
             for part in parts {
                 rename_in_condition(part, old, new);
@@ -573,8 +578,12 @@ impl Scene {
             }
         };
         for sensor in &mut self.sensors {
-            if let seq::SensorWatch::Robots(names) = &mut sensor.watch {
-                names.iter_mut().for_each(swap);
+            match &mut sensor.watch {
+                seq::SensorWatch::Robots(names) => names.iter_mut().for_each(swap),
+                seq::SensorWatch::Groups(pairs) => {
+                    pairs.iter_mut().for_each(|(robot, _)| swap(robot))
+                }
+                _ => {}
             }
         }
         for sequence in &mut self.sequences {
@@ -1271,7 +1280,7 @@ impl Scene {
     /// The link and every link below it in `robot`'s kinematic tree — the
     /// gripper subtree when `link` is the tool link. Used as the default
     /// touch set.
-    fn link_subtree(&self, robot: usize, link: usize) -> Vec<usize> {
+    pub(crate) fn link_subtree(&self, robot: usize, link: usize) -> Vec<usize> {
         let mut result = vec![link];
         let mut stack = vec![link];
         while let Some(l) = stack.pop() {
@@ -1307,17 +1316,35 @@ impl Scene {
         link: Option<&str>,
         touch_links: Option<&[String]>,
     ) -> Result<(), SceneError> {
+        self.attach_obstacle_in_group(robot, None, name, link, touch_links)
+    }
+
+    /// [`Scene::attach_obstacle_to`] naming the arm: `link = None` then
+    /// defaults to that group's tip (see [`Scene::resolve_group`] for the
+    /// unnamed case).
+    pub fn attach_obstacle_in_group(
+        &mut self,
+        robot: usize,
+        group: Option<&str>,
+        name: &str,
+        link: Option<&str>,
+        touch_links: Option<&[String]>,
+    ) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         if self.is_attached(name) {
             return Err(SceneError::AlreadyAttached(name.to_string()));
         }
-        let model = &self.robots[robot].model;
         let link = match link {
-            Some(l) => model
+            Some(l) => self.robots[robot]
+                .model
                 .link_index(l)
                 .ok_or_else(|| SceneError::UnknownLink(l.to_string()))?,
-            None => model.default_tcp_link(),
+            None => {
+                let g = self.resolve_group(robot, group, None)?;
+                self.group_tip(robot, g)
+            }
         };
+        let model = &self.robots[robot].model;
         let touch_links = match touch_links {
             Some(names) => {
                 let mut indices = Vec::with_capacity(names.len());
@@ -1488,6 +1515,45 @@ impl Scene {
                     ColliderId::Obstacle(k) => *id = ColliderId::Obstacle(obstacle_map[*k]),
                     ColliderId::Attached(k) => *id = ColliderId::Obstacle(attached_map[*k]),
                     ColliderId::Link { .. } => {}
+                }
+            }
+        }
+        pairs
+    }
+
+    /// One robot against itself at the current configuration: its links
+    /// under the intra-robot ACM, plus what it carries against its own
+    /// links (touch links exempt) — no obstacles, no other robots. What
+    /// the scan tick prices between the two arms of a dual-arm robot.
+    pub fn check_self_collisions_for(&self, robot: usize) -> Vec<CollisionPair> {
+        let poses = self.link_poses_for(robot);
+        let r = &self.robots[robot];
+        let query = [RobotQuery {
+            collider: &r.collider,
+            link_poses: &poses,
+            acm: &r.acm,
+        }];
+        let (attached, attached_map) = self.attached_query();
+        let mut mine = Vec::new();
+        let mut mine_map = Vec::new();
+        for (att, obstacle) in attached.into_iter().zip(attached_map) {
+            if att.robot == robot {
+                mine.push(botrail_collide::AttachedCollider { robot: 0, ..att });
+                mine_map.push(obstacle);
+            }
+        }
+        let pairs = botrail_collide::check_scene(
+            &query,
+            &self.inter_acm,
+            &[],
+            &mine,
+            &botrail_collide::ContactAllowance::default(),
+        );
+        let mut pairs = Self::remap_obstacle_ids(pairs, &[], &mine_map);
+        for pair in &mut pairs {
+            for id in [&mut pair.a, &mut pair.b] {
+                if let ColliderId::Link { robot: r, .. } = id {
+                    *r = robot;
                 }
             }
         }
@@ -1886,6 +1952,54 @@ impl Scene {
                 .unwrap_or(false)
     }
 
+    /// [`Scene::is_state_valid_for`] for a motion of one arm: only the
+    /// collision pairs that involve what the arm moves — its links and
+    /// what they carry — count. The rest of the robot is frozen for this
+    /// plan, and a static contact elsewhere (the other arm's held part
+    /// resting where it was picked) is not this arm's to resolve; the
+    /// scan tick still prices every meeting of the two arms. A group
+    /// spanning the whole robot is the plain check.
+    pub fn is_state_valid_for_group(
+        &self,
+        robot: usize,
+        group: Option<&botrail_model::Group>,
+        q: &[f64],
+    ) -> bool {
+        let model = &self.robots[robot].model;
+        let Some(group) = group.filter(|g| g.joints.len() < model.dof()) else {
+            return self.is_state_valid_for(robot, q);
+        };
+        if q.len() != model.dof() {
+            return false;
+        }
+        let within = q
+            .iter()
+            .zip(model.actuated_joint_limits())
+            .all(|(v, limits)| match limits {
+                Some((lo, hi)) => *v >= lo - 1e-9 && *v <= hi + 1e-9,
+                None => true,
+            });
+        if !within {
+            return false;
+        }
+        let moving = self.link_subtree(robot, group.base);
+        let carried: Vec<usize> = self
+            .attachments
+            .iter()
+            .filter(|a| a.robot == robot && moving.contains(&a.link))
+            .filter_map(|a| self.obstacle_index(&a.object).ok())
+            .collect();
+        let involves = |id: &ColliderId| match id {
+            ColliderId::Link { robot: r, link } => *r == robot && moving.contains(link),
+            ColliderId::Obstacle(k) => carried.contains(k),
+            ColliderId::Attached(_) => false,
+        };
+        match self.collisions_at_for(robot, q) {
+            Ok(pairs) => !pairs.iter().any(|p| involves(&p.a) || involves(&p.b)),
+            Err(_) => false,
+        }
+    }
+
     /// [`Scene::is_state_valid_for`] with the allowed-contact exemptions
     /// suspended — every link-obstacle pair counts. Toolpath rapids use
     /// this: a cutter through the stock while *not* cutting is a crash,
@@ -1929,6 +2043,81 @@ impl Scene {
         self.robots[0].acm()
     }
 
+    // --------------------------------------------------------------- groups
+
+    /// Resolves a `group=` argument on robot `robot` to an index into its
+    /// [`botrail_model::RobotModel::groups`]. Named, it must exist. Unnamed:
+    /// the sole group when the robot has one; else the most specific
+    /// group `link` hangs off when a link is given (the arm a hand belongs
+    /// to); else `Ok(None)` — the whole robot — while the groups are merely
+    /// derived, and an error naming the groups once they are declared (the
+    /// author has said the robot has arms; which one is not a guess).
+    pub fn resolve_group(
+        &self,
+        robot: usize,
+        group: Option<&str>,
+        link: Option<usize>,
+    ) -> Result<Option<usize>, SceneError> {
+        let model = &self.robots[robot].model;
+        if let Some(name) = group {
+            return model
+                .group_index(name)
+                .map(Some)
+                .ok_or_else(|| SceneError::UnknownGroup(name.to_string()));
+        }
+        let groups = model.groups();
+        if groups.len() == 1 {
+            return Ok(Some(0));
+        }
+        if let Some(link) = link {
+            if let Some(g) = model.group_for_link(link) {
+                return Ok(Some(g));
+            }
+        }
+        if model.groups_are_derived() {
+            return Ok(None);
+        }
+        Err(SceneError::AmbiguousGroup(format!(
+            "robot `{}` has several groups ({:?}); pass `group=` to say which arm",
+            self.robots[robot].name,
+            groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>()
+        )))
+    }
+
+    /// The link a group's motions place: the group's tip, or the robot's
+    /// default TCP for the whole robot (`None`).
+    pub fn group_tip(&self, robot: usize, group: Option<usize>) -> usize {
+        let model = &self.robots[robot].model;
+        group
+            .and_then(|g| model.groups().into_iter().nth(g))
+            .map(|g| g.tip)
+            .unwrap_or_else(|| model.default_tcp_link())
+    }
+
+    /// The IK joint mask of a group (`None` for the whole robot).
+    pub fn group_joint_mask(&self, robot: usize, group: Option<usize>) -> Option<Vec<bool>> {
+        let model = &self.robots[robot].model;
+        group
+            .and_then(|g| model.groups().into_iter().nth(g))
+            .map(|g| motion::group_mask(model.dof(), &g))
+    }
+
+    /// Plans a collision-free joint path for `robot` from `start` to
+    /// `goal` inside `group` (see [`motion::plan_joint_path`]); every other
+    /// robot is a frozen collision body.
+    pub fn plan_joint_path_for(
+        &self,
+        robot: usize,
+        group: Option<usize>,
+        start: &[f64],
+        goal: &[f64],
+        options: &botrail_plan::PlanOptions,
+    ) -> Result<Vec<Vec<f64>>, botrail_plan::PlanError> {
+        let group = group.and_then(|g| self.robots[robot].model.groups().into_iter().nth(g));
+        let mut none = |_: &[f64]| true;
+        motion::plan_joint_path(self, robot, group.as_ref(), start, goal, &mut none, options)
+    }
+
     // -------------------------------------------------------------- motions
 
     pub fn motions(&self) -> &[Motion] {
@@ -1957,6 +2146,28 @@ impl Scene {
         motion: &str,
         segment: Segment,
     ) -> Result<(), MotionError> {
+        self.add_segment_in_group(robot, None, motion, segment)
+    }
+
+    /// [`Scene::add_segment_for`] naming the planning group a new motion
+    /// drives (`None` leaves it to the robot — see
+    /// [`motion::Motion::group`]). An existing motion keeps its group.
+    pub fn add_segment_in_group(
+        &mut self,
+        robot: usize,
+        group: Option<&str>,
+        motion: &str,
+        segment: Segment,
+    ) -> Result<(), MotionError> {
+        let group = match group {
+            Some(name) => Some(
+                self.robots[robot]
+                    .model
+                    .group_index(name)
+                    .ok_or_else(|| MotionError::UnknownGroup(name.to_string()))?,
+            ),
+            None => None,
+        };
         let owner = self
             .motion_index(motion)
             .map(|i| self.motions[i].robot)
@@ -1978,6 +2189,7 @@ impl Scene {
                 self.motions.push(Motion {
                     name: motion.to_string(),
                     robot: owner,
+                    group,
                     segments: Vec::new(),
                 });
                 self.motions.len() - 1
@@ -2178,6 +2390,7 @@ impl Scene {
                         end: duration,
                         sequence: String::new(),
                         step: 0,
+                        group: None,
                     }]
                 } else {
                     Vec::new()
@@ -2575,6 +2788,7 @@ mod tests {
                 name: "wait".into(),
                 actions: vec![seq::Action::Untrack {
                     robot: Some("b".into()),
+                    group: None,
                 }],
                 transition: seq::Condition::All(vec![
                     seq::Condition::RobotDone { robot: "b".into() },
@@ -2595,7 +2809,7 @@ mod tests {
         }
         let step = &scene.sequences()[0].steps[0];
         match &step.actions[0] {
-            seq::Action::Untrack { robot } => assert_eq!(robot.as_deref(), Some("far")),
+            seq::Action::Untrack { robot, .. } => assert_eq!(robot.as_deref(), Some("far")),
             other => panic!("{other:?}"),
         }
         match &step.transition {
@@ -2634,6 +2848,7 @@ mod tests {
                         name: "park".into(),
                         actions: vec![seq::Action::Untrack {
                             robot: Some("b".into()),
+                            group: None,
                         }],
                         transition: seq::Condition::Immediately,
                         select: Vec::new(),
@@ -2691,7 +2906,7 @@ mod tests {
         let arm = &scene.sequences()[0].steps[0].select[0];
         assert!(matches!(&arm.condition, seq::Condition::RobotDone { robot } if robot == "far"));
         assert!(
-            matches!(&arm.steps[0].actions[0], seq::Action::Untrack { robot } if robot.as_deref() == Some("far"))
+            matches!(&arm.steps[0].actions[0], seq::Action::Untrack { robot, .. } if robot.as_deref() == Some("far"))
         );
         assert_eq!(scene.weld_flashes()[0].robot, "far");
         assert_eq!(scene.scenarios()[0].joints[0].0, "far");

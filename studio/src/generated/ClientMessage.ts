@@ -22,7 +22,12 @@ robot: string | null, positions: Array<number>, } | { "type": "set_tcp_target",
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, link: string, pose: PoseMsg, } | { "type": "set_robot_base_pose", 
+robot: string | null, link: string, pose: PoseMsg, 
+/**
+ * The arm to solve with (a dual-arm robot); `None` infers it
+ * from `link`.
+ */
+group: string | null, } | { "type": "set_robot_base_pose", 
 /**
  * Target robot instance name; `None` means the first robot.
  */
@@ -30,13 +35,28 @@ robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: Obs
 /**
  * Carrying robot instance name; `None` means the first robot.
  */
-robot: string | null, link: string | null, touch_links: Array<string> | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request", 
+robot: string | null, link: string | null, touch_links: Array<string> | null, 
+/**
+ * The arm that grasps (a dual-arm robot); `link` then defaults
+ * to its tip.
+ */
+group: string | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request", 
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, goal_positions: Array<number>, } | { "type": "add_segment", motion: string, 
+robot: string | null, goal_positions: Array<number>, 
+/**
+ * The arm to plan (a dual-arm robot); `None` is the robot's sole
+ * group, or every joint.
+ */
+group: string | null, } | { "type": "add_segment", motion: string, 
 /**
  * Owner when the motion is created (an existing motion keeps its
  * owner); `None` means the first robot.
  */
-robot: string | null, segment: SegmentMsg, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, scenario?: string | null, } | { "type": "simulate_sequences", names: Array<string>, scenario?: string | null, } | { "type": "export_usd", fps: number, } | { "type": "upsert_scenario", scenario: ScenarioMsg, } | { "type": "remove_scenario", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, } | { "type": "upsert_camera", camera: CameraMsg, } | { "type": "remove_camera", name: string, } | { "type": "upsert_lidar", lidar: LidarMsg, } | { "type": "remove_lidar", name: string, } | { "type": "scan_lidar", name: string, t?: number | null, } | { "type": "upsert_io_node", node: IoNode, } | { "type": "remove_io_node", name: string, } | { "type": "bind_io", binding: IoBinding, } | { "type": "unbind_io", point: IoPointId, node?: string | null, } | { "type": "declare_io", decl: IoDecl, } | { "type": "undeclare_io", name: string, } | { "type": "auto_assign_io", reassign: boolean, };
+robot: string | null, segment: SegmentMsg, 
+/**
+ * The arm a created motion drives (an existing motion keeps
+ * its arm).
+ */
+group: string | null, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, scenario?: string | null, } | { "type": "simulate_sequences", names: Array<string>, scenario?: string | null, } | { "type": "export_usd", fps: number, } | { "type": "upsert_scenario", scenario: ScenarioMsg, } | { "type": "remove_scenario", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, } | { "type": "upsert_camera", camera: CameraMsg, } | { "type": "remove_camera", name: string, } | { "type": "upsert_lidar", lidar: LidarMsg, } | { "type": "remove_lidar", name: string, } | { "type": "scan_lidar", name: string, t?: number | null, } | { "type": "upsert_io_node", node: IoNode, } | { "type": "remove_io_node", name: string, } | { "type": "bind_io", binding: IoBinding, } | { "type": "unbind_io", point: IoPointId, node?: string | null, } | { "type": "declare_io", decl: IoDecl, } | { "type": "undeclare_io", name: string, } | { "type": "auto_assign_io", reassign: boolean, };

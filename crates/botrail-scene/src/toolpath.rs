@@ -1526,6 +1526,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let mut scene = Scene::new(Arc::new(robot));

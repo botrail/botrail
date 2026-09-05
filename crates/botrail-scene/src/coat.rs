@@ -2432,6 +2432,7 @@ mod tests {
             Isometry3::identity(),
             None,
             None,
+            None,
         )
         .unwrap()
     }
@@ -3106,6 +3107,7 @@ mod standoff_tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let mut scene = Scene::new(Arc::new(robot));
@@ -3188,6 +3190,7 @@ mod standoff_tests {
                 Some("tool0"),
                 None,
                 Isometry3::identity(),
+                None,
                 None,
                 None,
             )
@@ -3287,6 +3290,7 @@ mod mesh_target_tests {
                 Some("tool0"),
                 None,
                 Isometry3::identity(),
+                None,
                 None,
                 None,
             )
@@ -3395,6 +3399,7 @@ mod trigger_tests {
                 Some("tool0"),
                 None,
                 Isometry3::identity(),
+                None,
                 None,
                 None,
             )
@@ -3571,6 +3576,7 @@ mod brush_tests {
                 Some("tool0"),
                 None,
                 Isometry3::identity(),
+                None,
                 None,
                 None,
             )
@@ -3878,6 +3884,7 @@ mod palette_tests {
                 Some("tool0"),
                 None,
                 Isometry3::identity(),
+                None,
                 None,
                 None,
             )

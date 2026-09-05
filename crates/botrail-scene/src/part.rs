@@ -653,6 +653,27 @@ fn robot_lines(
                 attributes,
             });
         }
+        RobotSource::Composite {
+            base,
+            tool,
+            role: botrail_model::MountRole::Arm,
+            group,
+            prefix,
+            ..
+        } => {
+            robot_lines(base, name, role_category, tool_counter, out);
+            // An arm bolted to a body is a robot of its own on the bill,
+            // named after its group (`pair/left`), not a tool.
+            let arm = group
+                .clone()
+                .or_else(|| {
+                    prefix
+                        .as_deref()
+                        .map(|p| p.trim_end_matches('_').to_string())
+                })
+                .unwrap_or_else(|| "arm".to_string());
+            robot_lines(tool, &format!("{name}/{arm}"), "robot", tool_counter, out);
+        }
         RobotSource::Composite { base, tool, .. } => {
             robot_lines(base, name, role_category, tool_counter, out);
             *tool_counter += 1;
@@ -663,6 +684,12 @@ fn robot_lines(
             };
             robot_lines(tool, &tool_name, "tool", tool_counter, out);
         }
+        // A URDF that is nothing but frames — the bare body `dual_arm`
+        // hangs two arms off — is not something to buy.
+        RobotSource::UrdfXml(xml)
+            if !xml.contains("<joint")
+                && !xml.contains("<visual")
+                && !xml.contains("<collision") => {}
         RobotSource::UrdfXml(_) | RobotSource::Usd { .. } => out.push(BomRow {
             category: role_category.to_string(),
             names: vec![name.to_string()],

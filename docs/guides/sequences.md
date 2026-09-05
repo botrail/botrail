@@ -82,6 +82,36 @@ hard, timestamped error, not a warning. The
 [Two arms, one belt](../tutorials/two-robots.md) tutorial builds this up
 properly.
 
+## Two arms of one robot
+
+A dual-arm robot ([arms of one robot](robots.md#arms-of-one-robot)) drives its
+arms independently: a motion on one arm and a ramp on the other bake side by
+side, and each arm has its own done test:
+
+```python
+sq.step("both", actions=[bt.seq.motion("left_pick"), bt.seq.motion("right_pick")],
+        transition=bt.seq.immediately())
+sq.step("left landed", transition=bt.seq.robot_done("oa", group="left"))
+sq.step("grip", actions=[bt.seq.attach("part", group="left")])
+sq.step("both idle", transition=bt.seq.robot_done("oa"))          # every arm
+```
+
+The rule underneath is **one driver per joint**: a motion, ramp or toolpath
+owns the joints it moves for as long as it runs, and a step that starts a
+second driver on a joint already in flight is a hard error naming the move and
+its end time — never a silent overwrite. Grasps and tracks are per arm too
+(`attach(..., group=)`, `track(..., group=)`, `untrack(group=)`), which is what
+a two-handed carry is made of: one arm `attach`es the load, the other `track`s
+it and follows wherever the first arm's planned motion takes it. Zone sensors
+can watch one arm (`watch_groups=[("oa", "left")]`).
+
+Two programs may share one dual-arm robot, an arm each — the PLC idiom of one
+task per arm — and interlock through signals and zones exactly as two robots
+would. A meeting of the two arms is a `GroupCollision` with the time and the
+links, whether one program drives them or two. The
+[Two arms, one robot](../tutorials/dual-arm.md) tutorial builds a kitting cell
+this way.
+
 ## The bake
 
 ```python

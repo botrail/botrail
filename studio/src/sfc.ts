@@ -327,6 +327,17 @@ export function truth(cond: ConditionMsg, t: number, ctx: TruthCtx): Truth {
         children: [],
       };
     }
+    case "group_done": {
+      // One arm's idle: only the moves labelled with that group count.
+      const moves = ctx.robots.find((r) => r.name === cond.robot)?.moves ?? [];
+      return {
+        cond,
+        holds: !moves.some(
+          (m) => m.group === cond.group && m.start <= t && t < m.end - 1e-9,
+        ),
+        children: [],
+      };
+    }
     case "elapsed": {
       const served = t - ctx.span.start;
       return {

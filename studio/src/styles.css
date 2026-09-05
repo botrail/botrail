@@ -272,6 +272,15 @@ body {
   font-size: 11px;
 }
 
+/* An arm's heading over its sliders (dual-arm robots only). */
+.joint-arm {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 6px 0 2px;
+}
+
 .joint-value {
   color: var(--accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

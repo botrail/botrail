@@ -59,6 +59,8 @@ function watchLabel(watch: SensorWatchMsg): string {
     case "robot":
     case "robots":
       return "robots";
+    case "groups":
+      return watch.groups.map((g) => `${g.robot}/${g.group}`).join(", ");
     case "all":
       return "everything";
   }

@@ -55,6 +55,19 @@ pub enum ModelError {
     MountNotRoot { link: String, root: String },
     #[error("`{0}` names both a robot and a tool {1}; pass a prefix to keep them apart")]
     NameCollision(String, &'static str),
+    #[error("unknown group `{0}`")]
+    UnknownGroup(String),
+    #[error("group `{group}`: link `{link}` does not exist on the robot")]
+    UnknownGroupLink { group: String, link: String },
+    #[error("group `{group}`: joint `{joint}` does not exist on the robot")]
+    UnknownGroupJoint { group: String, joint: String },
+    #[error(
+        "group `{group}`: joint `{joint}` carries no degree of freedom (fixed, or a mimic \
+         follower — name the joint that drives it)"
+    )]
+    GroupJointNotActuated { group: String, joint: String },
+    #[error("the robot has several groups ({0:?}); pass `group=` to say which arm")]
+    AmbiguousGroup(Vec<String>),
 }
 
 /// Joint types supported by botrail. URDF `floating`/`planar` are rejected.
@@ -195,6 +208,9 @@ pub enum RobotSource {
         /// Grasp-surface frames declared by the manifest
         /// (`frames.grasp_frames`), reapplied on rebuild.
         grasp: Vec<String>,
+        /// The arms a dual-arm package declares (`frames.arms[]`), each
+        /// applied as a planning group on load and again on rebuild.
+        arms: Vec<CatalogArm>,
         /// What the package *is* commercially (maker, product name,
         /// category, headline specs) — the manifest's identity fields, kept
         /// so a bill of materials can name the machine without re-reading
@@ -204,8 +220,9 @@ pub enum RobotSource {
         /// projects rebuild without touching the network.
         inner: Box<RobotSource>,
     },
-    /// A robot composed by [`RobotModel::attach_tool`]: both part sources
-    /// plus the weld parameters, so the composite can be rebuilt.
+    /// A robot composed by [`RobotModel::attach_tool`] or
+    /// [`RobotModel::mount`]: both part sources plus the weld parameters,
+    /// so the composite can be rebuilt.
     Composite {
         base: Box<RobotSource>,
         tool: Box<RobotSource>,
@@ -219,14 +236,89 @@ pub enum RobotSource {
         tcp: Option<String>,
         /// Prefix applied to every tool link/joint name in the composite.
         prefix: Option<String>,
+        /// What the welded part is to the composite: a tool on an arm, or
+        /// an arm on a body.
+        role: MountRole,
+        /// The group addressed (a tool's arm) or created (a mounted arm),
+        /// as the caller named it.
+        group: Option<String>,
     },
 }
+
+/// What a part welded by [`RobotModel::mount`] is to the composite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MountRole {
+    /// An end-effector: the arm it hangs off gains its TCP
+    /// ([`RobotModel::attach_tool`]).
+    #[default]
+    Tool,
+    /// A manipulator of its own — an arm bolted to a body: its joints
+    /// become a [`Group`] of the composite, with its own TCP and flange.
+    Arm,
+}
+
+/// A planning group: the joints one planned motion drives and the link it
+/// drives to — an arm of a dual-arm robot, or the whole of a single-arm
+/// one. See [`RobotModel::groups`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub name: String,
+    /// q indices, ascending. The tree is traversed breadth-first, so a
+    /// dual-arm's two arms interleave: a group is a set, not a range.
+    pub joints: Vec<usize>,
+    /// The link a motion of this group places (its TCP).
+    pub tip: usize,
+    /// This arm's own tool-mounting face, when declared.
+    pub flange: Option<usize>,
+    /// The link the group's chain hangs off: a dual-arm's shoulder mount,
+    /// the root for a single arm.
+    pub base: usize,
+    /// Read off the tree ([`RobotModel::derive_groups`]) rather than
+    /// declared.
+    pub derived: bool,
+}
+
+/// A declared group, by names: what a catalog manifest or
+/// [`RobotModel::define_group`] states. Names survive the rebuilds
+/// (a tool attached, a project reloaded) that renumber q indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupSpec {
+    pub name: String,
+    pub tip: String,
+    pub joints: Vec<String>,
+    pub flange: Option<String>,
+}
+
+/// A chain of at least this many actuated joints above a fork is an arm
+/// carrying a hand, and the fork's branches are its fingers: they stay in
+/// the arm's group. A shorter stem (a waist, a fixed body) is a torso
+/// carrying arms, and the branches become groups of their own.
+const ARM_STEM_MIN: usize = 4;
+
+/// A branch under a fork counts as a limb (an arm, a leg) — and so makes
+/// the fork a body rather than a hand — when it carries at least this many
+/// joints of its own. One-joint branches are fingers.
+const LIMB_MIN_JOINTS: usize = 2;
 
 /// The identity a catalog manifest declares for a package — who makes
 /// it, what it is called, which category it files under, and the numeric
 /// headline specs (`mass_kg`, `reach_mm`, `payload_kg`, ...). Carried on
 /// [`RobotSource::Catalog`] purely so downstream consumers (a bill of
 /// materials) can describe the machine; nothing kinematic reads it.
+/// One arm of a dual-arm catalog package (`frames.arms[]`): what
+/// [`RobotModel::define_group`] is called with on load.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CatalogArm {
+    pub name: String,
+    /// The arm's TCP link (`tcp_default`).
+    pub tip: String,
+    /// The arm's actuated joints, as the manifest lists them; empty lets
+    /// the tip's chain decide.
+    pub joints: Vec<String>,
+    /// The arm's tool-mounting face (`flange_frame`).
+    pub flange: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CatalogMeta {
     /// `manufacturer.name` in the manifest.
@@ -258,7 +350,7 @@ impl RobotSource {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RobotModel {
     pub name: String,
     pub links: Vec<Link>,
@@ -287,6 +379,10 @@ pub struct RobotModel {
     /// says it holds things. Advisory metadata for authoring; empty when
     /// the source declares none.
     pub grasp_links: Vec<usize>,
+    /// Declared planning groups (catalog `frames.arms`,
+    /// [`RobotModel::define_group`], a mounted arm). Empty means the groups
+    /// are derived from the tree — see [`RobotModel::groups`].
+    pub declared_groups: Vec<GroupSpec>,
 }
 
 impl RobotModel {
@@ -398,7 +494,18 @@ impl RobotModel {
     /// ancestor of all leaves" down to the base link. They are ignored
     /// (unless the whole model is fixed, where they are all there is).
     pub fn tool_mount_link(&self) -> usize {
+        self.subtree_tool_mount(self.root_link)
+    }
+
+    /// [`RobotModel::tool_mount_link`] for the subtree under `root`: the
+    /// deepest link every moving leaf below `root` hangs off, with
+    /// "moving" judged by the joints between `root` and the leaf. `root`
+    /// itself when the subtree has no leaf, or no common link below it.
+    pub fn subtree_tool_mount(&self, root: usize) -> usize {
         let moving = |mut link: usize| loop {
+            if link == root {
+                return false;
+            }
             match self.links[link].parent_joint {
                 Some(ji) => {
                     let j = &self.joints[ji];
@@ -410,17 +517,18 @@ impl RobotModel {
                 None => return false,
             }
         };
+        let is_leaf = |link: usize| !self.joints.iter().any(|j| j.parent_link == link);
+        let in_subtree = |link: usize| self.is_ancestor_or_self(root, link);
         let mut leaves: Vec<usize> = (0..self.links.len())
-            .filter(|link| !self.joints.iter().any(|j| j.parent_link == *link))
-            .filter(|&link| moving(link))
+            .filter(|&link| is_leaf(link) && in_subtree(link) && moving(link))
             .collect();
         if leaves.is_empty() {
             leaves = (0..self.links.len())
-                .filter(|link| !self.joints.iter().any(|j| j.parent_link == *link))
+                .filter(|&link| is_leaf(link) && in_subtree(link))
                 .collect();
         }
         let Some((first, rest)) = leaves.split_first() else {
-            return self.root_link;
+            return root;
         };
         // Deepest link on one leaf's chain that every other leaf hangs off.
         let mut link = Some(*first);
@@ -431,11 +539,387 @@ impl RobotModel {
             {
                 return current;
             }
+            if current == root {
+                break;
+            }
             link = self.links[current]
                 .parent_joint
                 .map(|ji| self.joints[ji].parent_link);
         }
-        self.root_link
+        root
+    }
+
+    // ------------------------------------------------------------- groups
+
+    /// The robot's planning groups — the unit a planned motion drives and
+    /// a TCP belongs to. The declared ones when any are (a catalog
+    /// manifest's arms, [`RobotModel::define_group`], an arm bolted on by
+    /// [`RobotModel::mount`]); otherwise read off the tree by
+    /// [`RobotModel::derive_groups`]. Never empty.
+    pub fn groups(&self) -> Vec<Group> {
+        if self.declared_groups.is_empty() {
+            return self.derive_groups();
+        }
+        self.declared_groups
+            .iter()
+            .map(|spec| {
+                self.resolve_group_spec(spec)
+                    .expect("declared groups are validated when they are declared")
+            })
+            .collect()
+    }
+
+    /// Index into [`RobotModel::groups`] of the group called `name`.
+    pub fn group_index(&self, name: &str) -> Option<usize> {
+        self.groups().iter().position(|g| g.name == name)
+    }
+
+    /// Whether the groups come from the tree rather than a declaration.
+    pub fn groups_are_derived(&self) -> bool {
+        self.declared_groups.is_empty()
+    }
+
+    /// The groups the tree implies, without any declaration. A robot with
+    /// no fork is one group of every actuated joint, tipped at the default
+    /// TCP — exactly the single-arm behaviour. Where a short stem (a fixed
+    /// body, a waist of fewer than `ARM_STEM_MIN` joints) forks into
+    /// several limbs (branches of `LIMB_MIN_JOINTS` joints or more — a
+    /// fork into one-joint fingers is a hand), each branch is a group of
+    /// its own (an arm of a dual-arm body, a leg of a quadruped), tipped at the branch's
+    /// own tool mount rather than at a fingertip, and the stem is a group
+    /// by itself. A long stem is an arm and its branches are fingers,
+    /// which stay in the arm's group. Names come from the joints' common
+    /// name prefix (`openarm_left`, `FL`), a lone tip link's name failing
+    /// that, uniquified.
+    pub fn derive_groups(&self) -> Vec<Group> {
+        let mut out = Vec::new();
+        self.derive_into(self.root_link, true, &mut out);
+        if out.is_empty() {
+            // A rigid body, or nothing but mimic followers: one empty
+            // group, so "the group" always has an answer.
+            out.push(Group {
+                name: "arm".to_string(),
+                joints: Vec::new(),
+                tip: self.default_tcp_link(),
+                flange: self.flange_link,
+                base: self.root_link,
+                derived: true,
+            });
+        }
+        out
+    }
+
+    fn derive_into(&self, root: usize, top: bool, out: &mut Vec<Group>) {
+        let joints = self.subtree_actuated(root);
+        if joints.is_empty() {
+            return;
+        }
+        let mount = self.subtree_tool_mount(root);
+        // The stem: actuated joints on the path from the subtree root down
+        // to the mount, base to tip.
+        let mut stem = Vec::new();
+        let mut link = mount;
+        while link != root {
+            let ji = self.links[link]
+                .parent_joint
+                .expect("the mount lies below the subtree root");
+            if let Some(qi) = self.joints[ji].q_index {
+                stem.push(qi);
+            }
+            link = self.joints[ji].parent_link;
+        }
+        stem.reverse();
+        let branches: Vec<usize> = self
+            .joint_order
+            .iter()
+            .map(|&ji| &self.joints[ji])
+            .filter(|j| j.parent_link == mount)
+            .map(|j| j.child_link)
+            .filter(|&child| !self.subtree_actuated(child).is_empty())
+            .collect();
+        // A branch is a limb — an arm, a leg — when it carries at least
+        // two joints of its own; one-joint branches are fingers, and a
+        // fork into fingers is a hand, whatever sits above it.
+        let limbs = branches
+            .iter()
+            .filter(|&&child| self.subtree_actuated(child).len() >= LIMB_MIN_JOINTS)
+            .count();
+        if limbs >= 2 && stem.len() < ARM_STEM_MIN {
+            if !stem.is_empty() {
+                let name = self.derived_name(&stem, mount, out);
+                out.push(Group {
+                    name,
+                    joints: stem,
+                    tip: mount,
+                    flange: None,
+                    base: root,
+                    derived: true,
+                });
+            }
+            for child in branches {
+                self.derive_into(child, false, out);
+            }
+            return;
+        }
+        let (name, tip, flange) = if top {
+            ("arm".to_string(), self.default_tcp_link(), self.flange_link)
+        } else {
+            (self.derived_name(&joints, mount, out), mount, None)
+        };
+        out.push(Group {
+            name,
+            joints,
+            tip,
+            flange,
+            base: root,
+            derived: true,
+        });
+    }
+
+    /// Actuated joints (q indices, ascending) whose child link lies under
+    /// `root`.
+    fn subtree_actuated(&self, root: usize) -> Vec<usize> {
+        self.actuated_joints
+            .iter()
+            .enumerate()
+            .filter(|(_, &ji)| self.is_ancestor_or_self(root, self.joints[ji].child_link))
+            .map(|(qi, _)| qi)
+            .collect()
+    }
+
+    /// A name for a derived group: the joints' common `_`-token prefix,
+    /// the tip link's name when they share none, kept unique among
+    /// `taken` (first by one more token of the first joint, then by a
+    /// counter).
+    fn derived_name(&self, joints: &[usize], tip: usize, taken: &[Group]) -> String {
+        let names: Vec<Vec<&str>> = joints
+            .iter()
+            .map(|&qi| {
+                self.joints[self.actuated_joints[qi]]
+                    .name
+                    .split('_')
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .collect();
+        let mut common = 0;
+        if let Some(first) = names.first() {
+            while common < first.len()
+                && names.iter().all(|n| n.get(common) == Some(&first[common]))
+            {
+                common += 1;
+            }
+        }
+        let base = match names.first() {
+            Some(first) if common > 0 => first[..common].join("_"),
+            _ => self.links[tip].name.clone(),
+        };
+        let used = |name: &str| taken.iter().any(|g| g.name == name);
+        if !used(&base) {
+            return base;
+        }
+        if let Some(first) = names.first() {
+            if let Some(next) = first.get(common) {
+                let longer = format!("{base}_{next}");
+                if !used(&longer) {
+                    return longer;
+                }
+            }
+        }
+        (2..)
+            .map(|n| format!("{base}_{n}"))
+            .find(|candidate| !used(candidate))
+            .expect("some counter is free")
+    }
+
+    /// The most specific group whose chain `link` hangs off: among the
+    /// groups whose base is an ancestor of `link` (or the link itself),
+    /// the one based deepest. `None` when no group contains it or two are
+    /// based equally deep (overlapping declarations).
+    pub fn group_for_link(&self, link: usize) -> Option<usize> {
+        let depth = |mut l: usize| {
+            let mut d = 0;
+            while let Some(ji) = self.links[l].parent_joint {
+                d += 1;
+                l = self.joints[ji].parent_link;
+            }
+            d
+        };
+        let groups = self.groups();
+        let mut best: Option<(usize, usize)> = None;
+        let mut tied = false;
+        for (gi, g) in groups.iter().enumerate() {
+            if !self.is_ancestor_or_self(g.base, link) {
+                continue;
+            }
+            let d = depth(g.base);
+            match best {
+                Some((_, bd)) if d < bd => {}
+                Some((_, bd)) if d == bd => tied = true,
+                _ => {
+                    best = Some((gi, d));
+                    tied = false;
+                }
+            }
+        }
+        if tied {
+            return None;
+        }
+        best.map(|(gi, _)| gi)
+    }
+
+    /// [`RobotModel::tool_mount_link`] of one group: the deepest link every
+    /// moving leaf under the group's base hangs off — the wrist a hand is
+    /// bolted to, per arm.
+    pub fn group_tool_mount(&self, group: &Group) -> usize {
+        self.subtree_tool_mount(group.base)
+    }
+
+    /// Declares (or redeclares, by name) a planning group and returns the
+    /// model carrying it; the input is not modified. `tip` is the link a
+    /// motion of the group places. `joints` names the actuated joints it
+    /// drives; omitted, they are the joints on `tip`'s chain minus those of
+    /// any existing group tipped above it (a waist declared as a group of
+    /// its own stays out of the arm). `flange` names this arm's
+    /// tool-mounting face, which [`RobotModel::attach_tool`] with
+    /// `group=` uses.
+    ///
+    /// The first declaration replaces the derived groups outright — from
+    /// then on the declaration is the truth, and arms not declared are not
+    /// groups.
+    pub fn define_group(
+        &self,
+        name: &str,
+        tip: &str,
+        joints: Option<&[&str]>,
+        flange: Option<&str>,
+    ) -> Result<RobotModel, ModelError> {
+        let tip_index = self
+            .link_index(tip)
+            .ok_or_else(|| ModelError::UnknownGroupLink {
+                group: name.to_string(),
+                link: tip.to_string(),
+            })?;
+        let joints: Vec<String> = match joints {
+            Some(list) => list.iter().map(|s| s.to_string()).collect(),
+            None => {
+                let above: Vec<usize> = self
+                    .groups()
+                    .iter()
+                    .filter(|g| g.name != name)
+                    .filter(|g| g.tip != tip_index && self.is_ancestor_or_self(g.tip, tip_index))
+                    .flat_map(|g| g.joints.clone())
+                    .collect();
+                let mut chain = self.driving_joints(tip_index);
+                chain.reverse();
+                chain
+                    .into_iter()
+                    .filter(|&ji| {
+                        self.joints[ji]
+                            .q_index
+                            .is_some_and(|qi| !above.contains(&qi))
+                    })
+                    .map(|ji| self.joints[ji].name.clone())
+                    .collect()
+            }
+        };
+        let spec = GroupSpec {
+            name: name.to_string(),
+            tip: tip.to_string(),
+            joints,
+            flange: flange.map(str::to_string),
+        };
+        let mut model = self.clone();
+        let mut specs = self.declared_groups.clone();
+        match specs.iter().position(|s| s.name == name) {
+            Some(i) => specs[i] = spec,
+            None => specs.push(spec),
+        }
+        model.declared_groups = specs;
+        model.validate_groups()?;
+        Ok(model)
+    }
+
+    /// Checks every declared group resolves on this tree.
+    pub fn validate_groups(&self) -> Result<(), ModelError> {
+        for spec in &self.declared_groups {
+            self.resolve_group_spec(spec)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_group_spec(&self, spec: &GroupSpec) -> Result<Group, ModelError> {
+        let tip = self
+            .link_index(&spec.tip)
+            .ok_or_else(|| ModelError::UnknownGroupLink {
+                group: spec.name.clone(),
+                link: spec.tip.clone(),
+            })?;
+        let flange = spec
+            .flange
+            .as_deref()
+            .map(|f| {
+                self.link_index(f)
+                    .ok_or_else(|| ModelError::UnknownGroupLink {
+                        group: spec.name.clone(),
+                        link: f.to_string(),
+                    })
+            })
+            .transpose()?;
+        let mut joints = Vec::with_capacity(spec.joints.len());
+        for joint in &spec.joints {
+            let ji = self
+                .joint_index(joint)
+                .ok_or_else(|| ModelError::UnknownGroupJoint {
+                    group: spec.name.clone(),
+                    joint: joint.clone(),
+                })?;
+            let qi = self.joints[ji]
+                .q_index
+                .ok_or_else(|| ModelError::GroupJointNotActuated {
+                    group: spec.name.clone(),
+                    joint: joint.clone(),
+                })?;
+            if !joints.contains(&qi) {
+                joints.push(qi);
+            }
+        }
+        joints.sort_unstable();
+        let base = match joints.first() {
+            Some(&qi) => self.joints[self.actuated_joints[qi]].parent_link,
+            None => self.root_link,
+        };
+        Ok(Group {
+            name: spec.name.clone(),
+            joints,
+            tip,
+            flange,
+            base,
+            derived: false,
+        })
+    }
+
+    /// The groups as declarations: the declared ones, or the derived ones
+    /// written down by name (empty groups dropped — a bare body has no arm
+    /// to keep). What a group-addressing composition starts from.
+    fn group_specs(&self) -> Vec<GroupSpec> {
+        if !self.declared_groups.is_empty() {
+            return self.declared_groups.clone();
+        }
+        self.derive_groups()
+            .into_iter()
+            .filter(|g| !g.joints.is_empty())
+            .map(|g| GroupSpec {
+                name: g.name,
+                tip: self.links[g.tip].name.clone(),
+                joints: g
+                    .joints
+                    .iter()
+                    .map(|&qi| self.joints[self.actuated_joints[qi]].name.clone())
+                    .collect(),
+                flange: g.flange.map(|i| self.links[i].name.clone()),
+            })
+            .collect()
     }
 
     /// Actuated joints that move `link` — its ancestors in the chain, i.e.
@@ -732,6 +1216,7 @@ impl RobotModel {
             flange_link: None,
             mount_link: None,
             grasp_links: Vec::new(),
+            declared_groups: Vec::new(),
         })
     }
 
@@ -756,8 +1241,14 @@ impl RobotModel {
     /// flange, so a whole coupling-then-gripper stack chains without
     /// naming a single frame.
     ///
+    /// `group` names the arm the tool goes on: its declared flange is the
+    /// default `flange`, and it is that arm whose TCP becomes the tool's.
+    /// A single-arm robot needs none; a robot with several arms needs
+    /// either `group` or a `flange` that lies on one of them.
+    ///
     /// [`flange_link`]: RobotModel::flange_link
     /// [`mount_link`]: RobotModel::mount_link
+    #[allow(clippy::too_many_arguments)]
     pub fn attach_tool(
         &self,
         tool: &RobotModel,
@@ -766,10 +1257,32 @@ impl RobotModel {
         offset: Isometry3<f64>,
         tcp: Option<&str>,
         prefix: Option<&str>,
+        group: Option<&str>,
     ) -> Result<RobotModel, ModelError> {
+        let groups = self.groups();
+        // The arm addressed: named, the sole declared one, or the one the
+        // named flange lies on. A sole *derived* group is the whole robot
+        // and keeps the model-level TCP/flange bookkeeping.
+        let target: Option<usize> = match group {
+            Some(name) => Some(
+                self.group_index(name)
+                    .ok_or_else(|| ModelError::UnknownGroup(name.to_string()))?,
+            ),
+            None if groups.len() == 1 => (!groups[0].derived).then_some(0),
+            None => match flange.and_then(|f| self.link_index(f)) {
+                Some(link) => Some(self.group_for_link(link).ok_or_else(|| {
+                    ModelError::AmbiguousGroup(groups.iter().map(|g| g.name.clone()).collect())
+                })?),
+                None => {
+                    return Err(ModelError::AmbiguousGroup(
+                        groups.iter().map(|g| g.name.clone()).collect(),
+                    ))
+                }
+            },
+        };
         let flange = match flange {
             Some(name) => name.to_string(),
-            None => match self.flange_link {
+            None => match target.and_then(|g| groups[g].flange).or(self.flange_link) {
                 Some(i) => self.links[i].name.clone(),
                 None => return Err(ModelError::NoFlangeDeclared),
             },
@@ -802,55 +1315,6 @@ impl RobotModel {
             // A TCP the tool declares (catalog metadata) survives mounting.
             None => tool.tcp_link,
         };
-        let rename = |name: &str| match prefix {
-            Some(p) => format!("{p}{name}"),
-            None => name.to_string(),
-        };
-
-        let link_offset = self.links.len();
-        let mut links = self.links.clone();
-        for link in &tool.links {
-            let name = rename(&link.name);
-            if self.link_index(&name).is_some() {
-                return Err(ModelError::NameCollision(name, "link"));
-            }
-            links.push(Link {
-                name,
-                ..link.clone()
-            });
-        }
-
-        let joint_offset = self.joints.len();
-        let mut joints = self.joints.clone();
-        for joint in &tool.joints {
-            let name = rename(&joint.name);
-            if self.joint_index(&name).is_some() {
-                return Err(ModelError::NameCollision(name, "joint"));
-            }
-            joints.push(Joint {
-                name,
-                parent_link: joint.parent_link + link_offset,
-                child_link: joint.child_link + link_offset,
-                // Tool-internal index; `q_index` is reassigned by from_parts.
-                mimic: joint.mimic.map(|m| JointMimic {
-                    source_joint: m.source_joint + joint_offset,
-                    ..m
-                }),
-                ..joint.clone()
-            });
-        }
-        joints.push(Joint {
-            name: format!("{flange}_to_{}", rename(mount)),
-            joint_type: JointType::Fixed,
-            origin: offset,
-            axis: Unit::new_unchecked(Vector3::z()),
-            limits: None,
-            parent_link: flange_index,
-            child_link: link_offset + tool.root_link,
-            q_index: None,
-            mimic: None,
-        });
-
         let source = RobotSource::Composite {
             base: Box::new(self.source.clone()),
             tool: Box::new(tool.source.clone()),
@@ -859,8 +1323,11 @@ impl RobotModel {
             offset,
             tcp: tcp.map(str::to_string),
             prefix: prefix.map(str::to_string),
+            role: MountRole::Tool,
+            group: group.map(str::to_string),
         };
-        let mut model = Self::from_parts(self.name.clone(), links, joints, source)?;
+        let (mut model, link_offset) =
+            self.weld(tool, flange_index, mount, offset, prefix, source)?;
         // The base's own TCP (if any) sits behind the tool now and does not
         // carry over; without a tool TCP the deepest-leaf heuristic applies,
         // which lands inside the tool.
@@ -879,7 +1346,222 @@ impl RobotModel {
             .copied()
             .chain(tool.grasp_links.iter().map(|i| i + link_offset))
             .collect();
+        // The addressed arm's declaration follows the tool: its TCP is the
+        // tool's now, its flange the tool's onward face. Other arms are
+        // untouched. With no arm addressed (a single-arm robot) the groups
+        // stay derived and re-derive on the composite.
+        if let Some(g) = target {
+            let rename = |name: &str| match prefix {
+                Some(p) => format!("{p}{name}"),
+                None => name.to_string(),
+            };
+            let mut specs = self.group_specs();
+            let spec = specs
+                .iter_mut()
+                .find(|s| s.name == groups[g].name)
+                .expect("the addressed group is among the specs");
+            spec.tip =
+                rename(&tool.links[tool_tcp.unwrap_or_else(|| tool.default_tcp_link())].name);
+            spec.flange = tool.flange_link.map(|i| rename(&tool.links[i].name));
+            model.declared_groups = specs;
+            model.validate_groups()?;
+        }
         Ok(model)
+    }
+
+    /// Welds `part` onto this robot's link `at` as a manipulator of its
+    /// own (`role` [`MountRole::Arm`]) — an arm bolted to a dual-arm body —
+    /// or as a tool (`role` [`MountRole::Tool`], the same as
+    /// [`RobotModel::attach_tool`] by `at`). The part's root goes on `at`
+    /// at `offset`; `prefix` namespaces its link and joint names.
+    ///
+    /// A mounted arm becomes a group of the composite: `group` names it
+    /// (the prefix without its trailing `_`, else the part's name, when
+    /// omitted), its TCP and flange are the part's, and the part's own
+    /// groups — when it has several — become `<group>_<name>`. The body's
+    /// TCP and flange bookkeeping is left alone: with several arms the
+    /// groups are what a TCP belongs to.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mount(
+        &self,
+        part: &RobotModel,
+        at: &str,
+        offset: Isometry3<f64>,
+        prefix: Option<&str>,
+        role: MountRole,
+        group: Option<&str>,
+    ) -> Result<RobotModel, ModelError> {
+        if role == MountRole::Tool {
+            return self.attach_tool(part, Some(at), None, offset, None, prefix, group);
+        }
+        let at_index = self
+            .link_index(at)
+            .ok_or_else(|| ModelError::UnknownFlange(at.to_string()))?;
+        let mount = part.links[part.root_link].name.clone();
+        let group_name = match group {
+            Some(name) => name.to_string(),
+            None => prefix
+                .map(|p| p.trim_end_matches(['_', '-', '/']).to_string())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| part.name.clone()),
+        };
+        let source = RobotSource::Composite {
+            base: Box::new(self.source.clone()),
+            tool: Box::new(part.source.clone()),
+            flange: at.to_string(),
+            mount: mount.clone(),
+            offset,
+            tcp: None,
+            prefix: prefix.map(str::to_string),
+            role: MountRole::Arm,
+            group: Some(group_name.clone()),
+        };
+        let (mut model, link_offset) = self.weld(part, at_index, &mount, offset, prefix, source)?;
+        model.tcp_link = self.tcp_link;
+        model.flange_link = self.flange_link;
+        model.mount_link = self.mount_link;
+        model.grasp_links = self
+            .grasp_links
+            .iter()
+            .copied()
+            .chain(part.grasp_links.iter().map(|i| i + link_offset))
+            .collect();
+        let rename = |name: &str| match prefix {
+            Some(p) => format!("{p}{name}"),
+            None => name.to_string(),
+        };
+        let mut specs = self.group_specs();
+        let part_specs = part.group_specs();
+        let several = part_specs.len() > 1;
+        for spec in part_specs {
+            let name = if several {
+                format!("{group_name}_{}", spec.name)
+            } else {
+                group_name.clone()
+            };
+            if specs.iter().any(|s| s.name == name) {
+                return Err(ModelError::NameCollision(name, "group"));
+            }
+            specs.push(GroupSpec {
+                name,
+                tip: rename(&spec.tip),
+                joints: spec.joints.iter().map(|j| rename(j)).collect(),
+                flange: spec.flange.as_deref().map(rename),
+            });
+        }
+        model.declared_groups = specs;
+        model.validate_groups()?;
+        Ok(model)
+    }
+
+    /// Two arms on one body, as one robot with the groups `left` and
+    /// `right` (link and joint names prefixed `left_` / `right_`). `body`
+    /// is the torso the arms bolt to — omitted, a bare frame named after
+    /// the left arm — and `left_mount` / `right_mount` name the body links
+    /// the arm roots go on (the body's root by default) at `left_at` /
+    /// `right_at`. Tools then attach per arm:
+    /// `attach_tool(gripper, …, group = "left")`.
+    pub fn dual_arm(
+        body: Option<&RobotModel>,
+        left: &RobotModel,
+        right: &RobotModel,
+        left_mount: Option<&str>,
+        left_at: Isometry3<f64>,
+        right_mount: Option<&str>,
+        right_at: Isometry3<f64>,
+    ) -> Result<RobotModel, ModelError> {
+        let body = match body {
+            Some(body) => body.clone(),
+            None => RobotModel::from_urdf_str(&format!(
+                "<robot name=\"{}_dual\"><link name=\"body\"/></robot>",
+                left.name
+            ))?,
+        };
+        let root = body.links[body.root_link].name.clone();
+        body.mount(
+            left,
+            left_mount.unwrap_or(&root),
+            left_at,
+            Some("left_"),
+            MountRole::Arm,
+            Some("left"),
+        )?
+        .mount(
+            right,
+            right_mount.unwrap_or(&root),
+            right_at,
+            Some("right_"),
+            MountRole::Arm,
+            Some("right"),
+        )
+    }
+
+    /// The weld itself: this robot's links and joints, then `part`'s
+    /// (renamed by `prefix`, indices offset), joined by a fixed joint from
+    /// `flange_index` to the part's root at `offset`. Returns the rebuilt
+    /// composite (q indices reassigned by [`RobotModel::from_parts`]) and
+    /// the part's link index offset.
+    fn weld(
+        &self,
+        part: &RobotModel,
+        flange_index: usize,
+        mount: &str,
+        offset: Isometry3<f64>,
+        prefix: Option<&str>,
+        source: RobotSource,
+    ) -> Result<(RobotModel, usize), ModelError> {
+        let rename = |name: &str| match prefix {
+            Some(p) => format!("{p}{name}"),
+            None => name.to_string(),
+        };
+        let flange = &self.links[flange_index].name;
+
+        let link_offset = self.links.len();
+        let mut links = self.links.clone();
+        for link in &part.links {
+            let name = rename(&link.name);
+            if self.link_index(&name).is_some() {
+                return Err(ModelError::NameCollision(name, "link"));
+            }
+            links.push(Link {
+                name,
+                ..link.clone()
+            });
+        }
+
+        let joint_offset = self.joints.len();
+        let mut joints = self.joints.clone();
+        for joint in &part.joints {
+            let name = rename(&joint.name);
+            if self.joint_index(&name).is_some() {
+                return Err(ModelError::NameCollision(name, "joint"));
+            }
+            joints.push(Joint {
+                name,
+                parent_link: joint.parent_link + link_offset,
+                child_link: joint.child_link + link_offset,
+                // Part-internal index; `q_index` is reassigned by from_parts.
+                mimic: joint.mimic.map(|m| JointMimic {
+                    source_joint: m.source_joint + joint_offset,
+                    ..m
+                }),
+                ..joint.clone()
+            });
+        }
+        joints.push(Joint {
+            name: format!("{flange}_to_{}", rename(mount)),
+            joint_type: JointType::Fixed,
+            origin: offset,
+            axis: Unit::new_unchecked(Vector3::z()),
+            limits: None,
+            parent_link: flange_index,
+            child_link: link_offset + part.root_link,
+            q_index: None,
+            mimic: None,
+        });
+
+        let model = Self::from_parts(self.name.clone(), links, joints, source)?;
+        Ok((model, link_offset))
     }
 }
 
@@ -1058,7 +1740,7 @@ mod tests {
 
     /// A wrist carrying a two-finger gripper: the tool mount is the wrist
     /// the fingers hang off, not the deepest leaf.
-    const GRIPPER: &str = r#"
+    pub(crate) const GRIPPER: &str = r#"
     <robot name="arm">
       <link name="base"/>
       <link name="wrist"/>
@@ -1332,6 +2014,7 @@ mod tests {
                 offset,
                 Some("grasp_center"),
                 None,
+                None,
             )
             .unwrap();
 
@@ -1377,6 +2060,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let names: Vec<&str> = combined
@@ -1400,6 +2084,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -1421,6 +2106,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 None,
+                None,
             )
             .unwrap_err();
         assert!(matches!(err, ModelError::NameCollision(_, "link")), "{err}");
@@ -1433,6 +2119,7 @@ mod tests {
                 Isometry3::identity(),
                 None,
                 Some("t2_"),
+                None,
             )
             .unwrap();
         assert_eq!(combined.dof(), 2);
@@ -1464,9 +2151,9 @@ mod tests {
         // Not a single frame named: the whole stack chains off declarations.
         let id = Isometry3::identity();
         let stack = arm
-            .attach_tool(&coupling, None, None, id, None, None)
+            .attach_tool(&coupling, None, None, id, None, None, None)
             .unwrap()
-            .attach_tool(&tool, None, None, id, None, None)
+            .attach_tool(&tool, None, None, id, None, None, None)
             .unwrap();
         assert_eq!(stack.dof(), 2);
         assert_eq!(stack.links[stack.default_tcp_link()].name, "grasp_center");
@@ -1478,7 +2165,9 @@ mod tests {
 
         // A tool with no declared mount falls back to its root link.
         let plain = RobotModel::from_urdf_str(TOOL).unwrap();
-        let combined = arm.attach_tool(&plain, None, None, id, None, None).unwrap();
+        let combined = arm
+            .attach_tool(&plain, None, None, id, None, None, None)
+            .unwrap();
         assert!(combined.joint_index("tool_to_mount_plate").is_some());
     }
 
@@ -1488,15 +2177,23 @@ mod tests {
         let tool = RobotModel::from_urdf_str(TOOL).unwrap();
         let id = Isometry3::identity();
         assert!(matches!(
-            arm.attach_tool(&tool, Some("nope"), Some("mount_plate"), id, None, None),
+            arm.attach_tool(
+                &tool,
+                Some("nope"),
+                Some("mount_plate"),
+                id,
+                None,
+                None,
+                None
+            ),
             Err(ModelError::UnknownFlange(_))
         ));
         assert!(matches!(
-            arm.attach_tool(&tool, Some("tool"), Some("nope"), id, None, None),
+            arm.attach_tool(&tool, Some("tool"), Some("nope"), id, None, None, None),
             Err(ModelError::UnknownMount(_))
         ));
         assert!(matches!(
-            arm.attach_tool(&tool, Some("tool"), Some("finger_l"), id, None, None),
+            arm.attach_tool(&tool, Some("tool"), Some("finger_l"), id, None, None, None),
             Err(ModelError::MountNotRoot { .. })
         ));
         assert!(matches!(
@@ -1506,13 +2203,14 @@ mod tests {
                 Some("mount_plate"),
                 id,
                 Some("nope"),
+                None,
                 None
             ),
             Err(ModelError::UnknownTcp(_))
         ));
         // No declared flange and no explicit one: refuse rather than guess.
         assert!(matches!(
-            arm.attach_tool(&tool, None, None, id, None, None),
+            arm.attach_tool(&tool, None, None, id, None, None, None),
             Err(ModelError::NoFlangeDeclared)
         ));
     }
@@ -1587,5 +2285,217 @@ mod tests {
         let iso = pose_to_isometry(&pose);
         let v = iso * nalgebra::Point3::new(1.0, 0.0, 0.0);
         assert!((v.y - 1.0).abs() < 1e-12 && v.x.abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::tests::GRIPPER;
+    use super::*;
+
+    const DUAL: &str = include_str!("../../../examples/assets/dual_arm_test.urdf");
+    const ARM: &str = include_str!("../../../examples/assets/simple_arm.urdf");
+
+    fn dual() -> RobotModel {
+        RobotModel::from_urdf_str(DUAL).unwrap()
+    }
+
+    fn names(model: &RobotModel, g: &Group) -> Vec<String> {
+        g.joints
+            .iter()
+            .map(|&qi| model.joints[model.actuated_joints[qi]].name.clone())
+            .collect()
+    }
+
+    /// A single chain is one group of every joint, tipped at the default
+    /// TCP — the single-arm behaviour, untouched.
+    #[test]
+    fn a_single_chain_is_one_whole_group() {
+        let arm = RobotModel::from_urdf_str(ARM).unwrap();
+        let groups = arm.groups();
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.name, "arm");
+        assert_eq!(g.joints, (0..arm.dof()).collect::<Vec<_>>());
+        assert_eq!(g.tip, arm.default_tcp_link());
+        assert_eq!(g.base, arm.root_link);
+        assert!(g.derived);
+        assert!(arm.groups_are_derived());
+    }
+
+    /// A body forking into two arms derives one group per arm, tipped at
+    /// each arm's own tool mount (the hand), not at a fingertip, and
+    /// named by the joints' common prefix.
+    #[test]
+    fn a_dual_arm_body_derives_one_group_per_arm() {
+        let model = dual();
+        assert_eq!(model.dof(), 8);
+        let groups = model.groups();
+        let by_name: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(by_name, vec!["left", "right"]);
+        let left = &groups[0];
+        assert_eq!(
+            names(&model, left),
+            vec!["left_shoulder", "left_elbow", "left_wrist", "left_finger"]
+        );
+        assert_eq!(model.links[left.tip].name, "left_hand");
+        assert_eq!(model.links[left.base].name, "left_base");
+        // The deepest-leaf heuristic lands on a fingertip; the group does not.
+        let deepest = &model.links[model.default_tcp_link()].name;
+        assert!(deepest.contains("finger"), "{deepest}");
+        // The right arm's joints interleave with the left's in q order.
+        let right = &groups[1];
+        assert!(right
+            .joints
+            .iter()
+            .any(|&qi| qi < *left.joints.last().unwrap()));
+    }
+
+    #[test]
+    fn group_for_link_picks_the_most_specific_arm() {
+        let model = dual();
+        let hand = model.link_index("right_finger_a").unwrap();
+        assert_eq!(model.group_for_link(hand), Some(1));
+        let body = model.root_link;
+        assert_eq!(model.group_for_link(body), None);
+    }
+
+    /// Declaring replaces the derived groups; the default joints are the
+    /// tip's chain, minus any group tipped above it.
+    #[test]
+    fn define_group_declares_by_name() {
+        let model = dual()
+            .define_group("l", "left_hand", None, Some("left_hand"))
+            .unwrap();
+        assert!(!model.groups_are_derived());
+        let groups = model.groups();
+        assert_eq!(
+            groups.len(),
+            1,
+            "the first declaration replaces the derived set"
+        );
+        let g = &groups[0];
+        assert_eq!(
+            names(&model, g),
+            vec!["left_shoulder", "left_elbow", "left_wrist"]
+        );
+        assert_eq!(model.links[g.flange.unwrap()].name, "left_hand");
+        assert!(!g.derived);
+        // Redeclaring by name replaces; a second name adds.
+        let model = model
+            .define_group("l", "left_hand", Some(&["left_shoulder"]), None)
+            .unwrap()
+            .define_group("r", "right_hand", None, None)
+            .unwrap();
+        let groups = model.groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(names(&model, &groups[0]), vec!["left_shoulder"]);
+        assert_eq!(model.group_index("r"), Some(1));
+        // A mimic follower is not a joint one drives.
+        let err = dual()
+            .define_group("f", "left_finger_b_link", Some(&["left_finger_b"]), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, ModelError::GroupJointNotActuated { .. }),
+            "{err}"
+        );
+    }
+
+    /// Two arms on a body through `dual_arm`: one robot, two declared
+    /// groups with the arms' own tips, joints prefixed apart.
+    #[test]
+    fn dual_arm_composes_two_arms_into_groups() {
+        let arm = RobotModel::from_urdf_str(ARM).unwrap();
+        let left_at = Isometry3::translation(0.0, 0.3, 0.8);
+        let right_at = Isometry3::translation(0.0, -0.3, 0.8);
+        let pair = RobotModel::dual_arm(None, &arm, &arm, None, left_at, None, right_at).unwrap();
+        assert_eq!(pair.dof(), 12);
+        assert_eq!(pair.name, "simple_arm_dual");
+        let groups = pair.groups();
+        assert_eq!(
+            groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            vec!["left", "right"]
+        );
+        assert_eq!(pair.links[groups[0].tip].name, "left_tool0");
+        assert_eq!(pair.links[groups[1].tip].name, "right_tool0");
+        assert_eq!(groups[0].joints.len(), 6);
+        assert!(groups[0]
+            .joints
+            .iter()
+            .all(|qi| !groups[1].joints.contains(qi)));
+        assert!(matches!(
+            pair.source,
+            RobotSource::Composite {
+                role: MountRole::Arm,
+                ..
+            }
+        ));
+        // A tool then goes on one arm, and only that arm's tip moves to it.
+        let tool = RobotModel::from_urdf_str(GRIPPER).unwrap();
+        let with_tool = pair
+            .attach_tool(
+                &tool,
+                Some("left_tool0"),
+                None,
+                Isometry3::identity(),
+                Some("left"),
+                Some("g_"),
+                None,
+            )
+            .unwrap();
+        let groups = with_tool.groups();
+        assert_eq!(with_tool.links[groups[0].tip].name, "g_left");
+        assert_eq!(with_tool.links[groups[1].tip].name, "right_tool0");
+        // Naming no arm and no flange is ambiguous on a two-arm robot.
+        let err = pair
+            .attach_tool(
+                &tool,
+                None,
+                None,
+                Isometry3::identity(),
+                None,
+                Some("g_"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelError::AmbiguousGroup(_)), "{err}");
+        // Naming the arm picks its flange... which a bare arm does not
+        // declare — so the error is the flange one, not the ambiguity.
+        let err = pair
+            .attach_tool(
+                &tool,
+                None,
+                None,
+                Isometry3::identity(),
+                None,
+                Some("g_"),
+                Some("right"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelError::NoFlangeDeclared), "{err}");
+    }
+
+    /// Attaching a tool to a single-arm robot leaves its groups derived —
+    /// the composite re-derives one whole group tipped at the tool.
+    #[test]
+    fn attach_tool_on_one_arm_keeps_the_groups_derived() {
+        let arm = RobotModel::from_urdf_str(ARM).unwrap();
+        let tool = RobotModel::from_urdf_str(GRIPPER).unwrap();
+        let combined = arm
+            .attach_tool(
+                &tool,
+                Some("tool0"),
+                None,
+                Isometry3::identity(),
+                Some("left"),
+                Some("g_"),
+                None,
+            )
+            .unwrap();
+        assert!(combined.groups_are_derived());
+        let groups = combined.groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tip, combined.default_tcp_link());
+        assert_eq!(groups[0].joints.len(), combined.dof());
     }
 }

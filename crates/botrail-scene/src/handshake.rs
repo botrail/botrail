@@ -27,6 +27,23 @@ pub fn robot_busy(timeline: &SequenceTimeline, robot: &str) -> Option<Vec<(f64, 
     Some(merge_spans(track.moves.iter().map(|m| (m.start, m.end))))
 }
 
+/// [`robot_busy`] for one arm of a robot: the move intervals labelled
+/// with that group. `None` for an unknown robot.
+pub fn group_busy(
+    timeline: &SequenceTimeline,
+    robot: &str,
+    group: &str,
+) -> Option<Vec<(f64, f64)>> {
+    let track = timeline.robots.iter().find(|r| r.name == robot)?;
+    Some(merge_spans(
+        track
+            .moves
+            .iter()
+            .filter(|m| m.group.as_deref() == Some(group))
+            .map(|m| (m.start, m.end)),
+    ))
+}
+
 /// Merges `(start, end)` intervals that touch or overlap (to float noise),
 /// in time order.
 pub fn merge_spans(spans: impl IntoIterator<Item = (f64, f64)>) -> Vec<(f64, f64)> {

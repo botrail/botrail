@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 
 import type { FrameMsg, ObstacleMsg, PartEntry } from "../protocol";
-import { collidingObstacleNames, useStudioStore } from "../store";
+import { collidingObstacleNames, robotArms, useStudioStore } from "../store";
 import {
   sendRemoveCamera,
   sendRemoveLidar,
@@ -24,6 +24,7 @@ export function SceneTreePanel() {
   const selectedRobot = useStudioStore((s) => s.selectedRobot);
   const selectTcp = useStudioStore((s) => s.selectTcp);
   const selectRobot = useStudioStore((s) => s.selectRobot);
+  const setSelectedGroup = useStudioStore((s) => s.setSelectedGroup);
   const obstacles = useStudioStore((s) => s.obstacles);
   const frames = useStudioStore((s) => s.frames);
   const sensors = useStudioStore((s) => s.sensors);
@@ -65,28 +66,54 @@ export function SceneTreePanel() {
         {robots.map((r) => {
           const name = r.desc.name;
           return (
-            <div
-              key={name}
-              className={`tree-row${selectedRobot === name ? " selected" : ""}`}
-            >
-              <span className="tree-twist" />
-              <span
-                className="tree-label"
-                title="select this robot"
-                onClick={() => selectTcp(name)}
+            <Fragment key={name}>
+              <div
+                className={`tree-row${selectedRobot === name ? " selected" : ""}`}
               >
-                {"\u{1F916} "}
-                {name}
-              </span>
-              <PartBadge entry={partIndex.get(`robot:${name}`)} />
-              <button
-                className="tree-toggle"
-                title="place robot base"
-                onClick={() => selectRobot(name)}
-              >
-                ⌖
-              </button>
-            </div>
+                <span className="tree-twist" />
+                <span
+                  className="tree-label"
+                  title="select this robot"
+                  onClick={() => selectTcp(name)}
+                >
+                  {"\u{1F916} "}
+                  {name}
+                </span>
+                <PartBadge entry={partIndex.get(`robot:${name}`)} />
+                <button
+                  className="tree-toggle"
+                  title="place robot base"
+                  onClick={() => selectRobot(name)}
+                >
+                  ⌖
+                </button>
+              </div>
+              {/* The arms of a dual-arm robot: pick one to drive it. */}
+              {robotArms(r.desc).map((g) => (
+                <div
+                  key={g.name}
+                  className={`tree-row${
+                    selectedRobot === name && r.selectedGroup === g.name
+                      ? " selected"
+                      : ""
+                  }`}
+                  style={{ paddingLeft: "12px" }}
+                >
+                  <span className="tree-twist" />
+                  <span
+                    className="tree-label"
+                    title={`select this arm (TCP ${g.tip_link})`}
+                    onClick={() => {
+                      setSelectedGroup(name, g.name);
+                      selectTcp(name);
+                    }}
+                  >
+                    {"\u{1F9BE} "}
+                    {g.name}
+                  </span>
+                </div>
+              ))}
+            </Fragment>
           );
         })}
       </div>

@@ -17,10 +17,13 @@ export function SequencePanel() {
   const sequences = useStudioStore((s) => s.sequences);
   const motions = useStudioStore((s) => s.motions);
   const selection = useStudioStore((s) => s.selection);
-  // Grasp steps attach with the selected robot at its TCP link.
+  // Grasp steps attach with the selected robot (arm) at its TCP link.
   const selectedRobot = useStudioStore((s) => s.selectedRobot);
   const tcpLink = useStudioStore(
     (s) => robotByName(s.robots, s.selectedRobot)?.tcpLink ?? null,
+  );
+  const selectedGroup = useStudioStore(
+    (s) => robotByName(s.robots, s.selectedRobot)?.selectedGroup ?? null,
   );
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const error = useStudioStore((s) => s.sequenceError);
@@ -103,6 +106,7 @@ export function SequencePanel() {
           object: selectedObstacle,
           link: tcpLink,
           touch_links: null,
+          group: selectedGroup,
         },
       ],
       transition: { type: "immediately" },

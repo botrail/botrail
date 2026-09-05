@@ -45,6 +45,8 @@ export type { SensorMsg } from "./generated/SensorMsg";
 export type { ScenarioMsg } from "./generated/ScenarioMsg";
 export type { SensorKindMsg } from "./generated/SensorKindMsg";
 export type { SensorWatchMsg } from "./generated/SensorWatchMsg";
+export type { GroupRefMsg } from "./generated/GroupRefMsg";
+export type { GroupMsg } from "./generated/GroupMsg";
 export type { CameraMsg } from "./generated/CameraMsg";
 export type { CameraMountMsg } from "./generated/CameraMountMsg";
 export type { LidarMsg } from "./generated/LidarMsg";
