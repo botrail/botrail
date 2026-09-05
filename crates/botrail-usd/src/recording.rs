@@ -754,6 +754,8 @@ mod tests {
             .collect();
         let objects = [
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "box".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(0.1, 0.1, 0.1),
@@ -764,6 +766,8 @@ mod tests {
                 physics: None,
             },
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "table".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(1.0, 1.0, 0.02),
@@ -776,6 +780,8 @@ mod tests {
             // Never moves, only blinks — the carve-stage shape whose whole
             // animation is its visibility window.
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "stage".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(0.2, 0.2, 0.01),

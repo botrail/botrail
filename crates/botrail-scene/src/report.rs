@@ -502,7 +502,9 @@ fn catalog_identity(
                 .find(|(k, _)| k == "reach_mm")
                 .map(|(_, v)| v / 1000.0),
         ),
-        RobotSource::Composite { base, .. } => catalog_identity(base),
+        RobotSource::Composite { base, .. } | RobotSource::Visuals { base, .. } => {
+            catalog_identity(base)
+        }
         _ => (None, None, None, None),
     }
 }

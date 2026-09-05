@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
 
-import type { GeometryMsg } from "../protocol";
+import type { GeometryMsg, MaterialMsg } from "../protocol";
 import { loadMesh, type LoadedMesh } from "../three/loaders";
+import { meshInstance } from "../three/meshAppearance";
 
 type MeshGeometry = Extract<GeometryMsg, { kind: "mesh" }>;
 
@@ -10,6 +11,11 @@ export function MeshVisual({
   geometry,
   color,
   forceColor = false,
+  material,
+  roughness = 0.85,
+  opacity = 1,
+  castShadow,
+  receiveShadow = true,
 }: {
   geometry: MeshGeometry;
   color: string | THREE.Color;
@@ -17,6 +23,12 @@ export function MeshVisual({
    * carries meaning the mesh cannot — a collision highlight, or a color
    * the scene author chose. */
   forceColor?: boolean;
+  material?: MaterialMsg | null;
+  roughness?: number;
+  opacity?: number;
+  /** Undefined casts only when the file supplied its own materials. */
+  castShadow?: boolean;
+  receiveShadow?: boolean;
 }) {
   const [loaded, setLoaded] = useState<LoadedMesh | null>(null);
 
@@ -30,40 +42,43 @@ export function MeshVisual({
     };
   }, [geometry.url, geometry.ext]);
 
-  // OBJ files parse to an Object3D that can only live at one place in the
-  // graph, so clone per instance. A mesh that brought its own materials
-  // keeps them; otherwise stamp the link color onto it.
+  // Depend on colour components, not a fresh Color object's identity: live
+  // poses and playback must not clone the whole mesh on every React render.
+  const { r, g, b } = new THREE.Color(color);
+  const metalness = material?.metalness;
+  const authoredRoughness = material?.roughness;
+  const authoredOpacity = material?.opacity;
+  const casts = (castShadow ?? (loaded?.kind === "object" && loaded.shaded)) && (authoredOpacity ?? 1) >= 1;
   const objectClone = useMemo(() => {
     if (!loaded || loaded.kind !== "object") return null;
-    const clone = loaded.object.clone(true);
-    if (loaded.shaded && !forceColor) return clone;
-    const material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(color),
-      roughness: 0.85,
-      metalness: 0.05,
-    });
-    clone.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (mesh.isMesh) mesh.material = material;
-    });
-    return clone;
-  }, [loaded, color, forceColor]);
+    return meshInstance(loaded.object, loaded.shaded, {
+      color: new THREE.Color(r, g, b), forceColor, roughness, opacity,
+      material: metalness !== undefined && authoredRoughness !== undefined
+      ? { metalness, roughness: authoredRoughness, opacity: authoredOpacity } : null,
+    }, casts, receiveShadow);
+  }, [loaded, r, g, b, forceColor, metalness, authoredRoughness, authoredOpacity, roughness, opacity, casts, receiveShadow]);
+
+  useEffect(() => () => objectClone?.dispose(), [objectClone]);
 
   if (!loaded) return null;
 
   if (loaded.kind === "geometry") {
     return (
-      <mesh geometry={loaded.geometry} scale={geometry.scale}>
+      <mesh geometry={loaded.geometry} scale={geometry.scale}
+        castShadow={casts} receiveShadow={receiveShadow}>
         <meshStandardMaterial
           color={color}
-          roughness={0.85}
-          metalness={0.05}
+          roughness={material?.roughness ?? roughness}
+          metalness={material?.metalness ?? 0.05}
+          opacity={authoredOpacity ?? opacity}
+          transparent={(authoredOpacity ?? opacity) < 1}
+          depthWrite={(authoredOpacity ?? opacity) >= 1}
         />
       </mesh>
     );
   }
 
   return objectClone ? (
-    <primitive object={objectClone} scale={geometry.scale} />
+    <primitive object={objectClone.object} scale={geometry.scale} />
   ) : null;
 }

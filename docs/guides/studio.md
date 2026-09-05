@@ -23,6 +23,20 @@ the connection dot. The viewport is a full orbit camera over the cell, with
 the TCP gizmo on the end-effector and the active TCP link named in the
 corner badge.
 
+**Quality** in the header selects **Performance**, **Balanced** (the default),
+or **High**. Use Performance for large cells or slower graphics, and High
+for close inspection: it improves shadow detail and smooths silhouettes.
+The choice is remembered in this browser. Authored dimensions, materials,
+collision checks and the camera's declared recording resolution stay the same.
+Camera RGB previews, still captures and video use the same lighting and
+colour conversion; compressed video can differ slightly. Metric depth remains
+in metres. The Studio's fine-grained floor is a viewer backdrop; exported
+USD contains the scene's own geometry and materials.
+
+Headless Python captures start with Balanced too. Pass `quality="high"`
+or `quality="performance"` to `capture.record_camera`, `capture.capture_depth`
+or `capture.capture_pointcloud` to select another setting for that capture.
+
 The sidebar is three workflow tabs. **LAYOUT** builds the world: robot
 placement, the scene tree, obstacles, sensors & devices. **MOTION** poses
 and teaches the selected robot: TCP, joints, waypoints — the things used

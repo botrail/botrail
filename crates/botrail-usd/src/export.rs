@@ -49,6 +49,8 @@ use thiserror::Error;
 use crate::articulation::AnyJoint;
 use crate::{decompose_matrix, y_up_to_z_up, AnyPrim, SearchPathResolver};
 
+mod visual;
+
 #[derive(Debug, Error)]
 pub enum UsdExportError {
     #[error("failed to open robot stage `{path}`: {message}")]
@@ -84,14 +86,24 @@ pub enum PoseTrack {
     Sampled(Vec<Isometry3<f64>>),
 }
 
+#[derive(Clone, Copy)]
+pub struct SurfaceMaterial {
+    pub metalness: f32,
+    pub roughness: f32,
+    pub opacity: Option<f32>,
+}
+
 pub struct ObjectSpec {
     /// Obstacle name; `/`-segments become nested prims under `/World/Env`.
     pub name: String,
     pub geometry: Geometry,
+    pub visual_asset: Option<botrail_model::VisualAsset>,
     pub track: PoseTrack,
     /// `primvars:displayColor` to author, linear RGB. `None` falls back to
     /// the neutral environment grey.
     pub color: Option<[f32; 3]>,
+    /// Explicit optical finish (metalness, roughness), independent of physics.
+    pub material: Option<SurfaceMaterial>,
     /// One flag per animation frame: false hides the prim that frame.
     /// Empty means always visible. USD carries this natively as animated
     /// `visibility`, so a magazine full of stock stays out of the picture
@@ -380,6 +392,7 @@ pub fn export_animation(
     layer.ensure_prim("/World", Specifier::Def, Some("Xform"));
 
     let mut assets = Vec::new();
+    let mut appearances = visual::VisualAssets::new(asset_stem);
     // Robot prims under /World, uniquified from sanitized instance names;
     // asset directories dedup by source stage (two instances of the same
     // asset share one copy, both references point at it).
@@ -416,12 +429,26 @@ pub fn export_animation(
             // URDF robots and composites have no single stage to reference;
             // their geometry bakes into per-link transforms.
             None => {
-                author_urdf_robot(&mut layer, robot, &codes, &robot_prim, &mut warnings)?;
+                author_urdf_robot(
+                    &mut layer,
+                    robot,
+                    &codes,
+                    &robot_prim,
+                    &mut warnings,
+                    &mut appearances,
+                )?;
             }
         }
     }
 
-    author_objects(&mut layer, input.objects, &codes, &mut warnings)?;
+    author_objects(
+        &mut layer,
+        input.objects,
+        &codes,
+        &mut warnings,
+        &mut appearances,
+    )?;
+    assets.extend(appearances.copies);
     author_curves(&mut layer, input.curves, &mut warnings);
     author_cameras(&mut layer, input.cameras, &codes);
 
@@ -754,6 +781,19 @@ impl LayerBuilder {
         self.attr_meta(prim, name, type_name, value, &[]);
     }
 
+    fn connect(&mut self, prim: &str, name: &str, type_name: &str, target: &str) {
+        self.attr_meta(
+            prim,
+            name,
+            type_name,
+            AttrValue::Declaration,
+            &[(
+                FieldKey::ConnectionPaths.as_ref(),
+                Value::PathListOp(ListOp::explicit(vec![sdf::path(target).unwrap()])),
+            )],
+        );
+    }
+
     /// Authors a relationship with one explicit target
     /// (`rel <name> = <target>`).
     fn rel(&mut self, prim: &str, name: &str, target: &str) {
@@ -801,6 +841,7 @@ impl LayerBuilder {
         let spec = self.data.create_spec(path, SpecType::Attribute);
         spec.add(FieldKey::TypeName, Value::Token(type_name.into()));
         match value {
+            AttrValue::Declaration => {}
             AttrValue::Default(v) => spec.add(FieldKey::Default, v),
             AttrValue::Uniform(v) => {
                 spec.add(
@@ -903,6 +944,7 @@ impl LayerBuilder {
 }
 
 enum AttrValue {
+    Declaration,
     Default(Value),
     Uniform(Value),
     Samples(sdf::TimeSampleMap),
@@ -1588,6 +1630,7 @@ fn author_urdf_robot(
     codes: &[f64],
     robot_prim: &str,
     warnings: &mut Vec<String>,
+    appearances: &mut visual::VisualAssets,
 ) -> Result<(), UsdExportError> {
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     let mut used = HashMap::new();
@@ -1599,7 +1642,18 @@ fn author_urdf_robot(
         layer.xform(&prim, &XformValue::Sampled(codes, poses), None);
         for (vi, shape) in link.visuals.iter().enumerate() {
             let shape_prim = format!("{prim}/Visual_{vi}");
-            author_shape(layer, &shape_prim, shape, warnings)?;
+            if let Some(source) = &shape.visual_asset {
+                appearances.author(
+                    layer,
+                    &shape_prim,
+                    source,
+                    &XformValue::Static(shape.origin),
+                    shape.color,
+                    None,
+                )?;
+            } else {
+                author_shape(layer, &shape_prim, shape, warnings)?;
+            }
         }
     }
     Ok(())
@@ -1827,6 +1881,7 @@ fn author_objects(
     objects: &[ObjectSpec],
     codes: &[f64],
     warnings: &mut Vec<String>,
+    appearances: &mut visual::VisualAssets,
 ) -> Result<(), UsdExportError> {
     if objects.is_empty() {
         return Ok(());
@@ -1858,7 +1913,14 @@ fn author_objects(
             PoseTrack::Static(x) => XformValue::Static(*x),
             PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples.clone()),
         };
-        author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
+        if let Some(source) = &obj.visual_asset {
+            appearances.author(layer, &prim, source, &pose, obj.color, obj.material)?;
+        } else {
+            author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
+            if let Some(finish) = obj.material {
+                author_surface(layer, &prim, finish);
+            }
+        }
         if !obj.visible.is_empty() {
             // Sparse: the first frame plus every transition. USD holds a
             // sample until the next one, so this reads identically to the
@@ -1885,6 +1947,89 @@ fn author_objects(
         }
     }
     Ok(())
+}
+
+/// The optical finish uses the existing displayColor primvar, including
+/// uniform face colours, instead of flattening a coloured mesh to grey.
+fn author_surface(
+    layer: &mut LayerBuilder,
+    prim: &str,
+    SurfaceMaterial {
+        metalness,
+        roughness,
+        opacity,
+    }: SurfaceMaterial,
+) {
+    let material = format!("{prim}/BotrailMaterial");
+    let shader = format!("{material}/Surface");
+    let reader = format!("{material}/Color");
+    layer.ensure_prim(&material, Specifier::Def, Some("Material"));
+    layer.ensure_prim(&shader, Specifier::Def, Some("Shader"));
+    layer.ensure_prim(&reader, Specifier::Def, Some("Shader"));
+    if let Some(value) = opacity {
+        layer.attr(
+            &shader,
+            "inputs:opacity",
+            "float",
+            AttrValue::Default(Value::Float(value)),
+        );
+    }
+    layer.attr(
+        &shader,
+        "info:id",
+        "token",
+        AttrValue::Uniform(Value::Token("UsdPreviewSurface".into())),
+    );
+    layer.attr(
+        &reader,
+        "info:id",
+        "token",
+        AttrValue::Uniform(Value::Token("UsdPrimvarReader_float3".into())),
+    );
+    layer.attr(&shader, "outputs:surface", "token", AttrValue::Declaration);
+    layer.attr(&reader, "outputs:result", "float3", AttrValue::Declaration);
+    layer.attr(
+        &reader,
+        "inputs:varname",
+        "token",
+        AttrValue::Default(Value::Token("displayColor".into())),
+    );
+    layer.attr(
+        &reader,
+        "inputs:fallback",
+        "float3",
+        AttrValue::Default(Value::Vec3f(gf::vec3f(
+            ENV_COLOR[0],
+            ENV_COLOR[1],
+            ENV_COLOR[2],
+        ))),
+    );
+    for (name, value) in [("metallic", metalness), ("roughness", roughness)] {
+        layer.attr(
+            &shader,
+            &format!("inputs:{name}"),
+            "float",
+            AttrValue::Default(Value::Float(value)),
+        );
+    }
+    layer.connect(
+        &shader,
+        "inputs:diffuseColor",
+        "color3f",
+        &format!("{reader}.outputs:result"),
+    );
+    layer.connect(
+        &material,
+        "outputs:surface",
+        "token",
+        &format!("{shader}.outputs:surface"),
+    );
+    layer.prim_field(
+        prim,
+        FieldKey::ApiSchemas,
+        Value::TokenListOp(ListOp::prepended(vec!["MaterialBindingAPI".into()])),
+    );
+    layer.rel(prim, "material:binding", &material);
 }
 
 /// UsdPhysics applied schemas for one obstacle prim, plus its bound
@@ -2049,6 +2194,8 @@ mod tests {
     fn physics_specs_author_usdphysics() {
         let objects = vec![
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "part".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(0.1, 0.05, 0.03),
@@ -2064,6 +2211,8 @@ mod tests {
                 }),
             },
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "table".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(1.0, 1.0, 0.7),
@@ -2079,6 +2228,8 @@ mod tests {
                 }),
             },
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "decor".into(),
                 geometry: Geometry::Sphere { radius: 0.1 },
                 track: PoseTrack::Static(Isometry3::translation(1.0, 0.0, 0.1)),
@@ -2543,6 +2694,8 @@ mod tests {
         ];
         let objects = vec![
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "/World/Conveyor/Box_A".into(),
                 geometry: Geometry::Box {
                     size: Vector3::new(0.1, 0.1, 0.1),
@@ -2553,6 +2706,8 @@ mod tests {
                 physics: None,
             },
             ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: "held".into(),
                 geometry: Geometry::Sphere { radius: 0.03 },
                 track: PoseTrack::Sampled(held_track.clone()),
@@ -2791,6 +2946,8 @@ mod tests {
             Isometry3::translation(0.2, 0.1, 0.6),
         ];
         let objects = vec![ObjectSpec {
+            material: None,
+            visual_asset: None,
             name: "crate".into(),
             geometry: Geometry::Box {
                 size: Vector3::new(0.1, 0.1, 0.1),
@@ -2922,6 +3079,8 @@ mod tests {
     fn cameras_author_as_usd_camera_prims() {
         let times = [0.0, 0.5];
         let objects = [ObjectSpec {
+            material: None,
+            visual_asset: None,
             name: "crate".into(),
             geometry: Geometry::Box {
                 size: Vector3::new(0.1, 0.1, 0.1),

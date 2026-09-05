@@ -49,7 +49,13 @@ wire on the CLAMP button, the E-stop in), each a scenario whose run must
 refuse the cycle rather than let it through.
 
 Run with:  python examples/machining/machine_tending_demo.py [out.usdc]
-                 [--catalog] [--studio]
+                 [--catalog] [--visual-dir DIR] [--studio]
+
+`--visual-dir` applies local `rv-5as-d.usdc` and `mph3.usda` display stages
+to the catalog URDF mechanics. The RV-5AS-D stage comes from catalog-builder's
+`tools/refine_rv5as_visuals.py`; MPH-3 comes from botrail-assets' generation
+script. These authored finishes and edge refinements do not change the
+cell's joints, collision envelopes, tool frames or bill of materials.
 
 `--catalog` orders the machine and the vise from their catalog packs: the
 ROBODRILL's openings, table, head and door come from
@@ -212,7 +218,7 @@ def along(pose, distance: float):
 
 
 # ------------------------------------------------------------------ build
-def tool() -> bt.Robot:
+def tool(*, visual_dir: Path | None = None) -> bt.Robot:
     """The arm with its hand: the 2F-85 on a bracket that also carries a
     pin and a fork — three tools, one wrist, switched by turning it."""
     arm = bt.Robot.from_catalog(ARM)
@@ -222,14 +228,18 @@ def tool() -> bt.Robot:
     # the plane the pads open in — so with the pads across a part, pin
     # and fork lie along the side opening, and the hand passes it end-on.
     bracket = bt.Robot.from_catalog(HAND_CATALOG)
+    if visual_dir is not None:
+        # Authored display stages; retain the validated catalog URDF mechanics.
+        arm = arm.with_visuals(bt.Robot.from_usd(visual_dir / "rv-5as-d.usdc"))
+        bracket = bracket.with_visuals(bt.Robot.from_usd(visual_dir / "mph3.usda"))
     stack = bracket.attach_tool(coupling, prefix="cpl_").attach_tool(gripper)
     return arm.attach_tool(stack)
 
 
-def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
+def build(*, catalog: bool = False, visual_dir: Path | None = None) -> tuple[bt.Scene, bt.tending.Handshake]:
     """The cell, taught and programmed. `catalog` orders the machine and
     the vise from their packs instead of typing their figures in."""
-    scene = bt.Scene(tool(), name=ROBOT)
+    scene = bt.Scene(tool(visual_dir=visual_dir), name=ROBOT)
 
     # -- the machine, the vise, the parts ----------------------------------
     if catalog:
@@ -583,8 +593,8 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
 
 
 # ------------------------------------------------------------------- bake
-def bake(*, catalog: bool = False):
-    scene, hs = build(catalog=catalog)
+def bake(*, catalog: bool = False, visual_dir: Path | None = None):
+    scene, hs = build(catalog=catalog, visual_dir=visual_dir)
     tl = scene.simulate_sequences(["tend", hs.program], max_duration=240.0)
     return scene, hs, tl
 
@@ -632,9 +642,11 @@ def main() -> None:
     parser.add_argument("--catalog", action="store_true",
                         help=f"order the machine ({MACHINE_CATALOG}) and the vise ({VISE_CATALOG}) from the catalog")
     parser.add_argument("--studio", action="store_true")
+    parser.add_argument("--visual-dir", type=Path,
+                        help="local display stages: rv-5as-d.usdc and mph3.usda (keeps catalog mechanics)")
     args = parser.parse_args()
 
-    scene, hs, tl = bake(catalog=args.catalog)
+    scene, hs, tl = bake(catalog=args.catalog, visual_dir=args.visual_dir)
     print(f"{hs.template}{' / catalog' if args.catalog else ''}: cycle {tl.duration:.2f}s")
     for name, t0, t1 in tl.step_spans:
         print(f"  {name:<28} {t0:7.2f} - {t1:7.2f}s")

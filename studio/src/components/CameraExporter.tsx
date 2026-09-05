@@ -6,6 +6,7 @@ import { ArrayBufferTarget, Muxer } from "webm-muxer";
 import { samplePlayback } from "../playback";
 import { applySample } from "../playbackRig";
 import { useStudioStore } from "../store";
+import { colorPipeline } from "../three/colorPipeline";
 import {
   aimSensorCamera,
   cameraRig,
@@ -149,10 +150,10 @@ function ExportRunner({ job }: { job: Job }) {
         codec: picked.codec,
         width,
         height,
-        // ~0.08 bpp — plenty for flat-shaded cells, small files.
+        // Bound file size while retaining fine surface detail.
         bitrate: Math.max(
           1_000_000,
-          Math.min(16_000_000, Math.round(width * height * job.fps * 0.08)),
+          Math.min(16_000_000, Math.round(width * height * job.fps * 0.12)),
         ),
         framerate: job.fps,
       });
@@ -229,7 +230,7 @@ function ExportRunner({ job }: { job: Job }) {
         );
         gl.setScissorTest(false);
       } else {
-        gl.render(scene, sensorCam);
+        colorPipeline(gl).render(gl, scene, sensorCam, rig.width, rig.height, "view");
       }
       if (rig.depthParts) {
         depthFrame = readDepth(gl, scene, sensorCam, rig.width, rig.height);

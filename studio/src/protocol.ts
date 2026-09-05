@@ -10,6 +10,7 @@ export type { MaterialMsg } from "./generated/MaterialMsg";
 export type { LegendMsg } from "./generated/LegendMsg";
 export type { LegendStopMsg } from "./generated/LegendStopMsg";
 export type { VisualMsg } from "./generated/VisualMsg";
+export type { VisualAssetMsg } from "./generated/VisualAssetMsg";
 export type { LinkMsg } from "./generated/LinkMsg";
 export type { JointTypeMsg } from "./generated/JointTypeMsg";
 export type { IkStatusMsg } from "./generated/IkStatusMsg";

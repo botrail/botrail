@@ -93,6 +93,14 @@ body {
   gap: 6px;
 }
 
+.render-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .header-error {
   color: var(--bad);
   font-size: 11px;

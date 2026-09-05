@@ -9,9 +9,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
-
 import botrail as bt
+import pytest
 from botrail import capture
 
 pytest.importorskip("playwright.sync_api")
@@ -75,7 +74,7 @@ def test_record_camera_rgbd(chromium, tmp_path) -> None:
     sq.step("swing", [bt.seq.ramp({joint: 1.2}, 1.5)], transition=bt.seq.done())
     tl = sq.simulate()
 
-    out = capture.record_camera(scene, "cam", tmp_path / "rgbd.webm", fps=8, depth=True)
+    out = capture.record_camera(scene, "cam", tmp_path / "rgbd.webm", fps=8, depth=True, quality="high")
     npz_path = tmp_path / "rgbd_depth.npz"
     assert out.exists() and out.stat().st_size > 1000
     assert npz_path.exists()
@@ -145,6 +144,28 @@ def _decode_png16(path: Path):
     assert all(rows[i * stride] == 0 for i in range(h))
     pix = b"".join(rows[i * stride + 1 : (i + 1) * stride] for i in range(h))
     return np.frombuffer(pix, dtype=">u2").reshape(h, w)
+
+
+def test_capture_quality_preserves_metric_depth(chromium) -> None:
+    np = pytest.importorskip("numpy")
+    scene = bt.Scene()
+    scene.add_box("wall", (2, .1, 2), (0, 0, 1), color=(.18, .18, .18))
+    scene.add_camera("cam", position=(0, -2, 1), look_at=(0, 0, 1),
+                     resolution=(80, 60), near=.05, far=10)
+    frames = [capture.capture_depth(scene, "cam", rgb=True, quality=q)
+              for q in ("performance", "balanced", "high")]
+    for frame in frames:
+        assert frame.rgb.shape == (60, 80, 3)
+        assert abs(float(frame.depth[30, 40]) - 1.95) < 1e-5
+        assert np.array_equal(frame.depth, frames[0].depth)
+        assert (frame.fx, frame.fy, frame.cx, frame.cy) == (frames[0].fx, frames[0].fy, frames[0].cx, frames[0].cy)
+
+
+@pytest.mark.parametrize("fn", [capture.capture_depth, capture.capture_pointcloud, capture.record_camera])
+def test_capture_quality_rejects_unknown(fn, tmp_path) -> None:
+    suffix = ".webm" if fn is capture.record_camera else ".ply" if fn is capture.capture_pointcloud else ".npy"
+    with pytest.raises(ValueError, match="quality must be"):
+        fn(None, "cam", tmp_path / f"x{suffix}", quality="ultra")
 
 
 def test_capture_depth_numbers(chromium, tmp_path) -> None:

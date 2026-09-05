@@ -33,6 +33,51 @@ pub fn resolve(filename: &str, base_dir: Option<&Path>, options: &ModelOptions) 
     }
 }
 
+/// Embedded project XML has no file directory on reload. Anchor just the
+/// filename attributes, retaining the source's numeric strings and formatting.
+pub fn anchored_urdf(
+    xml: &str,
+    base_dir: Option<&Path>,
+    options: &ModelOptions,
+) -> Result<String, String> {
+    if base_dir.is_none() && options.package_paths.is_empty() {
+        return Ok(xml.to_string());
+    }
+    let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut edits = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.has_tag_name("mesh") || n.has_tag_name("texture"))
+    {
+        let Some(attr) = node.attributes().iter().find(|a| a.name() == "filename") else {
+            continue;
+        };
+        let path = resolve(attr.value(), base_dir, options);
+        if path.to_string_lossy().starts_with("package://") {
+            continue;
+        }
+        let path = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        let value = path
+            .to_string_lossy()
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;");
+        edits.push((attr.value_range(), value));
+    }
+    let mut output = xml.to_string();
+    for (range, value) in edits.into_iter().rev() {
+        output.replace_range(range, &value);
+    }
+    Ok(output)
+}
+
 fn resolve_package(rest: &str, base_dir: Option<&Path>, options: &ModelOptions) -> PathBuf {
     let (package, rel) = match rest.split_once('/') {
         Some((p, r)) => (p, r),
@@ -63,6 +108,26 @@ fn resolve_package(rest: &str, base_dir: Option<&Path>, options: &ModelOptions) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_source_anchors_meshes_without_reformatting_joint_values() {
+        let xml = "<robot name='arm'><link name='base'><visual><geometry><mesh filename = '../m&amp;f/a.obj' /></geometry></visual></link><!-- 0.10000000000001 --></robot>";
+        let output = anchored_urdf(
+            xml,
+            Some(Path::new("/assets/robot/urdf")),
+            &ModelOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            xml.replace("../m&amp;f/a.obj", "/assets/robot/urdf/../m&amp;f/a.obj")
+        );
+        assert!(roxmltree::Document::parse(&output).is_ok());
+        assert_eq!(
+            anchored_urdf(xml, None, &ModelOptions::default()).unwrap(),
+            xml
+        );
+    }
 
     #[test]
     fn resolves_file_scheme_and_relative() {

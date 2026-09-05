@@ -646,6 +646,7 @@ impl SequenceTimeline {
 pub fn gripper_tool_specs(scene: &Scene, robot: usize) -> Vec<(String, f64)> {
     fn walk(source: &botrail_model::RobotSource, out: &mut Vec<(String, f64)>) {
         match source {
+            botrail_model::RobotSource::Visuals { base, .. } => walk(base, out),
             botrail_model::RobotSource::Catalog { meta, inner, .. } => {
                 if meta
                     .category

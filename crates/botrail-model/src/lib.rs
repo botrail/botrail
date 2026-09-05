@@ -13,6 +13,8 @@ pub use mesh_path::ModelOptions;
 
 #[derive(Debug, Error)]
 pub enum ModelError {
+    #[error("incompatible visual model: {0}")]
+    VisualModel(String),
     #[error("failed to parse robot description: {0}")]
     Parse(String),
     #[error("link `{0}` referenced by a joint does not exist")]
@@ -154,10 +156,24 @@ pub enum Geometry {
 }
 
 #[derive(Debug, Clone)]
+pub struct VisualAsset {
+    /// Original display asset and the gprim it contributes. Collision keeps
+    /// using Geometry; this reference is opaque to kinematics and planning.
+    pub path: PathBuf,
+    pub prim_path: String,
+    /// True only after an explicit scene colour edit, not for imported displayColor.
+    pub color_override: bool,
+    /// Column-major transform from source gprim coordinates to shape coordinates.
+    /// Retains unit conversion, scale and shear without modifying source normals.
+    pub transform: [f64; 16],
+}
+
+#[derive(Debug, Clone)]
 pub struct Shape {
     /// Transform from the link frame to the shape frame.
     pub origin: Isometry3<f64>,
     pub geometry: Geometry,
+    pub visual_asset: Option<VisualAsset>,
     /// The colour the file gave this visual — URDF `<material><color
     /// rgba>` or USD `primvars:displayColor` — and `None` when it named
     /// none, which is what makes a viewer free to shade the link its own
@@ -182,6 +198,12 @@ pub struct Link {
 pub enum RobotSource {
     /// URDF XML (xacro already expanded); embedded verbatim in projects.
     UrdfXml(String),
+    /// Replace display shapes from a compatible model, retaining the base's
+    /// joints, collision shapes and catalog identity.
+    Visuals {
+        base: Box<RobotSource>,
+        visual: Box<RobotSource>,
+    },
     /// A USD stage: file path plus the articulation root prim path.
     /// Referenced (not embedded) until asset bundling lands.
     Usd {
@@ -345,7 +367,9 @@ impl RobotSource {
                 articulation_root,
             } => Some((path, articulation_root)),
             RobotSource::Catalog { inner, .. } => inner.usd_stage(),
-            RobotSource::UrdfXml(_) | RobotSource::Composite { .. } => None,
+            RobotSource::UrdfXml(_)
+            | RobotSource::Composite { .. }
+            | RobotSource::Visuals { .. } => None,
         }
     }
 }
@@ -386,6 +410,70 @@ pub struct RobotModel {
 }
 
 impl RobotModel {
+    /// Display-only replacement. Names may be USD prim paths, but each leaf
+    /// name must match uniquely and link origins must agree at zero joints.
+    /// USD importers can choose a different basis for each joint frame; rotate
+    /// display shapes into the base's frame before installing them.
+    /// Use before tool composition. Never imports collision or joint state.
+    pub fn with_visuals(&self, visual: &Self) -> Result<Self, ModelError> {
+        fn poses(model: &RobotModel) -> Vec<Isometry3<f64>> {
+            let mut poses = vec![Isometry3::identity(); model.links.len()];
+            for &index in &model.joint_order {
+                let j = &model.joints[index];
+                poses[j.child_link] = poses[j.parent_link] * j.origin;
+            }
+            poses
+        }
+        let mut model = self.clone();
+        let base_poses = poses(self);
+        let visual_poses = poses(visual);
+        let mut replaced = std::collections::HashSet::new();
+        for (vi, link) in visual
+            .links
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.visuals.is_empty())
+        {
+            let name = link.name.rsplit('/').next().unwrap();
+            let matches: Vec<_> = self
+                .links
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.name.rsplit('/').next() == Some(name))
+                .collect();
+            let [(index, _)] = matches.as_slice() else {
+                return Err(ModelError::VisualModel(format!(
+                    "link `{name}` must match exactly once"
+                )));
+            };
+            if !replaced.insert(*index) {
+                return Err(ModelError::VisualModel(format!(
+                    "duplicate visual link `{name}`"
+                )));
+            }
+            let delta = base_poses[*index].inverse() * visual_poses[vi];
+            if delta.translation.vector.norm() > 2e-5 {
+                return Err(ModelError::VisualModel(format!(
+                    "link frame `{name}` differs"
+                )));
+            }
+            model.links[*index].visuals = link.visuals.clone();
+            for shape in &mut model.links[*index].visuals {
+                shape.origin = delta * shape.origin;
+            }
+        }
+        if replaced.is_empty() {
+            return Err(ModelError::VisualModel(
+                "source has no display shapes".into(),
+            ));
+        }
+        model.source = RobotSource::Visuals {
+            base: Box::new(self.source.clone()),
+            visual: Box::new(visual.source.clone()),
+        };
+        Ok(model)
+    }
+
     pub fn from_urdf_file(path: impl AsRef<Path>) -> Result<Self, ModelError> {
         Self::from_urdf_file_with(path, &ModelOptions::default())
     }
@@ -412,7 +500,8 @@ impl RobotModel {
     ) -> Result<Self, ModelError> {
         let robot =
             xurdf::parse_urdf_from_string(xml).map_err(|e| ModelError::Parse(e.to_string()))?;
-        Self::build(robot, base_dir, options, xml.to_string())
+        let source = mesh_path::anchored_urdf(xml, base_dir, options).map_err(ModelError::Parse)?;
+        Self::build(robot, base_dir, options, source)
     }
 
     /// Expands a Xacro file and parses the resulting URDF.
@@ -1645,6 +1734,7 @@ fn convert_shape(
         },
     };
     Shape {
+        visual_asset: None,
         origin: pose_to_isometry(origin),
         geometry,
         color: None,
@@ -1663,6 +1753,34 @@ fn material_color(material: &xurdf::Material) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_replacement_compensates_joint_basis_and_keeps_mechanics() {
+        let base = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let mut display = base.clone();
+        let index = base.link_index("link1").unwrap();
+        let joint = display.links[index].parent_joint.unwrap();
+        let rotation = Isometry3::from_parts(
+            Translation3::identity(),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.7),
+        );
+        display.joints[joint].origin *= rotation;
+        for shape in &mut display.links[index].visuals {
+            shape.origin = rotation.inverse() * shape.origin;
+        }
+        display.links[index].name = "/Display/link1".into();
+        let refined = base.with_visuals(&display).unwrap();
+        assert_eq!(refined.links[index].name, "link1");
+        assert_eq!(refined.joints[joint].origin, base.joints[joint].origin);
+        assert_eq!(refined.actuated_joint_names(), base.actuated_joint_names());
+        let delta =
+            refined.links[index].visuals[0].origin.inverse() * base.links[index].visuals[0].origin;
+        assert!(delta.translation.vector.norm() < 1e-12 && delta.rotation.angle() < 1e-12);
+        display.joints[joint].origin.translation.vector.x = 0.01;
+        assert!(base.with_visuals(&display).is_err());
+        display.links[index].name = "absent".into();
+        assert!(base.with_visuals(&display).is_err());
+    }
 
     const TWO_LINK: &str = r#"
     <robot name="two_link">

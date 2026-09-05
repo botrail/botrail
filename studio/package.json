@@ -5,6 +5,7 @@
   "license": "PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

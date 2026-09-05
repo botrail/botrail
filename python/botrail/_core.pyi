@@ -16,6 +16,14 @@ class IkResult:
     def iters(self) -> int: ...
 
 class Robot:
+    def with_visuals(self, visual: Robot) -> Robot:
+        """Copy matching display shapes; retain joints, collision shapes and identity.
+
+        Use before tool composition. Link leaf names must match uniquely and
+        link origins at zero joint coordinates must agree (20 µm).
+        Display shapes are rotated into the base's link frames.
+        """
+        ...
     @staticmethod
     def from_urdf(path: Union[str, Path]) -> "Robot": ...
     @staticmethod
@@ -257,11 +265,21 @@ class Scene:
         self, name: str, color: Optional[tuple[float, float, float]]
     ) -> None: ...
     def obstacle_color(self, name: str) -> Optional[tuple[float, float, float]]: ...
+    def set_obstacle_visual_asset(
+        self,
+        name: str,
+        path: str | Path,
+        prim_path: str,
+        transform: tuple[float, ...],
+        color_override: bool = False,
+    ) -> None: ...
     def set_obstacle_material(
         self,
         name: str,
         metalness: Optional[float] = None,
         roughness: Optional[float] = None,
+        *,
+        opacity: Optional[float] = None,
     ) -> None: ...
     def set_physics(
         self,
@@ -305,6 +323,7 @@ class Scene:
         stops: Optional[list[tuple[tuple[float, float, float], str]]] = None,
     ) -> None: ...
     def obstacle_material(self, name: str) -> Optional[tuple[float, float]]: ...
+    def obstacle_opacity(self, name: str) -> Optional[float]: ...
     def rename_robot(self, robot: str, name: str) -> str: ...
     def allow_inter_robot_collision(
         self, robot_a: str, link_a: str, robot_b: str, link_b: str

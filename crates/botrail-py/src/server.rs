@@ -17,6 +17,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/meshes/{id}", get(mesh_handler))
+        .route("/mesh-assets/{id}/{*rest}", get(visual_asset_handler))
         .route("/meshes/{id}/{sibling}", get(mesh_sibling_handler))
         .route("/usd-assets/{robot}/{*rest}", get(asset_handler))
         .route("/api/scene", get(scene_handler))
@@ -98,6 +99,33 @@ async fn asset_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::read(dir.join(&rest)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn visual_asset_handler(
+    Path((id, rest)): Path<(usize, String)>,
+    State(hub): State<Arc<SceneHub>>,
+) -> Response {
+    if rest.contains('\\')
+        || rest
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..")
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(file) = hub.visual_asset_path(id, &rest) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(file).await {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),

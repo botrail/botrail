@@ -36,7 +36,8 @@ jobs:
           uv venv .venv
           # pyyaml: the from_catalog tests fake out huggingface_hub, but the
           # manifest parsing still imports the real `yaml`.
-          uv pip install --python .venv/bin/python maturin pytest pyyaml
+          # usd-core checks exported appearance with Pixar's independent reader.
+          uv pip install --python .venv/bin/python maturin pytest pyyaml usd-core
           VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
           .venv/bin/python -m pytest python/tests -q
       # The API reference is generated from the extension built above; --strict
@@ -62,6 +63,7 @@ jobs:
         working-directory: studio
         run: |
           pnpm install --frozen-lockfile
+          pnpm test
           pnpm build
 
   wasm:

@@ -5,49 +5,50 @@ import type { LegendMsg } from "./LegendMsg";
 import type { MaterialMsg } from "./MaterialMsg";
 import type { PhysicsMsg } from "./PhysicsMsg";
 import type { PoseMsg } from "./PoseMsg";
+import type { VisualAssetMsg } from "./VisualAssetMsg";
 
-export type ObstacleMsg = { name: string, geometry: GeometryMsg, 
+export type ObstacleMsg = { name: string, geometry: GeometryMsg, visual_asset?: VisualAssetMsg | null,
 /**
  * World pose.
  */
-pose: PoseMsg, 
+pose: PoseMsg,
 /**
  * Disabled obstacles render but are excluded from collision checking.
  */
-enabled: boolean, 
+enabled: boolean,
 /**
  * Invisible obstacles still collide; they are simply not drawn. Files
  * written before this existed have every obstacle visible, which is
  * what they meant.
  */
-visible: boolean, 
+visible: boolean,
 /**
  * A walkable top face — a stair tread, a mezzanine slab: footfalls of
  * a walking machine snap onto it. Files written before this existed
  * have no walkable surfaces, which is what they meant.
  */
-walkable?: boolean, 
+walkable?: boolean,
 /**
  * Display colour, linear RGB, from the scene file's
  * `primvars:displayColor`. Absent means "no authored appearance": the
  * studio then draws the obstacle as a neutral collision proxy.
  */
-color?: [number, number, number] | null, 
+color?: [number, number, number] | null,
 /**
  * How the surface takes light. Absent means "no authored appearance",
  * same as `color`: the studio picks. Projects written before this
  * existed simply have no material, which is the same thing.
  */
-material?: MaterialMsg | null, 
+material?: MaterialMsg | null,
 /**
  * What the colours mean, when they mean something (a film map's
  * micron ramp). Absent for ordinary scenery.
  */
-legend?: LegendMsg | null, 
+legend?: LegendMsg | null,
 /**
  * Present while the obstacle is attached to (grasped by) a robot link.
  */
-attached_to: AttachmentMsg | null, 
+attached_to: AttachmentMsg | null,
 /**
  * Authored physics properties. Absent for ordinary scenery — files
  * written before this existed simply have none, which is what they

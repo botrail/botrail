@@ -149,6 +149,7 @@ fn rename_in_steps(steps: &mut [seq::Step], old: &str, new: &str) {
 pub struct Obstacle {
     pub name: String,
     pub geometry: Geometry,
+    pub visual_asset: Option<botrail_model::VisualAsset>,
     pub pose: Isometry3<f64>,
     /// Disabled obstacles keep their geometry but are excluded from
     /// collision checking (and therefore from planning validity).
@@ -183,16 +184,17 @@ pub struct Obstacle {
 }
 
 /// The two PBR knobs that decide whether a surface reads as bare steel, a
-/// painted panel or a concrete floor. Both are 0..1, and both mean what
-/// they mean in glTF, USD Preview Surface and three.js alike — which is
-/// why these two and not a bigger model: they are the pair every viewer
-/// botrail hands a scene to already understands.
+/// painted panel or a concrete floor. Both are 0..1 and use the
+/// glTF / USD Preview Surface convention, with an optional
+/// alpha override for thin glazing. Independent of collision and friction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// 0 for dielectrics (paint, concrete, plastic), 1 for bare metal.
     pub metalness: f32,
     /// 0 mirror, 1 fully diffuse.
     pub roughness: f32,
+    /// Optional alpha override for thin transparent covers; not refraction.
+    pub opacity: Option<f32>,
 }
 
 impl Material {
@@ -201,7 +203,13 @@ impl Material {
         Material {
             metalness: metalness.clamp(0.0, 1.0),
             roughness: roughness.clamp(0.0, 1.0),
+            opacity: None,
         }
+    }
+
+    pub fn with_opacity(mut self, opacity: Option<f32>) -> Self {
+        self.opacity = opacity.map(|v| v.clamp(0.0, 1.0));
+        self
     }
 }
 
@@ -210,6 +218,7 @@ impl Material {
 pub struct ObstacleSpec {
     pub name: String,
     pub geometry: Geometry,
+    pub visual_asset: Option<botrail_model::VisualAsset>,
     pub pose: Isometry3<f64>,
     pub color: Option<[f32; 3]>,
     pub material: Option<Material>,
@@ -944,6 +953,7 @@ impl Scene {
             .map_err(|e| SceneError::UnsupportedGeometry(e.to_string()))?;
         let name = self.unique_name(name);
         self.obstacles.push(Obstacle {
+            visual_asset: None,
             name: name.clone(),
             geometry,
             pose,
@@ -973,6 +983,7 @@ impl Scene {
         for (spec, collider) in batch.into_iter().zip(colliders) {
             let name = self.unique_name(&spec.name);
             self.obstacles.push(Obstacle {
+                visual_asset: spec.visual_asset,
                 name: name.clone(),
                 geometry: spec.geometry,
                 pose: spec.pose,
@@ -1002,6 +1013,7 @@ impl Scene {
     ) -> String {
         let name = self.unique_name(name);
         self.obstacles.push(Obstacle {
+            visual_asset: None,
             name: name.clone(),
             geometry,
             pose,
@@ -1061,6 +1073,19 @@ impl Scene {
     ) -> Result<(), SceneError> {
         let index = self.obstacle_index(name)?;
         self.obstacles[index].color = color;
+        if let Some(source) = &mut self.obstacles[index].visual_asset {
+            source.color_override = color.is_some();
+        }
+        Ok(())
+    }
+
+    pub fn set_obstacle_visual_asset(
+        &mut self,
+        name: &str,
+        source: Option<botrail_model::VisualAsset>,
+    ) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].visual_asset = source;
         Ok(())
     }
 

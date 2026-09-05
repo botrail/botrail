@@ -33,7 +33,7 @@ import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 __all__ = ["DepthFrame", "capture_depth", "capture_pointcloud", "record_camera"]
 
@@ -49,14 +49,28 @@ CHROMIUM_ARGS = [
 _SETTLE = 3.0
 
 
+def _check_quality(quality: str) -> None:
+    if quality not in ("performance", "balanced", "high"):
+        raise ValueError("quality must be 'performance', 'balanced', or 'high'")
+
+
+def _page_quality(page, quality: str) -> None:
+    # Set before Studio creates its renderer, just like a saved UI preference.
+    page.add_init_script(
+        "localStorage.setItem('botrail-studio.render-quality', "
+        + json.dumps(quality) + ");"
+    )
+
+
 def record_camera(
     scene,
     camera: str,
-    out: Union[str, Path],
+    out: str | Path,
     *,
     fps: int = 30,
     depth: bool | str | Path = False,
     timeout: float = 600.0,
+    quality: str = "balanced",
 ) -> Path:
     """Records ``camera``'s view of the scene's baked cycle into ``out``.
 
@@ -73,7 +87,12 @@ def record_camera(
     ``camera``. Pass a path for the ``.npz``, or ``True`` to put it next
     to the video as ``<stem>_depth.npz``. Lossy video codecs never touch
     these values — the stream leaves the browser as raw float32.
+
+    ``quality`` selects ``"performance"``, ``"balanced"`` (default), or
+    ``"high"`` for shadows and edge smoothing. The camera's recording
+    resolution and metric depth are independent of this choice.
     """
+    _check_quality(quality)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:  # dependency error at call time, by design
@@ -114,6 +133,7 @@ def record_camera(
         with sync_playwright() as p:
             browser = p.chromium.launch(args=CHROMIUM_ARGS)
             page = browser.new_page(viewport={"width": 1280, "height": 800})
+            _page_quality(page, quality)
             page.set_default_timeout(timeout * 1000)
             page.goto(server.url)
             page.wait_for_selector("canvas")
@@ -307,6 +327,7 @@ def capture_depth(
     t: float | None = None,
     rgb: bool = False,
     timeout: float = 120.0,
+    quality: str = "balanced",
 ) -> DepthFrame:
     """Captures ``camera``'s metric depth image from the scene.
 
@@ -319,8 +340,11 @@ def capture_depth(
 
     ``rgb=True`` also grabs the same view's color image onto
     :attr:`DepthFrame.rgb` — one seek, one pose, a true RGBD pair (the
-    colors ride the render-target path; tone mapping matches the PiP).
+    colors use the same output transform as the PiP). ``quality`` selects
+    ``"performance"``, ``"balanced"`` (default), or ``"high"`` for that
+    RGB image; metric depth and intrinsics stay the same.
     """
+    _check_quality(quality)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:  # dependency error at call time, by design
@@ -349,6 +373,7 @@ def capture_depth(
         with sync_playwright() as p:
             browser = p.chromium.launch(args=CHROMIUM_ARGS)
             page = browser.new_page(viewport={"width": 1280, "height": 800})
+            _page_quality(page, quality)
             page.set_default_timeout(timeout * 1000)
             page.goto(server.url)
             page.wait_for_selector("canvas")
@@ -425,6 +450,7 @@ def capture_pointcloud(
     stride: int = 1,
     color: bool = False,
     timeout: float = 120.0,
+    quality: str = "balanced",
 ) -> Any:
     """Captures ``camera``'s depth and unprojects it into a world-space
     point cloud (design/design-camera.md §12.4 DEP3).
@@ -437,11 +463,12 @@ def capture_pointcloud(
     ``color=True`` colors every point with its pixel's sRGB — the
     return grows to ``(N, 6)`` (rgb in ``[0, 1]``) and the ``.ply``
     carries ``uchar`` red/green/blue the way viewers expect.
+    ``quality`` controls the RGB rendering as in :func:`capture_depth`.
     """
     out = Path(out) if out is not None else None
     if out is not None and out.suffix != ".ply":
         raise ValueError(f"{out.name}: point clouds are written as .ply")
-    frame = capture_depth(scene, camera, t=t, rgb=color, timeout=timeout)
+    frame = capture_depth(scene, camera, t=t, rgb=color, timeout=timeout, quality=quality)
     pts = frame.points(world=True, stride=stride, color=color)
     if out is not None:
         _write_ply(out, pts)

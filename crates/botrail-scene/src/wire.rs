@@ -84,6 +84,8 @@ pub struct VisualMsg {
     /// Link-local transform of this shape.
     pub origin: PoseMsg,
     pub geometry: GeometryMsg,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_asset: Option<VisualAssetMsg>,
     /// The colour the robot file authored for this visual (URDF material
     /// or USD `displayColor`), linear RGB. Absent — the common case for
     /// robots that name no materials — leaves the viewer to shade the
@@ -330,6 +332,8 @@ pub struct RobotStateMsg {
 pub struct ObstacleMsg {
     pub name: String,
     pub geometry: GeometryMsg,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_asset: Option<Box<VisualAssetMsg>>,
     /// World pose.
     pub pose: PoseMsg,
     /// Disabled obstacles render but are excluded from collision checking.
@@ -377,6 +381,8 @@ pub struct ObstacleMsg {
 pub struct MaterialMsg {
     pub metalness: f32,
     pub roughness: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f32>,
 }
 
 /// Authored physics of an obstacle (design-physics.md). Inert on a
@@ -442,13 +448,14 @@ impl From<crate::Material> for MaterialMsg {
         MaterialMsg {
             metalness: m.metalness,
             roughness: m.roughness,
+            opacity: m.opacity,
         }
     }
 }
 
 impl From<MaterialMsg> for crate::Material {
     fn from(m: MaterialMsg) -> Self {
-        crate::Material::new(m.metalness, m.roughness)
+        crate::Material::new(m.metalness, m.roughness).with_opacity(m.opacity)
     }
 }
 
@@ -1734,6 +1741,41 @@ pub enum ClientMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct VisualAssetMsg {
+    /// URL at runtime, source path in a saved project.
+    pub url: String,
+    pub prim_path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub color_override: bool,
+    pub transform: [f64; 16],
+}
+
+pub fn visual_asset_msg(
+    source: &botrail_model::VisualAsset,
+    mesh_url: &mut impl FnMut(&Path) -> (String, String),
+) -> VisualAssetMsg {
+    VisualAssetMsg {
+        url: mesh_url(&source.path).0,
+        prim_path: source.prim_path.clone(),
+        color_override: source.color_override,
+        transform: source.transform,
+    }
+}
+
+impl From<&VisualAssetMsg> for botrail_model::VisualAsset {
+    fn from(msg: &VisualAssetMsg) -> Self {
+        Self {
+            path: msg.url.clone().into(),
+            prim_path: msg.prim_path.clone(),
+            color_override: msg.color_override,
+            transform: msg.transform,
+        }
+    }
+}
+
 /// Converts a model geometry to its wire form; `mesh_url` maps a mesh path
 /// to a URL + extension (URL assignment is a server concern).
 pub fn geometry_msg(
@@ -1803,6 +1845,10 @@ impl SceneDescriptionMsg {
                             .map(|shape| VisualMsg {
                                 origin: PoseMsg::from(&shape.origin),
                                 geometry: geometry_msg(&shape.geometry, &mut mesh_url),
+                                visual_asset: shape
+                                    .visual_asset
+                                    .as_ref()
+                                    .map(|v| visual_asset_msg(v, &mut mesh_url)),
                                 color: shape.color,
                             })
                             .collect(),
@@ -3214,6 +3260,10 @@ pub fn obstacles_message(
             .map(|o| ObstacleMsg {
                 name: o.name.clone(),
                 geometry: geometry_msg(&o.geometry, &mut mesh_url),
+                visual_asset: o
+                    .visual_asset
+                    .as_ref()
+                    .map(|v| Box::new(visual_asset_msg(v, &mut mesh_url))),
                 pose: PoseMsg::from(&o.pose),
                 enabled: o.enabled,
                 visible: o.visible,

@@ -3,6 +3,7 @@ import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
 import type { CameraMsg } from "../protocol";
+import { colorPipeline, disposeColorPipeline } from "./colorPipeline";
 
 /**
  * The imperative side of the camera picture (the PiP pass).
@@ -41,6 +42,19 @@ export function CameraRigBridge() {
     cameraRig.ctx = { gl, scene };
     return () => {
       if (cameraRig.ctx?.gl === gl) cameraRig.ctx = null;
+      disposeColorPipeline(gl);
+      colorTarget?.dispose();
+      colorTarget = null;
+      if (depthRig) {
+        depthRig.target.depthTexture?.dispose();
+        depthRig.target.dispose();
+        depthRig.read?.dispose();
+        depthRig.material.dispose();
+        depthRig.blitScene.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose();
+        });
+        depthRig = null;
+      }
     };
   }, [gl, scene]);
   return null;
@@ -308,11 +322,9 @@ export function readDepth(
 
 let colorTarget: THREE.WebGLRenderTarget | null = null;
 
-/** Renders the scene through `cam` into an sRGB byte target and returns
- * RGB rows top-down — the color mate of `readDepth` for the RGBD
- * capture. Colors ride the render-target path: tone mapping runs the
- * same, and the sRGB target matches the canvas encoding (the known
- * residual差 of this route is documented in design-camera.md §12). */
+/** RGB rows top-down, with the same HDR/output pass as the canvas. The
+ * byte target is untagged because OutputPass already encodes sRGB; an
+ * sRGB attachment would encode those bytes a second time. */
 export function readColor(
   gl: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -325,14 +337,13 @@ export function readColor(
     colorTarget = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.NearestFilter,
       magFilter: THREE.NearestFilter,
-      colorSpace: THREE.SRGBColorSpace,
+      colorSpace: THREE.NoColorSpace,
+      depthBuffer: false,
     });
   }
-  gl.setRenderTarget(colorTarget);
-  gl.render(scene, cam);
+  colorPipeline(gl).render(gl, scene, cam, w, h, "capture", colorTarget);
   const rgba = new Uint8Array(w * h * 4);
   gl.readRenderTargetPixels(colorTarget, 0, 0, w, h, rgba);
-  gl.setRenderTarget(null);
   // RGB only, flipped: readPixels rows run bottom-up.
   const out = new Uint8Array(w * h * 3);
   for (let row = 0; row < h; row++) {

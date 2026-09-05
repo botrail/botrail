@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 import { backendSupportsHttp } from "../backend";
 import { useStudioStore } from "../store";
+import { RENDER_QUALITY, type RenderQuality } from "../three/renderQuality";
 
 export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -20,6 +21,8 @@ export function Header() {
   const setSelectedRobot = useStudioStore((s) => s.setSelectedRobot);
   const connection = useStudioStore((s) => s.connection);
   const connected = connection === "connected";
+  const renderQuality = useStudioStore((s) => s.renderQuality);
+  const exporting = useStudioStore((s) => s.camExport !== null);
 
   // Errors from the HTTP save/load/export round-trips (kept out of the store).
   const [ioError, setIoError] = useState<string | null>(null);
@@ -82,6 +85,14 @@ export function Header() {
         robots[0] && <span className="robot-name">{robots[0].desc.name}</span>
       )}
       <span className="spacer" />
+      <label className="render-quality">
+        Quality
+        <select aria-label="Render quality" value={renderQuality} disabled={exporting}
+          onChange={(e) => useStudioStore.getState().setRenderQuality(e.target.value as RenderQuality)}>
+          {Object.entries(RENDER_QUALITY).map(([value, { label }]) =>
+            <option key={value} value={value}>{label}</option>)}
+        </select>
+      </label>
       {ioError && (
         <span className="header-error" title={ioError}>
           {ioError}

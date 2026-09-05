@@ -1197,6 +1197,7 @@ impl RobotBuilder<'_> {
             let relative = body_raw.inverse() * geom_raw;
             let origin = self.conjugate(&(correction.inverse() * relative));
             let mut shape = Shape {
+                visual_asset: None,
                 origin,
                 geometry,
                 color: None,
@@ -1206,10 +1207,24 @@ impl RobotBuilder<'_> {
                 // stage gave it once something other than the stage draws
                 // it (the wire, a re-export).
                 shape.color = display_color(&AnyPrim(info.prim.clone()));
+                if !self.meshes_in_memory {
+                    let (_, residual) = decompose_matrix(&info.world);
+                    let mut transform = nalgebra::Matrix4::identity();
+                    transform.fixed_view_mut::<3, 3>(0, 0).copy_from(
+                        &(self.up_fix.to_rotation_matrix().matrix() * residual * self.mpu),
+                    );
+                    shape.visual_asset = Some(botrail_model::VisualAsset {
+                        path: self.source_path.clone(),
+                        prim_path: info.path.clone(),
+                        color_override: false,
+                        transform: transform.as_slice().try_into().unwrap(),
+                    });
+                }
                 visuals.push(shape.clone());
             }
             if info.has_collision_api {
                 shape.color = None;
+                shape.visual_asset = None;
                 collisions.push(shape);
             }
         }

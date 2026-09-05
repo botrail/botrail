@@ -11,6 +11,8 @@ import { cursorEnter, cursorLeave } from "../three/cursor";
 import { authoredColor, COLLISION_COLOR } from "../three/palette";
 import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
+import { UsdVisual } from "./UsdVisual";
+import { UNIT_BOX, UNIT_CYLINDER, UNIT_SPHERE } from "../three/primitiveGeometry";
 
 const NEUTRAL_COLOR = "#9aa3b2";
 const SELECT_EDGE_COLOR = "#cdd4df";
@@ -278,9 +280,9 @@ function ObstacleNode({
     selectFromViewport(name);
   };
 
-  // Scenery the author styled is drawn as scenery: solid, and it casts. An
-  // obstacle with no authored colour is a bare collision proxy, so it keeps
-  // the translucent look that lets you see the robot through it.
+  // Scenery the author styled is solid and casts. Unstyled primitives are
+  // translucent collision proxies; MeshVisual also recognises a file's own
+  // materials as authored scenery.
   const tint = useMemo(() => obstacleColor(obstacle), [obstacle]);
   // "Styled at all" is what separates scenery from a bare collision proxy —
   // a material counts as much as a colour. Without this, authoring only a
@@ -292,7 +294,14 @@ function ObstacleNode({
   return (
     <>
       <group ref={setGroup} visible={!stowed}>
-        <ObstacleGeometry
+        {obstacle.visual_asset ? <group onClick={onSelect}
+          onPointerDown={(e) => { downAt.current = [e.clientX, e.clientY]; }}
+          onPointerOver={(e) => { e.stopPropagation(); cursorEnter(); }}
+          onPointerOut={cursorLeave}>
+          <UsdVisual source={obstacle.visual_asset} color={color}
+            forceColor={colliding || (!!obstacle.visual_asset.color_override && tint !== null)}
+            material={obstacle.material} />
+        </group> : <ObstacleGeometry
           geometry={obstacle.geometry}
           color={color}
           // An authored color and a collision highlight both mean
@@ -306,7 +315,7 @@ function ObstacleNode({
           onDown={(e) => {
             downAt.current = [e.clientX, e.clientY];
           }}
-        />
+        />}
       </group>
       {gizmo && !stowed && group && (
         <Aid>
@@ -358,15 +367,15 @@ function ObstacleGeometry({
     onPointerOut: () => cursorLeave(),
     // A see-through proxy casting a hard shadow reads as a glitch, so only
     // solid scenery casts. Everything receives.
-    castShadow: solid,
+    castShadow: solid && (material?.opacity ?? 1) >= 1,
     receiveShadow: true,
   };
 
   switch (geometry.kind) {
     case "box":
       return (
-        <mesh {...pick}>
-          <boxGeometry args={geometry.size} />
+        <mesh {...pick} scale={geometry.size}>
+          <primitive object={UNIT_BOX} attach="geometry" />
           <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
@@ -375,18 +384,17 @@ function ObstacleGeometry({
       // URDF cylinders point along +Z; three's CylinderGeometry points along
       // +Y, so rotate +90deg about X to align them (same as SceneView).
       return (
-        <mesh rotation={[Math.PI / 2, 0, 0]} {...pick}>
-          <cylinderGeometry
-            args={[geometry.radius, geometry.radius, geometry.length, 32]}
-          />
+        <mesh rotation={[Math.PI / 2, 0, 0]} {...pick}
+          scale={[geometry.radius, geometry.length, geometry.radius]}>
+          <primitive object={UNIT_CYLINDER} attach="geometry" />
           <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
       );
     case "sphere":
       return (
-        <mesh {...pick}>
-          <sphereGeometry args={[geometry.radius, 32, 24]} />
+        <mesh {...pick} scale={geometry.radius}>
+          <primitive object={UNIT_SPHERE} attach="geometry" />
           <ObstacleMaterial color={color} solid={solid} material={material} />
           {highlight}
         </mesh>
@@ -398,8 +406,13 @@ function ObstacleGeometry({
         <group {...pick}>
           <MeshVisual
             geometry={geometry}
-            color={`#${color.getHexString()}`}
+            color={color}
             forceColor={forceColor}
+            material={material}
+            roughness={solid ? 0.8 : 0.7}
+            opacity={solid ? 1 : 0.85}
+            castShadow={solid ? true : undefined}
+            receiveShadow
           />
         </group>
       );
@@ -424,8 +437,9 @@ function ObstacleMaterial({
       color={color}
       roughness={material ? material.roughness : solid ? 0.8 : 0.7}
       metalness={material ? material.metalness : 0.05}
-      transparent={!solid}
-      opacity={solid ? 1 : 0.85}
+      transparent={!solid || (material?.opacity ?? 1) < 1}
+      opacity={material?.opacity ?? (solid ? 1 : 0.85)}
+      depthWrite={(material?.opacity ?? 1) >= 1}
     />
   );
 }

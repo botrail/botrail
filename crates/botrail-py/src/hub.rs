@@ -50,6 +50,7 @@ pub struct SceneHub {
     /// Mesh id (URL path segment) -> filesystem path. Grows lazily as
     /// robot/obstacle mesh visuals are mapped to URLs.
     meshes: Mutex<Vec<PathBuf>>,
+    visual_roots: Mutex<std::collections::HashMap<usize, botrail_usd::StagePackage>>,
     /// Last successful recording playback, replayed to late-joining
     /// clients — the normal flow is "script plays, then the browser opens",
     /// so the original broadcast usually lands before anyone connects.
@@ -81,7 +82,32 @@ impl SessionHost for SceneHub {
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        (format!("/meshes/{id}"), ext)
+        let url = if matches!(ext.as_str(), "usd" | "usda" | "usdc" | "usdz") {
+            let mut roots = self.visual_roots.lock().expect("visual registry poisoned");
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            };
+            let pack = roots.entry(id).or_insert_with(|| {
+                botrail_usd::stage_package(path).unwrap_or_else(|e| {
+                    eprintln!("botrail: USD assets: {e}");
+                    botrail_usd::StagePackage {
+                        root: absolute.parent().unwrap().to_path_buf(),
+                        stage: absolute.clone(),
+                        files: vec![absolute.clone()],
+                    }
+                })
+            });
+            let relative = pack.stage.strip_prefix(&pack.root).unwrap_or(path);
+            format!(
+                "/mesh-assets/{id}/{}",
+                relative.to_string_lossy().replace('\\', "/")
+            )
+        } else {
+            format!("/meshes/{id}")
+        };
+        (url, ext)
     }
 
     fn has_listeners(&self) -> bool {
@@ -120,6 +146,7 @@ impl SceneHub {
             scene: Mutex::new(scene),
             tx,
             meshes: Mutex::new(Vec::new()),
+            visual_roots: Mutex::new(std::collections::HashMap::new()),
             last_recording: Mutex::new(None),
             baked: Mutex::new(None),
         }
@@ -147,6 +174,15 @@ impl SceneHub {
             .expect("mesh registry poisoned")
             .get(id)
             .cloned()
+    }
+
+    pub fn visual_asset_path(&self, id: usize, relative: &str) -> Option<PathBuf> {
+        let packs = self.visual_roots.lock().ok()?;
+        let pack = packs.get(&id)?;
+        let requested = pack.root.join(relative);
+        // Only composed dependencies are public. Named catalog files can be
+        // symlinks into a download cache; unrelated siblings stay private.
+        pack.files.iter().find(|p| **p == requested).cloned()
     }
 
     pub fn scene_init_json(&self) -> String {
@@ -1091,6 +1127,12 @@ impl SceneHub {
                     None => botrail_usd::export::PoseTrack::Static(o.pose),
                 };
                 botrail_usd::export::ObjectSpec {
+                    material: o.material.map(|m| botrail_usd::export::SurfaceMaterial {
+                        metalness: m.metalness,
+                        roughness: m.roughness,
+                        opacity: m.opacity,
+                    }),
+                    visual_asset: o.visual_asset.clone(),
                     name: o.name.clone(),
                     geometry: o.geometry.clone(),
                     track,

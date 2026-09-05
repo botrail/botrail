@@ -17,10 +17,10 @@ thiserror.workspace = true
 # Pre-1.0 pure-Rust USD implementation: pin an exact rev (crates.io releases
 # lag main significantly; see the spike notes in design/DESIGN.md).
 # Temporarily the neka-nat fork: upstream (mxpv/openusd) does not yet have
-# the usdc children-TokenVector fix pxr requires to open exported .usdc
-# (branch fix/usdc-children-token-vector, rebased on upstream main).
+# the usdc children-TokenVector and small-array compression fixes pxr
+# requires to read exported .usdc (fix/usdc-array-compression-boundary).
 # Repoint to mxpv/openusd once the PR lands.
-openusd = { git = "https://github.com/neka-nat/openusd", rev = "dce5ef95c0d52ecee03cd698865c0294f86caddf", features = ["geom", "physics"] }
+openusd = { git = "https://github.com/neka-nat/openusd", rev = "5f4e923f4bb06522847a12b3408a6c97462f2d63", features = ["geom", "physics"] }
 anyhow = "1"
 
 [dev-dependencies]

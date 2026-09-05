@@ -22,6 +22,13 @@ names = scene.load_usd("cell.usda", prefix="env")
 * **Names**: prim paths, optionally prefixed (`env/World/Table`). The call
   returns the added obstacle names.
 
+Studio renders each original USD gprim with its authored normals, UVs,
+material subsets and supported PBR channels. The collision geometry remains
+separate. Moving an obstacle moves its appearance with it; `enabled`,
+`visible`, `walkable` and botrail material overrides remain scene state.
+Imported appearances and their layer/image dependencies travel with saved
+projects and exported USD asset directories.
+
 ## Frames come along for free
 
 Leaf `Xform`/`Scope` prims become named frames — poses with no geometry. This
@@ -42,11 +49,42 @@ Move the pedestal prim in the USD and the robot moves with it; move
 
 ## Robots from USD
 
+To refine the appearance of an existing robot while keeping its validated
+mechanics, install display shapes from a compatible USD model before attaching
+tools:
+
+```python
+arm = bt.Robot.from_catalog("rv-5as-d")
+arm = arm.with_visuals(bt.Robot.from_usd("rv-5as-d.usdc"))
+```
+
+Each visual link's final name segment must match exactly one existing link.
+Link origins at zero joint coordinates must agree within 20 µm; differing
+joint-frame orientations are compensated in the display transform. Unmatched
+existing links retain their visuals. Joints, collision shapes, TCP, planning
+groups and catalog identity remain those of `arm`. The display source travels
+with projects, generated Python and USD exports. This is also how the machine
+tending example's `--visual-dir` applies local RV-5AS-D and MPH-3 refinements.
+
 Articulations load through [`Robot.from_usd`][botrail.Robot.from_usd] — see
 the [Robots guide](robots.md#three-ways-in) for the details (prim-path names,
 degree/unit conversion, `articulation_root`, `search_paths`). USD-sourced
 robots keep a pointer to their stage, which the exporter uses to reference the
 original asset at full visual fidelity.
+
+Attaching a USD-sourced tool also retains each component's source gprims,
+mapped to the combined robot's links. To use a catalog product's USD
+appearance, select `Robot.from_catalog("product-id", format="usd")` for
+that component. URDF remains the catalog default when available; choosing
+USD does not add material information absent from the source package.
+
+Appearance support follows Studio's USD loader, centered on
+`UsdPreviewSurface`; arbitrary MDL/MaterialX networks are not guaranteed to
+render identically. For portable assets, use relative layer and image
+references, including paths such as `../textures/panel.png`. Preserve the
+exported asset directory alongside the USD file. USD export of scene
+overrides supports constant or directly texture-connected Preview Surface
+inputs; unsupported override graphs produce an error.
 
 A stage with rigid bodies but no physics joints — a coupling, a fingertip, a
 static fixture — imports too: the bodies weld together at their stage poses

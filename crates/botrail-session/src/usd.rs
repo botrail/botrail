@@ -147,6 +147,12 @@ pub fn bake_timeline(
                 None => PoseTrack::Static(o.pose),
             };
             ObjectSpec {
+                material: o.material.map(|m| botrail_usd::export::SurfaceMaterial {
+                    metalness: m.metalness,
+                    roughness: m.roughness,
+                    opacity: m.opacity,
+                }),
+                visual_asset: o.visual_asset.clone(),
                 name: o.name.clone(),
                 geometry: o.geometry.clone(),
                 track,
@@ -188,6 +194,8 @@ pub fn bake_timeline(
             .map(|poses| poses[tcp] * offset)
             .collect();
         objects.push(ObjectSpec {
+            material: None,
+            visual_asset: None,
             name: format!("effects/{}", flash.name),
             geometry: botrail_model::Geometry::Cylinder {
                 radius: cone.radius * 0.6,
@@ -257,6 +265,8 @@ pub fn bake_timeline(
                 continue;
             }
             objects.push(ObjectSpec {
+                material: None,
+                visual_asset: None,
                 name: format!("flashes/{}_{}", flash.name, k + 1),
                 geometry: botrail_model::Geometry::Sphere { radius: 0.028 },
                 track: PoseTrack::Static(poses[tcp]),
@@ -394,6 +404,12 @@ pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, 
         // what someone opens in usdview, and hidden means hidden.
         .filter(|o| o.visible)
         .map(|o| ObjectSpec {
+            material: o.material.map(|m| botrail_usd::export::SurfaceMaterial {
+                metalness: m.metalness,
+                roughness: m.roughness,
+                opacity: m.opacity,
+            }),
+            visual_asset: o.visual_asset.clone(),
             name: o.name.clone(),
             geometry: o.geometry.clone(),
             track: PoseTrack::Static(o.pose),

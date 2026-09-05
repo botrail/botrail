@@ -1295,7 +1295,9 @@ fn group_reach_m(source: &RobotSource, group: &str) -> Option<f64> {
             group: Some(name),
             ..
         } if name == group => catalog_reach_m(tool).or_else(|| group_reach_m(base, group)),
-        RobotSource::Composite { base, .. } => group_reach_m(base, group),
+        RobotSource::Composite { base, .. } | RobotSource::Visuals { base, .. } => {
+            group_reach_m(base, group)
+        }
         RobotSource::Catalog { .. } => catalog_reach_m(source),
         _ => None,
     }
@@ -1310,7 +1312,9 @@ fn catalog_reach_m(source: &RobotSource) -> Option<f64> {
             .iter()
             .find(|(k, _)| k == "reach_mm")
             .map(|(_, v)| v / 1000.0),
-        RobotSource::Composite { base, .. } => catalog_reach_m(base),
+        RobotSource::Composite { base, .. } | RobotSource::Visuals { base, .. } => {
+            catalog_reach_m(base)
+        }
         _ => None,
     }
 }

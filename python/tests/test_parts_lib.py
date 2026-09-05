@@ -188,6 +188,50 @@ def test_generated_structures_round_trip_through_the_project(tmp_path: Path) -> 
     assert set(again.frames) == set(scene.frames)
 
 
+def test_surface_roles_and_overrides_survive_save_and_python_export(tmp_path: Path) -> None:
+    scene = scene_()
+    bt.parts.machine_tool(scene, "vmc", position=(4, 0), detail="full")
+    bt.parts.vise(scene, "vise", position=(4, 0, 0.9))
+    bt.parts.table(scene, "table", size=(1, 0.6, 0.7), position=(-3, 0), detail="full")
+    bt.parts.pedestal(scene, "stand", height=0.5, position=(-3, 2))
+    bt.parts.conveyor(scene, "belt", length=1.2, width=0.3, position=(-3, -2, 0.7))
+    # Finish follows the part's surface, including decorative meshes; it
+    # does not follow its colour or whether it participates in collision.
+    for name in ["vmc/shell/top", "vmc/side_door/leaf", "vmc/panel/plate",
+                 "vmc/panel/estop/cap", "table/top", "stand/column", "belt/belt"]:
+        assert scene.obstacle_material(name)[0] == 0
+    for name in ["vmc/table", "vise/jaw_fixed", "vise/jaw_moving"]:
+        assert scene.obstacle_material(name)[0] == 1
+    assert scene.obstacle_material("vmc/front_door/window")[1] < scene.obstacle_material("vmc/shell/top")[1]
+    assert scene.obstacle_material("table/trim/foot0")[1] > scene.obstacle_material("table/top")[1]
+    before_distance = scene.min_obstacle_distance()
+    before_bounds = {name: scene.obstacle_bounds(name) for name in scene.obstacle_names}
+    scene.set_obstacle_color("vmc/table", (0.3, 0.1, 0.1))
+    assert scene.obstacle_material("vmc/table")[0] == 1
+    scene.set_obstacle_material("vmc/table", metalness=0.0, roughness=0.63)
+    assert scene.min_obstacle_distance() == before_distance
+    assert {name: scene.obstacle_bounds(name) for name in scene.obstacle_names} == before_bounds
+
+    scene.save_project(tmp_path / "finishes.botrail")
+    original = json.loads((tmp_path / "finishes.botrail").read_text())
+    objects = {o["name"]: o for o in original["obstacles"]}
+    assert not objects["vmc/front_door/window"]["enabled"]
+    loaded = bt.Scene.load_project(tmp_path / "finishes.botrail")
+    namespace: dict = {}
+    exec(loaded.generate_python().replace("bt.studio(scene)", ""), namespace)
+    for i, again in enumerate([loaded, namespace["scene"]]):
+        assert again.obstacle_names == scene.obstacle_names
+        for name in scene.obstacle_names:
+            assert again.obstacle_material(name) == scene.obstacle_material(name)
+        again.save_project(tmp_path / f"again{i}.botrail")
+        restored = json.loads((tmp_path / f"again{i}.botrail").read_text())
+        assert [(o["name"], o["enabled"], o["visible"]) for o in restored["obstacles"]] == [
+            (o["name"], o["enabled"], o["visible"]) for o in original["obstacles"]
+        ]
+        assert again.bom().rows == scene.bom().rows
+        assert again.min_obstacle_distance() == pytest.approx(before_distance)
+
+
 def test_wall_leaves_a_doorway_and_spans_it() -> None:
     """A partition is piers and heads: what is left of the run once the
     openings are taken out of it, plus the wall over each one. The pier

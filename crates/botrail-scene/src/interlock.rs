@@ -224,7 +224,7 @@ fn trim_num(v: f64) -> String {
 fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool)>) {
     // (name, is_device_done, is_robot_done)
     let push = |out: &mut Vec<(String, bool, bool)>, item: (String, bool, bool)| {
-        if !out.iter().any(|x| *x == item) {
+        if !out.contains(&item) {
             out.push(item);
         }
     };

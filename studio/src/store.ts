@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { initialRenderQuality, persistRenderQuality, type RenderQuality } from "./three/renderQuality";
 import type {
   BranchTakenMsg,
   CollisionPairMsg,
@@ -381,6 +382,8 @@ export interface StudioState {
   selection: Selection;
   /** Which sidebar tab is up. */
   activeTab: SidebarTab;
+  renderQuality: RenderQuality;
+  setRenderQuality: (quality: RenderQuality) => void;
   /** Motion the Motion tab edits; null adopts the selected robot's first
    * motion (or the conventional fresh name when it has none yet). */
   selectedMotion: string | null;
@@ -611,6 +614,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   minDistance: null,
   selection: { type: "tcp", robot: "" },
   activeTab: initialTab(),
+  renderQuality: initialRenderQuality(),
+  setRenderQuality: (quality) => set({ renderQuality: persistRenderQuality(quality) }),
   ...initialOverlays(),
   selectedMotion: null,
   playback: null,

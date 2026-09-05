@@ -47,6 +47,14 @@ historical `Robot` prim;
 with several, each lands at `/World/<sanitized instance name>` — the
 convention playback relies on. Exporters return their warnings as a list.
 
+Equipment finishes export as `UsdPreviewSurface` metallic/roughness inputs,
+independently of friction and other physics materials. Static USD imports
+and USD components in a combined arm/tool retain their source geometry,
+normals, UVs and material subsets. Their material networks and images are
+copied under `<stem>_assets/`; distribute that directory with the layer.
+See [USD import](usd-import.md) for the supported appearance and override
+scope.
+
 The extension picks the serialization: `.usda` writes text (diffable, but
 large — timeSamples dominate), `.usdc` or `.usd` writes the binary crate
 format at roughly half the size, byte-for-byte the same composed result.

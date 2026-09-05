@@ -12,3 +12,4 @@ authors.workspace = true
 xurdf.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
+roxmltree = "0.14"

@@ -4,4 +4,4 @@
  * Metalness/roughness, the pair every viewer botrail hands a scene to
  * already speaks (glTF, USD Preview Surface, three.js).
  */
-export type MaterialMsg = { metalness: number, roughness: number, };
+export type MaterialMsg = { metalness: number, roughness: number, opacity?: number | null, };

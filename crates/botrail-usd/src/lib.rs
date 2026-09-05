@@ -78,6 +78,7 @@ pub struct ImportedNode {
     /// Prim path (the naming contract shared with client-side USD loaders).
     pub name: String,
     pub geometry: Geometry,
+    pub visual_asset: Option<botrail_model::VisualAsset>,
     /// World pose, meters / Z-up.
     pub pose: Isometry3<f64>,
     /// Authored `primvars:displayColor`, linear RGB. `None` when the prim
@@ -153,7 +154,7 @@ pub fn import_usd(path: &Path, options: &ImportOptions) -> Result<ImportedScene,
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
-    import_stage(&stage, options)
+    import_stage(&stage, options, Some(path))
 }
 
 /// Imports a stage held entirely in memory (single layer or usdz package —
@@ -170,12 +171,17 @@ pub fn import_usd_bytes(
             path: file_name.to_string(),
             message: e.to_string(),
         })?;
-    import_stage(&stage, options)
+    import_stage(&stage, options, None)
 }
 
-fn import_stage(stage: &Stage, options: &ImportOptions) -> Result<ImportedScene, UsdImportError> {
+fn import_stage(
+    stage: &Stage,
+    options: &ImportOptions,
+    source: Option<&Path>,
+) -> Result<ImportedScene, UsdImportError> {
     let mut importer = Importer {
         stage,
+        source_path: source.map(|p| p.to_path_buf()),
         // USD defaults: centimeters, Y-up.
         meters_per_unit: 0.01,
         up_axis_fix: y_up_to_z_up(),
@@ -345,6 +351,7 @@ pub(crate) fn display_color(view: &AnyPrim) -> Option<[f32; 3]> {
 
 struct Importer<'a> {
     stage: &'a Stage,
+    source_path: Option<PathBuf>,
     meters_per_unit: f64,
     up_axis_fix: UnitQuaternion<f64>,
     /// Resolved lazily in `write_mesh`: the default computation touches
@@ -442,9 +449,22 @@ impl Importer<'_> {
         color: Option<[f32; 3]>,
     ) -> anyhow::Result<()> {
         let (pose, residual) = self.normalized_pose(world);
-        let node = |geometry, pose| ImportedNode {
+        let source = self.source_path.clone();
+        let normalization = self.up_axis_fix.to_homogeneous()
+            * nalgebra::Matrix4::new_scaling(self.meters_per_unit);
+        let world_matrix = nalgebra::Matrix4::from_fn(|r, c| world[(c, r)]);
+        let node = |geometry, pose: Isometry3<f64>| ImportedNode {
             name: path.to_string(),
             geometry,
+            visual_asset: source.as_ref().map(|p| botrail_model::VisualAsset {
+                path: p.clone(),
+                prim_path: path.to_string(),
+                color_override: false,
+                transform: (pose.inverse().to_homogeneous() * normalization * world_matrix)
+                    .as_slice()
+                    .try_into()
+                    .unwrap(),
+            }),
             pose,
             color,
             mesh_data: None,
@@ -484,6 +504,7 @@ impl Importer<'_> {
                 if self.meshes_in_memory {
                     self.out.nodes.push(ImportedNode {
                         name: path.to_string(),
+                        visual_asset: None,
                         geometry: Geometry::Mesh {
                             path: PathBuf::from(format!("usd:/{path}")),
                             scale: Vector3::new(1.0, 1.0, 1.0),
@@ -836,21 +857,83 @@ pub fn stage_dependencies(
             message: e.to_string(),
         })?;
 
-    fn force_load(prim: Prim) -> anyhow::Result<()> {
+    fn force_load(prim: Prim, assets: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+        for attr in prim.attributes()? {
+            let values = match attr.get::<sdf::Value>()? {
+                Some(sdf::Value::AssetPath(a)) => vec![a],
+                Some(sdf::Value::AssetPathVec(a)) => a,
+                _ => Vec::new(),
+            };
+            for asset in values {
+                if let Some(resolved) = asset.resolved_path() {
+                    let path = PathBuf::from(resolved);
+                    if path.is_file() {
+                        assets.push(path);
+                    }
+                }
+            }
+        }
         for child in prim.children()? {
-            force_load(child)?;
+            force_load(child, assets)?;
         }
         Ok(())
     }
-    force_load(stage.prim(sdf::Path::abs_root()))
+    let mut assets = vec![path.to_path_buf()];
+    force_load(stage.prim(sdf::Path::abs_root()), &mut assets)
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
 
-    Ok(stage
-        .layer_identifiers()
-        .into_iter()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .collect())
+    assets.extend(
+        stage
+            .layer_identifiers()
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .collect::<Vec<_>>(),
+    );
+    assets.sort();
+    assets.dedup();
+    Ok(assets)
+}
+
+/// Files used by the composed stage, including texture assets. Keeping their
+/// relative tree also supports layers that refer to `../textures/...`.
+pub struct StagePackage {
+    pub root: PathBuf,
+    pub stage: PathBuf,
+    pub files: Vec<PathBuf>,
+}
+
+pub fn stage_package(path: &Path) -> Result<StagePackage, UsdImportError> {
+    fn absolute(path: &Path) -> io::Result<PathBuf> {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let mut result = PathBuf::new();
+        for c in path.components() {
+            match c {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    result.pop();
+                }
+                _ => result.push(c.as_os_str()),
+            }
+        }
+        Ok(result)
+    }
+    let stage = absolute(path)?;
+    let files = stage_dependencies(&stage, &[])?
+        .iter()
+        .map(|p| absolute(p))
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut root = stage.parent().unwrap().to_path_buf();
+    while files.iter().any(|p| !p.starts_with(&root)) {
+        if !root.pop() {
+            break;
+        }
+    }
+    Ok(StagePackage { root, stage, files })
 }
 
 #[cfg(test)]

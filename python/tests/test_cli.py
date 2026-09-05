@@ -49,7 +49,15 @@ def test_project_schema_is_the_loaders_contract(tmp_path: Path) -> None:
 
     scene = demo.build()
     scene.save_project(tmp_path / "cell.botrail")
-    doc = json.loads((tmp_path / "cell.botrail").read_text())
+    # Catalog-backed parts can make the same demo a portable asset archive.
+    # Validate the schema of the stored project in either supported container.
+    import zipfile
+    path = tmp_path / "cell.botrail"
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            doc = json.loads(archive.read("project.json"))
+    else:
+        doc = json.loads(path.read_text())
     validator = jsonschema.Draft202012Validator(schema)
     assert list(validator.iter_errors(doc)) == []
     doc["parts"] = [{"target": 1}]

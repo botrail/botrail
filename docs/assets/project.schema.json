@@ -2694,6 +2694,13 @@
           "type": "number",
           "format": "float"
         },
+        "opacity": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
         "roughness": {
           "type": "number",
           "format": "float"
@@ -2834,6 +2841,16 @@
           "description": "Invisible obstacles still collide; they are simply not drawn. Files\nwritten before this existed have every obstacle visible, which is\nwhat they meant.",
           "type": "boolean",
           "default": true
+        },
+        "visual_asset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAssetMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "walkable": {
           "description": "A walkable top face — a stair tread, a mezzanine slab: footfalls of\na walking machine snap onto it. Files written before this existed\nhave no walkable surfaces, which is what they meant.",
@@ -3383,6 +3400,26 @@
     "RobotSourceMsg": {
       "description": "Where a project robot comes from.",
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/RobotSourceMsg"
+            },
+            "kind": {
+              "type": "string",
+              "const": "visuals"
+            },
+            "visual": {
+              "$ref": "#/$defs/RobotSourceMsg"
+            }
+          },
+          "required": [
+            "kind",
+            "base",
+            "visual"
+          ]
+        },
         {
           "description": "URDF XML (xacro already expanded), embedded verbatim.",
           "type": "object",
@@ -4350,6 +4387,35 @@
       "required": [
         "pose",
         "size"
+      ]
+    },
+    "VisualAssetMsg": {
+      "type": "object",
+      "properties": {
+        "color_override": {
+          "type": "boolean"
+        },
+        "prim_path": {
+          "type": "string"
+        },
+        "transform": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 16,
+          "minItems": 16
+        },
+        "url": {
+          "description": "URL at runtime, source path in a saved project.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "prim_path",
+        "transform"
       ]
     }
   }

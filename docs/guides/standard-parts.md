@@ -60,6 +60,21 @@ whole thing down again.
 
 ## Drawn, and what it hits
 
+The machining centre, vise, operator panel, table and pedestal assign simple
+surface finishes by role: painted covers, exposed metal, plastic buttons and
+rubber feet. Conveyor belts and rails also have separate finishes. These are
+authored visual defaults, not measured manufacturer data or friction values.
+Colours and geometry stay independent of the finish. Override a surface with
+`scene.set_obstacle_material(name, metalness=..., roughness=...)`; overrides
+survive project save/load and generated Python. These defaults do not override
+imported catalog trim; its appearance follows the existing
+[import path](scene-and-obstacles.md). In `machine_tool(detail="full")`, the
+doors have transparent panes and separate seals and panels; the hidden full
+leaves remain the collision and switch-sensing envelopes. All moving trim
+belongs to `door_objects`. Service panels, seams, table slot markings and
+the operator panel's bezel are authored visual details that scale with the
+generator's dimensions. They do not claim manufacturer CAD accuracy.
+
 A catalog part is drawn the way it looks: a mesh panel as a tube frame with a
 grid of wire in it, a conveyor with its rollers and drive, a rack with its
 beams and braces. All of that is **decoration** — added with collision off,

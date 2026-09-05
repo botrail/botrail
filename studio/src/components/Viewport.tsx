@@ -33,6 +33,9 @@ import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
+import { RENDER_QUALITY } from "../three/renderQuality";
+import { colorPipeline } from "../three/colorPipeline";
+import { floorFinish } from "../three/floorFinish";
 
 /**
  * Image-based lighting, so the robot's PBR materials (the Isaac Franka ships
@@ -41,8 +44,8 @@ import { WasmStageView } from "./WasmStageView";
  *
  * `RoomEnvironment` is procedural — it builds the environment from emissive
  * boxes rather than fetching an HDRI, which keeps the studio working with no
- * network. The intensity is low: this is a sheen on top of the key light, not
- * the light source.
+ * network. Bare metal relies on this reflected light, so it must remain
+ * readable alongside the painted surfaces lit by the key light.
  */
 function IndoorLighting() {
   const gl = useThree((s) => s.gl);
@@ -50,6 +53,7 @@ function IndoorLighting() {
   useEffect(() => {
     const pmrem = new THREE.PMREMGenerator(gl);
     const room = RoomEnvironment();
+    room.rotation.x = Math.PI / 2; // RoomEnvironment is Y-up; botrail is Z-up.
     const target = pmrem.fromScene(room, 0.04);
     // three-stdlib's RoomEnvironment has no dispose() of its own, and the
     // baked cube map is all we keep.
@@ -64,7 +68,7 @@ function IndoorLighting() {
     });
     pmrem.dispose();
     scene.environment = target.texture;
-    scene.environmentIntensity = 0.32;
+    scene.environmentIntensity = 0.75;
     return () => {
       scene.environment = null;
       target.dispose();
@@ -74,6 +78,7 @@ function IndoorLighting() {
 }
 
 export function Viewport() {
+  const quality = useStudioStore((s) => s.renderQuality);
   const connected = useStudioStore((s) => s.connection === "connected");
   const selection = useStudioStore((s) => s.selection);
   const multi = useStudioStore((s) => s.robots.length > 1);
@@ -132,6 +137,8 @@ export function Viewport() {
     >
       <Canvas
         shadows="soft"
+        gl={{ antialias: false }}
+        dpr={[1, RENDER_QUALITY[quality].dpr]}
         camera={{
           position: [1.6, -1.6, 1.2],
           up: [0, 0, 1],
@@ -143,22 +150,17 @@ export function Viewport() {
       >
         <color attach="background" args={["#15171c"]} />
         <CameraRigBridge />
+        <RenderQuality />
         {/* The environment map does the ambient work, so the lights below it
             are only the key and a fill; stacking a bright ambient on top of
             an IBL is what flattens a scene out. */}
         <IndoorLighting />
         <ambientLight intensity={0.12} />
-        {/* Key light. The shadow camera follows the scene's own extent
-            (see ShadowFollow): sized to an arm's cell it cuts a line's
-            shadows off mid-floor, sized to a fixed line it wastes its 2k
-            map on one arm's cell. The map stays at 2k either way: 4k
-            covers the same span at twice the sharpness and several times
-            the cost, which software renderers (the headless screenshots)
-            will not carry. */}
+        {/* Shadow bounds follow the cell; quality controls map resolution. */}
         <ShadowFollow />
         {/* Fill from the opposite side so the shadowed faces don't go flat. */}
         <directionalLight position={[-3, -2, 2]} intensity={0.3} />
-        <hemisphereLight args={["#8899aa", "#20242c", 0.25]} />
+        <hemisphereLight position={[0, 0, 1]} args={["#8899aa", "#20242c", 0.25]} />
 
         {/* Something for the cell to stand on. A grid alone reads as graph
             paper, and a shadow with nothing to land on leaves every object
@@ -169,10 +171,7 @@ export function Viewport() {
             horizon: every pixel of it costs a shadow lookup, and a plane
             big enough to fill the view is what makes a soft renderer
             crawl. Beyond it the grid carries on. */}
-        <mesh position={[0, 0, -0.002]} receiveShadow>
-          <planeGeometry args={[48, 48]} />
-          <meshStandardMaterial color="#1a1d23" roughness={0.94} metalness={0} />
-        </mesh>
+        <Floor />
 
         {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor).
             An authoring aid — wrapped so the camera pass hides it (the
@@ -183,10 +182,10 @@ export function Viewport() {
             infiniteGrid
             cellSize={0.1}
             cellThickness={0.6}
-            cellColor="#2a2f3a"
+            cellColor="#50565a"
             sectionSize={1}
             sectionThickness={1}
-            sectionColor="#3c4557"
+            sectionColor="#626b71"
             fadeDistance={16}
             fadeStrength={1}
           />
@@ -252,6 +251,41 @@ export function Viewport() {
   );
 }
 
+function RenderQuality() {
+  const gl = useThree((s) => s.gl);
+  const quality = useStudioStore((s) => s.renderQuality);
+  useEffect(() => {
+    colorPipeline(gl).samples = RENDER_QUALITY[quality].samples;
+  }, [gl, quality]);
+  return null;
+}
+
+function Floor() {
+  const gl = useThree((s) => s.gl);
+  const maps = useMemo(() => floorFinish(gl.capabilities.getMaxAnisotropy()), [gl]);
+  // R3F v8 assigns renderer.outputColorSpace to texture-valued JSX props,
+  // including data maps. Own this material so normal/roughness stay raw.
+  const material = useMemo(() => new THREE.MeshStandardMaterial({
+    color: "#44484b", roughness: 0.92, metalness: 0, ...maps,
+  }), [maps]);
+  const geometry = useMemo(() => {
+    const g = new THREE.PlaneGeometry(48, 48);
+    const uv = g.getAttribute("uv");
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 48, uv.getY(i) * 48);
+    return g;
+  }, []);
+  useEffect(() => () => {
+    geometry.dispose();
+    maps.normalMap.dispose();
+    maps.roughnessMap.dispose();
+    material.dispose();
+  }, [geometry, maps, material]);
+  return <mesh position={[0, 0, -0.002]} receiveShadow>
+    <primitive object={geometry} attach="geometry" />
+    <primitive object={material} attach="material" />
+  </mesh>;
+}
+
 /** The key light, with its shadow frustum resized to the scene.
  *
  * Obstacles change rarely (authoring), so this recomputes on the obstacle
@@ -259,15 +293,17 @@ export function Viewport() {
  * padded for the arms, clamped so a lone robot keeps a crisp map and a
  * 25 m line still lands entirely inside the frustum. */
 function ShadowFollow() {
+  const quality = useStudioStore((s) => s.renderQuality);
+  const shadowSize = RENDER_QUALITY[quality].shadowSize;
   const light = useRef<THREE.DirectionalLight | null>(null);
   const obstacles = useStudioStore((s) => s.obstacles);
   const robots = useStudioStore((s) => s.robots);
 
   const frame = useMemo(() => {
-    let minX = -3;
-    let maxX = 3;
-    let minY = -3;
-    let maxY = 3;
+    let minX = -1;
+    let maxX = 1;
+    let minY = -1;
+    let maxY = 1;
     for (const o of obstacles) {
       minX = Math.min(minX, o.pose.position[0]);
       maxX = Math.max(maxX, o.pose.position[0]);
@@ -285,7 +321,7 @@ function ShadowFollow() {
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     const half = Math.min(
-      Math.max((Math.max(maxX - minX, maxY - minY) + 6) / 2, 9),
+      Math.max((Math.max(maxX - minX, maxY - minY) + 6) / 2, 4),
       26,
     );
     return { cx, cy, half };
@@ -294,7 +330,7 @@ function ShadowFollow() {
   useEffect(() => {
     const l = light.current;
     if (!l) return;
-    l.position.set(frame.cx + 6, frame.cy + 5, 9 + frame.half * 0.5);
+    l.position.set(frame.cx + 5, frame.cy - 4, 8 + frame.half * 0.5);
     l.target.position.set(frame.cx, frame.cy, 0);
     l.target.updateMatrixWorld();
     const cam = l.shadow.camera;
@@ -307,15 +343,23 @@ function ShadowFollow() {
     l.shadow.needsUpdate = true;
   }, [frame]);
 
+  useEffect(() => {
+    const shadow = light.current?.shadow;
+    if (!shadow) return;
+    shadow.map?.dispose();
+    shadow.map = null;
+    shadow.mapSize.set(shadowSize, shadowSize);
+    shadow.needsUpdate = true;
+  }, [shadowSize]);
+
   return (
     <directionalLight
       ref={light}
       position={[6, 5, 9]}
-      intensity={1.05}
+      intensity={1.35}
       castShadow
-      shadow-mapSize={[2048, 2048]}
-      shadow-bias={-0.0006}
-      shadow-normalBias={0.02}
+      shadow-bias={-0.00015}
+      shadow-normalBias={0.003}
       shadow-camera-near={0.1}
       shadow-camera-far={40}
     />

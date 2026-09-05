@@ -65,6 +65,20 @@ BELT: Color = (0.10, 0.10, 0.11)
 PLASTER: Color = (0.62, 0.60, 0.56)
 CONCRETE: Color = (0.40, 0.40, 0.39)
 
+# Authored appearance defaults (metalness, roughness), not measured product
+# data or physics materials. Generators choose by surface role, never by RGB.
+_Finish = tuple[float, float]
+_PAINT: _Finish = (0.0, 0.50)
+_MACHINED_METAL: _Finish = (1.0, 0.35)
+_CAST_METAL: _Finish = (1.0, 0.70)
+_RUBBER: _Finish = (0.0, 0.85)
+_PLASTIC: _Finish = (0.0, 0.45)
+_GLOSS: _Finish = (0.0, 0.15)
+
+
+def _finish(scene, name: str, finish: _Finish) -> None:
+    scene.set_obstacle_material(name, metalness=finish[0], roughness=finish[1])
+
 
 @dataclass
 class Built:
@@ -154,9 +168,12 @@ def _load_trim(
     return True
 
 
-def _trim(scene, built: Built, name: str, size, position, quaternion=None, color=None) -> str:
+def _trim(scene, built: Built, name: str, size, position, quaternion=None, color=None,
+          *, finish: Optional[_Finish] = None) -> str:
     """Add a decorative box: rendered, out of collision."""
     made = scene.add_box(name, size=size, position=position, quaternion=quaternion, color=color)
+    if finish is not None:
+        _finish(scene, made, finish)
     scene.set_obstacle_enabled(made, False)
     built.obstacles.append(made)
     return made
@@ -204,9 +221,12 @@ def _mul_quat(a, b):
     )
 
 
-def _trim_cylinder(scene, built: Built, name: str, radius, length, position, quaternion, color) -> str:
+def _trim_cylinder(scene, built: Built, name: str, radius, length, position, quaternion, color,
+                   *, finish: Optional[_Finish] = None) -> str:
     made = scene.add_cylinder(name, radius=radius, length=length, position=position,
                               quaternion=quaternion, color=color)
+    if finish is not None:
+        _finish(scene, made, finish)
     scene.set_obstacle_enabled(made, False)
     built.obstacles.append(made)
     return made
@@ -809,12 +829,14 @@ def table(
                       quaternion=q, color=color)
     )
     corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    _finish(scene, f"{name}/top", _PAINT)
     for i, (sx, sy) in enumerate(corners):
         px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
         built.obstacles.append(
             scene.add_box(f"{name}/leg{i}", size=(leg, leg, h - top_thickness),
                           position=(px, py, z0 + (h - top_thickness) / 2), quaternion=q, color=color)
         )
+        _finish(scene, f"{name}/leg{i}", _PAINT)
     scene.add_frame(f"{name}/top", position=(x, y, z0 + h), quaternion=q)
     built.frames.append(f"{name}/top")
 
@@ -834,11 +856,12 @@ def table(
             for i, (ex, ey) in enumerate([(0, -1), (0, 1), (-1, 0), (1, 0)]):
                 span = (rail * 0.6, wy - 2 * leg, rail) if ex else (lx - 2 * leg, rail * 0.6, rail)
                 px, py = world(ex * (lx / 2 - leg / 2), ey * (wy / 2 - leg / 2))
-                _trim(scene, built, f"{name}/trim/rail{i}", span, (px, py, under), q, DARK_STEEL)
+                _trim(scene, built, f"{name}/trim/rail{i}", span, (px, py, under), q, DARK_STEEL,
+                      finish=_PAINT)
             for i, (sx, sy) in enumerate(corners):
                 px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
                 _trim(scene, built, f"{name}/trim/foot{i}", (leg * 1.8, leg * 1.8, leg / 4),
-                      (px, py, z0 + leg / 8), q, DARK_STEEL)
+                      (px, py, z0 + leg / 8), q, DARK_STEEL, finish=_RUBBER)
         if _load_trim(
             scene, built, spec, "top", f"{name}/trim/top", (x, y, z0 + h), q,
             width=lx, depth=wy, thickness=top_thickness,
@@ -955,6 +978,8 @@ def pedestal(
         scene.add_box(f"{name}/top", size=(top[0], top[1], plate), position=(x, y, z0 + height - plate / 2),
                       quaternion=q, color=color)
     )
+    for part in ("base", "column", "top"):
+        _finish(scene, f"{name}/{part}", _PAINT)
     scene.add_frame(f"{name}/mount", position=(x, y, z0 + height), quaternion=q)
     built.frames.append(f"{name}/mount")
 
@@ -979,7 +1004,7 @@ def pedestal(
                     px, py = x + c * dx - s_ * dy, y + s_ * dx + c * dy
                     _trim(scene, built, f"{name}/trim/gusset{i}",
                           (reach if ux else web, reach if uy else web, rise),
-                          (px, py, z0 + plate + rise / 2), q, color)
+                          (px, py, z0 + plate + rise / 2), q, color, finish=_PAINT)
 
     if spec is None:
         scene.set_part(name, kind="group", category="structure.pedestal", **_identity(model, manufacturer, attributes))
@@ -1489,6 +1514,7 @@ def conveyor(
                       quaternion=q, color=BELT)
     )
     nx, ny = -dy, dx  # across the belt
+    _finish(scene, f"{name}/belt", _RUBBER)
     rail_rise = 0.04 if spec is None else float(spec.dimension_mm("unit", "rail_rise", 40.0)) / 1000.0
     if not math.isfinite(rail_rise) or rail_rise < 0:
         raise ValueError("conveyor: rail_rise must be finite and non-negative")
@@ -1498,6 +1524,7 @@ def conveyor(
             scene.add_box(f"{name}/{side}", size=(length, rail, belt_thickness + rail_rise),
                           position=(x + ox, y + oy, z - belt_thickness / 2 + rail_rise / 2), quaternion=q, color=color)
         )
+        _finish(scene, f"{name}/{side}", _PAINT)
     # A center-drive envelope is opt-in data, not a brand check. These three
     # dimensions must be supplied together; old packs retain their massing.
     drive_dims = [] if spec is None else [spec.dimension_mm("unit", key)
@@ -2902,6 +2929,7 @@ def operator_panel(
     manufacturer: Optional[str] = None,
     button_model: Union[str, Mapping[str, str], None] = None,
     color: Color = DARK_STEEL,
+    detail: Optional[str] = None,
     **attributes,
 ) -> Built:
     """An operator panel: a plate `size = (width, height)` centred at
@@ -2987,9 +3015,24 @@ def operator_panel(
     built.obstacles.append(
         scene.add_box(f"{name}/plate", size=(w, thickness, h), position=(x, y, z), quaternion=q, color=color)
     )
+    _finish(scene, f"{name}/plate", _PAINT)
     face = -thickness / 2
     scene.add_frame(name, position=world(0.0, face, 0.0), quaternion=q_press)
     built.frames.append(name)
+
+    if _detail(detail, spec is not None) == "full":
+        # A thin face bezel and captive screws. Button frames and travel stay
+        # on the original face, so a visual refinement cannot change a press.
+        rim = min(0.006, min(w, h) / 12)
+        for i, sign in enumerate((-1, 1)):
+            _trim(scene, built, f"{name}/trim/vertical{i}", (rim, 0.002, h),
+                  world(sign * (w - rim) / 2, face - 0.001, 0), q, TABLE_STEEL, finish=_MACHINED_METAL)
+            _trim(scene, built, f"{name}/trim/horizontal{i}", (w - 2 * rim, 0.002, rim),
+                  world(0, face - 0.001, sign * (h - rim) / 2), q, TABLE_STEEL, finish=_MACHINED_METAL)
+        for i, (u, v) in enumerate(((-1, -1), (-1, 1), (1, -1), (1, 1))):
+            _trim_cylinder(scene, built, f"{name}/trim/screw{i}", rim * 0.6, 0.0015,
+                           world(u * (w / 2 - 2 * rim), face - 0.00075, v * (h / 2 - 2 * rim)),
+                           q_cap, TABLE_STEEL, finish=_MACHINED_METAL)
 
     if watch_robots is None:
         watch: dict = {"watch": [], "watch_robot": True}
@@ -3016,9 +3059,9 @@ def operator_panel(
         colour = BUTTON_COLORS[BUTTON_BY_NAME.get(button, "black")]
         if estop:
             _trim_cylinder(scene, built, f"{name}/{button}/collar", 0.030, 0.003,
-                           world(u, face - 0.0015, v), q_cap, BUTTON_COLORS["yellow"])
+                           world(u, face - 0.0015, v), q_cap, BUTTON_COLORS["yellow"], finish=_PLASTIC)
         _trim_cylinder(scene, built, f"{name}/{button}/cap", radius, height,
-                       world(u, face - height / 2, v), q_cap, colour)
+                       world(u, face - height / 2, v), q_cap, colour, finish=_PLASTIC)
         # The zone sits behind the cap face, as deep as the stroke.
         zone = f"{name}/{button}"
         scene.add_zone_sensor(
@@ -3146,6 +3189,7 @@ def vise(
         scene.add_box(f"{name}/body", size=(jaw_width + 0.02, body_length, body_height),
                       position=(bx, by, z0 + body_height / 2), quaternion=q, color=color)
     )
+    _finish(scene, f"{name}/body", _CAST_METAL)
     for tag, sign in (("fixed", 1.0), ("moving", -1.0)):
         jx, jy = world(0.0, sign * (opening / 2 + jaw_thickness / 2))
         built.obstacles.append(
@@ -3153,6 +3197,7 @@ def vise(
                           position=(jx, jy, z0 + body_height + jaw_height / 2), quaternion=q,
                           color=DARK_STEEL)
         )
+        _finish(scene, f"{name}/jaw_{tag}", _MACHINED_METAL)
     scene.add_frame(f"{name}/jaw", position=(x, y, z0 + body_height), quaternion=q)
     built.frames.append(f"{name}/jaw")
     figures = {
@@ -3346,8 +3391,11 @@ def machine_tool(
     opening that does not fit its wall, a leaf whose stroke runs off the
     body, a spindle head that would stand through the roof.
 
-    `detail="full"` adds the windows, the door rails, the accent band and
-    the stack light — drawn, never collided. The part is pinned on the
+    `detail="full"` adds framed transparent windows, enclosure seams,
+    service panels, door rails, the accent band and the stack light.
+    These are authored visual details, not measured manufacturer CAD.
+    Door leaves keep their solid collision envelopes behind the drawn
+    panels and glazing. The part is pinned on the
     group (`machine_tool.vmc`), the side door as `<name>/side_door`
     (`machine_tool.door`, with its drive and stroke), the panel and its
     buttons by `operator_panel`.
@@ -3513,18 +3561,57 @@ def machine_tool(
     def world(dx: float, dy: float) -> tuple[float, float]:
         return x + c * dx - s * dy, y + s * dx + c * dy
 
-    def box(tag: str, sz: Point3, at: Point3, colour: Color = color, group: str = "shell") -> str:
+    def box(tag: str, sz: Point3, at: Point3, colour: Color = color, group: str = "shell",
+            *, finish: _Finish = _PAINT) -> str:
         px, py = world(at[0], at[1])
         made = scene.add_box(f"{name}/{group}/{tag}" if group else f"{name}/{tag}",
                              size=sz, position=(px, py, z0 + at[2]), quaternion=q, color=colour)
+        _finish(scene, made, finish)
         built.obstacles.append(made)
         return made
 
     built = MachineTool(name)
 
+    def trim(tag, sz, at, colour=color, finish=_PAINT):
+        px, py = world(at[0], at[1])
+        return _trim(scene, built, f"{name}/{tag}", sz,
+                     (px, py, z0 + at[2]), q, colour, finish=finish)
+
+    def glazed_leaf(group, leaf, width, height, at, side=False):
+        # All dimensions derive from this leaf, including small custom doors.
+        # The original full box stays enabled for collision and switch sensing.
+        scene.set_obstacle_visible(leaf, False)
+        made = []
+
+        def panel(tag, u, v, du, dv, colour=color, finish=_PAINT, depth=leaf_t):
+            sz = (depth, du, dv) if side else (du, depth, dv)
+            pos = (at[0], at[1] + u, at[2] + v) if side else (at[0] + u, at[1], at[2] + v)
+            obj = trim(f"{group}/{tag}", sz, pos, colour, finish)
+            made.append(obj)
+            return obj
+
+        rim = min(0.10, width * 0.14)
+        bottom, top = height * 0.22, height * 0.10
+        clear_w, clear_h = width - 2 * rim, height - bottom - top
+        vc = (bottom - top) / 2
+        for tag, sign in (("left", -1), ("right", 1)):
+            panel(tag, sign * (width - rim) / 2, 0, rim, height)
+        panel("lower", 0, -(height - bottom) / 2, clear_w, bottom)
+        panel("upper", 0, (height - top) / 2, clear_w, top)
+        seal = min(0.014, rim / 3)
+        for tag, sign in (("seal_left", -1), ("seal_right", 1)):
+            panel(tag, sign * (clear_w - seal) / 2, vc, seal, clear_h, DARK_STEEL, _RUBBER)
+        for tag, sign in (("seal_bottom", -1), ("seal_top", 1)):
+            panel(tag, 0, vc + sign * (clear_h - seal) / 2,
+                  clear_w - 2 * seal, seal, DARK_STEEL, _RUBBER)
+        pane = panel("window", 0, vc, clear_w - 2 * seal, clear_h - 2 * seal,
+                     (0.28, 0.36, 0.37), _GLOSS, depth=0.004)
+        scene.set_obstacle_material(pane, metalness=0.0, roughness=0.16, opacity=0.24)
+        return made
+
     # ---- the enclosure --------------------------------------------------
     bed_h = min(0.60, th - 0.10)
-    box("bed", (w - 2 * t, cd, bed_h), (0.0, y_c, bed_h / 2), MACHINE_BED, group="")
+    box("bed", (w - 2 * t, cd, bed_h), (0.0, y_c, bed_h / 2), MACHINE_BED, group="", finish=_CAST_METAL)
     box("column", (w, d - ls, h), (0.0, (y_r + d / 2) / 2, h / 2), color, group="")
     box("top", (w, ls, t), (0.0, yc_wall, h - t / 2))
     box("far", (t, ls, h), (-sx * (w / 2 - t / 2), yc_wall, h / 2))
@@ -3563,15 +3650,17 @@ def machine_tool(
         built.front_door_lane = lane
         scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end="closed")
         if mode == "full":
-            wx, wy = world(0.0, y0 - 0.01 - leaf_t - 0.0025)
-            _trim(scene, built, f"{name}/front_door/window", (fw - 0.10, 0.005, fh - 0.30),
-                  (wx, wy, z0 + fs + fh / 2 + 0.05), q, MACHINE_WINDOW)
+            glazed_leaf("front_door", front_leaf, fw + 0.10, fh + 0.10,
+                        (0.0, y0 - 0.01 - leaf_t / 2, fs + fh / 2))
+            trim("front_door/handle", (0.016, 0.030, fh * 0.32),
+                 (fw / 2, y0 - 0.01 - leaf_t - 0.015, fs + fh / 2), DARK_STEEL, _PLASTIC)
 
     # ---- the table at the exchange position, and the head over it -------
     box("saddle", (min(tw * 0.7, 0.45), min(td * 1.4, 0.55), th - plate - bed_h),
-        (tx_, ty_, (bed_h + th - plate) / 2), MACHINE_BED, group="")
-    box("table", (tw, td, plate), (tx_, ty_, th - plate / 2), TABLE_STEEL, group="")
-    box("head", (0.32, 0.42, h - t - th - hc), (0.0, y_c, (th + hc + h - t) / 2), MACHINE_BED, group="")
+        (tx_, ty_, (bed_h + th - plate) / 2), MACHINE_BED, group="", finish=_CAST_METAL)
+    box("table", (tw, td, plate), (tx_, ty_, th - plate / 2), TABLE_STEEL, group="", finish=_MACHINED_METAL)
+    box("head", (0.32, 0.42, h - t - th - hc), (0.0, y_c, (th + hc + h - t) / 2),
+        MACHINE_BED, group="", finish=_CAST_METAL)
     tx, ty = world(tx_, ty_)
     scene.add_frame(f"{name}/table", position=(tx, ty, z0 + th), quaternion=q)
     built.frames.append(f"{name}/table")
@@ -3592,27 +3681,25 @@ def machine_tool(
         zh = sill + 0.20
         hx, hy = world(xh, yh)
         built.door_objects.append(
-            _trim(scene, built, f"{name}/side_door/handle", (0.02, 0.02, 0.14), (hx, hy, z0 + zh), q, DARK_STEEL)
+            _trim(scene, built, f"{name}/side_door/handle", (0.02, 0.02, 0.14),
+                  (hx, hy, z0 + zh), q, DARK_STEEL, finish=_PAINT)
         )
         for i, dz in enumerate((-0.05, 0.05)):
             px, py = world(xl + sx * (leaf_t / 2 + 0.045), yh)
             built.door_objects.append(
                 _trim(scene, built, f"{name}/side_door/stub{i}", (0.090, 0.016, 0.016),
-                      (px, py, z0 + zh + dz), q, DARK_STEEL)
+                      (px, py, z0 + zh + dz), q, DARK_STEEL, finish=_PAINT)
             )
         q_handle = _mul_quat(q, _slope_quat(-sx * math.pi / 2))
         scene.add_frame(f"{name}/door/side/handle", position=(hx, hy, z0 + zh), quaternion=q_handle)
         built.frames.append(f"{name}/door/side/handle")
         if mode == "full":
-            wx, wy = world(xl + sx * (leaf_t / 2 + 0.0025), y_c)
-            built.door_objects.append(
-                _trim(scene, built, f"{name}/side_door/window", (0.005, aw - 0.10, ah - 0.30),
-                      (wx, wy, z0 + zl + 0.05), q, MACHINE_WINDOW)
-            )
+            built.door_objects.extend(glazed_leaf("side_door", leaf, 2 * half, ah + 2 * over,
+                                                  (xl, y_c, zl), side=True))
             for tag, dz in (("rail_top", ah / 2 + over + 0.02), ("rail_bottom", -(ah / 2 + over + 0.02))):
                 rx, ry = world(sx * (w / 2 + 0.01 + leaf_t / 2), y_c + travel / 2)
                 _trim(scene, built, f"{name}/side_door/{tag}", (0.015, 2 * half + travel, 0.03),
-                      (rx, ry, z0 + zl + dz), q, DARK_STEEL)
+                      (rx, ry, z0 + zl + dz), q, DARK_STEEL, finish=_MACHINED_METAL)
         built.door_travel = travel
         built.door_axis = (-s, c, 0.0)
         if door != "manual":
@@ -3659,7 +3746,7 @@ def machine_tool(
             px, py = world(sx * (w / 2 - 0.35), y0 - 0.015 - 0.005)
             made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.35), yaw=yaw, tilt=0.35,
                                   buttons=keys, pitch=panel_pitch, button_model=button_models or None,
-                                  manufacturer=manufacturer if button_models else None)
+                                  manufacturer=manufacturer if button_models else None, detail=mode)
         else:
             gap = (y_c - aw / 2) - y0
             width = min(0.24, gap - 0.04)
@@ -3667,7 +3754,7 @@ def machine_tool(
             made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.30), yaw=yaw + sx * math.pi / 2,
                                   size=(width, 0.22), buttons=keys, columns=2, pitch=panel_pitch,
                                   button_model=button_models or None,
-                                  manufacturer=manufacturer if button_models else None)
+                                  manufacturer=manufacturer if button_models else None, detail=mode)
         built.panel = made
         built.buttons = list(made.sensors)
         if f"{name}/panel/estop" in built.buttons:
@@ -3688,14 +3775,40 @@ def machine_tool(
                 )
 
     if mode == "full":
+        # Shallow overlays describe panel breaks without changing verified walls.
+        # Keep these relative to the enclosure, not a baked machine asset.
+        seam = min(0.003, t / 10)
+        skirt = min(0.16, bed_h / 3)
+        trim("trim/front_skirt", (w, seam, skirt), (0, y0 - seam / 2, skirt / 2), DARK_STEEL)
+        for tag, sign in (("left", -1), ("right", 1)):
+            xs = sign * (w / 2 + seam / 2)
+            trim(f"trim/{tag}_skirt", (seam, d, skirt), (xs, 0, skirt / 2), DARK_STEEL)
+            # Rear access panel and its inset seal, clear of the sliding leaf.
+            panel_d, panel_h = (d - ls) * 0.72, h * 0.62
+            yp, zp = (y_r + d / 2) / 2, h * 0.52
+            trim(f"trim/{tag}_service_seal", (seam, panel_d, panel_h), (xs, yp, zp), DARK_STEEL, _RUBBER)
+            trim(f"trim/{tag}_service_panel", (seam, panel_d - 2 * seam, panel_h - 2 * seam),
+                 (xs + sign * seam, yp, zp))
+            for i in range(5):
+                trim(f"trim/{tag}_vent{i}", (seam, panel_d * 0.65, seam * 1.5),
+                     (xs + sign * 2 * seam, yp, zp - panel_h * 0.30 + i * 0.014), DARK_STEEL)
+        # Front sill split and table T-slot markings are appearance only.
+        if front_door is not None:
+            trim("trim/sill_seam", (seam, seam, max(fs - skirt, seam)),
+                 (0, y0 - seam / 2, (fs + skirt) / 2), DARK_STEEL, _RUBBER)
+        for i, offset in enumerate((-0.28, 0.0, 0.28)):
+            trim(f"trim/table_slot{i}", (tw * 0.90, min(0.010, td / 15), 0.0005),
+                 (tx_, ty_ + offset * td, th + 0.00025), DARK_STEEL, _CAST_METAL)
         bx, by = world(0.0, y0 - 0.005)
-        _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + h - 0.10), q, MACHINE_ACCENT)
+        _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + h - 0.10),
+              q, MACHINE_ACCENT, finish=_PAINT)
         mx, my = world(sx * (w / 2 - 0.15), y0 + 0.15)
-        _trim_cylinder(scene, built, f"{name}/trim/mast", 0.012, 0.10, (mx, my, z0 + h + 0.05), q, DARK_STEEL)
+        _trim_cylinder(scene, built, f"{name}/trim/mast", 0.012, 0.10,
+                       (mx, my, z0 + h + 0.05), q, DARK_STEEL, finish=_PAINT)
         for i, (tag, colour) in enumerate((("green", (0.023, 0.332, 0.061)), ("amber", (0.686, 0.323, 0.005)),
                                            ("red", (0.578, 0.018, 0.012)))):
             _trim_cylinder(scene, built, f"{name}/trim/light_{tag}", 0.03, 0.06,
-                           (mx, my, z0 + h + 0.13 + 0.06 * i), q, colour)
+                           (mx, my, z0 + h + 0.13 + 0.06 * i), q, colour, finish=_GLOSS)
 
     # ---- the identity ---------------------------------------------------------
     figures = {

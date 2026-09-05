@@ -63,6 +63,10 @@ pub struct CatalogArmMsg {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RobotSourceMsg {
+    Visuals {
+        base: Box<RobotSourceMsg>,
+        visual: Box<RobotSourceMsg>,
+    },
     /// URDF XML (xacro already expanded), embedded verbatim.
     Urdf { xml: String },
     /// USD stage reference (local path until asset bundling lands). The
@@ -202,8 +206,31 @@ impl From<&GroupSpecMsg> for botrail_model::GroupSpec {
 /// Whether rebuilding `source` declares groups by itself — an arm mounted
 /// on a body, a tool attached to a named arm — so a project need not
 /// spell them out again.
+impl RobotSourceMsg {
+    /// Includes USD components nested under catalog provenance and tool mounts.
+    pub fn visit_usd_paths_mut<E>(
+        &mut self,
+        f: &mut impl FnMut(&mut String) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self {
+            Self::Usd { path, .. } => f(path),
+            Self::Catalog { inner, .. } => inner.visit_usd_paths_mut(f),
+            Self::Composite { base, tool, .. } => {
+                base.visit_usd_paths_mut(f)?;
+                tool.visit_usd_paths_mut(f)
+            }
+            Self::Visuals { base, visual } => {
+                base.visit_usd_paths_mut(f)?;
+                visual.visit_usd_paths_mut(f)
+            }
+            Self::Urdf { .. } => Ok(()),
+        }
+    }
+}
+
 fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
     match source {
+        botrail_model::RobotSource::Visuals { base, .. } => source_declares_groups(base),
         botrail_model::RobotSource::Composite {
             base,
             tool,
@@ -226,6 +253,10 @@ fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
 /// [`RobotSourceMsg`] from a model's provenance record.
 fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
     match source {
+        botrail_model::RobotSource::Visuals { base, visual } => RobotSourceMsg::Visuals {
+            base: Box::new(robot_source_msg(base)),
+            visual: Box::new(robot_source_msg(visual)),
+        },
         botrail_model::RobotSource::UrdfXml(xml) => RobotSourceMsg::Urdf { xml: xml.clone() },
         botrail_model::RobotSource::Usd {
             path,
@@ -318,6 +349,9 @@ pub fn model_from_source(
     import_usd: &dyn Fn(&str, &str) -> Result<botrail_model::RobotModel, String>,
 ) -> Result<botrail_model::RobotModel, ProjectError> {
     match msg {
+        RobotSourceMsg::Visuals { base, visual } => model_from_source(base, import_usd)?
+            .with_visuals(&model_from_source(visual, import_usd)?)
+            .map_err(|e| ProjectError::Robot(e.to_string())),
         RobotSourceMsg::Urdf { xml } => botrail_model::RobotModel::from_urdf_str(xml)
             .map_err(|e| ProjectError::Robot(e.to_string())),
         RobotSourceMsg::Usd {
@@ -897,6 +931,10 @@ impl Scene {
                 .map(|o| ObstacleMsg {
                     name: o.name.clone(),
                     geometry: geometry_msg(&o.geometry, &mut mesh_url),
+                    visual_asset: o
+                        .visual_asset
+                        .as_ref()
+                        .map(|v| Box::new(crate::wire::visual_asset_msg(v, &mut mesh_url))),
                     pose: PoseMsg::from(&o.pose),
                     enabled: o.enabled,
                     visible: o.visible,
@@ -1046,6 +1084,7 @@ impl Scene {
             let geometry = geometry_from_project(&o.geometry).map_err(ProjectError::Scene)?;
             obstacles.push((
                 ObstacleSpec {
+                    visual_asset: o.visual_asset.as_deref().map(Into::into),
                     name: o.name.clone(),
                     geometry,
                     pose: (&o.pose).into(),
@@ -1072,6 +1111,11 @@ impl Scene {
                 .expect("obstacle was just added");
             self.set_obstacle_material(&final_name, spec.material)
                 .expect("obstacle was just added");
+            self.obstacles
+                .iter_mut()
+                .find(|o| o.name == final_name)
+                .expect("obstacle was just added")
+                .visual_asset = spec.visual_asset;
             self.set_obstacle_legend(&final_name, legend)
                 .expect("obstacle was just added");
             self.set_obstacle_physics(&final_name, physics)
@@ -1399,6 +1443,12 @@ fn robot_kwarg_for_name(project: &ProjectFile, name: &Option<String>) -> String 
 /// their parts first (`{var}_tool`, `{konst}_TOOL`), then the attach call.
 fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst: &str) {
     match source {
+        RobotSourceMsg::Visuals { base, visual } => {
+            emit_robot_build(out, base, var, konst);
+            let display = format!("{var}_visual");
+            emit_robot_build(out, visual, &display, &format!("{konst}_VISUAL"));
+            out.push_str(&format!("{var} = {var}.with_visuals({display})\n"));
+        }
         RobotSourceMsg::Urdf { xml } => {
             // Triple-quote guard: a URDF containing ''' would break the literal.
             let urdf = xml.replace("'''", "'\\''\\''\\'");
@@ -1413,11 +1463,21 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
                 "{var} = bt.Robot.from_usd({path:?}, articulation_root={articulation_root:?})\n"
             ));
         }
-        RobotSourceMsg::Catalog { id, revision, .. } => {
+        RobotSourceMsg::Catalog {
+            id,
+            revision,
+            inner,
+            ..
+        } => {
             // Deterministic re-fetch: the pinned revision makes this the
             // same bytes the project was authored from.
+            let format = if matches!(inner.as_ref(), RobotSourceMsg::Usd { .. }) {
+                ", format=\"usd\""
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "{var} = bt.Robot.from_catalog({id:?}, revision={revision:?})\n"
+                "{var} = bt.Robot.from_catalog({id:?}, revision={revision:?}{format})\n"
             ));
         }
         RobotSourceMsg::Composite {
@@ -1591,9 +1651,23 @@ pub fn generate_python(project: &ProjectFile) -> String {
             ));
         }
         if let Some(m) = o.material {
+            let alpha = m
+                .opacity
+                .map(|v| format!(", opacity={v}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "scene.set_obstacle_material({:?}, metalness={}, roughness={})\n",
+                "scene.set_obstacle_material({:?}, metalness={}, roughness={}{alpha})\n",
                 o.name, m.metalness, m.roughness
+            ));
+        }
+        if let Some(v) = &o.visual_asset {
+            out.push_str(&format!(
+                "scene.set_obstacle_visual_asset({:?}, {:?}, {:?}, {}, color_override={})\n",
+                o.name,
+                v.url,
+                v.prim_path,
+                py_tuple(&v.transform),
+                if v.color_override { "True" } else { "False" }
             ));
         }
     }

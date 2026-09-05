@@ -11,6 +11,8 @@ import {
 import { cursorEnter, cursorLeave } from "../three/cursor";
 import { authoredColor, COLLISION_COLOR, UNPAINTED } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
+import { UsdVisual } from "./UsdVisual";
+import { UNIT_BOX, UNIT_CYLINDER, UNIT_SPHERE } from "../three/primitiveGeometry";
 
 const IDENTITY_POS: [number, number, number] = [0, 0, 0];
 const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
@@ -139,11 +141,13 @@ function VisualNode({
   );
   return (
     <group position={origin.position} quaternion={origin.quaternion}>
-      <GeometryMesh
+      {visual.visual_asset ? <UsdVisual source={visual.visual_asset}
+        color={!forceColor && own ? own : color}
+        forceColor={forceColor || !!visual.visual_asset.color_override} /> : <GeometryMesh
         geometry={visual.geometry}
         color={!forceColor && own ? own : color}
         forceColor={forceColor || own !== null}
-      />
+      />}
     </group>
   );
 }
@@ -160,8 +164,8 @@ function GeometryMesh({
   switch (geometry.kind) {
     case "box":
       return (
-        <mesh>
-          <boxGeometry args={geometry.size} />
+        <mesh castShadow receiveShadow scale={geometry.size}>
+          <primitive object={UNIT_BOX} attach="geometry" />
           <StandardMaterial color={color} />
         </mesh>
       );
@@ -169,23 +173,22 @@ function GeometryMesh({
       // URDF cylinders point along +Z; three's CylinderGeometry points along
       // +Y, so rotate +90deg about X to align them.
       return (
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <cylinderGeometry
-            args={[geometry.radius, geometry.radius, geometry.length, 32]}
-          />
+        <mesh rotation={[Math.PI / 2, 0, 0]} castShadow receiveShadow
+          scale={[geometry.radius, geometry.length, geometry.radius]}>
+          <primitive object={UNIT_CYLINDER} attach="geometry" />
           <StandardMaterial color={color} />
         </mesh>
       );
     case "sphere":
       return (
-        <mesh>
-          <sphereGeometry args={[geometry.radius, 32, 24]} />
+        <mesh castShadow receiveShadow scale={geometry.radius}>
+          <primitive object={UNIT_SPHERE} attach="geometry" />
           <StandardMaterial color={color} />
         </mesh>
       );
     case "mesh":
       return (
-        <MeshVisual geometry={geometry} color={color} forceColor={forceColor} />
+        <MeshVisual geometry={geometry} color={color} forceColor={forceColor} castShadow receiveShadow />
       );
     default:
       return null;

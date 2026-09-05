@@ -116,6 +116,16 @@ impl Robot {
         self.inner.name.clone()
     }
 
+    /// Returns a copy with display shapes from a compatible model. Link leaf
+    /// names must match uniquely and zero-position link origins must agree.
+    /// Display shapes are rotated into the base's link frames. Existing
+    /// joints, collision shapes, TCP and catalog identity are retained.
+    fn with_visuals(&self, visual: &Robot) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(self.inner.with_visuals(&visual.inner).map_err(model_err)?),
+        })
+    }
+
     #[getter]
     fn dof(&self) -> usize {
         self.inner.dof()
@@ -1399,13 +1409,13 @@ impl Scene {
             .nodes
             .into_iter()
             .map(|n| botrail_scene::ObstacleSpec {
+                visual_asset: n.visual_asset,
                 name: format!("{prefix}{}", n.name),
                 geometry: n.geometry,
                 pose: n.pose,
                 color: n.color,
-                // USD import reads displayColor but not shading: a stage
-                // that binds real materials is rendered from the stage
-                // itself, not from these proxies.
+                // Source shading is retained by visual_asset. Material is
+                // reserved for an explicit botrail finish override.
                 material: None,
             })
             .collect();
@@ -1496,6 +1506,7 @@ impl Scene {
                     format!("{prefix}{}/{i}", link.name)
                 };
                 batch.push(botrail_scene::ObstacleSpec {
+                    visual_asset: shape.visual_asset.clone(),
                     name,
                     geometry: shape.geometry.clone(),
                     pose: world * shape.origin,
@@ -1554,6 +1565,42 @@ impl Scene {
         self.hub.set_obstacle_color(name, color).map_err(scene_err)
     }
 
+    /// Sets the display gprim independently of the obstacle's collision shape.
+    /// The column-major transform maps source coordinates into obstacle-local
+    /// metres. Used by generated Python to reproduce imported USD appearance.
+    #[pyo3(signature = (name, path, prim_path, transform, color_override = false))]
+    fn set_obstacle_visual_asset(
+        &self,
+        name: &str,
+        path: PathBuf,
+        prim_path: String,
+        transform: [f64; 16],
+        color_override: bool,
+    ) -> PyResult<()> {
+        if !transform.iter().all(|v| v.is_finite()) || !prim_path.starts_with('/') {
+            return Err(PyValueError::new_err(
+                "visual asset requires a finite transform and absolute prim path",
+            ));
+        }
+        self.hub
+            .with_scene(|s| {
+                s.set_obstacle_visual_asset(
+                    name,
+                    Some(botrail_model::VisualAsset {
+                        path,
+                        prim_path,
+                        transform,
+                        color_override,
+                    }),
+                )
+            })
+            .map_err(scene_err)?;
+        self.hub.emit(&self.hub.with_scene(|scene| {
+            botrail_scene::wire::obstacles_message(scene, |p| self.hub.mesh_url(p))
+        }));
+        Ok(())
+    }
+
     /// Hides or shows an obstacle without touching whether it collides.
     /// A hidden obstacle is still a real obstacle: this is how a workpiece
     /// carries a display mesh and its convex collision pieces at once.
@@ -1576,23 +1623,30 @@ impl Scene {
             .map_err(scene_err)
     }
 
-    /// Sets how an obstacle's surface takes light. Passing neither knob
+    /// Sets how an obstacle's surface takes light. Passing no appearance values
     /// clears the material, handing the choice back to the viewer.
-    #[pyo3(signature = (name, metalness = None, roughness = None))]
+    #[pyo3(signature = (name, metalness = None, roughness = None, *, opacity = None))]
     fn set_obstacle_material(
         &self,
         name: &str,
         metalness: Option<f32>,
         roughness: Option<f32>,
+        opacity: Option<f32>,
     ) -> PyResult<()> {
-        let material = match (metalness, roughness) {
-            (None, None) => None,
+        if opacity.is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v)) {
+            return Err(PyValueError::new_err("opacity must be finite and in 0..1"));
+        }
+        let material = match (metalness, roughness, opacity) {
+            (None, None, None) => None,
             // One knob given is still an authored material; the other takes
             // the studio's own default rather than silently going to zero.
-            (m, r) => Some(botrail_scene::Material::new(
-                m.unwrap_or(DEFAULT_METALNESS),
-                r.unwrap_or(DEFAULT_ROUGHNESS),
-            )),
+            (m, r, opacity) => Some(
+                botrail_scene::Material::new(
+                    m.unwrap_or(DEFAULT_METALNESS),
+                    r.unwrap_or(DEFAULT_ROUGHNESS),
+                )
+                .with_opacity(opacity),
+            ),
         };
         self.hub
             .set_obstacle_material(name, material)
@@ -1689,6 +1743,20 @@ impl Scene {
     /// authored material.
     fn obstacle_material(&self, name: &str) -> PyResult<Option<(f32, f32)>> {
         self.hub.obstacle_material(name).map_err(scene_err)
+    }
+
+    /// Explicit alpha override, or None when the source/viewer supplies it.
+    fn obstacle_opacity(&self, name: &str) -> PyResult<Option<f32>> {
+        self.hub
+            .with_scene(|scene| {
+                let obstacle = scene
+                    .obstacles()
+                    .iter()
+                    .find(|o| o.name == name)
+                    .ok_or_else(|| botrail_scene::SceneError::UnknownObstacle(name.to_string()))?;
+                Ok(obstacle.material.and_then(|m| m.opacity))
+            })
+            .map_err(scene_err)
     }
 
     #[pyo3(signature = (name, position, quaternion = None))]
@@ -3935,6 +4003,10 @@ impl Scene {
                     );
                 }
                 RobotSource::Catalog { inner, .. } => source_paths(inner, paths)?,
+                RobotSource::Visuals { base, visual } => {
+                    source_paths(base, paths)?;
+                    source_paths(visual, paths)?;
+                }
                 RobotSource::Composite { base, tool, .. } => {
                     source_paths(base, paths)?;
                     source_paths(tool, paths)?;
@@ -5187,47 +5259,43 @@ impl Scene {
             }
         }
 
-        // A USD-sourced robot bundles its stage layers (root + sublayers +
-        // reference targets under the stage directory) as
-        // `robot/<relpath>` (`robot_<n>/<relpath>` for later robots, so two
-        // stages with same-named files cannot collide).
-        for (i, robot) in project.robots.iter_mut().enumerate() {
-            let bundle_dir = if i == 0 {
-                "robot".to_string()
-            } else {
-                format!("robot_{}", i + 1)
-            };
-            let botrail_scene::project::RobotSourceMsg::Usd {
-                path: stage_path, ..
-            } = &mut robot.source
-            else {
-                continue;
-            };
-            let root = PathBuf::from(&*stage_path);
-            let Some(root_dir) = root.parent().map(|d| d.to_path_buf()) else {
-                continue;
-            };
-            let deps = botrail_usd::stage_dependencies(&root, &[])
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            for dep in deps {
-                match dep.strip_prefix(&root_dir) {
-                    Ok(rel) => assets.push((
-                        format!("{bundle_dir}/{}", rel.to_string_lossy().replace('\\', "/")),
-                        dep.clone(),
-                    )),
-                    Err(_) => eprintln!(
-                        "botrail: project: stage layer {} is outside the robot directory; \
-                         referenced by absolute path (not bundled)",
-                        dep.display()
-                    ),
-                }
+        // Keep each source's relative layer/texture tree and visit composites
+        // recursively. Equal sources share one package within the project.
+        let mut stages = std::collections::HashMap::<String, String>::new();
+        let mut bundle = |source: &mut String| -> PyResult<()> {
+            if let Some(dest) = stages.get(source) {
+                *source = dest.clone();
+                return Ok(());
             }
-            let rel_root = root
-                .strip_prefix(&root_dir)
-                .expect("root is inside its parent")
+            let pack = botrail_usd::stage_package(std::path::Path::new(source))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let dir = format!("assets/usd_{}", stages.len());
+            for file in &pack.files {
+                let rel = file
+                    .strip_prefix(&pack.root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                assets.push((format!("{dir}/{rel}"), file.clone()));
+            }
+            let rel = pack
+                .stage
+                .strip_prefix(&pack.root)
+                .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            *stage_path = format!("{bundle_dir}/{rel_root}");
+            let dest = format!("{dir}/{rel}");
+            stages.insert(source.clone(), dest.clone());
+            *source = dest;
+            Ok(())
+        };
+        for obstacle in &mut project.obstacles {
+            if let Some(visual) = &mut obstacle.visual_asset {
+                bundle(&mut visual.url)?;
+            }
+        }
+        for robot in &mut project.robots {
+            robot.source.visit_usd_paths_mut(&mut bundle)?;
         }
 
         if assets.is_empty() {
@@ -5466,13 +5534,27 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
             }
         }
     }
-    for robot in &mut project.robots {
-        if let botrail_scene::project::RobotSourceMsg::Usd { path, .. } = &mut robot.source {
-            if path.starts_with("robot/") || path.starts_with("robot_") {
-                *path = dir.join(&*path).display().to_string();
+    for obstacle in &mut project.obstacles {
+        if let Some(visual) = &mut obstacle.visual_asset {
+            if visual.url.starts_with("assets/") {
+                visual.url = dir.join(&visual.url).display().to_string();
             }
         }
     }
+    for robot in &mut project.robots {
+        robot
+            .source
+            .visit_usd_paths_mut(&mut |path: &mut String| -> Result<(), String> {
+                if path.starts_with("robot/")
+                    || path.starts_with("robot_")
+                    || path.starts_with("assets/")
+                {
+                    *path = dir.join(&*path).display().to_string();
+                }
+                Ok(())
+            })?;
+    }
+
     Ok(project)
 }
 

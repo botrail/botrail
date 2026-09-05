@@ -2315,6 +2315,7 @@ mod tests {
         use botrail_model::{Geometry as G, Joint, JointLimits, JointType, Link, Shape};
         use nalgebra::{Translation3, Unit, UnitQuaternion, Vector3};
         let shape = || Shape {
+            visual_asset: None,
             origin: Isometry3::identity(),
             geometry: G::Box {
                 size: Vector3::new(0.1, 0.1, 0.1),
