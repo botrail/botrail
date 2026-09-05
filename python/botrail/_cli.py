@@ -2,6 +2,7 @@
 line of Python — the entry an agent's iteration loop and a CI job share.
 
     botrail check cell.botrail                 # load, lint, count → JSON, exit 1 on errors
+    botrail review cell.py --stage design      # missing information and unperformed evaluations
     botrail simulate cell.py --report r.json   # bake (+ scenarios) → the cell report
     botrail export cell.botrail --out deliverables/ --all
     botrail schema > project.schema.json       # the .botrail JSON Schema
@@ -25,6 +26,8 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Optional
+
+from .deliverables import EXPORTS
 
 
 class CliError(Exception):
@@ -152,79 +155,89 @@ def cmd_simulate(args) -> int:
     return 1 if failed else 0
 
 
-EXPORTS = ("project", "python", "bom", "io", "topology", "plc", "interlocks", "layout", "usd", "script", "report")
+def cmd_review(args) -> int:
+    from .review import review
+
+    scene = load_cell(args.cell)
+    config = {}
+    if args.config:
+        try:
+            config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise CliError(f"review config: {e}") from e
+        if not isinstance(config, dict) or set(config) - {"required", "totals", "annotations"}:
+            raise CliError("review config must be an object with required, totals and/or annotations")
+    if args.require:
+        configured = config.get("required", [])
+        if not isinstance(configured, list):
+            raise CliError("review config required must be a list")
+        config["required"] = [*configured, *args.require]
+    cell_report = None
+    if args.manifest and (args.simulate or args.scenarios):
+        raise CliError("review: use --manifest or a new simulation, not both")
+    if args.simulate or args.scenarios:
+        try:
+            cell_report, _, _ = _report(scene, args)
+        except (ValueError, KeyError) as e:
+            print(json.dumps({"ready": False, "cell": args.cell, "error": str(e)}, indent=2))
+            return 1
+    try:
+        result = review(scene, report=cell_report, manifest=args.manifest,
+                        sequences=args.sequence, stage=args.stage, **config)
+        if args.report:
+            result.save(args.report)
+    except (ValueError, TypeError, OSError) as e:
+        raise CliError(f"review: {e}") from e
+    print(result.to_markdown() if args.markdown else result.to_json())
+    return 0 if result.ready else 1
 
 
 def cmd_export(args) -> int:
+    from .deliverables import export_cell, verify_export
+
     scene = load_cell(args.cell)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     wanted = {name for name in EXPORTS if getattr(args, name)}
-    if args.all or not wanted:
-        wanted = set(EXPORTS)
-    stem = args.name or (Path(args.cell).stem if Path(args.cell).stem != "cell" else "cell")
-    written: list[Path] = []
-    timelines: dict = {}
-    runs = None
-    if wanted & {"usd", "script", "report"}:
-        try:
-            timelines, runs = _bake(scene, args.sequence, args.scenarios, args.max_duration)
-        except (ValueError, KeyError) as e:
-            print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
-            return 1
-
-    def write(name: str, fn) -> None:
-        path = out / name
-        fn(path)
-        written.append(path)
-
-    if "project" in wanted:
-        write(f"{stem}.botrail", scene.save_project)
-    if "python" in wanted:
-        write(f"{stem}.py", lambda p: p.write_text(scene.generate_python()))
-    if "bom" in wanted:
-        write(f"{stem}_bom.csv", scene.export_bom)
-        write(f"{stem}_bom.md", scene.export_bom)
-    if "io" in wanted:
-        write(f"{stem}_io.csv", scene.export_io_list)
-    if "topology" in wanted:
-        write(f"{stem}_topology.mmd", scene.export_topology)
-    if "plc" in wanted and scene.sequence_names:
-        write(f"{stem}.plcopen.xml", lambda p: scene.export_plcopen(p, name=args.title or stem))
-    if "interlocks" in wanted and scene.sequence_names:
-        write(f"{stem}_interlocks.md", scene.export_interlocks)
-        write(f"{stem}_interlocks.csv", scene.export_interlocks)
-    if "layout" in wanted:
-        write(f"{stem}_layout.svg", lambda p: scene.export_layout(p, scale=args.scale, title=args.title))
-        write(f"{stem}_layout.dxf", lambda p: scene.export_layout(p, title=args.title))
-    if "usd" in wanted:
-        for name, tl in timelines.items():
-            safe = name.replace("/", "_").replace("+", "_")
-            write(f"{stem}_{safe}.usda", lambda p, tl=tl: tl.export_usd(p, fps=args.fps))
-    if "script" in wanted and timelines:
-        try:
-            if runs is not None:
-                write(f"{stem}.script", runs.export_script)
-            else:
-                first = next(iter(timelines.values()))
-                write(f"{stem}.script", first.export_script)
-        except ValueError as e:
-            # A cell that cannot compile to the dialect (a 7-axis arm, an
-            # uncovered branch) is not an export failure; say why.
-            print(json.dumps({"warning": f"script: {e}"}), file=sys.stderr)
-    report = None
-    if "report" in wanted:
-        report = scene.cell_report(
-            timelines or None,
-            scenarios=runs,
-            deliverables=list(written),
+    try:
+        manifest = export_cell(
+            scene, args.out, name=args.name or Path(args.cell).stem,
+            exports=None if args.all or not wanted else wanted,
+            sequences=args.sequence, scenarios=args.scenarios, dt=args.dt,
+            max_duration=args.max_duration, plan_resolution=args.plan_resolution,
             clearance_dt=None if args.no_clearance else args.clearance_dt,
-            title=args.title,
+            title=args.title, fps=args.fps, scale=args.scale, attachments=args.attach,
         )
-        write(f"{stem}_report.md", report.save)
-        write(f"{stem}_report.json", report.save)
-    print(json.dumps({"ok": True, "cell": args.cell, "out": str(out), "files": [str(p) for p in written]}, indent=2))
+    except (ValueError, KeyError, OSError) as e:
+        print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
+        return 1
+    verified = verify_export(manifest)
+    files = [str(manifest.parent / row["path"]) for row in verified["files"]] + [str(manifest)]
+    print(json.dumps({"ok": True, "cell": args.cell, "out": str(args.out), "files": files,
+                      "manifest": str(manifest), "same_revision": verified["same_revision"],
+                      "issues": verified["issues"]}, indent=2))
     return 0
+
+
+def cmd_verify_export(args) -> int:
+    from .deliverables import verify_export
+
+    result = verify_export(args.manifest, scene=load_cell(args.cell) if args.cell else None)
+    print(json.dumps(result, indent=2))
+    return 0 if result["same_revision"] else 1
+
+
+def cmd_connections(args) -> int:
+    from .connections import report
+
+    result = report(load_cell(args.cell))
+    try:
+        for path, table in ((args.report, "connections"), (args.csv, "connections"), (args.power, "power")):
+            if path:
+                result.save(path, table=table)
+    except (ValueError, OSError) as e:
+        print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
+        return 2
+    print(result.to_markdown() if args.markdown else result.to_json())
+    return 0 if result.ready else 1
 
 
 def cmd_schema(args) -> int:
@@ -359,7 +372,7 @@ def cmd_studio(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="botrail",
-        description="Bake, check and export a robot cell (a .botrail project or a Python cell file).",
+        description="Bake, check, review and export a robot cell (a .botrail project or a Python cell file).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -375,6 +388,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("cell")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("review", help="review missing design information and required evidence (exit 1 if unresolved)")
+    p.add_argument("cell")
+    p.add_argument("--stage", choices=("concept", "design"), default="concept")
+    p.add_argument("--require", action="append", help="additional required group or item ID (repeatable)")
+    p.add_argument("--config", help="JSON object with required, totals and/or annotations")
+    p.add_argument("--simulate", action="store_true", help="also bake the selected programs for the review")
+    p.add_argument("--manifest", help="verify a generated package and review its execution evidence")
+    add_bake_args(p, "also bake the scenario matrix; expected-result acceptance remains a separate check")
+    p.add_argument("--report", help="write the design information review (.json or .md)")
+    p.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
+    p.set_defaults(func=cmd_review)
+
     p = sub.add_parser("simulate", help="bake the cell and print the cell report (JSON, or --markdown)")
     p.add_argument("cell")
     add_bake_args(p, "bake the whole scenario matrix (the report gets the table)")
@@ -384,14 +409,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
     p.set_defaults(func=cmd_simulate)
 
-    p = sub.add_parser("export", help="write the document set (project, python, bom, io, topology, plc, interlocks, layout, usd, script, report)")
+    p = sub.add_parser("export", help="write the document set (project, python, bom, io, topology, plc, interlocks, layout, usd, script, connections, report)")
     p.add_argument("cell")
-    p.add_argument("--out", required=True, help="output directory")
+    p.add_argument("--out", required=True, help="new or empty output directory for this revision")
     p.add_argument("--name", help="file stem (default: the cell file's stem)")
     for name in EXPORTS:
         p.add_argument(f"--{name}", action="store_true", help=f"write the {name}")
     p.add_argument("--all", action="store_true", help="write everything (the default when nothing is picked)")
     add_bake_args(p, "bake the scenario matrix for the report and the script")
+    p.add_argument("--dt", type=float, default=0.01, help="simulation scan step in seconds (default 0.01)")
+    p.add_argument("--plan-resolution", type=float, default=0.05, help="planner edge sampling stride (default 0.05)")
+    p.add_argument("--attach", action="append", help="copy an external attachment with unverified provenance (repeatable)")
     p.add_argument("--fps", type=float, default=30.0, help="USD frame rate (default 30)")
     p.add_argument("--scale", type=float, default=100.0, help="layout SVG pixels per metre (default 100)")
     p.set_defaults(func=cmd_export)
@@ -428,6 +456,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sequence", action="append", help="program(s) to bake together (default: all)")
     p.add_argument("--max-duration", type=float, default=120.0, help="bake time limit, seconds (default 120)")
     p.set_defaults(func=cmd_scan)
+
+    p = sub.add_parser("verify-export", help="verify a document set's revision and file digests (exit 1 on mismatch or attachments)")
+    p.add_argument("manifest", help="generated *_manifest.json")
+    p.add_argument("--cell", help="also compare against this current cell definition")
+    p.set_defaults(func=cmd_verify_export)
+
+    p = sub.add_parser("connections", help="check physical interfaces and connected supply loads (exit 1 if unresolved)")
+    p.add_argument("cell")
+    p.add_argument("--report", help="save the connection report (.json or .md)")
+    p.add_argument("--csv", help="save the interface requirements table (.csv)")
+    p.add_argument("--power", help="save the power supply capacity table (.csv)")
+    p.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
+    p.set_defaults(func=cmd_connections)
 
     p = sub.add_parser("studio", help="open the cell in the studio")
     p.add_argument("cell")

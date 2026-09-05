@@ -4,8 +4,9 @@ Two more documents a cell hands over, both *derived* from the scene the way
 the [I/O list](io-map.md) and the [BOM](parts-and-bom.md) are: the
 **layout sheet** — the cell seen from above, as a proposal drawing or the
 plant's 2D CAD wants it — and the **cell report** — one page that gathers
-the numbers everything else measured, with the digest of every file
-written from the same source.
+the numbers everything else measured, with digests of supplied attachments.
+For a document set with a recorded common input revision, use
+[batch export and verification](#the-document-set-as-one-thing).
 
 ```python
 scene.export_layout("layout.svg", scale=200)   # for the review
@@ -78,7 +79,7 @@ derived.
 | `machines` | the parts, devices, sensors and nodes | every machine tool (`machine_tool.*` part): its door — an axis the machine drives or a loose leaf — with drive, stroke and end-of-travel lanes, the panel's buttons, and the controller hosting its program |
 | `bom` | the [BOM](parts-and-bom.md) | line count, unidentified count, quantity per category, numeric totals |
 | `footprint` | the layout | the plan-view extent |
-| `deliverables` | the paths you pass | size and SHA-256 of every file — the evidence that the drawing, the list and the program are one cell |
+| `deliverables` | the paths you pass | size and SHA-256; `origin=external_attachment` because these calls do not establish the file's input revision |
 
 Pass the cycles as a `{name: timeline}` dict, a list, or a single
 `SequenceTimeline`; a `ScenarioRuns` passed as `scenarios=` fills the matrix
@@ -104,17 +105,75 @@ assert report.footprint["area"] <= 20.0
 assert report.bom["unidentified"] == 0
 ```
 
+Pass this report to [`bt.review(scene, report=report)`](design-review.md)
+to list missing design inputs, known subtotals and unperformed evaluations
+alongside these observations. A completed scenario is an execution result;
+its expected-behaviour acceptance still needs the project's test conditions.
+
 ## The document set as one thing
 
-Because every deliverable is derived from the same scene, a set of them is
-a *unit*: write them, hash them into the report, and a later run can say
-which ones an edit touched — by name, not by guess. Moving a photo-eye
-changes the layout sheet and the generated script and leaves the BOM and
-the I/O list byte-identical; adding a fence panel changes the BOM too. The
-repository's own tests pin exactly that
-([`python/tests/test_deliverables.py`](https://github.com/botrail/botrail/blob/main/python/tests/test_deliverables.py)),
-and the [Hand over the cell](../tutorials/hand-over.md) tutorial writes the
-whole set from one script. The set has a control-design half too — the
-[I/O list, the handshake spec, the interlock table](io-map.md#the-interlock-table)
-and the [PLCopen file](offline-commissioning.md) — derived from the same
-sequences the bake ran.
+Use `bt.export_cell` to generate the selected files from an independent
+snapshot and fresh timelines. Its `sequences` scope applies to the bake,
+I/O list, topology, interlocks, PLCopen, robot scripts and report I/O summary.
+The saved project and generated Python retain the full authored cell;
+this includes the [physical connection plan](connections.md). `exports=["connections"]`
+writes the requirements CSV/Markdown/JSON and a per-power-supply capacity CSV.
+The main batch report also contains these results. Physical requirements
+cover the entire cell regardless of the selected operating programs;
+the manifest records which programs were evaluated. Multiple programs
+produce separate robot scripts. Unsupported scripts and lowering warnings
+are recorded as unresolved issues, together with PLCopen stub blocks and
+failed scenario executions.
+
+```python
+manifest = bt.export_cell(scene, "deliverables/rev1", name="cell",
+                          sequences=["pick"], scenarios=True)
+verified = bt.verify_export(manifest, scene=scene)
+assert verified["same_revision"]
+review = bt.review(scene, manifest=manifest, stage="design",
+                   required=["deliverables"])
+review.save("design_review.md")  # keep later review files outside the package
+```
+
+The output directory must be new or empty. Files are generated in a
+temporary directory, verified, then moved into place. A failed export leaves
+no partial package. Existing files can be included with `attachments=[...]`;
+they are copied under `attachments/` and stay `external_attachment`.
+
+`<name>_manifest.json` records:
+
+| field | recorded evidence |
+|---|---|
+| `input` / `input_sha256` | serialized authored project, catalog IDs and recorded revisions, resolved local geometry paths with SHA-256 and size |
+| `conditions` | ordered program and scenario sets, simulation scan interval and time limit, planner stride, kinematic mode, clearance sampling, USD rate, layout scale and controller export defaults |
+| `generator` | botrail version, native extension hash, Python implementation hashes and manifest validator version |
+| `run_sha256` | fingerprint of input hash, conditions and generator |
+| `files` | relative path, format, origin, SHA-256, size; generated files also carry input/run fingerprints |
+| `issues` | missing catalog revisions, omitted scripts, lowering warnings, PLCopen stubs and scenario execution failures |
+
+The report includes provenance and exporter issues. The manifest hashes
+both report formats as well as the other files; the report lists the files
+generated before it. `verify_export` detects changed, missing and unlisted
+files, inconsistent manifest metadata and paths escaping the package.
+`scene=` also compares the current serialized authored input and observed
+asset hashes. For example, replacing a freshly generated DI5 script with an
+old DI2 script fails verification, even when the I/O CSV still matches.
+
+`ok` means the integrity checks succeeded. `same_revision` additionally
+requires generated files only; external attachments never count as verified
+generated evidence. These flags do not establish design acceptance: a package
+can have matching revisions and still contain stub implementations or failed
+scenario executions. Requiring `deliverables` in `bt.review` keeps those
+issues visible as unresolved work.
+
+Geometry hashes identify the local inputs observed at export; assets are
+checked again before publication. The snapshot retains loaded models and
+colliders without reconstructing them through the project serializer. A
+manifest is not a portable asset archive or a signed provenance certificate,
+and verification does not rerun simulation. `.botrail` portability remains
+subject to the existing project format's asset support. Catalog revisions
+that were not recorded are reported as unknown, rather than looked up later.
+
+::: botrail.export_cell
+
+::: botrail.verify_export

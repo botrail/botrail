@@ -138,3 +138,8 @@ A BOM line also carries *requirements* — the payload, reach, stroke, span,
 load the cell implies for it — and the check compares them with the part's
 attributes. See [Selecting parts](selection.md): `scene.requirements()`,
 `scene.check()` and `bt.catalog.search`.
+
+[Physical interface ports](connections.md) reference these same equipment
+targets. Supply capacity is compared with connected loads, using exact Part
+attributes where a single endpoint's rating can be resolved. Ports and cable
+references do not create additional BOM lines.

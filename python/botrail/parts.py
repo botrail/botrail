@@ -2046,8 +2046,8 @@ def power_supply(
     """A DIN-rail power supply: the box `<name>/body`, `size = (width,
     depth, height)`, standing on `position` (the centre of its foot — on a
     rail inside a cabinet), turned by `yaw`. The part (`power_supply`)
-    carries `output_v` / `output_a`, which is what `scene.check()` sums the
-    cell's `current_a` against.
+    carries `output_v` / `output_a`. Declare supply/load ports with
+    `bt.connections` to check the connected loads against this rating.
 
     With `catalog=` — the id of a power-supply spec pack, or a package
     directory — a unit you can order: `output_a` is matched against the
@@ -2079,6 +2079,8 @@ def power_supply(
     w, d, h = (float(v) for v in size)
     if min(w, d, h) <= 0:
         raise ValueError("power_supply: size must be positive")
+    if spec is None and output_a is not None:
+        attributes["output_a"] = output_a
     x, y, z0 = float(position[0]), float(position[1]), float(position[2])
     built = Built(name)
     built.obstacles.append(

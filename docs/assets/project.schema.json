@@ -37,6 +37,10 @@
         "$ref": "#/$defs/CameraMsg"
       }
     },
+    "connection_plan": {
+      "description": "Physical interface requirements and utility connections. These do\nnot execute the cell; the I/O assignment remains in `io`.",
+      "$ref": "#/$defs/ConnectionPlan"
+    },
     "devices": {
       "description": "Auxiliary devices (absent in older v2 files).",
       "type": "array",
@@ -894,6 +898,60 @@
           ]
         }
       ]
+    },
+    "Connection": {
+      "type": "object",
+      "properties": {
+        "cable": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string"
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source",
+        "target"
+      ]
+    },
+    "ConnectionPlan": {
+      "type": "object",
+      "properties": {
+        "links": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Connection"
+          }
+        },
+        "ports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Port"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "ConstraintMsg": {
       "description": "A TCP path constraint (see `motion::Constraint`).",
@@ -2274,6 +2332,38 @@
         "direction"
       ]
     },
+    "IoRef": {
+      "description": "A reference into the existing I/O map. The assigned channel is derived.",
+      "type": "object",
+      "properties": {
+        "aspect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Aspect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "direction": {
+          "$ref": "#/$defs/IoDirection"
+        },
+        "node": {
+          "type": "string"
+        },
+        "point": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "point",
+        "direction",
+        "node"
+      ]
+    },
     "LegendMsg": {
       "description": "A colour key for an obstacle whose colours mean something.",
       "type": "object",
@@ -2491,6 +2581,15 @@
       "required": [
         "metalness",
         "roughness"
+      ]
+    },
+    "Medium": {
+      "type": "string",
+      "enum": [
+        "power",
+        "pneumatic",
+        "signal",
+        "network"
       ]
     },
     "MotionMsg": {
@@ -2911,6 +3010,83 @@
         "angular_damping"
       ]
     },
+    "Port": {
+      "type": "object",
+      "properties": {
+        "io": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "medium": {
+          "$ref": "#/$defs/Medium"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "specs": {
+          "$ref": "#/$defs/Specs",
+          "default": {
+            "capacity_a": null,
+            "capacity_l_min": null,
+            "current_a": null,
+            "flow_l_min": null,
+            "flow_reference": null,
+            "logic": null,
+            "pressure_bar": null,
+            "pressure_max_bar": null,
+            "pressure_min_bar": null,
+            "protocol": null,
+            "signal_type": null,
+            "voltage_max_v": null,
+            "voltage_min_v": null,
+            "voltage_v": null
+          }
+        },
+        "target": {
+          "type": "string"
+        },
+        "target_kind": {
+          "$ref": "#/$defs/PartTargetKind"
+        },
+        "terminal": {
+          "description": "External drawing/terminal reference only; never a channel address.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "target",
+        "target_kind",
+        "medium",
+        "role",
+        "required"
+      ]
+    },
     "PoseMsg": {
       "description": "Position + quaternion (x, y, z, w), in meters / world frame unless noted.",
       "type": "object",
@@ -3238,6 +3414,16 @@
             "offset"
           ]
         }
+      ]
+    },
+    "Role": {
+      "type": "string",
+      "enum": [
+        "supply",
+        "load",
+        "input",
+        "output",
+        "peer"
       ]
     },
     "ScenarioJointsMsg": {
@@ -3667,6 +3853,123 @@
         "name",
         "initial"
       ]
+    },
+    "Specs": {
+      "description": "Values apply to this endpoint in total, not to an inferred BOM quantity.",
+      "type": "object",
+      "properties": {
+        "capacity_a": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "capacity_l_min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "current_a": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "flow_l_min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "flow_reference": {
+          "description": "The reference conditions used for both flow and capacity numbers.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "logic": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pressure_bar": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "pressure_max_bar": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "pressure_min_bar": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "signal_type": {
+          "description": "digital, safe_digital, analog or word; not a second channel table.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "voltage_max_v": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "voltage_min_v": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "voltage_v": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false
     },
     "StepMsg": {
       "type": "object",

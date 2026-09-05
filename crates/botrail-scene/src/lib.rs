@@ -8,6 +8,7 @@
 pub mod apt;
 pub mod carve;
 pub mod coat;
+pub mod connections;
 pub mod gait;
 pub mod gcode;
 pub mod grasp;
@@ -410,6 +411,7 @@ pub struct Scene {
     /// thing *is* commercially. Authoring data the BOM is derived from
     /// (see [`part`]); never read by collision, planning or the rollout.
     parts: Vec<part::PartEntry>,
+    connection_plan: connections::ConnectionPlan,
     /// Inputs a scenario's faults pin for the run — filled by
     /// `apply_scenario` on a rollout snapshot, read by the rollout. Never
     /// authored, never saved: the live scene's list is empty.
@@ -452,6 +454,7 @@ impl Scene {
             brushes: Vec::new(),
             io: iomap::IoMap::default(),
             parts: Vec::new(),
+            connection_plan: connections::ConnectionPlan::default(),
             forced_inputs: Vec::new(),
             collision_warnings: Vec::new(),
         }
@@ -484,6 +487,7 @@ impl Scene {
             brushes: Vec::new(),
             io: iomap::IoMap::default(),
             parts: Vec::new(),
+            connection_plan: connections::ConnectionPlan::default(),
             forced_inputs: Vec::new(),
             collision_warnings,
         }

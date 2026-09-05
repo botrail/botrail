@@ -39,7 +39,11 @@ came from:
 | vehicle, aerial | `flight_time_min` | the airborne time of the baked cycle — pass `requirements(timeline=tl)`; without it the comparison is left as a note |
 | I/O node | `di`, `do`, `ai`, `ao`, `safe_di`, `safe_do` | the points assigned to it |
 | pedestal / table | `load_kg` | the robots standing on it (base inside its top, at its height) and their tools |
-| power supply (`power_supply`) | `output_a` | the sum of `current_a` over the other lines |
+
+Power supply capacity is checked against its connected loads by
+[`bt.connections.report(scene)`](connections.md). Declare supply/load ports
+to obtain per-supply budgets; whole-BOM current sums are no longer generated
+as power supply requirements.
 
 A number the cell cannot supply is **not guessed**: a grasped part with no
 `mass_kg` leaves the payload out and adds a note (`requirement_incomplete`)
@@ -105,8 +109,13 @@ finding.
 `scene.check()` is every static check of the cell in one list — what
 `botrail check` prints: the I/O lint, each sequence walked for dangling
 references, unidentified lines with what the cell asks of them, and the
-requirement comparison. `ok` is false only on errors; unknowns and notes are
+requirement comparison, and declared physical connection checks. `ok` is false only on errors; unknowns and notes are
 information, not failure.
+
+For a review that also exposes missing specifications, electrical properties,
+partial subtotals and unperformed evaluations, use
+[`bt.review(scene, stage="design")`](design-review.md). It preserves `check().ok`
+and reports readiness for an explicit review scope separately.
 
 ```python
 report = scene.check()

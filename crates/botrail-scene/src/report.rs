@@ -2,7 +2,7 @@
 //! cycle times and step spans (the bake), the tightest clearance (the
 //! verifier), I/O counts and findings (the map), the scenario matrix, the
 //! BOM's totals, the plan-view footprint, and the hashes of the
-//! deliverables written from the same source.
+//! externally supplied attachments (whose input revision is not verified here).
 //!
 //! It is a *reading* surface, not a judging one: the same numbers a CI
 //! run asserts on with pytest, laid out for the person approving the
@@ -173,11 +173,11 @@ pub struct DoorSummary {
     pub driven: bool,
 }
 
-/// A file written from the same source as this report, with its digest —
-/// the evidence that the drawing, the list and the program are one cell.
+/// A caller-supplied attachment. A digest verifies bytes, not its input revision.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Deliverable {
     pub path: String,
+    pub origin: String,
     pub sha256: Option<String>,
     pub bytes: Option<u64>,
 }
@@ -211,6 +211,8 @@ pub struct CycleInput<'a> {
 
 pub struct CellReportInput<'a> {
     pub title: Option<String>,
+    /// Program scope for I/O derivation; absent means all programs.
+    pub sequences: Option<Vec<String>>,
     pub cycles: Vec<CycleInput<'a>>,
     pub scenarios: Vec<ScenarioRow>,
     pub deliverables: Vec<Deliverable>,
@@ -282,7 +284,11 @@ impl Scene {
             })
             .collect();
 
-        let (io, io_error) = match iomap::derive(self, None) {
+        let refs = input
+            .sequences
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
+        let (io, io_error) = match iomap::derive(self, refs.as_deref()) {
             Ok(d) => (Some(io_summary(&d)), None),
             Err(e) => (None, Some(e.to_string())),
         };
@@ -894,7 +900,7 @@ impl CellReport {
 
         // ---- deliverables ----------------------------------------------
         if !self.deliverables.is_empty() {
-            out.push_str("\n## Deliverables\n\n| file | bytes | sha256 |\n|---|---|---|\n");
+            out.push_str("\n## Deliverables\n\nExternal attachments: file digests do not verify a common input revision.\n\n| file | bytes | sha256 |\n|---|---|---|\n");
             for d in &self.deliverables {
                 let _ = writeln!(
                     out,
@@ -947,6 +953,7 @@ mod tests {
         scene.set_part("table", None, part).unwrap();
         let report = scene.cell_report(CellReportInput {
             title: None,
+            sequences: None,
             cycles: Vec::new(),
             scenarios: vec![ScenarioRow {
                 name: "baseline".into(),
@@ -956,6 +963,7 @@ mod tests {
             }],
             deliverables: vec![Deliverable {
                 path: "bom.csv".into(),
+                origin: "external_attachment".into(),
                 sha256: Some("abc".into()),
                 bytes: Some(120),
             }],

@@ -74,9 +74,9 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
 - **Engineering documents, derived** — bill of materials, plan-view layout
   sheet (SVG / DXF), I/O list and controller topology, and a cell report
   (cycle times, clearance, I/O counts, scenario matrix, footprint, file
-  digests) all come out of the same script as the simulation, so a layout
-  edit changes exactly the documents it touches — and never lets them
-  disagree.
+  digests). Batch export records the common cell snapshot, program scope,
+  execution conditions and file hashes; package verification detects
+  changed or missing files and a changed input definition.
 - **Selection, checked — not chosen** — `scene.requirements()` derives what
   every BOM line must be able to do (payload from the grasped parts, reach
   from the taught targets, a beam's span, a conveyor's load...) and compares
@@ -222,8 +222,12 @@ report.save("cell_report.md")             # cycle time, clearance, I/O, BOM tota
                                           # footprint — and the SHA-256 of each file
 ```
 
-Because they are derived, they cannot disagree with each other or with the
-bake, and a layout edit changes exactly the documents it touches:
+Individual exports reflect the scene or timeline supplied to each call;
+file hashes alone do not prove they share an input revision. Use
+`manifest = bt.export_cell(scene, "deliverables/rev1")` and
+`bt.verify_export(manifest, scene=scene)` for a document set generated from
+one isolated snapshot and a fresh bake. Existing files supplied as attachments
+keep unverified provenance. The individual API example
 [examples/engineering/cell_deliverables_demo.py](examples/engineering/cell_deliverables_demo.py)
 writes the whole set, and
 [python/tests/test_deliverables.py](python/tests/test_deliverables.py) pins
@@ -234,10 +238,24 @@ and a CI job share:
 
 ```bash
 botrail check cell.py                                  # load, lint, count → JSON (exit 1 on errors)
+botrail review cell.py --stage design                  # missing design inputs and unperformed checks
+botrail connections cell.py --power power.csv          # physical interfaces and per-supply load budgets
 botrail simulate cell.py --scenarios --report r.json   # bake the matrix → the cell report
-botrail export cell.py --out deliverables/ --all       # the whole document set, hashed into the report
+botrail export cell.py --out deliverables/rev1 --all   # fresh snapshot, bake, documents and manifest
+botrail verify-export deliverables/rev1/cell_manifest.json --cell cell.py
 botrail schema > project.schema.json                   # the .botrail JSON Schema, from the Rust types
 ```
+
+[`bt.review(scene)`](docs/guides/design-review.md) separates static-check
+success from available design information: equipment identity, specification
+gaps, electrical compatibility, known subtotals and evidence not yet supplied.
+`check().ok` keeps its existing meaning; the review lists the required items
+and unresolved reasons for its selected stage.
+
+[`bt.connections`](docs/guides/connections.md) records equipment power, air,
+signal and network interfaces. Each supply is checked against its connected
+loads, with unknown consumption retained explicitly. Connection requirements
+and power budgets are included in the batch export and its input revision.
 
 ## Development
 

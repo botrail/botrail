@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use botrail_model::RobotModel;
+use botrail_session::SessionHost;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -3187,11 +3188,13 @@ impl Scene {
     /// scenario matrix (`scenarios=` a `ScenarioRuns` — its runs also
     /// stand in for `timelines` when none are given), the BOM's totals,
     /// the plan-view footprint, and the SHA-256 of every file in
-    /// `deliverables` (paths of things written from this scene). A
-    /// reading surface — pytest keeps the `assert`s.
+    /// `deliverables` (external attachments with unverified provenance).
+    /// `sequences` scopes the report's I/O summary; default all. For a
+    /// common snapshot, fresh bakes and verified files, use `bt.export_cell`.
+    /// A reading surface — pytest keeps the `assert`s.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (timelines = None, *, scenarios = None, deliverables = None,
-        clearance_dt = Some(0.01), title = None, ground_z = 0.02))]
+        clearance_dt = Some(0.01), title = None, ground_z = 0.02, sequences = None))]
     fn cell_report(
         &self,
         py: Python<'_>,
@@ -3201,6 +3204,7 @@ impl Scene {
         clearance_dt: Option<f64>,
         title: Option<String>,
         ground_z: f64,
+        sequences: Option<Vec<String>>,
     ) -> PyResult<CellReport> {
         use botrail_scene::report::{CellReportInput, CycleInput, Deliverable, ScenarioRow};
         if let Some(dt) = clearance_dt {
@@ -3303,6 +3307,7 @@ impl Scene {
                 .extract()?;
             files.push(Deliverable {
                 path: path.display().to_string(),
+                origin: "external_attachment".to_string(),
                 sha256: Some(digest),
                 bytes: Some(bytes.len() as u64),
             });
@@ -3313,6 +3318,7 @@ impl Scene {
             scenarios: scenario_rows,
             deliverables: files,
             ground_z,
+            sequences,
         });
         Ok(CellReport { inner: report })
     }
@@ -3564,6 +3570,88 @@ impl Scene {
     /// the one read-out `bt.select` derives requirements through.
     fn _project_json(&self) -> String {
         self.hub.project_json()
+    }
+
+    fn _connection_plan_json(&self) -> String {
+        self.hub.with_scene(|scene| {
+            serde_json::to_string(scene.connection_plan()).expect("connection plan")
+        })
+    }
+
+    fn _set_connection_plan_json(&self, json: &str) -> PyResult<()> {
+        let plan = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("connection plan: {e}")))?;
+        self.hub
+            .with_scene(|scene| scene.set_connection_plan(plan))
+            .map_err(PyValueError::new_err)
+    }
+
+    #[pyo3(signature = (target, kind = None))]
+    fn _part_target_kind(&self, target: &str, kind: Option<&str>) -> PyResult<String> {
+        let kind = kind
+            .map(|k| {
+                botrail_scene::part::PartTargetKind::parse(k)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown target kind: {k}")))
+            })
+            .transpose()?;
+        self.hub
+            .with_scene(|scene| scene.part_target_kind(target, kind))
+            .map(|k| k.as_str().to_string())
+            .map_err(scene_err)
+    }
+
+    /// Independent authored snapshot for the batch exporter. It retains
+    /// the loaded models and colliders without a lossy save/load round trip.
+    fn _snapshot(&self) -> Self {
+        Self {
+            hub: Arc::new(SceneHub::new(self.hub.authored_snapshot())),
+            robot: self.robot.clone(),
+        }
+    }
+
+    /// Local geometry inputs used by the loaded models and exporters.
+    /// Resolve through the model, not raw URDF filenames (which can be relative).
+    fn _asset_paths(&self) -> PyResult<Vec<PathBuf>> {
+        use botrail_model::{Geometry, RobotSource};
+        use std::collections::BTreeSet;
+        fn source_paths(source: &RobotSource, paths: &mut BTreeSet<PathBuf>) -> PyResult<()> {
+            match source {
+                RobotSource::Usd { path, .. } => {
+                    paths.extend(
+                        botrail_usd::stage_dependencies(path, &[])
+                            .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                    );
+                }
+                RobotSource::Catalog { inner, .. } => source_paths(inner, paths)?,
+                RobotSource::Composite { base, tool, .. } => {
+                    source_paths(base, paths)?;
+                    source_paths(tool, paths)?;
+                }
+                RobotSource::UrdfXml(_) => {}
+            }
+            Ok(())
+        }
+        let scene = self.hub.authored_snapshot();
+        let mut paths = BTreeSet::new();
+        for robot in scene.robots() {
+            source_paths(&robot.model.source, &mut paths)?;
+            for shape in robot
+                .model
+                .links
+                .iter()
+                .flat_map(|l| l.visuals.iter().chain(&l.collisions))
+            {
+                if let Geometry::Mesh { path, .. } = &shape.geometry {
+                    paths.insert(path.clone());
+                }
+            }
+        }
+        for obstacle in scene.obstacles() {
+            if let Geometry::Mesh { path, .. } = &obstacle.geometry {
+                paths.insert(path.clone());
+            }
+        }
+        Ok(paths.into_iter().collect())
     }
 
     /// What every bill-of-materials line must be able to do, derived from

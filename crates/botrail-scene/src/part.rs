@@ -717,19 +717,13 @@ impl Scene {
         self.parts.iter().find(|p| p.target == target)
     }
 
-    /// Pins a part to a resident or group by name and returns the kind it
-    /// resolved to. Without `kind` the name is looked up in every name
-    /// space (robot, device, sensor, I/O node, obstacle, group of
-    /// obstacles under `<name>/`); a name that lives in several is an
-    /// error asking for the kind. Re-pinning the same target replaces the
-    /// part.
-    pub fn set_part(
-        &mut self,
+    /// Resolve an existing resident without adding or changing its identity.
+    pub fn part_target_kind(
+        &self,
         target: &str,
         kind: Option<PartTargetKind>,
-        part: Part,
     ) -> Result<PartTargetKind, SceneError> {
-        let kind = match kind {
+        Ok(match kind {
             Some(kind) => {
                 if !target_exists(self, target, kind) {
                     return Err(SceneError::BadPart(format!(
@@ -760,7 +754,22 @@ impl Scene {
                     }
                 }
             }
-        };
+        })
+    }
+
+    /// Pins a part to a resident or group by name and returns the kind it
+    /// resolved to. Without `kind` the name is looked up in every name
+    /// space (robot, device, sensor, I/O node, obstacle, group of
+    /// obstacles under `<name>/`); a name that lives in several is an
+    /// error asking for the kind. Re-pinning the same target replaces the
+    /// part.
+    pub fn set_part(
+        &mut self,
+        target: &str,
+        kind: Option<PartTargetKind>,
+        part: Part,
+    ) -> Result<PartTargetKind, SceneError> {
+        let kind = self.part_target_kind(target, kind)?;
         if part.qty == 0 {
             return Err(SceneError::BadPart(format!(
                 "part `{target}`: qty must be at least 1"
@@ -822,6 +831,23 @@ impl Scene {
     /// Follows a robot rename.
     pub(crate) fn rename_part_target(&mut self, kind: PartTargetKind, old: &str, new: &str) {
         let prefix = format!("{old}/");
+        for port in &mut self.connection_plan.ports {
+            if port.target_kind == kind && port.target == old {
+                port.target = new.to_string();
+            } else if kind == PartTargetKind::Robot
+                && port.target_kind == PartTargetKind::Tool
+                && port.target.starts_with(&prefix)
+            {
+                port.target = format!("{new}/{}", &port.target[prefix.len()..]);
+            }
+            if kind == PartTargetKind::Robot {
+                if let Some(io) = &mut port.io {
+                    if io.point == old {
+                        io.point = new.to_string();
+                    }
+                }
+            }
+        }
         for entry in &mut self.parts {
             if entry.kind == kind && entry.target == old {
                 entry.target = new.to_string();

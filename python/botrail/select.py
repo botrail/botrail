@@ -34,7 +34,6 @@ same column. The keys, and the attribute names that answer them
 | `max_descent_mps`      | an aerial vehicle's descent rate                           | the same                                     |
 | `flight_time_min`      | an aerial vehicle's airborne time per cycle, from the baked timeline (`requirements(timeline=tl)`) | the same |
 | `load_kg`              | parts on a conveyor / an axis; robots standing on a pedestal | `load_kg`, `capacity_kg`, `max_load_kg`, `payload_kg` |
-| `output_a`             | the sum of `current_a` over the other lines (power supply) | `output_a`, `current_a`                      |
 | `di` `do` `ai` `ao` `safe_di` `safe_do` | points assigned to an I/O node                | the node's declared channels                 |
 
 Every requirement is a minimum (`>=`) unless noted. The derivations are
@@ -504,6 +503,12 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
                 message += " — needs " + ", ".join(str(r) for r in row.requirements)
             findings.append(Finding("info", "unidentified_part", message, row.target))
     findings += req.findings()
+    from .connections import report as connection_report
+
+    for item in connection_report(scene).checks:
+        if item["status"] in ("fail", "unknown"):
+            findings.append(Finding("error" if item["status"] == "fail" else "warning",
+                                    "connection_" + item["id"].split(":")[0], item["message"], item["target"]))
     return CheckReport(findings, req)
 
 
@@ -1254,18 +1259,8 @@ class _Cell:
                                 load += tm * int(tool.get("qty") or 1)
                 if standing:
                     reqs.append(Requirement("load_kg", _round(load, 3), basis=f"{', '.join(standing)} standing on it"))
-        elif category == "power_supply":
-            total = 0.0
-            lines = 0
-            for row in self.bom_rows:
-                if name in row["names"]:
-                    continue
-                current = _number((row.get("attributes") or {}).get("current_a"))
-                if current is not None:
-                    total += current * int(row.get("qty") or 1)
-                    lines += 1
-            if lines:
-                reqs.append(Requirement("output_a", _round(total, 3), basis=f"sum of current_a over {lines} line(s)"))
+        # Power capacity is checked by connections.report, by supply port.
+        # A whole-BOM sum cannot define which supply feeds a load.
         return reqs, notes
 
     # ----------------------------------------------------------- helpers

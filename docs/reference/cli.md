@@ -37,6 +37,36 @@ and counts what is in the scene — the same list as `scene.check()`:
 grasped part with no `mass_kg`); exit 1 when any is an error.
 `requirements` counts the BOM lines by the outcome of that comparison.
 
+## `botrail review <cell>`
+
+Lists design information gaps and available evidence using
+[`bt.review`](../guides/design-review.md). `check().ok` and the `check` command
+keep their existing meanings; the review reports `ready` for its stated scope.
+
+| option | meaning |
+|---|---|
+| `--stage concept\|design` | required review groups (default concept) |
+| `--require NAME` (repeatable) | additional required group or exact item ID |
+| `--simulate` | bake the selected programs before reviewing |
+| `--manifest PATH` | verify a batch export against the current cell and review its report; mutually exclusive with a new simulation |
+| `--scenarios` | bake all scenarios; execution and expected-result acceptance remain separate |
+| `--config PATH` | JSON object with `required`, `totals` and/or `annotations` |
+| `--report PATH` / `--markdown` | save `.json`/`.md`, or print Markdown |
+
+Also accepts the bake options below (`--sequence`, `--max-duration`,
+`--clearance-dt`, `--no-clearance`, `--title`). Exit 0 means no review blockers,
+1 means unresolved items or a failed bake, and 2 means invalid input.
+
+## `botrail connections <cell>`
+
+Checks declared [equipment interfaces and supply capacity](../guides/connections.md)
+without baking. Prints JSON, or Markdown with `--markdown`. Use `--report PATH`
+for `.json`/`.md`, `--csv PATH` for the connection requirements table and
+`--power PATH` for the per-power-supply capacity CSV. Exit 0 means the declared
+requirements are resolved, 1 means failures or incomplete information, and
+2 means invalid input/output arguments. The table includes required but
+unconnected ports and identifies missing consumption in each source's budget.
+
 ## `botrail simulate <cell>`
 
 Bakes the sequences — all together, or the `--sequence NAME` set — and
@@ -56,17 +86,38 @@ prints the [cell report](../guides/layout-and-report.md#the-cell-report).
 ## `botrail export <cell> --out DIR`
 
 Writes the document set — pick with `--project --python --bom --io
---topology --plc --interlocks --layout --usd --script --report`, or `--all`
+--topology --plc --interlocks --layout --usd --script --connections --report`, or `--all`
 (the default when nothing is picked). Files are named after the cell
 (`--name` overrides the stem): `<stem>.botrail`, `<stem>.py`,
 `<stem>_bom.csv|.md`, `<stem>_io.csv`, `<stem>_topology.mmd`,
 `<stem>.plcopen.xml`, `<stem>_interlocks.md|.csv` (the [interlock
 table](../guides/io-map.md#the-interlock-table)), `<stem>_layout.svg|.dxf`
 (`--scale` for the SVG),
-`<stem>_<cycle>.usda` per baked cycle (`--fps`), `<stem>.script` (the robot
-program — a warning on stderr when the dialect cannot take the cell, e.g. a
-7-axis arm), and `<stem>_report.md|.json` last, with the digests of
-everything written before it. Takes the same bake options as `simulate`.
+`<stem>_<cycle>.usda` per baked cycle (`--fps`), `<stem>.script` for one
+program or `<stem>_<program>.script` for each of several programs, and
+`<stem>_report.md|.json`. Connection outputs are `<stem>_connections.csv|.md|.json`
+and `<stem>_power.csv`. Every export also writes `<stem>_manifest.json`,
+including hashes of both report formats. `--sequence` scopes every
+program-dependent document as well as the bake.
+
+`DIR` must be new or empty. Generation uses one isolated cell snapshot and
+publishes the directory only after export and integrity checks finish.
+Besides the `simulate` bake options, accepts `--dt` (scan interval, default
+0.01 s), `--plan-resolution` (planner stride, default 0.05), and repeatable
+`--attach PATH` for unverified external attachments. Bakes are kinematic.
+The JSON response and report retain export warnings, PLCopen stub blocks,
+omitted scripts and failed scenario executions in `issues`. Exit 0 means
+the package was generated; it does not mean those issues are resolved.
+
+## `botrail verify-export MANIFEST [--cell CELL]`
+
+Verifies the [manifest and every file](../guides/layout-and-report.md#the-document-set-as-one-thing).
+`--cell` also compares the current authored definition and observed geometry
+asset hashes. Exit 0 requires intact generated files from a common revision;
+1 means mismatch, missing/unlisted files, malformed manifest or unverified
+external attachments. `ok` reports integrity; `same_revision` also excludes
+external attachments. Exporter `issues` are returned separately and remain
+subject to the design review. This command does not rerun simulation.
 
 ## `botrail schema [--out FILE]`
 

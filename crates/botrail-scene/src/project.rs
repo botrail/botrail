@@ -499,6 +499,13 @@ pub struct ProjectFile {
     /// files). The BOM itself is derived, never stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<crate::part::PartEntry>,
+    /// Physical interface requirements and utility connections. These do
+    /// not execute the cell; the I/O assignment remains in `io`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::connections::ConnectionPlan::is_empty"
+    )]
+    pub connection_plan: crate::connections::ConnectionPlan,
 }
 
 /// One named [`crate::coat::Applicator`].
@@ -574,6 +581,7 @@ impl ProjectFile {
                     brushes: Vec::new(),
                     io: crate::iomap::IoMap::default(),
                     parts: Vec::new(),
+                    connection_plan: crate::connections::ConnectionPlan::default(),
                 })
             }
             2 => {
@@ -743,6 +751,7 @@ impl Scene {
             brushes: self.brushes().to_vec(),
             io: self.io_map().clone(),
             parts: self.parts().to_vec(),
+            connection_plan: self.connection_plan().clone(),
             frames: self
                 .frames()
                 .iter()
@@ -781,6 +790,10 @@ impl Scene {
     /// motions) onto this scene. The robot models themselves are kept; the
     /// project must have the same robot count and per-robot DOF.
     pub fn apply_project(&mut self, project: &ProjectFile) -> Result<(), ProjectError> {
+        project
+            .connection_plan
+            .validate()
+            .map_err(ProjectError::Incompatible)?;
         if project.robots.len() != self.robots().len() {
             return Err(ProjectError::Incompatible(format!(
                 "project has {} robots, scene has {}",
@@ -1060,6 +1073,8 @@ impl Scene {
         // Parts last: they pin to everything above by name.
         self.set_parts(project.parts.clone())
             .map_err(|e| ProjectError::Incompatible(format!("parts: {e}")))?;
+        self.set_connection_plan(project.connection_plan.clone())
+            .map_err(ProjectError::Incompatible)?;
         Ok(())
     }
 }
@@ -1898,6 +1913,13 @@ pub fn generate_python(project: &ProjectFile) -> String {
     }
     py_io_map(&mut out, &project.io);
     py_parts(&mut out, &project.parts);
+    if !project.connection_plan.is_empty() {
+        let json =
+            serde_json::to_string(&project.connection_plan).expect("validated connection plan");
+        out.push_str(&format!(
+            "\nbt.connections.restore(scene, json.loads({json:?}))\n"
+        ));
+    }
 
     out.push_str("\nbt.studio(scene)\n");
     out

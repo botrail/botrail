@@ -151,13 +151,18 @@ def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
             "pick_baseline.usda",
             "pick_ng_part.usda",
             "pick.script",
+            "pick_connections.csv",
+            "pick_connections.md",
+            "pick_connections.json",
+            "pick_power.csv",
             "pick_report.md",
             "pick_report.json",
+            "pick_manifest.json",
         ]
     )
     report = json.loads((tmp_path / "docs" / "pick_report.json").read_text())
     # The report hashes what was written before it.
-    assert len(report["deliverables"]) == 14
+    assert len(report["deliverables"]) == 18
     assert all(d["sha256"] for d in report["deliverables"])
     # A subset, no bake needed.
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "some"), "--bom", "--layout")
@@ -166,6 +171,7 @@ def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
         "cell_deliverables_demo_bom.md",
         "cell_deliverables_demo_layout.dxf",
         "cell_deliverables_demo_layout.svg",
+        "cell_deliverables_demo_manifest.json",
     ]
 
 
