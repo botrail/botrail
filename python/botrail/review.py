@@ -17,7 +17,7 @@ from typing import Any
 from . import select
 
 STATUSES = ("pass", "fail", "unknown", "not_run", "not_applicable")
-GROUPS = ("checks", "equipment", "specifications", "connections", "totals", "simulation", "scenarios", "deliverables")
+GROUPS = ("checks", "equipment", "specifications", "connections", "mounting", "totals", "simulation", "scenarios", "deliverables")
 STAGES = {
     "concept": ("checks",),
     "design": ("checks", "equipment", "specifications", "connections", "simulation"),
@@ -209,7 +209,7 @@ def review(
         "Resolve the error findings" if not check.ok else "", source_kind="derived")
     # Specification findings are represented below with their actual inputs.
     for index, finding in enumerate(check.findings):
-        if finding.code in ("spec_short", "spec_unknown", "requirement_incomplete", "unidentified_part") or finding.code.startswith("connection_"):
+        if finding.code in ("spec_short", "spec_unknown", "requirement_incomplete", "unidentified_part") or finding.code.startswith(("connection_", "mounting_")):
             continue
         if finding.severity == "info":
             continue
@@ -262,6 +262,12 @@ def review(
             add(f"{group}:none", group, "cell", "not_applicable", "No BOM equipment",
                 "The scene has no BOM rows; this does not check for omitted equipment")
 
+    from .mounting import report as mounting_report
+
+    mechanical = mounting_report(scene)
+    for item in mechanical.items:
+        add(item.id, item.group, item.target, item.status, item.message, item.basis, item.next_action,
+            **item.evidence, validator_version=mechanical.validator_version, input_hash=mechanical.input_hash)
     _connections(scene, sequences, add)
     for entry in physical.checks:
         # No interfaces are inferred for legacy cells. Identifiable utility

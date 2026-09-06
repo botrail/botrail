@@ -135,6 +135,7 @@ nav:
       - Selecting parts (requirements, check, catalog search): guides/selection.md
       - Design information review: guides/design-review.md
       - Equipment connections and supply capacity: guides/connections.md
+      - Mechanical tool mounting: guides/mounting.md
       - Layout sheet and cell report: guides/layout-and-report.md
       - Standard parts and CAD geometry: guides/standard-parts.md
       - Working with agents and automation: guides/agents.md

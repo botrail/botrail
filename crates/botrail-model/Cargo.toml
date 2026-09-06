@@ -13,3 +13,8 @@ xurdf.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
 roxmltree = "0.14"
+serde.workspace = true
+schemars = { workspace = true, optional = true }
+
+[features]
+schema = ["dep:schemars"]

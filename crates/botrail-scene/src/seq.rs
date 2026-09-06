@@ -317,6 +317,8 @@ pub enum DeviceKind {
     /// docks.
     Vehicle {
         path: VehiclePath,
+        /// Display-only wheels; their rotation is derived after the collision-checked bake.
+        wheels: Vec<crate::wheels::VehicleWheel>,
         /// Obstacles carried rigidly as the vehicle's body.
         body: Vec<String>,
         /// Cruise speed on straight legs (m/s).
@@ -2224,6 +2226,7 @@ impl Scene {
     fn validate_vehicle(&self, device: &Device) -> Result<(), String> {
         let DeviceKind::Vehicle {
             path,
+            wheels,
             body,
             speed,
             turn_speed,
@@ -2234,6 +2237,9 @@ impl Scene {
         else {
             return Ok(());
         };
+        for wheel in wheels {
+            wheel.validate(self, body)?;
+        }
         if let Some((_, size)) = tray {
             if size.iter().any(|v| !(v.is_finite() && *v > 0.0)) {
                 return Err(format!(

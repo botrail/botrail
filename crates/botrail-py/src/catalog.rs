@@ -119,7 +119,7 @@ pub fn from_catalog(
     let (snapshot, entry, sha) = download_package(py, query, revision)?;
     let package_dir = snapshot.join(&entry.id);
 
-    let manifest = read_manifest(py, &package_dir)?;
+    let mut manifest = read_manifest(py, &package_dir)?;
 
     // Prefer the URDF (meshes resolve as plain relative paths); the USD is
     // authoritative when asked for or when it is all the package ships.
@@ -202,6 +202,28 @@ pub fn from_catalog(
             .as_deref()
             .and_then(|f| resolve("arms[].flange_frame", Some(f)));
         resolved_arms.push((arm.name.clone(), tip, flange, arm.joints.clone()));
+    }
+    // Use the same exact-or-unique-leaf resolution as the package's frames.
+    // Store canonical model names so USD declarations survive source replay.
+    if let Some(spec) = &mut manifest.meta.mounting {
+        let mut names = std::collections::BTreeMap::new();
+        for face in &mut spec.interfaces {
+            let index =
+                resolve("mounting.interfaces[].frame", Some(&face.frame)).ok_or_else(|| {
+                    err(format!(
+                        "catalog `{}`: mounting frame `{}` does not exist or is ambiguous",
+                        entry.id, face.frame
+                    ))
+                })?;
+            let canonical = model.links[index].name.clone();
+            names.insert(face.frame.clone(), canonical.clone());
+            face.frame = canonical;
+        }
+        for req in &mut spec.requirements {
+            req.frame = names[&req.frame].clone();
+        }
+        spec.validate(&manifest.meta.sources, manifest.meta.order.as_ref())
+            .map_err(err)?;
     }
     model.tcp_link = tcp;
     model.flange_link = flange;
@@ -405,6 +427,30 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         std::fs::read_to_string(&path).map_err(|e| err(format!("{}: {e}", path.display())))?;
     let yaml = py.import("yaml")?;
     let manifest = yaml.call_method1("safe_load", (text,))?;
+    // YAML dates in source provenance are serialized as ISO text. Unlike the
+    // legacy optional frame hints, malformed mounting declarations are errors.
+    let field = |key: &str| -> PyResult<String> {
+        let value = manifest.call_method1("get", (key,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("default", py.import("builtins")?.getattr("str")?)?;
+        py.import("json")?
+            .call_method("dumps", (value,), Some(&kwargs))?
+            .extract()
+    };
+    let mounting: Option<botrail_model::mounting::MountingSpec> =
+        serde_json::from_str(&field("mounting")?)
+            .map_err(|e| err(format!("{}: mounting: {e}", path.display())))?;
+    let order: Option<botrail_model::mounting::CatalogOrder> =
+        serde_json::from_str(&field("order")?)
+            .map_err(|e| err(format!("{}: order: {e}", path.display())))?;
+    let sources: Option<Vec<botrail_model::mounting::CatalogSource>> =
+        serde_json::from_str(&field("sources")?)
+            .map_err(|e| err(format!("{}: sources: {e}", path.display())))?;
+    let sources = sources.unwrap_or_default();
+    if let Some(spec) = &mounting {
+        spec.validate(&sources, order.as_ref())
+            .map_err(|e| err(format!("{}: {e}", path.display())))?;
+    }
     let frame = |key: &str| {
         manifest
             .get_item("frames")
@@ -496,6 +542,9 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             product: text_at(&["name"]),
             category: text_at(&["category"]),
             specs,
+            mounting,
+            order,
+            sources,
         },
     })
 }

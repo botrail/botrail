@@ -18,6 +18,7 @@ botrail-plan.workspace = true
 botrail-traj.workspace = true
 botrail-physics.workspace = true
 nalgebra.workspace = true
+parry3d-f64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -32,7 +33,7 @@ ts = ["dep:ts-rs"]
 # JSON Schema for the `.botrail` project file (`project::project_schema`),
 # generated from the same serde types — the file an agent or an editor
 # authors projects against.
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "botrail-model/schema"]
 
 [dev-dependencies]
 botrail-physics-rapier.workspace = true

@@ -628,7 +628,7 @@ fn robot_lines(
 ) {
     use botrail_model::RobotSource;
     match source {
-        RobotSource::Visuals { base, .. } => {
+        RobotSource::Visuals { base, .. } | RobotSource::Mounting { base, .. } => {
             robot_lines(base, name, role_category, tool_counter, out)
         }
         RobotSource::Catalog {

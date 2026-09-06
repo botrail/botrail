@@ -51,6 +51,8 @@ def _input(scene):
         elif value["kind"] == "composite":
             source(value["base"], target)
             source(value["tool"], target + "/tool")
+        elif value["kind"] in ("mounting", "visuals"):
+            source(value["base"], target)
 
     for robot in project["robots"]:
         source(robot["source"], robot["name"])

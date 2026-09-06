@@ -50,8 +50,12 @@ explicitly unevaluated.
 | `concept` (default) | `checks` |
 | `design` | `checks`, `equipment`, `specifications`, `connections`, `simulation` |
 
-`required` adds group names or exact item IDs. Other groups are `totals`,
+`required` adds group names or exact item IDs. Other groups are `mounting`, `totals`,
 `scenarios` and `deliverables`.
+
+Use `required=["mounting"]` to require the [mechanical mounting review](mounting.md).
+It checks actual attachment paths and declared mating conditions; detailed fit,
+fasteners and assembly clearance remain explicitly unevaluated.
 
 ```python
 review = bt.review(scene, stage="concept", required=["connections", "totals"])

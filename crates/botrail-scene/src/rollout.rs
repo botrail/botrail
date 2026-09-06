@@ -357,6 +357,14 @@ impl BoolTrack {
 /// Piecewise world motion of one tracked object. Spans tile `[0, duration]`.
 #[derive(Debug, Clone)]
 pub enum TrackSpan {
+    /// Wheel spin about a local axle, layered on the unchanged vehicle ride.
+    Wheel {
+        motion: Box<TrackSpan>,
+        axis: nalgebra::Unit<Vector3<f64>>,
+        pivot: nalgebra::Point3<f64>,
+        angle: f64,
+        rate: f64,
+    },
     /// At rest at a fixed world pose.
     Hold {
         t0: f64,
@@ -525,6 +533,7 @@ impl TrackSpan {
     /// last pose past the end, same as every other final span).
     fn set_end(&mut self, t: f64) {
         match self {
+            TrackSpan::Wheel { motion, .. } => motion.set_end(t),
             TrackSpan::Hold { t1, .. }
             | TrackSpan::Stowed { t1, .. }
             | TrackSpan::Follow { t1, .. }
@@ -544,6 +553,7 @@ impl TrackSpan {
 
     pub fn range(&self) -> (f64, f64) {
         match self {
+            TrackSpan::Wheel { motion, .. } => motion.range(),
             TrackSpan::Hold { t0, t1, .. }
             | TrackSpan::Stowed { t0, t1, .. }
             | TrackSpan::Follow { t0, t1, .. }
@@ -860,6 +870,10 @@ impl SequenceTimeline {
                 t >= t0 - 1e-9 && t <= t1 + 1e-9
             })
             .or(track.spans.last());
+        let mut span = span;
+        while let Some(TrackSpan::Wheel { motion, .. }) = span {
+            span = Some(motion.as_ref());
+        }
         !matches!(span, Some(TrackSpan::Stowed { .. }))
     }
 
@@ -902,6 +916,24 @@ impl SequenceTimeline {
             })
             .or(spans.last())?;
         Some(match span {
+            TrackSpan::Wheel {
+                motion,
+                axis,
+                pivot,
+                angle,
+                rate,
+            } => {
+                let (t0, t1) = motion.range();
+                let rotation = nalgebra::UnitQuaternion::from_axis_angle(
+                    axis,
+                    angle + rate * (t.clamp(t0, t1) - t0),
+                );
+                let spin = Isometry3::from_parts(
+                    nalgebra::Translation3::from(pivot.coords - rotation * pivot.coords),
+                    rotation,
+                );
+                Self::span_pose(std::slice::from_ref(motion.as_ref()), link_poses, t)? * spin
+            }
             TrackSpan::Hold { pose, .. } | TrackSpan::Stowed { pose, .. } => *pose,
             TrackSpan::Follow {
                 robot,
@@ -990,7 +1022,7 @@ impl SequenceTimeline {
             | TrackSpan::Stowed { pose, .. }
             | TrackSpan::Linear { from: pose, .. }
             | TrackSpan::Pivot { from: pose, .. } => pose.translation.z,
-            TrackSpan::Follow { .. } => 0.0,
+            TrackSpan::Follow { .. } | TrackSpan::Wheel { .. } => 0.0,
             // A vehicle frame is never physics-owned; defensive, like
             // Follow above.
             TrackSpan::Sampled { poses, .. } => {
@@ -1040,7 +1072,7 @@ impl SequenceTimeline {
                     }
                     // Never a vehicle frame's span; count it as motion
                     // should that ever change, like Follow.
-                    span @ TrackSpan::Sampled { .. } => {
+                    span @ (TrackSpan::Sampled { .. } | TrackSpan::Wheel { .. }) => {
                         let (t0, t1) = span.range();
                         t1 - t0
                     }
@@ -2476,6 +2508,7 @@ impl Rollout {
                     }
                     DeviceKind::Vehicle {
                         path,
+                        wheels: _,
                         body,
                         speed,
                         turn_speed,
@@ -6430,6 +6463,7 @@ impl Rollout {
                 open.set_end(duration);
             }
         }
+        crate::wheels::animate(&self.world, &mut self.objects);
         // Friction holds still open at the horn were held to the end.
         for hold in &mut self.friction_holds {
             if hold.end.is_nan() {
@@ -10249,6 +10283,7 @@ mod vehicle_tests {
         Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: l_path(),
                 body,
                 speed: 0.5,
@@ -10389,6 +10424,7 @@ mod vehicle_tests {
         Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![Point3::new(0.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.3)],
                     stations: vec![("a".into(), 0), ("b".into(), 1)],
@@ -10689,6 +10725,7 @@ mod vehicle_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -10937,6 +10974,7 @@ mod vehicle_tests {
         Device {
             name: "drone".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: path,
                     stations,
@@ -11502,6 +11540,7 @@ mod vehicle_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
                     stations: vec![("a".into(), 0), ("ghost".into(), 9)],
@@ -11540,6 +11579,7 @@ mod vehicle_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -11667,6 +11707,7 @@ mod tray_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -11732,6 +11773,7 @@ mod tray_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -12163,6 +12205,7 @@ mod mount_tests {
         scene.upsert_device(Device {
             name: "amr".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -12864,6 +12907,7 @@ mod gait_tests {
         Device {
             name: "dog".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -13920,6 +13964,7 @@ mod biped_tests {
         Device {
             name: "walker".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: VehiclePath {
                     waypoints: vec![
                         Point3::new(0.0, 0.0, 0.0),
@@ -15008,6 +15053,7 @@ mod physics_tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: crate::seq::VehiclePath {
                     waypoints: vec![
                         nalgebra::Point3::new(0.0, 0.0, 0.0),

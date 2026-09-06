@@ -95,7 +95,13 @@ fn apply_state(
         };
         let entered = span_at[i] != Some(k);
         span_at[i] = Some(k);
-        match &track.spans[k] {
+        // Wheel spin is display-only. Replay the checked rigid motion,
+        // including any attachment state, when auditing collisions.
+        let mut span = &track.spans[k];
+        while let TrackSpan::Wheel { motion, .. } = span {
+            span = motion.as_ref();
+        }
+        match span {
             TrackSpan::Follow {
                 robot,
                 link,
@@ -161,6 +167,7 @@ fn apply_state(
                     .expect("sampled span is non-empty");
                 world.set_obstacle_pose(&track.name, pose)?;
             }
+            TrackSpan::Wheel { .. } => unreachable!("wheel decoration was unwrapped"),
         }
     }
     Ok(())

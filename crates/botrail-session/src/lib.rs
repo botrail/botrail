@@ -1867,6 +1867,7 @@ mod tests {
         scene.upsert_device(botrail_scene::seq::Device {
             name: "agv".into(),
             kind: botrail_scene::seq::DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: botrail_scene::seq::VehiclePath {
                     waypoints: vec![
                         nalgebra::Point3::new(0.0, 0.0, 0.0),

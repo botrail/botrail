@@ -16,6 +16,10 @@ class IkResult:
     def iters(self) -> int: ...
 
 class Robot:
+    def with_mounting(self, path: Union[str, Path]) -> "Robot": ...
+    def _with_mounting_json(self, json: str) -> "Robot": ...
+    def _mounting_report_json(self) -> str: ...
+    def _with_catalog_mounting_json(self, json: str) -> "Robot": ...
     def with_visuals(self, visual: Robot) -> Robot:
         """Copy matching display shapes; retain joints, collision shapes and identity.
 
@@ -131,6 +135,7 @@ class Group:
     def derived(self) -> bool: ...
 
 class Scene:
+    def _mounting_report_json(self) -> str: ...
     def __init__(
         self,
         robot: Optional[Robot] = None,
@@ -724,6 +729,16 @@ class Scene:
         axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
         zone_quaternion: Optional[tuple[float, float, float, float]] = None,
         start: Optional[str] = None,
+    ) -> None: ...
+    def set_vehicle_wheel(
+        self,
+        vehicle: str,
+        object: str,
+        *,
+        radius: float,
+        axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+        pivot: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        lateral_ratio: float = 0.0,
     ) -> None: ...
     def remove_device(self, name: str) -> None: ...
     @property

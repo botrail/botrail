@@ -511,6 +511,12 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
         if item["status"] in ("fail", "unknown"):
             findings.append(Finding("error" if item["status"] == "fail" else "warning",
                                     "connection_" + item["id"].split(":")[0], item["message"], item["target"]))
+    from .mounting import report as mounting_report
+
+    for item in mounting_report(scene).items:
+        if item.status in ("fail", "unknown", "not_run"):
+            findings.append(Finding("error" if item.status == "fail" else "warning",
+                                    "mounting_" + item.id.rsplit(":", 1)[-1], item.message, item.target))
     return CheckReport(findings, req)
 
 
@@ -804,6 +810,8 @@ class _Cell:
             if (entry.get("name") or self.default_robot) != robot:
                 continue
             source = entry.get("source") or {}
+            while source.get("kind") in ("mounting", "visuals"):
+                source = source.get("base") or {}
             if source.get("kind") == "composite":
                 return source.get("flange") or (source.get("base") or {}).get("flange")
             return source.get("flange")

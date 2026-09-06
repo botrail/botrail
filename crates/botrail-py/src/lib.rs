@@ -29,6 +29,75 @@ struct Robot {
 
 #[pymethods]
 impl Robot {
+    /// Read a versioned mechanical drawing JSON/YAML for an individual part.
+    /// The contents are embedded in this immutable Robot and saved projects.
+    fn with_mounting(&self, py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
+        let value = py.import("yaml")?.call_method1("safe_load", (text,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("default", py.import("builtins")?.getattr("str")?)?;
+        let json: String = py
+            .import("json")?
+            .call_method("dumps", (value,), Some(&kwargs))?
+            .extract()?;
+        self._with_mounting_json(&json)
+    }
+
+    fn _with_mounting_json(&self, json: &str) -> PyResult<Self> {
+        let document = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("mounting document: {e}")))?;
+        let model = self
+            .inner
+            .with_mounting(document)
+            .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            inner: Arc::new(model),
+        })
+    }
+
+    fn _mounting_report_json(&self) -> String {
+        serde_json::to_string(&botrail_scene::mounting::report_robot(&self.inner))
+            .expect("mounting report")
+    }
+
+    /// Script replay restores the declarations saved by the authoring version,
+    /// including absent metadata in old projects. Never enrich a saved review
+    /// silently from a newly understood field in a pinned catalog package.
+    fn _with_catalog_mounting_json(&self, json: &str) -> PyResult<Self> {
+        use botrail_model::mounting::{CatalogOrder, CatalogSource, MountingSpec};
+        let (mounting, order, sources): (
+            Option<MountingSpec>,
+            Option<CatalogOrder>,
+            Vec<CatalogSource>,
+        ) = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("catalog mounting snapshot: {e}")))?;
+        if let Some(spec) = &mounting {
+            spec.validate(&sources, order.as_ref())
+                .map_err(PyValueError::new_err)?;
+            for face in &spec.interfaces {
+                if self.inner.link_index(&face.frame).is_none() {
+                    return Err(PyValueError::new_err(format!(
+                        "mounting frame `{}` does not exist",
+                        face.frame
+                    )));
+                }
+            }
+        }
+        let mut model = (*self.inner).clone();
+        let botrail_model::RobotSource::Catalog { meta, .. } = &mut model.source else {
+            return Err(PyValueError::new_err(
+                "catalog mounting snapshot requires a catalog model",
+            ));
+        };
+        meta.mounting = mounting;
+        meta.order = order;
+        meta.sources = sources;
+        Ok(Self {
+            inner: Arc::new(model),
+        })
+    }
+
     /// Loads a robot from a URDF file. Mesh paths are resolved relative to
     /// the file; `package://` URIs are resolved heuristically.
     #[staticmethod]
@@ -3082,6 +3151,7 @@ impl Scene {
         self.hub.upsert_device(botrail_scene::seq::Device {
             name: name.to_string(),
             kind: botrail_scene::seq::DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: botrail_scene::seq::VehiclePath {
                     waypoints,
                     stations: stations.into_iter().collect(),
@@ -3095,6 +3165,37 @@ impl Scene {
                 tray,
             },
         });
+        Ok(())
+    }
+
+    /// Rotates a disabled wheel visual from the vehicle's travelled distance.
+    /// Axis and pivot are in the visual's local frame; radius is in metres.
+    /// A mecanum wheel uses lateral_ratio=-1 or +1 for its roller handedness.
+    #[pyo3(signature = (vehicle, object, *, radius, axis=(0.0, 1.0, 0.0), pivot=(0.0, 0.0, 0.0), lateral_ratio=0.0))]
+    fn set_vehicle_wheel(
+        &self,
+        vehicle: &str,
+        object: &str,
+        radius: f64,
+        axis: (f64, f64, f64),
+        pivot: (f64, f64, f64),
+        lateral_ratio: f64,
+    ) -> PyResult<()> {
+        let wheel = botrail_scene::wheels::VehicleWheel {
+            object: object.to_string(),
+            radius,
+            axis: [axis.0, axis.1, axis.2],
+            pivot: [pivot.0, pivot.1, pivot.2],
+            lateral_ratio,
+        };
+        self.hub
+            .with_scene(|scene| scene.set_vehicle_wheel(vehicle, wheel))
+            .map_err(PyValueError::new_err)?;
+        self.hub.emit(
+            &self
+                .hub
+                .with_scene(|scene| botrail_scene::wire::devices_message(scene)),
+        );
         Ok(())
     }
 
@@ -3958,6 +4059,12 @@ impl Scene {
         })
     }
 
+    fn _mounting_report_json(&self) -> String {
+        self.hub.with_scene(|scene| {
+            serde_json::to_string(&botrail_scene::mounting::report(scene)).expect("mounting report")
+        })
+    }
+
     fn _set_connection_plan_json(&self, json: &str) -> PyResult<()> {
         let plan = serde_json::from_str(json)
             .map_err(|e| PyValueError::new_err(format!("connection plan: {e}")))?;
@@ -4003,6 +4110,7 @@ impl Scene {
                     );
                 }
                 RobotSource::Catalog { inner, .. } => source_paths(inner, paths)?,
+                RobotSource::Mounting { base, .. } => source_paths(base, paths)?,
                 RobotSource::Visuals { base, visual } => {
                     source_paths(base, paths)?;
                     source_paths(visual, paths)?;

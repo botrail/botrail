@@ -113,10 +113,11 @@ export function samplePlayback(
     if (base && base.length > 0) {
       (bases ??= {})[name] = samplePose(trajectory.times, base, t);
     }
-    // Joints always (the USD appliers and the joint panel read them);
-    // world link poses too when the wire carries them — URDF robots, and
-    // USD robots with a link-mounted camera to place.
-    (joints ??= {})[name] = sampleJoints(trajectory, t);
+    // Transform recordings carry link poses without joint samples. Leave
+    // their joint override unset; the recorded world poses drive playback.
+    if (trajectory.joint_positions.length > 0) {
+      (joints ??= {})[name] = sampleJoints(trajectory, t);
+    }
     if (trajectory.link_poses) {
       (poses ??= {})[name] = samplePoses(
         { ...trajectory, link_poses: trajectory.link_poses },

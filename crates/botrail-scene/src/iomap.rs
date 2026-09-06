@@ -4131,6 +4131,7 @@ pub(crate) mod tests {
         scene.upsert_device(Device {
             name: "agv".into(),
             kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
                 path: crate::seq::VehiclePath {
                     waypoints: vec![
                         nalgebra::Point3::new(0.0, 0.0, 0.0),

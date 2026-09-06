@@ -2,6 +2,7 @@
 //! kinematic tree suitable for FK and scene serialization.
 
 mod mesh_path;
+pub mod mounting;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -195,9 +196,17 @@ pub struct Link {
 /// Where a robot model came from — kept so projects can persist and
 /// re-create the robot.
 #[derive(Debug, Clone)]
+// Cold provenance data owned by the model, not a per-frame processing value.
+// Keep the public Catalog { meta: CatalogMeta } construction contract.
+#[allow(clippy::large_enum_variant)]
 pub enum RobotSource {
     /// URDF XML (xacro already expanded); embedded verbatim in projects.
     UrdfXml(String),
+    /// A versioned mechanical drawing snapshot on an individual loaded part.
+    Mounting {
+        base: Box<RobotSource>,
+        document: Box<mounting::MountingDocument>,
+    },
     /// Replace display shapes from a compatible model, retaining the base's
     /// joints, collision shapes and catalog identity.
     Visuals {
@@ -352,6 +361,10 @@ pub struct CatalogMeta {
     /// Numeric `specs.*` entries, in manifest order (non-numeric specs
     /// such as `controller` lists are dropped).
     pub specs: Vec<(String, f64)>,
+    /// Mechanical declarations, without inferring them from flange labels.
+    pub mounting: Option<mounting::MountingSpec>,
+    pub order: Option<mounting::CatalogOrder>,
+    pub sources: Vec<mounting::CatalogSource>,
 }
 
 impl RobotSource {
@@ -367,6 +380,7 @@ impl RobotSource {
                 articulation_root,
             } => Some((path, articulation_root)),
             RobotSource::Catalog { inner, .. } => inner.usd_stage(),
+            RobotSource::Mounting { base, .. } => base.usd_stage(),
             RobotSource::UrdfXml(_)
             | RobotSource::Composite { .. }
             | RobotSource::Visuals { .. } => None,
@@ -410,6 +424,59 @@ pub struct RobotModel {
 }
 
 impl RobotModel {
+    /// Attach a drawing snapshot before assembling this part. Existing
+    /// catalog identity and mandatory part requirements are retained.
+    pub fn with_mounting(&self, mut document: mounting::MountingDocument) -> Result<Self, String> {
+        fn without_document(source: &RobotSource) -> Result<RobotSource, String> {
+            match source {
+                RobotSource::Composite { .. } => Err(
+                    "with_mounting applies to an individual part before attach_tool/mount".into(),
+                ),
+                RobotSource::Mounting { base, .. } => without_document(base),
+                RobotSource::Visuals { base, visual } => Ok(RobotSource::Visuals {
+                    base: Box::new(without_document(base)?),
+                    visual: visual.clone(),
+                }),
+                _ => Ok(source.clone()),
+            }
+        }
+        document.validate()?;
+        let base = without_document(&self.source)?;
+        let mut names = HashMap::new();
+        for face in &mut document.mounting.interfaces {
+            let index = self
+                .link_index(&face.frame)
+                .or_else(|| {
+                    let found: Vec<_> = self
+                        .links
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| l.name.rsplit('/').next() == Some(face.frame.as_str()))
+                        .collect();
+                    (found.len() == 1).then(|| found[0].0)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "mounting frame `{}` does not exist or is ambiguous",
+                        face.frame
+                    )
+                })?;
+            let canonical = self.links[index].name.clone();
+            names.insert(face.frame.clone(), canonical.clone());
+            face.frame = canonical;
+        }
+        for req in &mut document.mounting.requirements {
+            req.frame = names[&req.frame].clone();
+        }
+        document.validate()?;
+        let mut model = self.clone();
+        model.source = RobotSource::Mounting {
+            base: Box::new(base),
+            document: Box::new(document),
+        };
+        Ok(model)
+    }
+
     /// Display-only replacement. Names may be USD prim paths, but each leaf
     /// name must match uniquely and link origins must agree at zero joints.
     /// USD importers can choose a different basis for each joint frame; rotate

@@ -17,6 +17,7 @@ pub mod interlock;
 pub mod iomap;
 pub mod layout;
 pub mod motion;
+pub mod mounting;
 pub mod part;
 pub mod plcopen;
 pub mod project;
@@ -27,6 +28,7 @@ pub mod script;
 pub mod seq;
 pub mod toolpath;
 pub mod verify;
+pub mod wheels;
 pub mod wire;
 
 #[cfg(test)]

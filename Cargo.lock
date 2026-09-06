@@ -183,6 +183,8 @@ version = "0.8.0"
 dependencies = [
  "nalgebra 0.33.3",
  "roxmltree",
+ "schemars",
+ "serde",
  "thiserror",
  "xurdf",
 ]
@@ -252,6 +254,7 @@ dependencies = [
  "botrail-plan",
  "botrail-traj",
  "nalgebra 0.33.3",
+ "parry3d-f64",
  "schemars",
  "serde",
  "serde_json",

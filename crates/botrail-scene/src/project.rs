@@ -62,7 +62,13 @@ pub struct CatalogArmMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// Persisted provenance mirrors RobotSource; retain the public field types.
+#[allow(clippy::large_enum_variant)]
 pub enum RobotSourceMsg {
+    Mounting {
+        base: Box<RobotSourceMsg>,
+        document: Box<botrail_model::mounting::MountingDocument>,
+    },
     Visuals {
         base: Box<RobotSourceMsg>,
         visual: Box<RobotSourceMsg>,
@@ -107,6 +113,12 @@ pub enum RobotSourceMsg {
         category: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         specs: Vec<(String, f64)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mounting: Option<botrail_model::mounting::MountingSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<botrail_model::mounting::CatalogOrder>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<botrail_model::mounting::CatalogSource>,
         inner: Box<RobotSourceMsg>,
     },
     /// A part welded onto a base robot (`Robot.attach_tool`,
@@ -215,6 +227,7 @@ impl RobotSourceMsg {
         match self {
             Self::Usd { path, .. } => f(path),
             Self::Catalog { inner, .. } => inner.visit_usd_paths_mut(f),
+            Self::Mounting { base, .. } => base.visit_usd_paths_mut(f),
             Self::Composite { base, tool, .. } => {
                 base.visit_usd_paths_mut(f)?;
                 tool.visit_usd_paths_mut(f)
@@ -230,7 +243,8 @@ impl RobotSourceMsg {
 
 fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
     match source {
-        botrail_model::RobotSource::Visuals { base, .. } => source_declares_groups(base),
+        botrail_model::RobotSource::Visuals { base, .. }
+        | botrail_model::RobotSource::Mounting { base, .. } => source_declares_groups(base),
         botrail_model::RobotSource::Composite {
             base,
             tool,
@@ -253,6 +267,10 @@ fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
 /// [`RobotSourceMsg`] from a model's provenance record.
 fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
     match source {
+        botrail_model::RobotSource::Mounting { base, document } => RobotSourceMsg::Mounting {
+            base: Box::new(robot_source_msg(base)),
+            document: document.clone(),
+        },
         botrail_model::RobotSource::Visuals { base, visual } => RobotSourceMsg::Visuals {
             base: Box::new(robot_source_msg(base)),
             visual: Box::new(robot_source_msg(visual)),
@@ -295,6 +313,9 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             product: meta.product.clone(),
             category: meta.category.clone(),
             specs: meta.specs.clone(),
+            mounting: meta.mounting.clone(),
+            order: meta.order.clone(),
+            sources: meta.sources.clone(),
             inner: Box::new(robot_source_msg(inner)),
         },
         botrail_model::RobotSource::Composite {
@@ -349,6 +370,9 @@ pub fn model_from_source(
     import_usd: &dyn Fn(&str, &str) -> Result<botrail_model::RobotModel, String>,
 ) -> Result<botrail_model::RobotModel, ProjectError> {
     match msg {
+        RobotSourceMsg::Mounting { base, document } => model_from_source(base, import_usd)?
+            .with_mounting((**document).clone())
+            .map_err(ProjectError::Robot),
         RobotSourceMsg::Visuals { base, visual } => model_from_source(base, import_usd)?
             .with_visuals(&model_from_source(visual, import_usd)?)
             .map_err(|e| ProjectError::Robot(e.to_string())),
@@ -370,12 +394,27 @@ pub fn model_from_source(
             product,
             category,
             specs,
+            mounting,
+            order,
+            sources,
             inner,
         } => {
             // Rebuild from the embedded inner source (no network), then
             // restore the catalog provenance and manifest frames on the
             // model.
             let mut model = model_from_source(inner, import_usd)?;
+            if let Some(spec) = mounting {
+                spec.validate(sources, order.as_ref())
+                    .map_err(ProjectError::Robot)?;
+                for face in &spec.interfaces {
+                    if model.link_index(&face.frame).is_none() {
+                        return Err(ProjectError::Robot(format!(
+                            "mounting frame `{}` does not exist",
+                            face.frame
+                        )));
+                    }
+                }
+            }
             if let Some(tcp) = tcp {
                 model.tcp_link = model.link_index(tcp);
             }
@@ -423,6 +462,9 @@ pub fn model_from_source(
                     product: product.clone(),
                     category: category.clone(),
                     specs: specs.clone(),
+                    mounting: mounting.clone(),
+                    order: order.clone(),
+                    sources: sources.clone(),
                 },
                 inner: Box::new(inner_source),
             };
@@ -1443,6 +1485,12 @@ fn robot_kwarg_for_name(project: &ProjectFile, name: &Option<String>) -> String 
 /// their parts first (`{var}_tool`, `{konst}_TOOL`), then the attach call.
 fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst: &str) {
     match source {
+        RobotSourceMsg::Mounting { base, document } => {
+            emit_robot_build(out, base, var, konst);
+            let json = serde_json::to_string(document).expect("mounting document");
+            let literal = serde_json::to_string(&json).expect("mounting literal");
+            out.push_str(&format!("{var} = {var}._with_mounting_json({literal})\n"));
+        }
         RobotSourceMsg::Visuals { base, visual } => {
             emit_robot_build(out, base, var, konst);
             let display = format!("{var}_visual");
@@ -1467,6 +1515,9 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             id,
             revision,
             inner,
+            mounting,
+            order,
+            sources,
             ..
         } => {
             // Deterministic re-fetch: the pinned revision makes this the
@@ -1478,6 +1529,14 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             };
             out.push_str(&format!(
                 "{var} = bt.Robot.from_catalog({id:?}, revision={revision:?}{format})\n"
+            ));
+            let snapshot = serde_json::to_string(&(mounting, order, sources))
+                .expect("catalog mounting snapshot");
+            // JSON string escaping is also a valid Python string literal;
+            // Rust Debug can emit \u{...}, which Python cannot parse.
+            let literal = serde_json::to_string(&snapshot).expect("snapshot literal");
+            out.push_str(&format!(
+                "{var} = {var}._with_catalog_mounting_json({literal})\n"
             ));
         }
         RobotSourceMsg::Composite {
@@ -1816,6 +1875,7 @@ pub fn generate_python(project: &ProjectFile) -> String {
             )),
             crate::wire::DeviceKindMsg::Vehicle {
                 path,
+                wheels,
                 body,
                 speed,
                 turn_speed,
@@ -1883,6 +1943,13 @@ pub fn generate_python(project: &ProjectFile) -> String {
                     waypoints.join(", "),
                     stations.join(", "),
                 ));
+                for wheel in wheels {
+                    out.push_str(&format!(
+                        "scene.set_vehicle_wheel({:?}, {:?}, radius={}, axis={}, pivot={}, lateral_ratio={})\n",
+                        device.name, wheel.object, wheel.radius, py_tuple(&wheel.axis),
+                        py_tuple(&wheel.pivot), wheel.lateral_ratio,
+                    ));
+                }
             }
             crate::wire::DeviceKindMsg::Lift {
                 car,
@@ -2924,6 +2991,7 @@ mod tests {
                 product: Some("FR3".into()),
                 category: Some("manipulator".into()),
                 specs: vec![("payload_kg".into(), 3.0), ("reach_mm".into(), 855.0)],
+                ..Default::default()
             },
             inner: Box::new(inner),
         };

@@ -881,6 +881,8 @@ pub enum DeviceKindMsg {
     /// authored path, carrying its body obstacles rigidly.
     Vehicle {
         path: VehiclePathMsg,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wheels: Vec<crate::wheels::VehicleWheel>,
         body: Vec<String>,
         speed: f64,
         turn_speed: f64,
@@ -2576,6 +2578,7 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
             },
             DeviceKind::Vehicle {
                 path,
+                wheels,
                 body,
                 speed,
                 turn_speed,
@@ -2583,6 +2586,7 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 drive,
                 tray,
             } => DeviceKindMsg::Vehicle {
+                wheels: wheels.clone(),
                 allow_reverse: drive.allow_reverse(),
                 max_grade: drive.max_grade(),
                 holonomic: matches!(drive, crate::seq::Drive::Holonomic { .. }),
@@ -2707,6 +2711,7 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
             },
             DeviceKindMsg::Vehicle {
                 path,
+                wheels,
                 body,
                 speed,
                 turn_speed,
@@ -2717,6 +2722,7 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 aerial,
                 tray,
             } => DeviceKind::Vehicle {
+                wheels: wheels.clone(),
                 drive: match aerial {
                     Some(a) => crate::seq::Drive::Aerial {
                         climb_speed: a.climb_speed,

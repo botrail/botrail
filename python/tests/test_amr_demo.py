@@ -23,7 +23,10 @@ unreachable they skip rather than fail; the engine's own coverage lives
 in the Rust suites.
 """
 
+import json
+import math
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -75,6 +78,95 @@ def test_the_machine_is_measured_not_typed(carrier):
     # Speed is derated off the data sheet, never above it.
     assert carrier.cruise(3.0) <= specs["max_speed_mps"]
     assert carrier.cruise(0.5) < carrier.cruise(3.0)
+
+
+def test_the_body_draws_complete_visuals_with_separate_collisions(carrier, tmp_path):
+    """The decimated collision STL must never replace the full appearance."""
+    scene = demo.bt.Scene()
+    carrier.add_body(scene, "amr")
+    project = tmp_path / "body.botrail"
+    scene.save_project(project)
+    with zipfile.ZipFile(project) as archive:
+        body = {o["name"]: o for o in json.loads(archive.read("project.json"))["obstacles"]}
+        collisions = {f"amr/{p.stem}" for p in carrier.pieces}
+        assert {n for n, o in body.items() if o["enabled"]} == collisions
+        for stl in carrier.pieces:
+            obstacle = body[f"amr/{stl.stem}"]
+            assert not obstacle["visible"]
+            assert archive.read(obstacle["geometry"]["url"]) == stl.read_bytes()
+
+        visuals = {n for n, o in body.items() if o["visible"]}
+        assert visuals == set(body) - collisions
+        assert {
+            f"amr/visual/{link}" for link in (
+                "base_link", "top_cover", "front_right_wheel_link",
+                "front_left_wheel_link", "back_right_wheel_link", "back_left_wheel_link",
+            )
+        } <= visuals
+        chassis = body["amr/visual/base_link"]
+        assert archive.read(chassis["geometry"]["url"]) == (
+            carrier.visual_urdf.parent / "../sources/meshes/bases/rbkairos/rbkairos_chassis.stl"
+        ).read_bytes()
+        assert chassis["color"] == [0.0, 0.0, 0.0]  # catalog black, not a grey override
+        assert body["amr/visual/top_cover"]["color"] == [0.5, 0.5, 0.5]
+    assert scene.frames == {}  # fixed world frames would not ride with the body
+
+
+def test_the_complete_appearance_rides_and_turns_with_the_body(baked):
+    _, timeline = baked
+    base0, q0 = timeline.base_pose(0.0)
+    base1, q1 = timeline.base_pose(timeline.duration)
+    yaw = demo.yaw_of(q1) - demo.yaw_of(q0)
+    c, s = math.cos(yaw), math.sin(yaw)
+    for name in ("amr/base_link", "amr/visual/base_link", "amr/visual/top_cover",
+                 "amr/visual/front_right_wheel_link", "amr/visual/back_left_wheel_link"):
+        start, _ = timeline.object_pose(name, 0.0)
+        end, _ = timeline.object_pose(name, timeline.duration)
+        dx, dy, dz = (a - b for a, b in zip(start, base0))
+        assert end == pytest.approx((base1[0] + c * dx - s * dy,
+                                     base1[1] + s * dx + c * dy, base1[2] + dz))
+
+
+def test_catalog_wheels_rotate_during_travel_and_stop_at_the_dock(baked, tmp_path):
+    scene, timeline = baked
+    project = tmp_path / "amr.botrail"
+    scene.save_project(project)
+    with zipfile.ZipFile(project) as archive:
+        devices = json.loads(archive.read("project.json"))["devices"]
+    wheels = next(d["kind"]["wheels"] for d in devices if d["name"] == "amr")
+    assert len(wheels) == 4
+    assert {w["radius"] for w in wheels} == {0.127}
+    drive = timeline.step_span("走行")
+    for wheel in wheels:
+        assert wheel["axis"] == [0, 1, 0]
+        name = wheel["object"]
+        p0, q0 = timeline.object_pose(name, drive.start)
+        p1, q1 = timeline.object_pose(name, drive.start + 0.1)
+        distance = math.dist(p0, p1)
+        assert distance > 0
+        dot = abs(sum(a * b for a, b in zip(q0, q1)))
+        assert 2 * math.acos(min(dot, 1)) == pytest.approx(distance / wheel["radius"], abs=1e-8)
+        assert timeline.object_pose(name, 0)[1] == timeline.object_pose(name, drive.start / 2)[1]
+        assert timeline.object_pose(name, drive.end)[1] == timeline.object_pose(name, timeline.duration)[1]
+
+
+def test_staging_pallets_clear_tables_each_other_and_the_aisle(baked):
+    scene, _ = baked
+
+    def bounds(group):
+        boxes = [scene.obstacle_bounds(n) for n in scene.obstacle_names
+                 if n.startswith(f"{group}/")]
+        return (tuple(min(lo[i] for lo, _ in boxes) for i in range(3)),
+                tuple(max(hi[i] for _, hi in boxes) for i in range(3)))
+
+    pallets = [bounds(f"pallet{i}") for i in range(2)]
+    assert pallets[0][0][0] - bounds("lathe")[1][0] == pytest.approx(demo.PALLET_GAP)
+    assert pallets[1][0][0] - pallets[0][1][0] == pytest.approx(demo.PALLET_GAP)
+    for lo, hi in pallets:
+        assert hi[1] <= demo.SERVED_FACE + 1e-9
+        for table in ("bench", "lathe", "cnc"):
+            tlo, thi = bounds(table)
+            assert any(hi[i] <= tlo[i] or thi[i] <= lo[i] for i in (0, 1)), table
 
 
 def test_a_deck_that_needs_a_riser_is_refused(carrier):

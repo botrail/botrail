@@ -1,0 +1,753 @@
+{
+  "scope": "Recipe declarations, synthetic geometry and dataset revision in tests; no hardware validation",
+  "recorded_at": "2026-09-06",
+  "products": [
+    {
+      "recipe": "universal_robots/ur5e-rosi.yaml",
+      "manifest": {
+        "id": "universal_robots/ur/ur5e/r2",
+        "category": "manipulator",
+        "name": "UR5e",
+        "manufacturer": {
+          "name": "Universal Robots",
+          "country": "DK",
+          "product_url": "https://www.universal-robots.com/products/ur5e/"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "tool0",
+              "role": "flange",
+              "interface_id": "ISO 9409-1-50-4-M6",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "E-series / UR5e/UR7e"
+                }
+              ],
+              "note": "Drawing XY uses the indexing hole along +Y. Mapping to ROS-I tool0 remains unverified. Coordinates are derived from nominal PCD 50 and 45 degrees; positional tolerance is not inferred from PCD tolerance. H7/h8 diameter limits and M6 pitch have not been transcribed. Depth max 8 mm is the maximum bolt penetration, not screw length or guaranteed usable engagement.",
+              "geometry": {
+                "normal_z": 1,
+                "frame_verified": false,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m6-1",
+                    "position_mm": [
+                      -17.67766953,
+                      17.67766953
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 6.0,
+                      "left_hand": false
+                    },
+                    "depth_mm": {
+                      "min": 0.0,
+                      "max": 8.0
+                    },
+                    "fastener_rules": {
+                      "head_standard": "ISO 4762",
+                      "property_class": "8.8",
+                      "torque_nm": {
+                        "min": 8.0,
+                        "max": 8.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-2",
+                    "position_mm": [
+                      17.67766953,
+                      17.67766953
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 6.0,
+                      "left_hand": false
+                    },
+                    "depth_mm": {
+                      "min": 0.0,
+                      "max": 8.0
+                    },
+                    "fastener_rules": {
+                      "head_standard": "ISO 4762",
+                      "property_class": "8.8",
+                      "torque_nm": {
+                        "min": 8.0,
+                        "max": 8.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-3",
+                    "position_mm": [
+                      17.67766953,
+                      -17.67766953
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 6.0,
+                      "left_hand": false
+                    },
+                    "depth_mm": {
+                      "min": 0.0,
+                      "max": 8.0
+                    },
+                    "fastener_rules": {
+                      "head_standard": "ISO 4762",
+                      "property_class": "8.8",
+                      "torque_nm": {
+                        "min": 8.0,
+                        "max": 8.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-4",
+                    "position_mm": [
+                      -17.67766953,
+                      -17.67766953
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 6.0,
+                      "left_hand": false
+                    },
+                    "depth_mm": {
+                      "min": 0.0,
+                      "max": 8.0
+                    },
+                    "fastener_rules": {
+                      "head_standard": "ISO 4762",
+                      "property_class": "8.8",
+                      "torque_nm": {
+                        "min": 8.0,
+                        "max": 8.0
+                      }
+                    }
+                  }
+                ],
+                "locators": [
+                  {
+                    "id": "index",
+                    "kind": "hole",
+                    "position_mm": [
+                      0.0,
+                      25.0
+                    ],
+                    "diameter_mm": {
+                      "min": 6.0,
+                      "max": 6.0
+                    },
+                    "depth_mm": {
+                      "min": 6.0,
+                      "max": 6.4
+                    }
+                  },
+                  {
+                    "id": "center",
+                    "kind": "recess",
+                    "position_mm": [
+                      0.0,
+                      0.0
+                    ],
+                    "diameter_mm": {
+                      "min": 31.5,
+                      "max": 31.5
+                    }
+                  },
+                  {
+                    "id": "outer-pilot",
+                    "kind": "boss",
+                    "position_mm": [
+                      0.0,
+                      0.0
+                    ],
+                    "diameter_mm": {
+                      "min": 63.0,
+                      "max": 63.0
+                    }
+                  }
+                ],
+                "evidence": [
+                  {
+                    "source": 0,
+                    "section": "UR5e/UR7e tool drawing and mounting table"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": []
+        },
+        "order": {
+          "unit": "set",
+          "includes": [
+            {
+              "name": "制御箱 (Control Box、460 × 449 × 254 mm、12 kg、IP44)",
+              "qty": 1
+            },
+            {
+              "name": "ティーチペンダント (300 × 231 × 50 mm、1.8 kg、ケーブル 4.5 m)",
+              "qty": 1
+            },
+            {
+              "name": "ロボットケーブル 6 m (アーム〜制御箱)",
+              "qty": 1
+            }
+          ],
+          "requires": [],
+          "note": "UR5e データシートの標準構成。エンドエフェクタ・カップリングは別売"
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://www.universal-robots.com/articles/ur/application-installation/end-effector-mounting-on-tool-output-flange/",
+            "ref": "2025-09-08; UR5e/UR7e drawing",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "flange_frame": "tool0",
+          "flange_standard": "ISO 9409-1-50-4-M6",
+          "tcp_default": "tool0",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "robotiq/2f-85.yaml",
+      "manifest": {
+        "id": "robotiq/2f/2f-85/r1",
+        "category": "gripper.parallel",
+        "name": "2F-85",
+        "manufacturer": {
+          "name": "Robotiq",
+          "country": "CA",
+          "product_url": "https://robotiq.com/products/adaptive-grippers"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "robotiq_arg2f_base_link",
+              "role": "mount",
+              "interface_id": "robotiq:2f:coupling-to-gripper",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "6.1.1 Couplings"
+                }
+              ],
+              "note": "Catalog-local identifier for the gripper side of the coupling; not a bare ISO robot flange. Model pose and detailed fit remain unverified.",
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": [
+            {
+              "id": "gripper-coupling",
+              "frame": "robotiq_arg2f_base_link",
+              "order_requires": 0,
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "6.1.1 Couplings"
+                }
+              ],
+              "note": "The gripper requires the separately modeled Robotiq coupling on its attachment path. The offset alone does not supply it."
+            }
+          ]
+        },
+        "order": {
+          "unit": "each",
+          "includes": [],
+          "requires": [
+            {
+              "category": "adapter",
+              "catalog": "robotiq/coupling/gripper-coupling/r1",
+              "qty": 1,
+              "note": "Robotiq 2F 共通カップリング参照モデル（別売）。本モデルのロボット側は ISO40。UR の ISO50 用には対応型式とモデルを別途選定する。"
+            }
+          ]
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190315.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm",
+            "ref": "20190315",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "flange_standard": "ISO 9409-1-50-4-M6",
+          "mount_frame": "robotiq_arg2f_base_link",
+          "tcp_default": "tcp",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "robotiq/gripper-coupling.yaml",
+      "manifest": {
+        "id": "robotiq/coupling/gripper-coupling/r1",
+        "category": "adapter",
+        "name": "Gripper Coupling",
+        "manufacturer": {
+          "name": "Robotiq",
+          "country": "CA",
+          "product_url": "https://robotiq.com/products/adaptive-grippers"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "mount",
+              "role": "mount",
+              "interface_id": "ISO 9409-1-40-4-M6",
+              "evidence": [
+                {
+                  "source": 1,
+                  "section": "p.126 Fig.6-8, AGC-CPL-064-002 robot-side pattern"
+                },
+                {
+                  "source": 2,
+                  "section": "Four clearance-hole centers (+/-14.14214, +/-14.14214) mm, PCD40; index-hole center (0,20) mm. Faceted mesh fit is not a manufacturing tolerance."
+                }
+              ],
+              "note": "The supplied mesh corresponds to the ISO40 pattern in AGC-CPL-064-002, not the ISO50 AGC-CPL-062-002 required by a UR5e flange. This establishes the represented face pattern, not an orderable variant or electronics revision. The root at mesh z=-7 mm is the outer rim; the recessed robot bearing plane is at z=-4 mm. Detailed frame/pose, tolerances and fasteners remain unverified. Do not use the 13.9 mm overall thickness as the mating-plane offset.",
+              "geometry": {
+                "normal_z": -1,
+                "frame_verified": false,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m6-1",
+                    "position_mm": [
+                      -14.14213562,
+                      14.14213562
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-2",
+                    "position_mm": [
+                      14.14213562,
+                      14.14213562
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-3",
+                    "position_mm": [
+                      14.14213562,
+                      -14.14213562
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-4",
+                    "position_mm": [
+                      -14.14213562,
+                      -14.14213562
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  }
+                ],
+                "locators": [],
+                "evidence": [
+                  {
+                    "source": 1,
+                    "section": "p.126 Fig.6-8; PCD40, 45 degrees, 4x diameter 6.4 nominal, M6-1.0. Missing tolerances and unmapped bearing plane prohibit a fit pass."
+                  },
+                  {
+                    "source": 2,
+                    "section": "PCD40 measured from the input mesh; nominal XY features correspond to Fig.6-8."
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            },
+            {
+              "frame": "flange",
+              "role": "flange",
+              "interface_id": "robotiq:2f:coupling-to-gripper",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "6.1.1 Couplings"
+                }
+              ],
+              "note": "Catalog-local identifier for the common gripper-side interface. Detailed model dimensions and permitted pose remain unverified.",
+              "geometry": {
+                "normal_z": 1,
+                "frame_verified": false,
+                "complete": false,
+                "holes": [],
+                "locators": [
+                  {
+                    "id": "gripper-pilot",
+                    "kind": "recess",
+                    "position_mm": [
+                      0.0,
+                      0.0
+                    ],
+                    "diameter_mm": {
+                      "min": 71.03,
+                      "max": 71.076
+                    },
+                    "depth_mm": {
+                      "min": 2.9,
+                      "max": 2.9
+                    }
+                  }
+                ],
+                "evidence": [
+                  {
+                    "source": 1,
+                    "section": "p.123 section 6.1.1, Fig.6-5 gripper-side recess; depth is nominal"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": []
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190315.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm",
+            "ref": "20190315",
+            "fetched_at": "2026-09-06"
+          },
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://assets.robotiq.com/website-assets/support_archives/document_en/2F-85_2F-140_Instruction_Manual_PDF_20181130.pdf",
+            "ref": "20181130",
+            "fetched_at": "2026-09-06"
+          },
+          {
+            "kind": "measurement",
+            "url": "urn:sha256:4281e83002a25c20dc07c68b8d77da30a13e9a8401f157f6848ed8287d7cce44",
+            "ref": "ROS-I coupling STL; mesh section at z=-2 mm; not a hardware measurement",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "flange_frame": "flange",
+          "mount_frame": "mount",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "mitsubishi_electric/rv-5as-d.yaml",
+      "manifest": {
+        "id": "mitsubishi_electric/assista/rv-5as-d/r1",
+        "category": "manipulator",
+        "name": "RV-5AS-D (MELFA ASSISTA)",
+        "manufacturer": {
+          "name": "三菱電機",
+          "country": "JP",
+          "product_url": "https://gb-fa.mitsubishielectric.com/fa/products/rbt/assista/assista/rv-5as-d.html"
+        },
+        "sources": [],
+        "frames": {
+          "base_frame": "rv5as_base",
+          "flange_frame": "rv5as_hand_flange",
+          "tcp_default": "rv5as_default_tcp",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "botrail/spindle-emsf3060.yaml",
+      "manifest": {
+        "id": "botrail/spindle/spindle-emsf3060/r1",
+        "category": "tool.spindle",
+        "name": "Motor Spindle (EMSF-3060 class)",
+        "manufacturer": {
+          "name": "botrail",
+          "product_url": "https://github.com/botrail/botrail-assets"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "mount",
+              "role": "mount",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "6-2 Outside View; 10 Installation of the Motor Spindle"
+                }
+              ],
+              "note": "Reference product EMSF-3060K; this is an approximate authored model. The robot-side bracket and model mating pose have not been verified.",
+              "geometry": {
+                "normal_z": -1,
+                "frame_verified": false,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m4-1",
+                    "position_mm": [
+                      -11.184740509,
+                      15.973464864
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 4.2,
+                      "max": 4.2
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 4.0,
+                        "left_hand": false
+                      },
+                      "length_mm": {
+                        "min": 16.0,
+                        "max": 16.0
+                      },
+                      "head_standard": "hexagon socket head cap screw"
+                    }
+                  },
+                  {
+                    "id": "m4-2",
+                    "position_mm": [
+                      11.184740509,
+                      15.973464864
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 4.2,
+                      "max": 4.2
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 4.0,
+                        "left_hand": false
+                      },
+                      "length_mm": {
+                        "min": 16.0,
+                        "max": 16.0
+                      },
+                      "head_standard": "hexagon socket head cap screw"
+                    }
+                  },
+                  {
+                    "id": "m4-3",
+                    "position_mm": [
+                      11.184740509,
+                      -15.973464864
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 4.2,
+                      "max": 4.2
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 4.0,
+                        "left_hand": false
+                      },
+                      "length_mm": {
+                        "min": 16.0,
+                        "max": 16.0
+                      },
+                      "head_standard": "hexagon socket head cap screw"
+                    }
+                  },
+                  {
+                    "id": "m4-4",
+                    "position_mm": [
+                      -11.184740509,
+                      -15.973464864
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 4.2,
+                      "max": 4.2
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 4.0,
+                        "left_hand": false
+                      },
+                      "length_mm": {
+                        "min": 16.0,
+                        "max": 16.0
+                      },
+                      "head_standard": "hexagon socket head cap screw"
+                    }
+                  }
+                ],
+                "locators": [],
+                "evidence": [
+                  {
+                    "source": 0,
+                    "section": "p.4 Fig.4 (6-2 Outside View); pp.6-7 section 10, Fig.13"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": [
+            {
+              "id": "robot-bracket",
+              "frame": "mount",
+              "evidence": [],
+              "note": "A robot-to-spindle bracket has not been specified. Obtain its drawings and part identity before checking this assembly."
+            }
+          ]
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://en.nakanishi-spindle.com/wp-content/uploads/existing/industrial-eng/download/manual/sale/OM-KK0978EN000_Motor-Spindle_EMSF-3060K_Manual_EN_no-collet.pdf",
+            "ref": "OM-KK0978EN 000",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "mount_frame": "mount",
+          "tcp_default": "tip",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "fanuc/r2000ic-165f-official.yaml",
+      "manifest": {
+        "id": "fanuc/r2000ic/r2000ic-165f/r2",
+        "category": "manipulator",
+        "name": "R-2000iC/165F",
+        "manufacturer": {
+          "name": "FANUC",
+          "country": "JP",
+          "product_url": "https://www.fanucamerica.com/products/robot/r-2000ic-165f"
+        },
+        "sources": [],
+        "frames": {
+          "base_frame": "base_link",
+          "flange_frame": "fanuc_flange",
+          "tcp_default": "fanuc_flange",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
+      "recipe": "botrail/weld-gun-x1-r4.yaml",
+      "manifest": {
+        "id": "botrail/weld/weld-gun-x1/r4",
+        "category": "tool.weld_gun",
+        "name": "Weld Gun X16005 (reconstructed envelope)",
+        "manufacturer": {
+          "name": "botrail",
+          "product_url": "https://github.com/botrail/botrail-assets"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "mount",
+              "role": "mount",
+              "evidence": [],
+              "note": "Legacy frame on a reconstructed X16005 envelope. The product page is a reference for the envelope, not evidence for the mating holes or frame orientation.",
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": [
+            {
+              "id": "robot-bracket",
+              "frame": "mount",
+              "evidence": [],
+              "note": "The robot-side bracket and manufacturer mounting drawings are missing. Envelope placement cannot establish attachment compatibility."
+            }
+          ]
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://heron-welder.com/x-type-robotic-welding-gun-with-servo-actuator/",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "mount_frame": "mount",
+          "tcp_default": "tcp",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    }
+  ]
+}

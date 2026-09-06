@@ -48,7 +48,13 @@ Three rules of a moving base fall out of it:
     from where the machine will be standing when it serves them.
 
 Run with:  python examples/vehicles/amr_demo.py [out.usda] [--carrier NAME]
-                                       [--compare] [--drive-and-plan]
+                                       [--compare] [--drive-and-plan] [--studio]
+
+With --studio, opens the interactive studio after exporting (Ctrl-C to stop).
+--compare prints the carrier comparison without opening Studio.
+Driven wheel visuals rotate with travel when the carrier URDF supplies
+their radius and axle. Stops, turns and --holonomic sideways travel are
+reflected in Studio and the exported recording.
 
 (Name the output `cell_amr.usdc` for a binary stage: the same recording
 at a quarter of the size, since a catalog arm brings a lot of mesh with
@@ -57,6 +63,7 @@ it. `play_record.py` reads either.)
 
 import math
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -97,6 +104,8 @@ CNC_FACE = 1.60  # the machine tool at the back of the bay
 NOSE = 0.16  # how close the machine's front stops to it
 BENCH_TOP = 0.75
 BENCH = (1.30, 0.55)
+PALLET = (1.20, 1.00, 0.144)
+PALLET_GAP = 0.10  # clearance between staging pallets and the neighbouring table
 PART_X = -2.45  # where the part waits on the bench
 BELT_X = 1.34  # the outfeed belt, up the bay's east side
 BELT_RUN, BELT_W, BELT_TOP = (0.35, 1.45), 0.30, 0.62
@@ -133,10 +142,6 @@ PADS = [f"{side}_inner_{part}"
 ACCEL, RAMP_SHARE = 1.0, 0.15
 TURN = math.radians(45.0)  # in-cell pivot rate — assumed, as the AGV cell's
 
-# Linear-RGB colours (the USD convention — never raw sRGB bytes).
-SHELL = (0.76, 0.77, 0.79)
-BLACK = (0.010, 0.010, 0.011)
-
 UR_BASE_R = 0.075  # UR base flange radius: how far in from an edge it bolts
 PLATE = 0.015  # the adapter plate between deck and arm
 ARM_CLEAR = 0.22  # the arm's own room on the deck, ahead of which the tray starts
@@ -160,18 +165,20 @@ class Carrier:
     """
 
     def __init__(self, package: str):
-        spec = manifest(package)
+        root = Path(bt.catalog_package(package))
+        spec = yaml.safe_load((root / "manifest.yaml").read_text())
         self.package, self.id = package, spec["id"]
         self.product, self.maker = spec["name"], spec["manufacturer"]["name"]
         self.specs = spec["specs"]
+        self.visual_urdf = root / spec["assets"]["urdf"]
         self.model = bt.Robot.from_catalog(package, format="usd")
         if self.model.flange_link is None:
             raise ValueError(f"{self.id} declares no mount frame to bolt an arm to")
-        self.pieces = sorted((Path(bt.catalog_package(package)) / "collision").glob("*.stl"))
+        self.pieces = sorted((root / "collision").glob("*.stl"))
 
         # FK in a scene of its own: the mount frame, and every collision
-        # piece in the machine's frame. Those pieces are the body — the
-        # thing that has to clear the aisle *is* the thing you see.
+        # piece in the machine's frame. These measure clearance; the
+        # catalog's separate visual geometry supplies the appearance.
         probe = bt.Scene(self.model)
         self.deck = probe.link_pose(self.link(self.model.flange_link))[0][2]
         self.poses, self.bounds = {}, {}
@@ -266,11 +273,58 @@ class Carrier:
         x, y = self.infeed
         for stl in self.pieces:
             (px, py, pz), q = self.poses[stl.stem]
-            sensor = any(word in stl.stem for word in ("laser", "lidar"))
             name = scene.add_mesh(f"{prefix}/{stl.stem}", stl, (x + px, y + py, pz),
-                                  quaternion=q, color=BLACK if sensor else SHELL)
-            scene.set_obstacle_material(name, metalness=0.2 if sensor else 0.35,
-                                        roughness=0.6 if sensor else 0.45)
+                                  quaternion=q)
+            scene.set_obstacle_visible(name, False)
+
+        # Collision meshes are decimated and omit visual-only links such
+        # as the wheels and deck cover. Draw the full catalog visuals with
+        # their own colors/materials, in the same moving vehicle group.
+        # They ride with the body but do not change its clearance checks.
+        visuals = scene.load_urdf(self.visual_urdf, prefix=f"{prefix}/visual",
+                                  position=(x, y, 0.0), frames=False)
+        for name in visuals:
+            scene.set_obstacle_enabled(name, False)
+
+    def add_wheels(self, scene: bt.Scene, vehicle: str) -> None:
+        """Animate driven wheels whose radius and axle the URDF declares.
+
+        The common wheel visuals share their link's axes. Unknown radii
+        or rotated visual frames stay as supplied instead of guessing a
+        rolling radius. This does not add wheel contact physics.
+        """
+        robot = ET.parse(self.visual_urdf).getroot()
+        links = {link.get("name"): link for link in robot.findall("link")}
+        probe = bt.Scene(self.model)
+        for joint in robot.findall("joint"):
+            if joint.get("type") != "continuous":
+                continue
+            child = joint.find("child").get("link")
+            if "wheel" not in child:
+                continue
+            link = links[child]
+            shapes = link.findall("visual")
+            radius_shape = next((g for g in link.findall("collision/geometry/*")
+                                 if g.tag in ("sphere", "cylinder")), None)
+            if radius_shape is None or len(shapes) != 1:
+                continue
+            origin = shapes[0].find("origin")
+            if origin is not None and any(float(v) for v in origin.get("rpy", "0 0 0").split()):
+                continue
+            pivot = (tuple(-float(v) for v in origin.get("xyz", "0 0 0").split())
+                     if origin is not None else (0.0, 0.0, 0.0))
+            axis = joint.find("axis")
+            axis = (tuple(float(v) for v in axis.get("xyz", "1 0 0").split())
+                    if axis is not None else (1.0, 0.0, 0.0))
+            lateral = 0.0
+            if self.specs.get("drive") == "mecanum":
+                (x, y, _), _ = probe.link_pose(self.link(child))
+                # Standard 45-degree X roller layout: opposite diagonals
+                # spin opposite ways during a sideways translation.
+                lateral = -math.copysign(1.0, x * y)
+            scene.set_vehicle_wheel(vehicle, f"{vehicle}/visual/{child}",
+                                    radius=float(radius_shape.get("radius")),
+                                    axis=axis, pivot=pivot, lateral_ratio=lateral)
 
 
 # ------------------------------------------------------------------ the cell
@@ -315,8 +369,11 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
                    model="TL-25", manufacturer="Generic", color=(0.22, 0.26, 0.32))
     # The staging pallets opposite the bay. They are what the pivot has to
     # miss: a turn there sweeps the body's half-diagonal, not its width.
-    for i, x in enumerate((0.35, 1.35)):
-        bt.parts.pallet(scene, f"pallet{i}", position=(x, SERVED_FACE - 0.40))
+    lathe_right = scene.obstacle_bounds("lathe/top")[1][0]
+    for i in range(2):
+        x = lathe_right + PALLET_GAP + PALLET[0] / 2 + i * (PALLET[0] + PALLET_GAP)
+        bt.parts.pallet(scene, f"pallet{i}", size=PALLET,
+                        position=(x, SERVED_FACE - PALLET[1] / 2))
 
     # -- the bay: the machine tool, and the belt that takes parts away ---
     bt.parts.table(scene, "cnc", size=(1.20, 0.90, 1.70),
@@ -356,6 +413,7 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
         tray_size=(*machine.tray_size, 0.12),
         **drive,
     )
+    machine.add_wheels(scene, "amr")
     # From here the arm's base is not a scene constant: it is the deck.
     scene.mount_robot("amr", offset_position=machine.mount)
     # The vehicle is a product, so it goes on the bill of materials as one.
@@ -652,8 +710,8 @@ def main() -> None:
         print(f"  {who:<9} carries {carried:5.1f} kg of {rated:6.1f} kg rated")
 
     try:
-        _, tl = bake(carrier, "--drive-and-plan" in args,
-                     holonomic="--holonomic" in args)
+        scene, tl = bake(carrier, "--drive-and-plan" in args,
+                         holonomic="--holonomic" in args)
     except (ValueError, RuntimeError) as err:
         print(f"\ncycle failed: {err}")
         sys.exit(1)
@@ -695,6 +753,9 @@ def main() -> None:
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")
     print(f"  replay it with:  python examples/export/play_record.py {out}")
+
+    if "--studio" in args:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":
