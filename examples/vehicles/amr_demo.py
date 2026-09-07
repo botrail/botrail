@@ -51,6 +51,9 @@ Run with:  python examples/vehicles/amr_demo.py [out.usda] [--carrier NAME]
                                        [--compare] [--drive-and-plan] [--studio]
 
 With --studio, opens the interactive studio after exporting (Ctrl-C to stop).
+Normal runs download the built r2/ES-062 kit and re-teach the grasp.
+`--robotiq-r2 CATALOG_ROOT` is a local development override. Its declared manufacturer support is limited to the catalog's
+listed host; this demo does not extend that claim to its UR16e.
 --compare prints the carrier comparison without opening Studio.
 Driven wheel visuals rotate with travel when the carrier URDF supplies
 their radius and axle. Stops, turns and --holonomic sideways travel are
@@ -61,6 +64,9 @@ at a quarter of the size, since a catalog arm brings a lot of mesh with
 it. `play_record.py` reads either.)
 """
 
+from __future__ import annotations
+
+import argparse
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -72,14 +78,18 @@ import yaml  # noqa: E402  (catalog manifests; `from_catalog` needs it too)
 
 import botrail as bt  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _robotiq as rq
+
 # ------------------------------------------------------------- the machine
 # Three catalog ids. `from_catalog` takes a short name as long as it is
 # unambiguous, and what a project records is the id and dataset revision
 # it resolved to — so naming them this way costs nothing in replayability.
 CARRIER = "rb-kairos"  # Robotnik RB-KAIROS: a base sold to carry exactly this
 ARM = "ur16e"  # 900 mm of reach: a low deck has to cross the aisle to work
-COUPLING = "gripper-coupling"
-GRIPPER = "2f-85"
+# Exact runtime models; TCP and close are taught from their geometry.
+COUPLING = rq.COUPLING_ES062
+GRIPPER = rq.HAND_R2
 
 # What `--compare` re-bakes the cell on. Any `vehicle.amr` package with a
 # mount frame is a candidate; the cell asks nothing else of a carrier.
@@ -328,15 +338,14 @@ class Carrier:
 
 
 # ------------------------------------------------------------------ the cell
-def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
+def build_scene(carrier: str = CARRIER, *, holonomic: bool = False,
+                robotiq_root: Path | None = None) -> bt.Scene:
     """The aisle, the bay, and the machine standing at the bench.
 
     Shared with `play_record.py`, which rebuilds the cell a recording was
     baked from."""
     machine = Carrier(carrier)
-    arm = (bt.Robot.from_catalog(ARM)
-           .attach_tool(bt.Robot.from_catalog(COUPLING), prefix="cpl_")
-           .attach_tool(bt.Robot.from_catalog(GRIPPER)))
+    arm = rq.attach(bt.Robot.from_catalog(ARM), robotiq_root)
     scene = bt.Scene(arm, name="ur")
     scene.set_joint_positions(READY)
 
@@ -488,6 +497,9 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
                 drive_and_plan: bool = False) -> str:
     """Teaches the poses in the machine's frame and writes the cycle."""
     machine = Carrier(carrier)
+    shut = rq.close_for_width(scene.robot, PART, SHUT)
+    finger_joint = scene.robot.joint_names[-1]
+    pads = rq.pads(scene.robot)
 
     def teach(point, standoff: float, finger: float, seed=None) -> list:
         """IK on a point given in the machine's frame.
@@ -534,7 +546,7 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
     for name, point in (("bench", bench), ("deck", deck), ("belt", belt)):
         over = teach(point, HOVER, OPEN)
         seat = teach(point, 0.0, OPEN, over)
-        for state, finger in (("open", OPEN), ("shut", SHUT)):
+        for state, finger in (("open", OPEN), ("shut", shut)):
             scene.add_segment(f"over_{name}_{state}", goal=[*over[:6], finger])
             scene.add_segment(f"at_{name}_{state}", goal=[*seat[:6], finger])
     # The travelling pose: the fold, with the wrist left where the deck
@@ -560,12 +572,12 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
     sq = scene.sequence("amr_transfer")
     sq.step("接近", actions=[bt.seq.motion("over_bench_open")])
     sq.step("下降", actions=[bt.seq.motion("at_bench_open")])
-    sq.step("把持", actions=[bt.seq.ramp({"finger_joint": SHUT}, 0.5)])
-    sq.step("保持", actions=[bt.seq.attach(TOTE, touch_links=PADS)])
+    sq.step("把持", actions=[bt.seq.ramp({finger_joint: shut}, 0.5)])
+    sq.step("保持", actions=[bt.seq.attach(TOTE, touch_links=pads)])
     sq.step("持上", actions=[bt.seq.motion("over_bench_shut")])
     sq.step("移載", actions=[bt.seq.motion("over_deck_shut")])
     sq.step("載置", actions=[bt.seq.motion("at_deck_shut")])
-    sq.step("解放", actions=[bt.seq.ramp({"finger_joint": OPEN}, 0.4),
+    sq.step("解放", actions=[bt.seq.ramp({finger_joint: OPEN}, 0.4),
                              bt.seq.detach(TOTE)])
     # The departure permit a real machine waits on, asked of the machine
     # itself: its own load sensor says the part is aboard — it rides with
@@ -590,12 +602,12 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
     # Same deck, same taught pose. The machine has moved; the deck has not.
     sq.step("取出", actions=[bt.seq.motion("over_deck_open")])
     sq.step("下降", actions=[bt.seq.motion("at_deck_open")])
-    sq.step("把持", actions=[bt.seq.ramp({"finger_joint": SHUT}, 0.5)])
-    sq.step("保持", actions=[bt.seq.attach(TOTE, touch_links=PADS)])
+    sq.step("把持", actions=[bt.seq.ramp({finger_joint: shut}, 0.5)])
+    sq.step("保持", actions=[bt.seq.attach(TOTE, touch_links=pads)])
     sq.step("持上", actions=[bt.seq.motion("over_deck_shut")])
     sq.step("払出", actions=[bt.seq.motion("over_belt_shut")])
     sq.step("投入", actions=[bt.seq.motion("at_belt_shut")])
-    sq.step("離脱", actions=[bt.seq.ramp({"finger_joint": OPEN}, 0.4),
+    sq.step("離脱", actions=[bt.seq.ramp({finger_joint: OPEN}, 0.4),
                              bt.seq.detach(TOTE), bt.seq.start("outfeed")])
     sq.step("復帰", actions=[bt.seq.motion("over_belt_open")])
     sq.step("格納", actions=[bt.seq.motion("home")])
@@ -603,22 +615,30 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
 
 
 # ------------------------------------------------------------------- reports
-def load_chain(machine: Carrier) -> list:
+def load_chain(machine: Carrier, *, robotiq_root: Path | None = None) -> list:
     """What each product in the stack is rated for against what it
     actually carries, tightest margin first.
 
     A mobile manipulator is three data sheets in series: the gripper
     holds the part, the arm holds the gripper and the part, the carrier
-    holds all of it. Exactly one of them is the binding one, and it is
-    worth knowing which before the cell is built rather than after.
+    holds all of it. Missing ratings or component masses stay unknown;
+    only rows with both figures can be ranked by their margin.
     """
-    arm, gripper = manifest(ARM)["specs"], manifest(GRIPPER)["specs"]
+    arm = manifest(ARM)["specs"]
+    gripper = (yaml.safe_load((robotiq_root / rq.HAND_R2 / "manifest.yaml").read_text())["specs"]
+               if robotiq_root is not None else manifest(GRIPPER)["specs"])
+    tool_mass = gripper.get("mass_kg")
+    coupling = (yaml.safe_load((robotiq_root / rq.COUPLING_ES062 / "manifest.yaml").read_text())
+                if robotiq_root is not None else manifest(COUPLING))
+    coupling_mass = coupling.get("specs", {}).get("mass_kg")
+    tool_mass = tool_mass + coupling_mass if tool_mass is not None and coupling_mass is not None else None
+    carried = PART_MASS + tool_mass if tool_mass is not None else None
     return sorted([
-        ("gripper", gripper["payload_kg"], PART_MASS),
-        ("arm", arm["payload_kg"], PART_MASS + gripper["mass_kg"]),
+        ("gripper", gripper.get("payload_kg"), PART_MASS),
+        ("arm", arm["payload_kg"], carried),
         ("carrier", machine.specs["payload_kg"],
-         PART_MASS + gripper["mass_kg"] + arm["mass_kg"]),
-    ], key=lambda row: row[1] - row[2])
+         carried + arm["mass_kg"] if carried is not None else None),
+    ], key=lambda row: row[1] - row[2] if row[1] is not None and row[2] is not None else math.inf)
 
 
 def pivot_at(tl, dt: float = 0.02) -> float:
@@ -633,14 +653,15 @@ def pivot_at(tl, dt: float = 0.02) -> float:
     return tl.duration
 
 
-def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False):
+def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False,
+         *, robotiq_root: Path | None = None):
     """One carrier, all the way through: scene, cycle, timeline."""
-    scene = build_scene(carrier, holonomic=holonomic)
+    scene = build_scene(carrier, holonomic=holonomic, robotiq_root=robotiq_root)
     name = build_cycle(scene, carrier, drive_and_plan)
     return scene, scene.simulate_sequence(name, max_duration=150.0)
 
 
-def compare() -> None:
+def compare(*, robotiq_root: Path | None = None) -> None:
     """The same authored cell, baked on every carrier in the catalog.
 
     Three kinds of answer come back, and they come from three different
@@ -664,7 +685,7 @@ def compare() -> None:
                f"{machine.length:5.2f}x{machine.width:<5.2f} {machine.swing:6.2f} "
                f"{machine.cruise(CORNER_X - machine.infeed[0]):5.2f}")
         try:
-            _, tl = bake(name)
+            _, tl = bake(name, robotiq_root=robotiq_root)
         except (ValueError, RuntimeError) as err:
             print(f"{row} {'—':>7}   {first_line(err)}")
             continue
@@ -682,10 +703,13 @@ def first_line(err: Exception) -> str:
 
 
 def main() -> None:
-    args = sys.argv[1:]
+    parser = argparse.ArgumentParser(add_help=False)
+    rq.add_argument(parser)
+    selected, args = parser.parse_known_args()
+    r2 = {"robotiq_root": selected.robotiq_r2} if selected.robotiq_r2 is not None else {}
     carrier = args[args.index("--carrier") + 1] if "--carrier" in args else CARRIER
     if "--compare" in args:
-        compare()
+        compare(**r2)
         return
     out = next((a for a in args if not a.startswith("--") and a != carrier),
                "cell_amr.usda")
@@ -696,7 +720,7 @@ def main() -> None:
         print(f"{carrier} cannot carry this cell: {err}")
         sys.exit(1)
     print(f"{machine.product} ({machine.maker}) + {manifest(ARM)['name']} + "
-          f"{manifest(GRIPPER)['name']}")
+          f"{'2F-85 r2 / ES-062' if r2 else manifest(GRIPPER)['name']}")
     print(f"  deck      {machine.deck * 1e3:4.0f} mm, chassis {machine.proud * 1e3:.0f} mm "
           f"proud of the mount frame")
     print(f"  arm at    ({machine.mount[0]:+.3f}, {machine.mount[1]:+.3f}, "
@@ -706,12 +730,14 @@ def main() -> None:
           f"pivot sweeps {machine.swing:.2f} m")
     print(f"  cruise    {machine.cruise(CORNER_X - machine.infeed[0]):.2f} m/s "
           f"(data sheet {machine.specs['max_speed_mps']:.2f})")
-    for who, rated, carried in load_chain(machine):
-        print(f"  {who:<9} carries {carried:5.1f} kg of {rated:6.1f} kg rated")
+    for who, rated, carried in load_chain(machine, **r2):
+        load = f"{carried:.1f} kg" if carried is not None else "unknown (component mass not declared)"
+        limit = f"{rated:.1f} kg" if rated is not None else "unknown"
+        print(f"  {who:<9} carries {load}, rated {limit}")
 
     try:
         scene, tl = bake(carrier, "--drive-and-plan" in args,
-                         holonomic="--holonomic" in args)
+                         holonomic="--holonomic" in args, **r2)
     except (ValueError, RuntimeError) as err:
         print(f"\ncycle failed: {err}")
         sys.exit(1)

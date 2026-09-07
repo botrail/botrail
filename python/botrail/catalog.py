@@ -27,8 +27,11 @@ used when the hub cannot be reached, and `index(path=...)` /
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional, Union
@@ -42,6 +45,112 @@ REPO_URL = f"https://huggingface.co/datasets/{REPO_ID}"
 LEVELS = ("V0", "V1", "V2", "V3", "V4", "V5")
 
 _CACHE: dict[Optional[str], "Index"] = {}
+
+
+def _mesh_package(source):
+    """Referenced mesh plus OBJ material/texture files, with relative paths.
+
+    Keep lexical paths: Hub snapshots use symlinks to unrelated blob names.
+    Absolute OBJ/MTL dependencies cannot survive a move and are rejected.
+    """
+    mesh = Path(os.path.abspath(source.removeprefix("file://")))
+    files = {mesh}
+
+    def dependency(owner, name):
+        if Path(name).is_absolute() or "://" in name:
+            raise ValueError(f"use relative material/texture paths before saving: {owner}: {name}")
+        path = Path(os.path.abspath(owner.parent / name))
+        files.add(path)
+        return path
+
+    if mesh.suffix.lower() == ".obj":
+        for line in mesh.read_text(encoding="utf-8").splitlines():
+            if not line.lstrip().startswith("mtllib "):
+                continue
+            for name in shlex.split(line, comments=True)[1:]:
+                mtl = dependency(mesh, name)
+                for material_line in mtl.read_text(encoding="utf-8").splitlines():
+                    tokens = shlex.split(material_line, comments=True)
+                    if not tokens or not (tokens[0].startswith("map_") or tokens[0] in {"bump", "disp", "decal", "norm", "refl"}):
+                        continue
+                    tokens.pop(0)
+                    # Wavefront map options precede the (possibly spaced) path.
+                    while tokens and tokens[0].startswith("-"):
+                        option = tokens.pop(0)
+                        if option in {"-o", "-s", "-t"}:
+                            for _ in range(3):
+                                try:
+                                    float(tokens[0])
+                                except (IndexError, ValueError):
+                                    break
+                                tokens.pop(0)
+                        elif option in {"-mm", "-bm", "-clamp", "-blendu", "-blendv", "-boost", "-texres", "-imfchan", "-type", "-cc", "-colorspace"}:
+                            del tokens[:2 if option == "-mm" else 1]
+                        else:
+                            raise ValueError(f"unsupported texture option {option}: {mtl}")
+                    if not tokens:
+                        raise ValueError(f"missing texture filename: {mtl}")
+                    dependency(mtl, " ".join(tokens))
+    for file in files:
+        if not file.is_file():
+            raise FileNotFoundError(f"cannot bundle missing mesh asset: {file}")
+    root = Path(os.path.commonpath([str(p.parent) for p in files]))
+    return str(root), str(mesh), [str(p) for p in sorted(files)]
+
+
+def _package_info(path):
+    """Manifest identity and a content fingerprint for Robot.from_package.
+
+    This identifies local package bytes, not manufacturer approval. File names
+    and per-file hashes are framed by JSON so renames and changed assets count;
+    moving an unchanged directory does not change the revision.
+    """
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError("Robot.from_package needs PyYAML; install botrail[catalog] or pyyaml") from exc
+
+    root = Path(path).resolve()
+    files = sorted(root.rglob("*"))
+    for file in files:
+        if file.is_symlink():
+            raise ValueError(f"local catalog packages must contain files, not symlinks: {file}")
+    manifest = yaml.safe_load((root / "manifest.yaml").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise TypeError("manifest.yaml must contain a catalog manifest mapping")
+    pid = manifest.get("id")
+    if not isinstance(pid, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9_.-]*/r[1-9][0-9]*", pid):
+        raise ValueError("manifest.yaml must declare a full catalog product id")
+    if manifest.get("kind", "model") not in {"model", "kit"}:
+        raise ValueError("Robot.from_package requires a model package or kit")
+    assets = manifest.get("assets") or {}
+    if not isinstance(assets, dict):
+        raise TypeError("manifest assets must be a mapping")
+    models = []
+    for key in ("urdf", "usd"):
+        value = assets.get(key)
+        if value is not None:
+            if not isinstance(value, str) or Path(value).is_absolute():
+                raise ValueError(f"assets.{key} must be a package-relative file path")
+            asset = (root / value).resolve()
+            if root not in asset.parents or not asset.is_file():
+                raise ValueError(f"assets.{key} must name an existing file inside the package")
+        models.append(value)
+    hashes = []
+    for file in files:
+        if file.is_file():
+            digest = hashlib.sha256()
+            with file.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            hashes.append((file.relative_to(root).as_posix(), digest.hexdigest()))
+    fingerprint = hashlib.sha256(json.dumps(hashes, separators=(",", ":")).encode()).hexdigest()
+    return pid, *models, "local-sha256:" + fingerprint
+
+
+def _kit_revision(manifest_revision, component_revisions):
+    data = json.dumps([manifest_revision, component_revisions], separators=(",", ":"))
+    return "local-sha256:" + hashlib.sha256(data.encode()).hexdigest()
 
 
 @dataclass
@@ -62,6 +171,8 @@ class Product:
     configuration: Optional[dict[str, Any]] = None
     #: The dataset commit the index came from (None for a local file).
     revision: Optional[str] = None
+    order: Optional[dict[str, Any]] = None
+    kit: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_entry(cls, entry: dict[str, Any], revision: Optional[str] = None) -> "Product":
@@ -82,6 +193,8 @@ class Product:
             assets=dict(entry.get("assets") or {}),
             configuration=entry.get("configuration"),
             revision=revision,
+            order=entry.get("order"),
+            kit=entry.get("kit"),
         )
 
     @property
@@ -159,6 +272,8 @@ class Product:
             "validation_level": self.validation_level,
             "distribution": self.distribution,
             "attributes": self.attributes(),
+            **({"order": self.order} if self.order is not None else {}),
+            **({"kit": self.kit} if self.kit is not None else {}),
         }
 
     def __repr__(self) -> str:
@@ -198,7 +313,10 @@ class Index:
     def get(self, query: str) -> Product:
         """A product by exact id, or by a unique id whose path segments
         contain the query's segments in order (`universal_robots/ur5e`);
-        several revisions of one product resolve to the newest."""
+        several revisions of one product prefer the newest public revision,
+        matching ``Robot.from_catalog``. If none is public, return the newest
+        metadata entry; loading it requires a local build. Exact IDs are
+        unchanged, and search/iteration still include every revision."""
         for p in self.products:
             if p.id == query:
                 return p
@@ -208,7 +326,7 @@ class Index:
             raise KeyError(f"no catalog product matches {query!r}")
         stems = {p.id.rsplit("/", 1)[0] for p in matches}
         if len(stems) == 1:
-            return max(matches, key=lambda p: _revision_number(p.id))
+            return max(matches, key=lambda p: (p.distribution == "public", _revision_number(p.id)))
         raise KeyError(f"{query!r} is ambiguous: {sorted(p.id for p in matches)}")
 
     def search(

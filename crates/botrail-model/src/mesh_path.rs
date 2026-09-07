@@ -43,8 +43,28 @@ pub fn anchored_urdf(
     if base_dir.is_none() && options.package_paths.is_empty() {
         return Ok(xml.to_string());
     }
-    let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    rewrite_urdf_filenames(xml, &mut |filename| {
+        let path = resolve(filename, base_dir, options);
+        if path.to_string_lossy().starts_with("package://") {
+            return Ok(filename.to_string());
+        }
+        Ok(if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+        .to_string_lossy()
+        .into_owned())
+    })
+}
+
+/// Rewrite mesh/texture filenames without round-tripping joint numbers or XML.
+pub fn rewrite_urdf_filenames(
+    xml: &str,
+    f: &mut impl FnMut(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let mut edits = Vec::new();
     for node in doc
         .descendants()
@@ -53,17 +73,7 @@ pub fn anchored_urdf(
         let Some(attr) = node.attributes().iter().find(|a| a.name() == "filename") else {
             continue;
         };
-        let path = resolve(attr.value(), base_dir, options);
-        if path.to_string_lossy().starts_with("package://") {
-            continue;
-        }
-        let path = if path.is_absolute() {
-            path
-        } else {
-            cwd.join(path)
-        };
-        let value = path
-            .to_string_lossy()
+        let value = f(attr.value())?
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")

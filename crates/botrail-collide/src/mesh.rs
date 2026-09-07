@@ -21,7 +21,7 @@ pub const VHACD_RESOLUTION: u32 = 64;
 
 /// Bump when the decomposition parameters or cache layout change; stale
 /// entries then miss instead of deserializing garbage.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// Decomposes a triangle mesh into a compound of convex hulls (VHACD).
 /// Pure and filesystem-free — the entry point for mesh data that arrives
@@ -173,8 +173,12 @@ fn decompose(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {
         ..Default::default()
     };
     let vhacd = VHACD::decompose(&params, &points, &mesh.indices, true);
+    // Use the source triangles within each voxel partition. Hulling voxel
+    // corners expands surfaces by a resolution-dependent amount and can close
+    // real assembly gaps. These remain convex approximations of the input
+    // mesh, not exact CAD or a guarantee that small concavities survive.
     vhacd
-        .compute_convex_hulls(0)
+        .compute_exact_convex_hulls(&points, &mesh.indices)
         .into_iter()
         .map(|(pts, _)| pts.iter().map(|p| [p.x, p.y, p.z]).collect())
         .collect()
@@ -288,6 +292,80 @@ mod tests {
     }
 
     #[test]
+    fn mesh_preserves_sub_voxel_clearance_and_thin_obstacle_hits() {
+        let mesh = botrail_mesh::box_mesh([0.1, 0.06, 0.04]);
+        let shape = mesh_to_compound(&mesh).unwrap();
+        // This 0.1 mm clearance is far smaller than a voxel at resolution 64.
+        let probe = SharedShape::cuboid(0.0001, 0.01, 0.01);
+        for (x, expected_hit) in [(0.0502, false), (0.05, true), (0.0, true)] {
+            let pose = Pose {
+                translation: Vector::new(x, 0.0, 0.0),
+                ..Pose::identity()
+            };
+            assert_eq!(
+                query::intersection_test(&Pose::identity(), shape.as_ref(), &pose, probe.as_ref())
+                    .unwrap(),
+                expected_hit
+            );
+            if !expected_hit {
+                let distance =
+                    query::distance(&Pose::identity(), shape.as_ref(), &pose, probe.as_ref())
+                        .unwrap();
+                assert!((distance - 0.0001).abs() < 1.0e-9, "gap {distance}");
+            }
+        }
+        // The serialized hull path is also used by the WASM worker.
+        let hulls = decompose_hulls(&mesh);
+        let roundtrip = compound_from_hulls(
+            &serde_json::from_str::<Vec<Vec<[f64; 3]>>>(&serde_json::to_string(&hulls).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let bounds = roundtrip.compute_local_aabb();
+        assert!((bounds.maxs.x - 0.05).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn concave_mesh_keeps_slot_open_and_walls_solid() {
+        let mut mesh = MeshData::new(vec![], vec![]);
+        for (size, offset) in [
+            ([0.01, 0.06, 0.04], [-0.035, 0.0, 0.0]),
+            ([0.01, 0.06, 0.04], [0.035, 0.0, 0.0]),
+            ([0.06, 0.01, 0.04], [0.0, -0.025, 0.0]),
+        ] {
+            let part = botrail_mesh::box_mesh(size);
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend(
+                part.vertices
+                    .iter()
+                    .map(|p| [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]]),
+            );
+            mesh.indices.extend(
+                part.indices
+                    .iter()
+                    .map(|i| [i[0] + base, i[1] + base, i[2] + base]),
+            );
+        }
+        let shape = mesh_to_compound(&mesh).unwrap();
+        let ball = SharedShape::ball(0.001);
+        for (point, hit) in [
+            ([0.0, 0.01, 0.0], false),
+            ([0.035, 0.01, 0.0], true),
+            ([0.0, -0.025, 0.0], true),
+        ] {
+            let pose = Pose {
+                translation: Vector::from_array(point),
+                ..Pose::identity()
+            };
+            assert_eq!(
+                query::intersection_test(&Pose::identity(), shape.as_ref(), &pose, ball.as_ref())
+                    .unwrap(),
+                hit
+            );
+        }
+    }
+
+    #[test]
     fn file_load_uses_cache() {
         let dir = std::env::temp_dir().join(format!("botrail-mesh-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -308,11 +386,11 @@ mod tests {
         let second = load_mesh_compound(&stl, &scale).unwrap();
 
         // Same compound either way; scale respected (z half-extent = 0.2).
-        // VHACD voxelization inflates hulls slightly, hence the loose tol.
+        // The hulls follow the input surfaces; only STL float rounding remains.
         for shape in [&first, &second] {
             let aabb = shape.compute_local_aabb();
-            assert!((aabb.maxs.z - 0.2).abs() < 0.02, "z max {}", aabb.maxs.z);
-            assert!((aabb.maxs.x - 0.1).abs() < 0.02, "x max {}", aabb.maxs.x);
+            assert!((aabb.maxs.z - 0.2).abs() < 1.0e-8, "z max {}", aabb.maxs.z);
+            assert!((aabb.maxs.x - 0.1).abs() < 1.0e-8, "x max {}", aabb.maxs.x);
         }
 
         std::env::remove_var("BOTRAIL_CACHE_DIR");

@@ -24,7 +24,7 @@ label on a different model cannot satisfy a required adapter.
 
 | Item | Current comparison |
 |---|---|
-| Required parts | The catalog product and quantity referenced by `order.requires`, or an explicitly permitted `interface_pair` adapter, must occur on this tool's upstream attachment path. The alternative must use both specified faces on that path. A spare elsewhere does not count. |
+| Required parts | The catalog product and quantity referenced by `order.requires`, a documented `catalog_alternatives` product, or an explicitly permitted `interface_pair` adapter must occur on this tool's upstream attachment path. Interface-pair alternatives must use both specified faces on that path. A spare elsewhere does not count. |
 | Bare mating interfaces | Explicit `interface_id` declarations on the two connected faces are compared when supported by cited manufacturer/standard/official source records. Legacy `flange_standard` or compatibility text is not converted into a mating-face declaration. |
 | Assembly pose | The recorded transform is compared with explicitly documented `allowed_poses`. Translation is in metres; quaternions are unit XYZW. The comparison tolerance, `1e-8`, handles numerical roundoff and is not a manufacturing tolerance. |
 | Product identity | A conflicting catalog ID or pinned dataset revision in `set_part` is a failure. Free-form BOM names do not prove product identity. |
@@ -37,8 +37,9 @@ Missing declarations, unknown brackets and insufficient evidence remain
 interface. A matching interface identifier is a partial comparison: it does
 not establish the fit of holes, threads, pilots or the model geometry.
 
-For example, a Robotiq 2F gripper requires a separate coupling; translating
-the gripper by the coupling thickness does not supply that part. The
+For example, a bare Robotiq 2F gripper needs a coupling in the assembly.
+Manufacturer UR kits include the appropriate coupling; translating the bare
+gripper by the coupling thickness does not supply that part. The
 manufacturer documents this requirement in [section 6.1.1 of its manual](https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190315.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm).
 The catalog's EMSF spindle reference model and reconstructed X16005 weld gun
 retain unknown robot-side brackets and mounting details.
@@ -118,7 +119,7 @@ one another after applying the assembly transform.
 |---|---|
 | `geometry.frame_verified` | The cited drawing coordinates and mating plane have been checked against this model frame. Default false. |
 | `geometry.complete` | Every required mating feature and dimensional/positional tolerance is covered. Default false. Equal min/max values alone do not assert a complete drawing. |
-| `holes[]` | Local `id`, XY `position_mm`, `kind` (`clearance` or `threaded`), optional `position_tolerance_mm` (radial bound), `diameter_mm`, `thread`, `depth_mm`, `grip_mm` and `fastener_rules`. Hole names/order do not establish a match. |
+| `holes[]` | Local `id`, XY `position_mm`, `kind` (`clearance` or `threaded`), optional `position_tolerance_mm` (radial bound), `diameter_mm`, `thread`, `depth_mm`, `thread_start_mm`, `grip_mm` and `fastener_rules`. Hole names/order do not establish a match. |
 | `thread` | `diameter_mm`, optional `pitch_mm`, and `left_hand` (default false). Missing pitch stays unknown. |
 | `locators[]` | Local `id`, XY position/tolerance, `kind` (`boss`, `recess`, `pin`, `hole`), diameter and projection/usable recess depth. |
 | `fastener_rules` | Drawing requirements: optional `thread`, `head_standard`, `property_class`, `length_mm`, `min_engagement_mm` and `torque_nm`. |
@@ -126,10 +127,15 @@ one another after applying the assembly transform.
 | `requirements_complete` | The cited installation declaration covers all required mounting parts. An empty list with this flag means no additional adapter; the default false means unconfirmed completeness. |
 
 Dimensions use `{min: ..., max: ...}` except coordinates, thread sizes and minimum
-engagement. Engagement is screw length minus the bearing stack (`grip_mm`) minus
-washers, compared with the minimum engagement and **usable** receiver depth.
-Account for counterbores in the bearing stack and for bottom/tip allowances in
-usable depth. A maximum flange penetration is not the total screw length.
+engagement. Tip penetration is screw length minus the bearing stack (`grip_mm`)
+minus washers. Engagement additionally subtracts the receiver's unthreaded lead,
+`thread_start_mm`. Omitted lead means zero for compatibility with existing
+drawings; supply it explicitly for a recessed thread. Compare engagement with
+the required minimum and tip penetration with **usable** `depth_mm`, both depths
+measured from the mating plane. Account for counterbores in the bearing stack
+and for bottom/tip allowances in usable depth. For example, 6 mm penetration
+with a 2 mm unthreaded lead gives only 4 mm engagement. A maximum flange
+penetration is not the total screw length.
 Head and property-class strings are compared exactly; the checker does not infer
 that a different class or head is an acceptable substitution.
 
@@ -163,6 +169,22 @@ with evidence. This accepts a custom adapter using those two faces on the actual
 path, while keeping all dimension, screw and clearance checks. Omit it for a
 product-specific obligation such as the electronics-bearing Robotiq coupling.
 
+For explicitly documented product variants, add `catalog_alternatives` to the
+requirement instead:
+
+```yaml
+catalog_alternatives:
+  - catalog: robotiq/coupling/agc-cpl-062-002/r1
+    evidence: [{source: 1, section: "20181130 manual, pp.123-124 and p.152"}]
+```
+
+The referenced source must be present in that part's `sources`; the requirement
+also needs its own evidence. Only exact loaded catalog IDs count. A present
+alternative without supported evidence remains unknown. Quantities count each
+physical instance once, and all mating-interface and detailed fit checks still
+apply. The AGC example is a legacy variant; its declarations cannot be transferred
+to GRP or GRP-ES models solely because all use a nominal ISO50 input.
+
 Detailed comparisons are available in each item's `evidence["checks"]`, with
 their statuses and input dimensions. JSON preserves these inputs and source
 references; Markdown includes the individual comparison names and results.
@@ -185,6 +207,10 @@ the pinned catalog model and restores the saved declaration snapshot, including
 absent metadata from old projects. Changes in later catalog data do not silently
 upgrade an old project's mounting evidence.
 
+Locally built packages loaded with `Robot.from_package` retain their manifest
+declarations and a local content digest. Their generated Python restores the
+embedded source, since a local digest is not a downloadable dataset commit.
+
 Packages without mounting metadata still load. Their attached tools report
 missing information. New declarations become available through a rebuilt
 catalog package and its dataset revision; editing a builder recipe alone does
@@ -202,3 +228,187 @@ Use the robot-specific coupling model and its installation documents when
 building a verified assembly. The coupling's outside thickness is not necessarily
 the distance between its recessed bearing planes, and a mesh measurement does
 not supply manufacturing tolerances or a fastener specification.
+
+## Inspecting the connection in Studio
+
+Open **Robot → Inspect mounting** to inspect the current assembly. The connection
+strip follows the attached components; choose a connection to bring its mating
+frames and downstream tool into view. A kit keeps its purchase grouping while
+showing its internal connections. Manufacturer support, composition, model
+correspondence and detailed fit remain separate results.
+
+The inspector provides five views:
+
+- **Assembled** shows the model at its actual mounting pose, with inspection colors.
+- **Exploded** separates the selected connection for viewing. Adjust separation,
+  make the tool transparent, or temporarily hide the flange geometry.
+- **Hole overlay** projects documented features into the flange coordinate system.
+  Select holes in the drawing or the feature selector to see their dimensions,
+  the checker's paired hole and the source evidence.
+- **Screw section** shows a schematic bearing stack, engagement, unthreaded lead
+  and allowed tip depth. Intervals and depth limits are drawn as bands or dashed
+  lines. Screw heads and the physical bore bottom are not reconstructed.
+- **Tool access** shows the declared mating-part solids and required access
+  volumes, highlighting overlaps reported by the checker.
+
+Drawing features appear on the model only when the declared frame mapping has
+supporting evidence. An unconfirmed side retains its separate drawing and missing
+information; geometry is not guessed to make it look connected. Wire shafts are
+dimensioned overlays, not additional purchased fasteners. An empty attachment
+list is shown as **No mounting connection to inspect**.
+
+The inspector uses a separate camera and rendering materials. These controls
+leave the Scene, TCP, BOM, trajectories and mounting input hash unchanged.
+The report and frame poses form a read-only snapshot; **Refresh** takes another
+snapshot. Composition and part-annotation updates invalidate an open report.
+**Report ↓** downloads the Rust mounting report, including its input hash and
+evidence. Its checks match `bt.mounting.report(scene)`; Python additionally
+exposes its review annotation and derived `blocking` fields.
+
+Native and WASM sessions handle the same `inspect_mounting` request through the
+shared Rust checker. This view does not extend the check to nearby cell equipment
+or validate an assembly approach path.
+
+## Manufacturer kits
+
+A `kind: kit` catalog entry identifies a purchase configuration. Loading it
+assembles the referenced component packages with their mounting frames and TCP:
+
+```python
+kit = bt.Robot.from_package(
+    "build/robotiq/2f/2f-85-ur-es-062-kit/r1", catalog_root="build"
+)
+robot = arm.attach_tool(kit)
+scene = bt.Scene(robot)
+
+purchase = scene.bom().rows[-1]
+print(purchase["qty"], purchase["order"]["part_number"])  # 1 kit SKU
+print(purchase["order"]["includes"])  # quantities per kit, not extra purchases
+
+result = bt.mounting.report(scene)
+for kit_result in result.kits:
+    for key in ("manufacturer_support", "composition", "model_correspondence", "detailed_fit"):
+        print(key, kit_result[key]["status"])
+```
+
+`Robot.from_catalog(kit_id, revision=...)` loads publicly distributed kits and
+all dependencies at the same dataset commit. For a locally built kit,
+`catalog_root` contains the component directories at their full catalog IDs;
+it can be omitted when the kit itself occupies `<root>/<full-id>`.
+Missing packages, cycles, inconsistent included quantities and mismatched IDs
+are errors. Local kit revisions include the component package fingerprints.
+Saved projects bundle the assembly's model assets for offline replay.
+
+The report separates documented mechanical support for the actual directly
+attached host, agreement with the kit assembly, model correspondence, and
+detailed fit. Missing dimensional inputs do not negate a manufacturer's
+compatibility statement. Conversely, that statement cannot override an
+incorrect component or a failed dimensional check. `ready` continues to mean
+that **all required detailed checks** have passed. Electrical compatibility is
+not inferred from mechanical support.
+
+For simulation, `bt.mounting.preview(...).can_apply` also accepts an unchanged
+manufacturer-supported kit when internal dimensional or fastening inputs are
+missing. The claim covers only that kit's connections and its actual host
+mount: the declared mounting frames and either an explicitly permitted pose
+or their default coincident placement must match. This placement convention
+does not verify the model's seating datum or TCP calibration.
+
+The detailed results remain `unknown` / `not_run`, and `result.ready` retains
+its strict meaning. Known mismatches, missing required components, and
+unresolved connections outside the supported assembly still block application.
+`proposal.mounting_blockers` lists the finding IDs that prevent simulation;
+`proposal.blockers` lists scene-reference problems. Studio shows manufacturer
+support and model correspondence separately, with detailed findings expandable.
+
+The ES-062 entry identifies `AGC-ES-UR-KIT-85` as documented in the 2021
+[Robotiq quick-start guide](https://blog.robotiq.com/hubfs/support-files/Quick_start_2Finger_e-Series_nocropmarks_EN.pdf).
+Its included coupling is `GRP-ES-CPL-062`; the gripper's existing standalone
+catalog ID still represents the bare hand. This kit uses a reference gripper
+model, and the protector and installation hardware are recorded in the BOM
+without separate geometry. Verify the actual wrist connector generation:
+Robotiq distinguishes [ES-062 and ES-077 configurations](https://blog.robotiq.com/knowledge/couplings-and-cables-for-universal-robots-robots).
+
+## Compare and reuse assemblies
+
+Keep composition explicit: build another `Robot` with `attach_tool` / `mount`,
+then inspect the change before replacing the robot in the cell:
+
+```python
+# arm, adapter and tool are loaded catalog products or local packages.
+candidate = arm.attach_tool(adapter, prefix="adapter_").attach_tool(
+    tool, flange="adapter_out", prefix="tool_"
+)
+proposal = bt.mounting.preview(scene, candidate, robot="arm")
+print(proposal.route, proposal.can_apply)
+print(proposal.before["tcp"], proposal.after["tcp"])
+print(proposal.after["mass"], proposal.after["bom"])
+print(proposal.mounting_blockers, proposal.blockers, proposal.revalidation)
+proposal.save("tool-assembly.botrail")
+
+# Preserve the findings; apply only when the simulation conditions are met.
+if proposal.can_apply:
+    proposal.apply()
+
+# Reuse the actual saved model and inspect it against the destination scene.
+reused = bt.Scene.load_project("tool-assembly.botrail").robot
+comparison = bt.mounting.preview(other_scene, reused)
+```
+
+Use the actual frame names declared by the products in place of `adapter_out`.
+`bt.mounting.candidates(scene, [candidate_a, candidate_b])` compares supplied
+models and orders them by **direct mounting evidence**, **adapter route
+evidence**, and **needs design / information**. These categories describe the
+route's declarations or manufacturer kit support; they do not override a failed
+screw/dimension check. The function retains unknown and failing candidates.
+It does not search every catalog product or design a bracket automatically.
+
+`proposal.scene` is the separate candidate scene at the transferred pose.
+Saving it uses the existing project format, including asset bundling and
+catalog/kit provenance. No confirmation flag is saved. Loading and inspecting
+recomputes the result. A kit remains one purchase unit; included components
+are not additional purchasing rows. Mass comes from the BOM's declared
+`mass_kg`: `known_kg` is a **subtotal** if `missing` lists any components, and
+`null` means no declared mass was available.
+
+Apply rebuilds the model, collision geometry and source graph. It transfers
+joint values only when the joint name, physical definition, ancestor chain,
+and available catalog identity match. Other joints start at neutral. Existing
+scene references are resolved by name; missing attachment frames or motions
+whose joint identities changed block the replacement. Application checks both
+snapshots again: changed poses, scene content or candidate inputs require a
+new preview. Keep the original `Robot` objects for any independent scripts;
+`scene.robot` / `scene.robot_of(name)` return the current scene model.
+
+Affected motions, toolpaths and sequences appear in
+`scene.mounting_revalidation`, which survives project save/load. Rerun the
+motion planner, toolpath checker or sequence simulation; successful evaluations
+clear the corresponding entries. Previously retained recordings, rollouts and
+Studio playback are invalidated, including jobs started before the replacement.
+Self-collision exclusions are recomputed and inter-robot exclusions touching
+the replaced robot are cleared; review authored process-contact allowances.
+
+### Studio workflow
+
+Open **Robot → Inspect mounting → Compare assemblies**:
+
+1. Select a catalog query, a package directory on the server, or a saved JSON
+   project. Multi-robot projects require selecting one robot. The tool's explicit
+   unmet product requirements also appear as candidate shortcuts.
+2. Choose to replace the assembly, attach a part, or insert an adapter at a
+   selected existing tool connection. Specify frames when the product does not
+   declare them. Insertion keeps the downstream tool and its original prefix.
+3. Preview the current and proposed assemblies at the same scale, inspect a
+   connection in assembled or exploded view, and compare TCP, declared mass,
+   purchasing BOM and mounting findings. Multiple proposals remain selectable.
+4. **Save proposal** keeps unresolved alternatives. **Apply checked assembly**
+   requires resolved mounting checks and valid scene references, and performs
+   the snapshot checks again on the server.
+
+Studio downloads assembly projects as JSON, with references to available assets.
+For portable bundled projects, use `proposal.save(...)` in Python. The browser
+file picker currently accepts JSON projects; load ZIP projects with
+`Scene.load_project` in Python. In the standalone WASM session, embedded URDF
+projects can be compared and applied. Catalog fetching, server package paths and
+USD re-import require the Python Studio server; the UI does not offer these as
+available WASM capabilities.

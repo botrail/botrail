@@ -1,7 +1,7 @@
 """A pick cell you can watch: the studio's SFC chart over a real cell.
 
-The cell is a UR5e with a Robotiq 2F-85 on a coupling (catalog models —
-the first run downloads them), picking parts off a belt. The belt is real
+The cell is a UR5e with a Robotiq 2F-85 on a coupling (catalog r2
+models — the first run downloads them), picking parts off a belt. The belt is real
 geometry, not just a transport zone; the gripper really closes on the
 part before the attach; and each seat is approached the way a cell does
 — over the target, straight down, release, lift clear.
@@ -22,6 +22,9 @@ gripper through edge conditions, so two columns scan side by side.
 
     .venv/bin/python examples/basics/sfc_chart_demo.py
 
+The built r2/ES-062 kit is downloaded on first use. TCP and close are
+re-taught from its geometry. `--robotiq-r2 CATALOG_ROOT` is a development override.
+
 Then, in the browser:
 
 1. Sequence tab -> **SFC chart** — the authored program, neutral.
@@ -40,7 +43,16 @@ Then, in the browser:
    which is exactly why the verdict is captured rather than re-read.
 """
 
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
 import botrail as bt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _robotiq as rq
 
 # --- cell dimensions (metres; z = 0 is the shop floor) ------------------
 # Everything stands *above* z = 0: the studio draws the floor there, and
@@ -71,6 +83,9 @@ HOVER = 0.14  # how far above a seat the arm hovers before coming down
 # surface reads as a collision. Seat it a few millimetres clear — the
 # same margin a real release leaves, and invisible on screen.
 SEAT_GAP = 0.004
+# The kinematic conveyor retains Z. Keep a 0.1 mm separation from its slab
+# so a just-attached part can start its planned lift without initial contact.
+BELT_CLEARANCE = 0.0001
 
 TRAY_XY = (0.30, -0.42)
 # Rejects are set back down on the belt downstream of the beam and sent
@@ -116,13 +131,11 @@ SCENERY = [
 ]
 
 
-def build_cell() -> bt.Scene:
+def build_cell(*, robotiq_root: Path | None = None) -> bt.Scene:
     """The cell: arm with gripper, belt structure, fixtures, the part, and
     the two field devices (transport zone + through-beam sensor)."""
-    arm = bt.Robot.from_catalog("ur5e")
-    coupling = bt.Robot.from_catalog("gripper-coupling")
-    gripper = bt.Robot.from_catalog("2f-85")
-    robot = arm.attach_tool(coupling, prefix="cpl_").attach_tool(gripper)
+    arm = rq.load_arm(root=robotiq_root)
+    robot = rq.attach(arm, robotiq_root)
     scene = bt.Scene(robot, base_position=(0.0, 0.0, BASE_Z))
     scene.set_joint_positions(READY)
 
@@ -156,7 +169,7 @@ def build_cell() -> bt.Scene:
     # one taught pick serves both.
     for name, height, color, start in PARTS:
         scene.add_box(name, size=(PART, PART, height),
-                      position=(start, BELT_Y, BELT_TOP + height / 2), color=color)
+                      position=(start, BELT_Y, BELT_TOP + height / 2 + BELT_CLEARANCE), color=color)
         scene.set_obstacle_material(name, metalness=0.2, roughness=0.6)
 
     # A conveyor is a transport zone: it sits above the slab, so it carries
@@ -202,6 +215,7 @@ def teach(scene: bt.Scene) -> None:
     itself. Coming in sideways at working height and letting go is what
     makes a simulated cell look simulated; real ones arrive over the
     target, come straight down, release, and lift clear."""
+    shut = rq.close_for_width(scene.robot, PART, SHUT)
 
     def at(position, finger):
         scene.set_joint_positions(READY)
@@ -210,7 +224,7 @@ def teach(scene: bt.Scene) -> None:
             raise SystemExit(f"cell layout unreachable at {position}")
         return [*scene.joint_positions[:6], finger]
 
-    def seat(name, position, carried=SHUT):
+    def seat(name, position, carried=shut):
         """`over_x` / `to_x` / `clear_x`: hover, come down, lift away
         empty-handed."""
         x, y, z = position
@@ -221,7 +235,7 @@ def teach(scene: bt.Scene) -> None:
     approach = at((PICK_X, BELT_Y, GRIP_Z + HOVER), OPEN)
     scene.add_segment("approach", goal=approach)
     scene.add_segment("descend", goal=at((PICK_X, BELT_Y, GRIP_Z), OPEN))
-    scene.add_segment("lift", goal=[*approach[:6], SHUT])
+    scene.add_segment("lift", goal=[*approach[:6], shut])
     seat("tray", (*TRAY_XY, TRAY_TOP + 0.02 + HANG + SEAT_GAP))
     seat("purge", (PURGE_X, BELT_Y, BELT_TOP + HANG + SEAT_GAP))
     scene.add_segment("home", goal=READY)
@@ -232,11 +246,12 @@ def author_pick(scene: bt.Scene) -> None:
     """The process: one block per part, run back to back. Steps are the
     chart's boxes; transitions its bars."""
     sq = scene.sequence("pick")
+    shut = rq.close_for_width(scene.robot, PART, SHUT)
     for name, _, _, _ in PARTS:
-        one_part(sq, name)
+        one_part(sq, name, finger=scene.robot.joint_names[-1], shut=shut, pads=rq.pads(scene.robot))
 
 
-def one_part(sq, part: str) -> None:
+def one_part(sq, part: str, *, finger="finger_joint", shut=SHUT, pads=PADS) -> None:
     """Feed, gauge, pick, and route one part."""
     # Get in position *first*, then run the belt. Feeding while the arm is
     # still travelling is the classic way to lose an arrival: the part can
@@ -261,23 +276,23 @@ def one_part(sq, part: str) -> None:
     sq.step("descend", actions=[bt.seq.motion("descend")])
     sq.step(
         "grip",
-        actions=[bt.seq.ramp({"finger_joint": SHUT}, 0.5), bt.seq.set_signal("gripped")],
+        actions=[bt.seq.ramp({finger: shut}, 0.5), bt.seq.set_signal("gripped")],
     )
-    sq.step("hold", actions=[bt.seq.attach(part, touch_links=PADS)])
+    sq.step("hold", actions=[bt.seq.attach(part, touch_links=pads)])
     sq.step("lift", actions=[bt.seq.motion("lift")])
 
     # SFC selection on the latched verdict: good parts are seated on the
     # tray, bad ones go back on the belt and are sent downstream.
     judge = sq.select("judge")
-    seat(judge.when(bt.seq.signal("reject", False)), "tray", "to tray", part)
+    seat(judge.when(bt.seq.signal("reject", False)), "tray", "to tray", part, finger=finger)
     reject = judge.when(bt.seq.otherwise())
-    seat(reject, "purge", "to belt", part)
+    seat(reject, "purge", "to belt", part, finger=finger)
     reject.step("purge", actions=[bt.seq.start("conv")])
 
     sq.step("return", actions=[bt.seq.motion("home")])
 
 
-def seat(arm, motion: str, label: str, part: str) -> None:
+def seat(arm, motion: str, label: str, part: str, *, finger="finger_joint") -> None:
     """Put the carried part down like a cell does: over the target, down
     onto it, open, and lift clear before going anywhere else."""
     arm.step(label, actions=[bt.seq.motion(f"over_{motion}")])
@@ -285,7 +300,7 @@ def seat(arm, motion: str, label: str, part: str) -> None:
     arm.step(
         "release",
         actions=[
-            bt.seq.ramp({"finger_joint": OPEN}, 0.4),
+            bt.seq.ramp({finger: OPEN}, 0.4),
             bt.seq.detach(part),
             bt.seq.set_signal("gripped", False),
         ],
@@ -305,7 +320,11 @@ def author_lamp(scene: bt.Scene) -> None:
 
 
 def main() -> None:
-    scene = build_cell()
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--studio", action="store_true", help="open Studio (the default)")
+    rq.add_argument(parser)
+    args = parser.parse_args()
+    scene = build_cell(robotiq_root=args.robotiq_r2)
     teach(scene)
     author_pick(scene)
     author_lamp(scene)

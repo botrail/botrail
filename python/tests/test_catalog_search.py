@@ -144,6 +144,17 @@ def test_product_attributes_and_repr(index: catalog.Index) -> None:
     assert p.to_dict()["attributes"]["mass_kg"] == 0.065
 
 
+@pytest.mark.parametrize("distribution,selected", [("public", "r10"), ("recipe_only", "r2")])
+def test_get_prefers_public_but_search_keeps_all_revisions(distribution, selected):
+    newest = dict(INDEX["products"][7], id="universal_robots/ur/ur5e/r10", distribution=distribution)
+    index = catalog.Index.from_dict(dict(INDEX, products=[*INDEX["products"], newest]))
+    assert index.get("ur5e").id == f"universal_robots/ur/ur5e/{selected}"
+    assert index.get(newest["id"]).distribution == distribution
+    assert set(ids(index.search(text="ur5e"))) == {
+        f"universal_robots/ur/ur5e/{rev}" for rev in ("r1", "r2", "r10")
+    }
+
+
 def test_search_for_a_requirement_row_and_identify(index: catalog.Index) -> None:
     scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_beam_sensor("eye", frm=(0.25, 0.25, 0.03), to=(0.25, 2.25, 0.03))  # 2 m span

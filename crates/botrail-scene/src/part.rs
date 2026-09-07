@@ -252,6 +252,9 @@ pub struct BomRow {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, PartAttr>,
+    /// Contents per purchase unit; included items are not extra purchasing rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<botrail_model::mounting::CatalogOrder>,
 }
 
 impl BomRow {
@@ -268,6 +271,7 @@ impl BomRow {
             qty: part.qty,
             description: part.description.clone(),
             attributes: part.attributes.clone(),
+            order: None,
         }
     }
 
@@ -654,6 +658,7 @@ fn robot_lines(
                 qty: 1,
                 description: None,
                 attributes,
+                order: meta.order.clone(),
             });
         }
         RobotSource::Composite {
@@ -702,6 +707,7 @@ fn robot_lines(
             qty: 1,
             description: None,
             attributes: BTreeMap::new(),
+            order: None,
         }),
     }
 }

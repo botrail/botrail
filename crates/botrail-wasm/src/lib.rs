@@ -138,8 +138,14 @@ impl SessionHost for WasmHost {
         *self.baked.borrow_mut() = Some((scene.clone(), timeline.clone()));
     }
 
+    fn invalidate_mounting_results(&self) {
+        *self.baked.borrow_mut() = None;
+    }
+
     fn baked(&self) -> Option<(Scene, botrail_scene::rollout::SequenceTimeline)> {
-        self.baked.borrow().clone()
+        self.baked.borrow().clone().filter(|(snapshot, _)| {
+            self.scene.borrow().assembly_generation() == snapshot.assembly_generation()
+        })
     }
 }
 

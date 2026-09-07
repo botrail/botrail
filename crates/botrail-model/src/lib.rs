@@ -1,6 +1,7 @@
 //! Robot model layer: wraps xurdf's URDF/Xacro parsing into an indexed
 //! kinematic tree suitable for FK and scene serialization.
 
+pub mod kit;
 mod mesh_path;
 pub mod mounting;
 
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 use nalgebra::{Isometry3, Translation3, Unit, UnitQuaternion, Vector3};
 use thiserror::Error;
 
-pub use mesh_path::ModelOptions;
+pub use mesh_path::{rewrite_urdf_filenames, ModelOptions};
 
 #[derive(Debug, Error)]
 pub enum ModelError {
@@ -364,6 +365,7 @@ pub struct CatalogMeta {
     /// Mechanical declarations, without inferring them from flange labels.
     pub mounting: Option<mounting::MountingSpec>,
     pub order: Option<mounting::CatalogOrder>,
+    pub kit: Option<kit::KitSpec>,
     pub sources: Vec<mounting::CatalogSource>,
 }
 
@@ -429,6 +431,9 @@ impl RobotModel {
     pub fn with_mounting(&self, mut document: mounting::MountingDocument) -> Result<Self, String> {
         fn without_document(source: &RobotSource) -> Result<RobotSource, String> {
             match source {
+                RobotSource::Catalog { meta, .. } if meta.kit.is_some() => Err(
+                    "with_mounting applies to an individual kit component before assembly".into(),
+                ),
                 RobotSource::Composite { .. } => Err(
                     "with_mounting applies to an individual part before attach_tool/mount".into(),
                 ),

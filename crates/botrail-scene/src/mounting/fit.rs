@@ -389,32 +389,42 @@ fn fasteners(
                 json!({"head_documented": head, "property_class_documented": class, "torque_documented": torque}),
             );
         }
-        let engagement = clearance.grip_mm.map(|grip| DimensionRange {
+        let penetration = clearance.grip_mm.map(|grip| DimensionRange {
             min: selected.length_mm.min - grip.max - selected.washer_mm.max,
             max: selected.length_mm.max - grip.min - selected.washer_mm.min,
+        });
+        let start = receiver
+            .thread_start_mm
+            .unwrap_or(DimensionRange { min: 0.0, max: 0.0 });
+        let engagement = penetration.map(|p| DimensionRange {
+            min: p.min - start.max,
+            max: p.max - start.min,
         });
         let minimum = receiver
             .fastener_rules
             .as_ref()
             .and_then(|r| r.min_engagement_mm);
-        let status = match (engagement, minimum, receiver.depth_mm) {
-            (Some(actual), Some(min), Some(depth)) => {
-                if min > depth.max + EPS || actual.max < min - EPS || actual.min > depth.max + EPS {
+        let status = match (penetration, engagement, minimum, receiver.depth_mm) {
+            (_, Some(actual), _, _) if actual.max <= 0.0 => "fail",
+            (Some(tip), Some(actual), Some(min), Some(depth)) => {
+                if min > depth.max - start.min + EPS
+                    || actual.max < min - EPS
+                    || tip.min > depth.max + EPS
+                {
                     "fail"
-                } else if actual.min + EPS >= min && actual.max <= depth.min + EPS {
+                } else if actual.min + EPS >= min && tip.max <= depth.min + EPS {
                     "pass"
                 } else {
                     "unknown"
                 }
             }
-            (Some(actual), _, Some(depth)) if actual.min > depth.max + EPS || actual.max <= 0.0 => {
-                "fail"
-            }
-            (Some(actual), Some(min), _) if actual.max < min - EPS => "fail",
+            (Some(tip), _, _, Some(depth)) if tip.min > depth.max + EPS => "fail",
+            (_, Some(actual), Some(min), _) if actual.max < min - EPS => "fail",
             _ => "unknown",
         };
-        checks.add(&format!("{}:engagement", clearance.id), status, "Screw length minus bearing stack and washer thickness compared with usable thread engagement",
+        checks.add(&format!("{}:engagement", clearance.id), status, "Thread engagement excludes the unthreaded lead; tip penetration must stay within usable depth",
             json!({"length_mm": selected.length_mm, "grip_mm": clearance.grip_mm, "washer_mm": selected.washer_mm,
+                "tip_penetration_mm": penetration, "thread_start_mm": start,
                 "engagement_mm": engagement, "min_engagement_mm": minimum, "usable_depth_mm": receiver.depth_mm, "sources": owner.evidence(&selected.evidence)}));
     }
 }

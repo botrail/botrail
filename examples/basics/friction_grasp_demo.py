@@ -15,13 +15,10 @@ contact facts around that weld. Here the weld is gone:
   real, and `tl.grasp_report()` grows a measured `slip_m` and a `hold`
   check.
 
-Two bakes of the same taught cycle: a feeble 0.18 N*m cap closes the
-hand — it even carries the fingers' own weight, just barely — but the
-squeeze it buys is a couple of newtons, and the lift loses the part
-back onto its stand. The stock drive (the knuckle's own effort limit)
-carries it to the plate. Same authoring — the physics decides. The
-stock bake runs LAST on purpose: the studio replays the most recent
-bake, so `--studio` opens on the cycle that works.
+Two bakes of the same taught cycle: a weak 0.15 N*m simulation cap loses
+the part back onto its stand, while a 2 N*m cap carries it to the plate.
+The successful bake runs last so Studio opens on that cycle. These are
+simulation conditions for the reference meshes, not controller settings.
 
 Teaching notes, both measured on the catalog 2F-85:
 
@@ -34,11 +31,27 @@ Teaching notes, both measured on the catalog 2F-85:
   a weld (G1); holding by friction needs ~2 mm.
 
 Run with:  python examples/basics/friction_grasp_demo.py [out.usda] [--studio]
+                                                    [--robotiq-r2 CATALOG_ROOT]
+Normal runs download the built r2/ES-062 assembly and re-teach the close.
+The optional root overrides it with a local development build. r2 does not
+declare a calibrated effort limit. The teaching notes above originated with
+the r1 reference; closing positions are taught from the loaded geometry.
 """
 
+import argparse
 import sys
+from pathlib import Path
 
 import botrail as bt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _robotiq as rq
+
+parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+parser.add_argument("out", nargs="?", default="friction_grasp.usda")
+parser.add_argument("--studio", action="store_true")
+rq.add_argument(parser)
+args = parser.parse_args()
 
 # --- the gripper_pick_demo cell, unchanged --------------------------------
 BASE_Z = 0.74
@@ -54,10 +67,8 @@ DOWN = (1.0, 0.0, 0.0, 0.0)
 OPEN = 0.0
 READY = [0.0, -1.9, 1.8, -1.5, -1.57, 0.0, OPEN]
 
-arm = bt.Robot.from_catalog("ur5e")
-coupling = bt.Robot.from_catalog("gripper-coupling")
-gripper = bt.Robot.from_catalog("2f-85")
-scene = bt.Scene(arm.attach_tool(coupling, prefix="cpl_").attach_tool(gripper),
+arm = rq.load_arm(root=args.robotiq_r2)
+scene = bt.Scene(rq.attach(arm, args.robotiq_r2),
                  base_position=(0.0, 0.0, BASE_Z))
 scene.set_joint_positions(READY)
 
@@ -73,14 +84,18 @@ scene.add_box("plate", size=(0.22, 0.22, PLATE_TOP), position=(*PLATE_XY, PLATE_
 scene.add_box("part", size=(PART, PART, PART),
               position=(*STAND_XY, STAND_TOP + PART / 2), color=(0.85, 0.33, 0.20))
 scene.set_physics("part", dynamic=True, mass=0.35, friction=0.6)
-for side in ("left", "right"):
-    scene.set_link_material(f"{side}_inner_finger_pad", friction=1.1)
+for link in rq.pads(scene.robot):
+    if link.endswith("finger_pad"):
+        scene.set_link_material(link, friction=1.1)
 
 # --- the one line that changes the physics of holding ---------------------
 # Fingers become force-limited dynamic bodies; the cap defaults to the
 # knuckle's URDF effort limit, stiffness/damping/finger_mass to measured
 # defaults. Everything taught below is ordinary G1 authoring.
-scene.set_gripper_drive()
+# r2 has no calibrated motor torque. This is an explicit simulation setting,
+# not a manufacturer effort rating. The r1 path retains its original drive.
+DRIVE_CAP = 2.0 if rq.is_r2(scene.robot) else None
+scene.set_gripper_drive(max_force=DRIVE_CAP)
 
 # --- teach (gripper_pick_demo's poses, G3-adjusted) ------------------------
 GRIP_DEPTH = 0.010  # shallow: keeps the mimic-rigid knuckle bars off the part
@@ -150,29 +165,25 @@ def show(tl, label):
     return rep
 
 
-# The feeble hand first: redeclaring the drive replaces it, the taught
-# sequence is untouched. 0.18 N*m at the knuckle still closes the
-# fingers (below ~0.15 they cannot even hold their own weight and the
-# hand visibly dangles — that reads as a broken robot, not a weak grip),
-# but the squeeze it buys is a couple of newtons, under what 0.35 kg
-# needs at this carry's 2 m/s2 peak.
-scene.set_gripper_drive(max_force=0.18)
+# The weak simulation condition first. Replacing the drive leaves the taught
+# sequence unchanged; the report checks whether the 0.35 kg part stays held.
+scene.set_gripper_drive(max_force=0.15)
 feeble = scene.simulate_sequence("cycle", physics=True, max_duration=60.0)
-rep = show(feeble, "feeble drive (max_force = 0.18 N*m)")
+rep = show(feeble, "feeble drive (max_force = 0.15 N*m)")
 assert rep["checks"]["hold"] == "fail" and not rep["_on_plate"]
 
-# The stock drive, baked LAST: the studio replays the latest bake, so a
+# The successful drive, baked LAST: the studio replays the latest bake, so a
 # connected (or --studio) viewer sees the cycle that works, and the USD
 # below exports it.
-scene.set_gripper_drive()
+scene.set_gripper_drive(max_force=DRIVE_CAP)
 timeline = scene.simulate_sequence("cycle", physics=True, max_duration=60.0)
-rep = show(timeline, "stock drive (cap = knuckle effort limit)")
+rep = show(timeline, "simulation drive (cap = 2 N*m)" if rq.is_r2(scene.robot)
+           else "stock drive (cap = knuckle effort limit)")
 assert rep["checks"]["hold"] == "pass" and rep["_on_plate"]
 
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
-out = args[0] if args else "friction_grasp.usda"
+out = args.out
 warnings = timeline.export_usd(out, fps=30.0)
 print(f"wrote {out}" + (f" ({len(warnings)} warnings)" if warnings else ""))
 
-if "--studio" in sys.argv:
+if args.studio:
     bt.studio(scene)

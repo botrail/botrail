@@ -180,6 +180,52 @@ impl Robot {
         })
     }
 
+    /// Loads a locally built catalog package directory containing manifest.yaml.
+    /// Preserves its product ID, frames, BOM and mounting declarations. The
+    /// revision is local-sha256:<digest of package files>, not a Hub commit.
+    /// Needs PyYAML (included in botrail[catalog]); no network request is made.
+    /// Save a project to bundle its geometry for portable, offline replay.
+    #[staticmethod]
+    #[pyo3(signature = (path, format = None, *, catalog_root = None))]
+    fn from_package(
+        py: Python<'_>,
+        path: PathBuf,
+        format: Option<&str>,
+        catalog_root: Option<PathBuf>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: Arc::new(catalog::from_package(
+                py,
+                &path,
+                format,
+                catalog_root.as_deref(),
+            )?),
+        })
+    }
+
+    /// Restore an embedded local package source in a generated project script.
+    #[staticmethod]
+    fn _from_source_json(json: &str) -> PyResult<Self> {
+        let source = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("robot source: {e}")))?;
+        let import_usd = |path: &str, articulation_root: &str| {
+            botrail_usd::import_robot(
+                std::path::Path::new(path),
+                &botrail_usd::RobotImportOptions {
+                    articulation_root: Some(articulation_root.to_string()),
+                    ..Default::default()
+                },
+            )
+            .map(|imported| imported.model)
+            .map_err(|e| e.to_string())
+        };
+        let model = botrail_scene::project::model_from_source(&source, &import_usd)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(model),
+        })
+    }
+
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
@@ -878,6 +924,12 @@ fn bom_row_dict(py: Python<'_>, row: &botrail_scene::part::BomRow) -> PyResult<P
     d.set_item("manufacturer", row.manufacturer.clone())?;
     d.set_item("model", row.model.clone())?;
     d.set_item("catalog", row.catalog.as_ref().map(|c| c.display()))?;
+    if let Some(order) = &row.order {
+        let json =
+            serde_json::to_string(order).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        d.set_item("order", py.import("json")?.call_method1("loads", (json,))?)?;
+    }
+
     d.set_item("qty", row.qty)?;
     d.set_item("description", row.description.clone())?;
     let attributes = PyDict::new(py);
@@ -1274,9 +1326,75 @@ impl Scene {
 
     #[getter]
     fn robot(&self) -> PyResult<Robot> {
-        self.robot
-            .clone()
-            .ok_or_else(|| PyValueError::new_err("scene has no robot; add one with add_robot"))
+        if self.hub.robot_names().is_empty() {
+            return Err(PyValueError::new_err(
+                "scene has no robot; add one with add_robot",
+            ));
+        }
+        Ok(Robot {
+            inner: self.hub.robot_model(0),
+        })
+    }
+
+    /// Work requiring a fresh evaluation after the last assembly change.
+    #[getter]
+    fn mounting_revalidation(&self) -> Vec<String> {
+        use botrail_session::SessionHost;
+        self.hub
+            .with_scene(|scene| scene.mounting_revalidation.clone())
+    }
+
+    #[pyo3(signature = (candidate, robot=None))]
+    fn _mounting_preview(
+        &self,
+        candidate: &Robot,
+        robot: Option<&str>,
+    ) -> PyResult<(Scene, String)> {
+        use botrail_session::SessionHost;
+        let index = self.resolve_robot(robot)?;
+        let snapshot = self.hub.snapshot();
+        let preview = botrail_scene::mounting::edit::preview(
+            &snapshot,
+            &snapshot.robots()[index].name,
+            candidate.inner.clone(),
+        )
+        .map_err(PyValueError::new_err)?;
+        Ok((
+            Scene {
+                hub: Arc::new(hub::SceneHub::new(preview.candidate)),
+                robot: Some(candidate.clone()),
+            },
+            preview.data.to_string(),
+        ))
+    }
+
+    #[pyo3(signature = (candidate, base_revision, candidate_revision, robot=None))]
+    fn _mounting_apply(
+        &self,
+        candidate: &Robot,
+        base_revision: &str,
+        candidate_revision: &str,
+        robot: Option<&str>,
+    ) -> PyResult<()> {
+        use botrail_session::SessionHost;
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .with_scene(|scene| {
+                let name = scene.robots()[index].name.clone();
+                botrail_scene::mounting::edit::apply(
+                    scene,
+                    &name,
+                    candidate.inner.clone(),
+                    base_revision,
+                    candidate_revision,
+                )
+            })
+            .map_err(PyValueError::new_err)?;
+        self.hub.invalidate_mounting_results();
+        for message in botrail_session::initial_messages(self.hub.as_ref()) {
+            self.hub.emit(&message);
+        }
+        Ok(())
     }
 
     /// Instance names of every robot in the scene, in insertion order.
@@ -5347,25 +5465,12 @@ impl Scene {
     /// when everything is self-contained; a zip archive (`project.json` +
     /// `assets/`) when mesh files are referenced, so the file stays
     /// portable across machines.
-    fn save_project(&self, path: PathBuf) -> PyResult<()> {
+    fn save_project(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let io_err = |e: std::io::Error| PyIOError::new_err(format!("{}: {e}", path.display()));
         let mut project = self.hub.project();
 
-        // Collect referenced mesh files and rewrite their urls to bundled
-        // asset names.
+        // Collect referenced assets and rewrite their urls to bundled names.
         let mut assets: Vec<(String, PathBuf)> = Vec::new();
-        for o in &mut project.obstacles {
-            if let botrail_scene::wire::GeometryMsg::Mesh { url, .. } = &mut o.geometry {
-                let source = PathBuf::from(&*url);
-                let file_name = source
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "mesh".to_string());
-                let asset = format!("assets/{}_{}", assets.len(), file_name);
-                *url = asset.clone();
-                assets.push((asset, source));
-            }
-        }
 
         // Keep each source's relative layer/texture tree and visit composites
         // recursively. Equal sources share one package within the project.
@@ -5404,6 +5509,45 @@ impl Scene {
         }
         for robot in &mut project.robots {
             robot.source.visit_usd_paths_mut(&mut bundle)?;
+        }
+
+        // Both obstacle meshes and URDF sources need their OBJ sidecars and
+        // relative texture trees. Equal sources share one package in the zip.
+        let mut meshes = std::collections::HashMap::<String, String>::new();
+        let mut bundle_mesh = |source: &str| -> Result<String, String> {
+            if let Some(dest) = meshes.get(source) {
+                return Ok(dest.clone());
+            }
+            let pack = || -> PyResult<(PathBuf, PathBuf, Vec<PathBuf>)> {
+                py.import("botrail.catalog")?
+                    .call_method1("_mesh_package", (source,))?
+                    .extract()
+            };
+            let (root, mesh, files) = pack().map_err(|e| e.to_string())?;
+            let dir = format!("assets/mesh_{}", meshes.len());
+            let relative = |p: &std::path::Path| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            };
+            let dest = format!("{dir}/{}", relative(&mesh));
+            for file in files {
+                assets.push((format!("{dir}/{}", relative(&file)), file));
+            }
+            meshes.insert(source.to_string(), dest.clone());
+            Ok(dest)
+        };
+        for obstacle in &mut project.obstacles {
+            if let botrail_scene::wire::GeometryMsg::Mesh { url, .. } = &mut obstacle.geometry {
+                *url = bundle_mesh(url).map_err(PyValueError::new_err)?;
+            }
+        }
+        for robot in &mut project.robots {
+            robot
+                .source
+                .visit_urdf_paths_mut(&mut bundle_mesh)
+                .map_err(PyValueError::new_err)?;
         }
 
         if assets.is_empty() {
@@ -5650,6 +5794,13 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
         }
     }
     for robot in &mut project.robots {
+        robot.source.visit_urdf_paths_mut(&mut |path| {
+            Ok(if path.starts_with("assets/") {
+                dir.join(path).display().to_string()
+            } else {
+                path.to_string()
+            })
+        })?;
         robot
             .source
             .visit_usd_paths_mut(&mut |path: &mut String| -> Result<(), String> {

@@ -84,6 +84,13 @@
         "$ref": "#/$defs/MotionMsg"
       }
     },
+    "mounting_revalidation": {
+      "description": "Authored work requiring a fresh evaluation after an assembly change.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "obstacles": {
       "type": "array",
       "items": {
@@ -754,6 +761,13 @@
           }
         },
         "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "part_number": {
           "type": [
             "string",
             "null"
@@ -2663,6 +2677,169 @@
         "node"
       ]
     },
+    "KitAttachment": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": "string"
+        },
+        "mount_frame": {
+          "type": "string"
+        },
+        "offset": {
+          "$ref": "#/$defs/KitOffset",
+          "default": {
+            "rpy": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "package": {
+          "type": "string"
+        },
+        "parent_frame": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "package",
+        "alias",
+        "parent_frame",
+        "mount_frame"
+      ]
+    },
+    "KitOffset": {
+      "type": "object",
+      "properties": {
+        "rpy": {
+          "type": "array",
+          "default": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "xyz": {
+          "type": "array",
+          "default": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false
+    },
+    "KitRepresentation": {
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "note": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RepresentationStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "note"
+      ]
+    },
+    "KitScope": {
+      "type": "string",
+      "enum": [
+        "mechanical_mounting"
+      ]
+    },
+    "KitSpec": {
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KitAttachment"
+          }
+        },
+        "base": {
+          "type": "string"
+        },
+        "manufacturer_support": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/KitSupport"
+          }
+        },
+        "representation": {
+          "$ref": "#/$defs/KitRepresentation"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "attachments",
+        "representation"
+      ]
+    },
+    "KitSupport": {
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "host": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "description": "Only mechanical mounting is evaluated; electrical claims are separate.",
+          "$ref": "#/$defs/KitScope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "scope",
+        "evidence"
+      ]
+    },
     "LegendMsg": {
       "description": "A colour key for an obstacle whose colours mean something.",
       "type": "object",
@@ -2940,6 +3117,25 @@
         "segments"
       ]
     },
+    "MountAlternative": {
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "catalog"
+      ]
+    },
     "MountBox": {
       "type": "object",
       "properties": {
@@ -3126,7 +3322,7 @@
       "type": "object",
       "properties": {
         "depth_mm": {
-          "description": "Usable threaded depth, including any documented tip/bottom allowance.",
+          "description": "Maximum usable tip depth from the mating plane, including bottom allowance.",
           "anyOf": [
             {
               "$ref": "#/$defs/DimensionRange"
@@ -3205,6 +3401,17 @@
             }
           ],
           "default": null
+        },
+        "thread_start_mm": {
+          "description": "Unthreaded distance from the mating plane to the first usable receiver\nthread. Omitted = threads start at the plane (the original contract).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -3384,6 +3591,13 @@
     "MountRequirement": {
       "type": "object",
       "properties": {
+        "catalog_alternatives": {
+          "description": "Individually sourced product alternatives, including OEM electronic\ncouplings. These are exact catalog identities, not face equivalence.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountAlternative"
+          }
+        },
         "evidence": {
           "type": "array",
           "default": [],
@@ -3633,6 +3847,13 @@
     "OrderInclude": {
       "type": "object",
       "properties": {
+        "catalog": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "name": {
           "type": "string"
         },
@@ -4192,6 +4413,14 @@
         "value"
       ]
     },
+    "RepresentationStatus": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "reference",
+        "unknown"
+      ]
+    },
     "RobotMountMsg": {
       "description": "A robot riding a vehicle (`Scene::mount_robot`): the device, where the\nbase sits in its frame, and — for a machine whose legs are the robot —\nthe gait that walks it.",
       "type": "object",
@@ -4357,6 +4586,16 @@
             "kind": {
               "type": "string",
               "const": "catalog"
+            },
+            "kit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KitSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "manufacturer": {
               "description": "Manifest identity (maker, product name, category, numeric\nspecs) — what the BOM names the package by. Absent in files\nwritten before parts existed; those lines then show the id only.",

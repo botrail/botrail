@@ -269,6 +269,11 @@ def test_three_product_families_report_known_gaps_and_preserve_them(
         assert item(assembled, "interface", "robot/tool2").status == "pass"
         assert item(assembled, "dimensions", "robot/tool").status == "unknown"
         assert not assembled.ready
+        iso50 = load(products["robotiq/agc-cpl-062-002.yaml"]["id"])
+        candidate = bt.mounting.report(arm.attach_tool(iso50, prefix="cpl_").attach_tool(tool, prefix="g_"))
+        assert item(candidate, "required:gripper-coupling").status == "pass"
+        assert [i.status for i in candidate.items if i.id.endswith(":interface")] == ["pass", "pass"]
+        assert not candidate.ready  # real declarations, synthetic geometry; no complete fit claim
 
 
 def test_old_project_does_not_acquire_missing_mounting_data_on_script_replay(catalog, tmp_path):

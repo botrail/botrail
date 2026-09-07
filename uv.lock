@@ -80,6 +80,7 @@ source = { editable = "." }
 catalog = [
     { name = "huggingface-hub", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "huggingface-hub", version = "1.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -96,7 +97,10 @@ docs = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "huggingface-hub", marker = "extra == 'catalog'", specifier = ">=0.24" }]
+requires-dist = [
+    { name = "huggingface-hub", marker = "extra == 'catalog'", specifier = ">=0.24" },
+    { name = "pyyaml", marker = "extra == 'catalog'", specifier = ">=6" },
+]
 provides-extras = ["catalog"]
 
 [package.metadata.requires-dev]

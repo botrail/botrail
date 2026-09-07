@@ -77,7 +77,7 @@ def test_the_cycle_runs_in_order_and_the_parts_change_places(cell) -> None:
 def test_the_hand_is_three_tools_on_one_wrist(cell) -> None:
     scene, _hs, tl = cell
     robot = scene.robot_of("arm")
-    assert robot.tcp_link == "tcp" and {demo.PIN_TIP, demo.FORK_TIP, demo.FORK} <= set(robot.link_names)
+    assert robot.tcp_link == "kit_gripper/tcp" and {demo.PIN_TIP, demo.FORK_TIP, demo.FORK} <= set(robot.link_names)
     # The bracket is a catalog product: its row on the bill carries the id.
     by = {row["names"][0]: row for row in scene.bom().rows}
     assert by["arm/tool"]["category"] == "tool.multi" and by["arm/tool"]["catalog"].startswith("botrail/hand/mph3/")

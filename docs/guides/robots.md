@@ -39,26 +39,106 @@ Instead of hunting down URDFs, load released packages straight from the
 (needs the optional extra: `pip install botrail[catalog]`):
 
 ```python
-robot = bt.Robot.from_catalog("2f-85")                       # newest revision
+robot = bt.Robot.from_catalog("2f-85")                       # newest public revision
 robot = bt.Robot.from_catalog("robotiq/2f/2f-85/r1",
                               revision="<dataset commit sha>")  # pinned
 ```
 
 Ids resolve exactly or by any unambiguous shorthand (`2f-85`,
 `robotiq/2f-85`). An id ends in a revision (`.../r1`), and when a shorthand
-matches several revisions of one product the newest wins — a revision is the
-same machine re-cut from a better source, so short names follow it forward
-instead of breaking. Different *products* stay ambiguous and raise, listing
-what matched. Name a revision outright to pin it.
+matches several revisions of one product, the newest `public` revision wins.
+Adding a newer `recipe_only` candidate leaves the latest public model selected
+by the short name. `bt.catalog.Index.get` uses the same preference; catalog search still
+lists all revisions. Different *products* stay ambiguous even if only one is
+public. Name a full revision ID to select it exactly. Pin the model revision
+used to teach a demo: newer models can change geometry, joint zero or TCP.
 
 Every load resolves to a concrete dataset commit and records the resolved id
 in the robot's source, so a saved project — and the script the studio
 exports — replays the *same bytes* later, on the revision it resolved to;
 that is the [determinism story](../concepts/determinism.md) extended to model
 acquisition.
-Downloads land in the standard Hugging Face cache. Packages whose meshes
-cannot be redistributed are `recipe_only`: `from_catalog` raises and points at
-building them locally with botrail-catalog-builder.
+Downloads land in the standard Hugging Face cache. `recipe_only` packages
+contain metadata without distributed geometry; they are not runnable model
+releases. Released models ship built geometry and load through `from_catalog`
+without a local CAD build, regardless of the model revision. An explicit ID
+for a metadata-only package, or a short name with no public revision, raises
+an error. The local-build pointer in that error is for model development.
+Kit dependencies keep
+their exact IDs; they are never substituted with another revision. A public
+package's download, format or asset errors are reported directly.
+
+Public distribution describes availability, independently of model precision
+or mechanical compatibility. The selected full ID and dataset commit remain
+visible in the robot's source and BOM.
+
+Load the resulting package directory, including its manifest, with:
+
+```python
+coupling = bt.Robot.from_package("dist/robotiq/coupling/agc-cpl-062-002/r1")
+# format="usd" selects the USD; the default prefers URDF.
+```
+
+`from_package` makes no network request and retains the manifest's product ID,
+frames, order and mounting declarations. It needs PyYAML, included in the catalog
+extra. Its revision is `local-sha256:<digest>` of the files inside the package;
+moving an unchanged directory preserves that revision. This records locally
+supplied data, not a published catalog release or manufacturer approval. Build
+self-contained packages with files inside the directory; symlinks are rejected.
+Save a `.botrail` project to bundle geometry. Reloading that project and running
+its generated Python restore local package sources without the original package
+directory or a Hub lookup for those sources. Loading just the URDF or USD does
+not carry the package identity and mounting information.
+
+The five Robotiq demos use the public r2 reference hand and ES-062 assembly.
+Run them normally; the built packages download on first use:
+
+```bash
+uv run python examples/basics/sfc_chart_demo.py --studio
+```
+
+The hand uses published BSD-2-Clause Menagerie meshes with Botrail's r2 joint
+tree and teaching frames. The coupling represents the mounting housing;
+electronics, spring contacts, cable, protector and fasteners have no geometry.
+The kit records the documented purchased components and manufacturer support,
+while its representation remains a reference with unverified detailed fit.
+Saved projects retain the selected IDs and dataset commit. r1 remains available
+by its full ID for older teaching data.
+
+??? info "Developing with local Robotiq r2 packages"
+
+    The five demos accept `--robotiq-r2 CATALOG_ROOT` for testing prepared local
+    packages. This option does not build them. The root must contain:
+
+    - `robotiq/2f/2f-85/r2`
+    - `robotiq/coupling/grp-es-cpl-062/r1`
+    - `robotiq/2f/2f-85-ur-es-062-kit/r2`
+
+    ```bash
+    uv run python examples/basics/sfc_chart_demo.py --robotiq-r2 /path/to/catalog --studio
+    uv run python examples/basics/gripper_pick_demo.py pick.usdc --robotiq-r2 /path/to/catalog --studio
+    uv run python examples/basics/friction_grasp_demo.py friction.usdc --robotiq-r2 /path/to/catalog --studio
+    uv run python examples/vehicles/amr_demo.py amr.usdc --robotiq-r2 /path/to/catalog --studio
+    uv run python examples/machining/machine_tending_demo.py tending.usdc --robotiq-r2 /path/to/catalog --studio
+    ```
+
+    An explicit local r2 selection requires its files and does not substitute
+    r1. The UR5e demos can also read `universal_robots/ur/ur5e/r2` from that root;
+    otherwise they fetch the public arm. Other equipment still uses the catalog.
+
+    The r2 paths use the new TCP, namespaced finger joint and pad geometry to
+    re-teach the motions and close values. UR demos load the complete ES-062 kit;
+    the Mitsubishi MPH-3 demo assembles the coupling and hand as separate parts
+    on its custom bracket. Its bracket fit remains unverified, and the kit's
+    recorded manufacturer support applies only to the listed host model.
+
+    The friction demo explicitly uses a **2 N·m simulation motor cap** for r2,
+    since that model has no calibrated effort limit. Both that cap and the weak
+    0.15 N·m case are simulation conditions, not Robotiq controller settings.
+    The model's unresolved seating datum and contact-adaptation limits remain
+    in its mounting report. Saved projects retain the local model fingerprints.
+    The AMR load report displays missing r2 payload ratings and component masses
+    as `unknown`; it does not inherit those figures from r1.
 
 Not every package is a robot. A `workpiece` — a body-in-white, a casting, a
 fixture — is a pile of meshes a cell loads as obstacles, and
@@ -122,11 +202,10 @@ one kinematic tree whose DOF vector is the arm's joints followed by the
 tool's, mimic joints included. Neither input changes; robots are immutable.
 
 ```python
-arm = bt.Robot.from_catalog("ur5e")
-coupling = bt.Robot.from_catalog("gripper-coupling")
-gripper = bt.Robot.from_catalog("2f-85")
+arm = bt.Robot.from_catalog("universal_robots/ur/ur5e/r2")
+kit = bt.Robot.from_catalog("robotiq/2f/2f-85-ur-es-062-kit/r2")
 
-robot = arm.attach_tool(coupling).attach_tool(gripper)   # frames from the manifests
+robot = arm.attach_tool(kit)   # includes the ES-062 coupling once
 robot.dof        # 6 + 1
 robot.tcp_link   # the gripper's declared TCP — IK now targets the grasp center
 ```
@@ -138,12 +217,8 @@ next `attach_tool` in the stack keeps chaining. Models without declared frames
 spell them out:
 
 ```python
-robot = arm.attach_tool(
-    gripper,
-    flange="flange",                       # arm-side link (ISO 9409-1 face)
-    mount="robotiq_arg2f_base_link",       # tool-side link — its root
-    offset_position=(0, 0, 0.0139),        # e.g. the coupling's thickness
-)
+tool = bt.Robot.from_urdf("custom_tool.urdf")
+robot = arm.attach_tool(tool, flange="tool0", mount="mount")
 ```
 
 The composite's TCP comes from `tcp=` if you pass it, else from a TCP the tool

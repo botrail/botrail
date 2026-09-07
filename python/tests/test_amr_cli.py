@@ -73,6 +73,48 @@ def test_comparison_does_not_open_studio(cli, monkeypatch):
     demo.bt.studio.assert_not_called()
 
 
+def test_r2_root_is_not_treated_as_the_export_path(cli, monkeypatch, tmp_path):
+    demo, _, timeline = cli
+    monkeypatch.setattr(sys, "argv", ["amr_demo.py", "--robotiq-r2", str(tmp_path), "r2.usdc"])
+    demo.main()
+    demo.bake.assert_called_once_with("rb-kairos", False, holonomic=False, robotiq_root=tmp_path)
+    timeline.export_usd.assert_called_once_with("r2.usdc", fps=60)
+    demo.load_chain.assert_called_once_with(demo.Carrier.return_value, robotiq_root=tmp_path)
+
+
+def test_r2_selection_is_retained_during_carrier_comparison(cli, monkeypatch, tmp_path):
+    demo, _, _ = cli
+    monkeypatch.setattr(sys, "argv", ["amr_demo.py", "--robotiq-r2", str(tmp_path), "--compare"])
+    demo.main()
+    demo.compare.assert_called_once_with(robotiq_root=tmp_path)
+
+
+def test_r2_load_report_preserves_missing_ratings_and_masses(monkeypatch, tmp_path):
+    import amr_demo as demo
+
+    for product, specs in ((demo.rq.HAND_R2, "dof: 1, stroke_mm: 85"),
+                           (demo.rq.COUPLING_ES062, "")):
+        package = tmp_path / product
+        package.mkdir(parents=True)
+        (package / "manifest.yaml").write_text(f"specs: {{{specs}}}\n")
+    lookup = Mock(return_value={"specs": {"payload_kg": 16, "mass_kg": 33.1}})
+    monkeypatch.setattr(demo, "manifest", lookup)
+    rows = demo.load_chain(SimpleNamespace(specs={"payload_kg": 250}), robotiq_root=tmp_path)
+    assert rows == [("gripper", None, demo.PART_MASS), ("arm", 16, None), ("carrier", 250, None)]
+    lookup.assert_called_once_with(demo.ARM)  # no inherited r1 rating or mass
+
+
+def test_unknown_load_does_not_prevent_r2_cli_export(cli, monkeypatch, tmp_path, capsys):
+    demo, _, timeline = cli
+    demo.load_chain.return_value = [("gripper", None, demo.PART_MASS), ("arm", 16, None)]
+    monkeypatch.setattr(sys, "argv", ["amr_demo.py", "--robotiq-r2", str(tmp_path)])
+    demo.main()
+    output = capsys.readouterr().out
+    assert "rated unknown" in output
+    assert "unknown (component mass not declared)" in output
+    timeline.export_usd.assert_called_once_with("cell_amr.usda", fps=60)
+
+
 @pytest.mark.parametrize("failure", ["bake", "export"])
 def test_failed_cycle_or_export_does_not_open_studio(cli, monkeypatch, failure):
     demo, _, timeline = cli

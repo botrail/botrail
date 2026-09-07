@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { parseInspection, type Inspection } from "./mounting";
 import { initialRenderQuality, persistRenderQuality, type RenderQuality } from "./three/renderQuality";
 import type {
   BranchTakenMsg,
@@ -361,6 +362,13 @@ function startPlayback(tracks: PlaybackTracks) {
 }
 
 export interface StudioState {
+  mountingOpen: boolean;
+  mountingInspection: Inspection | null;
+  mountingRequest: string | null;
+  mountingError: string | null;
+  mountingRevision: number;
+  setMountingOpen: (open: boolean) => void;
+  beginMountingRequest: (id: string) => void;
   /** Robot instances, in server (scene) order. */
   robots: RobotUiState[];
   /** Robot the panels operate on (instance name). */
@@ -603,6 +611,16 @@ export interface StudioState {
 }
 
 export const useStudioStore = create<StudioState>((set, get) => ({
+  mountingOpen: false,
+  mountingInspection: null,
+  mountingRequest: null,
+  mountingError: null,
+  mountingRevision: 0,
+  setMountingOpen: (open) => {
+    if (open) get().stopPlayback();
+    set({ mountingOpen: open, mountingInspection: null, mountingRequest: null, mountingError: null });
+  },
+  beginMountingRequest: (id) => set({ mountingRequest: id, mountingInspection: null, mountingError: null }),
   robots: [],
   selectedRobot: null,
   connection: "connecting",
@@ -659,10 +677,20 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   droppedStage: null,
   hiddenObstacles: new Set(),
 
-  setConnection: (c) => set({ connection: c }),
+  setConnection: (c) => set((s) => ({ connection: c,
+    mountingInspection: c === "connected" ? s.mountingInspection : null,
+    mountingRequest: c === "connected" ? s.mountingRequest : null,
+  })),
 
   applyServerMessage: (msg) => {
-    if (msg.type === "scene_init") {
+    if (msg.type === "mounting_inspection") {
+      if (get().mountingRequest !== msg.request_id || !get().mountingOpen) return;
+      try {
+        set({ mountingInspection: parseInspection(msg.inspection), mountingRequest: null, mountingError: null });
+      } catch (error) {
+        set({ mountingInspection: null, mountingRequest: null, mountingError: String(error) });
+      }
+    } else if (msg.type === "scene_init") {
       set((s) => {
         // A re-handshake (e.g. a robot was added) keeps the user's TCP link
         // and selection for robots that survive by name.
@@ -682,7 +710,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             linkPoses: [],
             ikStatus: null,
             tcpLink:
-              before?.tcpLink ??
+              (before && JSON.stringify(before.desc) === JSON.stringify(desc) ? before.tcpLink : null) ??
               groupTip(desc, selectedGroup) ??
               desc.tcp_link,
             selectedGroup,
@@ -696,6 +724,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : (robots[0]?.desc.name ?? null);
         return {
           robots,
+          mountingInspection: null,
+          mountingRequest: null,
+          mountingRevision: s.mountingRevision + 1,
           selectedRobot: selected,
           obstacles: [],
           frames: [],
@@ -846,7 +877,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
     } else if (msg.type === "parts") {
-      set({ parts: msg.parts });
+      set((s) => ({ parts: msg.parts, mountingInspection: null, mountingRequest: null,
+        mountingRevision: s.mountingRevision + 1 }));
     } else if (msg.type === "io") {
       set((s) => {
         const sel = s.selection;

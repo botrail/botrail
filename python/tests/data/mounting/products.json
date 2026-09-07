@@ -260,7 +260,18 @@
                   "section": "6.1.1 Couplings"
                 }
               ],
-              "note": "The gripper requires the separately modeled Robotiq coupling on its attachment path. The offset alone does not supply it."
+              "note": "The gripper requires the separately modeled Robotiq coupling on its attachment path. The offset alone does not supply it.",
+              "catalog_alternatives": [
+                {
+                  "catalog": "robotiq/coupling/agc-cpl-062-002/r1",
+                  "evidence": [
+                    {
+                      "source": 1,
+                      "section": "pp.123-124 section 6.1.1; p.152 AGC-CPL-062-002 for 2-Finger Gripper"
+                    }
+                  ]
+                }
+              ]
             }
           ]
         },
@@ -281,6 +292,12 @@
             "kind": "manufacturer_datasheet",
             "url": "https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190315.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm",
             "ref": "20190315",
+            "fetched_at": "2026-09-06"
+          },
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://assets.robotiq.com/website-assets/support_archives/document_en/2F-85_2F-140_Instruction_Manual_PDF_20181130.pdf",
+            "ref": "20181130",
             "fetched_at": "2026-09-06"
           }
         ],
@@ -498,6 +515,311 @@
       }
     },
     {
+      "recipe": "robotiq/agc-cpl-062-002.yaml",
+      "manifest": {
+        "id": "robotiq/coupling/agc-cpl-062-002/r1",
+        "category": "adapter",
+        "name": "AGC-CPL-062-002 (legacy ISO50 coupling)",
+        "manufacturer": {
+          "name": "Robotiq",
+          "country": "CA",
+          "product_url": "https://robotiq.com/support/archive"
+        },
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "mount",
+              "role": "mount",
+              "interface_id": "ISO 9409-1-50-4-M6",
+              "evidence": [
+                {
+                  "source": 1,
+                  "section": "p.124 Fig.6-6; p.152 coupling ordering entry"
+                }
+              ],
+              "note": "Frame is the CAD recess floor at z=-4 mm. Model-to-robot index orientation and all dimensional tolerances remain unconfirmed; no allowed pose declared.",
+              "geometry": {
+                "normal_z": -1,
+                "frame_verified": true,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m6-1",
+                    "position_mm": [
+                      -17.67766953,
+                      17.67766953
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "grip_mm": {
+                      "min": 3.5,
+                      "max": 3.5
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-2",
+                    "position_mm": [
+                      17.67766953,
+                      17.67766953
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "grip_mm": {
+                      "min": 3.5,
+                      "max": 3.5
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-3",
+                    "position_mm": [
+                      17.67766953,
+                      -17.67766953
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "grip_mm": {
+                      "min": 3.5,
+                      "max": 3.5
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  },
+                  {
+                    "id": "m6-4",
+                    "position_mm": [
+                      -17.67766953,
+                      -17.67766953
+                    ],
+                    "kind": "clearance",
+                    "diameter_mm": {
+                      "min": 6.4,
+                      "max": 6.4
+                    },
+                    "grip_mm": {
+                      "min": 3.5,
+                      "max": 3.5
+                    },
+                    "fastener_rules": {
+                      "thread": {
+                        "diameter_mm": 6.0,
+                        "pitch_mm": 1.0,
+                        "left_hand": false
+                      }
+                    }
+                  }
+                ],
+                "locators": [],
+                "evidence": [
+                  {
+                    "source": 0,
+                    "section": "AGC-CPL-062-002: four radius-3.2 cylinders at XY +/-17.67767 mm; bearing surfaces z=-4 and -0.5 mm; nominal grip 3.5 mm"
+                  },
+                  {
+                    "source": 1,
+                    "section": "p.124 Fig.6-6: PCD50, 4x diameter 6.4, M6-1.0; position/diameter/grip tolerances not supplied"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            },
+            {
+              "frame": "flange",
+              "role": "flange",
+              "interface_id": "robotiq:2f:coupling-to-gripper",
+              "evidence": [
+                {
+                  "source": 1,
+                  "section": "pp.123-124 section 6.1.1; p.147 section 7.1"
+                }
+              ],
+              "note": "CAD bearing annulus at z=6.9 mm; tapped bores start at z=4 mm. The 2.9 mm thread lead is nominal CAD geometry, not a guaranteed usable-thread start including unspecified chamfer/run-in tolerances.",
+              "geometry": {
+                "normal_z": 1,
+                "frame_verified": true,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m5-1",
+                    "position_mm": [
+                      -27.0,
+                      16.0
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "pitch_mm": 0.8,
+                      "left_hand": false
+                    },
+                    "thread_start_mm": {
+                      "min": 2.9,
+                      "max": 2.9
+                    },
+                    "fastener_rules": {
+                      "length_mm": {
+                        "min": 35.0,
+                        "max": 35.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m5-2",
+                    "position_mm": [
+                      27.0,
+                      16.0
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "pitch_mm": 0.8,
+                      "left_hand": false
+                    },
+                    "thread_start_mm": {
+                      "min": 2.9,
+                      "max": 2.9
+                    },
+                    "fastener_rules": {
+                      "length_mm": {
+                        "min": 35.0,
+                        "max": 35.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m5-3",
+                    "position_mm": [
+                      27.0,
+                      -16.0
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "pitch_mm": 0.8,
+                      "left_hand": false
+                    },
+                    "thread_start_mm": {
+                      "min": 2.9,
+                      "max": 2.9
+                    },
+                    "fastener_rules": {
+                      "length_mm": {
+                        "min": 35.0,
+                        "max": 35.0
+                      }
+                    }
+                  },
+                  {
+                    "id": "m5-4",
+                    "position_mm": [
+                      -27.0,
+                      -16.0
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "pitch_mm": 0.8,
+                      "left_hand": false
+                    },
+                    "thread_start_mm": {
+                      "min": 2.9,
+                      "max": 2.9
+                    },
+                    "fastener_rules": {
+                      "length_mm": {
+                        "min": 35.0,
+                        "max": 35.0
+                      }
+                    }
+                  }
+                ],
+                "locators": [],
+                "evidence": [
+                  {
+                    "source": 0,
+                    "section": "AGC-CPL-062-002: four radius-2.1 thread-core cylinders at XY (+/-27,+/-16), entry z=4 mm; top annulus z=6.9 mm"
+                  },
+                  {
+                    "source": 1,
+                    "section": "p.147 section 7.1: four M5-0.8 x 35 socket-head screws, tooth lock washers, medium-strength threadlocker; grade/torque/usable depth unconfirmed"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": [],
+          "note": "Legacy AGC coupling, not GRP-CPL-062 or GRP-ES-CPL-062. CAD covers the mechanical body; mass, electronics, cable routing and hardware grade/torque are not inferred from its solid volume. All fit coverage remains incomplete."
+        },
+        "order": {
+          "unit": "each",
+          "includes": [
+            {
+              "name": "M5-0.8 x 35 socket head cap screw for legacy gripper fixation",
+              "qty": 4
+            },
+            {
+              "name": "1 m pigtail cable",
+              "qty": 1
+            }
+          ],
+          "requires": [],
+          "note": "Legacy ordering entry, manual 20181130 p.152. Robot-side screws/dowel and installation consumables are separate. Tooth lock washers are required by the installation section; their supply unit is not established here. CAD shows the mechanical body, not every supplied item. Current availability is not asserted."
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_cad",
+            "url": "https://blog.robotiq.com/hubfs/support-files/AGC-CPL-062-002_20190816-Sep-06-2024-02-43-07-0050-PM.step",
+            "ref": "20190816; sha256 d2215390b85f84d5503015fd058ebba1c6bd9a1a7803a52cb5900ee642a175d8",
+            "fetched_at": "2026-09-06"
+          },
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://assets.robotiq.com/website-assets/support_archives/document_en/2F-85_2F-140_Instruction_Manual_PDF_20181130.pdf",
+            "ref": "20181130",
+            "fetched_at": "2026-09-06"
+          }
+        ],
+        "frames": {
+          "flange_frame": "flange",
+          "mount_frame": "mount",
+          "tcp_default": "flange",
+          "grasp_frames": [],
+          "camera_frames": [],
+          "lidar_frames": [],
+          "arms": []
+        }
+      }
+    },
+    {
       "recipe": "mitsubishi_electric/rv-5as-d.yaml",
       "manifest": {
         "id": "mitsubishi_electric/assista/rv-5as-d/r1",
@@ -657,7 +979,8 @@
               "id": "robot-bracket",
               "frame": "mount",
               "evidence": [],
-              "note": "A robot-to-spindle bracket has not been specified. Obtain its drawings and part identity before checking this assembly."
+              "note": "A robot-to-spindle bracket has not been specified. Obtain its drawings and part identity before checking this assembly.",
+              "catalog_alternatives": []
             }
           ]
         },
@@ -728,7 +1051,8 @@
               "id": "robot-bracket",
               "frame": "mount",
               "evidence": [],
-              "note": "The robot-side bracket and manufacturer mounting drawings are missing. Envelope placement cannot establish attachment compatibility."
+              "note": "The robot-side bracket and manufacturer mounting drawings are missing. Envelope placement cannot establish attachment compatibility.",
+              "catalog_alternatives": []
             }
           ]
         },

@@ -14,47 +14,47 @@ import type { SegmentMsg } from "./SegmentMsg";
 import type { SensorMsg } from "./SensorMsg";
 import type { SequenceMsg } from "./SequenceMsg";
 
-export type ClientMessage = { "type": "set_joint_positions", 
+export type ClientMessage = { "type": "inspect_mounting", request_id: string, } | { "type": "edit_mounting", request_id: string, action: string, data: unknown, } | { "type": "set_joint_positions",
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, positions: Array<number>, } | { "type": "set_tcp_target", 
+robot: string | null, positions: Array<number>, } | { "type": "set_tcp_target",
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, link: string, pose: PoseMsg, 
+robot: string | null, link: string, pose: PoseMsg,
 /**
  * The arm to solve with (a dual-arm robot); `None` infers it
  * from `link`.
  */
-group: string | null, } | { "type": "set_robot_base_pose", 
+group: string | null, } | { "type": "set_robot_base_pose",
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_poses", obstacles: Array<[string, PoseMsg]>, frames: Array<[string, PoseMsg]>, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string, 
+robot: string | null, pose: PoseMsg, } | { "type": "add_obstacle", obstacle: ObstacleMsg, } | { "type": "update_obstacle_pose", name: string, pose: PoseMsg, } | { "type": "update_poses", obstacles: Array<[string, PoseMsg]>, frames: Array<[string, PoseMsg]>, } | { "type": "update_obstacle_geometry", name: string, geometry: GeometryMsg, } | { "type": "remove_obstacle", name: string, } | { "type": "set_obstacle_enabled", name: string, enabled: boolean, } | { "type": "attach_obstacle", name: string,
 /**
  * Carrying robot instance name; `None` means the first robot.
  */
-robot: string | null, link: string | null, touch_links: Array<string> | null, 
+robot: string | null, link: string | null, touch_links: Array<string> | null,
 /**
  * The arm that grasps (a dual-arm robot); `link` then defaults
  * to its tip.
  */
-group: string | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request", 
+group: string | null, } | { "type": "detach_obstacle", name: string, } | { "type": "plan_request",
 /**
  * Target robot instance name; `None` means the first robot.
  */
-robot: string | null, goal_positions: Array<number>, 
+robot: string | null, goal_positions: Array<number>,
 /**
  * The arm to plan (a dual-arm robot); `None` is the robot's sole
  * group, or every joint.
  */
-group: string | null, } | { "type": "add_segment", motion: string, 
+group: string | null, } | { "type": "add_segment", motion: string,
 /**
  * Owner when the motion is created (an existing motion keeps its
  * owner); `None` means the first robot.
  */
-robot: string | null, segment: SegmentMsg, 
+robot: string | null, segment: SegmentMsg,
 /**
  * The arm a created motion drives (an existing motion keeps
  * its arm).

@@ -23,11 +23,25 @@ station. The taught cycle closes on air and carries nothing — attach is a
 weld, it cannot notice — but the report can: `touch: fail, 0 pads`.
 
 Run with:  python examples/basics/gripper_pick_demo.py [out.usda] [--studio]
+                                                   [--robotiq-r2 CATALOG_ROOT]
+Normal runs download the built r2 hand and ES-062 kit and re-teach close.
+The optional root overrides the catalog with a local development build.
 """
 
+import argparse
 import sys
+from pathlib import Path
 
 import botrail as bt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _robotiq as rq
+
+parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+parser.add_argument("out", nargs="?", default="gripper_pick.usda")
+parser.add_argument("--studio", action="store_true")
+rq.add_argument(parser)
+args = parser.parse_args()
 
 # --- cell dimensions (metres; z = 0 is the shop floor) ------------------
 BASE_Z = 0.74  # robot mounting plane, on top of its pedestal
@@ -43,10 +57,8 @@ DOWN = (1.0, 0.0, 0.0, 0.0)  # tool +Z at the floor
 OPEN = 0.0
 READY = [0.0, -1.9, 1.8, -1.5, -1.57, 0.0, OPEN]
 
-arm = bt.Robot.from_catalog("ur5e")
-coupling = bt.Robot.from_catalog("gripper-coupling")
-gripper = bt.Robot.from_catalog("2f-85")
-scene = bt.Scene(arm.attach_tool(coupling, prefix="cpl_").attach_tool(gripper),
+arm = rq.load_arm(root=args.robotiq_r2)
+scene = bt.Scene(rq.attach(arm, args.robotiq_r2),
                  base_position=(0.0, 0.0, BASE_Z))
 scene.set_joint_positions(READY)
 
@@ -66,8 +78,9 @@ scene.add_box("part", size=(PART, PART, PART),
 scene.set_physics("part", dynamic=True, mass=0.35, friction=0.6)
 # The pads are rubber — say so, and the contact record (and any future
 # friction grasp) sees rubber, not the 0.5 default.
-for side in ("left", "right"):
-    scene.set_link_material(f"{side}_inner_finger_pad", friction=1.1)
+for link in rq.pads(scene.robot):
+    if link.endswith("finger_pad"):
+        scene.set_link_material(link, friction=1.1)
 
 # --- teach --------------------------------------------------------------
 # IK poses with the finger value carried in every goal (a pose taught
@@ -167,10 +180,9 @@ missing = scene.simulate_sequence("cycle", physics=True, scenario="part_missing"
 print("scenario part_missing:")
 show(missing.grasp_report())
 
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
-out = args[0] if args else "gripper_pick.usda"
+out = args.out
 warnings = timeline.export_usd(out, fps=30.0)
 print(f"wrote {out}" + (f" ({len(warnings)} warnings)" if warnings else ""))
 
-if "--studio" in sys.argv:
+if args.studio:
     bt.studio(scene)

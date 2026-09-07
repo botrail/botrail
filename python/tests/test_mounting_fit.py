@@ -8,7 +8,7 @@ import json
 import botrail as bt
 import pytest
 import yaml
-from test_mounting import ARM, EVIDENCE, IDENTITY, TOOL, face, item, load
+from test_mounting import ADAPTER, ARM, EVIDENCE, IDENTITY, TOOL, face, item, load
 from test_mounting import catalog as catalog  # noqa: PLC0414 - pytest fixture re-export
 
 
@@ -116,6 +116,100 @@ def test_selected_screw_conditions(fitted, key, value, status):
     report = bt.mounting.report(fitted(b=b))
     assert item(report, "fasteners").status == status
     assert not report.ready
+
+
+@pytest.mark.parametrize("start,length,status", [
+    (bounds(0), 12, "pass"),
+    (bounds(2), 12, "fail"),  # 6 mm penetration, only 4 mm engaged; needs 5
+    (bounds(2), 13, "pass"),
+    (bounds(2), 15, "fail"),  # sufficient engagement but tip bottoms beyond 8
+    (bounds(0, 2), 12, "unknown"),
+    (bounds(6), 12, "fail"),  # tip does not reach a usable thread
+])
+def test_unthreaded_lead_is_excluded_without_moving_the_depth_limit(fitted, start, length, status):
+    a, b = drawing("left", "flange"), drawing("tool_root", "mount")
+    a["geometry"]["holes"][0]["thread_start_mm"] = start
+    b["fasteners"][0]["length_mm"] = bounds(length)
+    report = bt.mounting.report(fitted(a, b))
+    fasteners = item(report, "fasteners")
+    assert fasteners.status == status
+    check = next(c for c in fasteners.evidence["checks"] if c["check"] == "h0:engagement")
+    assert check["inputs"]["tip_penetration_mm"] == bounds(length - 6)
+    assert check["inputs"]["engagement_mm"] == bounds(length - 6 - start["max"], length - 6 - start["min"])
+
+
+def test_clearance_cannot_declare_thread_lead(fitted):
+    b = drawing("tool_root", "mount")
+    b["geometry"]["holes"][0]["thread_start_mm"] = bounds(2)
+    with pytest.raises(ValueError, match="clearance"):
+        fitted(b=b)
+
+
+ALT = "acme/adapter/alternative/r1"
+
+
+def declared_alternative(catalog, *, evidence=None, qty=1, primary=ADAPTER):
+    catalog(ALT, flange="out", mounting={"interfaces": [
+        face("mount", "mount", "robot-face"), face("out", "flange", "tool-face")]})
+    return catalog(TOOL, mount="tool_root", mounting={
+        "interfaces": [face("tool_root", "mount", "tool-face")],
+        "requirements": [{"id": "adapter", "frame": "tool_root", "order_requires": 0,
+                          "catalog_alternatives": [{"catalog": ALT, "evidence": EVIDENCE if evidence is None else evidence}],
+                          "evidence": EVIDENCE, "note": "Explicit fixture variant"}]},
+        order={"requires": [{"catalog": primary, "qty": qty}]})
+
+
+def test_documented_catalog_alternative_and_primary_both_count(catalog):
+    declared_alternative(catalog)
+    for pid in (ADAPTER, ALT):
+        robot = load(ARM).attach_tool(load(pid), prefix="a_").attach_tool(load(TOOL))
+        report = bt.mounting.report(robot)
+        assert item(report, "required:adapter").status == "pass"
+        assert not report.ready  # this exception does not supply dimension/fastener proofs
+
+
+def test_catalog_alternative_uses_actual_path_and_counts_each_instance_once(catalog):
+    declared_alternative(catalog)
+    arm = load(ARM).attach_tool(load(ALT), flange="right", prefix="spare_")
+    scene = bt.Scene(arm.attach_tool(load(TOOL), flange="left"))
+    scene.add_robot(load(ALT), name="spare")
+    assert item(bt.mounting.report(scene), "required:adapter").status == "fail"
+    declared_alternative(catalog, qty=2, primary=ALT)
+    robot = load(ARM).attach_tool(load(ALT), prefix="a_").attach_tool(load(TOOL))
+    assert item(bt.mounting.report(robot), "required:adapter").status == "fail"
+
+
+@pytest.mark.parametrize("community", [False, True])
+def test_present_alternative_with_missing_evidence_is_unknown(catalog, community):
+    path = declared_alternative(catalog, evidence=[{"source": 1, "section": "unverified"}] if community else [])
+    if community:
+        manifest = yaml.safe_load((path / "manifest.yaml").read_text())
+        manifest["sources"].append({"kind": "community", "url": "https://example.com/unverified"})
+        (path / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+    robot = load(ARM).attach_tool(load(ALT), prefix="a_").attach_tool(load(TOOL))
+    assert item(bt.mounting.report(robot), "required:adapter").status == "unknown"
+
+
+def test_alternative_source_indices_rebase_and_replay(catalog, tmp_path):
+    declared_alternative(catalog)
+    catalog(TOOL, mount="tool_root", mounting={"interfaces": [face("tool_root", "mount", "tool-face")]})
+    doc = document(face("tool_root", "mount", "tool-face"))
+    doc["mounting"]["requirements"] = [{"id": "variant", "frame": "tool_root",
+        "catalog_alternatives": [{"catalog": ALT, "evidence": EVIDENCE}],
+        "evidence": EVIDENCE, "note": "Fixture approved alternative"}]
+    tool = load(TOOL)._with_mounting_json(json.dumps(doc))
+    scene = bt.Scene(load(ARM).attach_tool(load(ALT), prefix="a_").attach_tool(tool))
+    before = bt.mounting.report(scene).to_dict()
+    requirement = item(bt.mounting.report(scene), "required:document:variant")
+    assert requirement.status == "pass"
+    assert requirement.evidence["requirement"]["catalog_alternatives"][0]["evidence"][0]["source"] == 1
+    project = tmp_path / "alternatives.botrail"
+    scene.save_project(project)
+    restored = bt.Scene.load_project(project)
+    ns = {}
+    exec(restored.generate_python().replace("bt.studio(scene)", ""), ns)
+    assert bt.mounting.report(restored).to_dict() == before
+    assert bt.mounting.report(ns["scene"]).to_dict() == before
 
 
 @pytest.mark.parametrize("field", ["frame_verified", "complete", "evidence"])

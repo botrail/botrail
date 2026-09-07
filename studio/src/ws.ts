@@ -39,6 +39,10 @@ export function startWs(): void {
     onMessage: (text) => {
       try {
         const msg = JSON.parse(text) as ServerMessage;
+        if (msg.type === "mounting_edit") {
+          mountingReplies.get(msg.request_id)?.(msg.result);
+          return;
+        }
         useStudioStore.getState().applyServerMessage(msg);
       } catch (err) {
         console.error("botrail studio: failed to parse server message", err);
@@ -49,6 +53,31 @@ export function startWs(): void {
 
 function rawSend(msg: ClientMessage): void {
   backend?.send(JSON.stringify(msg));
+}
+
+const mountingReplies = new Map<string, (result: unknown) => void>();
+export function editMounting(action: string, data: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const request_id = crypto.randomUUID();
+    const timer = window.setTimeout(() => {
+      mountingReplies.delete(request_id);
+      reject(new Error("Assembly request timed out. Check the server and try again."));
+    }, 180_000);
+    mountingReplies.set(request_id, (result) => {
+      clearTimeout(timer);
+      mountingReplies.delete(request_id);
+      if (result && typeof result === "object" && "error" in result) reject(new Error(String(result.error)));
+      else resolve(result);
+    });
+    rawSend({ type: "edit_mounting", request_id, action, data });
+  });
+}
+
+/** Read-only inspection. The token rejects replies for an older snapshot. */
+export function requestMountingInspection(): void {
+  const request_id = crypto.randomUUID();
+  useStudioStore.getState().beginMountingRequest(request_id);
+  rawSend({ type: "inspect_mounting", request_id });
 }
 
 // --- throttled senders (leading + trailing edge) ---

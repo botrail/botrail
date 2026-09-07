@@ -1,0 +1,694 @@
+.mounting-dialog {
+  box-sizing: border-box;
+  width: min(1500px, calc(100vw - 28px));
+  height: calc(100vh - 28px);
+  max-height: none;
+  max-width: none;
+  padding: 0;
+  border: 1px solid #3a4a5a;
+  border-radius: 10px;
+  background: #171e27;
+  color: #d9e3ed;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font:
+    13px system-ui,
+    sans-serif;
+}
+.mounting-dialog::backdrop {
+  background: #070c13c9;
+}
+.mounting-dialog * {
+  box-sizing: border-box;
+}
+.mounting-dialog button,
+.mounting-dialog select {
+  font: inherit;
+  color: inherit;
+  background: #24303d;
+  border: 1px solid #415365;
+  border-radius: 5px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.mounting-dialog button:hover {
+  background: #34495d;
+}
+.mounting-dialog button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.mounting-dialog button.active {
+  background: #294860;
+  border-color: #7eb8e0;
+}
+.mounting-dialog :focus-visible {
+  outline: 2px solid #9ad3f8;
+  outline-offset: 2px;
+}
+.mounting-dialog h2 {
+  font-size: 21px;
+  margin: 4px 0 0;
+}
+.mounting-dialog h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 18px 0 11px;
+}
+.mounting-dialog p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #aebdcb;
+}
+.mounting-dialog small {
+  font-size: 10px;
+  color: #91a5b8;
+}
+.mounting-dialog a {
+  color: #93c7ed;
+}
+.mounting-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 17px 20px;
+  border-bottom: 1px solid #34404f;
+  flex-shrink: 0;
+}
+.mounting-header > div {
+  margin-right: auto;
+}
+.mounting-header select {
+  max-width: 220px;
+}
+.mounting-summary {
+  display: flex;
+  gap: 22px;
+  justify-content: space-between;
+  font-size: 11px;
+  padding: 12px 20px;
+  background: #1b2632;
+  flex-shrink: 0;
+}
+.mounting-summary > span:last-child {
+  color: #a8b7c6;
+}
+.mounting-dialog .pass {
+  color: #8bc6ab;
+}
+.mounting-dialog .fail {
+  color: #efa49c;
+}
+.mounting-dialog .unknown,
+.mounting-dialog .not_run {
+  color: #e8c086;
+}
+.mounting-dialog .not_applicable {
+  color: #a1adba;
+}
+.mounting-chain {
+  padding: 12px 20px;
+  display: flex;
+  gap: 9px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.mounting-chain button {
+  font-size: 11px;
+  white-space: nowrap;
+  text-align: left;
+}
+.mounting-chain small {
+  display: block;
+  margin-bottom: 5px;
+}
+.mounting-chain b {
+  padding: 0 6px;
+  color: #8dc5eb;
+}
+.mounting-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 325px;
+  min-height: 0;
+  flex: 1;
+  border-top: 1px solid #34404f;
+}
+.mounting-visual-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.mounting-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  background: #1b2530;
+}
+.mounting-toolbar nav {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.mounting-toolbar button {
+  font-size: 11px;
+}
+.mounting-stage {
+  position: relative;
+  flex: 1;
+  min-height: 220px;
+  background: #e9eef2;
+  color: #30475a;
+  overflow: hidden;
+}
+.mounting-canvas {
+  position: absolute !important;
+  inset: 0;
+}
+.mounting-stage-note {
+  position: absolute;
+  top: 15px;
+  left: 15px;
+  max-width: calc(100% - 30px);
+  padding: 9px 12px;
+  font-size: 11px;
+  background: #ffffffe8;
+  border: 1px solid #c5d3de;
+  border-radius: 6px;
+  pointer-events: none;
+}
+.mounting-stage-note small {
+  display: block;
+  color: #597085;
+  font-size: 10px;
+  margin-top: 5px;
+}
+.mounting-frame-label,
+.mounting-hole-label {
+  background: #fbfdffe8;
+  color: #3c566d;
+  font-size: 10px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mounting-hole-label {
+  background: #f3e8f8;
+  color: #703990;
+}
+.mounting-view-controls {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
+  padding: 11px 15px;
+  border-bottom: 1px solid #34404f;
+  font-size: 11px;
+  color: #b5c3d0;
+}
+.mounting-view-controls label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.mounting-view-controls input[type="range"] {
+  width: 110px;
+  accent-color: #88b8d8;
+}
+.mounting-view-controls > span {
+  margin-left: auto;
+  font-size: 10px;
+  color: #92a6b8;
+}
+.mounting-legend {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: #a6b9ca;
+  padding: 11px 15px;
+}
+.mounting-results {
+  overflow: auto;
+  border-left: 1px solid #34404f;
+  padding: 3px 17px 24px;
+}
+.mounting-results > select {
+  width: 100%;
+  font-size: 11px;
+}
+.mounting-kit {
+  border-bottom: 1px solid #34404f;
+  padding: 12px 20px;
+}
+.mounting-kit h3 {
+  margin-top: 7px;
+}
+.mounting-dialog > .mounting-kit {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
+}
+.assembly-editor .mounting-kit .pass {
+  color: #28644d;
+}
+.mounting-status-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  padding: 10px 0;
+  border-bottom: 1px solid #293744;
+}
+.mounting-status-row b {
+  white-space: nowrap;
+}
+.mounting-dimensions {
+  font-size: 11px;
+  margin: 12px 0;
+}
+.mounting-dimensions > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 9px 0;
+  border-bottom: 1px solid #2c3947;
+}
+.mounting-dimensions dt {
+  color: #9bafc1;
+}
+.mounting-dimensions dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.mounting-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mounting-findings button {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  font-size: 11px;
+}
+.mounting-findings button > span {
+  color: #d6e1eb;
+}
+.mounting-findings button > b {
+  font-size: 10px;
+  white-space: nowrap;
+}
+.mounting-finding {
+  border-left: 3px solid currentColor;
+  margin-top: 20px;
+  padding-left: 12px;
+}
+.mounting-finding h3 {
+  color: #e0e8f0;
+  line-height: 1.6;
+}
+.mounting-dialog details {
+  margin-top: 12px;
+}
+.mounting-dialog summary {
+  font-size: 11px;
+  cursor: pointer;
+  color: #b6cce0;
+  line-height: 1.6;
+}
+.mounting-dialog pre {
+  font-size: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 230px;
+  overflow: auto;
+  background: #111922;
+  padding: 9px;
+  color: #aabed0;
+}
+.mounting-evidence p {
+  overflow-wrap: anywhere;
+}
+.mounting-evidence small {
+  display: block;
+  margin-top: 5px;
+}
+.mounting-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  font-size: 10px;
+  color: #8ea4b8;
+  border-top: 1px solid #34404f;
+  flex-shrink: 0;
+}
+.mounting-footer code {
+  font-size: 10px;
+}
+.mounting-empty {
+  padding: 40px;
+  line-height: 1.7;
+  overflow: auto;
+}
+.mounting-empty > b {
+  font-size: 17px;
+}
+.mounting-stage > .mounting-empty {
+  color: #3d5365;
+}
+.mounting-stage > .mounting-empty p {
+  color: #526b7e;
+}
+.mounting-diagram {
+  width: 100%;
+  height: 100%;
+  display: block;
+  min-height: 220px;
+}
+.mounting-diagram text {
+  fill: #304a5e;
+  font-family: system-ui, sans-serif;
+}
+.mounting-diagram g[role="button"] {
+  cursor: pointer;
+}
+.mounting-diagram g[role="button"]:focus {
+  outline: none;
+  filter: drop-shadow(0 0 3px #9657b3);
+}
+.mounting-note {
+  font-size: 11px !important;
+}
+.mounting-open {
+  width: 100%;
+}
+@media (max-width: 1050px) {
+  .mounting-content {
+    grid-template-columns: minmax(0, 1fr) 290px;
+  }
+  .mounting-toolbar {
+    flex-wrap: wrap;
+  }
+  .mounting-header {
+    flex-wrap: wrap;
+  }
+  .mounting-header select {
+    max-width: 180px;
+  }
+  .mounting-summary {
+    gap: 10px;
+  }
+  .mounting-toolbar button {
+    padding: 7px;
+  }
+  .mounting-view-controls > span {
+    margin-left: 0;
+  }
+}
+@media (max-width: 720px) {
+  .mounting-dialog {
+    width: calc(100vw - 12px);
+    height: calc(100vh - 12px);
+    overflow: auto;
+  }
+  .mounting-content {
+    display: block;
+    flex: none;
+    min-height: auto;
+  }
+  .mounting-visual-panel {
+    height: 600px;
+  }
+  .mounting-results {
+    overflow: visible;
+    border-left: 0;
+    border-top: 1px solid #34404f;
+  }
+  .mounting-header {
+    padding: 12px;
+  }
+  .mounting-header > div {
+    width: 100%;
+  }
+  .mounting-header h2 {
+    font-size: 18px;
+  }
+  .mounting-header select {
+    max-width: 135px;
+  }
+  .mounting-header button {
+    font-size: 11px;
+  }
+  .mounting-summary {
+    flex-direction: column;
+    gap: 5px;
+  }
+  .mounting-footer {
+    flex-wrap: wrap;
+  }
+  .mounting-stage-note {
+    font-size: 10px;
+    top: 8px;
+    left: 8px;
+  }
+  .mounting-view-controls {
+    padding: 8px;
+  }
+  .mounting-legend {
+    gap: 9px;
+  }
+  .mounting-chain {
+    padding: 9px 12px;
+  }
+  .mounting-toolbar button {
+    font-size: 10px;
+    padding: 7px 5px;
+  }
+}
+
+.assembly-editor {
+  display: grid;
+  grid-template-columns: 285px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  color: #243441;
+  background: #f5f7f9;
+}
+.assembly-picker {
+  padding: 16px;
+  overflow-y: auto;
+  border-right: 1px solid #cbd5de;
+  background: #fff;
+}
+.assembly-picker h3,
+.assembly-model h3 {
+  margin: 0 0 10px;
+}
+.assembly-picker p,
+.assembly-picker small {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.assembly-picker label {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.assembly-picker input,
+.assembly-picker select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.assembly-picker button {
+  width: 100%;
+  margin-top: 10px;
+}
+.assembly-picker details {
+  margin: 16px 0;
+}
+.assembly-picker summary {
+  cursor: pointer;
+}
+.assembly-primary {
+  background: #225a7b !important;
+  color: #fff !important;
+  border-color: #225a7b !important;
+}
+.assembly-primary:disabled {
+  opacity: 0.45;
+}
+.assembly-error {
+  color: #963621;
+  overflow-wrap: anywhere;
+}
+.assembly-candidates button {
+  text-align: left;
+  white-space: normal;
+  padding: 12px;
+}
+.assembly-candidates button[aria-pressed="true"] {
+  outline: 2px solid #397895;
+  background: #edf5fa;
+}
+.assembly-candidates b,
+.assembly-candidates span,
+.assembly-candidates small,
+.assembly-actions small {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 3px 0;
+}
+.assembly-comparison {
+  overflow: auto;
+  min-width: 0;
+}
+.assembly-welcome {
+  max-width: 560px;
+  margin: 100px auto;
+  padding: 24px;
+  line-height: 1.6;
+}
+.assembly-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  background: #fff;
+  border-bottom: 1px solid #cbd5de;
+}
+.assembly-actions > div {
+  flex: 1;
+}
+.assembly-actions small {
+  font-size: 11px;
+  font-weight: normal;
+}
+.assembly-view-options {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 18px;
+  font-size: 12px;
+}
+.assembly-models {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: #cbd5de;
+}
+.assembly-model {
+  position: relative;
+  height: 300px;
+  min-width: 0;
+  background: #e9eef2;
+}
+.assembly-model h3 {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  z-index: 1;
+  font-size: 13px;
+  pointer-events: none;
+}
+.assembly-differences {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 1fr);
+  gap: 16px;
+  padding: 16px;
+  align-items: start;
+}
+.assembly-differences table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  background: #fff;
+}
+.assembly-differences td,
+.assembly-differences th {
+  padding: 9px;
+  border-bottom: 1px solid #d5dde3;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.assembly-differences th {
+  font-weight: 600;
+}
+.assembly-changed {
+  background: #e8f3f9;
+}
+.assembly-findings {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.assembly-findings h3 {
+  margin-top: 0;
+}
+.assembly-findings p {
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  background: #fff;
+  border-left: 3px solid #a2b6c3;
+}
+.assembly-findings b,
+.assembly-findings span,
+.assembly-findings small {
+  display: block;
+}
+@media (max-width: 1000px) {
+  .assembly-editor {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+  .assembly-differences {
+    grid-template-columns: 1fr;
+  }
+  .assembly-actions {
+    flex-wrap: wrap;
+  }
+  .assembly-model {
+    height: 250px;
+  }
+}
+/* The comparison area has a light surface inside the dark inspector shell. */
+.mounting-dialog .assembly-editor button,
+.mounting-dialog .assembly-editor select,
+.mounting-dialog .assembly-editor input:not([type="checkbox"]) {
+  color: #243441;
+  background: #fff;
+  border: 1px solid #aabac8;
+  border-radius: 5px;
+  padding: 8px 10px;
+  font: inherit;
+}
+.mounting-dialog .assembly-editor button:hover {
+  background: #e4eef5;
+}
+.mounting-dialog .assembly-editor button[aria-pressed="true"] {
+  background: #edf5fa;
+}
+.mounting-dialog .assembly-editor p {
+  color: #405668;
+}
+.mounting-dialog .assembly-editor small {
+  color: #536b7d;
+}
+.mounting-dialog .assembly-editor summary {
+  color: #36596f;
+}
+.mounting-dialog .assembly-editor .assembly-error {
+  color: #963621;
+}

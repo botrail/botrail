@@ -66,22 +66,32 @@ to a page and every line of the bill carrying a number.
 Needs the catalog (`pip install botrail[catalog]`; the packages are
 fetched from the Hugging Face dataset botrail/botrail-catalog and
 cached).
+
+Normal runs download the built r2 hand and ES-062 coupling.
+`--robotiq-r2 CATALOG_ROOT` overrides them with a local development build. The MPH-3 remains a custom bracket with unverified mounting fit;
+it does not inherit the manufacturer's UR-kit support. The grasp and
+door/button approaches are re-taught with the new geometry and TCP.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
 import botrail as bt
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _robotiq as rq
 
 HERE = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------- products
 ARM = "rv-5as-d"                 # Mitsubishi Electric MELFA ASSISTA, 5 kg / 910 mm
-COUPLING = "gripper-coupling"
-GRIPPER = "2f-85"
+# Exact runtime models; TCP and close are taught from their geometry.
+COUPLING = rq.COUPLING_ES062
+GRIPPER = rq.HAND_R2
 STAND = "sus/zf/robostand-crx"   # a robot stand, bought to the height the door wants
 ROBOT = "arm"
 # The machine and the vise as catalog products (`--catalog`): the
@@ -115,7 +125,7 @@ SEAT = 0.005                     # a carried part is set down proud of the surfa
 HOVER = 0.10                     # the straight-line approach above a grasp
 GRIP = 0.005                     # the pads' centre below the part's top face
 OPEN, SHUT = 0.0, 0.40           # finger joint: 92 mm across the pads, and 50
-PRESS_STANDOFF = 0.03            # where a press starts, off the cap
+PRESS_STANDOFF = 0.06            # keep the r2 hand's swing clear of the panel before pressing
 HOOK_STANDOFF = 0.06             # where the fork comes at the handle from (the bar is 16 mm; the seat 50)
 
 CYCLE_S = 20.0                   # a short part program, so the bake stays short
@@ -218,11 +228,10 @@ def along(pose, distance: float):
 
 
 # ------------------------------------------------------------------ build
-def tool(*, visual_dir: Path | None = None) -> bt.Robot:
+def tool(*, visual_dir: Path | None = None, robotiq_root: Path | None = None) -> bt.Robot:
     """The arm with its hand: the 2F-85 on a bracket that also carries a
     pin and a fork — three tools, one wrist, switched by turning it."""
     arm = bt.Robot.from_catalog(ARM)
-    coupling, gripper = bt.Robot.from_catalog(COUPLING), bt.Robot.from_catalog(GRIPPER)
     # The gripper down the plate's axis (the hand's declared flange); the
     # pin out one side of the plate and the fork out the other, both in
     # the plane the pads open in — so with the pads across a part, pin
@@ -232,14 +241,15 @@ def tool(*, visual_dir: Path | None = None) -> bt.Robot:
         # Authored display stages; retain the validated catalog URDF mechanics.
         arm = arm.with_visuals(bt.Robot.from_usd(visual_dir / "rv-5as-d.usdc"))
         bracket = bracket.with_visuals(bt.Robot.from_usd(visual_dir / "mph3.usda"))
-    stack = bracket.attach_tool(coupling, prefix="cpl_").attach_tool(gripper)
+    stack = rq.attach(bracket, robotiq_root, purchase_kit=False)
     return arm.attach_tool(stack)
 
 
-def build(*, catalog: bool = False, visual_dir: Path | None = None) -> tuple[bt.Scene, bt.tending.Handshake]:
+def build(*, catalog: bool = False, visual_dir: Path | None = None,
+          robotiq_root: Path | None = None) -> tuple[bt.Scene, bt.tending.Handshake]:
     """The cell, taught and programmed. `catalog` orders the machine and
     the vise from their packs instead of typing their figures in."""
-    scene = bt.Scene(tool(visual_dir=visual_dir), name=ROBOT)
+    scene = bt.Scene(tool(visual_dir=visual_dir, robotiq_root=robotiq_root), name=ROBOT)
 
     # -- the machine, the vise, the parts ----------------------------------
     if catalog:
@@ -293,7 +303,7 @@ def build(*, catalog: bool = False, visual_dir: Path | None = None) -> tuple[bt.
     # The pads touch the part they close on — that is what a grasp is, so
     # it is declared rather than found by the clearance measure.
     for part in ("finished", "blank"):
-        for link in PADS:
+        for link in rq.pads(scene.robot_of(ROBOT)):
             scene.allow_link_obstacle_contact(link, part, robot=ROBOT)
 
     # -- the machine's program: its cycle on the start button, the clamp
@@ -341,6 +351,7 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     press starts, off the cap — wider where the swing to the panel passes
     close to its plate."""
     limits = scene.robot_of(ROBOT).joint_limits
+    shut = rq.close_for_width(scene.robot_of(ROBOT), PART[0], SHUT)
     name = vmc.name
     # Which way this machine lies from the base, as the first joint's
     # angle: every seed below faces it, so an arm between two machines is
@@ -476,7 +487,7 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
         try:
             for i, (tag, target, fraction) in enumerate(path):
                 slide_door(scene, vmc, fraction)
-                prev = solve(target, fq, prev, fingers=SHUT, link=FORK_TIP, strict=True)
+                prev = solve(target, fq, prev, fingers=shut, link=FORK_TIP, strict=True)
                 chain[(tag, "near" if i in (1, 2) else "off")] = prev
         except RuntimeError as err:
             failure = err
@@ -520,6 +531,7 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
     `home` ends with the park motion."""
     S = bt.seq
     finger = scene.robot_of(ROBOT).joint_names[-1]
+    shut = rq.close_for_width(scene.robot_of(ROBOT), PART[0], SHUT)
     sq = sq if sq is not None else scene.sequence("tend")
     finished, blank = parts
 
@@ -537,7 +549,7 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
         on the blank once it sits in the jaws; the clamp is a button."""
         step("enter", actions=[motion("enter")])
         step("down", actions=[motion("down")])
-        step("grip", actions=[grip(SHUT)])
+        step("grip", actions=[grip(shut)])
         step("hold", actions=[S.attach(finished, touch_links="tool", robot=ROBOT)])
         step("up", actions=[motion("up")])
         step("exit", actions=[motion("exit")])
@@ -547,7 +559,7 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
         step("clear_out", actions=[motion("clear_out")])
         step("to_blank", actions=[motion("to_blank")])
         step("down_blank", actions=[motion("down_blank")])
-        step("grip_blank", actions=[grip(SHUT)])
+        step("grip_blank", actions=[grip(shut)])
         step("hold_blank", actions=[S.attach(blank, touch_links="tool", robot=ROBOT)])
         step("up_blank", actions=[motion("up_blank")])
         step("approach_2", actions=[motion("approach")])
@@ -570,7 +582,7 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
         # (with what rides on it) is carried by the fork for the slide.
         # The empty gripper is tucked shut for the door and opened again
         # after it — hanging open, its pads are what grazes the leaf.
-        step(f"tuck_{tag}", actions=[grip(SHUT)])
+        step(f"tuck_{tag}", actions=[grip(shut)])
         step(f"to_handle_{tag}", actions=[motion(f"to_handle_{tag}")])
         step(f"take_handle_{tag}", actions=[motion(f"take_handle_{tag}")])
         step(f"hold_door_{tag}", actions=[S.attach(o, link=FORK, robot=ROBOT) for o in vmc.door_objects])
@@ -593,8 +605,9 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
 
 
 # ------------------------------------------------------------------- bake
-def bake(*, catalog: bool = False, visual_dir: Path | None = None):
-    scene, hs = build(catalog=catalog, visual_dir=visual_dir)
+def bake(*, catalog: bool = False, visual_dir: Path | None = None,
+         robotiq_root: Path | None = None):
+    scene, hs = build(catalog=catalog, visual_dir=visual_dir, robotiq_root=robotiq_root)
     tl = scene.simulate_sequences(["tend", hs.program], max_duration=240.0)
     return scene, hs, tl
 
@@ -644,9 +657,10 @@ def main() -> None:
     parser.add_argument("--studio", action="store_true")
     parser.add_argument("--visual-dir", type=Path,
                         help="local display stages: rv-5as-d.usdc and mph3.usda (keeps catalog mechanics)")
+    rq.add_argument(parser)
     args = parser.parse_args()
 
-    scene, hs, tl = bake(catalog=args.catalog, visual_dir=args.visual_dir)
+    scene, hs, tl = bake(catalog=args.catalog, visual_dir=args.visual_dir, robotiq_root=args.robotiq_r2)
     print(f"{hs.template}{' / catalog' if args.catalog else ''}: cycle {tl.duration:.2f}s")
     for name, t0, t1 in tl.step_spans:
         print(f"  {name:<28} {t0:7.2f} - {t1:7.2f}s")

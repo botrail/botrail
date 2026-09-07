@@ -61,6 +61,56 @@ pub struct SceneHub {
 }
 
 impl SessionHost for SceneHub {
+    fn load_mounting_model(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<botrail_model::RobotModel, String> {
+        let optional = |key: &str| input[key].as_str().filter(|s| !s.is_empty());
+        match input["kind"].as_str() {
+            Some("catalog") => pyo3::Python::with_gil(|py| {
+                crate::catalog::from_catalog(
+                    py,
+                    optional("query").ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err("Missing catalog query")
+                    })?,
+                    optional("revision"),
+                    optional("format"),
+                )
+            })
+            .map_err(|e| e.to_string()),
+            Some("package") => pyo3::Python::with_gil(|py| {
+                crate::catalog::from_package(
+                    py,
+                    std::path::Path::new(optional("path").ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err("Missing package path")
+                    })?),
+                    optional("format"),
+                    optional("catalog_root").map(std::path::Path::new),
+                )
+            })
+            .map_err(|e| e.to_string()),
+            _ => botrail_session::mounting::load_embedded(input, &|path, root| {
+                botrail_usd::import_robot(
+                    std::path::Path::new(path),
+                    &botrail_usd::RobotImportOptions {
+                        articulation_root: Some(root.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .map(|r| r.model)
+                .map_err(|e| e.to_string())
+            }),
+        }
+    }
+
+    fn invalidate_mounting_results(&self) {
+        *self.baked.lock().expect("baked mutex poisoned") = None;
+        *self
+            .last_recording
+            .lock()
+            .expect("recording mutex poisoned") = None;
+    }
+
     fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
         f(&mut self.scene.lock().expect("scene mutex poisoned"))
     }
@@ -135,7 +185,10 @@ impl SessionHost for SceneHub {
     }
 
     fn baked(&self) -> Option<(Scene, botrail_scene::rollout::SequenceTimeline)> {
-        self.baked.lock().expect("baked mutex poisoned").clone()
+        let baked = self.baked.lock().expect("baked mutex poisoned").clone();
+        baked.filter(|(snapshot, _)| {
+            self.with_scene(|scene| scene.assembly_generation() == snapshot.assembly_generation())
+        })
     }
 }
 
@@ -765,9 +818,15 @@ impl SceneHub {
         options: &botrail_scene::toolpath::ToolpathOptions,
     ) -> Result<botrail_scene::toolpath::ToolpathReport, String> {
         self.with_scene(|scene| {
-            scene
+            let report = scene
                 .check_toolpath(name, robot, tcp, options)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            if report.ok() {
+                scene
+                    .mounting_revalidation
+                    .retain(|item| item != &format!("toolpath:{name}"));
+            }
+            Ok(report)
         })
     }
 
@@ -1336,12 +1395,20 @@ impl SceneHub {
                     warnings: rec.warnings.clone(),
                     timeline: Some(timeline),
                 };
-                *self
-                    .last_recording
-                    .lock()
-                    .expect("recording mutex poisoned") =
-                    Some(serde_json::to_string(&msg).expect("wire types serialize infallibly"));
-                self.emit(&msg);
+                self.with_scene(|live| {
+                    if live.assembly_generation() != scene.assembly_generation() {
+                        return Err(
+                            "Assembly changed while loading recording; load it again".to_string()
+                        );
+                    }
+                    *self
+                        .last_recording
+                        .lock()
+                        .expect("recording mutex poisoned") =
+                        Some(serde_json::to_string(&msg).expect("wire types serialize infallibly"));
+                    self.emit(&msg);
+                    Ok(())
+                })?;
                 Ok((mode.to_string(), duration, rec.warnings, track_names))
             }
             Err(e) => {

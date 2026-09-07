@@ -1,11 +1,9 @@
 import json
-import math
 import urllib.request
 from pathlib import Path
 
-import pytest
-
 import botrail as bt
+import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -136,6 +134,15 @@ def test_generated_python_compiles(scene: bt.Scene) -> None:
     compile(code, "generated_scene.py", "exec")  # syntax must be valid
     for needle in ("bt.Robot.from_urdf_string", "scene.add_sphere", "scene.plan_motion"):
         assert needle in code
+
+
+def test_generated_python_preserves_joint_positions_exactly(scene: bt.Scene) -> None:
+    # Six-place rounding changes contact at this gripper terminal angle.
+    q = [0.8014334716699494, 0.1234567890123456, -0.1234567890123456, 0.0, 0.0, 0.0]
+    scene.set_joint_positions(q)
+    namespace = {}
+    exec(scene.generate_python().replace("bt.studio(scene)", ""), namespace)  # noqa: S102
+    assert namespace["scene"].joint_positions == q
 
 
 def test_http_project_endpoints(scene: bt.Scene) -> None:

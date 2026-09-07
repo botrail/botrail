@@ -13,9 +13,14 @@ use crate::{
     Scene,
 };
 
+pub mod edit;
 mod fit;
+mod kit;
+mod view;
 
-pub const VALIDATOR_VERSION: &str = "mounting/2";
+pub use view::inspection;
+
+pub const VALIDATOR_VERSION: &str = "mounting/5";
 
 #[derive(Debug, Serialize)]
 pub struct MountingItem {
@@ -49,6 +54,7 @@ pub struct MountingReport {
     pub ready: bool,
     pub assemblies: Vec<Assembly>,
     pub items: Vec<MountingItem>,
+    pub kits: Vec<Value>,
 }
 
 struct Part<'a> {
@@ -128,12 +134,50 @@ type Links = BTreeMap<String, (usize, String)>;
 struct Graph<'a> {
     parts: Vec<Part<'a>>,
     edges: Vec<Edge>,
+    kits: Vec<KitRecord<'a>>,
+}
+
+struct KitRecord<'a> {
+    name: String,
+    source: &'a RobotSource,
+    root: Option<usize>,
+    mount_frame: Option<String>,
+    visual_override: bool,
+    members: std::ops::Range<usize>,
 }
 
 impl<'a> Graph<'a> {
     fn visit(&mut self, source: &'a RobotSource, name: &str, count: &mut usize) -> Links {
         match source {
-            RobotSource::Visuals { base, .. } => self.visit(base, name, count),
+            RobotSource::Visuals { base, .. } => {
+                let start = self.kits.len();
+                let links = self.visit(base, name, count);
+                for record in &mut self.kits[start..] {
+                    record.visual_override = true;
+                }
+                links
+            }
+            RobotSource::Catalog {
+                meta, inner, mount, ..
+            } if meta.kit.is_some() => {
+                let start = self.parts.len();
+                let links = self.visit(inner, &format!("{name}/components"), &mut 0);
+                let root = mount.as_ref().and_then(|m| links.get(m)).map(|p| p.0);
+                let mount_frame = mount
+                    .as_ref()
+                    .and_then(|m| links.get(m))
+                    .map(|p| p.1.clone());
+                self.kits.push(KitRecord {
+                    name: name.into(),
+                    source,
+                    root,
+                    mount_frame,
+                    visual_override: false,
+                    members: start..self.parts.len(),
+                });
+                links
+            }
+
             RobotSource::Composite {
                 base,
                 tool,
@@ -262,6 +306,44 @@ fn effective_meta(source: &RobotSource) -> CatalogMeta {
 }
 
 impl MountingReport {
+    /// Missing detail on an unchanged manufacturer-supported assembly does not
+    /// prevent simulation. Keep every observation (and strict `ready`) intact.
+    pub fn simulation_blockers(&self) -> Vec<&MountingItem> {
+        self.items
+            .iter()
+            .filter(|item| match item.status {
+                "fail" => true,
+                "unknown" | "not_run" => !self.deferred_for_simulation(item),
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn deferred_for_simulation(&self, item: &MountingItem) -> bool {
+        let prefix = format!("mounting:{}:", item.target);
+        let key = item.id.strip_prefix(&prefix).unwrap_or("");
+        let detail = matches!(
+            key,
+            "interface"
+                | "pose"
+                | "requirements"
+                | "requirements_coverage"
+                | "dimensions"
+                | "fasteners"
+                | "assembly_clearance"
+        ) || key.starts_with("required:");
+        detail
+            && self.kits.iter().any(|kit| {
+                let support = &kit["manufacturer_support"];
+                support["status"] == "pass"
+                    && support["connections"]
+                        .as_array()
+                        .is_some_and(|connections| {
+                            connections.iter().any(|target| target == &item.target)
+                        })
+            })
+    }
+
     fn add(
         &mut self,
         target: &str,
@@ -309,6 +391,7 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         ready: false,
         assemblies: Vec::new(),
         items: Vec::new(),
+        kits: Vec::new(),
     };
     let pins: Vec<_> = annotations
         .iter()
@@ -451,6 +534,22 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
                         .collect()
                 })
                 .unwrap_or_default();
+            let mut unconfirmed_alternatives = Vec::new();
+            for alternative in &req.catalog_alternatives {
+                for &index in &path {
+                    if graph.parts[index]
+                        .catalog()
+                        .is_some_and(|(id, _, _)| id == alternative.catalog)
+                        && !found.contains(&index)
+                    {
+                        if tool.supported(&alternative.evidence) {
+                            found.push(index);
+                        } else {
+                            unconfirmed_alternatives.push(index);
+                        }
+                    }
+                }
+            }
             if let Some(pair) = &req.interface_pair {
                 for (position, &index) in path.iter().enumerate() {
                     let part = &graph.parts[index];
@@ -485,12 +584,21 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
             }
             // A category/model label or a part elsewhere in the BOM cannot
             // establish that the required product is physically in this path.
+            // Count each physical instance once even if several declarations
+            // name it. Missing evidence for a present candidate stays unknown.
+            unconfirmed_alternatives.retain(|i| !found.contains(i));
+            unconfirmed_alternatives.sort_unstable();
+            unconfirmed_alternatives.dedup();
+            let quantity = order.map_or(1, |r| r.qty as usize);
             let status = if (order.is_some_and(|r| r.catalog.is_some())
+                || !req.catalog_alternatives.is_empty()
                 || req.interface_pair.is_some())
                 && tool.supported(&req.evidence)
             {
-                if found.len() >= order.map_or(1, |r| r.qty as usize) {
+                if found.len() >= quantity {
                     "pass"
+                } else if found.len() + unconfirmed_alternatives.len() >= quantity {
+                    "unknown"
                 } else if complete_path {
                     "fail"
                 } else {
@@ -502,6 +610,8 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
             report.add(&edge.target, &format!("required:{}", req.id), status, req.note.clone(),
                 if status == "pass" { "" } else { "Specify and attach the required product on this tool's upstream path" },
                 json!({"requirement": req, "order_requirement": order, "sources": tool.evidence(&req.evidence),
+                    "alternative_sources": req.catalog_alternatives.iter().map(|a| json!({"catalog": a.catalog, "sources": tool.evidence(&a.evidence)})).collect::<Vec<_>>(),
+                    "unconfirmed_alternatives": unconfirmed_alternatives.iter().map(|&p| &graph.parts[p].name).collect::<Vec<_>>(),
                     "upstream": path.iter().map(|&p| json!({"target": graph.parts[p].name, "catalog": graph.parts[p].catalog().map(|(id, rev, _)| json!({"id": id, "revision": rev}))})).collect::<Vec<_>>(),
                     "path_complete": complete_path, "found": found.iter().map(|&p| &graph.parts[p].name).collect::<Vec<_>>()}));
         }
@@ -536,6 +646,9 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
             );
         }
     }
+    for kit in &graph.kits {
+        kit::review(kit, &graph, &pins, &mut report);
+    }
     if report.items.is_empty() {
         report.add(
             "cell",
@@ -550,7 +663,7 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         json!({"target": p.name, "catalog": p.catalog().map(|(id, revision, _)| json!({"id": id, "revision": revision})),
             "mounting": p.meta.mounting, "order": p.meta.order, "sources": p.meta.sources,
             "document": match p.source { RobotSource::Mounting { document, .. } => Some(document), _ => None }})).collect::<Vec<_>>(),
-        "assemblies": report.assemblies, "annotations": pins});
+        "assemblies": report.assemblies, "annotations": pins, "kits": report.kits});
     let bytes = serde_json::to_vec(&inputs).expect("mounting inputs");
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)

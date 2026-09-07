@@ -117,6 +117,8 @@ pub enum RobotSourceMsg {
         mounting: Option<botrail_model::mounting::MountingSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<botrail_model::mounting::CatalogOrder>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kit: Option<botrail_model::kit::KitSpec>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sources: Vec<botrail_model::mounting::CatalogSource>,
         inner: Box<RobotSourceMsg>,
@@ -219,6 +221,30 @@ impl From<&GroupSpecMsg> for botrail_model::GroupSpec {
 /// on a body, a tool attached to a named arm — so a project need not
 /// spell them out again.
 impl RobotSourceMsg {
+    /// Meshes/textures in embedded URDF, including all component wrappers.
+    pub fn visit_urdf_paths_mut(
+        &mut self,
+        f: &mut impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Urdf { xml } => {
+                *xml = botrail_model::rewrite_urdf_filenames(xml, f)?;
+                Ok(())
+            }
+            Self::Catalog { inner, .. } => inner.visit_urdf_paths_mut(f),
+            Self::Mounting { base, .. } => base.visit_urdf_paths_mut(f),
+            Self::Composite { base, tool, .. } => {
+                base.visit_urdf_paths_mut(f)?;
+                tool.visit_urdf_paths_mut(f)
+            }
+            Self::Visuals { base, visual } => {
+                base.visit_urdf_paths_mut(f)?;
+                visual.visit_urdf_paths_mut(f)
+            }
+            Self::Usd { .. } => Ok(()),
+        }
+    }
+
     /// Includes USD components nested under catalog provenance and tool mounts.
     pub fn visit_usd_paths_mut<E>(
         &mut self,
@@ -265,7 +291,7 @@ fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
 }
 
 /// [`RobotSourceMsg`] from a model's provenance record.
-fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
+pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
     match source {
         botrail_model::RobotSource::Mounting { base, document } => RobotSourceMsg::Mounting {
             base: Box::new(robot_source_msg(base)),
@@ -315,6 +341,7 @@ fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             specs: meta.specs.clone(),
             mounting: meta.mounting.clone(),
             order: meta.order.clone(),
+            kit: meta.kit.clone(),
             sources: meta.sources.clone(),
             inner: Box::new(robot_source_msg(inner)),
         },
@@ -396,6 +423,7 @@ pub fn model_from_source(
             specs,
             mounting,
             order,
+            kit,
             sources,
             inner,
         } => {
@@ -403,6 +431,18 @@ pub fn model_from_source(
             // restore the catalog provenance and manifest frames on the
             // model.
             let mut model = model_from_source(inner, import_usd)?;
+            if kit.is_some() {
+                model.name = id.split('/').nth(2).unwrap_or(id).to_string();
+            }
+            if kit.is_some() && mounting.is_some() {
+                return Err(ProjectError::Robot(
+                    "kit mounting declarations belong to its components".into(),
+                ));
+            }
+            if let Some(kit) = kit {
+                kit.validate(sources, order.as_ref())
+                    .map_err(ProjectError::Robot)?;
+            }
             if let Some(spec) = mounting {
                 spec.validate(sources, order.as_ref())
                     .map_err(ProjectError::Robot)?;
@@ -464,6 +504,7 @@ pub fn model_from_source(
                     specs: specs.clone(),
                     mounting: mounting.clone(),
                     order: order.clone(),
+                    kit: kit.clone(),
                     sources: sources.clone(),
                 },
                 inner: Box::new(inner_source),
@@ -719,6 +760,9 @@ pub fn gait_from_msg(msg: &GaitMsg) -> Result<crate::seq::GaitSpec, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectFile {
+    /// Authored work requiring a fresh evaluation after an assembly change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounting_revalidation: Vec<String>,
     /// Project file format version (currently 2).
     pub version: u32,
     pub robots: Vec<ProjectRobotMsg>,
@@ -828,6 +872,7 @@ impl ProjectFile {
                 let v1: ProjectV1 =
                     serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
                 Ok(ProjectFile {
+                    mounting_revalidation: Vec::new(),
                     version: PROJECT_VERSION,
                     robots: vec![ProjectRobotMsg {
                         name: None,
@@ -920,6 +965,7 @@ impl Scene {
     pub fn to_project(&self) -> ProjectFile {
         let mut mesh_url = mesh_path_url;
         ProjectFile {
+            mounting_revalidation: self.mounting_revalidation.clone(),
             version: PROJECT_VERSION,
             robots: self
                 .robots()
@@ -1367,6 +1413,7 @@ impl Scene {
             .map_err(|e| ProjectError::Incompatible(format!("parts: {e}")))?;
         self.set_connection_plan(project.connection_plan.clone())
             .map_err(ProjectError::Incompatible)?;
+        self.mounting_revalidation = project.mounting_revalidation.clone();
         Ok(())
     }
 }
@@ -1425,7 +1472,10 @@ fn py_gait(gait: &GaitMsg) -> String {
 }
 
 fn py_list(values: &[f64]) -> String {
-    let items: Vec<String> = values.iter().map(|v| format!("{v:.6}")).collect();
+    // Joint limits/contact endpoints must survive script replay. Six decimal
+    // places can move a gripper away from its saved terminal contact (or round
+    // a joint beyond its limit). Debug emits round-trippable float literals.
+    let items: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
     format!("[{}]", items.join(", "))
 }
 
@@ -1517,9 +1567,18 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             inner,
             mounting,
             order,
+            kit,
             sources,
             ..
         } => {
+            if revision.starts_with("local-sha256:") || kit.is_some() {
+                // Local recipe-only packages have no downloadable Hub revision.
+                // Use the embedded source (and bundled paths after save/load).
+                let json = serde_json::to_string(source).expect("local catalog source");
+                let literal = serde_json::to_string(&json).expect("source literal");
+                out.push_str(&format!("{var} = bt.Robot._from_source_json({literal})\n"));
+                return;
+            }
             // Deterministic re-fetch: the pinned revision makes this the
             // same bytes the project was authored from.
             let format = if matches!(inner.as_ref(), RobotSourceMsg::Usd { .. }) {

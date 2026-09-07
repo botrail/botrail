@@ -117,7 +117,7 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
         },
         {"urdf": "urdf/model.urdf", "usd": None},
     )
-    # A second cut of the same product — a better source, same machine.
+    # Another public revision of the same product.
     add(
         ARM_R2,
         "public",
@@ -223,10 +223,8 @@ def test_short_ids_resolve_by_segment_subsequence(catalog: dict) -> None:
 
 
 def test_a_short_name_takes_the_newest_revision(catalog: dict, tmp_path: Path) -> None:
-    """Revisions are the same product re-cut from a better source, so a
-    short name follows them forward instead of turning every catalog
-    revision into a breaking change. The *resolved* id is what gets
-    recorded, so a replay stays on the revision it resolved to."""
+    """Short names follow public revisions; replay records the resolved ID.
+    Selecting a revision does not assert equivalent geometry or motion."""
     scene = bt.Scene(bt.Robot.from_catalog("mini"))
     project = tmp_path / "cell.botrail"
     scene.save_project(project)
@@ -240,10 +238,74 @@ def test_a_short_name_takes_the_newest_revision(catalog: dict, tmp_path: Path) -
     assert f'from_catalog("{ARM_ID}"' in bt.Scene.load_project(project).generate_python()
 
 
+def _set_distribution(catalog: dict, ids: list[str], distribution: str) -> None:
+    path = catalog["repo"] / "index.json"
+    data = json.loads(path.read_text())
+    for product in data["products"]:
+        if product["id"] in ids:
+            product["distribution"] = distribution
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("query", ["mini", "acme/mini"])
+def test_new_metadata_revision_preserves_public_loading(catalog, tmp_path, query):
+    _set_distribution(catalog, [ARM_R2], "recipe_only")
+    assert bt.catalog.Index.from_path(catalog["repo"] / "index.json").get(query).id == ARM_ID
+    assert Path(bt.catalog_package(query)) == catalog["repo"] / ARM_ID
+    robot = bt.Robot.from_catalog(query)
+    assert catalog["allow_patterns"] == [f"{ARM_ID}/*"]
+
+    # Replaying the selected public model does not re-resolve its short name.
+    scene = bt.Scene(robot)
+    project = tmp_path / "cell.botrail"
+    scene.save_project(project)
+    _set_distribution(catalog, [ARM_R2], "public")
+    assert f'from_catalog("{ARM_ID}", revision="{SHA}")' in bt.Scene.load_project(project).generate_python()
+
+
+@pytest.mark.parametrize("query", [ARM_R2, "mini/r2"])
+def test_explicit_recipe_revision_is_not_substituted(catalog, query):
+    _set_distribution(catalog, [ARM_R2], "recipe_only")
+    with pytest.raises(ValueError, match=f"{ARM_R2}.*recipe_only.*locally"):
+        bt.Robot.from_catalog(query)
+    assert "allow_patterns" not in catalog
+
+
+def test_no_public_revision_reports_latest_recipe(catalog):
+    _set_distribution(catalog, [ARM_ID, ARM_R2], "recipe_only")
+    assert bt.catalog.Index.from_path(catalog["repo"] / "index.json").get("mini").id == ARM_R2
+    with pytest.raises(ValueError, match=f"{ARM_R2}.*recipe_only.*locally"):
+        bt.Robot.from_catalog("mini")
+    assert "allow_patterns" not in catalog
+
+
+@pytest.mark.parametrize("failure", ["missing_model", "format", "network"])
+def test_public_revision_failure_does_not_retry_older_model(catalog, monkeypatch, failure):
+    kwargs = {}
+    if failure == "missing_model":
+        (catalog["repo"] / ARM_R2 / "urdf/model.urdf").unlink()
+        match = "model.urdf"
+    elif failure == "format":
+        kwargs["format"] = "usd"
+        match = f"{ARM_R2}.*ships no usd model"
+    else:
+        def unavailable(*args, allow_patterns=None, **kwargs):
+            catalog["allow_patterns"] = allow_patterns
+            raise OSError("download unavailable")
+        monkeypatch.setattr(sys.modules["huggingface_hub"], "snapshot_download", unavailable)
+        match = "download unavailable"
+    with pytest.raises(ValueError, match=match):
+        bt.Robot.from_catalog("mini", **kwargs)
+    assert catalog["allow_patterns"] == [f"{ARM_R2}/*"]
+
+
 def test_distinct_products_stay_ambiguous(catalog: dict) -> None:
     """The rule is narrow on purpose: only a differing trailing revision
     collapses. `mini` and `maxi` are different machines, and picking one
     for the caller would be a guess."""
+    _set_distribution(catalog, [MAXI_ID, LOCKED_ID], "recipe_only")
+    with pytest.raises(KeyError, match="ambiguous"):
+        bt.catalog.Index.from_path(catalog["repo"] / "index.json").get("acme/arm")
     with pytest.raises(ValueError, match="ambiguous"):
         bt.Robot.from_catalog("acme/arm")
 
@@ -398,4 +460,3 @@ def test_a_dual_arm_package_loads_with_its_arms_as_groups(
     # The BOM line carries the arm count the manifest quoted.
     row = next(r for r in scene.bom().rows if DUAL_ID in str(r.get("catalog", "")) or "pair" in r["names"][0])
     assert row["attributes"].get("arm_count") == 2
-

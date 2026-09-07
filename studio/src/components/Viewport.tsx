@@ -78,6 +78,7 @@ function IndoorLighting() {
 }
 
 export function Viewport() {
+  const mountingOpen = useStudioStore((s) => s.mountingOpen);
   const quality = useStudioStore((s) => s.renderQuality);
   const connected = useStudioStore((s) => s.connection === "connected");
   const selection = useStudioStore((s) => s.selection);
@@ -136,6 +137,7 @@ export function Viewport() {
       onDrop={onDrop}
     >
       <Canvas
+        frameloop={mountingOpen ? "never" : "always"}
         shadows="soft"
         gl={{ antialias: false }}
         dpr={[1, RENDER_QUALITY[quality].dpr]}

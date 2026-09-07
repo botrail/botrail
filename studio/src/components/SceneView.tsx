@@ -2,7 +2,7 @@ import { useCallback, useMemo } from "react";
 import * as THREE from "three";
 
 import { linkKey, playbackRig } from "../playbackRig";
-import type { GeometryMsg, LinkMsg, PoseMsg, VisualMsg } from "../protocol";
+import type { GeometryMsg, LinkMsg, MaterialMsg, PoseMsg, VisualMsg } from "../protocol";
 import {
   collidingLinkNames,
   useStudioStore,
@@ -125,14 +125,16 @@ function LinkGroup({
   );
 }
 
-function VisualNode({
+export function VisualNode({
   visual,
   color,
   forceColor,
+  material,
 }: {
   visual: VisualMsg;
   color: string | THREE.Color;
   forceColor: boolean;
+  material?: MaterialMsg;
 }) {
   const { origin } = visual;
   const own = useMemo(
@@ -143,10 +145,11 @@ function VisualNode({
     <group position={origin.position} quaternion={origin.quaternion}>
       {visual.visual_asset ? <UsdVisual source={visual.visual_asset}
         color={!forceColor && own ? own : color}
-        forceColor={forceColor || !!visual.visual_asset.color_override} /> : <GeometryMesh
+        forceColor={forceColor || !!visual.visual_asset.color_override} material={material} /> : <GeometryMesh
         geometry={visual.geometry}
         color={!forceColor && own ? own : color}
         forceColor={forceColor || own !== null}
+        material={material}
       />}
     </group>
   );
@@ -156,17 +159,19 @@ function GeometryMesh({
   geometry,
   color,
   forceColor = false,
+  material,
 }: {
   geometry: GeometryMsg;
   color: string | THREE.Color;
   forceColor?: boolean;
+  material?: MaterialMsg;
 }) {
   switch (geometry.kind) {
     case "box":
       return (
         <mesh castShadow receiveShadow scale={geometry.size}>
           <primitive object={UNIT_BOX} attach="geometry" />
-          <StandardMaterial color={color} />
+          <StandardMaterial color={color} material={material} />
         </mesh>
       );
     case "cylinder":
@@ -176,25 +181,26 @@ function GeometryMesh({
         <mesh rotation={[Math.PI / 2, 0, 0]} castShadow receiveShadow
           scale={[geometry.radius, geometry.length, geometry.radius]}>
           <primitive object={UNIT_CYLINDER} attach="geometry" />
-          <StandardMaterial color={color} />
+          <StandardMaterial color={color} material={material} />
         </mesh>
       );
     case "sphere":
       return (
         <mesh castShadow receiveShadow scale={geometry.radius}>
           <primitive object={UNIT_SPHERE} attach="geometry" />
-          <StandardMaterial color={color} />
+          <StandardMaterial color={color} material={material} />
         </mesh>
       );
     case "mesh":
       return (
-        <MeshVisual geometry={geometry} color={color} forceColor={forceColor} castShadow receiveShadow />
+        <MeshVisual geometry={geometry} color={color} forceColor={forceColor} material={material} castShadow receiveShadow />
       );
     default:
       return null;
   }
 }
 
-function StandardMaterial({ color }: { color: string | THREE.Color }) {
-  return <meshStandardMaterial color={color} roughness={0.85} metalness={0.05} />;
+function StandardMaterial({ color, material }: { color: string | THREE.Color; material?: MaterialMsg }) {
+  return <meshStandardMaterial color={color} roughness={material?.roughness ?? 0.85} metalness={material?.metalness ?? 0.05}
+    opacity={material?.opacity ?? 1} transparent={(material?.opacity ?? 1)<1} depthWrite={(material?.opacity ?? 1)>=1} />;
 }

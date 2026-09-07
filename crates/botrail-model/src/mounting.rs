@@ -19,6 +19,8 @@ pub struct CatalogSource {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CatalogOrder {
+    #[serde(default)]
+    pub part_number: Option<String>,
     #[serde(default = "each")]
     pub unit: String,
     #[serde(default)]
@@ -41,6 +43,8 @@ fn one() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct OrderInclude {
     pub name: String,
+    #[serde(default)]
+    pub catalog: Option<String>,
     #[serde(default)]
     pub part_number: Option<String>,
     #[serde(default = "one")]
@@ -137,6 +141,19 @@ pub struct MountRequirement {
     /// interfaces. Absent for product-specific/electronic couplings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_pair: Option<InterfacePair>,
+    /// Individually sourced product alternatives, including OEM electronic
+    /// couplings. These are exact catalog identities, not face equivalence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalog_alternatives: Vec<MountAlternative>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MountAlternative {
+    pub catalog: String,
+    #[serde(default)]
+    pub evidence: Vec<MountEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,9 +226,13 @@ pub struct MountHole {
     pub diameter_mm: Option<DimensionRange>,
     #[serde(default)]
     pub thread: Option<MountThread>,
-    /// Usable threaded depth, including any documented tip/bottom allowance.
+    /// Maximum usable tip depth from the mating plane, including bottom allowance.
     #[serde(default)]
     pub depth_mm: Option<DimensionRange>,
+    /// Unthreaded distance from the mating plane to the first usable receiver
+    /// thread. Omitted = threads start at the plane (the original contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_start_mm: Option<DimensionRange>,
     /// Bearing surface to mating face, accounting for any counterbore.
     #[serde(default)]
     pub grip_mm: Option<DimensionRange>,
@@ -374,13 +395,18 @@ impl MountingSpec {
                         h.position_tolerance_mm,
                         &mut features,
                     )?;
-                    for r in [h.diameter_mm, h.depth_mm, h.grip_mm].into_iter().flatten() {
+                    for r in [h.diameter_mm, h.depth_mm, h.grip_mm, h.thread_start_mm]
+                        .into_iter()
+                        .flatten()
+                    {
                         r.validate()?;
                     }
                     if let Some(t) = &h.thread {
                         t.validate()?;
                     }
-                    if h.kind == HoleKind::Clearance && h.thread.is_some() {
+                    if h.kind == HoleKind::Clearance
+                        && (h.thread.is_some() || h.thread_start_mm.is_some())
+                    {
                         return Err("a clearance hole cannot declare a thread".into());
                     }
                     if let Some(rules) = &h.fastener_rules {
@@ -495,6 +521,14 @@ impl MountingSpec {
                 );
             }
             evidence(&r.evidence)?;
+            let mut alternatives = std::collections::HashSet::new();
+            for alternative in &r.catalog_alternatives {
+                nonempty(&alternative.catalog)?;
+                if !alternatives.insert(&alternative.catalog) {
+                    return Err("mounting catalog alternatives must be unique".into());
+                }
+                evidence(&alternative.evidence)?;
+            }
             if let Some(pair) = &r.interface_pair {
                 nonempty(&pair.mount)?;
                 nonempty(&pair.flange)?;
@@ -626,6 +660,9 @@ impl MountingDocument {
                 req.id = format!("document:{}", req.id);
             }
             shift(&mut req.evidence);
+            for alternative in &mut req.catalog_alternatives {
+                shift(&mut alternative.evidence);
+            }
             req.order_requires = req.order_requires.map(|i| i + order_offset);
             spec.requirements.push(req);
         }

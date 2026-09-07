@@ -31,6 +31,9 @@ export function RobotPanel() {
       badge={<span className="badge">{robot.desc.name}</span>}
     >
       <div className="tcp-controls">
+        <button className="mounting-open" onClick={() => useStudioStore.getState().setMountingOpen(true)}>
+          Inspect mounting
+        </button>
         <div className="seg">
           <button
             className={placing ? "active" : ""}
