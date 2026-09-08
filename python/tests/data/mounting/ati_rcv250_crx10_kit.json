@@ -1,0 +1,197 @@
+{
+  "scope": "Manufacturer-documented purchase and assembly metadata. Tests use synthetic geometry; this fixture does not validate hardware fits or public catalog availability.",
+  "host": "fanuc/crx/crx10ia/r1",
+  "host_flange": "fanuc_flange",
+  "components": [
+    {
+      "id": "ati/adapter/3700-50-9210/r1",
+      "flange_z_m": 0.00889
+    },
+    {
+      "id": "ati/adapter/9005-50-6091/r1",
+      "flange_z_m": 0.0127
+    },
+    {
+      "id": "ati/rcv/rcv-250/r1"
+    }
+  ],
+  "manifest": {
+    "id": "ati/rcv/rcv-250-crx10-kit/r1",
+    "kind": "kit",
+    "category": "tool.spindle",
+    "name": "RCV-250 CRX-10iA kit (public reference model)",
+    "manufacturer": {
+      "name": "ATI Industrial Automation",
+      "country": "US",
+      "product_url": "https://www.ati-ia.com/CRX"
+    },
+    "sources": [
+      {
+        "kind": "manufacturer_datasheet",
+        "url": "https://www.ati-ia.com/library/documents/ATI_MR_CRX.zip",
+        "ref": "9610-50-1049-03 Table 2.5; 9640-50-1041 rev01",
+        "fetched_at": "2026-09-08"
+      },
+      {
+        "kind": "measurement",
+        "url": "https://github.com/botrail/botrail-assets/blob/4c5af1e569588337bc9708ee1d2a2885e7bef755/ati-rcv250-crx-kit/docs/measurements.md",
+        "ref": "4c5af1e569588337bc9708ee1d2a2885e7bef755",
+        "fetched_at": "2026-09-08"
+      }
+    ],
+    "frames": {
+      "mount_frame": "mount",
+      "tcp_default": "spindle/tcp",
+      "grasp_frames": [],
+      "camera_frames": [],
+      "lidar_frames": [],
+      "arms": []
+    },
+    "order": {
+      "part_number": "9150-COB-CRX10-RCV250-01",
+      "unit": "kit",
+      "includes": [
+        {
+          "catalog": "ati/adapter/3700-50-9210/r1",
+          "name": "Robot interface plate",
+          "part_number": "3700-50-9210",
+          "qty": 1
+        },
+        {
+          "catalog": "ati/adapter/9005-50-6091/r1",
+          "name": "Side mounting bracket kit",
+          "part_number": "9005-50-6091",
+          "qty": 1,
+          "note": "Includes four M6 x 16 screws and two factory-installed pins. All are BOM-only in the public reference model."
+        },
+        {
+          "catalog": "ati/rcv/rcv-250/r1",
+          "name": "RCV-250 spindle",
+          "part_number": "9150-RCV-250",
+          "qty": 1
+        },
+        {
+          "name": "Cutting bit",
+          "part_number": "9150-RC-B-24061",
+          "qty": 1
+        },
+        {
+          "name": "Robot plate screws",
+          "part_number": "3500-1066010-15",
+          "qty": 4
+        },
+        {
+          "name": "Bracket to robot plate screws",
+          "part_number": "3500-1066016-15A",
+          "qty": 4
+        },
+        {
+          "name": "Wrist dowel pin",
+          "part_number": "3540-0106010-21",
+          "qty": 1,
+          "note": "Three supplied overall; two already belong to the bracket kit. This row is the remaining wrist pin."
+        },
+        {
+          "name": "5 mm hex key",
+          "part_number": "3690-0000103-00",
+          "qty": 1
+        },
+        {
+          "name": "Air preparation kit",
+          "part_number": "9005-50-6165",
+          "qty": 1
+        },
+        {
+          "name": "Compliance solenoid",
+          "part_number": "9005-50-6202",
+          "qty": 1
+        },
+        {
+          "name": "Motor solenoid",
+          "part_number": "9005-50-6203",
+          "qty": 1
+        },
+        {
+          "name": "Wire extension kit",
+          "part_number": "3710-50-1565",
+          "qty": 1,
+          "note": "Manual Table 2.5 quantity; drawing lists two valve splicing kits under the same number. Resolve at ordering."
+        }
+      ],
+      "requires": [],
+      "note": "One purchased kit. Public reference model; included items are not separate purchase lines. Manual Table 3.1 gives 10 Nm for M6 robot plate screws; drawing note 1 has inconsistent 89 in-lbs (121 Nm). No detailed torque pass is declared."
+    },
+    "kit": {
+      "base": "ati/adapter/3700-50-9210/r1",
+      "attachments": [
+        {
+          "package": "ati/adapter/9005-50-6091/r1",
+          "alias": "bracket",
+          "parent_frame": "flange",
+          "mount_frame": "mount",
+          "offset": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rpy": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "package": "ati/rcv/rcv-250/r1",
+          "alias": "spindle",
+          "parent_frame": "bracket/flange",
+          "mount_frame": "mount",
+          "offset": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rpy": [
+              0.0,
+              0.0,
+              1.5707963267948966
+            ]
+          }
+        }
+      ],
+      "manufacturer_support": [
+        {
+          "host": "fanuc/crx/crx10ia/r1",
+          "scope": "mechanical_mounting",
+          "evidence": [
+            {
+              "source": 0,
+              "section": "9610-50-1049-03 Table 2.5; 9640-50-1041 rev01 assembly and BOM"
+            },
+            {
+              "source": 1,
+              "section": "Authored reference geometry; measured support planes and mounting axes"
+            }
+          ],
+          "note": "Exact purchased kit in Table 2.5, CRX-10iA in drawing 9640-50-1041. No claim about process performance or controller integration."
+        }
+      ],
+      "representation": {
+        "status": "reference",
+        "evidence": [
+          {
+            "source": 0,
+            "section": "9610-50-1049-03 Table 2.5; 9640-50-1041 rev01 assembly and BOM"
+          },
+          {
+            "source": 1,
+            "section": "Authored reference geometry; measured support planes and mounting axes"
+          }
+        ],
+        "note": "Independently authored CC0 plate and spindle reference meshes. Nominal mounting axes and plate thicknesses are retained; chamfers, nose, collet and internal mechanics are simplified. All screws, pins, cutting bit, air preparation, valves and cables are BOM-only. The shared housing was measured from RCV-250-E CAD; no exact collet variant is claimed. TCP coincides with the side mounting frame, not a calibrated cutting tip. No active compliance, mass or inertia is modelled. Primitive collisions are neutral envelopes that fill bores; detailed fits and robot wrist clocking remain unverified. Manufacturer support applies to the documented purchased kit independently of this reference geometry."
+      }
+    }
+  }
+}

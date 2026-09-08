@@ -41,8 +41,20 @@ For example, a bare Robotiq 2F gripper needs a coupling in the assembly.
 Manufacturer UR kits include the appropriate coupling; translating the bare
 gripper by the coupling thickness does not supply that part. The
 manufacturer documents this requirement in [section 6.1.1 of its manual](https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190315.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/6.%20Specifications.htm).
-The catalog's EMSF spindle reference model and reconstructed X16005 weld gun
-retain unknown robot-side brackets and mounting details.
+
+The EMSF-3060K spindle needs a holder: its four M4 mounting screws on a 39 mm
+bolt circle do not directly fit the RV-5AS-D's four M5 holes on a 31.5 mm bolt
+circle ([spindle manual, Fig. 1 and section 10](https://en.nakanishi-spindle.com/wp-content/uploads/existing/industrial-eng/download/manual/sale/OM-KK0978EN000_Motor-Spindle_EMSF-3060K_Manual_EN_no-collet.pdf),
+[robot manual, Fig. 2-3](https://dl.mitsubishielectric.com/dl/fa/document/manual/robot/bfp-a3727/bfp-a3727p.pdf)).
+An offset cannot supply that holder. The reference spindle's simplified flange
+also differs from the drawing; nominal hole coordinates do not establish their
+location on that mesh.
+
+For the reconstructed X16005 weld gun, the [manufacturer's specification](https://heron-welder.com/x-type-robotic-welding-gun-with-servo-actuator/)
+lists attachment sides but does not identify this model's robot-side bracket.
+Its robot-brand statement concerns servo-motor integration. Select the gun
+configuration, mounting side, bracket and robot flange option before recording
+a manufacturer-supported assembly. A custom bracket needs its own drawings.
 
 **An attached assembly remains unresolved while required detailed checks
 are `unknown` or `not_run`.** `result.ready` covers all mounting items.
@@ -191,10 +203,56 @@ references; Markdown includes the individual comparison names and results.
 
 ## Results and replay
 
-The report provides `items`, `assemblies`, `ready`, `blockers()`, `scope`,
+The report provides `items`, `assemblies`, `simulation`, `ready`, `blockers()`, `scope`,
 `validator_version` and `input_hash`, plus JSON/Markdown export. Each assembly
 names its base, tool, original product frames, relative pose and upstream
 part instances. Item IDs use the same instance names as the BOM.
+
+### Simulation routes and detailed checks
+
+A manufacturer kit is one way to establish a mounting route. Individual catalog
+parts and custom parts with `with_mounting` drawing documents can also establish
+one. `result.simulation` separates the connection method from its evidence:
+
+```python
+result = bt.mounting.report(robot)
+print(result.simulation["ready"])  # mounting eligibility for simulation
+for connection in result.simulation["connections"]:
+    print(connection["target"], connection["method"], connection["basis"])
+print(result.ready)  # all required detailed mounting checks
+```
+
+| Field | Values |
+|---|---|
+| `method` | `direct`, `catalog_adapter`, `custom_adapter`, or `unknown` |
+| `basis` | `manufacturer_kit`, `interface_declarations`, `dimensional_checks`, or `unknown` |
+| `evidence_items` | IDs of passed observations; follow their evidence to the recorded sources |
+
+The method follows the actual upstream attachment path. `catalog_adapter` means
+the intervening parts have catalog identities, not that Botrail has verified
+their commercial availability. A path containing an intervening part without a
+catalog identity is `custom_adapter`. Manufacturer support is a separate result;
+neither catalog registration nor a user drawing creates a manufacturer claim.
+
+For `interface_declarations`, both bare faces must have the same explicitly
+documented identifier, the actual pose must match a documented permitted pose,
+and the complete required-part declaration must be satisfied on that path.
+Legacy flange-standard text and matching names alone are insufficient.
+`dimensional_checks` can instead use passing dimensional and fastener checks,
+together with the permitted pose and complete part requirements; it does not
+require inventing a common interface name.
+
+These routes can be applied while detailed dimensions, fastening or assembly
+access remain `unknown` / `not_run`. Their findings are retained, and any explicit
+failure still blocks application. Supported evidence on one connection cannot
+cover another connection. `simulation["blockers"]` lists mounting finding IDs;
+`preview(...).can_apply` additionally checks scene references and revision state.
+The strict `ready`, `blockers()` and `bt.review(..., required=["mounting"])`
+contracts are unchanged. None of these results establish payload, strength,
+electrical compatibility or process performance.
+
+Studio shows the method and evidence for each connection in both the inspection
+and assembly comparison views, alongside the existing detailed findings.
 
 `input_hash` is a deterministic FNV-1a fingerprint of the evaluated declarations,
 assembly paths and catalog annotations, not a security digest or a hardware
@@ -275,9 +333,7 @@ A `kind: kit` catalog entry identifies a purchase configuration. Loading it
 assembles the referenced component packages with their mounting frames and TCP:
 
 ```python
-kit = bt.Robot.from_package(
-    "build/robotiq/2f/2f-85-ur-es-062-kit/r1", catalog_root="build"
-)
+kit = bt.Robot.from_catalog("robotiq/2f/2f-85-ur-es-062-kit/r2")
 robot = arm.attach_tool(kit)
 scene = bt.Scene(robot)
 
@@ -328,6 +384,32 @@ catalog ID still represents the bare hand. This kit uses a reference gripper
 model, and the protector and installation hardware are recorded in the BOM
 without separate geometry. Verify the actual wrist connector generation:
 Robotiq distinguishes [ES-062 and ES-077 configurations](https://blog.robotiq.com/knowledge/couplings-and-cables-for-universal-robots-robots).
+
+The same purchase model applies to process tools. ATI documents the
+`9150-COB-CRX10-RCV250-01` spindle kit for CRX-10iA: robot interface plate
+`3700-50-9210`, side mounting bracket kit `9005-50-6091`, and spindle
+`9150-RCV-250` ([ATI CRX documentation bundle](https://www.ati-ia.com/library/documents/ATI_MR_CRX.zip),
+manual `9610-50-1049-03`, Table 2.5; assembly drawing `9640-50-1041`).
+Represent both adapters as components of the purchased kit, with the spindle
+attached to the bracket's output frame. Missing either adapter or changing an
+internal attachment invalidates the recorded kit configuration. Mechanical
+support does not establish cutting-tip calibration, pneumatic connections or
+compliance behavior. Prebuilt public reference models are available:
+
+```python
+arm = bt.Robot.from_catalog("fanuc/crx/crx10ia/r1")
+kit = bt.Robot.from_catalog("ati/rcv/rcv-250-crx10-kit/r1")
+scene = bt.Scene(arm.attach_tool(kit))
+```
+
+The authored plate models preserve the measured hole positions and support
+planes. The kit's screws, pins, cutting bit and pneumatic equipment are BOM-only;
+its TCP is a mounting reference. No manufacturer CAD build is required.
+To inspect the assembly in Studio, run:
+
+```bash
+uv run python examples/machining/spindle_mounting_demo.py --studio
+```
 
 ## Compare and reuse assemblies
 

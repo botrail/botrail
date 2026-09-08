@@ -150,11 +150,22 @@ fn route(report: &MountingReport) -> &'static str {
     let supported_kit = report.kits.iter().any(|k| {
         k["manufacturer_support"]["status"] == "pass" && k["composition"]["status"] == "pass"
     });
-    let known = !interfaces.is_empty() && interfaces.iter().all(|i| i.status == "pass");
+    let known = !interfaces.is_empty() && interfaces.iter().all(|i| i.status == "pass")
+        || !report.simulation.connections.is_empty()
+            && report
+                .simulation
+                .connections
+                .iter()
+                .all(|c| c.basis != "unknown");
     if !known && !supported_kit {
         return "needs_information";
     }
-    if report.assemblies.iter().any(|a| a.upstream_parts.len() > 1) {
+    if report
+        .simulation
+        .connections
+        .iter()
+        .any(|c| matches!(c.method, "catalog_adapter" | "custom_adapter"))
+    {
         "adapter_evidence"
     } else {
         "direct_evidence"

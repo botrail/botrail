@@ -20,6 +20,7 @@ import { MountingHoles, MountingSection } from "./MountingDiagrams";
 import { MountingViewport } from "./MountingViewport";
 import { MountingEditor } from "./MountingEditor";
 import { MountingKitSummary } from "./MountingKitSummary";
+import { MountingRouteSummary } from "./MountingRouteSummary";
 import "./mounting.css";
 
 const MODES: { id: MountingMode; label: string }[] = [
@@ -236,26 +237,32 @@ function InspectionDialog() {
       ) : (
         <>
           {kits.map((kit) => <MountingKitSummary key={kit.target} kit={kit} />)}
+          <MountingRouteSummary inspection={inspection} robotName={robotName} />
           <div className="mounting-summary">
-            <span
-              className={
-                !inspection.connections.length
-                  ? "unknown"
+            <div>
+              {inspection.simulation.ready && <>
+                <b className="pass">✓ Mounting can be used in simulation</b><br />
+              </>}
+              <span
+                className={
+                  !inspection.connections.length
+                    ? "unknown"
+                    : inspection.ready
+                      ? "pass"
+                      : inspection.findings.some((f) => f.status === "fail")
+                        ? "fail"
+                        : "unknown"
+                }
+              >
+                {!inspection.connections.length
+                  ? "— No mounting connection to inspect"
                   : inspection.ready
-                    ? "pass"
+                    ? "✓ Detailed scene mounting checks passed"
                     : inspection.findings.some((f) => f.status === "fail")
-                      ? "fail"
-                      : "unknown"
-              }
-            >
-              {!inspection.connections.length
-                ? "— No mounting connection to inspect"
-                : inspection.ready
-                  ? "✓ Detailed scene mounting checks passed"
-                  : inspection.findings.some((f) => f.status === "fail")
-                    ? "× Detailed checks found mismatches"
-                    : "? Detailed mounting checks incomplete"}
-            </span>
+                      ? "× Detailed checks found mismatches"
+                      : "? Detailed mounting checks incomplete"}
+              </span>
+            </div>
             <span>
               {inspection.findings.filter((f) => f.status === "fail").length}{" "}
               mismatches ·{" "}

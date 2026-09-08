@@ -7,6 +7,10 @@ from the catalog. The spindle ships the frame convention the 5-DOF solver
 wants (`tip` +Z runs tip -> body) and its cutter as its own link, so the
 contact exemption binds to a real part of the tool.
 
+The robot-to-spindle holder has not been specified. The two bare mounting
+faces have different hole patterns; this toolpath example does not establish
+a physically mountable assembly. See docs/guides/mounting.md.
+
 What the cell shows, following design/design-machining.md:
 
 * **A 5-axis path from APT.** The rim chamfer arrives as CL text
@@ -78,8 +82,8 @@ FIXTURE_BODIES = ("plate", "bench", "clamp_front", "clamp_back")
 def build_scene() -> tuple[bt.Scene, str]:
     arm = bt.Robot.from_catalog(CATALOG_ARM)
     spindle = bt.Robot.from_catalog(CATALOG_SPINDLE)
-    # The spindle's root *is* its mounting face and its tcp is the cutter
-    # tip, so the flange name is the only thing to say.
+    # Keep the taught placement of this reference model. Its root is not a
+    # verified holder seating plane; the real assembly requires a holder.
     robot = arm.attach_tool(spindle, flange=arm.flange_link)
     scene = bt.Scene(robot)
     scene.set_joint_positions(REF_Q)

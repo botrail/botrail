@@ -20,7 +20,7 @@ mod view;
 
 pub use view::inspection;
 
-pub const VALIDATOR_VERSION: &str = "mounting/5";
+pub const VALIDATOR_VERSION: &str = "mounting/6";
 
 #[derive(Debug, Serialize)]
 pub struct MountingItem {
@@ -45,6 +45,23 @@ pub struct Assembly {
     pub upstream_parts: Vec<String>,
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct SimulationMounting {
+    /// Mounting eligibility only; scene references are checked by preview.
+    pub ready: bool,
+    pub blockers: Vec<String>,
+    pub connections: Vec<ConnectionSupport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionSupport {
+    pub target: String,
+    pub method: &'static str,
+    pub basis: &'static str,
+    /// References to observations whose evidence supports this connection.
+    pub evidence_items: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MountingReport {
     pub scope: &'static str,
@@ -55,6 +72,7 @@ pub struct MountingReport {
     pub assemblies: Vec<Assembly>,
     pub items: Vec<MountingItem>,
     pub kits: Vec<Value>,
+    pub simulation: SimulationMounting,
 }
 
 struct Part<'a> {
@@ -306,8 +324,57 @@ fn effective_meta(source: &RobotSource) -> CatalogMeta {
 }
 
 impl MountingReport {
-    /// Missing detail on an unchanged manufacturer-supported assembly does not
-    /// prevent simulation. Keep every observation (and strict `ready`) intact.
+    fn manufacturer_supported(&self, target: &str) -> bool {
+        self.kits.iter().any(|kit| {
+            let support = &kit["manufacturer_support"];
+            support["status"] == "pass"
+                && support["connections"]
+                    .as_array()
+                    .is_some_and(|connections| {
+                        connections.iter().any(|connection| connection == target)
+                    })
+        })
+    }
+
+    fn connection_basis(&self, target: &str) -> &'static str {
+        if self.manufacturer_supported(target) {
+            return "manufacturer_kit";
+        }
+        let prefix = format!("mounting:{target}:");
+        let passed = |key: &str| {
+            self.items
+                .iter()
+                .any(|i| i.id == format!("{prefix}{key}") && i.status == "pass")
+        };
+        let requirements: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| {
+                i.id.strip_prefix(&prefix).is_some_and(|key| {
+                    matches!(key, "requirements" | "requirements_coverage")
+                        || key.starts_with("required:")
+                })
+            })
+            .collect();
+        // A matching name alone is insufficient. The permitted pose and full
+        // required-part path must also have supported declarations.
+        if !passed("pose")
+            || requirements.is_empty()
+            || requirements.iter().any(|i| i.status != "pass")
+        {
+            return "unknown";
+        }
+        if passed("dimensions") && passed("fasteners") {
+            "dimensional_checks"
+        } else if passed("interface") {
+            "interface_declarations"
+        } else {
+            "unknown"
+        }
+    }
+
+    /// Documented interfaces or a supported kit can establish a simulation
+    /// route without complete detail. All observations and strict ready remain.
     pub fn simulation_blockers(&self) -> Vec<&MountingItem> {
         self.items
             .iter()
@@ -322,6 +389,14 @@ impl MountingReport {
     fn deferred_for_simulation(&self, item: &MountingItem) -> bool {
         let prefix = format!("mounting:{}:", item.target);
         let key = item.id.strip_prefix(&prefix).unwrap_or("");
+        if self.connection_basis(&item.target) != "unknown"
+            && matches!(
+                key,
+                "interface" | "dimensions" | "fasteners" | "assembly_clearance"
+            )
+        {
+            return true;
+        }
         let detail = matches!(
             key,
             "interface"
@@ -332,16 +407,7 @@ impl MountingReport {
                 | "fasteners"
                 | "assembly_clearance"
         ) || key.starts_with("required:");
-        detail
-            && self.kits.iter().any(|kit| {
-                let support = &kit["manufacturer_support"];
-                support["status"] == "pass"
-                    && support["connections"]
-                        .as_array()
-                        .is_some_and(|connections| {
-                            connections.iter().any(|target| target == &item.target)
-                        })
-            })
+        detail && self.manufacturer_supported(&item.target)
     }
 
     fn add(
@@ -392,6 +458,7 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         assemblies: Vec::new(),
         items: Vec::new(),
         kits: Vec::new(),
+        simulation: SimulationMounting::default(),
     };
     let pins: Vec<_> = annotations
         .iter()
@@ -649,6 +716,51 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
     for kit in &graph.kits {
         kit::review(kit, &graph, &pins, &mut report);
     }
+    report.simulation.connections = graph
+        .edges
+        .iter()
+        .filter(|e| e.role == MountRole::Tool)
+        .map(|edge| {
+            let (path, complete) = graph.upstream(edge);
+            // Stop at the arm's own mounting boundary: a pedestal or mobile
+            // base is not an adapter between that arm and its tool.
+            let adapters = path
+                .iter()
+                .take_while(|&&part| {
+                    graph
+                        .edges
+                        .iter()
+                        .any(|e| e.tool == Some(part) && e.role == MountRole::Tool)
+                })
+                .count();
+            let method = if !complete {
+                "unknown"
+            } else if adapters == 0 {
+                "direct"
+            } else if path[..adapters]
+                .iter()
+                .all(|&i| graph.parts[i].catalog().is_some())
+            {
+                "catalog_adapter"
+            } else {
+                "custom_adapter"
+            };
+            let basis = report.connection_basis(&edge.target);
+            let prefix = format!("mounting:{}:", edge.target);
+            let evidence_items = report
+                .items
+                .iter()
+                .filter(|item| item.status == "pass" && item.id.starts_with(&prefix))
+                .map(|item| item.id.clone())
+                .collect();
+            ConnectionSupport {
+                target: edge.target.clone(),
+                method,
+                basis,
+                evidence_items,
+            }
+        })
+        .collect();
     if report.items.is_empty() {
         report.add(
             "cell",
@@ -673,6 +785,13 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         .items
         .iter()
         .any(|i| matches!(i.status, "fail" | "unknown" | "not_run"));
+    report.simulation.blockers = report
+        .simulation_blockers()
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    report.simulation.ready =
+        !report.assemblies.is_empty() && report.simulation.blockers.is_empty();
     report
 }
 

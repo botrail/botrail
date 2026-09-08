@@ -33,6 +33,7 @@ class MountingReport:
         self.input_hash = data["input_hash"]
         self.assemblies = data["assemblies"]
         self.kits = data.get("kits", [])
+        self.simulation = data.get("simulation", {"ready": False, "blockers": [], "connections": []})
         self.items = [ReviewItem(**item) for item in data["items"]]
 
     @property
@@ -45,7 +46,8 @@ class MountingReport:
     def to_dict(self) -> dict:
         return {"scope": self.scope, "validator_version": self.validator_version,
                 "input_hash": self.input_hash, "ready": self.ready,
-                "assemblies": self.assemblies, "kits": self.kits, "items": [item.to_dict() for item in self.items]}
+                "assemblies": self.assemblies, "kits": self.kits, "simulation": self.simulation,
+                "items": [item.to_dict() for item in self.items]}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False, allow_nan=False)
@@ -70,6 +72,13 @@ class MountingReport:
                 if note:
                     lines += ["", _md(note), ""]
             lines += ["", *table]
+        if self.simulation["connections"]:
+            table = lines[-2:]
+            lines = lines[:-2] + ["Simulation mounting routes (not a detailed-fit approval):", "",
+                "| connection | method | evidence basis |", "|---|---|---|"]
+            for connection in self.simulation["connections"]:
+                lines.append("| " + " | ".join(_md(connection[key]) for key in ("target", "method", "basis")) + " |")
+            lines += ["", f"Mounting eligible for simulation: {self.simulation['ready']}.", "", *table]
         for item in self.items:
             lines.append("| " + " | ".join(_md(v) for v in
                          (item.target, item.id, item.status, item.message, item.next_action)) + " |")
@@ -105,8 +114,9 @@ class MountingProposal:
 
     ``route`` describes mounting evidence, not a detailed-fit approval.
     ``save`` retains unknown/failing proposals in the normal project format;
-    ``can_apply`` also accepts an unchanged manufacturer-supported kit with
-    missing internal detail. ``report.ready`` remains the strict result.
+    ``can_apply`` also accepts supported kits and sourced interface/pose/part
+    declarations with incomplete detail. ``report.simulation`` records each
+    route and its basis; ``report.ready`` remains the strict result.
     Known mismatches and unresolved scene references still block application.
     """
 

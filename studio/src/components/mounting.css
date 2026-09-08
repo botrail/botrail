@@ -82,6 +82,21 @@
 .mounting-header select {
   max-width: 220px;
 }
+.mounting-routes {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.mounting-routes > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+.mounting-routes small {
+  color: var(--muted);
+}
 .mounting-summary {
   display: flex;
   gap: 22px;

@@ -197,6 +197,8 @@ def test_kit_candidate_keeps_purchase_unit_and_evidence_when_saved(tmp_path):
     assert len(proposal.after["bom"]) == 2
     assert proposal.after["mass"] == {"known_kg": 12.5, "missing": []}
     assert proposal.report.kits[0]["manufacturer_support"]["status"] == "pass"
+    assert {c["basis"] for c in proposal.report.simulation["connections"]} == {"manufacturer_kit"}
+    assert "catalog_adapter" in {c["method"] for c in proposal.report.simulation["connections"]}
     proposal.save(tmp_path / "kit-proposal.botrail")
     restored = bt.Scene.load_project(tmp_path / "kit-proposal.botrail")
     assert restored.bom().rows == proposal.scene.bom().rows
@@ -295,3 +297,104 @@ def test_orphan_annotation_blocks_apply_but_draft_remains_loadable(tmp_path):
     restored = bt.Scene.load_project(tmp_path / "draft.botrail")
     assert bt.mounting.report(restored).ready
     assert json.loads(scene._project_json())["parts"][0]["target"] == "arm/tool2"
+
+
+def declared_parts(*, detail=False, change=None):
+    """Synthetic drawing-backed route, deliberately not a manufacturer kit."""
+    a, b, c, d = (drawing("face", "flange"), drawing("mount", "mount"),
+                  drawing("mount", "mount"), drawing("out", "flange"))
+    for face in (a, b, c, d):
+        face.pop("clearance")
+        if not detail:
+            face.pop("geometry")
+            face.pop("fasteners")
+    if change == "interface":
+        b["interface_id"] = "different-face"
+    elif change == "pose":
+        b["allowed_poses"] = [{"position": [0, 0, .01], "quaternion": [0, 0, 0, 1]}]
+    elif change == "parts":
+        b["requirements_complete"] = False
+    elif change == "evidence":
+        b["evidence"] = []
+    elif change == "names_only":
+        b.pop("allowed_poses")
+    elif change == "screw":
+        b["fasteners"][0]["length_mm"] = bounds(9)
+    elif change == "holes":
+        b["geometry"]["holes"][0]["position_mm"][0] += 10
+    elif change == "no_identifiers":
+        for face in (a, b, c, d):
+            face.pop("interface_id")
+    return tuple(bt.Robot.from_urdf_string(xml)._with_mounting_json(json.dumps(document(*faces)))
+                 for xml, faces in ((ARM, (a,)), (TOOL, (b,)), (ADAPTER, (c, d))))
+
+
+@pytest.mark.parametrize("adapter", [False, True])
+@pytest.mark.parametrize("detail", [False, True])
+def test_documented_nonkit_route_applies_with_separate_detail_status(tmp_path, adapter, detail):
+    a, t, plate = declared_parts(detail=detail)
+    candidate = a
+    if adapter:
+        candidate = candidate.attach_tool(plate, flange="face", mount="mount", prefix="plate_")
+    candidate = candidate.attach_tool(t, flange="plate_out" if adapter else "face", mount="mount", prefix="tool_")
+    scene = bt.Scene(a)
+    proposal = bt.mounting.preview(scene, candidate)
+    assert proposal.can_apply and not proposal.report.ready
+    assert not proposal.report.kits
+    sim = proposal.report.simulation
+    assert sim["ready"] and not sim["blockers"]
+    connection = sim["connections"][-1]
+    assert connection["method"] == ("custom_adapter" if adapter else "direct")
+    assert connection["basis"] == ("dimensional_checks" if detail else "interface_declarations")
+    assert connection["evidence_items"]
+    assert any(i.id.endswith(":assembly_clearance") and i.status == "not_run" for i in proposal.report.items)
+    assert connection["basis"] in proposal.report.to_markdown()
+    # Immutable drawing sources, topology and results survive both handoffs.
+    proposal.save(tmp_path / "declared-route.botrail")
+    restored = bt.Scene.load_project(tmp_path / "declared-route.botrail")
+    assert bt.mounting.report(restored).to_dict() == proposal.report.to_dict()
+    proposal.apply()
+    assert bt.mounting.report(scene).to_dict() == proposal.report.to_dict()
+    assert not bt.review(scene, required=["mounting"]).ready
+
+
+@pytest.mark.parametrize("change", ["interface", "pose", "parts", "evidence", "names_only", "screw", "holes"])
+def test_nonkit_support_never_hides_mismatches_or_missing_installation_evidence(change):
+    a, t, _ = declared_parts(detail=change in ("screw", "holes"), change=change)
+    scene = bt.Scene(a)
+    proposal = bt.mounting.preview(scene, a.attach_tool(t, flange="face", mount="mount"))
+    assert not proposal.can_apply
+    assert proposal.mounting_blockers == proposal.report.simulation["blockers"]
+    before = scene._project_json()
+    with pytest.raises(ValueError, match="unresolved"):
+        proposal.apply()
+    assert scene._project_json() == before
+
+
+def test_dimension_checks_do_not_require_inventing_a_shared_interface_name():
+    a, t, _ = declared_parts(detail=True, change="no_identifiers")
+    proposal = bt.mounting.preview(bt.Scene(a), a.attach_tool(t, flange="face", mount="mount"))
+    assert proposal.can_apply and not proposal.report.ready
+    assert proposal.report.simulation["connections"][0]["basis"] == "dimensional_checks"
+    assert proposal.route == "direct_evidence"
+
+
+def test_evidence_on_one_connection_cannot_cover_an_extra_undeclared_tool():
+    a, t, _ = declared_parts()
+    supported = a.attach_tool(t, flange="face", mount="mount", prefix="tool_")
+    candidate = supported.attach_tool(bt.Robot.from_urdf_string(TOOL), flange="tool_tip", mount="mount", prefix="extra_")
+    proposal = bt.mounting.preview(bt.Scene(a), candidate)
+    assert not proposal.can_apply
+    assert proposal.report.simulation["connections"][0]["basis"] == "interface_declarations"
+    assert proposal.report.simulation["connections"][1]["basis"] == "unknown"
+
+
+def test_arm_pedestal_is_not_an_end_effector_adapter():
+    body = bt.Robot.from_urdf_string('<robot name="cell"><link name="pedestal"/></robot>')
+    a, t, _ = declared_parts()
+    arm = a.attach_tool(t, flange="face", mount="mount", prefix="tool_")
+    mounted = body.mount(arm, at="pedestal", prefix="arm_", group="arm")
+    proposal = bt.mounting.preview(bt.Scene(body), mounted)
+    assert proposal.can_apply
+    assert proposal.report.simulation["connections"][0]["method"] == "direct"
+    assert proposal.route == "direct_evidence"

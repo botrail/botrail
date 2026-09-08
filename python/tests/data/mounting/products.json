@@ -1,6 +1,6 @@
 {
   "scope": "Recipe declarations, synthetic geometry and dataset revision in tests; no hardware validation",
-  "recorded_at": "2026-09-06",
+  "recorded_at": "2026-09-08",
   "products": [
     {
       "recipe": "universal_robots/ur5e-rosi.yaml",
@@ -830,7 +830,95 @@
           "country": "JP",
           "product_url": "https://gb-fa.mitsubishielectric.com/fa/products/rbt/assista/assista/rv-5as-d.html"
         },
-        "sources": [],
+        "mounting": {
+          "interfaces": [
+            {
+              "frame": "rv5as_hand_flange",
+              "role": "flange",
+              "interface_id": "MELFA ASSISTA RV-5AS-D 4-M5 PCD31.5",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "PDF p.32 / printed 2-24, Fig.2-3 View A"
+                }
+              ],
+              "note": "Manufacturer nominal pattern: four M5 tapped holes on PCD 31.5 at 45 degrees. The drawing specifies screw insertion of 7.5 to 8 mm, a central diameter-20 H7 recess (depth 6), diameter-40 h8 outside register (depth 6.5), and a diameter-5 H7 locating hole (depth 8). Numeric fit/position tolerances, usable thread depth, fastener selection and correspondence to the upstream mesh are unverified. This identifies the bare face, not approval of a spindle or gun assembly.",
+              "geometry": {
+                "normal_z": 1,
+                "frame_verified": false,
+                "complete": false,
+                "holes": [
+                  {
+                    "id": "m5-1",
+                    "position_mm": [
+                      -11.136931804,
+                      11.136931804
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "left_hand": false
+                    }
+                  },
+                  {
+                    "id": "m5-2",
+                    "position_mm": [
+                      11.136931804,
+                      11.136931804
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "left_hand": false
+                    }
+                  },
+                  {
+                    "id": "m5-3",
+                    "position_mm": [
+                      11.136931804,
+                      -11.136931804
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "left_hand": false
+                    }
+                  },
+                  {
+                    "id": "m5-4",
+                    "position_mm": [
+                      -11.136931804,
+                      -11.136931804
+                    ],
+                    "kind": "threaded",
+                    "thread": {
+                      "diameter_mm": 5.0,
+                      "left_hand": false
+                    }
+                  }
+                ],
+                "locators": [],
+                "evidence": [
+                  {
+                    "source": 0,
+                    "section": "PDF p.32 / printed 2-24, Fig.2-3 View A"
+                  }
+                ]
+              },
+              "fasteners": [],
+              "requirements_complete": false
+            }
+          ],
+          "requirements": []
+        },
+        "sources": [
+          {
+            "kind": "manufacturer_datasheet",
+            "url": "https://dl.mitsubishielectric.com/dl/fa/document/manual/robot/bfp-a3727/bfp-a3727p.pdf",
+            "ref": "BFP-A3727-P",
+            "fetched_at": "2026-09-08"
+          }
+        ],
         "frames": {
           "base_frame": "rv5as_base",
           "flange_frame": "rv5as_hand_flange",
@@ -857,13 +945,14 @@
             {
               "frame": "mount",
               "role": "mount",
+              "interface_id": "NAKANISHI EMSF-3060K 4-M4 PCD39",
               "evidence": [
                 {
                   "source": 0,
-                  "section": "6-2 Outside View; 10 Installation of the Motor Spindle"
+                  "section": "p.4 Fig.1; pp.6-7 section 10, Fig.13"
                 }
               ],
-              "note": "Reference product EMSF-3060K; this is an approximate authored model. The robot-side bracket and model mating pose have not been verified.",
+              "note": "EMSF-3060K drawing: four diameter-4.2 clearance holes on PCD 39, at 35 degrees from the drawing's vertical axis; supplied M4x16 socket-head screws secure the flange to a holder. This differs from the ASSISTA 4-M5 PCD31.5 bare flange. The authored r1 visual uses 45-degree solid markers instead of the real holes, a circular flange instead of the 33-by-43 outline, and a front-plane root; Fig.13 seats the holder against the rear of the flange. Do not overlay the drawing holes on that mesh as verified. The spindle body and motor cord need rear clearance; offsetting the model does not create a supporting bracket.",
               "geometry": {
                 "normal_z": -1,
                 "frame_verified": false,
@@ -966,7 +1055,7 @@
                 "evidence": [
                   {
                     "source": 0,
-                    "section": "p.4 Fig.4 (6-2 Outside View); pp.6-7 section 10, Fig.13"
+                    "section": "p.4 Fig.1 (6-2 Outside View); pp.6-7 section 10, Fig.13"
                   }
                 ]
               },
@@ -978,8 +1067,13 @@
             {
               "id": "robot-bracket",
               "frame": "mount",
-              "evidence": [],
-              "note": "A robot-to-spindle bracket has not been specified. Obtain its drawings and part identity before checking this assembly.",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "pp.6-7 section 10, Figs.13-14"
+                }
+              ],
+              "note": "A robot-to-spindle holder is required but not specified. For an ASSISTA assembly, provide a bracket drawing with both the 4-M5 PCD31.5 robot face and 4-M4 PCD39 spindle face, the diameter-30 body passage, rear-body/cord clearance and M4x16 screw seating. Do not clamp the spindle body with a split holder or set screw (Fig.14). Hole/seat tolerances, fastener engagement, tool access and bracket identity remain unverified; a generic box or a BOM label cannot establish fit.",
               "catalog_alternatives": []
             }
           ]
@@ -1040,8 +1134,13 @@
             {
               "frame": "mount",
               "role": "mount",
-              "evidence": [],
-              "note": "Legacy frame on a reconstructed X16005 envelope. The product page is a reference for the envelope, not evidence for the mating holes or frame orientation.",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "Specification, DB6-075-X16005-00; Connecting Way With Robot"
+                }
+              ],
+              "note": "The manufacturer lists top, bottom, left, right and rear attachment choices. These choices alone do not verify transforms of this legacy mount frame. The DB6-075-X16005-00 envelope does not identify the bracket, mating holes, insulation stack or the selected robot flange option. \"Apply to all Robot Brands\" describes servo-motor integration in the source; it is not evidence of direct mechanical mounting to every robot.",
               "fasteners": [],
               "requirements_complete": false
             }
@@ -1050,8 +1149,13 @@
             {
               "id": "robot-bracket",
               "frame": "mount",
-              "evidence": [],
-              "note": "The robot-side bracket and manufacturer mounting drawings are missing. Envelope placement cannot establish attachment compatibility.",
+              "evidence": [
+                {
+                  "source": 0,
+                  "section": "Description item 7; Specification, Connecting Way With Robot and Servo Motor"
+                }
+              ],
+              "note": "For FANUC R-2000iC/165F + DB6-075-X16005-00, specify the gun arm/actuator configuration, mounting side, bracket part/drawing revision, robot flange option and any insulation parts. A manufacturer-approved assembly needs a reference covering this selected configuration. For a custom bracket, obtain both mating-face drawings, bolt/pin selection, torque and maintenance access. The public envelope and brand-wide servo integration statement do not establish this assembly.",
               "catalog_alternatives": []
             }
           ]

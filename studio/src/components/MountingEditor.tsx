@@ -14,6 +14,7 @@ import {
 } from "../mounting-edit";
 import { MountingViewport, type ComparisonBounds } from "./MountingViewport";
 import { MountingKitSummary } from "./MountingKitSummary";
+import { MountingRouteSummary } from "./MountingRouteSummary";
 
 function download(project: unknown, name: string) {
   const url = URL.createObjectURL(
@@ -564,6 +565,7 @@ export function MountingEditor({
               </table>
               <div className="assembly-findings">
                 <h3>Simulation application</h3>
+                <MountingRouteSummary inspection={candidate.inspection} robotName={robotName} />
                 {!candidate.inspection.connections.length && (
                   <p>No tool mounting connection recorded.</p>
                 )}
@@ -599,7 +601,7 @@ export function MountingEditor({
                   <p>
                     {candidate.inspection.ready
                       ? "Required mounting checks are resolved."
-                      : "The documented kit configuration can be used in simulation. Missing internal detail remains unverified."}
+                      : "The documented mounting configuration can be used in simulation. Missing detail remains unverified."}
                     {" "}Application checks this snapshot again.
                   </p>
                 )}

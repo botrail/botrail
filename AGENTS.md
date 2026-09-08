@@ -1,6 +1,7 @@
 ## How to work on this project
 
 - Save internal design documents in the `.internal` folder.
+- When making an implementation plan, clearly define the goals for each phase and do not delve into each phase. Aim for completion and record remaining items.
 - Avoid overengineering. Develop features based on actual needs and requirements.
 - When adding a feature, aim for the optimal change. Consider which approach fits best: writing something new from scratch, extending existing code, refactoring existing functionality to add it, or removing unnecessary code before adding.
 - Check the appearance of the UI in a browser: the `/chrome` command, or the headless capture `scripts/docs_screenshots.py` uses (Playwright + SwiftShader).

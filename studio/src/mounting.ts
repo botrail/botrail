@@ -88,6 +88,11 @@ export type Connection = {
   movingLinks: string[];
 };
 export type Inspection = {
+  simulation: {
+    ready: boolean;
+    blockers: string[];
+    connections: { target: string; method: string; basis: string; evidenceItems: string[] }[];
+  };
   revalidation: string[];
   ready: boolean;
   hash: string;
@@ -271,6 +276,15 @@ export function parseInspection(value: unknown): Inspection {
       "Unsupported mounting inspection response. Update the Studio and server together.",
     );
   return {
+    simulation: {
+      ready: record(r.simulation).ready === true,
+      blockers: list(record(r.simulation).blockers).map(text),
+      connections: list(record(r.simulation).connections).map((value) => {
+        const c = record(value);
+        return { target: text(c.target), method: text(c.method), basis: text(c.basis),
+          evidenceItems: list(c.evidence_items).map(text) };
+      }),
+    },
     ready: r.ready,
     hash: text(r.input_hash),
     validator: text(r.validator_version),

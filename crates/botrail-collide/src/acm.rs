@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use botrail_model::RobotModel;
+use botrail_model::{JointType, RobotModel};
 
 #[derive(Debug, Clone, Default)]
 pub struct Acm {
@@ -14,12 +14,44 @@ fn key(i: usize, j: usize) -> (usize, usize) {
 }
 
 impl Acm {
-    /// Default ACM: every pair of links directly connected by a joint is
-    /// allowed to "collide" (they usually touch by construction).
+    /// Direct joint neighbours may touch by construction. Empty fixed frames
+    /// do not separate physical neighbours (e.g. plate -> flange -> bracket).
     pub fn adjacent(model: &RobotModel) -> Self {
         let mut acm = Acm::default();
         for joint in &model.joints {
             acm.allow(joint.parent_link, joint.child_link);
+        }
+        let mut fixed = vec![Vec::new(); model.links.len()];
+        for joint in &model.joints {
+            if joint.joint_type == JointType::Fixed {
+                fixed[joint.parent_link].push(joint.child_link);
+                fixed[joint.child_link].push(joint.parent_link);
+            }
+        }
+        let frame: Vec<_> = model
+            .links
+            .iter()
+            .map(|link| link.visuals.is_empty() && link.collisions.is_empty())
+            .collect();
+        for start in 0..model.links.len() {
+            if frame[start] {
+                continue;
+            }
+            let mut seen = HashSet::from([start]);
+            let mut pending = vec![start];
+            while let Some(current) = pending.pop() {
+                for &next in &fixed[current] {
+                    if !seen.insert(next) {
+                        continue;
+                    }
+                    acm.allow(start, next);
+                    // Stop at the next physical link. This does not disable
+                    // all collisions in a rigid assembly or cross moving joints.
+                    if frame[next] {
+                        pending.push(next);
+                    }
+                }
+            }
         }
         acm
     }
@@ -142,16 +174,18 @@ mod tests {
 
     #[test]
     fn always_colliding_pair_is_detected() {
-        // Two boxes welded together overlapping, plus a third link far away
-        // on a revolute joint that never reaches them.
+        // Two overlapping boxes connected through a moving empty link, plus
+        // a third link far away that never reaches them.
         let urdf = r#"
         <robot name="welded">
           <link name="a"><visual><geometry><box size="0.2 0.2 0.2"/></geometry></visual></link>
           <link name="hop"/>
           <link name="b"><visual><geometry><box size="0.2 0.2 0.2"/></geometry></visual></link>
           <link name="c"><visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual></link>
-          <joint name="a_hop" type="fixed">
+          <joint name="a_hop" type="revolute">
             <parent link="a"/><child link="hop"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-3" upper="3" effort="1" velocity="1"/>
           </joint>
           <joint name="hop_b" type="fixed">
             <parent link="hop"/><child link="b"/>
@@ -170,8 +204,33 @@ mod tests {
 
         let a = model.link_index("a").unwrap();
         let b = model.link_index("b").unwrap();
-        // a and b are NOT adjacent (connected through `hop`), always overlap.
+        // The moving `hop` must not be treated as a fixed mounting frame.
+        assert!(!acm.allows(a, b));
         let always = detect_always_colliding(&model, &collider, &acm, 64, 0.95);
         assert_eq!(always, vec![key(a, b)]);
+    }
+
+    #[test]
+    fn empty_fixed_frames_preserve_physical_adjacency() {
+        let model = RobotModel::from_urdf_str(
+            r#"<robot name="plates">
+              <link name="plate"><collision><geometry><box size=".1 .1 .01"/></geometry></collision></link>
+              <link name="flange"/>
+              <link name="mount"/>
+              <link name="bracket"><visual><geometry><box size=".1 .1 .02"/></geometry></visual></link>
+              <link name="tool"><visual><geometry><box size=".1 .1 .03"/></geometry></visual></link>
+              <joint name="out" type="fixed"><parent link="plate"/><child link="flange"/><origin xyz="0 0 .005"/></joint>
+              <joint name="mate" type="fixed"><parent link="flange"/><child link="mount"/></joint>
+              <joint name="body" type="fixed"><parent link="mount"/><child link="bracket"/><origin xyz="0 0 .01"/></joint>
+              <joint name="tool" type="fixed"><parent link="bracket"/><child link="tool"/></joint>
+            </robot>"#,
+        ).unwrap();
+        let acm = Acm::adjacent(&model);
+        let plate = model.link_index("plate").unwrap();
+        let bracket = model.link_index("bracket").unwrap();
+        let tool = model.link_index("tool").unwrap();
+        assert!(acm.allows(plate, bracket));
+        assert!(acm.allows(bracket, tool));
+        assert!(!acm.allows(plate, tool));
     }
 }

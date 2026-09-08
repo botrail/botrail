@@ -10,6 +10,19 @@ import {
 } from "../src/mounting.ts";
 
 const identity = { position: [0, 0, 0], quaternion: [0, 0, 0, 1] };
+
+test("simulation evidence is read from Rust independently of detailed readiness", () => {
+  const input = { schema_version: "1", report: { ready: false, input_hash: "declarations", items: [],
+    simulation: { ready: true, blockers: [], connections: [{ target: "arm/tool", method: "custom_adapter",
+      basis: "interface_declarations", evidence_items: ["mounting:arm/tool:interface"] }] } } };
+  const result = parseInspection(input);
+  assert.equal(result.ready, false);
+  assert.equal(result.simulation.ready, true);
+  assert.equal(result.simulation.connections[0].basis, "interface_declarations");
+  assert.deepEqual(result.simulation.connections[0].evidenceItems, ["mounting:arm/tool:interface"]);
+  delete input.report.simulation;
+  assert.equal(parseInspection(input).simulation.ready, false);
+});
 function fixture() {
   const face = (role, ids) => ({
     frame: role,

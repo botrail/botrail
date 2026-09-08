@@ -251,6 +251,14 @@ def test_three_product_families_report_known_gaps_and_preserve_them(
     assert required[0].next_action and required[0].message
     assert item(report, "dimensions").status == ("not_run" if "weld-gun" in tool_recipe else "unknown")
     assert not report.ready
+    if "spindle-emsf3060" in tool_recipe:
+        assert item(report, "interface").status == "fail"
+        assert "4-M5 PCD31.5" in item(report, "interface").message
+        assert "4-M4 PCD39" in item(report, "interface").message
+        assert not scene.check().ok
+    elif "weld-gun" in tool_recipe:
+        assert item(report, "interface").status == "unknown"
+        assert item(report, "pose").status == "unknown"
     path = tmp_path / "product.botrail"
     scene.save_project(path)
     reloaded = bt.Scene.load_project(path)
@@ -274,6 +282,37 @@ def test_three_product_families_report_known_gaps_and_preserve_them(
         assert item(candidate, "required:gripper-coupling").status == "pass"
         assert [i.status for i in candidate.items if i.id.endswith(":interface")] == ["pass", "pass"]
         assert not candidate.ready  # real declarations, synthetic geometry; no complete fit claim
+
+
+def test_spindle_offset_cannot_repair_the_documented_bare_flange_mismatch(catalog):
+    data = json.loads((Path(__file__).parent / "data/mounting/products.json").read_text())
+    products = {p["recipe"]: p["manifest"] for p in data["products"]}
+    arm = products["mitsubishi_electric/rv-5as-d.yaml"]
+    spindle = products["botrail/spindle-emsf3060.yaml"]
+    for raw in (arm, spindle):
+        catalog(raw["id"], raw=raw)
+    # Rear-body clearance alone cannot turn the M5 robot face into an M4 holder.
+    candidate = load(arm["id"]).attach_tool(load(spindle["id"]), prefix="ee_", offset_position=(0, 0, .16))
+    scene = bt.Scene(load(arm["id"]))
+    proposal = bt.mounting.preview(scene, candidate)
+    assert item(proposal.report, "interface").status == "fail"
+    assert not proposal.can_apply
+    assert not proposal.report.ready
+
+
+def test_weld_brand_integration_is_not_evidence_for_an_arbitrary_mounting_pose(catalog):
+    data = json.loads((Path(__file__).parent / "data/mounting/products.json").read_text())
+    products = {p["recipe"]: p["manifest"] for p in data["products"]}
+    arm = products["fanuc/r2000ic-165f-official.yaml"]
+    gun = products["botrail/weld-gun-x1-r4.yaml"]
+    for raw in (arm, gun):
+        catalog(raw["id"], raw=raw)
+    robot = load(arm["id"]).attach_tool(load(gun["id"]), prefix="ee_", offset_quaternion=(0, 0, 1, 0))
+    report = bt.mounting.report(robot)
+    assert item(report, "interface").status == "unknown"
+    assert item(report, "pose").status == "unknown"
+    assert "robot flange option" in item(report, "required:robot-bracket").message
+    assert not report.kits and not report.ready
 
 
 def test_old_project_does_not_acquire_missing_mounting_data_on_script_replay(catalog, tmp_path):
