@@ -121,7 +121,11 @@ pub fn inspection(scene: &Scene) -> Value {
             })
         })
         .collect();
-    let report = evaluate(graph, scene.parts());
+    let report = evaluate(
+        graph,
+        scene.parts(),
+        &scene.connection_plan().configurations,
+    );
     json!({"schema_version": "1", "report": report, "connections": connections,
         "parts": parts, "robots": robots, "revalidation": scene.mounting_revalidation})
 }

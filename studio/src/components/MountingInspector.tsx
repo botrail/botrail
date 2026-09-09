@@ -19,7 +19,7 @@ import {
 import { MountingHoles, MountingSection } from "./MountingDiagrams";
 import { MountingViewport } from "./MountingViewport";
 import { MountingEditor } from "./MountingEditor";
-import { MountingKitSummary } from "./MountingKitSummary";
+import { MountingKitSummary, MountingProductSummary } from "./MountingKitSummary";
 import { MountingRouteSummary } from "./MountingRouteSummary";
 import "./mounting.css";
 
@@ -146,6 +146,9 @@ function InspectionDialog() {
           (p.id === c?.flange.part || p.id === c?.mount.part),
       ),
     ) ?? [];
+  const products = inspection?.products.filter((p) =>
+    p.target.startsWith(`${robotName}/`),
+  ) ?? [];
   const name = (id: string | null) =>
     inspection?.parts.find((p) => p.id === id)?.name ??
     id ??
@@ -237,6 +240,7 @@ function InspectionDialog() {
       ) : (
         <>
           {kits.map((kit) => <MountingKitSummary key={kit.target} kit={kit} />)}
+          {products.map((product) => <MountingProductSummary key={product.target} product={product} />)}
           <MountingRouteSummary inspection={inspection} robotName={robotName} />
           <div className="mounting-summary">
             <div>

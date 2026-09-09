@@ -41,3 +41,17 @@ of truth — with the bake numbers pinned by a
 The studio's **Save** / **Load** buttons read and write the same `.botrail`
 format, and **Export .py** is `generate_python` — the file formats and the UI
 are the same feature.
+
+For Python replay without catalog access, load the portable project and embed
+its captured catalog sources explicitly:
+
+```python
+scene = bt.Scene.load_project("cell.botrail")
+code = scene.generate_python(embed_catalog=True)
+```
+
+This preserves catalog IDs, revisions, frames and declarations for the host,
+adapters and tools. The default keeps pinned catalog downloads in ordinary
+public-model scripts. Meshes and USD stages remain file references in either
+script mode: keep the extracted files available. To move the cell to another
+machine, transfer the `.botrail` file and generate the script after loading it.

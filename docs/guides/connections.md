@@ -165,3 +165,151 @@ package. Physical requirements always cover the whole cell, even when a
 subset of operating programs is selected. Direct `scene.cell_report()`
 continues to describe simulation results; use the batch export or
 `bt.connections.report()` for the physical connection tables.
+
+
+## Catalog connection configurations
+
+A manufacturer's support applies to a purchase SKU and a particular host
+configuration. `compatibility.connections` records those conditions separately
+from program listings (`compatibility.programs`), mechanical mounting and model
+validation. UR+ listing alone does not establish connector or software support.
+
+`bt.connections.configure(scene, target, profile, values=...)` records the
+settings for an attached catalog kit. `target` is the kit path in
+`bt.mounting.report(scene).kits`, such as `robot/tool`. Product and directly
+attached host catalog IDs are pinned automatically. `remove_configuration`
+clears the selection. Replacing the kit or host requires selecting its own
+configuration; an old selection cannot qualify a different product.
+
+```python
+bt.connections.configure(scene, "robot/tool", "ur5e-es062-polyscope5", values={
+    "wrist_connector": "m8_8pin_male",
+    "controller": "ur_e_series",
+    "voltage_v": 24,
+    "protocol": "modbus_rtu_rs485",
+    "software_family": "polyscope_5",
+    # Supply capacities, pinout verification and installed releases are unknown.
+})
+print(bt.connections.report(scene).to_markdown())
+scene.save_project("cell.botrail")
+```
+
+The report and Studio's mounting inspector show **configuration**, **electrical**,
+**communication**, and **software** results separately. The stored declarations
+and package evidence survive project save/load and generated Python. For offline
+Python replay of every public host and tool, load the portable project and use
+`scene.generate_python(embed_catalog=True)`. Earlier projects load with unknown
+connection conditions.
+
+| Input | Meaning |
+|---|---|
+| `wrist_connector`, `pinout` | Exact connector and documented pinout identifiers from the profile; a pinout identifier records the user's verification against that drawing |
+| `voltage_v` | Configured host supply voltage in volts |
+| `current_a`, `peak_current_a` | Available supply capacity in amperes; continuous and peak remain separate |
+| `protocol`, `signal_logic` | Exact declared protocol and PNP/NPN mode |
+| `controller`, `software_family` | Exact controller and software family identifiers |
+| `software_version`, `plugin`, `plugin_version` | Installed release and plugin identifiers; versions match only explicitly recorded strings |
+
+Unknown input or missing documentary conditions produce `unknown`, even when
+the user supplies a plausible value. A different connector or software family
+produces `fail`. A release absent from the documentary list remains `unknown`. A profile for another host is an invalid selection (`fail`);
+absence of a manufacturer's claim remains `unknown`. Axes outside an explicitly
+documented route can be `not_applicable`. These results compare declarations;
+continue to use `port` and `connect` to check the physical wiring plan. Required
+purchases stay in `order.requires`; included components stay in `order.includes`.
+
+For a product that has no model yet, use
+`bt.connections.evaluate(manifest_dict_or_package_path, exact_host_id,
+profile="...", values={...})`. A catalog reference is also accepted and is
+resolved before evaluation. The evaluator itself does not access the network.
+The builder's `examples/connections/` contains separate Zimmer HRC-03-118505
+(UR e-Series, NPN) and HRC-03-116787 (CRX, PNP) metadata examples. Their new
+geometry and mounting models are not included in these examples.
+
+### Local UR5e / ES-062 example
+
+Build the new kit revision in the catalog-builder checkout:
+
+```bash
+bcb build recipes/robotiq/2f-85-ur-es-062-kit-r3.yaml --work-dir /tmp/urplus-catalog
+```
+
+In an environment with `botrail[catalog]`, copy the three existing packages into
+the same local root. This preparation downloads the catalog packages once:
+
+```python
+from pathlib import Path
+import shutil
+import botrail as bt
+
+root = Path("/tmp/urplus-catalog")
+for product in ("universal_robots/ur/ur5e/r2",
+                "robotiq/coupling/grp-es-cpl-062/r1",
+                "robotiq/2f/2f-85/r2"):
+    shutil.copytree(bt.catalog_package(product), root / product)
+```
+
+Then run in the Botrail checkout:
+
+```bash
+python examples/engineering/urplus_connections.py --catalog-root /tmp/urplus-catalog --studio
+python examples/engineering/urplus_connections.py --catalog-root /tmp/urplus-catalog --connector m8_8pin_female --out /tmp/urplus-wrong-connector
+```
+
+The ES-062 example retains unresolved continuous current, exact PolyScope
+release and installation data. Its electrical result becomes `fail` when the
+female wrist is selected. It does not substitute the ES-077 purchase
+configuration. The example uses a local r3 package and does not require r3 to
+have been published to the catalog.
+
+### Product configurations and tool loads
+
+The catalog also includes Hand-E and 2F-85 kits with ES-077, the four
+robot-specific Zimmer HRC-03 variants, and RG6 / VGC10 with a separately
+purchased robot-side Quick Changer. CRX-20iA/L and M1509 have their own robot
+packages. Try the complete configurations with:
+
+```bash
+python examples/engineering/urplus_products.py --configuration hand-e --studio
+python examples/engineering/urplus_products.py --configuration zimmer-crx --format usd --out /tmp/hrc-crx
+python examples/engineering/urplus_products.py --configuration vgc10 --out /tmp/vgc10
+```
+
+Available configurations are `hand-e`, `2f85-es077`, `zimmer-ur` (118506,
+female wrist), `zimmer-ur-old` (118505, male wrist), `zimmer-crx` (116787),
+`zimmer-doosan` (126895), `rg6`, and `vgc10`. Use `--revision` to pin a public
+catalog commit, or `--catalog-root` to load staged packages. The output includes
+a portable project, generated Python, BOM, mounting and connection reports,
+and a tool-load report. Example settings leave unverified wiring and releases
+unset.
+
+Individually purchased tools appear in `bt.mounting.report(scene).products`.
+A connection profile's `via` lists exact adapters in order from the host toward
+the tool. Botrail compares this with the actual attachment path; missing,
+additional or reordered adapters and changed mounting poses invalidate the
+selected configuration. Studio shows these products and their required items
+in the mounting inspector and assembly comparison.
+
+```python
+loads = bt.select.tool_loads(scene)
+for load in loads:
+    print(load["robot"], load["known_mass_kg"], load["total_mass_kg"])
+    print(load["missing_mass"], load["unresolved_requirements"])
+```
+
+`known_mass_kg` sums documented masses of attached purchase units on that
+robot. A kit counts once; its included parts are not additional purchases.
+`total_mass_kg` remains `None` when a mass or required item is missing. Required
+quantities need matching catalog IDs and part numbers when both are supplied;
+the same attached item cannot satisfy two required quantities. This report
+does not include workpieces or calculate center of gravity, inertia, or dynamic
+payload suitability.
+
+The authored tool shapes are reference geometry. Detailed fastening, cable
+routing, and real gripper control require separate verification. VGC10 has no
+actuated simulation joint and its four 30 mm cups do not inherit the rated load
+of the manufacturer's three 40 mm cup configuration. Hand-E and RG6 report
+opposing finger contact at full closure. The reused 2F-85 model reports internal
+knuckle/pad interference at full closure; that endpoint is unsuitable as a
+collision-free planning goal. The M1509's upstream collision meshes are not
+watertight, so detailed collision geometry remains unverified.

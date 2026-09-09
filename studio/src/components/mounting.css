@@ -707,3 +707,9 @@
 .mounting-dialog .assembly-editor .assembly-error {
   color: #963621;
 }
+
+.mounting-connection { margin-top: 12px; padding: 12px; border: 1px solid #465261; border-radius: 6px; }
+.mounting-connection h4 { margin: 0 0 8px; }
+.mounting-connection-status { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 0; }
+.mounting-connection table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.mounting-connection td, .mounting-connection th { text-align: left; vertical-align: top; padding: 6px; border-bottom: 1px solid #465261; overflow-wrap: anywhere; }

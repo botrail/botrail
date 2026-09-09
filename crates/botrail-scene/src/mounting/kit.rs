@@ -2,7 +2,7 @@ use super::*;
 use botrail_model::kit::{KitSpec, RepresentationStatus};
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-fn bare(source: &RobotSource) -> &RobotSource {
+pub(super) fn bare(source: &RobotSource) -> &RobotSource {
     match source {
         RobotSource::Mounting { base, .. } | RobotSource::Visuals { base, .. } => bare(base),
         _ => source,
@@ -128,6 +128,7 @@ pub(super) fn review(
     record: &KitRecord<'_>,
     graph: &Graph<'_>,
     pins: &[&PartEntry],
+    configurations: &[botrail_model::compatibility::ConnectionSelection],
     report: &mut MountingReport,
 ) {
     let RobotSource::Catalog {
@@ -213,6 +214,38 @@ pub(super) fn review(
             .filter(|i| i.target.starts_with(&format!("{}/components", record.name)))
             .map(|i| i.status),
     );
+    let selected = configurations.iter().find(|s| s.target == record.name);
+    let mut connection = meta.compatibility.review(
+        id,
+        host.and_then(|h| h.catalog()).map(|(id, _, _)| id),
+        selected,
+        &meta.sources,
+    );
+    let host_identity_ok = host.is_none_or(|h| {
+        pins.iter().filter(|p| p.target == h.name).all(|p| {
+            p.part.catalog.as_ref().is_none_or(|c| {
+                h.catalog().is_some_and(|(id, revision, _)| {
+                    c.id == id && c.revision.as_deref().is_none_or(|r| r == revision)
+                })
+            })
+        })
+    });
+    let invalid_via = selected.is_some_and(|s| {
+        meta.compatibility
+            .connections
+            .iter()
+            .any(|p| p.id == s.profile && !p.via.is_empty())
+    });
+    if !matches
+        || invalid_via
+        || !host_identity_ok
+        || host_edge.is_some_and(|e| !host_mount_matches(record, graph, e))
+    {
+        connection["configuration"] = json!({"status": "fail", "message": "Kit composition, host mounting or assigned identity differs from the declared configuration"});
+        for axis in ["electrical", "communication", "software"] {
+            connection[axis] = json!({"status": "not_applicable", "checks": []});
+        }
+    }
     report.kits.push(json!({
         "target": record.name, "catalog": id, "revision": revision, "name": meta.product,
         "host": host.and_then(|h| h.catalog()).map(|(id,_,_)| id), "order": meta.order,
@@ -220,6 +253,7 @@ pub(super) fn review(
         "composition": {"status": if matches { "pass" } else { "fail" }},
         "model_correspondence": {"status": representation, "representation": kit.representation},
         "detailed_fit": {"status": detailed, "message": "Detailed dimensional, fastener and access checks; independent of manufacturer support"},
-        "electrical": {"status": "not_run", "message": "Mechanical support does not verify wrist connector, wiring or control compatibility"},
+        "electrical": connection["electrical"],
+        "connection": connection,
     }));
 }

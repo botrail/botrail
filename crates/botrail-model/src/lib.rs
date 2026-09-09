@@ -1,6 +1,7 @@
 //! Robot model layer: wraps xurdf's URDF/Xacro parsing into an indexed
 //! kinematic tree suitable for FK and scene serialization.
 
+pub mod compatibility;
 pub mod kit;
 mod mesh_path;
 pub mod mounting;
@@ -366,6 +367,8 @@ pub struct CatalogMeta {
     pub mounting: Option<mounting::MountingSpec>,
     pub order: Option<mounting::CatalogOrder>,
     pub kit: Option<kit::KitSpec>,
+    pub compatibility: compatibility::Compatibility,
+    pub electrical: Option<serde_json::Value>,
     pub sources: Vec<mounting::CatalogSource>,
 }
 

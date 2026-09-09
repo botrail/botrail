@@ -173,6 +173,7 @@ class Product:
     revision: Optional[str] = None
     order: Optional[dict[str, Any]] = None
     kit: Optional[dict[str, Any]] = None
+    compatibility: dict[str, Any] | None = None
 
     @classmethod
     def from_entry(cls, entry: dict[str, Any], revision: Optional[str] = None) -> "Product":
@@ -195,6 +196,7 @@ class Product:
             revision=revision,
             order=entry.get("order"),
             kit=entry.get("kit"),
+            compatibility=entry.get("compatibility"),
         )
 
     @property
@@ -274,6 +276,7 @@ class Product:
             "attributes": self.attributes(),
             **({"order": self.order} if self.order is not None else {}),
             **({"kit": self.kit} if self.kit is not None else {}),
+            **({"compatibility": self.compatibility} if self.compatibility is not None else {}),
         }
 
     def __repr__(self) -> str:
@@ -359,7 +362,7 @@ class Index:
                 continue
             if min_level is not None and p.level < min_level:
                 continue
-            if text and text.lower() not in (p.id + " " + p.name).lower():
+            if text and text.lower() not in (p.id + " " + p.name + " " + json.dumps(p.compatibility or {}, ensure_ascii=False)).lower():
                 continue
             closeness = 0.0
             ok = True

@@ -33,6 +33,7 @@ class MountingReport:
         self.input_hash = data["input_hash"]
         self.assemblies = data["assemblies"]
         self.kits = data.get("kits", [])
+        self.products = data.get("products", [])
         self.simulation = data.get("simulation", {"ready": False, "blockers": [], "connections": []})
         self.items = [ReviewItem(**item) for item in data["items"]]
 
@@ -46,7 +47,7 @@ class MountingReport:
     def to_dict(self) -> dict:
         return {"scope": self.scope, "validator_version": self.validator_version,
                 "input_hash": self.input_hash, "ready": self.ready,
-                "assemblies": self.assemblies, "kits": self.kits, "simulation": self.simulation,
+                "assemblies": self.assemblies, "kits": self.kits, "products": self.products, "simulation": self.simulation,
                 "items": [item.to_dict() for item in self.items]}
 
     def to_json(self) -> str:
@@ -71,6 +72,12 @@ class MountingReport:
                 note = kit["manufacturer_support"].get("note")
                 if note:
                     lines += ["", _md(note), ""]
+            lines += ["", "Declared connection conditions (separate from mechanical results):", "",
+                      "| kit | configuration | electrical | communication | software |", "|---|---|---|---|---|"]
+            for kit in self.kits:
+                connection = kit.get("connection", {})
+                lines.append("| " + " | ".join(_md(v) for v in [kit["target"],
+                    *(connection.get(key, {}).get("status", "unknown") for key in ("configuration", "electrical", "communication", "software"))]) + " |")
             lines += ["", *table]
         if self.simulation["connections"]:
             table = lines[-2:]

@@ -16,11 +16,12 @@ use crate::{
 pub mod edit;
 mod fit;
 mod kit;
+mod product;
 mod view;
 
 pub use view::inspection;
 
-pub const VALIDATOR_VERSION: &str = "mounting/6";
+pub const VALIDATOR_VERSION: &str = "mounting/7";
 
 #[derive(Debug, Serialize)]
 pub struct MountingItem {
@@ -72,6 +73,8 @@ pub struct MountingReport {
     pub assemblies: Vec<Assembly>,
     pub items: Vec<MountingItem>,
     pub kits: Vec<Value>,
+    /// Individually purchased catalog products with declared connection profiles.
+    pub products: Vec<Value>,
     pub simulation: SimulationMounting,
 }
 
@@ -437,7 +440,7 @@ impl MountingReport {
 pub fn report_robot(model: &RobotModel) -> MountingReport {
     let mut graph = Graph::default();
     graph.visit(&model.source, &model.name, &mut 0);
-    evaluate(graph, &[])
+    evaluate(graph, &[], &[])
 }
 
 /// Inspect every robot, also comparing authored BOM identity to loaded identity.
@@ -446,10 +449,18 @@ pub fn report(scene: &Scene) -> MountingReport {
     for robot in scene.robots() {
         graph.visit(&robot.model.source, &robot.name, &mut 0);
     }
-    evaluate(graph, scene.parts())
+    evaluate(
+        graph,
+        scene.parts(),
+        &scene.connection_plan().configurations,
+    )
 }
 
-fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
+fn evaluate(
+    graph: Graph<'_>,
+    annotations: &[PartEntry],
+    configurations: &[botrail_model::compatibility::ConnectionSelection],
+) -> MountingReport {
     let mut report = MountingReport {
         scope: "mechanical_assembly",
         validator_version: VALIDATOR_VERSION,
@@ -458,6 +469,7 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         assemblies: Vec::new(),
         items: Vec::new(),
         kits: Vec::new(),
+        products: Vec::new(),
         simulation: SimulationMounting::default(),
     };
     let pins: Vec<_> = annotations
@@ -714,8 +726,9 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         }
     }
     for kit in &graph.kits {
-        kit::review(kit, &graph, &pins, &mut report);
+        kit::review(kit, &graph, &pins, configurations, &mut report);
     }
+    report.products = product::review(&graph, &pins, configurations);
     report.simulation.connections = graph
         .edges
         .iter()
@@ -775,7 +788,7 @@ fn evaluate(graph: Graph<'_>, annotations: &[PartEntry]) -> MountingReport {
         json!({"target": p.name, "catalog": p.catalog().map(|(id, revision, _)| json!({"id": id, "revision": revision})),
             "mounting": p.meta.mounting, "order": p.meta.order, "sources": p.meta.sources,
             "document": match p.source { RobotSource::Mounting { document, .. } => Some(document), _ => None }})).collect::<Vec<_>>(),
-        "assemblies": report.assemblies, "annotations": pins, "kits": report.kits});
+        "assemblies": report.assemblies, "annotations": pins, "kits": report.kits, "products": report.products});
     let bytes = serde_json::to_vec(&inputs).expect("mounting inputs");
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)

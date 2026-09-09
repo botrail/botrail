@@ -185,6 +185,7 @@ dependencies = [
  "roxmltree",
  "schemars",
  "serde",
+ "serde_json",
  "thiserror",
  "xurdf",
 ]
@@ -234,6 +235,7 @@ dependencies = [
  "botrail-usd",
  "nalgebra 0.33.3",
  "pyo3",
+ "serde",
  "serde_json",
  "tokio",
  "tower-http",

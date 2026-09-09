@@ -13,7 +13,7 @@ import {
   type Proposal,
 } from "../mounting-edit";
 import { MountingViewport, type ComparisonBounds } from "./MountingViewport";
-import { MountingKitSummary } from "./MountingKitSummary";
+import { MountingKitSummary, MountingProductSummary } from "./MountingKitSummary";
 import { MountingRouteSummary } from "./MountingRouteSummary";
 
 function download(project: unknown, name: string) {
@@ -467,6 +467,9 @@ export function MountingEditor({
             </div>
             {candidate.inspection.kits.map((kit) => (
               <MountingKitSummary key={kit.target} kit={kit} />
+            ))}
+            {candidate.inspection.products.map((product) => (
+              <MountingProductSummary key={product.target} product={product} />
             ))}
             <div className="assembly-view-options">
               <label>

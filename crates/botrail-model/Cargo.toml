@@ -14,6 +14,7 @@ nalgebra.workspace = true
 thiserror.workspace = true
 roxmltree = "0.14"
 serde.workspace = true
+serde_json.workspace = true
 schemars = { workspace = true, optional = true }
 
 [features]

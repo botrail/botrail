@@ -174,3 +174,33 @@ test("missing and invalid intervals stay unknown; evidence links allow only web 
   ])
     assert.equal(sourceHref(url), undefined);
 });
+
+
+test("connection configuration, missing releases and mechanical support remain separate", () => {
+  const result = parseInspection({schema_version: "1", report: {ready: false, input_hash: "fixture", items: [], kits: [{target: "arm/tool", catalog: "vendor/tool/kit/r3",
+    manufacturer_support: {status: "pass"}, electrical: {status: "fail"},
+    connection: {host: "vendor/arm/host/r2", profile: {id: "male-wrist"},
+      configuration: {status: "pass", message: "Exact host"}, electrical: {status: "fail", checks: [{field: "wrist_connector", status: "fail", actual: "female", accepted: ["male"]}]},
+      communication: {status: "pass"}, software: {status: "unknown", checks: [{field: "software_version", status: "unknown", actual: null, accepted: []}]}}}]}});
+  const kit = result.kits[0];
+  assert.equal(kit.support, "pass");
+  assert.equal(kit.connection.scopes.find(s => s.name === "software").status, "unknown");
+  assert.equal(kit.connection.checks[0].actual, "female");
+  assert.equal(kit.connection.checks[1].expected, "Unknown · confirmation required");
+  const legacy = parseInspection({schema_version: "1", report: {ready: false, input_hash: "fixture", items: [], kits: [{target: "arm/tool"}]}}).kits[0];
+  assert.equal(legacy.connection.scopes.find(s => s.name === "electrical").status, "unknown");
+});
+
+test("an individual product retains its adapter route and missing purchased hardware", () => {
+  const result = parseInspection({schema_version: "1", report: {ready: false, input_hash: "product", items: [], products: [{
+    target: "arm/tool2", catalog: "onrobot/vgc/vgc10/r1", name: "VGC10", host: "vendor/arm/host/r1",
+    via: ["onrobot/quick-changer/109498/r1"], order: {requires: [{part_number: "114222", qty: 1}]},
+    connection: {configuration: {status: "pass"}, electrical: {status: "unknown"}}
+  }]}});
+  assert.equal(result.kits.length, 0);
+  assert.equal(result.products[0].catalog, "onrobot/vgc/vgc10/r1");
+  assert.deepEqual(result.products[0].via, ["onrobot/quick-changer/109498/r1"]);
+  assert.equal(result.products[0].requires[0], "114222 × 1");
+  assert.equal(result.products[0].connection.scopes.find(s => s.name === "electrical").status, "unknown");
+  assert.deepEqual(parseInspection({schema_version: "1", report: {ready: false, input_hash: "legacy", items: []}}).products, []);
+});

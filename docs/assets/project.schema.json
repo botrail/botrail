@@ -849,6 +849,40 @@
         "word"
       ]
     },
+    "Compatibility": {
+      "type": "object",
+      "properties": {
+        "connections": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConnectionProfile"
+          }
+        },
+        "mounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "programs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProgramListing"
+          }
+        },
+        "requires_adapter": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "ConditionMsg": {
       "oneOf": [
         {
@@ -1081,9 +1115,81 @@
         "target"
       ]
     },
+    "ConnectionCondition": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "field": {
+          "$ref": "#/$defs/ConnectionField"
+        },
+        "maximum": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "minimum": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "evidence"
+      ]
+    },
+    "ConnectionField": {
+      "type": "string",
+      "enum": [
+        "controller",
+        "wrist_connector",
+        "pinout",
+        "voltage_v",
+        "current_a",
+        "peak_current_a",
+        "protocol",
+        "signal_logic",
+        "software_family",
+        "software_version",
+        "plugin",
+        "plugin_version"
+      ]
+    },
     "ConnectionPlan": {
       "type": "object",
       "properties": {
+        "configurations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConnectionSelection"
+          }
+        },
         "links": {
           "type": "array",
           "default": [],
@@ -1100,6 +1206,106 @@
         }
       },
       "additionalProperties": false
+    },
+    "ConnectionProfile": {
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConnectionCondition"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "host": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "not_applicable": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Scope"
+          }
+        },
+        "note": {
+          "type": "string"
+        },
+        "part_number": {
+          "type": "string"
+        },
+        "support": {
+          "$ref": "#/$defs/Support"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "host",
+        "part_number",
+        "support",
+        "evidence",
+        "note"
+      ]
+    },
+    "ConnectionSelection": {
+      "description": "Recorded on the existing scene ConnectionPlan. Identity is pinned so\nreplacing an arm or kit cannot reuse the former configuration silently.",
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "target": {
+          "type": "string"
+        },
+        "values": {
+          "type": "object",
+          "properties": {
+            "controller": true,
+            "current_a": true,
+            "peak_current_a": true,
+            "pinout": true,
+            "plugin": true,
+            "plugin_version": true,
+            "protocol": true,
+            "signal_logic": true,
+            "software_family": true,
+            "software_version": true,
+            "voltage_v": true,
+            "wrist_connector": true
+          },
+          "additionalProperties": false,
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "catalog",
+        "host",
+        "profile"
+      ]
     },
     "ConstraintMsg": {
       "description": "A TCP path constraint (see `motion::Constraint`).",
@@ -3034,6 +3240,13 @@
         "restitution"
       ]
     },
+    "ListingStatus": {
+      "type": "string",
+      "enum": [
+        "listed",
+        "unknown"
+      ]
+    },
     "LocatorKind": {
       "type": "string",
       "enum": [
@@ -4328,6 +4541,36 @@
         "quaternion"
       ]
     },
+    "ProgramListing": {
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/ListingStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status",
+        "evidence"
+      ]
+    },
     "ProjectRobotMsg": {
       "description": "One robot in a project.",
       "type": "object",
@@ -4562,6 +4805,18 @@
                 "string",
                 "null"
               ]
+            },
+            "compatibility": {
+              "$ref": "#/$defs/Compatibility",
+              "default": {
+                "connections": [],
+                "mounts": [],
+                "programs": [],
+                "requires_adapter": []
+              }
+            },
+            "electrical": {
+              "default": null
             },
             "flange": {
               "type": [
@@ -4835,6 +5090,14 @@
       "required": [
         "name",
         "value"
+      ]
+    },
+    "Scope": {
+      "type": "string",
+      "enum": [
+        "electrical",
+        "communication",
+        "software"
       ]
     },
     "SegmentKindMsg": {
@@ -5342,6 +5605,14 @@
         "name",
         "actions",
         "transition"
+      ]
+    },
+    "Support": {
+      "type": "string",
+      "enum": [
+        "supported",
+        "unsupported",
+        "unknown"
       ]
     },
     "ToolMoveMsg": {

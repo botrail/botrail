@@ -119,6 +119,10 @@ pub enum RobotSourceMsg {
         order: Option<botrail_model::mounting::CatalogOrder>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kit: Option<botrail_model::kit::KitSpec>,
+        #[serde(default)]
+        compatibility: botrail_model::compatibility::Compatibility,
+        #[serde(default)]
+        electrical: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sources: Vec<botrail_model::mounting::CatalogSource>,
         inner: Box<RobotSourceMsg>,
@@ -342,6 +346,8 @@ pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             mounting: meta.mounting.clone(),
             order: meta.order.clone(),
             kit: meta.kit.clone(),
+            compatibility: meta.compatibility.clone(),
+            electrical: meta.electrical.clone(),
             sources: meta.sources.clone(),
             inner: Box::new(robot_source_msg(inner)),
         },
@@ -424,6 +430,8 @@ pub fn model_from_source(
             mounting,
             order,
             kit,
+            compatibility,
+            electrical,
             sources,
             inner,
         } => {
@@ -439,6 +447,9 @@ pub fn model_from_source(
                     "kit mounting declarations belong to its components".into(),
                 ));
             }
+            compatibility
+                .validate(sources, order.as_ref())
+                .map_err(ProjectError::Robot)?;
             if let Some(kit) = kit {
                 kit.validate(sources, order.as_ref())
                     .map_err(ProjectError::Robot)?;
@@ -505,6 +516,8 @@ pub fn model_from_source(
                     mounting: mounting.clone(),
                     order: order.clone(),
                     kit: kit.clone(),
+                    compatibility: compatibility.clone(),
+                    electrical: electrical.clone(),
                     sources: sources.clone(),
                 },
                 inner: Box::new(inner_source),
@@ -1533,18 +1546,30 @@ fn robot_kwarg_for_name(project: &ProjectFile, name: &Option<String>) -> String 
 /// Emits Python that builds `source` into the variable `var`; embedded URDF
 /// text goes into an `r'''...'''` constant named `konst`. Composites emit
 /// their parts first (`{var}_tool`, `{konst}_TOOL`), then the attach call.
-fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst: &str) {
+fn emit_robot_build(
+    out: &mut String,
+    source: &RobotSourceMsg,
+    var: &str,
+    konst: &str,
+    embed_catalog: bool,
+) {
     match source {
         RobotSourceMsg::Mounting { base, document } => {
-            emit_robot_build(out, base, var, konst);
+            emit_robot_build(out, base, var, konst, embed_catalog);
             let json = serde_json::to_string(document).expect("mounting document");
             let literal = serde_json::to_string(&json).expect("mounting literal");
             out.push_str(&format!("{var} = {var}._with_mounting_json({literal})\n"));
         }
         RobotSourceMsg::Visuals { base, visual } => {
-            emit_robot_build(out, base, var, konst);
+            emit_robot_build(out, base, var, konst, embed_catalog);
             let display = format!("{var}_visual");
-            emit_robot_build(out, visual, &display, &format!("{konst}_VISUAL"));
+            emit_robot_build(
+                out,
+                visual,
+                &display,
+                &format!("{konst}_VISUAL"),
+                embed_catalog,
+            );
             out.push_str(&format!("{var} = {var}.with_visuals({display})\n"));
         }
         RobotSourceMsg::Urdf { xml } => {
@@ -1568,13 +1593,20 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             mounting,
             order,
             kit,
+            compatibility,
+            electrical,
             sources,
             ..
         } => {
-            if revision.starts_with("local-sha256:") || kit.is_some() {
-                // Local recipe-only packages have no downloadable Hub revision.
-                // Use the embedded source (and bundled paths after save/load).
-                let json = serde_json::to_string(source).expect("local catalog source");
+            if embed_catalog
+                || revision.starts_with("local-sha256:")
+                || kit.is_some()
+                || *compatibility != botrail_model::compatibility::Compatibility::default()
+                || electrical.is_some()
+            {
+                // Replay the captured source and declarations without Hub access.
+                // After project load, file paths refer to the extracted bundle.
+                let json = serde_json::to_string(source).expect("catalog source");
                 let literal = serde_json::to_string(&json).expect("source literal");
                 out.push_str(&format!("{var} = bt.Robot._from_source_json({literal})\n"));
                 return;
@@ -1609,9 +1641,15 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
             role,
             group,
         } => {
-            emit_robot_build(out, base, var, konst);
+            emit_robot_build(out, base, var, konst, embed_catalog);
             let tool_var = format!("{var}_tool");
-            emit_robot_build(out, tool, &tool_var, &format!("{konst}_TOOL"));
+            emit_robot_build(
+                out,
+                tool,
+                &tool_var,
+                &format!("{konst}_TOOL"),
+                embed_catalog,
+            );
             let mut kwargs = String::new();
             if !is_identity_pose(offset) {
                 kwargs.push_str(&format!(
@@ -1655,9 +1693,23 @@ fn emit_robot_build(out: &mut String, source: &RobotSourceMsg, var: &str, konst:
 /// botrail API. The robot sources are embedded so the script is
 /// self-contained.
 pub fn generate_python(project: &ProjectFile) -> String {
+    generate_python_impl(project, false)
+}
+
+/// Rebuild catalog models from their captured sources without Hub access.
+/// Mesh and USD paths still need to exist; load a portable project first to
+/// resolve them from its bundled assets.
+pub fn generate_python_embedded(project: &ProjectFile) -> String {
+    generate_python_impl(project, true)
+}
+
+fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
     let mut out = String::new();
     out.push_str("\"\"\"Generated by botrail studio — rebuilds the saved project.\"\"\"\n\n");
-    if project.applicators.is_empty() && project.io.nodes.is_empty() {
+    if project.applicators.is_empty()
+        && project.io.nodes.is_empty()
+        && project.connection_plan.is_empty()
+    {
         out.push_str("import botrail as bt\n\n");
     } else {
         // Applicators and I/O node channel lists are emitted as JSON
@@ -1675,7 +1727,7 @@ pub fn generate_python(project: &ProjectFile) -> String {
         } else {
             format!("URDF_{}", i + 1)
         };
-        emit_robot_build(&mut out, &robot_msg.source, &var, &konst);
+        emit_robot_build(&mut out, &robot_msg.source, &var, &konst, embed_catalog);
         for g in &robot_msg.groups {
             let joints: Vec<String> = g.joints.iter().map(|j| format!("{j:?}")).collect();
             let flange = match &g.flange {

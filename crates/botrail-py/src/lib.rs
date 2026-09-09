@@ -5624,8 +5624,17 @@ impl Scene {
 
     /// Generates a Python script that rebuilds this scene with the botrail
     /// API (same content as the studio's "Export Python").
-    fn generate_python(&self) -> String {
-        self.hub.python_code()
+    /// `embed_catalog=True` uses captured catalog sources without Hub access.
+    /// Mesh/USD paths must exist; load a portable project first to extract them.
+    #[pyo3(signature = (*, embed_catalog = false))]
+    fn generate_python(&self, embed_catalog: bool) -> String {
+        if embed_catalog {
+            self.hub.with_scene(|scene| {
+                botrail_scene::project::generate_python_embedded(&scene.to_project())
+            })
+        } else {
+            self.hub.python_code()
+        }
     }
 
     /// IK to the given pose, then plan to the found configuration. `group`
@@ -9607,6 +9616,35 @@ impl ToolpathReport {
 /// the descriptions. Write it out for an editor or hand it to an agent
 /// that authors projects directly.
 #[pyfunction]
+fn _connection_compatibility_json(manifest: &str, host: &str, selection: &str) -> PyResult<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        id: String,
+        #[serde(default)]
+        compatibility: botrail_model::compatibility::Compatibility,
+        #[serde(default)]
+        order: Option<botrail_model::mounting::CatalogOrder>,
+        #[serde(default)]
+        sources: Vec<botrail_model::mounting::CatalogSource>,
+    }
+    let input: Input =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let selected: Option<botrail_model::compatibility::ConnectionSelection> =
+        serde_json::from_str(selection).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    input
+        .compatibility
+        .validate(&input.sources, input.order.as_ref())
+        .map_err(PyValueError::new_err)?;
+    if let Some(s) = &selected {
+        s.validate().map_err(PyValueError::new_err)?;
+    }
+    Ok(input
+        .compatibility
+        .review(&input.id, Some(host), selected.as_ref(), &input.sources)
+        .to_string())
+}
+
+#[pyfunction]
 fn project_schema() -> String {
     botrail_scene::project::ProjectFile::json_schema()
 }
@@ -9677,6 +9715,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;
     m.add_function(wrap_pyfunction!(project_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(_connection_compatibility_json, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_gcode_json, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_apt_json, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

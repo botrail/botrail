@@ -72,11 +72,20 @@ export type Kit = {
   correspondence: Status;
   fit: Status;
   electrical: Status;
+  connection: { profile: string; host: string; message: string;
+    scopes: {name: string; status: Status}[];
+    checks: {field: string; status: Status; actual: string; expected: string; note: string; sources: Source[]}[];
+  };
+  requires: string[];
   note: string;
   representationNote: string;
   representation: string;
   includes: { name: string; qty: number | null }[];
   sources: Source[];
+};
+export type ProductConnection = {
+  target: string; name: string; catalog: string; note: string;
+  connection: Kit["connection"]; requires: string[]; via: string[];
 };
 export type Connection = {
   target: string;
@@ -99,6 +108,7 @@ export type Inspection = {
   validator: string;
   findings: Finding[];
   kits: Kit[];
+  products: ProductConnection[];
   connections: Connection[];
   parts: {
     id: string;
@@ -326,6 +336,8 @@ export function parseInspection(value: unknown): Inspection {
         correspondence: status(record(k.model_correspondence).status),
         fit: status(record(k.detailed_fit).status),
         electrical: status(record(k.electrical).status),
+        connection: connectionSummary(k.connection),
+        requires: list(order.requires).map((v) => { const i = record(v); return `${text(i.part_number) || text(i.catalog) || text(i.category)} × ${number(i.qty) ?? 1}${text(i.note) ? ` — ${text(i.note)}` : ""}`; }),
         note: text(support.note),
         representationNote: text(record(record(k.model_correspondence).representation).note),
         representation: text(record(record(k.model_correspondence).representation).status),
@@ -334,6 +346,13 @@ export function parseInspection(value: unknown): Inspection {
           return { name: text(i.name), qty: number(i.qty) };
         }),
         sources: sources(support.evidence),
+      };
+    }),
+    products: list(r.products).map((value) => {
+      const p = record(value), order = record(p.order);
+      return {target: text(p.target), name: text(p.name) || text(p.catalog), catalog: text(p.catalog),
+        note: text(order.note), connection: connectionSummary(p.connection), via: list(p.via).map(text),
+        requires: list(order.requires).map((v) => {const i = record(v); return `${text(i.part_number) || text(i.catalog) || text(i.category)} × ${number(i.qty) ?? 1}${text(i.note) ? ` — ${text(i.note)}` : ""}`;}),
       };
     }),
     connections: list(v.connections).flatMap((value) => {
@@ -479,3 +498,19 @@ export const STATUS_LABEL: Record<Status, string> = {
   not_run: "— Not run",
   not_applicable: "— Not applicable",
 };
+
+function connectionSummary(value: unknown): Kit["connection"] {
+  const c = record(value);
+  return {
+    profile: text(record(c.profile).id), host: text(c.host),
+    message: text(record(c.configuration).message) || "No connection configuration recorded",
+    scopes: ["configuration", "electrical", "communication", "software"].map(name => ({name, status: status(record(c[name]).status)})),
+    checks: ["electrical", "communication", "software"].flatMap(scope => list(record(c[scope]).checks).map(value => {
+      const r = record(value), accepted = list(r.accepted);
+      return {field: text(r.field).replace(/_/g, " "), status: status(r.status),
+        actual: r.actual == null ? "Unknown" : String(r.actual),
+        expected: accepted.length ? accepted.join(" / ") : r.minimum != null && r.maximum != null ? `${r.minimum} … ${r.maximum}` : r.minimum != null ? `≥ ${r.minimum}` : r.maximum != null ? `≤ ${r.maximum}` : "Unknown · confirmation required",
+        note: text(r.note), sources: sources(r.evidence)};
+    })),
+  };
+}

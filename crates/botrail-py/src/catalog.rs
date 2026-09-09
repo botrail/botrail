@@ -656,6 +656,15 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
     let sources = sources.unwrap_or_default();
     let kit: Option<botrail_model::kit::KitSpec> = serde_json::from_str(&field("kit")?)
         .map_err(|e| err(format!("{}: kit: {e}", path.display())))?;
+    let compatibility: Option<botrail_model::compatibility::Compatibility> =
+        serde_json::from_str(&field("compatibility")?)
+            .map_err(|e| err(format!("{}: compatibility: {e}", path.display())))?;
+    let compatibility = compatibility.unwrap_or_default();
+    compatibility
+        .validate(&sources, order.as_ref())
+        .map_err(err)?;
+    let electrical =
+        serde_json::from_str(&field("electrical")?).map_err(|e| err(format!("electrical: {e}")))?;
     let kind: Option<String> =
         serde_json::from_str(&field("kind")?).map_err(|e| err(e.to_string()))?;
     if (kind.as_deref() == Some("kit")) != kit.is_some() {
@@ -770,6 +779,8 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             specs,
             mounting,
             kit,
+            compatibility,
+            electrical,
             order,
             sources,
         },

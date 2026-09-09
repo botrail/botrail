@@ -103,16 +103,25 @@ pub struct Connection {
 pub struct ConnectionPlan {
     pub ports: Vec<Port>,
     pub links: Vec<Connection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub configurations: Vec<botrail_model::compatibility::ConnectionSelection>,
 }
 
 impl ConnectionPlan {
     pub fn is_empty(&self) -> bool {
-        self.ports.is_empty() && self.links.is_empty()
+        self.ports.is_empty() && self.links.is_empty() && self.configurations.is_empty()
     }
 
     /// Validate representation, not design correctness. Broken references
     /// survive deletion and save/load so the engineering review can name them.
     pub fn validate(&self) -> Result<(), String> {
+        let mut targets = BTreeSet::new();
+        for selection in &self.configurations {
+            selection.validate()?;
+            if !targets.insert(&selection.target) {
+                return Err("duplicate connection configuration target".into());
+            }
+        }
         let mut names = BTreeSet::new();
         for port in &self.ports {
             if port.name.trim().is_empty()

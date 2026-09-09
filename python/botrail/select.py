@@ -60,6 +60,7 @@ __all__ = [
     "Row",
     "check",
     "requirements",
+    "tool_loads",
 ]
 
 #: Requirement key -> the part attributes that answer it, in priority order.
@@ -1551,3 +1552,116 @@ def _quat_mul(a, b) -> tuple[float, float, float, float]:
 def _extent_along(size, local_dir) -> float:
     """Extent of a box of `size` measured along a unit direction given in its own frame."""
     return sum(abs(float(local_dir[i])) * float(size[i]) for i in range(3))
+
+
+def tool_loads(scene) -> list[dict]:
+    """Report one tool-mass budget per robot, preserving missing values.
+
+    Only the robot's own tool instances contribute, even when identical products
+    are combined into one BOM row. Included kit components are counted once via
+    the kit row; external ``order.requires`` remain unresolved unless an exact
+    catalog/part-number match exists among that robot's attached tools.
+
+    ``known_mass_kg`` is a subtotal. ``total_mass_kg`` stays ``None`` when a mass
+    or required item is missing. Workpieces, CoG and inertia are not evaluated.
+    """
+    bom = scene.bom().rows
+    results = []
+    for robot in scene.robots:
+        prefix = robot + "/"
+        items = []
+        for row in bom:
+            names = [
+                n
+                for n in row["names"]
+                if n.startswith(prefix)
+                and any(
+                    segment == "tool"
+                    or (segment.startswith("tool") and segment[4:].isdigit())
+                    for segment in n[len(prefix) :].split("/")
+                )
+            ]
+            if not names:
+                continue
+            mass = (row.get("attributes") or {}).get("mass_kg")
+            known = (
+                isinstance(mass, (int, float))
+                and not isinstance(mass, bool)
+                and math.isfinite(mass)
+                and mass >= 0
+            )
+            items.append(
+                {
+                    "names": names,
+                    "catalog": row.get("catalog"),
+                    "qty": len(names),
+                    "mass_kg": mass if known else None,
+                    "order": row.get("order") or {},
+                }
+            )
+        missing = [
+            n for item in items if item["mass_kg"] is None for n in item["names"]
+        ]
+        unresolved = []
+        available = [item["qty"] for item in items]
+        for item in items:
+            for req in item["order"].get("requires", []):
+                candidates = [
+                    i
+                    for i, x in enumerate(items)
+                    if x is not item
+                    and (req.get("catalog") or req.get("part_number"))
+                    and (
+                        not req.get("catalog")
+                        or (x["catalog"] or "").split("@")[0] == req["catalog"]
+                    )
+                    and (
+                        not req.get("part_number")
+                        or x["order"].get("part_number") == req["part_number"]
+                    )
+                ]
+                required = req.get("qty", 1) * item["qty"]
+                remaining = required
+                for i in candidates:
+                    used = min(available[i], remaining)
+                    available[i] -= used
+                    remaining -= used
+                if remaining:
+                    unresolved.append(
+                        {
+                            "required_by": item["names"],
+                            **req,
+                            "required_qty": required,
+                            "missing_qty": remaining,
+                        }
+                    )
+        subtotal = round(
+            sum(
+                item["mass_kg"] * item["qty"]
+                for item in items
+                if item["mass_kg"] is not None
+            ),
+            9,
+        )
+        complete = bool(items) and not missing and not unresolved
+        results.append(
+            {
+                "robot": robot,
+                "scope": "attached_tool_purchase_metadata",
+                "mass_status": "complete"
+                if complete
+                else "unknown"
+                if items
+                else "not_applicable",
+                "known_mass_kg": subtotal,
+                "total_mass_kg": subtotal if complete else None,
+                "missing_mass": missing,
+                "unresolved_requirements": unresolved,
+                "items": items,
+                "center_of_gravity": None,
+                "inertia": None,
+                "dynamics_status": "not_evaluated",
+                "workpiece_included": False,
+            }
+        )
+    return results

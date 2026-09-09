@@ -11,10 +11,10 @@ import io
 import json
 import math
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["ConnectionReport", "connect", "disconnect", "port", "remove_port", "report", "restore"]
+__all__ = ["ConnectionReport", "configure", "connect", "disconnect", "evaluate", "port", "remove_configuration", "remove_port", "report", "restore"]
 
 
 def _plan(scene):
@@ -28,6 +28,52 @@ def restore(scene, plan: dict) -> None:
     its design meaning and names references broken by equipment/port removal.
     """
     scene._set_connection_plan_json(json.dumps(plan, allow_nan=False))
+
+
+def evaluate(ref, host: str, *, profile: str | None = None, values=None, revision=None) -> dict:
+    """Compare a package's documented conditions with declared host settings.
+
+    ``ref`` is a manifest dict, package path or catalog reference. Host is an
+    exact catalog ID; software versions are exact documented strings. Numeric
+    current values mean available capacity. This does not verify actual wiring.
+    """
+    from ._core import _connection_compatibility_json
+    from .io import _catalog_manifest
+
+    manifest = ref if isinstance(ref, dict) else _catalog_manifest(ref, revision)
+    selected = None if profile is None else {"target": "evaluation", "catalog": manifest["id"],
+        "host": host, "profile": profile, "values": values or {}}
+    return json.loads(_connection_compatibility_json(
+        json.dumps(manifest, default=str, allow_nan=False), host,
+        json.dumps(selected, allow_nan=False)))
+
+
+def configure(scene, target: str, profile: str, *, values=None, reference=None) -> None:
+    """Record host/controller settings for an attached catalog product.
+
+    Target comes from ``bt.mounting.report(scene).kits`` or ``.products``. Product,
+    robot host and ordered adapter identities are read from the scene. A
+    different wrist, software family or unknown version cannot inherit a pass.
+    Values are declarations; use ``port``/``connect`` for the actual wiring plan.
+    """
+    from . import mounting
+
+    mounted = mounting.report(scene)
+    kit = next((k for k in [*mounted.kits, *mounted.products] if k["target"] == target), None)
+    if kit is None or kit.get("host") is None:
+        raise ValueError("configure requires an attached catalog product and catalog host")
+    plan = _plan(scene)
+    selected = {"target": target, "catalog": kit["catalog"], "host": kit["host"],
+                "profile": profile, "values": values or {}, "reference": reference}
+    plan["configurations"] = [s for s in plan.get("configurations", []) if s["target"] != target] + [selected]
+    restore(scene, plan)
+
+
+def remove_configuration(scene, target: str) -> None:
+    """Remove the recorded settings; the configuration becomes unknown."""
+    plan = _plan(scene)
+    plan["configurations"] = [s for s in plan.get("configurations", []) if s["target"] != target]
+    restore(scene, plan)
 
 
 def port(scene, name: str, target: str, medium: str, role: str, *, target_kind=None,
@@ -129,6 +175,7 @@ class ConnectionReport:
     connections: list[dict]
     supplies: list[dict]
     checks: list[dict]
+    configurations: list[dict] = field(default_factory=list)
 
     @property
     def ready(self) -> bool:
@@ -136,7 +183,8 @@ class ConnectionReport:
 
     def to_dict(self) -> dict:
         return {"ready": self.ready, "ports": self.ports, "connections": self.connections,
-                "supplies": self.supplies, "checks": self.checks}
+                "supplies": self.supplies, "checks": self.checks,
+                "configurations": self.configurations}
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False, allow_nan=False)
@@ -161,6 +209,17 @@ class ConnectionReport:
                 s["source"], s["medium"], f"{_cell(s['capacity'])} {s['unit']}",
                 f"{_cell(s['known_subtotal'])} {s['unit']}", f"{s['known_loads']} / {s['total_loads']}",
                 ", ".join(s["missing_loads"]), s["status"])) + " |")
+        if self.configurations:
+            lines.extend(["\n## Product connection configurations\n",
+                          "| target | setting | recorded | documented condition | status |", "|---|---|---|---|---|"])
+            for config in self.configurations:
+                for scope in ("electrical", "communication", "software"):
+                    for c in config[scope].get("checks", []):
+                        expected = " / ".join(c.get("accepted") or []) or (
+                            f"{c['minimum']} … {c['maximum']}" if c.get("minimum") is not None and c.get("maximum") is not None else
+                            f"≥ {c['minimum']}" if c.get("minimum") is not None else
+                            f"≤ {c['maximum']}" if c.get("maximum") is not None else "unknown")
+                        lines.append("| " + " | ".join(_cell(v) for v in (config["target"], c["field"], c.get("actual"), expected, c["status"])) + " |")
         lines.extend(["\n## Checks\n", "| status | target | finding | basis / next action |", "|---|---|---|---|"])
         for c in self.checks:
             lines.append("| " + " | ".join(_cell(c[k]) for k in ("status", "target", "message", "basis")) + " |")
@@ -419,7 +478,27 @@ def report(scene) -> ConnectionReport:
             p["status"] = "not_applicable"
     for row in rows:
         row["status"] = _status([row["status"], *(ports.get(n, {}).get("status", "fail") for n in (row["source"], row["target"]))])
-    return ConnectionReport(list(ports.values()), rows, supplies, checks)
+    from . import mounting
+
+    configurations = []
+    mounted = mounting.report(scene)
+    kits = [*mounted.kits, *mounted.products]
+    for kit in kits:
+        result = kit.get("connection")
+        if not result:
+            continue
+        configurations.append({"target": kit["target"], **result})
+        for scope in ("configuration", "electrical", "communication", "software"):
+            item = result[scope]
+            check(f"configuration:{kit['target']}:{scope}", kit["target"], item["status"],
+                  item.get("message", f"{scope}: documented conditions compared with declared settings"),
+                  "Declared configuration only; independent of wiring and mechanical fit", result=item)
+    targets = {k["target"] for k in kits}
+    for selected in plan.get("configurations", []):
+        if selected["target"] not in targets:
+            check(f"configuration:{selected['target']}:missing", selected["target"], "fail",
+                  "Selected connection configuration has no attached catalog product", "Restore or remove the stale selection", selection=selected)
+    return ConnectionReport(list(ports.values()), rows, supplies, checks, configurations)
 
 
 def _value(port, key):
