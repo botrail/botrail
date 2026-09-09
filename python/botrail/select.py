@@ -517,6 +517,18 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
         if item.status in ("fail", "unknown", "not_run"):
             findings.append(Finding("error" if item.status == "fail" else "warning",
                                     "mounting_" + item.id.rsplit(":", 1)[-1], item.message, item.target))
+    from . import process
+
+    for target in process.targets(scene):
+        try:
+            checks = process.report(scene, target).checks
+        except (ValueError, KeyError, TypeError) as exc:
+            findings.append(Finding("error", "process_setup", str(exc), target))
+            continue
+        for item in checks:
+            if item["status"] in ("fail", "unknown"):
+                findings.append(Finding("error" if item["status"] == "fail" else "warning",
+                                        "process_" + item["id"], item["message"], target))
     return CheckReport(findings, req)
 
 

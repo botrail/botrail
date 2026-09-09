@@ -94,6 +94,36 @@ class Fork:
 Tool = Union[Mount, Pin, Fork]
 
 
+def rotary_bur(
+    *, diameter: float, cutting_length: float, shank_diameter: float,
+    exposed_shank: float,
+) -> Robot:
+    """A cylindrical bur envelope, dimensions in metres.
+
+    ``mount`` is the collet nose, +Z outward. ``tcp`` is the distal tip,
+    +Z toward the spindle, matching the toolpath axis convention. Only the
+    separate ``cutter`` link should be allowed to contact stock. The shank
+    inside the collet and flute geometry are omitted; this is not a model
+    of cutting forces or proof of sufficient insertion depth.
+    """
+    for key, value in locals().copy().items():
+        if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"rotary_bur: {key} must be finite and positive")
+    u = _Urdf("rotary_bur")
+    u.link("mount")
+    for name, length, radius, offset in (
+        ("shank", exposed_shank, shank_diameter / 2, 0),
+        ("cutter", cutting_length, diameter / 2, exposed_shank),
+    ):
+        u.link(name, f'<cylinder radius="{radius:.9f}" length="{length:.9f}"/>',
+               f'<origin xyz="0 0 {length / 2:.9f}"/>', (0.55, 0.56, 0.58))
+        u.fixed("mount", name, _xyz((0, 0, offset)))
+    u.link("tcp")
+    u.fixed("mount", "tcp", _xyz((0, 0, exposed_shank + cutting_length)),
+            f"{math.pi:.12f} 0 0")
+    return Robot.from_urdf_string(u.text())
+
+
 def _unit(v: Sequence[float]) -> Point3:
     x, y, z = (float(c) for c in v)
     n = math.sqrt(x * x + y * y + z * z)
