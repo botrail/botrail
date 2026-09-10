@@ -433,3 +433,37 @@ def test_a_lathe_asks_for_reach_to_its_spindle() -> None:
     (sx, sy, sz), _ = scene.frame("lathe/spindle")
     distance = ((sx + 0.55) ** 2 + (sy + 1.7) ** 2 + sz ** 2) ** 0.5
     assert reach[0].value == pytest.approx(distance * 1000.0 * 1.1, abs=0.2)
+
+
+def test_power_supply_requirement_counts_the_loads_at_its_voltage() -> None:
+    """Each supply is asked for the current of the parts at its own voltage.
+    A part that does not say its voltage counts against every supply (with a
+    note), and two supplies at one voltage each see the same loads."""
+    scene = bt.Scene()
+    bt.parts.power_supply(scene, "ps24", (0, 0, 0), size=(.1, .1, .2), model="S8-240", output_v=24, output_a=10)
+    bt.parts.power_supply(scene, "ps48", (0.3, 0, 0), size=(.1, .1, .2), model="S8-480", output_v=48, output_a=4)
+    for name, x, attrs in (
+        ("eye", 1.0, dict(voltage_v=24, current_a=0.1)),
+        ("valve", 1.3, dict(voltage_v=24, current_a=0.2)),
+        ("drive", 1.6, dict(voltage_v=48, current_a=4.5)),
+        ("beacon", 1.9, dict(current_a=0.5)),  # no voltage_v — counted everywhere
+    ):
+        scene.add_box(name, size=(.05, .05, .05), position=(x, 0, .5))
+        scene.set_part(name, model=name, **attrs)
+    req = scene.requirements()
+    ps24, ps48 = by_key(req["ps24"]), by_key(req["ps48"])
+    assert ps24["output_a"].value == pytest.approx(0.8) and ps24["output_a"].status == "ok"
+    assert "at 24 V" in ps24["output_a"].basis and ps24["output_a"].provided == 10
+    assert ps48["output_a"].value == pytest.approx(5.0) and ps48["output_a"].status == "short"
+    assert any("beacon" in note and "voltage_v" in note for note in req["ps24"].notes)
+    assert scene.check().ok is False  # the 48 V supply is short
+    # A second 24 V supply sees the same loads, and says so.
+    bt.parts.power_supply(scene, "ps24b", (0.6, 0, 0), size=(.1, .1, .2), model="S8-241", output_v=24, output_a=10)
+    req = scene.requirements()
+    assert by_key(req["ps24b"])["output_a"].value == pytest.approx(0.8)
+    assert any("ps24b" in note for note in req["ps24"].notes)
+    # Two identical units merge into one BOM row; the note counts the units.
+    bt.parts.power_supply(scene, "ps24c", (0.9, 0, 0), size=(.1, .1, .2), model="S8-240", output_v=24, output_a=10)
+    req = scene.requirements()
+    assert by_key(req["ps24"])["output_a"].value == pytest.approx(0.8)
+    assert any("2 units" in note for note in req["ps24"].notes)

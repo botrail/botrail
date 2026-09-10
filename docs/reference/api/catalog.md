@@ -25,24 +25,16 @@ lift = bt.Robot.from_catalog("ewellix/liftkit/liftkit-ur/r2")
 # Use format="usd" to choose USD instead of the default URDF.
 ```
 
-These packages use independently authored reference geometry. UR keeps the
-official default kinematics, joint limits, inertia and `tool0` frame; its
-shells and collision shapes are approximate. RG6 uses a parallel linkage
-with one drive: `0` rad opens approximately 160 mm and `1.3` rad closes it.
-At full closure the opposing pads touch; use a smaller angle for an empty,
-collision-free motion goal. Its fixed TCP retains the previous datum.
-LIFTKIT is the UR20/UR30 **620 variant with 800 mm stroke**: the drive ranges
-from `0` to `0.4` m and the second stage follows it, giving a mount height
-of 0.905–1.705 m. Its two stage speed limits total 0.08 m/s.
-
-Mounting holes, robot-specific adapters and hardware communication are not
-provided by these reference models. Detailed fit and per-link dynamics of
-RG6/LIFTKIT remain unverified. Read `compatibility.model_fidelity` in each
-manifest and its `sources/<asset>/README.md` before using model geometry or
-catalog mass values for engineering decisions.
-
-The original `r1` packages remain `recipe_only`. Pin both the full product
-ID and a dataset `revision` to reproduce an existing project. Saving with
-`scene.save_project(...)` bundles the loaded geometry for offline replay.
+These are reference shells: the UR arms keep the official kinematics, joint
+limits, inertia and `tool0` frame under approximate covers; the RG6 is a
+one-drive parallel linkage (`0` rad opens about 160 mm, `1.3` rad closes it
+until the pads touch — aim a little short of that for an empty grasp); the
+LIFTKIT is the 620 variant with its 800 mm stroke (`0`–`0.4` m of drive, the
+second stage following, 0.905–1.705 m of mount height, 0.08 m/s over both
+stages). Mounting holes, adapters and communication are not in them, and
+`compatibility.model_fidelity` in each manifest says how far to trust the
+geometry and the masses. The `r1` packages stay `recipe_only`; pin the full
+id and a `revision` to reproduce a cell, and `save_project` bundles the
+geometry for replay without the catalog.
 
 ::: botrail.catalog

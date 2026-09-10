@@ -125,7 +125,7 @@ function LinkGroup({
   );
 }
 
-export function VisualNode({
+function VisualNode({
   visual,
   color,
   forceColor,

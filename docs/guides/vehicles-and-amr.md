@@ -71,30 +71,24 @@ edges). `examples/vehicles/amr_demo.py --holonomic` runs the AMR cell that way.
 
 ### Wheel appearance
 
-Register separate wheel visuals after `add_vehicle` to make them rotate
-with the vehicle's travel. The obstacle must belong to the vehicle body
-and have collision checking disabled:
+A wheel that is its own obstacle in the vehicle's body can turn with the
+travel. Register it after `add_vehicle`, with collision off (the body
+already covers it):
 
 ```python
 scene.set_obstacle_enabled("/World/AGV/front_left_wheel", False)
-scene.set_vehicle_wheel("agv", "/World/AGV/front_left_wheel",
-                        radius=0.127, axis=(0, 1, 0), lateral_ratio=-1)
+scene.set_vehicle_wheel("agv", "/World/AGV/front_left_wheel", radius=0.127)
 ```
 
-`radius` is the rolling radius in metres. `axis` and `pivot` (default
-`(0, 0, 0)`) describe the axle in the visual's local coordinates; its
-world direction must be horizontal. `lateral_ratio=0` is an ordinary
-wheel. For a standard 45-degree mecanum X arrangement with axles pointing
-along +Y, use −1 for front-left/rear-right and +1 for front-right/rear-left.
-The rotation follows signed travel and turning, and holds its angle when
-parked. This animates the whole wheel mesh; individual rollers, contact
-forces and slip are not simulated. Collision checks retain the separate
-body geometry.
-
-The setting survives project saves and generated Python, and the baked
-rotations appear in Studio and USD exports. The AMR example reads its wheel
-radii and axes from the carrier URDF. It leaves visuals without a declared
-radius, or with unsupported visual frames, unchanged.
+Usually `radius` is all it takes; `axis` (default `(0, 1, 0)`) and `pivot`
+say where the axle lies in the wheel's own frame when it is not the +Y axis
+through the origin. A mecanum wheel adds `lateral_ratio=±1` (the usual
+45-degree X arrangement with axles along +Y: −1 front-left and rear-right,
++1 front-right and rear-left) so sideways travel turns it too. The whole
+mesh turns — rollers, contact and slip are not simulated — it holds its
+angle when parked, the setting survives a project and generated Python, and
+the turning is in the studio and in exported USD. The AMR example reads its
+wheels from the carrier's URDF.
 
 ### Aerial drive — a drone is a vehicle too
 

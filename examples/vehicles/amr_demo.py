@@ -51,9 +51,9 @@ Run with:  python examples/vehicles/amr_demo.py [out.usda] [--carrier NAME]
                                        [--compare] [--drive-and-plan] [--studio]
 
 With --studio, opens the interactive studio after exporting (Ctrl-C to stop).
-Normal runs download the built r2/ES-062 kit and re-teach the grasp.
-`--robotiq-r2 CATALOG_ROOT` is a local development override. Its declared manufacturer support is limited to the catalog's
-listed host; this demo does not extend that claim to its UR16e.
+The run downloads the built r2/ES-062 kit and re-teaches the grasp. Its
+declared manufacturer support is limited to the catalog's listed host;
+this demo does not extend that claim to its UR16e.
 --compare prints the carrier comparison without opening Studio.
 Driven wheel visuals rotate with travel when the carrier URDF supplies
 their radius and axle. Stops, turns and --holonomic sideways travel are
@@ -66,7 +66,6 @@ it. `play_record.py` reads either.)
 
 from __future__ import annotations
 
-import argparse
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -338,14 +337,13 @@ class Carrier:
 
 
 # ------------------------------------------------------------------ the cell
-def build_scene(carrier: str = CARRIER, *, holonomic: bool = False,
-                robotiq_root: Path | None = None) -> bt.Scene:
+def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
     """The aisle, the bay, and the machine standing at the bench.
 
     Shared with `play_record.py`, which rebuilds the cell a recording was
     baked from."""
     machine = Carrier(carrier)
-    arm = rq.attach(bt.Robot.from_catalog(ARM), robotiq_root)
+    arm = rq.attach(bt.Robot.from_catalog(ARM))
     scene = bt.Scene(arm, name="ur")
     scene.set_joint_positions(READY)
 
@@ -615,7 +613,7 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
 
 
 # ------------------------------------------------------------------- reports
-def load_chain(machine: Carrier, *, robotiq_root: Path | None = None) -> list:
+def load_chain(machine: Carrier) -> list:
     """What each product in the stack is rated for against what it
     actually carries, tightest margin first.
 
@@ -625,12 +623,9 @@ def load_chain(machine: Carrier, *, robotiq_root: Path | None = None) -> list:
     only rows with both figures can be ranked by their margin.
     """
     arm = manifest(ARM)["specs"]
-    gripper = (yaml.safe_load((robotiq_root / rq.HAND_R2 / "manifest.yaml").read_text())["specs"]
-               if robotiq_root is not None else manifest(GRIPPER)["specs"])
+    gripper = manifest(GRIPPER)["specs"]
     tool_mass = gripper.get("mass_kg")
-    coupling = (yaml.safe_load((robotiq_root / rq.COUPLING_ES062 / "manifest.yaml").read_text())
-                if robotiq_root is not None else manifest(COUPLING))
-    coupling_mass = coupling.get("specs", {}).get("mass_kg")
+    coupling_mass = manifest(COUPLING).get("specs", {}).get("mass_kg")
     tool_mass = tool_mass + coupling_mass if tool_mass is not None and coupling_mass is not None else None
     carried = PART_MASS + tool_mass if tool_mass is not None else None
     return sorted([
@@ -653,15 +648,14 @@ def pivot_at(tl, dt: float = 0.02) -> float:
     return tl.duration
 
 
-def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False,
-         *, robotiq_root: Path | None = None):
+def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False):
     """One carrier, all the way through: scene, cycle, timeline."""
-    scene = build_scene(carrier, holonomic=holonomic, robotiq_root=robotiq_root)
+    scene = build_scene(carrier, holonomic=holonomic)
     name = build_cycle(scene, carrier, drive_and_plan)
     return scene, scene.simulate_sequence(name, max_duration=150.0)
 
 
-def compare(*, robotiq_root: Path | None = None) -> None:
+def compare() -> None:
     """The same authored cell, baked on every carrier in the catalog.
 
     Three kinds of answer come back, and they come from three different
@@ -685,7 +679,7 @@ def compare(*, robotiq_root: Path | None = None) -> None:
                f"{machine.length:5.2f}x{machine.width:<5.2f} {machine.swing:6.2f} "
                f"{machine.cruise(CORNER_X - machine.infeed[0]):5.2f}")
         try:
-            _, tl = bake(name, robotiq_root=robotiq_root)
+            _, tl = bake(name)
         except (ValueError, RuntimeError) as err:
             print(f"{row} {'—':>7}   {first_line(err)}")
             continue
@@ -703,13 +697,10 @@ def first_line(err: Exception) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(add_help=False)
-    rq.add_argument(parser)
-    selected, args = parser.parse_known_args()
-    r2 = {"robotiq_root": selected.robotiq_r2} if selected.robotiq_r2 is not None else {}
+    args = sys.argv[1:]
     carrier = args[args.index("--carrier") + 1] if "--carrier" in args else CARRIER
     if "--compare" in args:
-        compare(**r2)
+        compare()
         return
     out = next((a for a in args if not a.startswith("--") and a != carrier),
                "cell_amr.usda")
@@ -720,7 +711,7 @@ def main() -> None:
         print(f"{carrier} cannot carry this cell: {err}")
         sys.exit(1)
     print(f"{machine.product} ({machine.maker}) + {manifest(ARM)['name']} + "
-          f"{'2F-85 r2 / ES-062' if r2 else manifest(GRIPPER)['name']}")
+          f"{manifest(GRIPPER)['name']}")
     print(f"  deck      {machine.deck * 1e3:4.0f} mm, chassis {machine.proud * 1e3:.0f} mm "
           f"proud of the mount frame")
     print(f"  arm at    ({machine.mount[0]:+.3f}, {machine.mount[1]:+.3f}, "
@@ -730,14 +721,14 @@ def main() -> None:
           f"pivot sweeps {machine.swing:.2f} m")
     print(f"  cruise    {machine.cruise(CORNER_X - machine.infeed[0]):.2f} m/s "
           f"(data sheet {machine.specs['max_speed_mps']:.2f})")
-    for who, rated, carried in load_chain(machine, **r2):
+    for who, rated, carried in load_chain(machine):
         load = f"{carried:.1f} kg" if carried is not None else "unknown (component mass not declared)"
         limit = f"{rated:.1f} kg" if rated is not None else "unknown"
         print(f"  {who:<9} carries {load}, rated {limit}")
 
     try:
         scene, tl = bake(carrier, "--drive-and-plan" in args,
-                         holonomic="--holonomic" in args, **r2)
+                         holonomic="--holonomic" in args)
     except (ValueError, RuntimeError) as err:
         print(f"\ncycle failed: {err}")
         sys.exit(1)

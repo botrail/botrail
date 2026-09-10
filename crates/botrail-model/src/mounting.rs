@@ -1,5 +1,7 @@
-//! Declared mechanical interfaces. Values describe bare mating faces, not
-//! the compatibility of a complete robot/tool stack. No geometric inference.
+//! Declared mechanical interfaces and purchase data from a catalog manifest:
+//! the mating faces a product names, the parts its installation documents
+//! require between it and the robot, and where those statements come from.
+//! Nothing here is inferred from geometry.
 
 use serde::{Deserialize, Serialize};
 
@@ -97,9 +99,10 @@ pub struct MountPose {
     pub quaternion: [f64; 4],
 }
 
+/// A mating face the manifest names. Drawing-level detail a manifest may
+/// carry for it (hole patterns, fasteners, envelopes) is not read here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
 pub struct MountInterface {
     pub frame: String,
     pub role: InterfaceRole,
@@ -113,12 +116,6 @@ pub struct MountInterface {
     pub evidence: Vec<MountEvidence>,
     #[serde(default)]
     pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geometry: Option<MountGeometry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clearance: Option<MountClearance>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fasteners: Vec<MountFastener>,
     /// The installation documentation enumerates all required separate parts.
     #[serde(default)]
     pub requirements_complete: bool,
@@ -164,183 +161,6 @@ pub struct InterfacePair {
     pub flange: String,
 }
 
-/// Explicit dimensional bounds. Equal bounds describe a nominal value only;
-/// dimensional completeness must also be established by the source drawing.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct DimensionRange {
-    pub min: f64,
-    pub max: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountThread {
-    pub diameter_mm: f64,
-    #[serde(default)]
-    pub pitch_mm: Option<f64>,
-    #[serde(default)]
-    pub left_hand: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum HoleKind {
-    Clearance,
-    Threaded,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct FastenerRules {
-    #[serde(default)]
-    pub thread: Option<MountThread>,
-    /// Optional manufacturer-prescribed screw length, under the head.
-    #[serde(default)]
-    pub length_mm: Option<DimensionRange>,
-    #[serde(default)]
-    pub head_standard: Option<String>,
-    #[serde(default)]
-    pub property_class: Option<String>,
-    #[serde(default)]
-    pub min_engagement_mm: Option<f64>,
-    #[serde(default)]
-    pub torque_nm: Option<DimensionRange>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountHole {
-    pub id: String,
-    /// XY coordinates in the mating plane of this link, millimetres.
-    pub position_mm: [f64; 2],
-    pub kind: HoleKind,
-    #[serde(default)]
-    pub position_tolerance_mm: Option<f64>,
-    #[serde(default)]
-    pub diameter_mm: Option<DimensionRange>,
-    #[serde(default)]
-    pub thread: Option<MountThread>,
-    /// Maximum usable tip depth from the mating plane, including bottom allowance.
-    #[serde(default)]
-    pub depth_mm: Option<DimensionRange>,
-    /// Unthreaded distance from the mating plane to the first usable receiver
-    /// thread. Omitted = threads start at the plane (the original contract).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_start_mm: Option<DimensionRange>,
-    /// Bearing surface to mating face, accounting for any counterbore.
-    #[serde(default)]
-    pub grip_mm: Option<DimensionRange>,
-    #[serde(default)]
-    pub fastener_rules: Option<FastenerRules>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum LocatorKind {
-    Boss,
-    Recess,
-    Pin,
-    Hole,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountLocator {
-    pub id: String,
-    pub kind: LocatorKind,
-    pub position_mm: [f64; 2],
-    #[serde(default)]
-    pub position_tolerance_mm: Option<f64>,
-    #[serde(default)]
-    pub diameter_mm: Option<DimensionRange>,
-    /// Projection height (boss/pin) or usable recess/hole depth.
-    #[serde(default)]
-    pub depth_mm: Option<DimensionRange>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountGeometry {
-    /// Outward surface normal along local Z: exactly +1 or -1.
-    pub normal_z: i8,
-    #[serde(default)]
-    pub frame_verified: bool,
-    /// All mating features and their tolerances are covered by the drawing.
-    #[serde(default)]
-    pub complete: bool,
-    #[serde(default)]
-    pub holes: Vec<MountHole>,
-    #[serde(default)]
-    pub locators: Vec<MountLocator>,
-    #[serde(default)]
-    pub evidence: Vec<MountEvidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountFastener {
-    /// Hole IDs on the clearance-hole side. One screw per listed hole.
-    pub holes: Vec<String>,
-    pub thread: MountThread,
-    pub head_standard: String,
-    pub property_class: String,
-    pub length_mm: DimensionRange,
-    /// Explicitly zero when no washer is used.
-    pub washer_mm: DimensionRange,
-    pub torque_nm: DimensionRange,
-    #[serde(default)]
-    pub evidence: Vec<MountEvidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountBox {
-    pub id: String,
-    pub center_mm: [f64; 3],
-    pub size_mm: [f64; 3],
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountClearance {
-    #[serde(default)]
-    pub frame_verified: bool,
-    /// Conservative solids and every required access space for this joint.
-    #[serde(default)]
-    pub complete: bool,
-    #[serde(default)]
-    pub solids: Vec<MountBox>,
-    #[serde(default)]
-    pub access: Vec<MountBox>,
-    #[serde(default)]
-    pub evidence: Vec<MountEvidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MountingDocument {
-    pub schema_version: String,
-    pub revision: String,
-    pub mounting: MountingSpec,
-    #[serde(default)]
-    pub order: Option<CatalogOrder>,
-    #[serde(default)]
-    pub sources: Vec<CatalogSource>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -382,110 +202,6 @@ impl MountingSpec {
                 return Err("mounting interface_id cannot be empty".into());
             }
             evidence(&face.evidence)?;
-            if let Some(g) = &face.geometry {
-                if !matches!(g.normal_z, -1 | 1) {
-                    return Err("mounting normal_z must be +1 or -1".into());
-                }
-                evidence(&g.evidence)?;
-                let mut features = std::collections::HashSet::new();
-                for h in &g.holes {
-                    feature(
-                        &h.id,
-                        &h.position_mm,
-                        h.position_tolerance_mm,
-                        &mut features,
-                    )?;
-                    for r in [h.diameter_mm, h.depth_mm, h.grip_mm, h.thread_start_mm]
-                        .into_iter()
-                        .flatten()
-                    {
-                        r.validate()?;
-                    }
-                    if let Some(t) = &h.thread {
-                        t.validate()?;
-                    }
-                    if h.kind == HoleKind::Clearance
-                        && (h.thread.is_some() || h.thread_start_mm.is_some())
-                    {
-                        return Err("a clearance hole cannot declare a thread".into());
-                    }
-                    if let Some(rules) = &h.fastener_rules {
-                        if let Some(thread) = &rules.thread {
-                            thread.validate()?;
-                        }
-                        if let Some(v) = rules.min_engagement_mm {
-                            positive(v)?;
-                        }
-                        if let Some(v) = rules.torque_nm {
-                            v.validate()?;
-                        }
-                        if let Some(v) = rules.length_mm {
-                            v.validate()?;
-                            positive(v.min)?;
-                        }
-                        for s in [rules.head_standard.as_ref(), rules.property_class.as_ref()]
-                            .into_iter()
-                            .flatten()
-                        {
-                            nonempty(s)?;
-                        }
-                    }
-                }
-                for l in &g.locators {
-                    feature(
-                        &l.id,
-                        &l.position_mm,
-                        l.position_tolerance_mm,
-                        &mut features,
-                    )?;
-                    for r in [l.diameter_mm, l.depth_mm].into_iter().flatten() {
-                        r.validate()?;
-                    }
-                }
-            }
-            let mut selected = std::collections::HashSet::new();
-            for f in &face.fasteners {
-                f.thread.validate()?;
-                f.length_mm.validate()?;
-                f.washer_mm.validate()?;
-                f.torque_nm.validate()?;
-                positive(f.length_mm.min)?;
-                nonempty(&f.head_standard)?;
-                nonempty(&f.property_class)?;
-                evidence(&f.evidence)?;
-                if f.holes.is_empty() {
-                    return Err("fastener holes must not be empty".into());
-                }
-                for id in &f.holes {
-                    if !selected.insert(id)
-                        || !face.geometry.as_ref().is_some_and(|g| {
-                            g.holes
-                                .iter()
-                                .any(|h| &h.id == id && h.kind == HoleKind::Clearance)
-                        })
-                    {
-                        return Err(
-                            "fasteners must reference distinct declared clearance holes".into()
-                        );
-                    }
-                }
-            }
-            if let Some(c) = &face.clearance {
-                evidence(&c.evidence)?;
-                if c.complete && c.solids.is_empty() {
-                    return Err("complete clearance requires conservative solid envelopes".into());
-                }
-                let mut ids = std::collections::HashSet::new();
-                for b in c.solids.iter().chain(&c.access) {
-                    nonempty(&b.id)?;
-                    if !ids.insert(&b.id) || !b.center_mm.iter().all(|v| v.is_finite()) {
-                        return Err("clearance boxes need unique ids and finite centers".into());
-                    }
-                    for v in b.size_mm {
-                        positive(v)?;
-                    }
-                }
-            }
             if let Some(poses) = &face.allowed_poses {
                 if face.role != InterfaceRole::Mount || poses.is_empty() {
                     return Err("allowed_poses must be a nonempty list on a mount interface".into());
@@ -551,121 +267,5 @@ fn nonempty(value: &str) -> Result<(), String> {
         Err("mounting identifiers must not be blank".into())
     } else {
         Ok(())
-    }
-}
-
-fn positive(value: f64) -> Result<(), String> {
-    if value.is_finite() && value > 0.0 {
-        Ok(())
-    } else {
-        Err("mounting dimension must be finite and positive".into())
-    }
-}
-
-fn feature<'a>(
-    id: &'a str,
-    position: &[f64; 2],
-    tolerance: Option<f64>,
-    ids: &mut std::collections::HashSet<&'a str>,
-) -> Result<(), String> {
-    nonempty(id)?;
-    if !ids.insert(id)
-        || !position.iter().all(|v| v.is_finite())
-        || tolerance.is_some_and(|t| !t.is_finite() || t < 0.0)
-    {
-        return Err(
-            "mounting features need unique ids, finite positions and nonnegative tolerances".into(),
-        );
-    }
-    Ok(())
-}
-
-impl DimensionRange {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.min.is_finite() && self.max.is_finite() && self.min >= 0.0 && self.max >= self.min {
-            Ok(())
-        } else {
-            Err("mounting range must have finite 0 <= min <= max".into())
-        }
-    }
-}
-
-impl MountThread {
-    fn validate(&self) -> Result<(), String> {
-        positive(self.diameter_mm)?;
-        if let Some(pitch) = self.pitch_mm {
-            positive(pitch)?;
-        }
-        Ok(())
-    }
-}
-
-impl MountingDocument {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != "1" {
-            return Err("unsupported mounting document schema_version; expected 1".into());
-        }
-        nonempty(&self.revision)?;
-        self.mounting.validate(&self.sources, self.order.as_ref())
-    }
-
-    /// Overlay declared faces while retaining the catalog's required parts.
-    /// Source and order references are rebased, never resolved from a path again.
-    pub fn apply_to(&self, base: &crate::CatalogMeta) -> crate::CatalogMeta {
-        let mut result = base.clone();
-        let source_offset = result.sources.len();
-        result.sources.extend(self.sources.iter().cloned());
-        let order_offset = result.order.as_ref().map_or(0, |o| o.requires.len());
-        if let Some(order) = &self.order {
-            if let Some(existing) = &mut result.order {
-                existing.requires.extend(order.requires.iter().cloned());
-            } else {
-                result.order = Some(order.clone());
-            }
-        }
-        let shift = |e: &mut Vec<MountEvidence>| {
-            for e in e {
-                e.source += source_offset;
-            }
-        };
-        let spec = result.mounting.get_or_insert_with(MountingSpec::default);
-        for face in &self.mounting.interfaces {
-            let mut face = face.clone();
-            shift(&mut face.evidence);
-            if let Some(g) = &mut face.geometry {
-                shift(&mut g.evidence);
-            }
-            if let Some(c) = &mut face.clearance {
-                shift(&mut c.evidence);
-            }
-            for f in &mut face.fasteners {
-                shift(&mut f.evidence);
-            }
-            if let Some(existing) = spec
-                .interfaces
-                .iter_mut()
-                .find(|f| f.frame == face.frame && f.role == face.role)
-            {
-                *existing = face;
-            } else {
-                spec.interfaces.push(face);
-            }
-        }
-        for req in &self.mounting.requirements {
-            let mut req = req.clone();
-            // Keep independently sourced obligations distinct even when an
-            // author reuses the catalog requirement's display identifier.
-            req.id = format!("document:{}", req.id);
-            while spec.requirements.iter().any(|r| r.id == req.id) {
-                req.id = format!("document:{}", req.id);
-            }
-            shift(&mut req.evidence);
-            for alternative in &mut req.catalog_alternatives {
-                shift(&mut alternative.evidence);
-            }
-            req.order_requires = req.order_requires.map(|i| i + order_offset);
-            spec.requirements.push(req);
-        }
-        result
     }
 }

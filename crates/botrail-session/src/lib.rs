@@ -8,7 +8,6 @@
 //! wall clock (Instant vs Date.now), and logging. Everything protocol- or
 //! planning-shaped lives here, once.
 
-pub mod mounting;
 pub mod usd;
 
 use std::path::Path;
@@ -25,22 +24,6 @@ use nalgebra::Isometry3;
 
 /// Environment plumbing a session runs on.
 pub trait SessionHost {
-    /// Environment-specific catalog/package loading; embedded URDF projects
-    /// work in every host. Loading takes place outside the scene lock.
-    fn load_mounting_model(
-        &self,
-        input: &serde_json::Value,
-    ) -> Result<botrail_model::RobotModel, String> {
-        mounting::load_embedded(input, &|_, _| {
-            Err(
-                "USD assembly import is unavailable in this session; use the Python Studio server"
-                    .into(),
-            )
-        })
-    }
-
-    /// Assembly changes invalidate recordings as well as retained rollouts.
-    fn invalidate_mounting_results(&self) {}
     /// Exclusive scene access. Implementations hold a lock (or borrow) for
     /// the duration of `f`, so keep the work brief — long-running planning
     /// goes through [`snapshot`](Self::snapshot) instead.
@@ -184,24 +167,6 @@ fn resolve_robot(host: &impl SessionHost, robot: &Option<String>) -> Result<usiz
 
 fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
     match msg {
-        ClientMessage::EditMounting {
-            request_id,
-            action,
-            data,
-        } => {
-            let result = mounting::edit(host, &action, &data)
-                .unwrap_or_else(|error| serde_json::json!({"error":error}));
-            host.emit(&ServerMessage::MountingEdit { request_id, result });
-            Ok(())
-        }
-        ClientMessage::InspectMounting { request_id } => {
-            let inspection = host.with_scene(|scene| botrail_scene::mounting::inspection(scene));
-            host.emit(&ServerMessage::MountingInspection {
-                request_id,
-                inspection,
-            });
-            Ok(())
-        }
         ClientMessage::SetJointPositions { robot, positions } => resolve_robot(host, &robot)
             .and_then(|robot| {
                 set_joint_positions_for(host, robot, positions).map_err(|e| e.to_string())
@@ -1385,15 +1350,7 @@ pub fn simulate_sequences_and_emit_with(
             planning_time_ms: None,
         },
     };
-    let reviewed = if result.is_ok() {
-        names
-            .iter()
-            .map(|name| format!("sequence:{name}"))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    emit_for_assembly(host, &snapshot, &msg, &reviewed)?;
+    host.emit(&msg);
     result.map(|(timeline, _)| timeline)
 }
 
@@ -1746,7 +1703,7 @@ pub fn plan_and_emit_for(
             stats: None,
         },
     };
-    emit_for_assembly(host, &snapshot, &msg, &[])?;
+    host.emit(&msg);
     result
 }
 
@@ -1759,20 +1716,9 @@ pub fn plan_motion_snapshot(
 ) -> Result<PlannedMotion, String> {
     let snapshot = host.snapshot();
     let owner = motion_owner(&snapshot, name)?;
-    let result = snapshot
+    snapshot
         .plan_motion(name, options, &traj_limits(&snapshot.robots()[owner].model))
-        .map_err(|e| e.to_string());
-    host.with_scene(|scene| {
-        if scene.assembly_generation() != snapshot.assembly_generation() {
-            return Err("Assembly changed during planning; run it again".into());
-        }
-        if result.is_ok() {
-            scene
-                .mounting_revalidation
-                .retain(|item| item != &format!("motion:{name}"));
-        }
-        result
-    })
+        .map_err(|e| e.to_string())
 }
 
 /// The owning robot of a named motion.
@@ -1824,12 +1770,7 @@ pub fn plan_motion_and_emit(
             planning_time_ms: None,
         },
     };
-    let reviewed = if result.is_ok() {
-        vec![format!("motion:{name}")]
-    } else {
-        Vec::new()
-    };
-    emit_for_assembly(host, &snapshot, &msg, &reviewed)?;
+    host.emit(&msg);
     result.map(|planned| (planned, ms))
 }
 
@@ -2045,8 +1986,6 @@ mod tests {
                 .borrow()
                 .iter()
                 .map(|m| match m {
-                    ServerMessage::MountingEdit { .. } => "mounting_edit",
-                    ServerMessage::MountingInspection { .. } => "mounting_inspection",
                     ServerMessage::SceneInit { .. } => "scene_init",
                     ServerMessage::Obstacles { .. } => "obstacles",
                     ServerMessage::State { .. } => "state",
@@ -2095,85 +2034,6 @@ mod tests {
     }
 
     #[test]
-    fn assembly_editor_keeps_unknown_candidates_and_returns_request_errors() {
-        use serde_json::json;
-        let host = TestHost::new();
-        let before = host.with_scene(|s| s.to_project().to_json());
-        let request = json!({"type":"edit_mounting", "request_id":"candidate", "action":"preview", "data":{
-            "robot":"r", "operation":"attach", "flange":"b", "mount":"root", "prefix":"tool_",
-            "input":{"kind":"source", "source":{"kind":"urdf", "xml":"<robot name=\"tool\"><link name=\"root\"/></robot>"}}}});
-        handle_client_message(&host, &request.to_string());
-        let ServerMessage::MountingEdit { request_id, result } = host.out.borrow()[0].clone()
-        else {
-            panic!("missing proposal")
-        };
-        assert_eq!(request_id, "candidate");
-        assert_eq!(result["can_apply"], false);
-        assert_eq!(result["route"], "needs_information");
-        assert_eq!(host.with_scene(|s| s.to_project().to_json()), before);
-        let saved =
-            botrail_scene::project::ProjectFile::from_json(&result["project"].to_string()).unwrap();
-        let replay = Scene::from_project(&saved).unwrap();
-        assert!(replay.robot().link_index("tool_root").is_some());
-        let apply = json!({"type":"edit_mounting", "request_id":"apply", "action":"apply", "data":{
-            "robot":"r", "project":result["project"], "base_revision":result["base_revision"], "candidate_revision":result["candidate_revision"], "can_apply":true}});
-        handle_client_message(&host, &apply.to_string());
-        let ServerMessage::MountingEdit { request_id, result } =
-            host.out.borrow().last().unwrap().clone()
-        else {
-            panic!("missing error")
-        };
-        assert_eq!(request_id, "apply");
-        assert!(result["error"].as_str().unwrap().contains("unresolved"));
-        assert_eq!(host.with_scene(|s| s.to_project().to_json()), before);
-        assert!(host.logs.borrow().is_empty());
-    }
-
-    #[test]
-    fn insert_adapter_rebuilds_the_source_and_preserves_downstream_prefix() {
-        use serde_json::json;
-        let host = TestHost::new();
-        let tool = botrail_model::RobotModel::from_urdf_str(
-            "<robot name=\"tool\"><link name=\"mount\"/></robot>",
-        )
-        .unwrap();
-        let base = host
-            .snapshot()
-            .robot()
-            .attach_tool(
-                &tool,
-                Some("b"),
-                Some("mount"),
-                Isometry3::identity(),
-                None,
-                Some("kept_"),
-                None,
-            )
-            .unwrap();
-        let host = TestHost::from_scene(Scene::new(Arc::new(base)));
-        let result = mounting::edit(&host, "preview", &json!({"robot":"r", "operation":"insert_adapter", "connection_path":"", "flange":"out", "prefix":"plate_",
-            "input":{"kind":"source", "source":{"kind":"urdf", "xml":"<robot name=\"plate\"><link name=\"mount\"/><link name=\"out\"/><joint name=\"thickness\" type=\"fixed\"><parent link=\"mount\"/><child link=\"out\"/><origin xyz=\"0 0 0.03\"/></joint></robot>"}}})).unwrap();
-        assert!(
-            result["after"]["tcp"]["pose"]["position"][2]
-                .as_f64()
-                .unwrap()
-                > result["before"]["tcp"]["pose"]["position"][2]
-                    .as_f64()
-                    .unwrap()
-        );
-        assert_eq!(result["after"]["tcp"]["link"], "kept_mount");
-        assert_eq!(result["after"]["links"], 5);
-        assert_eq!(result["source"]["flange"], "plate_out");
-        assert_eq!(result["source"]["prefix"], "kept_");
-        assert!(!host
-            .snapshot()
-            .robot()
-            .links
-            .iter()
-            .any(|l| l.name == "plate_out"));
-    }
-
-    #[test]
     fn handshake_order() {
         let host = TestHost::new();
         let msgs = initial_messages(&host);
@@ -2192,30 +2052,6 @@ mod tests {
         assert!(matches!(msgs[12], ServerMessage::Io { .. }));
         assert!(matches!(msgs[13], ServerMessage::Parts { .. }));
         assert!(matches!(msgs[14], ServerMessage::State { .. }));
-    }
-
-    #[test]
-    fn mounting_inspection_reuses_scene_report_and_echoes_request_without_mutation() {
-        let host = TestHost::new();
-        let before =
-            host.with_scene(|s| serde_json::to_value(botrail_scene::mounting::report(s)).unwrap());
-        let positions = host.with_scene(|s| s.joint_positions().to_vec());
-        handle_client_message(
-            &host,
-            r#"{"type":"inspect_mounting","request_id":"panel-1"}"#,
-        );
-        let out = host.out.borrow();
-        let ServerMessage::MountingInspection {
-            request_id,
-            inspection,
-        } = &out[0]
-        else {
-            panic!("missing inspection");
-        };
-        assert_eq!(request_id, "panel-1");
-        assert_eq!(inspection["report"], before);
-        assert_eq!(host.with_scene(|s| s.joint_positions().to_vec()), positions);
-        assert_eq!(out.len(), 1);
     }
 
     #[test]
@@ -3272,23 +3108,4 @@ mod tests {
         assert!(traj.link_poses.is_none(), "USD robots skip pose baking");
         assert!(traj.object_tracks.is_some(), "objects are baked regardless");
     }
-}
-
-/// Publish only while the assembly the job inspected is still current.
-pub fn emit_for_assembly(
-    host: &impl SessionHost,
-    snapshot: &Scene,
-    message: &ServerMessage,
-    reviewed: &[String],
-) -> Result<(), String> {
-    host.with_scene(|scene| {
-        if scene.assembly_generation() != snapshot.assembly_generation() {
-            return Err("Assembly changed during evaluation; run it again".into());
-        }
-        scene
-            .mounting_revalidation
-            .retain(|name| !reviewed.contains(name));
-        host.emit(message);
-        Ok(())
-    })
 }

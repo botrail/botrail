@@ -23,67 +23,63 @@ import type { ToolpathOverlayMsg } from "./ToolpathOverlayMsg";
 import type { TopologyMsg } from "./TopologyMsg";
 import type { TrajectoryMsg } from "./TrajectoryMsg";
 
-export type ServerMessage = { "type": "mounting_edit", request_id: string, result: unknown, } | { "type": "mounting_inspection", request_id: string,
-/**
- * Versioned report + rendering references, parsed in one UI adapter.
- */
-inspection: unknown, } | { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state",
+export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state", 
 /**
  * One entry per robot, in `SceneDescriptionMsg::robots` order.
  */
-robots: Array<RobotStateMsg>,
+robots: Array<RobotStateMsg>, 
 /**
  * Colliding pairs at this configuration (empty when collision-free).
  */
-collisions: Array<CollisionPairMsg>,
+collisions: Array<CollisionPairMsg>, 
 /**
  * Minimum robot-obstacle distance; `null` without obstacles.
  */
-min_distance: number | null, } | { "type": "plan_result",
+min_distance: number | null, } | { "type": "plan_result", 
 /**
  * Robot instance the plan is for (plays back on that robot).
  */
-robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "cameras", cameras: Array<CameraMsg>, } | { "type": "lidars", lidars: Array<LidarMsg>, } | { "type": "scenarios", scenarios: Array<ScenarioMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "parts", parts: Array<PartEntry>, } | { "type": "io", io: IoMap, points: Array<IoPointMsg>, findings: Array<IoFindingMsg>,
+robot: string, ok: boolean, error: string | null, trajectory: TrajectoryMsg | null, stats: PlanStatsMsg | null, } | { "type": "motions", motions: Array<MotionMsg>, } | { "type": "sequences", sequences: Array<SequenceMsg>, signals: Array<SignalDefMsg>, } | { "type": "sensors", sensors: Array<SensorMsg>, } | { "type": "devices", devices: Array<DeviceMsg>, } | { "type": "cameras", cameras: Array<CameraMsg>, } | { "type": "lidars", lidars: Array<LidarMsg>, } | { "type": "scenarios", scenarios: Array<ScenarioMsg>, } | { "type": "effects", flashes: Array<FlashMsg>, } | { "type": "parts", parts: Array<PartEntry>, } | { "type": "io", io: IoMap, points: Array<IoPointMsg>, findings: Array<IoFindingMsg>, 
 /**
  * The electrical topology (hosts, stations, programs, field
  * devices and the wires between them) — the same graph
  * `export_topology` writes, cosmetic rows left out.
  */
-topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, error?: string | null,
+topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, error?: string | null, 
 /**
  * World-frame hit points, meters, rounded to 0.1 mm (display
  * data — the analysis-grade sweep stays in the Python API).
  */
-points: Array<[number, number, number]>, } | { "type": "sequence_result", ok: boolean, sequence: string,
+points: Array<[number, number, number]>, } | { "type": "sequence_result", ok: boolean, sequence: string, 
 /**
  * Scenario the rollout ran under; absent = `baseline`.
  */
-scenario?: string | null, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean,
+scenario?: string | null, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
 /**
  * Source layer path (display form).
  */
-source: string, error: string | null,
+source: string, error: string | null, 
 /**
  * `"joint_state"` (q(t) recovered, client plays joints) or
  * `"transforms"` (link-pose playback) when ok.
  */
-mode: string | null, warnings: Array<string>,
+mode: string | null, warnings: Array<string>, 
 /**
  * Playable timeline (no step/signal lanes) when ok.
  */
-timeline: TimelineMsg | null, } | { "type": "usd_document", ok: boolean,
+timeline: TimelineMsg | null, } | { "type": "usd_document", ok: boolean, 
 /**
  * Suggested file name (`<sequences>.usda`).
  */
-name: string,
+name: string, 
 /**
  * The usda layer text when ok.
  */
-text: string | null, error: string | null, warnings: Array<string>, } | { "type": "motion_result",
+text: string | null, error: string | null, warnings: Array<string>, } | { "type": "motion_result", 
 /**
  * Owning robot instance (plays back on that robot).
  */
-robot: string, ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null,
+robot: string, ok: boolean, motion: string, error: string | null, trajectory: TrajectoryMsg | null, 
 /**
  * Time at which each segment ends (playback markers).
  */

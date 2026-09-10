@@ -25,6 +25,9 @@ SOURCE = {"kind": "manufacturer_datasheet", "url": "https://example.com/test-dra
           "ref": "fixture-1", "fetched_at": "2026-09-06"}
 EVIDENCE = [{"source": 0, "section": "Synthetic test drawing A"}]
 IDENTITY = {"position": [0, 0, 0], "quaternion": [0, 0, 0, 1]}
+REQUIREMENT = {"id": "adapter", "frame": "tool_root", "order_requires": 0,
+               "evidence": EVIDENCE, "note": "The specified adapter is required"}
+ORDER = {"requires": [{"catalog": ADAPTER, "category": "adapter", "qty": 1}]}
 
 
 def face(frame, role, interface_id, **kwargs):
@@ -76,9 +79,7 @@ def catalog(tmp_path, monkeypatch):
         face("mount", "mount", "robot-face", allowed_poses=[IDENTITY]), face("out", "flange", "tool-face")]})
     add(TOOL, mount="tool_root", mounting={"interfaces": [
         face("tool_root", "mount", "tool-face", allowed_poses=[IDENTITY])],
-        "requirements": [{"id": "adapter", "frame": "tool_root", "order_requires": 0,
-                          "evidence": EVIDENCE, "note": "The specified adapter is required"}]},
-        order={"requires": [{"catalog": ADAPTER, "category": "adapter", "qty": 1}]})
+        "requirements": [copy.deepcopy(REQUIREMENT)]}, order=copy.deepcopy(ORDER))
     return add
 
 
@@ -98,29 +99,24 @@ def complete():
 def test_missing_adapter_cannot_be_replaced_with_an_offset(catalog, offset):
     robot = load(ARM).attach_tool(load(TOOL), offset_position=offset)
     report = bt.mounting.report(robot)
-    assert item(report, "required:adapter").status == "fail"
-    assert item(report, "interface").status == "fail"
-    assert not report.ready
-    scene = bt.Scene(robot)
-    assert not scene.check().ok
-    review = bt.review(scene, required=["mounting"])
-    assert not review.ready
-    assert len([i for i in review.items if i.id.endswith(":required:adapter")]) == 1
-    assert not any(i.id.startswith("checks:mounting_") for i in review.items)
+    requirement = item(report, "required:adapter")
+    assert requirement.status == "fail"
+    assert "not on the attachment path" in requirement.message
+    assert "The specified adapter is required" in requirement.message
+    assert not report.ready and report.blockers() == [requirement]
+    # The static check repeats a missing required part as a warning, never an error.
+    static = bt.Scene(robot).check()
+    assert static.ok
+    assert [(f.code, f.target) for f in static.findings if f.code == "required_part_missing"] == [("required_part_missing", "robot/tool")]
 
 
-def test_actual_adapter_path_passes_partial_checks_only(catalog):
+def test_actual_adapter_path_passes(catalog):
     report = bt.mounting.report(complete())
+    assert [i.key for i in report.items] == ["required:adapter"]
     assert item(report, "required:adapter").status == "pass"
-    assert item(report, "interface", "robot/tool2").status == "pass"
-    assert item(report, "pose", "robot/tool2").status == "pass"
-    assert item(report, "fasteners").status == "not_run"
-    assert not report.ready
+    assert report.ready
     assert report.assemblies[-1]["upstream_parts"] == ["robot/tool", "robot"]
-    scene = bt.Scene(complete())
-    assert scene.check().ok  # information gaps do not become static errors
-    assert bt.review(scene).ready
-    assert not bt.review(scene, required=["mounting"]).ready
+    assert "Result: ready" in report.to_markdown()
 
 
 def test_adapter_on_another_branch_or_another_robot_does_not_count(catalog):
@@ -146,30 +142,27 @@ def test_preassembled_stack_preserves_original_frames_and_bom_names(catalog):
     assert requirement.evidence["found"] == ["robot/tool"]
 
 
-def test_explicit_pose_checks_rotation_and_translation(catalog):
-    base = load(ARM).attach_tool(load(ADAPTER), prefix="a_")
-    for kwargs in ({"offset_position": (0, 0, 0.01)}, {"offset_quaternion": (0, 0, 1, 0)}):
-        report = bt.mounting.report(base.attach_tool(load(TOOL), **kwargs))
-        assert item(report, "pose", "robot/tool2").status == "fail"
-    report = bt.mounting.report(base.attach_tool(load(TOOL), offset_quaternion=(0, 0, 0, -1)))
-    assert item(report, "pose", "robot/tool2").status == "pass"
-
-
 @pytest.mark.parametrize("sources", [[], [{**SOURCE, "kind": "community"}]])
-def test_missing_or_community_evidence_cannot_verify_interfaces(catalog, sources):
+def test_missing_or_community_evidence_leaves_the_requirement_unknown(catalog, sources):
     declaration = face("tool_root", "mount", "tool-face")
+    requirement = copy.deepcopy(REQUIREMENT)
     if not sources:
         declaration["evidence"] = []
-    catalog(TOOL, mount="tool_root", mounting={"interfaces": [declaration]}, sources=sources)
-    assert item(bt.mounting.report(complete()), "interface", "robot/tool2").status == "unknown"
+        requirement["evidence"] = []
+    catalog(TOOL, mount="tool_root", mounting={"interfaces": [declaration], "requirements": [requirement]},
+            order=copy.deepcopy(ORDER), sources=sources)
+    report = bt.mounting.report(complete())
+    assert item(report, "required:adapter").status == "unknown"
+    assert "could not be established" in item(report, "required:adapter").message
+    assert not report.ready
 
 
 def test_saved_project_and_generated_python_preserve_snapshot(catalog, tmp_path):
     # Directional marks copied from PDF manuals must survive Python quoting.
-    package = catalog("acme/mark/fixture/r1", sources=[{**SOURCE, "ref": "資料\u200e版"}])
+    package = catalog("acme/mark/fixture/r1", sources=[{**SOURCE, "ref": "資料‎版"}])
     source_path = package.parents[3] / TOOL / "manifest.yaml"
     source = yaml.safe_load(source_path.read_text())
-    source["sources"][0]["ref"] = "資料\u200e版"
+    source["sources"][0]["ref"] = "資料‎版"
     source_path.write_text(yaml.safe_dump(source, allow_unicode=True))
     scene = bt.Scene(complete())
     before = bt.mounting.report(scene).to_dict()
@@ -188,30 +181,23 @@ def test_saved_project_and_generated_python_preserve_snapshot(catalog, tmp_path)
     report.save(tmp_path / "mounting.json")
     report.save(tmp_path / "mounting.md")
     assert json.loads((tmp_path / "mounting.json").read_text()) == before
-    assert "not_run" in (tmp_path / "mounting.md").read_text()
+    assert "| required:adapter | pass |" in (tmp_path / "mounting.md").read_text()
 
 
-def test_part_relabel_cannot_change_loaded_product_or_satisfy_requirement(catalog):
+def test_part_relabel_cannot_satisfy_a_requirement(catalog):
     scene = bt.Scene(load(ARM).attach_tool(load(TOOL)))
-    before = bt.mounting.report(scene)
     scene.set_part("robot", catalog=ADAPTER)
-    report = bt.mounting.report(scene)
-    assert item(report, "identity").status == "fail"
-    assert item(report, "required:adapter").status == "fail"
-    assert before.input_hash != report.input_hash
-    assert item(report, "identity").evidence["loaded"]["id"] == ARM
-    scene.set_part("robot", catalog=f"{ARM}@wrong-revision")
-    assert item(bt.mounting.report(scene), "identity").status == "fail"
+    assert item(bt.mounting.report(scene), "required:adapter").status == "fail"
 
 
-def test_legacy_catalog_remains_unknown_and_empty_scene_has_no_attachment_claim(catalog):
+def test_products_without_declarations_have_nothing_to_report(catalog):
     catalog(TOOL, mount="tool_root")
     report = bt.mounting.report(complete())
-    assert item(report, "interface", "robot/tool2").status == "unknown"
-    assert item(report, "pose", "robot/tool2").status == "unknown"
-    assert not report.ready
-    assert item(bt.mounting.report(load(TOOL)), "unmounted").status == "unknown"
-    assert item(bt.mounting.report(bt.Scene()), "none").status == "not_applicable"
+    assert report.items == [] and report.ready
+    assert len(report.assemblies) == 2
+    empty = bt.mounting.report(bt.Scene())
+    assert empty.items == [] and empty.assemblies == [] and empty.ready
+    assert "No tool attachments" in empty.to_markdown()
     with pytest.raises(TypeError):
         bt.mounting.report("robot")
 
@@ -235,7 +221,7 @@ def test_malformed_declarations_are_errors_not_silently_dropped(catalog, mutate,
     ("mitsubishi_electric/rv-5as-d.yaml", "botrail/spindle-emsf3060.yaml", "unknown"),
     ("fanuc/r2000ic-165f-official.yaml", "botrail/weld-gun-x1-r4.yaml", "unknown"),
 ])
-def test_three_product_families_report_known_gaps_and_preserve_them(
+def test_three_product_families_report_their_required_parts_and_preserve_them(
     catalog, tmp_path, arm_recipe, tool_recipe, expected,
 ):
     data = json.loads((Path(__file__).parent / "data/mounting/products.json").read_text())
@@ -249,16 +235,7 @@ def test_three_product_families_report_known_gaps_and_preserve_them(
     assert len(required) == 1 and required[0].status == expected
     assert required[0].target == "robot/tool"
     assert required[0].next_action and required[0].message
-    assert item(report, "dimensions").status == ("not_run" if "weld-gun" in tool_recipe else "unknown")
     assert not report.ready
-    if "spindle-emsf3060" in tool_recipe:
-        assert item(report, "interface").status == "fail"
-        assert "4-M5 PCD31.5" in item(report, "interface").message
-        assert "4-M4 PCD39" in item(report, "interface").message
-        assert not scene.check().ok
-    elif "weld-gun" in tool_recipe:
-        assert item(report, "interface").status == "unknown"
-        assert item(report, "pose").status == "unknown"
     path = tmp_path / "product.botrail"
     scene.save_project(path)
     reloaded = bt.Scene.load_project(path)
@@ -270,37 +247,13 @@ def test_three_product_families_report_known_gaps_and_preserve_them(
         coupling = load(products["robotiq/gripper-coupling.yaml"]["id"])
         assembled = bt.mounting.report(arm.attach_tool(coupling, prefix="cpl_").attach_tool(tool, prefix="g_"))
         assert item(assembled, "required:gripper-coupling").status == "pass"
-        mismatch = item(assembled, "interface", "robot/tool")
-        assert mismatch.status == "fail"  # The actual ROS-I model has the ISO40 pattern.
-        assert "ISO 9409-1-50-4-M6" in mismatch.message
-        assert "ISO 9409-1-40-4-M6" in mismatch.message
-        assert item(assembled, "interface", "robot/tool2").status == "pass"
-        assert item(assembled, "dimensions", "robot/tool").status == "unknown"
-        assert not assembled.ready
+        assert assembled.ready
         iso50 = load(products["robotiq/agc-cpl-062-002.yaml"]["id"])
         candidate = bt.mounting.report(arm.attach_tool(iso50, prefix="cpl_").attach_tool(tool, prefix="g_"))
         assert item(candidate, "required:gripper-coupling").status == "pass"
-        assert [i.status for i in candidate.items if i.id.endswith(":interface")] == ["pass", "pass"]
-        assert not candidate.ready  # real declarations, synthetic geometry; no complete fit claim
 
 
-def test_spindle_offset_cannot_repair_the_documented_bare_flange_mismatch(catalog):
-    data = json.loads((Path(__file__).parent / "data/mounting/products.json").read_text())
-    products = {p["recipe"]: p["manifest"] for p in data["products"]}
-    arm = products["mitsubishi_electric/rv-5as-d.yaml"]
-    spindle = products["botrail/spindle-emsf3060.yaml"]
-    for raw in (arm, spindle):
-        catalog(raw["id"], raw=raw)
-    # Rear-body clearance alone cannot turn the M5 robot face into an M4 holder.
-    candidate = load(arm["id"]).attach_tool(load(spindle["id"]), prefix="ee_", offset_position=(0, 0, .16))
-    scene = bt.Scene(load(arm["id"]))
-    proposal = bt.mounting.preview(scene, candidate)
-    assert item(proposal.report, "interface").status == "fail"
-    assert not proposal.can_apply
-    assert not proposal.report.ready
-
-
-def test_weld_brand_integration_is_not_evidence_for_an_arbitrary_mounting_pose(catalog):
+def test_weld_gun_bracket_requirement_names_the_missing_flange_option(catalog):
     data = json.loads((Path(__file__).parent / "data/mounting/products.json").read_text())
     products = {p["recipe"]: p["manifest"] for p in data["products"]}
     arm = products["fanuc/r2000ic-165f-official.yaml"]
@@ -309,8 +262,6 @@ def test_weld_brand_integration_is_not_evidence_for_an_arbitrary_mounting_pose(c
         catalog(raw["id"], raw=raw)
     robot = load(arm["id"]).attach_tool(load(gun["id"]), prefix="ee_", offset_quaternion=(0, 0, 1, 0))
     report = bt.mounting.report(robot)
-    assert item(report, "interface").status == "unknown"
-    assert item(report, "pose").status == "unknown"
     assert "robot flange option" in item(report, "required:robot-bracket").message
     assert not report.kits and not report.ready
 
@@ -334,7 +285,7 @@ def test_old_project_does_not_acquire_missing_mounting_data_on_script_replay(cat
     path.write_text(json.dumps(data))
     old = bt.Scene.load_project(path)
     before = bt.mounting.report(old).to_dict()
-    assert item(bt.mounting.report(old), "interface").status == "unknown"
+    assert before["items"] == []
     namespace = {}
     exec("\n".join(l for l in old.generate_python().splitlines() if l != "bt.studio(scene)"), namespace)
     assert bt.mounting.report(namespace["scene"]).to_dict() == before
@@ -353,7 +304,6 @@ def test_usd_leaf_frames_are_resolved_and_preserved(catalog, tmp_path):
     scene = bt.Scene(complete())
     report = bt.mounting.report(scene)
     assert item(report, "required:adapter").status == "pass"
-    assert item(report, "interface", "robot/tool2").status == "pass"
     assert report.assemblies[0]["mount"].endswith("/body")
     path = tmp_path / "usd.botrail"
     scene.save_project(path)

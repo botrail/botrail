@@ -1358,19 +1358,6 @@ pub struct PlanStatsMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ServerMessage {
-    /// Transactional assembly editor response (errors keep the request id).
-    MountingEdit {
-        request_id: String,
-        #[cfg_attr(feature = "ts", ts(type = "unknown"))]
-        result: serde_json::Value,
-    },
-    /// Read-only mechanical inspection, computed by the shared Rust checker.
-    MountingInspection {
-        request_id: String,
-        /// Versioned report + rendering references, parsed in one UI adapter.
-        #[cfg_attr(feature = "ts", ts(type = "unknown"))]
-        inspection: serde_json::Value,
-    },
     SceneInit {
         scene: SceneDescriptionMsg,
     },
@@ -1524,17 +1511,6 @@ pub enum ServerMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ClientMessage {
-    /// Inspect the current composition; never changes a model or pose.
-    InspectMounting {
-        request_id: String,
-    },
-    /// Preview, apply, or save an assembly through the existing source graph.
-    EditMounting {
-        request_id: String,
-        action: String,
-        #[cfg_attr(feature = "ts", ts(type = "unknown"))]
-        data: serde_json::Value,
-    },
     SetJointPositions {
         /// Target robot instance name; `None` means the first robot.
         #[serde(default)]

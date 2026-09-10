@@ -39,7 +39,7 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`light_curtain`][botrail.parts.light_curtain] | two columns, `<name>/column_a|b` | — | the beam sensor `<name>`, spanning the gap between the lens faces (trips on anything in the field) | the *sensor* (`sensor.light_curtain`) — with a catalog the emitter/receiver pair's model number, and the range of the resolution chosen |
 | [`photoelectric`][botrail.parts.photoelectric] | the sensor body `<name>/body` behind its lens; a through-beam pair adds `<name>/receiver`, a retroreflective one `<name>/reflector` | — | the beam sensor `<name>` (trips on `watch`, and on the robot if asked) | the *sensor* (`sensor.photoelectric`), and with a catalog the reflector where the maker sells it separately |
 | [`proximity`][botrail.parts.proximity] | the threaded barrel `<name>/body` behind the sensing face | — | the beam sensor `<name>`, as long as the switch's sensing range (a few millimetres) | the *sensor* (`sensor.proximity`) — with a catalog the model of the size, shield and output chosen, and its range |
-| [`power_supply`][botrail.parts.power_supply] | the box `<name>/body` on its rail | — | — | `<name>` (`power_supply`, carrying `output_v` / `output_a` — what the cell's `current_a` total is checked against) |
+| [`power_supply`][botrail.parts.power_supply] | the box `<name>/body` on its rail | — | — | `<name>` (`power_supply`, carrying `output_v` / `output_a` — what the `current_a` of the parts at its voltage is checked against) |
 | [`remote_io`][botrail.parts.remote_io] | the coupler `<name>/coupler`, a box per terminal unit `<name>/di{i}` / `<name>/do{i}` | — | the I/O node `<name>` (`remote_io`, a channel per point, hung off `uplink=`) | the coupler (`io.remote`, with `di` / `do` counts), and every unit as a line of its own |
 | [`wall`][botrail.parts.wall] | a pier per solid stretch under `<name>/e{edge}_{i}`, the wall over each opening under `<name>/head/`, a column at each shared corner | `<name>/opening{edge}_{i}` (on the floor at each doorway, facing along the wall) | — | `<name>` (`structure.wall`, carrying the run's length, height and thickness) |
 | [`machine_tool`][botrail.parts.machine_tool] | the enclosure under `<name>/shell/`, `<name>/bed`, `<name>/column`, `<name>/saddle`, `<name>/table`, `<name>/head`, the door leaves under `<name>/side_door/` and `<name>/front_door/`, the panel's plate | `<name>/table`, `<name>/entry`, `<name>/door/side/handle`, the panel's | the side door as a linear axis `<name>/side_door` (servo / air) with the stops `closed` / `open` as lanes, a zone per button | `<name>` (`machine_tool.vmc`), `<name>/side_door` (`machine_tool.door`, drive and stroke), the panel and its buttons — with a catalog the pack's envelope, options, door times and interface |
@@ -69,10 +69,10 @@ Colours and geometry stay independent of the finish. Override a surface with
 survive project save/load and generated Python. These defaults do not override
 imported catalog trim; its appearance follows the existing
 [import path](scene-and-obstacles.md). In `machine_tool(detail="full")`, the
-doors have transparent panes and separate seals and panels; the hidden full
-leaves remain the collision and switch-sensing envelopes. All moving trim
-belongs to `door_objects`. Service panels, seams, table slot markings and
-the operator panel's bezel are authored visual details that scale with the
+doors have framed transparent panes; the hidden full leaves remain the
+collision and switch-sensing envelopes, and all moving trim belongs to
+`door_objects`. The skirt, the accent band, the stack light and the
+operator panel's bezel are authored visual details that scale with the
 generator's dimensions. They do not claim manufacturer CAD accuracy.
 
 A catalog part is drawn the way it looks: a mesh panel as a tube frame with a
@@ -155,21 +155,17 @@ its manifest, so the BOM line writes itself.
 
 ## Series-specific equipment trims
 
-Catalog-backed fence `height` / `height_mm` means **panel height**. A pack's
-`configuration.rules.floor_gap_mm` raises the panel bottom above the floor;
-the posts reach panel height plus that gap. This applies equally to collision
-slabs, full-detail trims and the built-in frame/wire fallback. With no declared
-gap the previous zero-gap behavior is retained. Code relying on the former
-ignored-gap behavior must account for the corrected installed height.
+A catalog fence's `height` / `height_mm` is the **panel** height; a pack's
+`configuration.rules.floor_gap_mm` lifts the panel off the floor and the
+posts reach panel height plus that gap — in the collision slabs, the
+full-detail trims and the built-in frame-and-wire fallback alike. Fence,
+conveyor and cabinet trims are handed the resolved pack parameters
+(including string choices such as `post_finish`) on top of their metre
+arguments; a fence panel trim's origin is its **bottom centre**, already
+raised, and a post trim gets the installed height.
 
-Fence, conveyor and cabinet trims receive the resolved catalog parameters
-(including string choices such as `post_finish`) in addition to their metre
-arguments. Explicit geometry arguments take precedence. A fence panel trim's
-origin is its **bottom center**, already raised by the generator; do not add the
-floor gap again inside the asset. Post trims receive the full installed height.
-
-Optional `components[].dimensions_mm` fields add conservative collision
-envelopes **in both detail modes**, without adding BOM quantities:
+A pack's `components[].dimensions_mm` can add conservative collision
+envelopes, in both detail modes and without touching the BOM:
 
 | Component | Fields | Effect |
 | --- | --- | --- |
@@ -179,8 +175,7 @@ envelopes **in both detail modes**, without adding BOM quantities:
 | conveyor `stand` | `inset` | Distance from each belt end to the first/last support center |
 | cabinet `body` | `lifting_eye_height` | Conservative top slab above the enclosure, including any base offset |
 
-These are pack-defined approximations, not vendor-certified mounting or load
-envelopes. Missing fields preserve the previous generator massing. Thin handles,
-fasteners, wire openings and foot covers need not have their own colliders.
-`detail="plain"` hides the detailed geometry; it does not remove the new
-envelopes or change the selected dimensions or BOM.
+A field left out keeps the generator's own massing; handles, fasteners,
+wire openings and foot covers need no colliders of their own.
+`detail="plain"` hides the trim but keeps these envelopes, the chosen
+dimensions and the BOM.

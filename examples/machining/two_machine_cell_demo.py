@@ -87,7 +87,7 @@ def build() -> tuple[bt.Scene, dict[str, bt.tending.Handshake]]:
         scene.set_part(f"blank_{tag}", kind="obstacle", category="workpiece", model="WP-50-raw",
                        mass_kg=one.PART_MASS)
         for part in (f"finished_{tag}", f"blank_{tag}"):
-            for link in one.PADS:
+            for link in one.rq.pads(scene.robot_of(ROBOT)):
                 scene.allow_link_obstacle_contact(link, part, robot=ROBOT)
         handshakes[tag] = bt.tending.manual(scene, vmc, cycle_s=CYCLE_S, clamp_s=one.CLAMP_S,
                                             buttons=("unclamp", "clamp", "cycle_start"))

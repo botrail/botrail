@@ -223,8 +223,11 @@ def test_report_defaults_from_the_catalog_gripper() -> None:
     the composite's provenance; grasp_report defaults its holding checks
     from them — payload here, grip force once the published row carries
     the flat mirrors (G2 republish)."""
-    arm = bt.Robot.from_catalog("ur5e")
-    tool = bt.Robot.from_catalog("robotiq/2f-85")
+    # Pinned public packages: the reference 2F-85 deliberately declares no
+    # payload, so the check reads the Hand-E's published 7 kg instead.
+    revision = "936d6a2167834f86161a6c093808550d043d221f"
+    arm = bt.Robot.from_catalog("universal_robots/ur/ur5e/r2", revision=revision)
+    tool = bt.Robot.from_catalog("robotiq/hand-e/hand-e/r1", revision=revision)
     scene = bt.Scene(arm.attach_tool(tool), base_position=(0.0, 0.0, 0.74))
     (px, py, pz), _ = scene.link_pose(scene.robot.tcp_link)
     scene.add_box("carton", size=(0.06, 0.06, 0.06), position=(px, py, pz))
@@ -235,7 +238,7 @@ def test_report_defaults_from_the_catalog_gripper() -> None:
     sq.step("drop", actions=[bt.seq.detach("carton")], transition=bt.seq.elapsed(0.2))
     tl = scene.simulate_sequence("hold")
     (rep,) = tl.grasp_report()
-    assert rep["payload_limit_kg"] == pytest.approx(5.0)  # 2F-85 specs, not retyped
+    assert rep["payload_limit_kg"] == pytest.approx(7.0)  # Hand-E specs, not retyped
     assert rep["mass_kg"] == pytest.approx(3.0)
     assert rep["checks"]["payload"] == "pass"
     # An explicit argument always beats the catalog number.

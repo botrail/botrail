@@ -60,7 +60,6 @@ __all__ = [
     "Row",
     "check",
     "requirements",
-    "tool_loads",
 ]
 
 #: Requirement key -> the part attributes that answer it, in priority order.
@@ -506,30 +505,15 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
                 message += " — needs " + ", ".join(str(r) for r in row.requirements)
             findings.append(Finding("info", "unidentified_part", message, row.target))
     findings += req.findings()
-    from .connections import report as connection_report
-
-    for item in connection_report(scene).checks:
-        if item["status"] in ("fail", "unknown"):
-            findings.append(Finding("error" if item["status"] == "fail" else "warning",
-                                    "connection_" + item["id"].split(":")[0], item["message"], item["target"]))
+    # A tool whose installation documents require a part that is missing from
+    # its attachment path (a bare 2F-85 without its coupling) is a warning:
+    # the product says so, and the cell as authored cannot be built that way.
     from .mounting import report as mounting_report
 
     for item in mounting_report(scene).items:
-        if item.status in ("fail", "unknown", "not_run"):
-            findings.append(Finding("error" if item.status == "fail" else "warning",
-                                    "mounting_" + item.id.rsplit(":", 1)[-1], item.message, item.target))
-    from . import process
-
-    for target in process.targets(scene):
-        try:
-            checks = process.report(scene, target).checks
-        except (ValueError, KeyError, TypeError) as exc:
-            findings.append(Finding("error", "process_setup", str(exc), target))
-            continue
-        for item in checks:
-            if item["status"] in ("fail", "unknown"):
-                findings.append(Finding("error" if item["status"] == "fail" else "warning",
-                                        "process_" + item["id"], item["message"], target))
+        if item.status == "fail":
+            code = "required_part_missing" if item.key.startswith("required:") else item.key
+            findings.append(Finding("warning", code, item.message, item.target))
     return CheckReport(findings, req)
 
 
@@ -823,8 +807,6 @@ class _Cell:
             if (entry.get("name") or self.default_robot) != robot:
                 continue
             source = entry.get("source") or {}
-            while source.get("kind") in ("mounting", "visuals"):
-                source = source.get("base") or {}
             if source.get("kind") == "composite":
                 return source.get("flange") or (source.get("base") or {}).get("flange")
             return source.get("flange")
@@ -1364,8 +1346,46 @@ class _Cell:
                                 load += tm * int(tool.get("qty") or 1)
                 if standing:
                     reqs.append(Requirement("load_kg", _round(load, 3), basis=f"{', '.join(standing)} standing on it"))
-        # Power capacity is checked by connections.report, by supply port.
-        # A whole-BOM sum cannot define which supply feeds a load.
+        elif category == "power_supply":
+            # Each supply must cover the loads at its own voltage: a part's
+            # `voltage_v` against the supply's `output_v` (the I/O lint's
+            # 0.5 V tolerance). A load that does not say its voltage counts
+            # against every supply, and a supply that does not say its
+            # voltage counts every load — conservative, never silent.
+            supply_row = next((r for r in self.bom_rows if name in r["names"]), None)
+            supply_v = _number(((supply_row or {}).get("attributes") or {}).get("output_v"))
+            units = int((supply_row or {}).get("qty") or 1)
+            total = 0.0
+            lines = 0
+            unvoiced: list[str] = []
+            peers: list[str] = []
+            for row in self.bom_rows:
+                if name in row["names"]:
+                    continue
+                attrs = row.get("attributes") or {}
+                if supply_v is not None and str(row.get("category") or "") == "power_supply":
+                    peer_v = _number(attrs.get("output_v"))
+                    if peer_v is not None and abs(peer_v - supply_v) <= 0.5:
+                        peers.extend(row["names"])
+                current = _number(attrs.get("current_a"))
+                if current is None:
+                    continue
+                load_v = _number(attrs.get("voltage_v"))
+                if supply_v is not None and load_v is not None and abs(load_v - supply_v) > 0.5:
+                    continue
+                if supply_v is not None and load_v is None:
+                    unvoiced.extend(row["names"])
+                total += current * int(row.get("qty") or 1)
+                lines += 1
+            if lines:
+                at = f" at {_fmt(supply_v)} V" if supply_v is not None else ""
+                reqs.append(Requirement("output_a", _round(total, 3), basis=f"sum of current_a over {lines} line(s){at}"))
+            if unvoiced:
+                notes.append(f"current counts {', '.join(unvoiced)} with no voltage_v — give them voltage_v on set_part to keep them off the other supplies")
+            if units > 1:
+                notes.append(f"{units} units — the same loads are counted against each unit")
+            if peers:
+                notes.append(f"{', '.join(peers)} also supplies {_fmt(supply_v)} V — the same loads are counted against each")
         return reqs, notes
 
     # ----------------------------------------------------------- helpers
@@ -1552,116 +1572,3 @@ def _quat_mul(a, b) -> tuple[float, float, float, float]:
 def _extent_along(size, local_dir) -> float:
     """Extent of a box of `size` measured along a unit direction given in its own frame."""
     return sum(abs(float(local_dir[i])) * float(size[i]) for i in range(3))
-
-
-def tool_loads(scene) -> list[dict]:
-    """Report one tool-mass budget per robot, preserving missing values.
-
-    Only the robot's own tool instances contribute, even when identical products
-    are combined into one BOM row. Included kit components are counted once via
-    the kit row; external ``order.requires`` remain unresolved unless an exact
-    catalog/part-number match exists among that robot's attached tools.
-
-    ``known_mass_kg`` is a subtotal. ``total_mass_kg`` stays ``None`` when a mass
-    or required item is missing. Workpieces, CoG and inertia are not evaluated.
-    """
-    bom = scene.bom().rows
-    results = []
-    for robot in scene.robots:
-        prefix = robot + "/"
-        items = []
-        for row in bom:
-            names = [
-                n
-                for n in row["names"]
-                if n.startswith(prefix)
-                and any(
-                    segment == "tool"
-                    or (segment.startswith("tool") and segment[4:].isdigit())
-                    for segment in n[len(prefix) :].split("/")
-                )
-            ]
-            if not names:
-                continue
-            mass = (row.get("attributes") or {}).get("mass_kg")
-            known = (
-                isinstance(mass, (int, float))
-                and not isinstance(mass, bool)
-                and math.isfinite(mass)
-                and mass >= 0
-            )
-            items.append(
-                {
-                    "names": names,
-                    "catalog": row.get("catalog"),
-                    "qty": len(names),
-                    "mass_kg": mass if known else None,
-                    "order": row.get("order") or {},
-                }
-            )
-        missing = [
-            n for item in items if item["mass_kg"] is None for n in item["names"]
-        ]
-        unresolved = []
-        available = [item["qty"] for item in items]
-        for item in items:
-            for req in item["order"].get("requires", []):
-                candidates = [
-                    i
-                    for i, x in enumerate(items)
-                    if x is not item
-                    and (req.get("catalog") or req.get("part_number"))
-                    and (
-                        not req.get("catalog")
-                        or (x["catalog"] or "").split("@")[0] == req["catalog"]
-                    )
-                    and (
-                        not req.get("part_number")
-                        or x["order"].get("part_number") == req["part_number"]
-                    )
-                ]
-                required = req.get("qty", 1) * item["qty"]
-                remaining = required
-                for i in candidates:
-                    used = min(available[i], remaining)
-                    available[i] -= used
-                    remaining -= used
-                if remaining:
-                    unresolved.append(
-                        {
-                            "required_by": item["names"],
-                            **req,
-                            "required_qty": required,
-                            "missing_qty": remaining,
-                        }
-                    )
-        subtotal = round(
-            sum(
-                item["mass_kg"] * item["qty"]
-                for item in items
-                if item["mass_kg"] is not None
-            ),
-            9,
-        )
-        complete = bool(items) and not missing and not unresolved
-        results.append(
-            {
-                "robot": robot,
-                "scope": "attached_tool_purchase_metadata",
-                "mass_status": "complete"
-                if complete
-                else "unknown"
-                if items
-                else "not_applicable",
-                "known_mass_kg": subtotal,
-                "total_mass_kg": subtotal if complete else None,
-                "missing_mass": missing,
-                "unresolved_requirements": unresolved,
-                "items": items,
-                "center_of_gravity": None,
-                "inertia": None,
-                "dynamics_status": "not_evaluated",
-                "workpiece_included": False,
-            }
-        )
-    return results

@@ -70,8 +70,7 @@ def test_kit_purchase_unit_preserves_components_and_scoped_results(packages):
     kit = report.kits[0]
     assert kit["manufacturer_support"]["status"] == "pass"
     assert kit["composition"]["status"] == "pass"
-    assert kit["model_correspondence"]["status"] == "unknown"
-    assert kit["detailed_fit"]["status"] == "unknown" and not report.ready
+    assert report.ready
     assert len(report.assemblies) == 2  # The internal weld is still checked.
     two = bt.Scene()
     two.add_robot(robot, name="one")
@@ -87,36 +86,21 @@ def test_wrong_host_is_unknown_not_incompatible(packages):
     assert kit["composition"]["status"] == "pass"
 
 
-@pytest.mark.parametrize("mutation", ["component", "offset", "pin"])
-def test_changed_assembly_or_product_identity_does_not_pass(packages, mutation):
+@pytest.mark.parametrize("mutation", ["component", "offset"])
+def test_changed_assembly_does_not_pass(packages, mutation):
     root, _ = packages
     scene = bt.Scene(load(root, ARM).attach_tool(load(root), prefix="kit_"))
-    if mutation == "pin":
-        scene.set_part("robot/tool", catalog=TOOL)
+    source = json.loads(scene._project_json())["robots"][0]["source"]
+    inside = source["tool"]["inner"]
+    if mutation == "component":
+        inside["tool"]["id"] = BASE
     else:
-        source = json.loads(scene._project_json())["robots"][0]["source"]
-        inside = source["tool"]["inner"]
-        if mutation == "component":
-            inside["tool"]["id"] = BASE
-        else:
-            inside["offset"]["position"][2] = .123
-        scene = bt.Scene(bt.Robot._from_source_json(json.dumps(source)))
+        inside["offset"]["position"][2] = .123
+    scene = bt.Scene(bt.Robot._from_source_json(json.dumps(source)))
     report = bt.mounting.report(scene)
     assert report.kits[0]["composition"]["status"] == "fail"
-    assert report.kits[0]["manufacturer_support"]["status"] == "not_applicable"
-    assert report.kits[0]["model_correspondence"]["status"] == "fail"
+    assert report.kits[0]["manufacturer_support"]["status"] == "unknown"
     assert not report.ready
-
-
-def test_manufacturer_claim_does_not_hide_interface_failure(packages):
-    root, _ = packages
-    p = root / BASE / "manifest.yaml"
-    data = yaml.safe_load(p.read_text())
-    data["mounting"]["interfaces"][0]["interface_id"] = "different"
-    p.write_text(yaml.safe_dump(data))
-    kit = assessment(load(root, ARM).attach_tool(load(root), prefix="kit_"))
-    assert kit["manufacturer_support"]["status"] == "pass"
-    assert kit["detailed_fit"]["status"] == "fail"
 
 
 def test_kit_revision_includes_component_bytes_and_is_relocatable(packages, tmp_path):
@@ -220,19 +204,6 @@ def test_hub_kit_dependencies_use_one_revision(packages, monkeypatch, tool_publi
     assert bt.Scene(kit).bom().rows[0]["catalog"] == f"{KIT}@{SHA}"
 
 
-def test_visual_override_cannot_inherit_verified_kit_representation(packages):
-    root, data = packages
-    data['kit']['representation'].update(status='verified', evidence=copy.deepcopy(EVIDENCE))
-    write_manifest(root, KIT, data)
-    kit = load(root)
-    assert assessment(kit)['model_correspondence']['status'] == 'pass'
-    source = json.loads(bt.Scene(kit)._project_json())["robots"][0]["source"]
-    tool = source["inner"]["tool"]
-    source["inner"]["tool"] = {"kind": "visuals", "base": tool, "visual": copy.deepcopy(tool)}
-    changed = bt.Robot._from_source_json(json.dumps(source))
-    assert assessment(changed)['model_correspondence']['status'] == 'unknown'
-
-
 def test_search_preserves_kit_purchase_metadata(packages):
     _, data = packages
     index = bt.catalog.Index.from_dict({'products': [data]})
@@ -240,3 +211,16 @@ def test_search_preserves_kit_purchase_metadata(packages):
     assert product.order['part_number'] == 'HOST-KIT'
     assert product.kit['base'] == BASE
     assert product.to_dict()['order'] == data['order']
+
+
+def test_a_kit_attaches_under_kit_by_default(packages):
+    """A kit's coupling exposes `flange` like the arm; without a prefix the
+    kit lands under `kit_`, the same names the explicit form gives."""
+    root, _ = packages
+    implicit = load(root, ARM).attach_tool(load(root))
+    explicit = load(root, ARM).attach_tool(load(root), prefix="kit_")
+    assert implicit.link_names == explicit.link_names
+    assert implicit.tcp_link == explicit.tcp_link and implicit.tcp_link.startswith("kit_")
+    scene = bt.Scene(implicit)
+    assert bt.mounting.report(scene).to_dict() == bt.mounting.report(bt.Scene(explicit)).to_dict()
+    assert "prefix=\"kit_\"" in scene.generate_python()

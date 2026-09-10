@@ -9,7 +9,7 @@ import botrail as bt
 import pytest
 from botrail import _cli
 
-c = bt.connections
+from botrail import connections as c  # not re-exported by `botrail`
 
 
 def equipment(scene, name, **attrs):
@@ -44,9 +44,12 @@ def test_separate_voltage_systems_and_unconnected_loads():
     assert [(p["capacity"], p["known_subtotal"], p["status"]) for p in r.supplies] == [(2, .1, "pass"), (10, 5, "pass")]
     assert not r.ready  # The spare's demand is unconnected, never added to either source.
     assert check(r, "requirements:obstacle:spare:power:load")["status"] == "unknown"
-    assert not any(req.key == "output_a" for row in bt.select.requirements(s) for req in row.requirements)
-    assert s.check().ok
-    assert any(i.id == "specifications:obstacle:psu:supply" and i.status == "pass" for i in bt.review(s).items)
+    # `scene.requirements()` keeps its per-voltage sums: there the spare
+    # counts against the 24 V supply, which the connection plan refines.
+    rows = {row.names[0]: {q.key: q for q in row.requirements} for row in bt.select.requirements(s)}
+    assert rows["psu"]["output_a"].value == pytest.approx(99.1) and rows["psu"]["output_a"].status == "short"
+    assert rows["psu48"]["output_a"].value == pytest.approx(5) and rows["psu48"]["output_a"].status == "ok"
+    assert any(f.code == "spec_short" and f.target == "psu" for f in s.check().findings)
 
 
 def test_missing_consumption_known_overload_zero_and_updated_part():
@@ -61,8 +64,7 @@ def test_missing_consumption_known_overload_zero_and_updated_part():
     s.set_part("eye", model="eye", voltage_v=24, current_a=3)
     r = c.report(s)
     assert r.supplies[0]["status"] == "fail"  # Known overload wins over incomplete data.
-    assert not s.check().ok
-    assert any(i.id == "connections:physical:supply:24V:capacity" and i.status == "fail" for i in bt.review(s).items)
+    assert not r.ready
     s.set_part("eye", model="eye", voltage_v=24, current_a=0)
     s.set_part("unknown", model="unknown", voltage_v=24, current_a=0)
     r = c.report(s)
@@ -110,7 +112,6 @@ def test_orphan_optional_multiple_and_dangling_references(tmp_path):
     c.port(s, "eye.power", "eye", "power", "load", required=False)
     assert check(c.report(s), "port:eye.power:connection")["status"] == "not_applicable"
     assert c.report(s).supplies[0]["status"] == c.report(s).ports[1]["status"] == "not_applicable"
-    assert any(i.id == "specifications:obstacle:psu:supply" and i.status == "not_applicable" for i in bt.review(s).items)
     c.connect(s, "24V", "eye.power", name="W1")
     c.connect(s, "24V", "eye.power", name="W2")
     r = c.report(s)
@@ -256,30 +257,23 @@ def test_local_power_supply_keeps_declared_rating():
     assert s.part("PSU")["attributes"]["output_a"] == 3
 
 
-def test_cli_tables_and_export_revision(tmp_path, capsys):
+def test_tables_are_written_from_the_report(tmp_path):
     s = power_cell()
-    path = tmp_path / "cell.botrail"
-    s.save_project(path)
-    assert _cli.main(["connections", str(path), "--csv", str(tmp_path / "ports.csv"),
-                      "--power", str(tmp_path / "power.csv"), "--report", str(tmp_path / "report.md")]) == 0
-    assert json.loads(capsys.readouterr().out)["ready"]
+    report = c.report(s)
+    assert report.ready
+    report.save(tmp_path / "ports.csv")
+    report.save(tmp_path / "power.csv", table="power")
+    report.save(tmp_path / "report.md")
+    report.save(tmp_path / "report.json")
     assert len(list(csv.DictReader((tmp_path / "ports.csv").open()))) == 2
     row = next(csv.DictReader(io.StringIO((tmp_path / "power.csv").read_text())))
     assert row["capacity"] == "2.0" and row["known_subtotal"] == "0.1"
     assert "CBL-001" in (tmp_path / "report.md").read_text()
-    assert _cli.main(["connections", str(path), "--csv", str(tmp_path / "bad.txt")]) == 2
-    assert "extension" in json.loads(capsys.readouterr().out)["error"]
-    manifest = bt.export_cell(s, tmp_path / "package", exports=["connections", "report"])
-    assert bt.verify_export(manifest, scene=s)["same_revision"]
-    data = json.loads((manifest.parent / "cell_report.json").read_text())
-    physical = json.loads((manifest.parent / "cell_connections.json").read_text())
-    assert physical == data["connections"] == c.report(s).to_dict()
-    assert next(csv.DictReader(io.StringIO((manifest.parent / "cell_power.csv").read_text())))["known_subtotal"] == "0.1"
+    assert json.loads((tmp_path / "report.json").read_text()) == report.to_dict()
+    with pytest.raises(ValueError, match="extension"):
+        report.save(tmp_path / "bad.txt")
     c.disconnect(s, "W1")
-    assert not bt.verify_export(manifest, scene=s)["same_revision"]
-    s.save_project(path)
-    assert _cli.main(["connections", str(path)]) == 1
-    assert not json.loads(capsys.readouterr().out)["ready"]
+    assert not c.report(s).ready
 
 
 def test_empty_declarations_are_not_a_completed_review():
@@ -303,15 +297,3 @@ def test_restore_validates_structure_and_unknown_capacity():
     assert check(r, "supply:24V:capacity")["status"] == "unknown"
 
 
-def test_example_known_and_missing_load():
-    import runpy
-
-    build = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples/engineering/cell_connections_demo.py"))["build"]
-    r = c.report(build())
-    assert r.ready
-    assert [s["known_subtotal"] for s in r.supplies] == pytest.approx([.45, 2, 60])
-    assert "0.45 A" in r.to_markdown()
-    r = c.report(build(unknown_valve_current=True))
-    assert not r.ready and r.supplies[0]["known_subtotal"] == .1
-    assert r.supplies[0]["missing_loads"] == ["field/valve.power"]
-    assert r.supplies[1]["status"] == "pass" and r.supplies[1]["known_subtotal"] == 2

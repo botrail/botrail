@@ -1,5 +1,8 @@
-//! Mechanical declaration checks derived from the immutable assembly source.
-//! No CAD fit, fastener strength, collision, or hardware certification is inferred.
+//! Mechanical attachment checks read from the immutable assembly source: the
+//! parts a product's installation documents require between it and the robot
+//! flange, and the hosts a purchase kit is documented for. Nothing is inferred
+//! from geometry — a passing item repeats a manufacturer statement about the
+//! products actually loaded.
 
 use std::collections::BTreeMap;
 
@@ -7,21 +10,9 @@ use botrail_model::{mounting::*, CatalogMeta, MountRole, RobotModel, RobotSource
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::{
-    part::{PartEntry, PartTargetKind},
-    wire::PoseMsg,
-    Scene,
-};
+use crate::{wire::PoseMsg, Scene};
 
-pub mod edit;
-mod fit;
 mod kit;
-mod product;
-mod view;
-
-pub use view::inspection;
-
-pub const VALIDATOR_VERSION: &str = "mounting/7";
 
 #[derive(Debug, Serialize)]
 pub struct MountingItem {
@@ -46,36 +37,14 @@ pub struct Assembly {
     pub upstream_parts: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize)]
-pub struct SimulationMounting {
-    /// Mounting eligibility only; scene references are checked by preview.
-    pub ready: bool,
-    pub blockers: Vec<String>,
-    pub connections: Vec<ConnectionSupport>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ConnectionSupport {
-    pub target: String,
-    pub method: &'static str,
-    pub basis: &'static str,
-    /// References to observations whose evidence supports this connection.
-    pub evidence_items: Vec<String>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct MountingReport {
-    pub scope: &'static str,
-    pub validator_version: &'static str,
-    /// Fingerprint of evaluated declarations/topology, not a security digest.
-    pub input_hash: String,
+    /// No item failed or stayed unknown.
     pub ready: bool,
     pub assemblies: Vec<Assembly>,
     pub items: Vec<MountingItem>,
+    /// One entry per purchase kit: its host and the manufacturer's claim.
     pub kits: Vec<Value>,
-    /// Individually purchased catalog products with declared connection profiles.
-    pub products: Vec<Value>,
-    pub simulation: SimulationMounting,
 }
 
 struct Part<'a> {
@@ -86,18 +55,12 @@ struct Part<'a> {
 
 impl Part<'_> {
     fn catalog(&self) -> Option<(&str, &str, &CatalogMeta)> {
-        fn find(source: &RobotSource) -> Option<(&str, &str, &CatalogMeta)> {
-            match source {
-                RobotSource::Catalog {
-                    id, revision, meta, ..
-                } => Some((id, revision, meta)),
-                RobotSource::Mounting { base, .. } | RobotSource::Visuals { base, .. } => {
-                    find(base)
-                }
-                _ => None,
-            }
+        match self.source {
+            RobotSource::Catalog {
+                id, revision, meta, ..
+            } => Some((id, revision, meta)),
+            _ => None,
         }
-        find(self.source)
     }
 
     fn face(&self, frame: &str, role: InterfaceRole) -> Option<&MountInterface> {
@@ -118,6 +81,7 @@ impl Part<'_> {
             .collect::<Vec<_>>())
     }
 
+    /// The declaration cites a manufacturer, standard or measured source.
     fn supported(&self, refs: &[MountEvidence]) -> bool {
         refs.iter().any(|e| {
             self.meta.sources.get(e.source).is_some_and(|s| {
@@ -163,21 +127,12 @@ struct KitRecord<'a> {
     source: &'a RobotSource,
     root: Option<usize>,
     mount_frame: Option<String>,
-    visual_override: bool,
     members: std::ops::Range<usize>,
 }
 
 impl<'a> Graph<'a> {
     fn visit(&mut self, source: &'a RobotSource, name: &str, count: &mut usize) -> Links {
         match source {
-            RobotSource::Visuals { base, .. } => {
-                let start = self.kits.len();
-                let links = self.visit(base, name, count);
-                for record in &mut self.kits[start..] {
-                    record.visual_override = true;
-                }
-                links
-            }
             RobotSource::Catalog {
                 meta, inner, mount, ..
             } if meta.kit.is_some() => {
@@ -193,12 +148,10 @@ impl<'a> Graph<'a> {
                     source,
                     root,
                     mount_frame,
-                    visual_override: false,
                     members: start..self.parts.len(),
                 });
                 links
             }
-
             RobotSource::Composite {
                 base,
                 tool,
@@ -249,7 +202,10 @@ impl<'a> Graph<'a> {
                 self.parts.push(Part {
                     name: name.into(),
                     source,
-                    meta: effective_meta(source),
+                    meta: match source {
+                        RobotSource::Catalog { meta, .. } => meta.clone(),
+                        _ => CatalogMeta::default(),
+                    },
                 });
                 leaf_links(source)
                     .into_iter()
@@ -259,6 +215,8 @@ impl<'a> Graph<'a> {
         }
     }
 
+    /// The parts between a tool and the robot base, nearest first, and
+    /// whether every step of that path resolved to a known part.
     fn upstream(&self, edge: &Edge) -> (Vec<usize>, bool) {
         let mut path = Vec::new();
         let mut complete = edge.base.is_some() && edge.tool.is_some();
@@ -281,11 +239,6 @@ impl<'a> Graph<'a> {
 
 fn leaf_links(source: &RobotSource) -> Vec<String> {
     match source {
-        RobotSource::Mounting { base, document } => {
-            let mut links = leaf_links(base);
-            links.extend(document.mounting.interfaces.iter().map(|f| f.frame.clone()));
-            links
-        }
         RobotSource::Catalog {
             tcp,
             flange,
@@ -310,109 +263,13 @@ fn leaf_links(source: &RobotSource) -> Vec<String> {
         RobotSource::UrdfXml(xml) => RobotModel::from_urdf_str(xml)
             .map(|m| m.links.into_iter().map(|l| l.name).collect())
             .unwrap_or_default(),
-        RobotSource::Visuals { base, .. } => leaf_links(base),
         // A USD package exposes its declared frames above; an undeclared USD
         // frame cannot be assigned to a part without reimporting the asset.
         _ => Vec::new(),
     }
 }
 
-fn effective_meta(source: &RobotSource) -> CatalogMeta {
-    match source {
-        RobotSource::Catalog { meta, .. } => meta.clone(),
-        RobotSource::Visuals { base, .. } => effective_meta(base),
-        RobotSource::Mounting { base, document } => document.apply_to(&effective_meta(base)),
-        _ => CatalogMeta::default(),
-    }
-}
-
 impl MountingReport {
-    fn manufacturer_supported(&self, target: &str) -> bool {
-        self.kits.iter().any(|kit| {
-            let support = &kit["manufacturer_support"];
-            support["status"] == "pass"
-                && support["connections"]
-                    .as_array()
-                    .is_some_and(|connections| {
-                        connections.iter().any(|connection| connection == target)
-                    })
-        })
-    }
-
-    fn connection_basis(&self, target: &str) -> &'static str {
-        if self.manufacturer_supported(target) {
-            return "manufacturer_kit";
-        }
-        let prefix = format!("mounting:{target}:");
-        let passed = |key: &str| {
-            self.items
-                .iter()
-                .any(|i| i.id == format!("{prefix}{key}") && i.status == "pass")
-        };
-        let requirements: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| {
-                i.id.strip_prefix(&prefix).is_some_and(|key| {
-                    matches!(key, "requirements" | "requirements_coverage")
-                        || key.starts_with("required:")
-                })
-            })
-            .collect();
-        // A matching name alone is insufficient. The permitted pose and full
-        // required-part path must also have supported declarations.
-        if !passed("pose")
-            || requirements.is_empty()
-            || requirements.iter().any(|i| i.status != "pass")
-        {
-            return "unknown";
-        }
-        if passed("dimensions") && passed("fasteners") {
-            "dimensional_checks"
-        } else if passed("interface") {
-            "interface_declarations"
-        } else {
-            "unknown"
-        }
-    }
-
-    /// Documented interfaces or a supported kit can establish a simulation
-    /// route without complete detail. All observations and strict ready remain.
-    pub fn simulation_blockers(&self) -> Vec<&MountingItem> {
-        self.items
-            .iter()
-            .filter(|item| match item.status {
-                "fail" => true,
-                "unknown" | "not_run" => !self.deferred_for_simulation(item),
-                _ => false,
-            })
-            .collect()
-    }
-
-    fn deferred_for_simulation(&self, item: &MountingItem) -> bool {
-        let prefix = format!("mounting:{}:", item.target);
-        let key = item.id.strip_prefix(&prefix).unwrap_or("");
-        if self.connection_basis(&item.target) != "unknown"
-            && matches!(
-                key,
-                "interface" | "dimensions" | "fasteners" | "assembly_clearance"
-            )
-        {
-            return true;
-        }
-        let detail = matches!(
-            key,
-            "interface"
-                | "pose"
-                | "requirements"
-                | "requirements_coverage"
-                | "dimensions"
-                | "fasteners"
-                | "assembly_clearance"
-        ) || key.starts_with("required:");
-        detail && self.manufacturer_supported(&item.target)
-    }
-
     fn add(
         &mut self,
         target: &str,
@@ -440,62 +297,25 @@ impl MountingReport {
 pub fn report_robot(model: &RobotModel) -> MountingReport {
     let mut graph = Graph::default();
     graph.visit(&model.source, &model.name, &mut 0);
-    evaluate(graph, &[], &[])
+    evaluate(graph)
 }
 
-/// Inspect every robot, also comparing authored BOM identity to loaded identity.
+/// Inspect every robot in the scene.
 pub fn report(scene: &Scene) -> MountingReport {
     let mut graph = Graph::default();
     for robot in scene.robots() {
         graph.visit(&robot.model.source, &robot.name, &mut 0);
     }
-    evaluate(
-        graph,
-        scene.parts(),
-        &scene.connection_plan().configurations,
-    )
+    evaluate(graph)
 }
 
-fn evaluate(
-    graph: Graph<'_>,
-    annotations: &[PartEntry],
-    configurations: &[botrail_model::compatibility::ConnectionSelection],
-) -> MountingReport {
+fn evaluate(graph: Graph<'_>) -> MountingReport {
     let mut report = MountingReport {
-        scope: "mechanical_assembly",
-        validator_version: VALIDATOR_VERSION,
-        input_hash: String::new(),
         ready: false,
         assemblies: Vec::new(),
         items: Vec::new(),
         kits: Vec::new(),
-        products: Vec::new(),
-        simulation: SimulationMounting::default(),
     };
-    let pins: Vec<_> = annotations
-        .iter()
-        .filter(|p| matches!(p.kind, PartTargetKind::Robot | PartTargetKind::Tool))
-        .collect();
-    for part in &graph.parts {
-        for pin in pins.iter().filter(|p| p.target == part.name) {
-            let Some(named) = &pin.part.catalog else {
-                continue;
-            };
-            let status = match part.catalog() {
-                Some((id, revision, _))
-                    if id != named.id
-                        || named.revision.as_deref().is_some_and(|r| r != revision) =>
-                {
-                    "fail"
-                }
-                Some(_) => "pass",
-                None => "unknown",
-            };
-            report.add(&part.name, "identity", status, "Authored catalog identity compared with the loaded model",
-                if status == "pass" { "" } else { "Load the intended product; set_part changes BOM identity only" },
-                json!({"loaded": part.catalog().map(|(id, revision, _)| json!({"id": id, "revision": revision})), "authored": named}));
-        }
-    }
     for edge in graph.edges.iter().filter(|e| e.role == MountRole::Tool) {
         let (path, complete_path) = graph.upstream(edge);
         report.assemblies.push(Assembly {
@@ -506,67 +326,13 @@ fn evaluate(
             offset: edge.offset.clone(),
             upstream_parts: path.iter().map(|&p| graph.parts[p].name.clone()).collect(),
         });
-        let base = edge.base.map(|i| &graph.parts[i]);
-        let tool = edge.tool.map(|i| &graph.parts[i]);
-        let flange = base.and_then(|p| p.face(&edge.flange, InterfaceRole::Flange));
-        let mount = tool.and_then(|p| p.face(&edge.mount, InterfaceRole::Mount));
-        let documented = flange
-            .zip(mount)
-            .zip(base.zip(tool))
-            .is_some_and(|((f, m), (b, t))| b.supported(&f.evidence) && t.supported(&m.evidence));
-        let ids = flange
-            .and_then(|f| f.interface_id.as_deref())
-            .zip(mount.and_then(|m| m.interface_id.as_deref()));
-        let status = match ids {
-            Some((a, b)) if documented => {
-                if a == b {
-                    "pass"
-                } else {
-                    "fail"
-                }
-            }
-            _ => "unknown",
+        let Some(tool) = edge.tool.map(|i| &graph.parts[i]) else {
+            continue;
         };
-        let message = match (status, ids) {
-            ("fail", Some((a, b))) => {
-                format!("Bare mating interfaces differ: flange {a}; mount {b}")
-            }
-            _ => "Declared bare mating interface identifiers compared".into(),
-        };
-        report.add(
-            &edge.target,
-            "interface",
-            status,
-            message,
-            if status == "pass" {
-                ""
-            } else {
-                "Provide the mating-face drawings and evidence, or select a compatible adapter"
-            },
-            json!({"flange": flange, "mount": mount,
-                "flange_sources": flange.zip(base).map(|(f, p)| p.evidence(&f.evidence)),
-                "mount_sources": mount.zip(tool).map(|(f, p)| p.evidence(&f.evidence))}),
-        );
-        let poses = mount.and_then(|m| m.allowed_poses.as_ref());
-        let pose_supported = mount
-            .zip(tool)
-            .is_some_and(|(m, t)| t.supported(&m.evidence));
-        let pose_status = match poses {
-            Some(poses) if pose_supported => {
-                if poses.iter().any(|p| pose_matches(p, &edge.offset)) {
-                    "pass"
-                } else {
-                    "fail"
-                }
-            }
-            _ => "unknown",
-        };
-        report.add(&edge.target, "pose", pose_status, "Attachment transform compared with explicitly permitted poses",
-            if pose_status == "pass" { "" } else { "Confirm the model frame convention and permitted mating pose; an offset does not add a physical adapter" },
-            json!({"actual": edge.offset, "allowed": poses, "numerical_tolerance": 1e-8,
-                "sources": mount.zip(tool).map(|(f, p)| p.evidence(&f.evidence))}));
         let requirements: Vec<_> = tool
-            .and_then(|p| p.meta.mounting.as_ref())
+            .meta
+            .mounting
+            .as_ref()
             .map(|m| {
                 m.requirements
                     .iter()
@@ -574,32 +340,20 @@ fn evaluate(
                     .collect()
             })
             .unwrap_or_default();
-        if requirements.is_empty() {
-            let complete = mount
-                .zip(tool)
-                .is_some_and(|(m, t)| m.requirements_complete && t.supported(&m.evidence));
-            report.add(&edge.target, "requirements", if complete { "pass" } else { "unknown" }, if complete { "Installation declaration requires no additional adapter" } else { "No mounting part requirements documented for this face" },
-                "Confirm the required coupling, bracket and supplied parts from the installation manual", json!({}));
-        } else if !mount
-            .zip(tool)
-            .is_some_and(|(m, t)| m.requirements_complete && t.supported(&m.evidence))
-        {
-            report.add(
-                &edge.target,
-                "requirements_coverage",
-                "unknown",
-                "Completeness of the required mounting parts is unconfirmed",
-                "Confirm that the installation declaration covers every required part",
-                json!({}),
-            );
-        }
         for req in requirements {
-            let tool = tool.expect("requirement has a catalog source");
             let order = tool
                 .meta
                 .order
                 .as_ref()
                 .and_then(|o| req.order_requires.and_then(|i| o.requires.get(i)));
+            let what = order
+                .and_then(|r| {
+                    r.part_number
+                        .clone()
+                        .or_else(|| r.catalog.clone())
+                        .or_else(|| r.category.clone())
+                })
+                .unwrap_or_else(|| req.id.clone());
             let mut found: Vec<_> = order
                 .and_then(|r| r.catalog.as_deref())
                 .map(|id| {
@@ -686,125 +440,33 @@ fn evaluate(
             } else {
                 "unknown"
             };
-            report.add(&edge.target, &format!("required:{}", req.id), status, req.note.clone(),
-                if status == "pass" { "" } else { "Specify and attach the required product on this tool's upstream path" },
+            let message = match status {
+                "pass" => format!("{what} is on the attachment path"),
+                "fail" => format!(
+                    "{what} is required between this tool and the robot flange but is not on the attachment path — {}",
+                    req.note
+                ),
+                _ => format!(
+                    "{what}: presence on the attachment path could not be established — {}",
+                    req.note
+                ),
+            };
+            report.add(&edge.target, &format!("required:{}", req.id), status, message,
+                if status == "pass" { "" } else { "Attach the required product — or the kit that includes it — between the robot flange and this tool" },
                 json!({"requirement": req, "order_requirement": order, "sources": tool.evidence(&req.evidence),
                     "alternative_sources": req.catalog_alternatives.iter().map(|a| json!({"catalog": a.catalog, "sources": tool.evidence(&a.evidence)})).collect::<Vec<_>>(),
                     "unconfirmed_alternatives": unconfirmed_alternatives.iter().map(|&p| &graph.parts[p].name).collect::<Vec<_>>(),
                     "upstream": path.iter().map(|&p| json!({"target": graph.parts[p].name, "catalog": graph.parts[p].catalog().map(|(id, rev, _)| json!({"id": id, "revision": rev}))})).collect::<Vec<_>>(),
                     "path_complete": complete_path, "found": found.iter().map(|&p| &graph.parts[p].name).collect::<Vec<_>>()}));
         }
-        fit::review(
-            &mut report,
-            &edge.target,
-            base,
-            tool,
-            flange,
-            mount,
-            &edge.offset,
-        );
-    }
-    // An unmounted standalone tool still has an unresolved mounting task.
-    for (index, part) in graph.parts.iter().enumerate() {
-        let is_tool = match part.meta.category.as_deref() {
-            Some(c) => c == "adapter" || c.starts_with("tool.") || c.starts_with("gripper."),
-            None => part
-                .meta
-                .mounting
-                .as_ref()
-                .is_some_and(|m| m.interfaces.iter().any(|f| f.role == InterfaceRole::Mount)),
-        };
-        if is_tool && !graph.edges.iter().any(|e| e.tool == Some(index)) {
-            report.add(
-                &part.name,
-                "unmounted",
-                "unknown",
-                "Tool has no declared incoming attachment",
-                "Attach this product to the intended robot or adapter",
-                json!({}),
-            );
-        }
     }
     for kit in &graph.kits {
-        kit::review(kit, &graph, &pins, configurations, &mut report);
+        kit::review(kit, &graph, &mut report);
     }
-    report.products = product::review(&graph, &pins, configurations);
-    report.simulation.connections = graph
-        .edges
-        .iter()
-        .filter(|e| e.role == MountRole::Tool)
-        .map(|edge| {
-            let (path, complete) = graph.upstream(edge);
-            // Stop at the arm's own mounting boundary: a pedestal or mobile
-            // base is not an adapter between that arm and its tool.
-            let adapters = path
-                .iter()
-                .take_while(|&&part| {
-                    graph
-                        .edges
-                        .iter()
-                        .any(|e| e.tool == Some(part) && e.role == MountRole::Tool)
-                })
-                .count();
-            let method = if !complete {
-                "unknown"
-            } else if adapters == 0 {
-                "direct"
-            } else if path[..adapters]
-                .iter()
-                .all(|&i| graph.parts[i].catalog().is_some())
-            {
-                "catalog_adapter"
-            } else {
-                "custom_adapter"
-            };
-            let basis = report.connection_basis(&edge.target);
-            let prefix = format!("mounting:{}:", edge.target);
-            let evidence_items = report
-                .items
-                .iter()
-                .filter(|item| item.status == "pass" && item.id.starts_with(&prefix))
-                .map(|item| item.id.clone())
-                .collect();
-            ConnectionSupport {
-                target: edge.target.clone(),
-                method,
-                basis,
-                evidence_items,
-            }
-        })
-        .collect();
-    if report.items.is_empty() {
-        report.add(
-            "cell",
-            "none",
-            "not_applicable",
-            "No end-effector attachments declared",
-            "",
-            json!({"scope_note": "Does not detect equipment omitted from the scene"}),
-        );
-    }
-    let inputs = json!({"validator_version": VALIDATOR_VERSION, "parts": graph.parts.iter().map(|p|
-        json!({"target": p.name, "catalog": p.catalog().map(|(id, revision, _)| json!({"id": id, "revision": revision})),
-            "mounting": p.meta.mounting, "order": p.meta.order, "sources": p.meta.sources,
-            "document": match p.source { RobotSource::Mounting { document, .. } => Some(document), _ => None }})).collect::<Vec<_>>(),
-        "assemblies": report.assemblies, "annotations": pins, "kits": report.kits, "products": report.products});
-    let bytes = serde_json::to_vec(&inputs).expect("mounting inputs");
-    let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
-    });
-    report.input_hash = format!("fnv1a64:{hash:016x}");
     report.ready = !report
         .items
         .iter()
-        .any(|i| matches!(i.status, "fail" | "unknown" | "not_run"));
-    report.simulation.blockers = report
-        .simulation_blockers()
-        .iter()
-        .map(|i| i.id.clone())
-        .collect();
-    report.simulation.ready =
-        !report.assemblies.is_empty() && report.simulation.blockers.is_empty();
+        .any(|i| matches!(i.status, "fail" | "unknown"));
     report
 }
 

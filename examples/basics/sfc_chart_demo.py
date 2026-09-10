@@ -23,7 +23,7 @@ gripper through edge conditions, so two columns scan side by side.
     .venv/bin/python examples/basics/sfc_chart_demo.py
 
 The built r2/ES-062 kit is downloaded on first use. TCP and close are
-re-taught from its geometry. `--robotiq-r2 CATALOG_ROOT` is a development override.
+re-taught from its geometry.
 
 Then, in the browser:
 
@@ -131,11 +131,11 @@ SCENERY = [
 ]
 
 
-def build_cell(*, robotiq_root: Path | None = None) -> bt.Scene:
+def build_cell() -> bt.Scene:
     """The cell: arm with gripper, belt structure, fixtures, the part, and
     the two field devices (transport zone + through-beam sensor)."""
-    arm = rq.load_arm(root=robotiq_root)
-    robot = rq.attach(arm, robotiq_root)
+    arm = rq.load_arm()
+    robot = rq.attach(arm)
     scene = bt.Scene(robot, base_position=(0.0, 0.0, BASE_Z))
     scene.set_joint_positions(READY)
 
@@ -322,9 +322,8 @@ def author_lamp(scene: bt.Scene) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--studio", action="store_true", help="open Studio (the default)")
-    rq.add_argument(parser)
-    args = parser.parse_args()
-    scene = build_cell(robotiq_root=args.robotiq_r2)
+    parser.parse_args()
+    scene = build_cell()
     teach(scene)
     author_pick(scene)
     author_lamp(scene)

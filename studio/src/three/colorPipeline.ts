@@ -11,7 +11,9 @@ type Channel = "view" | "pip" | "capture";
 export class ColorPipeline {
   private targets = new Map<Channel, THREE.WebGLRenderTarget>();
   private output = new OutputPass();
-  samples = 2;
+  /** MSAA on the HDR target: the canvas itself is created without
+   * antialiasing because every pixel goes through the OutputPass. */
+  samples = 4;
 
   render(
     gl: THREE.WebGLRenderer,

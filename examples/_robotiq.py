@@ -1,11 +1,11 @@
-"""Shared model selection for the Robotiq demos.
+"""Shared Robotiq r2 model selection for the demos.
 
-Normal runs download the built r2 hand and ES-062 kit from the catalog.
-The optional local root is retained for development builds.
+`attach` puts the catalog 2F-85 r2 on a host either as the purchased UR
+ES-062 kit or as the coupling and the hand on a custom bracket; `pads`
+and `close_for_width` are the pad list and the geometric close the demos
+share.
 """
 from __future__ import annotations
-
-from pathlib import Path
 
 import botrail as bt
 
@@ -15,28 +15,20 @@ COUPLING_ES062 = "robotiq/coupling/grp-es-cpl-062/r1"
 KIT_R2 = "robotiq/2f/2f-85-ur-es-062-kit/r2"
 
 
-def add_argument(parser):
-    parser.add_argument("--robotiq-r2", type=Path, metavar="CATALOG_ROOT",
-                        help="override the catalog r2 with a local development build")
+def load_arm(product=ARM):
+    return bt.Robot.from_catalog(product)
 
 
-def load_arm(product=ARM, root=None):
-    path = Path(root) / product if root is not None else None
-    return bt.Robot.from_package(path) if path is not None and path.is_dir() else bt.Robot.from_catalog(product)
+def load(product):
+    return bt.Robot.from_catalog(product)
 
 
-def load(product, root=None):
-    if root is None:
-        return bt.Robot.from_catalog(product)
-    return bt.Robot.from_package(Path(root) / product, catalog_root=Path(root))
-
-
-def attach(host, root=None, *, purchase_kit=True):
+def attach(host, *, purchase_kit=True):
     if purchase_kit:
-        return host.attach_tool(load(KIT_R2, root), prefix="kit_")
+        return host.attach_tool(load(KIT_R2), prefix="kit_")
     # A custom bracket does not inherit the UR purchase kit's support.
-    coupling = load(COUPLING_ES062, root)
-    hand = load(HAND_R2, root)
+    coupling = load(COUPLING_ES062)
+    hand = load(HAND_R2)
     tool = coupling.attach_tool(hand, prefix="gripper/", offset_quaternion=(
         0.0, 0.0, -0.7071067811865475, 0.7071067811865476))
     return host.attach_tool(tool, prefix="kit_")

@@ -391,9 +391,6 @@ impl SceneRobot {
 /// resolve a robot by name/index first (the bindings already do).
 #[derive(Clone)]
 pub struct Scene {
-    assembly_generation: u64,
-    /// Work authored against an earlier assembly. Results must be recomputed.
-    pub mounting_revalidation: Vec<String>,
     robots: Vec<SceneRobot>,
     /// Allowed collision pairs between links of different robots
     /// (`(robot, link)` keyed). Default: everything is checked.
@@ -451,8 +448,6 @@ impl Scene {
     /// is added.
     pub fn empty() -> Self {
         Self {
-            assembly_generation: 0,
-            mounting_revalidation: Vec::new(),
             robots: Vec::new(),
             inter_acm: InterRobotAcm::default(),
             obstacles: Vec::new(),
@@ -487,8 +482,6 @@ impl Scene {
         let (scene_robot, collision_warnings) = SceneRobot::new(name, robot, base);
         Self {
             robots: vec![scene_robot],
-            assembly_generation: 0,
-            mounting_revalidation: Vec::new(),
             inter_acm: InterRobotAcm::default(),
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),

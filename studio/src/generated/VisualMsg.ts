@@ -3,11 +3,11 @@ import type { GeometryMsg } from "./GeometryMsg";
 import type { PoseMsg } from "./PoseMsg";
 import type { VisualAssetMsg } from "./VisualAssetMsg";
 
-export type VisualMsg = {
+export type VisualMsg = { 
 /**
  * Link-local transform of this shape.
  */
-origin: PoseMsg, geometry: GeometryMsg, visual_asset?: VisualAssetMsg | null,
+origin: PoseMsg, geometry: GeometryMsg, visual_asset?: VisualAssetMsg | null, 
 /**
  * The colour the robot file authored for this visual (URDF material
  * or USD `displayColor`), linear RGB. Absent — the common case for

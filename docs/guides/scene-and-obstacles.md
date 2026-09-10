@@ -52,24 +52,14 @@ scene.set_obstacle_material("panel")                  # back to the viewer's cho
 scene.obstacle_material("panel")                      # (metalness, roughness) | None
 ```
 
-`opacity` is an optional value from 0 (transparent) to 1 (opaque). It survives
-project save/load, generated Python and USD export. `obstacle_opacity(name)`
-reads the override; `obstacle_material(name)` retains its `(metalness, roughness)`
-return value. This models a thin transparent cover without refraction. It
-does not change collisions or sensor detection.
-
-Both knobs use the 0–1 metallic/roughness convention of glTF, USD Preview
-Surface and three.js. Studio applies them to primitives and meshes. Colour
-changes and collision highlighting preserve the mesh's other material
-channels, including textures. An explicit metallic/roughness pair converts
-legacy OBJ/MTL shading to PBR while keeping its shared surface channels;
-MTL shininess and specular maps have no direct equivalent in that workflow.
-
-Finishes survive project save/load, generated Python, and USD export as
-`UsdPreviewSurface` metallic/roughness inputs. Imported USD meshes retain
-their original normals, UVs, material subsets and textures for display;
-an explicit scene finish overrides their metallic/roughness values. Clear
-the override to restore the source material. Metal is what
+`opacity` (0 transparent … 1 opaque) makes a window or a guard pane
+see-through; it is appearance only — collision and sensors see the solid —
+and `obstacle_opacity(name)` reads it back. Both knobs are the 0–1 pair that
+glTF, USD Preview Surface and three.js all speak, so they mean the same
+thing wherever the scene ends up: the studio applies them to primitives and
+meshes alike (a colour change or a collision highlight leaves a mesh's
+textures in place), a project and its generated Python carry them, and USD
+export writes them as `UsdPreviewSurface` inputs. Metal is what
 makes an unpainted body read as *metal* rather than as grey plastic: it
 reflects its surroundings instead of carrying a diffuse colour of its own.
 Appearance never touches collision or planning.

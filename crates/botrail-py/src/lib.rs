@@ -29,33 +29,6 @@ struct Robot {
 
 #[pymethods]
 impl Robot {
-    /// Read a versioned mechanical drawing JSON/YAML for an individual part.
-    /// The contents are embedded in this immutable Robot and saved projects.
-    fn with_mounting(&self, py: Python<'_>, path: PathBuf) -> PyResult<Self> {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))?;
-        let value = py.import("yaml")?.call_method1("safe_load", (text,))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("default", py.import("builtins")?.getattr("str")?)?;
-        let json: String = py
-            .import("json")?
-            .call_method("dumps", (value,), Some(&kwargs))?
-            .extract()?;
-        self._with_mounting_json(&json)
-    }
-
-    fn _with_mounting_json(&self, json: &str) -> PyResult<Self> {
-        let document = serde_json::from_str(json)
-            .map_err(|e| PyValueError::new_err(format!("mounting document: {e}")))?;
-        let model = self
-            .inner
-            .with_mounting(document)
-            .map_err(PyValueError::new_err)?;
-        Ok(Self {
-            inner: Arc::new(model),
-        })
-    }
-
     fn _mounting_report_json(&self) -> String {
         serde_json::to_string(&botrail_scene::mounting::report_robot(&self.inner))
             .expect("mounting report")
@@ -229,16 +202,6 @@ impl Robot {
     #[getter]
     fn name(&self) -> String {
         self.inner.name.clone()
-    }
-
-    /// Returns a copy with display shapes from a compatible model. Link leaf
-    /// names must match uniquely and zero-position link origins must agree.
-    /// Display shapes are rotated into the base's link frames. Existing
-    /// joints, collision shapes, TCP and catalog identity are retained.
-    fn with_visuals(&self, visual: &Robot) -> PyResult<Self> {
-        Ok(Self {
-            inner: Arc::new(self.inner.with_visuals(&visual.inner).map_err(model_err)?),
-        })
     }
 
     #[getter]
@@ -1334,67 +1297,6 @@ impl Scene {
         Ok(Robot {
             inner: self.hub.robot_model(0),
         })
-    }
-
-    /// Work requiring a fresh evaluation after the last assembly change.
-    #[getter]
-    fn mounting_revalidation(&self) -> Vec<String> {
-        use botrail_session::SessionHost;
-        self.hub
-            .with_scene(|scene| scene.mounting_revalidation.clone())
-    }
-
-    #[pyo3(signature = (candidate, robot=None))]
-    fn _mounting_preview(
-        &self,
-        candidate: &Robot,
-        robot: Option<&str>,
-    ) -> PyResult<(Scene, String)> {
-        use botrail_session::SessionHost;
-        let index = self.resolve_robot(robot)?;
-        let snapshot = self.hub.snapshot();
-        let preview = botrail_scene::mounting::edit::preview(
-            &snapshot,
-            &snapshot.robots()[index].name,
-            candidate.inner.clone(),
-        )
-        .map_err(PyValueError::new_err)?;
-        Ok((
-            Scene {
-                hub: Arc::new(hub::SceneHub::new(preview.candidate)),
-                robot: Some(candidate.clone()),
-            },
-            preview.data.to_string(),
-        ))
-    }
-
-    #[pyo3(signature = (candidate, base_revision, candidate_revision, robot=None))]
-    fn _mounting_apply(
-        &self,
-        candidate: &Robot,
-        base_revision: &str,
-        candidate_revision: &str,
-        robot: Option<&str>,
-    ) -> PyResult<()> {
-        use botrail_session::SessionHost;
-        let index = self.resolve_robot(robot)?;
-        self.hub
-            .with_scene(|scene| {
-                let name = scene.robots()[index].name.clone();
-                botrail_scene::mounting::edit::apply(
-                    scene,
-                    &name,
-                    candidate.inner.clone(),
-                    base_revision,
-                    candidate_revision,
-                )
-            })
-            .map_err(PyValueError::new_err)?;
-        self.hub.invalidate_mounting_results();
-        for message in botrail_session::initial_messages(self.hub.as_ref()) {
-            self.hub.emit(&message);
-        }
-        Ok(())
     }
 
     /// Instance names of every robot in the scene, in insertion order.
@@ -3906,7 +3808,6 @@ impl Scene {
                 .extract()?;
             files.push(Deliverable {
                 path: path.display().to_string(),
-                origin: "external_attachment".to_string(),
                 sha256: Some(digest),
                 bytes: Some(bytes.len() as u64),
             });
@@ -4228,11 +4129,6 @@ impl Scene {
                     );
                 }
                 RobotSource::Catalog { inner, .. } => source_paths(inner, paths)?,
-                RobotSource::Mounting { base, .. } => source_paths(base, paths)?,
-                RobotSource::Visuals { base, visual } => {
-                    source_paths(base, paths)?;
-                    source_paths(visual, paths)?;
-                }
                 RobotSource::Composite { base, tool, .. } => {
                     source_paths(base, paths)?;
                     source_paths(tool, paths)?;
@@ -9616,35 +9512,6 @@ impl ToolpathReport {
 /// the descriptions. Write it out for an editor or hand it to an agent
 /// that authors projects directly.
 #[pyfunction]
-fn _connection_compatibility_json(manifest: &str, host: &str, selection: &str) -> PyResult<String> {
-    #[derive(serde::Deserialize)]
-    struct Input {
-        id: String,
-        #[serde(default)]
-        compatibility: botrail_model::compatibility::Compatibility,
-        #[serde(default)]
-        order: Option<botrail_model::mounting::CatalogOrder>,
-        #[serde(default)]
-        sources: Vec<botrail_model::mounting::CatalogSource>,
-    }
-    let input: Input =
-        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let selected: Option<botrail_model::compatibility::ConnectionSelection> =
-        serde_json::from_str(selection).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    input
-        .compatibility
-        .validate(&input.sources, input.order.as_ref())
-        .map_err(PyValueError::new_err)?;
-    if let Some(s) = &selected {
-        s.validate().map_err(PyValueError::new_err)?;
-    }
-    Ok(input
-        .compatibility
-        .review(&input.id, Some(host), selected.as_ref(), &input.sources)
-        .to_string())
-}
-
-#[pyfunction]
 fn project_schema() -> String {
     botrail_scene::project::ProjectFile::json_schema()
 }
@@ -9715,7 +9582,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(serve_studio, m)?)?;
     m.add_function(wrap_pyfunction!(catalog::catalog_package, m)?)?;
     m.add_function(wrap_pyfunction!(project_schema, m)?)?;
-    m.add_function(wrap_pyfunction!(_connection_compatibility_json, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_gcode_json, m)?)?;
     m.add_function(wrap_pyfunction!(_parse_apt_json, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

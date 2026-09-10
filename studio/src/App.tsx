@@ -2,7 +2,6 @@ import { Header } from "./components/Header";
 import { IoNodePanel } from "./components/IoNodePanel";
 import { JointPanel } from "./components/JointPanel";
 import { MotionPanel } from "./components/MotionPanel";
-import { MountingInspector } from "./components/MountingInspector";
 import { ObstaclePanel } from "./components/ObstaclePanel";
 import { RobotPanel } from "./components/RobotPanel";
 import { SceneTreePanel } from "./components/SceneTreePanel";
@@ -64,7 +63,6 @@ export function App() {
           {activeTab === "sequence" && <SequencePanel />}
         </aside>
       </div>
-      <MountingInspector />
     </div>
   );
 }

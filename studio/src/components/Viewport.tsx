@@ -33,8 +33,6 @@ import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
-import { RENDER_QUALITY } from "../three/renderQuality";
-import { colorPipeline } from "../three/colorPipeline";
 import { floorFinish } from "../three/floorFinish";
 
 /**
@@ -78,8 +76,6 @@ function IndoorLighting() {
 }
 
 export function Viewport() {
-  const mountingOpen = useStudioStore((s) => s.mountingOpen);
-  const quality = useStudioStore((s) => s.renderQuality);
   const connected = useStudioStore((s) => s.connection === "connected");
   const selection = useStudioStore((s) => s.selection);
   const multi = useStudioStore((s) => s.robots.length > 1);
@@ -137,10 +133,9 @@ export function Viewport() {
       onDrop={onDrop}
     >
       <Canvas
-        frameloop={mountingOpen ? "never" : "always"}
         shadows="soft"
         gl={{ antialias: false }}
-        dpr={[1, RENDER_QUALITY[quality].dpr]}
+        dpr={[1, 2]}
         camera={{
           position: [1.6, -1.6, 1.2],
           up: [0, 0, 1],
@@ -152,13 +147,12 @@ export function Viewport() {
       >
         <color attach="background" args={["#15171c"]} />
         <CameraRigBridge />
-        <RenderQuality />
         {/* The environment map does the ambient work, so the lights below it
             are only the key and a fill; stacking a bright ambient on top of
             an IBL is what flattens a scene out. */}
         <IndoorLighting />
         <ambientLight intensity={0.12} />
-        {/* Shadow bounds follow the cell; quality controls map resolution. */}
+        {/* Shadow bounds follow the cell. */}
         <ShadowFollow />
         {/* Fill from the opposite side so the shadowed faces don't go flat. */}
         <directionalLight position={[-3, -2, 2]} intensity={0.3} />
@@ -253,15 +247,6 @@ export function Viewport() {
   );
 }
 
-function RenderQuality() {
-  const gl = useThree((s) => s.gl);
-  const quality = useStudioStore((s) => s.renderQuality);
-  useEffect(() => {
-    colorPipeline(gl).samples = RENDER_QUALITY[quality].samples;
-  }, [gl, quality]);
-  return null;
-}
-
 function Floor() {
   const gl = useThree((s) => s.gl);
   const maps = useMemo(() => floorFinish(gl.capabilities.getMaxAnisotropy()), [gl]);
@@ -288,6 +273,11 @@ function Floor() {
   </mesh>;
 }
 
+/** One shadow map resolution for every machine: the frustum below is
+ * clamped to at most a 52 m square, and 2048 px keeps a robot-sized
+ * shadow crisp across that range. */
+const SHADOW_MAP_SIZE = 2048;
+
 /** The key light, with its shadow frustum resized to the scene.
  *
  * Obstacles change rarely (authoring), so this recomputes on the obstacle
@@ -295,8 +285,6 @@ function Floor() {
  * padded for the arms, clamped so a lone robot keeps a crisp map and a
  * 25 m line still lands entirely inside the frustum. */
 function ShadowFollow() {
-  const quality = useStudioStore((s) => s.renderQuality);
-  const shadowSize = RENDER_QUALITY[quality].shadowSize;
   const light = useRef<THREE.DirectionalLight | null>(null);
   const obstacles = useStudioStore((s) => s.obstacles);
   const robots = useStudioStore((s) => s.robots);
@@ -345,21 +333,13 @@ function ShadowFollow() {
     l.shadow.needsUpdate = true;
   }, [frame]);
 
-  useEffect(() => {
-    const shadow = light.current?.shadow;
-    if (!shadow) return;
-    shadow.map?.dispose();
-    shadow.map = null;
-    shadow.mapSize.set(shadowSize, shadowSize);
-    shadow.needsUpdate = true;
-  }, [shadowSize]);
-
   return (
     <directionalLight
       ref={light}
       position={[6, 5, 9]}
       intensity={1.35}
       castShadow
+      shadow-mapSize={[SHADOW_MAP_SIZE, SHADOW_MAP_SIZE]}
       shadow-bias={-0.00015}
       shadow-normalBias={0.003}
       shadow-camera-near={0.1}

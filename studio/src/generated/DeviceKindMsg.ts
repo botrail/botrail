@@ -6,32 +6,32 @@ import type { VehiclePathMsg } from "./VehiclePathMsg";
 import type { VehicleTrayMsg } from "./VehicleTrayMsg";
 import type { VehicleWheel } from "./VehicleWheel";
 
-export type DeviceKindMsg = { "kind": "conveyor", zone_pose: PoseMsg, zone_size: [number, number, number], velocity: [number, number, number], running: boolean, } | { "kind": "linear_axis", objects: Array<string>, axis: [number, number, number], speed: number, position: number, range: [number, number], stops: Array<LiftStopMsg>, } | { "kind": "source", pool: Array<string>, park: PoseMsg, pitch: [number, number, number], pose: PoseMsg, interval: number, running: boolean, } | { "kind": "sink", zone_pose: PoseMsg, zone_size: [number, number, number], source: string, } | { "kind": "vehicle", path: VehiclePathMsg, wheels?: Array<VehicleWheel>, body: Array<string>, speed: number, turn_speed: number, start: string,
+export type DeviceKindMsg = { "kind": "conveyor", zone_pose: PoseMsg, zone_size: [number, number, number], velocity: [number, number, number], running: boolean, } | { "kind": "linear_axis", objects: Array<string>, axis: [number, number, number], speed: number, position: number, range: [number, number], stops: Array<LiftStopMsg>, } | { "kind": "source", pool: Array<string>, park: PoseMsg, pitch: [number, number, number], pose: PoseMsg, interval: number, running: boolean, } | { "kind": "sink", zone_pose: PoseMsg, zone_size: [number, number, number], source: string, } | { "kind": "vehicle", path: VehiclePathMsg, wheels?: Array<VehicleWheel>, body: Array<string>, speed: number, turn_speed: number, start: string, 
 /**
  * May it drive a leg backwards instead of turning around for it?
  */
-allow_reverse?: boolean,
+allow_reverse?: boolean, 
 /**
  * Steepest grade the drive may climb, as rise over horizontal run
  * (0.10 = 10 %). Absent means level paths only.
  */
-max_grade?: number | null,
+max_grade?: number | null, 
 /**
  * Holonomic drive: the machine translates while holding its
  * heading — no pivot turns. `allow_reverse` is then unused;
  * `max_grade` still applies (it is a ground drive).
  */
-holonomic?: boolean,
+holonomic?: boolean, 
 /**
  * Aerial drive: present means the machine flies its legs (z free,
  * each axis at its own rate); `allow_reverse` / `max_grade` are
  * then unused.
  */
-aerial?: AerialMsg | null,
+aerial?: AerialMsg | null, 
 /**
  * Load deck in the vehicle frame: pose plus full size.
  */
-tray?: VehicleTrayMsg | null, } | { "kind": "lift", car: Array<string>,
+tray?: VehicleTrayMsg | null, } | { "kind": "lift", car: Array<string>, 
 /**
  * Capture zone at the reference position (`position = 0`).
  */

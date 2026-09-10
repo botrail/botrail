@@ -84,13 +84,6 @@
         "$ref": "#/$defs/MotionMsg"
       }
     },
-    "mounting_revalidation": {
-      "description": "Authored work requiring a fresh evaluation after an assembly change.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
     "obstacles": {
       "type": "array",
       "items": {
@@ -852,13 +845,6 @@
     "Compatibility": {
       "type": "object",
       "properties": {
-        "connections": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ConnectionProfile"
-          }
-        },
         "mounts": {
           "type": "array",
           "default": [],
@@ -1115,81 +1101,9 @@
         "target"
       ]
     },
-    "ConnectionCondition": {
-      "type": "object",
-      "properties": {
-        "accepted": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/MountEvidence"
-          }
-        },
-        "field": {
-          "$ref": "#/$defs/ConnectionField"
-        },
-        "maximum": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        },
-        "minimum": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        },
-        "note": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "field",
-        "evidence"
-      ]
-    },
-    "ConnectionField": {
-      "type": "string",
-      "enum": [
-        "controller",
-        "wrist_connector",
-        "pinout",
-        "voltage_v",
-        "current_a",
-        "peak_current_a",
-        "protocol",
-        "signal_logic",
-        "software_family",
-        "software_version",
-        "plugin",
-        "plugin_version"
-      ]
-    },
     "ConnectionPlan": {
       "type": "object",
       "properties": {
-        "configurations": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ConnectionSelection"
-          }
-        },
         "links": {
           "type": "array",
           "default": [],
@@ -1206,106 +1120,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "ConnectionProfile": {
-      "type": "object",
-      "properties": {
-        "conditions": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ConnectionCondition"
-          }
-        },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/MountEvidence"
-          }
-        },
-        "host": {
-          "type": "string"
-        },
-        "id": {
-          "type": "string"
-        },
-        "not_applicable": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Scope"
-          }
-        },
-        "note": {
-          "type": "string"
-        },
-        "part_number": {
-          "type": "string"
-        },
-        "support": {
-          "$ref": "#/$defs/Support"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "host",
-        "part_number",
-        "support",
-        "evidence",
-        "note"
-      ]
-    },
-    "ConnectionSelection": {
-      "description": "Recorded on the existing scene ConnectionPlan. Identity is pinned so\nreplacing an arm or kit cannot reuse the former configuration silently.",
-      "type": "object",
-      "properties": {
-        "catalog": {
-          "type": "string"
-        },
-        "host": {
-          "type": "string"
-        },
-        "profile": {
-          "type": "string"
-        },
-        "reference": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "target": {
-          "type": "string"
-        },
-        "values": {
-          "type": "object",
-          "properties": {
-            "controller": true,
-            "current_a": true,
-            "peak_current_a": true,
-            "pinout": true,
-            "plugin": true,
-            "plugin_version": true,
-            "protocol": true,
-            "signal_logic": true,
-            "software_family": true,
-            "software_version": true,
-            "voltage_v": true,
-            "wrist_connector": true
-          },
-          "additionalProperties": false,
-          "default": {}
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "target",
-        "catalog",
-        "host",
-        "profile"
-      ]
     },
     "ConstraintMsg": {
       "description": "A TCP path constraint (see `motion::Constraint`).",
@@ -1867,25 +1681,6 @@
         "kind"
       ]
     },
-    "DimensionRange": {
-      "description": "Explicit dimensional bounds. Equal bounds describe a nominal value only;\ndimensional completeness must also be established by the source drawing.",
-      "type": "object",
-      "properties": {
-        "max": {
-          "type": "number",
-          "format": "double"
-        },
-        "min": {
-          "type": "number",
-          "format": "double"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "min",
-        "max"
-      ]
-    },
     "Electrical": {
       "description": "Electrical facts about a channel or a field device: what a lint can\ncompare when both sides state them.",
       "type": "object",
@@ -1909,68 +1704,6 @@
           "format": "double"
         }
       }
-    },
-    "FastenerRules": {
-      "type": "object",
-      "properties": {
-        "head_standard": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "length_mm": {
-          "description": "Optional manufacturer-prescribed screw length, under the head.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "min_engagement_mm": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        },
-        "property_class": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "thread": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MountThread"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "torque_nm": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false
     },
     "FaultMsg": {
       "description": "A forced input of a scenario: a contact stuck at a value, or an open\nwire (input level low — the functional value follows the binding's\npolarity).",
@@ -2468,13 +2201,6 @@
         "name",
         "tip",
         "joints"
-      ]
-    },
-    "HoleKind": {
-      "type": "string",
-      "enum": [
-        "clearance",
-        "threaded"
       ]
     },
     "InterfacePair": {
@@ -3247,15 +2973,6 @@
         "unknown"
       ]
     },
-    "LocatorKind": {
-      "type": "string",
-      "enum": [
-        "boss",
-        "recess",
-        "pin",
-        "hole"
-      ]
-    },
     "Logic": {
       "type": "string",
       "enum": [
@@ -3349,74 +3066,6 @@
         "catalog"
       ]
     },
-    "MountBox": {
-      "type": "object",
-      "properties": {
-        "center_mm": {
-          "type": "array",
-          "items": {
-            "type": "number",
-            "format": "double"
-          },
-          "maxItems": 3,
-          "minItems": 3
-        },
-        "id": {
-          "type": "string"
-        },
-        "size_mm": {
-          "type": "array",
-          "items": {
-            "type": "number",
-            "format": "double"
-          },
-          "maxItems": 3,
-          "minItems": 3
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "center_mm",
-        "size_mm"
-      ]
-    },
-    "MountClearance": {
-      "type": "object",
-      "properties": {
-        "access": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountBox"
-          }
-        },
-        "complete": {
-          "description": "Conservative solids and every required access space for this joint.",
-          "type": "boolean",
-          "default": false
-        },
-        "evidence": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountEvidence"
-          }
-        },
-        "frame_verified": {
-          "type": "boolean",
-          "default": false
-        },
-        "solids": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountBox"
-          }
-        }
-      },
-      "additionalProperties": false
-    },
     "MountEvidence": {
       "type": "object",
       "properties": {
@@ -3437,204 +3086,8 @@
         "section"
       ]
     },
-    "MountFastener": {
-      "type": "object",
-      "properties": {
-        "evidence": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountEvidence"
-          }
-        },
-        "head_standard": {
-          "type": "string"
-        },
-        "holes": {
-          "description": "Hole IDs on the clearance-hole side. One screw per listed hole.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "length_mm": {
-          "$ref": "#/$defs/DimensionRange"
-        },
-        "property_class": {
-          "type": "string"
-        },
-        "thread": {
-          "$ref": "#/$defs/MountThread"
-        },
-        "torque_nm": {
-          "$ref": "#/$defs/DimensionRange"
-        },
-        "washer_mm": {
-          "description": "Explicitly zero when no washer is used.",
-          "$ref": "#/$defs/DimensionRange"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "holes",
-        "thread",
-        "head_standard",
-        "property_class",
-        "length_mm",
-        "washer_mm",
-        "torque_nm"
-      ]
-    },
-    "MountGeometry": {
-      "type": "object",
-      "properties": {
-        "complete": {
-          "description": "All mating features and their tolerances are covered by the drawing.",
-          "type": "boolean",
-          "default": false
-        },
-        "evidence": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountEvidence"
-          }
-        },
-        "frame_verified": {
-          "type": "boolean",
-          "default": false
-        },
-        "holes": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountHole"
-          }
-        },
-        "locators": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/MountLocator"
-          }
-        },
-        "normal_z": {
-          "description": "Outward surface normal along local Z: exactly +1 or -1.",
-          "type": "integer",
-          "format": "int8",
-          "maximum": 127,
-          "minimum": -128
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "normal_z"
-      ]
-    },
-    "MountHole": {
-      "type": "object",
-      "properties": {
-        "depth_mm": {
-          "description": "Maximum usable tip depth from the mating plane, including bottom allowance.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "diameter_mm": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "fastener_rules": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FastenerRules"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "grip_mm": {
-          "description": "Bearing surface to mating face, accounting for any counterbore.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/HoleKind"
-        },
-        "position_mm": {
-          "description": "XY coordinates in the mating plane of this link, millimetres.",
-          "type": "array",
-          "items": {
-            "type": "number",
-            "format": "double"
-          },
-          "maxItems": 2,
-          "minItems": 2
-        },
-        "position_tolerance_mm": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        },
-        "thread": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MountThread"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "thread_start_mm": {
-          "description": "Unthreaded distance from the mating plane to the first usable receiver\nthread. Omitted = threads start at the plane (the original contract).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "position_mm",
-        "kind"
-      ]
-    },
     "MountInterface": {
+      "description": "A mating face the manifest names. Drawing-level detail a manifest may\ncarry for it (hole patterns, fasteners, envelopes) is not read here.",
       "type": "object",
       "properties": {
         "allowed_poses": {
@@ -3648,16 +3101,6 @@
             "$ref": "#/$defs/MountPose"
           }
         },
-        "clearance": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MountClearance"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "evidence": {
           "type": "array",
           "default": [],
@@ -3665,24 +3108,8 @@
             "$ref": "#/$defs/MountEvidence"
           }
         },
-        "fasteners": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/MountFastener"
-          }
-        },
         "frame": {
           "type": "string"
-        },
-        "geometry": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MountGeometry"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "interface_id": {
           "description": "Shared identifier of the bare mating interface. None = not known.",
@@ -3708,67 +3135,9 @@
           "$ref": "#/$defs/InterfaceRole"
         }
       },
-      "additionalProperties": false,
       "required": [
         "frame",
         "role"
-      ]
-    },
-    "MountLocator": {
-      "type": "object",
-      "properties": {
-        "depth_mm": {
-          "description": "Projection height (boss/pin) or usable recess/hole depth.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "diameter_mm": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DimensionRange"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/LocatorKind"
-        },
-        "position_mm": {
-          "type": "array",
-          "items": {
-            "type": "number",
-            "format": "double"
-          },
-          "maxItems": 2,
-          "minItems": 2
-        },
-        "position_tolerance_mm": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "kind",
-        "position_mm"
       ]
     },
     "MountPose": {
@@ -3863,69 +3232,6 @@
       "enum": [
         "tool",
         "arm"
-      ]
-    },
-    "MountThread": {
-      "type": "object",
-      "properties": {
-        "diameter_mm": {
-          "type": "number",
-          "format": "double"
-        },
-        "left_hand": {
-          "type": "boolean",
-          "default": false
-        },
-        "pitch_mm": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double",
-          "default": null
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "diameter_mm"
-      ]
-    },
-    "MountingDocument": {
-      "type": "object",
-      "properties": {
-        "mounting": {
-          "$ref": "#/$defs/MountingSpec"
-        },
-        "order": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CatalogOrder"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "revision": {
-          "type": "string"
-        },
-        "schema_version": {
-          "type": "string"
-        },
-        "sources": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/CatalogSource"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "revision",
-        "mounting"
       ]
     },
     "MountingSpec": {
@@ -4712,46 +4018,6 @@
       "description": "Where a project robot comes from.",
       "oneOf": [
         {
-          "type": "object",
-          "properties": {
-            "base": {
-              "$ref": "#/$defs/RobotSourceMsg"
-            },
-            "document": {
-              "$ref": "#/$defs/MountingDocument"
-            },
-            "kind": {
-              "type": "string",
-              "const": "mounting"
-            }
-          },
-          "required": [
-            "kind",
-            "base",
-            "document"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "base": {
-              "$ref": "#/$defs/RobotSourceMsg"
-            },
-            "kind": {
-              "type": "string",
-              "const": "visuals"
-            },
-            "visual": {
-              "$ref": "#/$defs/RobotSourceMsg"
-            }
-          },
-          "required": [
-            "kind",
-            "base",
-            "visual"
-          ]
-        },
-        {
           "description": "URDF XML (xacro already expanded), embedded verbatim.",
           "type": "object",
           "properties": {
@@ -4809,7 +4075,6 @@
             "compatibility": {
               "$ref": "#/$defs/Compatibility",
               "default": {
-                "connections": [],
                 "mounts": [],
                 "programs": [],
                 "requires_adapter": []
@@ -5090,14 +4355,6 @@
       "required": [
         "name",
         "value"
-      ]
-    },
-    "Scope": {
-      "type": "string",
-      "enum": [
-        "electrical",
-        "communication",
-        "software"
       ]
     },
     "SegmentKindMsg": {
@@ -5605,14 +4862,6 @@
         "name",
         "actions",
         "transition"
-      ]
-    },
-    "Support": {
-      "type": "string",
-      "enum": [
-        "supported",
-        "unsupported",
-        "unknown"
       ]
     },
     "ToolMoveMsg": {

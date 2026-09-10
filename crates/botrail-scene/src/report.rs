@@ -187,11 +187,10 @@ pub struct DoorSummary {
     pub driven: bool,
 }
 
-/// A caller-supplied attachment. A digest verifies bytes, not its input revision.
+/// A file written from this cell, with its size and digest.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Deliverable {
     pub path: String,
-    pub origin: String,
     pub sha256: Option<String>,
     pub bytes: Option<u64>,
 }
@@ -502,9 +501,7 @@ fn catalog_identity(
                 .find(|(k, _)| k == "reach_mm")
                 .map(|(_, v)| v / 1000.0),
         ),
-        RobotSource::Composite { base, .. }
-        | RobotSource::Visuals { base, .. }
-        | RobotSource::Mounting { base, .. } => catalog_identity(base),
+        RobotSource::Composite { base, .. } => catalog_identity(base),
         _ => (None, None, None, None),
     }
 }
@@ -946,7 +943,7 @@ impl CellReport {
 
         // ---- deliverables ----------------------------------------------
         if !self.deliverables.is_empty() {
-            out.push_str("\n## Deliverables\n\nExternal attachments: file digests do not verify a common input revision.\n\n| file | bytes | sha256 |\n|---|---|---|\n");
+            out.push_str("\n## Deliverables\n\n| file | bytes | sha256 |\n|---|---|---|\n");
             for d in &self.deliverables {
                 let _ = writeln!(
                     out,
@@ -1009,7 +1006,6 @@ mod tests {
             }],
             deliverables: vec![Deliverable {
                 path: "bom.csv".into(),
-                origin: "external_attachment".into(),
                 sha256: Some("abc".into()),
                 bytes: Some(120),
             }],

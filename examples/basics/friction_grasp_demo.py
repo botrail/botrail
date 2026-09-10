@@ -31,11 +31,10 @@ Teaching notes, both measured on the catalog 2F-85:
   a weld (G1); holding by friction needs ~2 mm.
 
 Run with:  python examples/basics/friction_grasp_demo.py [out.usda] [--studio]
-                                                    [--robotiq-r2 CATALOG_ROOT]
-Normal runs download the built r2/ES-062 assembly and re-teach the close.
-The optional root overrides it with a local development build. r2 does not
-declare a calibrated effort limit. The teaching notes above originated with
-the r1 reference; closing positions are taught from the loaded geometry.
+The run downloads the built r2/ES-062 assembly and re-teaches the close.
+r2 does not declare a calibrated effort limit. The teaching notes above
+originated with the r1 reference; closing positions are taught from the
+loaded geometry.
 """
 
 import argparse
@@ -50,7 +49,6 @@ import _robotiq as rq
 parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 parser.add_argument("out", nargs="?", default="friction_grasp.usda")
 parser.add_argument("--studio", action="store_true")
-rq.add_argument(parser)
 args = parser.parse_args()
 
 # --- the gripper_pick_demo cell, unchanged --------------------------------
@@ -67,9 +65,8 @@ DOWN = (1.0, 0.0, 0.0, 0.0)
 OPEN = 0.0
 READY = [0.0, -1.9, 1.8, -1.5, -1.57, 0.0, OPEN]
 
-arm = rq.load_arm(root=args.robotiq_r2)
-scene = bt.Scene(rq.attach(arm, args.robotiq_r2),
-                 base_position=(0.0, 0.0, BASE_Z))
+arm = rq.load_arm()
+scene = bt.Scene(rq.attach(arm), base_position=(0.0, 0.0, BASE_Z))
 scene.set_joint_positions(READY)
 
 scene.add_box("floor", size=(2.4, 2.4, 0.05), position=(0.2, 0.0, -0.025),

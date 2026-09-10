@@ -67,7 +67,9 @@ pytestmark = pytest.mark.skipif(
 # datum and sweep tests — the dn-attitude tabs drifted into the closing
 # electrodes). Gated on the beam, the body boards before the pitch is
 # commanded and lands to 1e-9 — not one scan short, not one past.
-GOLDEN_CYCLE = 182.50
+# Re-pinned 2026-09-10 (was 182.50): the collision layer now builds hull pieces
+# on the mesh surface instead of voxel corners, which moved this planned cycle.
+GOLDEN_CYCLE = 187.68
 CYCLE_BUDGET = 1.0
 
 

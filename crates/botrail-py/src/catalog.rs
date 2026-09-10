@@ -660,9 +660,7 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         serde_json::from_str(&field("compatibility")?)
             .map_err(|e| err(format!("{}: compatibility: {e}", path.display())))?;
     let compatibility = compatibility.unwrap_or_default();
-    compatibility
-        .validate(&sources, order.as_ref())
-        .map_err(err)?;
+    compatibility.validate(&sources).map_err(err)?;
     let electrical =
         serde_json::from_str(&field("electrical")?).map_err(|e| err(format!("electrical: {e}")))?;
     let kind: Option<String> =

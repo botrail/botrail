@@ -29,14 +29,11 @@ decompositions**: triangle-mesh-vs-triangle-mesh testing misses containment
 and mis-reports distance, so every mesh is decomposed into convex pieces
 (about a second per mesh on first load, cached on disk afterwards). The studio
 still renders the original mesh — only the collision layer sees the
-decomposition. Each piece follows the source mesh surface rather than the outer
-corners of its voxels, which avoids adding a resolution-dependent envelope to
-small gaps. These pieces still approximate concavities; simplified or incomplete
-input meshes can lose clearance or solid interiors. Inspect collision geometry
-and test both clearance and actual obstacle penetration before relying on a
-model. Exact zero-gap contact can be reported as a collision.
-
-The updated hull construction invalidates the previous disk cache automatically.
+decomposition. The pieces hug the mesh surface rather than the corners of
+the voxels they were grown from, so a small gap keeps its clearance instead
+of gaining a resolution-dependent skin — and two faces in exact zero-gap
+contact count as touching. Concavities are still approximated, and a mesh
+with holes in it can lose its solid interior.
 
 Anything that could not be prepared for collision is listed, not silently
 dropped:

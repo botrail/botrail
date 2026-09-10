@@ -65,14 +65,6 @@ pub struct CatalogArmMsg {
 // Persisted provenance mirrors RobotSource; retain the public field types.
 #[allow(clippy::large_enum_variant)]
 pub enum RobotSourceMsg {
-    Mounting {
-        base: Box<RobotSourceMsg>,
-        document: Box<botrail_model::mounting::MountingDocument>,
-    },
-    Visuals {
-        base: Box<RobotSourceMsg>,
-        visual: Box<RobotSourceMsg>,
-    },
     /// URDF XML (xacro already expanded), embedded verbatim.
     Urdf { xml: String },
     /// USD stage reference (local path until asset bundling lands). The
@@ -236,14 +228,9 @@ impl RobotSourceMsg {
                 Ok(())
             }
             Self::Catalog { inner, .. } => inner.visit_urdf_paths_mut(f),
-            Self::Mounting { base, .. } => base.visit_urdf_paths_mut(f),
             Self::Composite { base, tool, .. } => {
                 base.visit_urdf_paths_mut(f)?;
                 tool.visit_urdf_paths_mut(f)
-            }
-            Self::Visuals { base, visual } => {
-                base.visit_urdf_paths_mut(f)?;
-                visual.visit_urdf_paths_mut(f)
             }
             Self::Usd { .. } => Ok(()),
         }
@@ -257,14 +244,9 @@ impl RobotSourceMsg {
         match self {
             Self::Usd { path, .. } => f(path),
             Self::Catalog { inner, .. } => inner.visit_usd_paths_mut(f),
-            Self::Mounting { base, .. } => base.visit_usd_paths_mut(f),
             Self::Composite { base, tool, .. } => {
                 base.visit_usd_paths_mut(f)?;
                 tool.visit_usd_paths_mut(f)
-            }
-            Self::Visuals { base, visual } => {
-                base.visit_usd_paths_mut(f)?;
-                visual.visit_usd_paths_mut(f)
             }
             Self::Urdf { .. } => Ok(()),
         }
@@ -273,8 +255,6 @@ impl RobotSourceMsg {
 
 fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
     match source {
-        botrail_model::RobotSource::Visuals { base, .. }
-        | botrail_model::RobotSource::Mounting { base, .. } => source_declares_groups(base),
         botrail_model::RobotSource::Composite {
             base,
             tool,
@@ -297,14 +277,6 @@ fn source_declares_groups(source: &botrail_model::RobotSource) -> bool {
 /// [`RobotSourceMsg`] from a model's provenance record.
 pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
     match source {
-        botrail_model::RobotSource::Mounting { base, document } => RobotSourceMsg::Mounting {
-            base: Box::new(robot_source_msg(base)),
-            document: document.clone(),
-        },
-        botrail_model::RobotSource::Visuals { base, visual } => RobotSourceMsg::Visuals {
-            base: Box::new(robot_source_msg(base)),
-            visual: Box::new(robot_source_msg(visual)),
-        },
         botrail_model::RobotSource::UrdfXml(xml) => RobotSourceMsg::Urdf { xml: xml.clone() },
         botrail_model::RobotSource::Usd {
             path,
@@ -403,12 +375,6 @@ pub fn model_from_source(
     import_usd: &dyn Fn(&str, &str) -> Result<botrail_model::RobotModel, String>,
 ) -> Result<botrail_model::RobotModel, ProjectError> {
     match msg {
-        RobotSourceMsg::Mounting { base, document } => model_from_source(base, import_usd)?
-            .with_mounting((**document).clone())
-            .map_err(ProjectError::Robot),
-        RobotSourceMsg::Visuals { base, visual } => model_from_source(base, import_usd)?
-            .with_visuals(&model_from_source(visual, import_usd)?)
-            .map_err(|e| ProjectError::Robot(e.to_string())),
         RobotSourceMsg::Urdf { xml } => botrail_model::RobotModel::from_urdf_str(xml)
             .map_err(|e| ProjectError::Robot(e.to_string())),
         RobotSourceMsg::Usd {
@@ -448,7 +414,7 @@ pub fn model_from_source(
                 ));
             }
             compatibility
-                .validate(sources, order.as_ref())
+                .validate(sources)
                 .map_err(ProjectError::Robot)?;
             if let Some(kit) = kit {
                 kit.validate(sources, order.as_ref())
@@ -773,9 +739,6 @@ pub fn gait_from_msg(msg: &GaitMsg) -> Result<crate::seq::GaitSpec, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectFile {
-    /// Authored work requiring a fresh evaluation after an assembly change.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mounting_revalidation: Vec<String>,
     /// Project file format version (currently 2).
     pub version: u32,
     pub robots: Vec<ProjectRobotMsg>,
@@ -885,7 +848,6 @@ impl ProjectFile {
                 let v1: ProjectV1 =
                     serde_json::from_str(json).map_err(|e| ProjectError::Json(e.to_string()))?;
                 Ok(ProjectFile {
-                    mounting_revalidation: Vec::new(),
                     version: PROJECT_VERSION,
                     robots: vec![ProjectRobotMsg {
                         name: None,
@@ -978,7 +940,6 @@ impl Scene {
     pub fn to_project(&self) -> ProjectFile {
         let mut mesh_url = mesh_path_url;
         ProjectFile {
-            mounting_revalidation: self.mounting_revalidation.clone(),
             version: PROJECT_VERSION,
             robots: self
                 .robots()
@@ -1426,7 +1387,6 @@ impl Scene {
             .map_err(|e| ProjectError::Incompatible(format!("parts: {e}")))?;
         self.set_connection_plan(project.connection_plan.clone())
             .map_err(ProjectError::Incompatible)?;
-        self.mounting_revalidation = project.mounting_revalidation.clone();
         Ok(())
     }
 }
@@ -1554,24 +1514,6 @@ fn emit_robot_build(
     embed_catalog: bool,
 ) {
     match source {
-        RobotSourceMsg::Mounting { base, document } => {
-            emit_robot_build(out, base, var, konst, embed_catalog);
-            let json = serde_json::to_string(document).expect("mounting document");
-            let literal = serde_json::to_string(&json).expect("mounting literal");
-            out.push_str(&format!("{var} = {var}._with_mounting_json({literal})\n"));
-        }
-        RobotSourceMsg::Visuals { base, visual } => {
-            emit_robot_build(out, base, var, konst, embed_catalog);
-            let display = format!("{var}_visual");
-            emit_robot_build(
-                out,
-                visual,
-                &display,
-                &format!("{konst}_VISUAL"),
-                embed_catalog,
-            );
-            out.push_str(&format!("{var} = {var}.with_visuals({display})\n"));
-        }
         RobotSourceMsg::Urdf { xml } => {
             // Triple-quote guard: a URDF containing ''' would break the literal.
             let urdf = xml.replace("'''", "'\\''\\''\\'");

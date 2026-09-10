@@ -1,11 +1,15 @@
 """Move a Kawasaki BX250L with the configured NIMAK 95.020.516/P3U gun.
 
-    uv run python examples/welding/spot_gun_mounting_demo.py --studio
-
-Prebuilt reference models require no local catalog build. The arm moves through
-inspection poses while the gun's right jaw opens and closes. The 0..20 degree
-window and 0.2 rad/s jaw rate are simulation settings, not manufacturer limits.
+Prebuilt reference models require no local catalog build. The gun is
+attached to the arm's flange with `attach_tool`, and `bt.mounting.report`
+repeats what the loaded products say about that assembly. The arm then
+moves through inspection poses while the gun's right jaw opens and
+closes through the real catalog joint. The 0..20 degree window and the
+0.2 rad/s jaw rate are simulation settings, not manufacturer limits.
 This example checks mounting and motion, not a welding process.
+
+Run with:  python examples/welding/spot_gun_mounting_demo.py [--studio]
+                 [--opening-mm MM] [--output cell.botrail] [--catalog-root DIR]
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import botrail as bt
 ARM = "kawasaki/bx/bx250l-b001/r2"
 GUN = "nimak/multiframegun/95-020-516-p3u/r4"
 MOTION = "mounting_inspection"
-TIP_RADIUS_MM = 700.0
+TIP_RADIUS_MM = 700.0  # jaw pivot to electrode tip in the reference model
 MAX_OPENING_MM = TIP_RADIUS_MM * math.sin(math.radians(20))
 
 
@@ -30,14 +34,13 @@ def opening_angle(opening_mm: float) -> float:
     return math.asin(opening_mm / TIP_RADIUS_MM)
 
 
-def build_cell(
-    catalog_root: Path | None = None, *, opening_mm: float = 120.0
-) -> bt.Scene:
+def build(catalog_root: Path | None = None, *, opening_mm: float = 120.0) -> bt.Scene:
+    """The arm with the gun on its flange and the inspection motion taught."""
     angle = opening_angle(opening_mm)
 
     def load(pid: str) -> bt.Robot:
         if catalog_root is not None:
-            return bt.Robot.from_package(catalog_root / pid)
+            return bt.Robot.from_package(catalog_root / pid, catalog_root=catalog_root)
         return bt.Robot.from_catalog(pid)
 
     arm, gun = load(ARM), load(GUN)
@@ -46,13 +49,10 @@ def build_cell(
     jaw_limits = gun.joint_limits[0]
     if jaw_limits is not None:
         angle = min(angle, jaw_limits[1])
-    scene = bt.Scene(arm)
-    bt.mounting.preview(scene, arm.attach_tool(gun, prefix="gun_")).apply()
+    scene = bt.Scene(arm.attach_tool(gun, prefix="gun_"))
     # Resolve names so the same example works with a prefixed tool joint tree.
     jaw_index = next(
-        i
-        for i, name in enumerate(scene.robot.joint_names)
-        if name.endswith("jaw_opening")
+        i for i, name in enumerate(scene.robot.joint_names) if name.endswith("jaw_opening")
     )
     arm_indices = [i for i in range(scene.robot.dof) if i != jaw_index]
 
@@ -74,40 +74,30 @@ def build_cell(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--studio", action="store_true")
     parser.add_argument(
         "--opening-mm",
         type=float,
         default=120.0,
-        help=f"Projected tip opening, 0..{MAX_OPENING_MM:.3f} mm (default: 120)",
+        help=f"projected tip opening, 0..{MAX_OPENING_MM:.3f} mm (default: 120)",
     )
-    parser.add_argument(
-        "--output", type=Path, help="Save the assembly and inspection motion"
-    )
-    parser.add_argument(
-        "--catalog-root", type=Path, help="Local packages for catalog development"
-    )
+    parser.add_argument("--output", type=Path, help="save the assembly and inspection motion")
+    parser.add_argument("--catalog-root", type=Path, help="local packages for catalog development")
     args = parser.parse_args()
     try:
-        scene = build_cell(args.catalog_root, opening_mm=args.opening_mm)
+        scene = build(args.catalog_root, opening_mm=args.opening_mm)
     except ValueError as exc:
         parser.error(str(exc))
+
     report = bt.mounting.report(scene)
+    print(report.to_markdown())
     trajectory = scene.plan_motion(MOTION, seed=7, broadcast=False)
-    print("Mounting can be used in simulation:", report.simulation["ready"])
-    print("Detailed mounting checks complete:", report.ready)
     print(f"Arm: 6 axes + gun: 1 axis; inspection motion: {trajectory.duration:.2f} s")
-    print(
-        f"Gun opening: {args.opening_mm:.1f} mm projected tip separation; right jaw rotates."
-    )
+    print(f"Gun opening: {args.opening_mm:.1f} mm projected tip separation; right jaw rotates.")
     print("Jaw window 0..20 deg and speed 0.2 rad/s are simulation settings.")
-    print(
-        "Approximate shape/collisions; internal actuator omitted; TCP is a CAD reference."
-    )
-    print(
-        "Separate mounting hardware: MISUMI CB10-25 x 10 (already shown in the model)."
-    )
+    print("Approximate shape/collisions; internal actuator omitted; TCP is a CAD reference.")
+    print("Separate mounting hardware: MISUMI CB10-25 x 10 (already shown in the model).")
     if args.output:
         scene.save_project(args.output)
         print("Saved:", args.output)

@@ -2129,8 +2129,8 @@ def power_supply(
     """A DIN-rail power supply: the box `<name>/body`, `size = (width,
     depth, height)`, standing on `position` (the centre of its foot — on a
     rail inside a cabinet), turned by `yaw`. The part (`power_supply`)
-    carries `output_v` / `output_a`. Declare supply/load ports with
-    `bt.connections` to check the connected loads against this rating.
+    carries `output_v` / `output_a` — the rating `scene.requirements()`
+    checks against the `current_a` of the parts at its voltage.
 
     With `catalog=` — the id of a power-supply spec pack, or a package
     directory — a unit you can order: `output_a` is matched against the
@@ -3391,8 +3391,8 @@ def machine_tool(
     opening that does not fit its wall, a leaf whose stroke runs off the
     body, a spindle head that would stand through the roof.
 
-    `detail="full"` adds framed transparent windows, enclosure seams,
-    service panels, door rails, the accent band and the stack light.
+    `detail="full"` adds framed transparent windows, the enclosure skirt,
+    the accent band and the stack light.
     These are authored visual details, not measured manufacturer CAD.
     Door leaves keep their solid collision envelopes behind the drawn
     panels and glazing. The part is pinned on the
@@ -3598,13 +3598,7 @@ def machine_tool(
             panel(tag, sign * (width - rim) / 2, 0, rim, height)
         panel("lower", 0, -(height - bottom) / 2, clear_w, bottom)
         panel("upper", 0, (height - top) / 2, clear_w, top)
-        seal = min(0.014, rim / 3)
-        for tag, sign in (("seal_left", -1), ("seal_right", 1)):
-            panel(tag, sign * (clear_w - seal) / 2, vc, seal, clear_h, DARK_STEEL, _RUBBER)
-        for tag, sign in (("seal_bottom", -1), ("seal_top", 1)):
-            panel(tag, 0, vc + sign * (clear_h - seal) / 2,
-                  clear_w - 2 * seal, seal, DARK_STEEL, _RUBBER)
-        pane = panel("window", 0, vc, clear_w - 2 * seal, clear_h - 2 * seal,
+        pane = panel("window", 0, vc, clear_w, clear_h,
                      (0.28, 0.36, 0.37), _GLOSS, depth=0.004)
         scene.set_obstacle_material(pane, metalness=0.0, roughness=0.16, opacity=0.24)
         return made
@@ -3775,30 +3769,15 @@ def machine_tool(
                 )
 
     if mode == "full":
-        # Shallow overlays describe panel breaks without changing verified walls.
-        # Keep these relative to the enclosure, not a baked machine asset.
+        # Shallow overlays on the verified walls: the dark skirt along the
+        # floor, the accent band and the stack light — what reads from
+        # across the cell. Finer trim would only crowd the scene tree.
         seam = min(0.003, t / 10)
         skirt = min(0.16, bed_h / 3)
         trim("trim/front_skirt", (w, seam, skirt), (0, y0 - seam / 2, skirt / 2), DARK_STEEL)
         for tag, sign in (("left", -1), ("right", 1)):
             xs = sign * (w / 2 + seam / 2)
             trim(f"trim/{tag}_skirt", (seam, d, skirt), (xs, 0, skirt / 2), DARK_STEEL)
-            # Rear access panel and its inset seal, clear of the sliding leaf.
-            panel_d, panel_h = (d - ls) * 0.72, h * 0.62
-            yp, zp = (y_r + d / 2) / 2, h * 0.52
-            trim(f"trim/{tag}_service_seal", (seam, panel_d, panel_h), (xs, yp, zp), DARK_STEEL, _RUBBER)
-            trim(f"trim/{tag}_service_panel", (seam, panel_d - 2 * seam, panel_h - 2 * seam),
-                 (xs + sign * seam, yp, zp))
-            for i in range(5):
-                trim(f"trim/{tag}_vent{i}", (seam, panel_d * 0.65, seam * 1.5),
-                     (xs + sign * 2 * seam, yp, zp - panel_h * 0.30 + i * 0.014), DARK_STEEL)
-        # Front sill split and table T-slot markings are appearance only.
-        if front_door is not None:
-            trim("trim/sill_seam", (seam, seam, max(fs - skirt, seam)),
-                 (0, y0 - seam / 2, (fs + skirt) / 2), DARK_STEEL, _RUBBER)
-        for i, offset in enumerate((-0.28, 0.0, 0.28)):
-            trim(f"trim/table_slot{i}", (tw * 0.90, min(0.010, td / 15), 0.0005),
-                 (tx_, ty_ + offset * td, th + 0.00025), DARK_STEEL, _CAST_METAL)
         bx, by = world(0.0, y0 - 0.005)
         _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + h - 0.10),
               q, MACHINE_ACCENT, finish=_PAINT)

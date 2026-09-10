@@ -37,3 +37,10 @@ tmp/
 # Editors
 .vscode/
 .idea/
+
+# Demo outputs written next to the demos / into the working directory
+examples/**/*_deliverables/
+examples/**/*_io.csv
+/machining_cell.script
+/machining_plate_cut.obj
+/machining_plate_cut.mtl

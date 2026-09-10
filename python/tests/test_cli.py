@@ -159,22 +159,28 @@ def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
             "pick_baseline.usda",
             "pick_ng_part.usda",
             "pick.script",
-            "pick_connections.csv",
-            "pick_connections.md",
-            "pick_connections.json",
-            "pick_power.csv",
             "pick_report.md",
             "pick_report.json",
-            "pick_manifest.json",
         ]
     )
     report = json.loads((tmp_path / "docs" / "pick_report.json").read_text())
     # The report hashes what was written before it.
-    assert len(report["deliverables"]) == 18
+    assert len(report["deliverables"]) == 14
     assert all(d["sha256"] for d in report["deliverables"])
     # A subset, no bake needed.
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "some"), "--bom", "--layout")
     assert code == 0 and sorted(Path(p).name for p in out["files"]) == [
+        "cell_deliverables_demo_bom.csv",
+        "cell_deliverables_demo_bom.md",
+        "cell_deliverables_demo_layout.dxf",
+        "cell_deliverables_demo_layout.svg",
+    ]
+    assert "manifest" not in out
+    # Re-exporting into the same directory overwrites the set in place; the
+    # manifest is written only when asked for.
+    code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "some"), "--bom", "--manifest")
+    assert code == 0 and Path(out["manifest"]).name == "cell_deliverables_demo_manifest.json"
+    assert sorted(p.name for p in (tmp_path / "some").iterdir()) == [
         "cell_deliverables_demo_bom.csv",
         "cell_deliverables_demo_bom.md",
         "cell_deliverables_demo_layout.dxf",

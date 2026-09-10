@@ -46,7 +46,9 @@ window.__THREE_DEVTOOLS__.addEventListener('observe', (e) => {
     obj.__docsWrapped = true;
     const orig = obj.render.bind(obj);
     obj.render = (scene, camera) => {
-      if (window.__CAM) {
+      // Only the orbit camera: the studio draws its final output pass with
+      // an orthographic screen-quad camera, and re-aiming that blanks the frame.
+      if (window.__CAM && camera.isPerspectiveCamera) {
         camera.position.set(...window.__CAM.pos);
         camera.lookAt(...window.__CAM.look);
       }

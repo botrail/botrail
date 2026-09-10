@@ -23,9 +23,7 @@ station. The taught cycle closes on air and carries nothing — attach is a
 weld, it cannot notice — but the report can: `touch: fail, 0 pads`.
 
 Run with:  python examples/basics/gripper_pick_demo.py [out.usda] [--studio]
-                                                   [--robotiq-r2 CATALOG_ROOT]
-Normal runs download the built r2 hand and ES-062 kit and re-teach close.
-The optional root overrides the catalog with a local development build.
+The run downloads the built r2 hand and ES-062 kit and re-teaches the close.
 """
 
 import argparse
@@ -40,7 +38,6 @@ import _robotiq as rq
 parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 parser.add_argument("out", nargs="?", default="gripper_pick.usda")
 parser.add_argument("--studio", action="store_true")
-rq.add_argument(parser)
 args = parser.parse_args()
 
 # --- cell dimensions (metres; z = 0 is the shop floor) ------------------
@@ -57,9 +54,8 @@ DOWN = (1.0, 0.0, 0.0, 0.0)  # tool +Z at the floor
 OPEN = 0.0
 READY = [0.0, -1.9, 1.8, -1.5, -1.57, 0.0, OPEN]
 
-arm = rq.load_arm(root=args.robotiq_r2)
-scene = bt.Scene(rq.attach(arm, args.robotiq_r2),
-                 base_position=(0.0, 0.0, BASE_Z))
+arm = rq.load_arm()
+scene = bt.Scene(rq.attach(arm), base_position=(0.0, 0.0, BASE_Z))
 scene.set_joint_positions(READY)
 
 # The world: floor, the robot's pedestal (scenery), a stand the part

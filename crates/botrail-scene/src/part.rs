@@ -632,9 +632,6 @@ fn robot_lines(
 ) {
     use botrail_model::RobotSource;
     match source {
-        RobotSource::Visuals { base, .. } | RobotSource::Mounting { base, .. } => {
-            robot_lines(base, name, role_category, tool_counter, out)
-        }
         RobotSource::Catalog {
             id, revision, meta, ..
         } => {
@@ -867,15 +864,6 @@ impl Scene {
     /// Follows a robot rename.
     pub(crate) fn rename_part_target(&mut self, kind: PartTargetKind, old: &str, new: &str) {
         let prefix = format!("{old}/");
-        if kind == PartTargetKind::Robot {
-            for selected in &mut self.connection_plan.configurations {
-                if selected.target == old {
-                    selected.target = new.to_string();
-                } else if selected.target.starts_with(&prefix) {
-                    selected.target = format!("{new}/{}", &selected.target[prefix.len()..]);
-                }
-            }
-        }
         for port in &mut self.connection_plan.ports {
             if port.target_kind == kind && port.target == old {
                 port.target = new.to_string();

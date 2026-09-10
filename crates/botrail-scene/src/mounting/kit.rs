@@ -1,16 +1,9 @@
 use super::*;
-use botrail_model::kit::{KitSpec, RepresentationStatus};
+use botrail_model::kit::KitSpec;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-pub(super) fn bare(source: &RobotSource) -> &RobotSource {
-    match source {
-        RobotSource::Mounting { base, .. } | RobotSource::Visuals { base, .. } => bare(base),
-        _ => source,
-    }
-}
-
 fn catalog_id(source: &RobotSource) -> Option<&str> {
-    match bare(source) {
+    match source {
         RobotSource::Catalog { id, .. } => Some(id),
         _ => None,
     }
@@ -25,8 +18,10 @@ fn frame_matches(actual: &str, declared: &str) -> bool {
         && (prefix.is_empty() || actual.starts_with(&format!("{prefix}/")))
 }
 
+/// The loaded components sit on the kit's declared frames, in its declared
+/// order and offsets — the assembly the manufacturer's part number names.
 fn composition(source: &RobotSource, kit: &KitSpec) -> bool {
-    let mut source = bare(source);
+    let mut source = source;
     for a in kit.attachments.iter().rev() {
         let RobotSource::Composite {
             base,
@@ -61,25 +56,13 @@ fn composition(source: &RobotSource, kit: &KitSpec) -> bool {
         {
             return false;
         }
-        source = bare(base);
+        source = base;
     }
     catalog_id(source) == Some(kit.base.as_str())
 }
 
-fn visual_override(source: &RobotSource) -> bool {
-    match source {
-        RobotSource::Visuals { .. } => true,
-        RobotSource::Mounting { base, .. } | RobotSource::Catalog { inner: base, .. } => {
-            visual_override(base)
-        }
-        RobotSource::Composite { base, tool, .. } => visual_override(base) || visual_override(tool),
-        _ => false,
-    }
-}
-
 /// A kit claim covers the registered host flange and kit mount, using either
 /// an explicitly permitted pose or the default coincident mounting frames.
-/// The latter is a model convention, not a measured seating/TCP approval.
 fn host_mount_matches(record: &KitRecord<'_>, graph: &Graph<'_>, edge: &Edge) -> bool {
     let Some(base) = edge.base.map(|i| &graph.parts[i]) else {
         return false;
@@ -87,7 +70,7 @@ fn host_mount_matches(record: &KitRecord<'_>, graph: &Graph<'_>, edge: &Edge) ->
     let RobotSource::Catalog {
         flange: Some(flange),
         ..
-    } = bare(base.source)
+    } = base.source
     else {
         return false;
     };
@@ -113,24 +96,7 @@ fn host_mount_matches(record: &KitRecord<'_>, graph: &Graph<'_>, edge: &Edge) ->
     )
 }
 
-fn status<'a>(items: impl Iterator<Item = &'a str>) -> &'static str {
-    let items: Vec<_> = items.collect();
-    if items.contains(&"fail") {
-        "fail"
-    } else if items.is_empty() || items.iter().any(|s| matches!(*s, "unknown" | "not_run")) {
-        "unknown"
-    } else {
-        "pass"
-    }
-}
-
-pub(super) fn review(
-    record: &KitRecord<'_>,
-    graph: &Graph<'_>,
-    pins: &[&PartEntry],
-    configurations: &[botrail_model::compatibility::ConnectionSelection],
-    report: &mut MountingReport,
-) {
+pub(super) fn review(record: &KitRecord<'_>, graph: &Graph<'_>, report: &mut MountingReport) {
     let RobotSource::Catalog {
         id,
         revision,
@@ -144,13 +110,7 @@ pub(super) fn review(
     let Some(kit) = &meta.kit else {
         return;
     };
-    let identity_ok = pins.iter().filter(|p| p.target == record.name).all(|p| {
-        p.part
-            .catalog
-            .as_ref()
-            .is_none_or(|c| c.id == *id && c.revision.as_ref().is_none_or(|r| r == revision))
-    });
-    let matches = composition(inner, kit) && identity_ok;
+    let matches = composition(inner, kit);
     report.add(
         &record.name,
         "kit_composition",
@@ -158,12 +118,12 @@ pub(super) fn review(
         if matches {
             "Loaded components and transforms match the purchase kit"
         } else {
-            "Loaded assembly or assigned product differs from the declared kit"
+            "Loaded assembly differs from the declared kit"
         },
         if matches {
             ""
         } else {
-            "Restore the kit components and assembly, or register a separate configuration"
+            "Load the kit from the catalog as one product instead of reassembling its parts"
         },
         json!({"catalog": id, "kit": kit}),
     );
@@ -172,88 +132,50 @@ pub(super) fn review(
         .and_then(|root| graph.edges.iter().find(|e| e.tool == Some(root)))
         .filter(|e| e.base.is_some_and(|i| !record.members.contains(&i)));
     let host = host_edge.and_then(|e| e.base).map(|i| &graph.parts[i]);
-    let claim = host
-        .and_then(|h| h.catalog())
-        .and_then(|(id, _, _)| kit.manufacturer_support.iter().find(|s| s.host == id));
-    let manufacturer_support = if let Some(c) = claim {
-        let mounted = host_edge.is_some_and(|edge| host_mount_matches(record, graph, edge));
-        let applicable = matches && mounted;
-        let connections: Vec<_> = graph
-            .edges
-            .iter()
-            .filter(|edge| {
-                applicable
-                    && edge.role == MountRole::Tool
-                    && edge.tool.is_some_and(|i| record.members.contains(&i))
-                    && (edge.base.is_some_and(|i| record.members.contains(&i))
-                        || host_edge.is_some_and(|host| std::ptr::eq(host, *edge)))
-            })
-            .map(|edge| &edge.target)
-            .collect();
-        json!({"status": if applicable { "pass" } else { "not_applicable" }, "scope": c.scope,
-            "message": if applicable { "Manufacturer documents mechanical installation of this kit on this host" } else { "Assembly, host mounting frames or pose differ from the supported configuration" },
-            "connections": connections, "note": c.note,
+    let host_id = host.and_then(|h| h.catalog()).map(|(id, _, _)| id);
+    let claim = host_id.and_then(|host| kit.manufacturer_support.iter().find(|s| s.host == host));
+    let mounted = matches && host_edge.is_some_and(|edge| host_mount_matches(record, graph, edge));
+    let (status, message) = match (host_edge, host_id, claim) {
+        (None, _, _) => ("unknown", "The kit is not attached to a robot".to_string()),
+        (Some(_), None, _) => (
+            "unknown",
+            "The kit's host is not a catalog product, so the manufacturer's installation claim cannot be matched to it".to_string(),
+        ),
+        (Some(_), Some(host), None) => (
+            "unknown",
+            format!("No manufacturer document covers this kit on {host}; absence is not incompatibility"),
+        ),
+        (Some(_), Some(host), Some(_)) if mounted => (
+            "pass",
+            format!("The manufacturer documents installation of this kit on {host}"),
+        ),
+        (Some(_), Some(host), Some(_)) => (
+            "unknown",
+            format!("The manufacturer documents this kit on {host}, but the assembly or its mounting frames differ from the documented configuration"),
+        ),
+    };
+    let evidence = claim.map(|c| {
+        json!({"scope": c.scope, "note": c.note,
             "evidence": c.evidence.iter().map(|e| json!({"source": meta.sources.get(e.source), "section": e.section})).collect::<Vec<_>>()})
-    } else {
-        json!({"status": "unknown", "scope": "mechanical_mounting", "message": "No documented kit claim for the actual directly attached host; absence is not incompatibility"})
-    };
-    let representation = if !matches {
-        "fail"
-    } else if kit.representation.status == RepresentationStatus::Verified
-        && !record.visual_override
-        && !visual_override(inner)
-    {
-        "pass"
-    } else {
-        "unknown"
-    };
-    let detailed = status(
-        report
-            .items
-            .iter()
-            .filter(|i| i.target.starts_with(&format!("{}/components", record.name)))
-            .map(|i| i.status),
-    );
-    let selected = configurations.iter().find(|s| s.target == record.name);
-    let mut connection = meta.compatibility.review(
-        id,
-        host.and_then(|h| h.catalog()).map(|(id, _, _)| id),
-        selected,
-        &meta.sources,
-    );
-    let host_identity_ok = host.is_none_or(|h| {
-        pins.iter().filter(|p| p.target == h.name).all(|p| {
-            p.part.catalog.as_ref().is_none_or(|c| {
-                h.catalog().is_some_and(|(id, revision, _)| {
-                    c.id == id && c.revision.as_deref().is_none_or(|r| r == revision)
-                })
-            })
-        })
     });
-    let invalid_via = selected.is_some_and(|s| {
-        meta.compatibility
-            .connections
-            .iter()
-            .any(|p| p.id == s.profile && !p.via.is_empty())
-    });
-    if !matches
-        || invalid_via
-        || !host_identity_ok
-        || host_edge.is_some_and(|e| !host_mount_matches(record, graph, e))
-    {
-        connection["configuration"] = json!({"status": "fail", "message": "Kit composition, host mounting or assigned identity differs from the declared configuration"});
-        for axis in ["electrical", "communication", "software"] {
-            connection[axis] = json!({"status": "not_applicable", "checks": []});
-        }
-    }
+    report.add(
+        &record.name,
+        "kit_host",
+        status,
+        message.clone(),
+        if status == "pass" {
+            ""
+        } else {
+            "Mount the kit on a host the manufacturer documents it for, at the documented frames"
+        },
+        json!({"host": host_id, "claim": evidence}),
+    );
     report.kits.push(json!({
         "target": record.name, "catalog": id, "revision": revision, "name": meta.product,
-        "host": host.and_then(|h| h.catalog()).map(|(id,_,_)| id), "order": meta.order,
-        "manufacturer_support": manufacturer_support,
+        "host": host_id, "order": meta.order,
+        "manufacturer_support": {"status": status, "message": message,
+            "scope": claim.map(|c| c.scope), "note": claim.and_then(|c| c.note.clone()),
+            "evidence": evidence.and_then(|e| e.get("evidence").cloned()).unwrap_or(Value::Array(Vec::new()))},
         "composition": {"status": if matches { "pass" } else { "fail" }},
-        "model_correspondence": {"status": representation, "representation": kit.representation},
-        "detailed_fit": {"status": detailed, "message": "Detailed dimensional, fastener and access checks; independent of manufacturer support"},
-        "electrical": connection["electrical"],
-        "connection": connection,
     }));
 }

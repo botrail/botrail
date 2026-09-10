@@ -92,10 +92,6 @@ def test_fingerprint_tracks_metadata_and_geometry_but_not_directory(package, tmp
     with (copied / "shape.obj").open("a") as stream:
         stream.write("# changed asset\n")
     assert bt.Scene(bt.Robot.from_package(copied)).bom().rows != original.bom().rows
-    manifest = yaml.safe_load((package / "manifest.yaml").read_text())
-    manifest["mounting"]["interfaces"][0]["interface_id"] = "updated-face"
-    (package / "manifest.yaml").write_text(yaml.safe_dump(manifest))
-    assert bt.mounting.report(bt.Robot.from_package(package)).input_hash != before["input_hash"]
     assert bt.mounting.report(original).to_dict() == before
 
 
