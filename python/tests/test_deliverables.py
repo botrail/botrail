@@ -13,6 +13,7 @@ it touches, by name.
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,15 @@ import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 sys.path[:0] = [str(EXAMPLES / d) for d in ("engineering", "export")]
+
+# The demo orders its control cabinet from the catalog; CI runs offline and
+# skips it, as test_equipment_cell_demo does (the hand-built cells above cover
+# the document set itself).
+HF_HUB = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+needs_catalog = pytest.mark.skipif(
+    not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
+    reason="botrail catalog not in the HF cache (run examples/engineering/cell_deliverables_demo.py once)",
+)
 
 
 def small_cell() -> bt.Scene:
@@ -268,6 +278,7 @@ def test_a_layout_edit_changes_exactly_the_deliverables_it_touches(tmp_path: Pat
 # ----------------------------------------------------------------- demo
 
 
+@needs_catalog
 def test_deliverables_demo_writes_the_document_set(tmp_path: Path) -> None:
     import cell_deliverables_demo as demo
 

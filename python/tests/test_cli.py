@@ -9,6 +9,7 @@ that validates is a project that loads.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,16 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 DEMO = EXAMPLES / "engineering" / "cell_deliverables_demo.py"
 sys.path.insert(0, str(EXAMPLES / "engineering"))
 
+# The demo orders its control cabinet from the catalog (`nito/fz/standard`),
+# so building it needs the dataset in the HF cache. CI keeps the suite
+# offline (no huggingface_hub) and skips those tests, the way
+# test_equipment_cell_demo does; the rest of the CLI runs on hand-typed cells.
+HF_HUB = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+needs_catalog = pytest.mark.skipif(
+    not (HF_HUB / "datasets--botrail--botrail-catalog").exists(),
+    reason="botrail catalog not in the HF cache (run examples/engineering/cell_deliverables_demo.py once)",
+)
+
 
 def run(capsys, *argv) -> tuple[int, dict]:
     code = _cli.main(list(argv))
@@ -31,7 +42,7 @@ def run(capsys, *argv) -> tuple[int, dict]:
 # --------------------------------------------------------------- schema
 
 
-def test_project_schema_is_the_loaders_contract(tmp_path: Path) -> None:
+def test_project_schema_is_the_loaders_contract() -> None:
     schema = json.loads(bt.project_schema())
     assert schema["$schema"].endswith("2020-12/schema")
     assert schema["title"] == "botrail project (.botrail)"
@@ -43,10 +54,14 @@ def test_project_schema_is_the_loaders_contract(tmp_path: Path) -> None:
     checked_in = Path(__file__).resolve().parents[2] / "docs" / "assets" / "project.schema.json"
     assert json.loads(checked_in.read_text()) == schema, "docs/assets/project.schema.json is stale"
 
+
+@needs_catalog
+def test_saved_project_validates_against_the_schema(tmp_path: Path) -> None:
     # A real project validates; a broken one does not.
     jsonschema = pytest.importorskip("jsonschema")
     import cell_deliverables_demo as demo
 
+    schema = json.loads(bt.project_schema())
     scene = demo.build()
     scene.save_project(tmp_path / "cell.botrail")
     # Catalog-backed parts can make the same demo a portable asset archive.
@@ -67,6 +82,7 @@ def test_project_schema_is_the_loaders_contract(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ CLI
 
 
+@needs_catalog
 def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "check", str(DEMO))
     assert code == 0 and out["ok"] and out["robots"] == ["simple_arm"]
@@ -82,6 +98,9 @@ def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     demo.build().save_project(tmp_path / "cell.botrail")
     code, out2 = run(capsys, "check", str(tmp_path / "cell.botrail"))
     assert code == 0 and out2["counts"] == out["counts"]
+
+
+def test_check_flags_problems_and_unidentified_lines(capsys, tmp_path: Path) -> None:
     # A cell with a problem: a sequence that starts a motion nobody taught.
     broken = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     broken.add_beam_sensor("eye", frm=(0, 0, 0.5), to=(0, 1, 0.5))
@@ -120,6 +139,7 @@ def test_check_reports_load_failures_as_json_with_exit_2(capsys, tmp_path: Path)
     assert code == 0 and out["robots"] == ["simple_arm"]
 
 
+@needs_catalog
 def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> None:
     code, report = run(capsys, "simulate", str(DEMO), "--report", str(tmp_path / "r.md"), "--usd", str(tmp_path / "c.usda"))
     assert code == 0
@@ -139,6 +159,7 @@ def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> 
     assert code == 0 and capsys.readouterr().out.startswith("# simple_arm cell — cell report")
 
 
+@needs_catalog
 def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "docs"), "--all", "--scenarios", "--name", "pick")
     assert code == 0 and out["ok"]

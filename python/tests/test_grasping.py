@@ -10,6 +10,7 @@ plus the release-order and specs checks.
 """
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,9 @@ import pytest
 import botrail as bt
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+
+HF_HUB = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+CATALOG_CACHED = (HF_HUB / "datasets--botrail--botrail-catalog").exists()
 
 # A coupled two-finger gripper with collision boxes: pad inner faces 30 mm
 # out from the centre plane each at q = 0, so a 40 mm part is touched at
@@ -218,6 +222,7 @@ def test_grasp_close_max_accel_feeds_grip_check() -> None:
     assert rep["max_accel"] == pytest.approx(0.0, abs=1e-6)
 
 
+@pytest.mark.skipif(not CATALOG_CACHED, reason="the pinned UR5e + Hand-E packages need the botrail catalog cached")
 def test_report_defaults_from_the_catalog_gripper() -> None:
     """A catalog gripper welded on with attach_tool keeps its specs inside
     the composite's provenance; grasp_report defaults its holding checks

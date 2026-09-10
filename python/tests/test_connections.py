@@ -223,7 +223,7 @@ def test_invalid_specification_rejected_without_mutation(specs):
 
 
 def test_schema_roundtrip_python_snapshot_and_no_behaviour_changes(tmp_path, monkeypatch):
-    import jsonschema
+    jsonschema = pytest.importorskip("jsonschema")
 
     s = signal_cell()
     equipment(s, "supply", category="power_supply", output_v=24, output_a=2)

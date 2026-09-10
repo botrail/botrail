@@ -37,7 +37,8 @@ jobs:
           # pyyaml: the from_catalog tests fake out huggingface_hub, but the
           # manifest parsing still imports the real `yaml`.
           # usd-core checks exported appearance with Pixar's independent reader.
-          uv pip install --python .venv/bin/python maturin pytest pyyaml usd-core
+          # jsonschema validates saved projects against the generated schema.
+          uv pip install --python .venv/bin/python maturin pytest pyyaml usd-core jsonschema
           VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
           .venv/bin/python -m pytest python/tests -q
       # The API reference is generated from the extension built above; --strict
