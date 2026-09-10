@@ -63,7 +63,9 @@ def test_kit_purchase_unit_preserves_components_and_scoped_results(packages):
     robot = load(root, ARM).attach_tool(load(root), prefix="kit_")
     scene = bt.Scene(robot)
     bom = scene.bom().rows
-    assert len(bom) == 2 and bom[1]["qty"] == 1
+    # The arm, the kit, and the controller the arm needs.
+    assert len(bom) == 3 and bom[1]["qty"] == 1
+    assert bom[2]["names"] == ["robot/controller"]
     assert bom[1]["order"]["unit"] == "kit"
     assert [i.get("catalog") for i in bom[1]["order"]["includes"]] == [BASE, TOOL, None]
     report = bt.mounting.report(scene)

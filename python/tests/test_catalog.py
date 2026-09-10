@@ -397,8 +397,8 @@ def test_catalog_identity_reaches_the_bom_and_survives_the_project(
     coupling = bt.Robot.from_catalog(COUPLING_ID)
     scene = bt.Scene(arm.attach_tool(coupling))
     bom = scene.bom()
-    assert len(bom) == 2
-    robot, tool = bom.rows
+    assert len(bom) == 3
+    robot, tool, controller = bom.rows
     assert robot["names"] == ["mini"]
     assert robot["manufacturer"] == "ACME Robotics"
     assert robot["model"] == "Mini Arm"
@@ -412,6 +412,13 @@ def test_catalog_identity_reaches_the_bom_and_survives_the_project(
     assert tool["names"] == ["mini/tool"]
     assert tool["category"] == "tool"
     assert tool["catalog"] == f"{COUPLING_ID}@{SHA}"
+    # The controller the arm needs, named by the one the manifest lists
+    # (`specs.controller`) — the maker's, not a purchase from the catalog.
+    assert controller["names"] == ["mini/controller"]
+    assert controller["category"] == "robot_controller"
+    assert (controller["manufacturer"], controller["model"], controller["catalog"]) == ("ACME Robotics", "MC-1", None)
+    assert controller["description"] == "controller for mini"
+    assert bom.unidentified() == []
     assert bom.total("payload_kg") == 3.5
 
     # A pinned part on the robot overlays the derived identity.

@@ -105,6 +105,10 @@ pub enum RobotSourceMsg {
         category: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         specs: Vec<(String, f64)>,
+        /// The controllers the maker pairs the arm with (`specs.controller`)
+        /// — the derived controller line's name. Absent in older files.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        controllers: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mounting: Option<botrail_model::mounting::MountingSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -315,6 +319,7 @@ pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             product: meta.product.clone(),
             category: meta.category.clone(),
             specs: meta.specs.clone(),
+            controllers: meta.controllers.clone(),
             mounting: meta.mounting.clone(),
             order: meta.order.clone(),
             kit: meta.kit.clone(),
@@ -393,6 +398,7 @@ pub fn model_from_source(
             product,
             category,
             specs,
+            controllers,
             mounting,
             order,
             kit,
@@ -479,6 +485,7 @@ pub fn model_from_source(
                     product: product.clone(),
                     category: category.clone(),
                     specs: specs.clone(),
+                    controllers: controllers.clone(),
                     mounting: mounting.clone(),
                     order: order.clone(),
                     kit: kit.clone(),

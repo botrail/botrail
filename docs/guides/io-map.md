@@ -88,7 +88,12 @@ scene.declare_io("door_ch1", role="input", kind="safe_di", safety=True, pair="do
 
 * **Nodes** are `plc`, `safety_plc`, `remote_io`, `robot_controller`
   (with `robots=[...]` — a two-arm cabinet lists both) or `other`
-  (documentation only). `programs=` places sequences on a node and
+  (documentation only). An arm nobody has declared a cabinet for still
+  has one on the [BOM](parts-and-bom.md) — the derived line
+  `<robot>/controller` — and its points land on the implicit host
+  `<robot>`; declaring the node gives that cabinet its channels, a model
+  and a place (`bt.parts.controller` declares it together with the box it
+  stands in). `programs=` places sequences on a node and
   overrides the implicit hosting; `uplink=` hangs a remote station or a
   safety module off a controller — its channels then take that
   controller's points. `channels=` is a list of dicts; the `bt.io`

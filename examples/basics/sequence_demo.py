@@ -143,10 +143,11 @@ def identify_parts(scene: bt.Scene) -> None:
     not — this robot is NVIDIA's Isaac USD, and the scenery of the factory
     stage is geometry until a part is pinned to it: the pedestal (a whole
     USD subtree), the pallet, the photo-eye. Free attributes (`mass_kg`)
-    are summed by `bom.total()`. The four lines below are the difference
+    are summed by `bom.total()`. The five lines below are the difference
     between a bill you can send to a supplier and one with holes in it —
     and the catalog lines are the ones nobody had to write."""
     scene.set_part("panda", manufacturer="Franka Robotics", model="Panda", mass_kg=18)
+    scene.set_part("panda/controller", manufacturer="Franka Robotics", model="Control")
     scene.set_part("beam_pick", manufacturer="KEYENCE", model="PZ-G61N", category="sensor.photoelectric")
     scene.set_part("/World/Pedestal", model="PD-500", category="structure.pedestal",
                    description="robot pedestal, 4 anchors", mass_kg=120)

@@ -35,6 +35,20 @@ pub struct RobotSummary {
     pub model: Option<String>,
     /// Catalog `reach_mm` in metres, when declared.
     pub reach: Option<f64>,
+    /// The cabinet driving this arm: the `robot_controller` node declared
+    /// for it, else the line the bill derives (`<robot>/controller`);
+    /// `None` for a machine that needs none (a vehicle, a hand).
+    pub controller: Option<ControllerSummary>,
+}
+
+/// Which cabinet an arm runs on, and where it stands.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ControllerSummary {
+    pub name: String,
+    pub model: Option<String>,
+    /// The obstacle or frame the box stands at (`IoNode.place`); `None`
+    /// until somebody places it.
+    pub place: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -236,6 +250,7 @@ pub struct CellReportInput<'a> {
 impl Scene {
     /// Gathers the report over this scene (see the module docs).
     pub fn cell_report(&self, input: CellReportInput<'_>) -> CellReport {
+        let bom = self.bom();
         let robots = self
             .robots()
             .iter()
@@ -250,6 +265,7 @@ impl Scene {
                     manufacturer,
                     model,
                     reach,
+                    controller: self.controller_summary(&r.name, &bom),
                 }
             })
             .collect();
@@ -336,7 +352,7 @@ impl Scene {
             Err(e) => (None, Some(e.to_string())),
         };
 
-        let bom = self.bom();
+        // `bom` was gathered above, with the robots.
         let mut by_category: BTreeMap<String, u32> = BTreeMap::new();
         for row in &bom.rows {
             *by_category.entry(row.category.clone()).or_default() += row.qty;
@@ -388,6 +404,35 @@ impl Scene {
     /// `machine_tool.*` category on a group, with its door (a device the
     /// machine drives, or a loose leaf with limit switches), its panel
     /// buttons and the controller hosting its program.
+    /// The cabinet an arm runs on: its declared node, else the derived
+    /// line on the bill (which carries the catalog's controller name).
+    fn controller_summary(&self, robot: &str, bom: &crate::part::Bom) -> Option<ControllerSummary> {
+        if let Some(node) = self.io_map().nodes.iter().find(|n| {
+            matches!(&n.kind, crate::iomap::IoNodeKind::RobotController { robots } if robots.iter().any(|r| r == robot))
+        }) {
+            let model = bom
+                .rows
+                .iter()
+                .find(|row| row.names.iter().any(|n| n == &node.name))
+                .and_then(|row| row.model.clone())
+                .or_else(|| node.model.clone());
+            return Some(ControllerSummary {
+                name: node.name.clone(),
+                model,
+                place: node.place.clone(),
+            });
+        }
+        let derived = format!("{robot}/controller");
+        bom.rows
+            .iter()
+            .find(|row| row.names.iter().any(|n| n == &derived))
+            .map(|row| ControllerSummary {
+                name: derived.clone(),
+                model: row.model.clone(),
+                place: None,
+            })
+    }
+
     fn machine_summaries(&self) -> Vec<MachineSummary> {
         use crate::seq::DeviceKind;
         let text = |attrs: &std::collections::BTreeMap<String, crate::part::PartAttr>,
@@ -605,10 +650,15 @@ impl CellReport {
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" ");
+                let cabinet = match &r.controller {
+                    Some(c) if c.place.is_some() => format!(", cabinet {}", c.name),
+                    Some(c) => format!(", cabinet {} — unplaced", c.name),
+                    None => String::new(),
+                };
                 if ident.is_empty() {
-                    format!("{} ({} DOF)", r.name, r.dof)
+                    format!("{} ({} DOF{cabinet})", r.name, r.dof)
                 } else {
-                    format!("{} ({ident}, {} DOF)", r.name, r.dof)
+                    format!("{} ({ident}, {} DOF{cabinet})", r.name, r.dof)
                 }
             })
             .collect();
@@ -1013,8 +1063,9 @@ mod tests {
         });
         assert_eq!(report.title, "arm cell");
         assert_eq!(report.robots.len(), 1);
-        assert_eq!(report.bom.rows, 2); // the robot line + the table
-        assert_eq!(report.bom.unidentified, 1);
+        // The robot line, the controller it needs, and the table.
+        assert_eq!(report.bom.rows, 3);
+        assert_eq!(report.bom.unidentified, 2);
         assert_eq!(report.bom.totals.get("mass_kg"), Some(&30.0));
         assert!((report.footprint.width - 1.5).abs() < 1e-9);
         assert!((report.footprint.area - 0.75).abs() < 1e-9);
@@ -1025,7 +1076,7 @@ mod tests {
         assert!(md.starts_with("# arm cell — cell report\n"), "{md}");
         assert!(md.contains("| Cycle time | — (no bake supplied) |"));
         assert!(
-            md.contains("| BOM | 2 lines, 1 unidentified, mass_kg 30 |"),
+            md.contains("| BOM | 3 lines, 2 unidentified, mass_kg 30 |"),
             "{md}"
         );
         assert!(md.contains("| Scenarios | 1/1 passed |"));

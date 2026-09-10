@@ -699,9 +699,12 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         node.extract::<Option<String>>().ok().flatten()
     };
     // Numeric specs only, in manifest order: `dof`, `payload_kg`,
-    // `reach_mm`, `mass_kg`, ... Lists and strings (`controller`,
-    // `ip_rating`) are not BOM attributes and are dropped here.
+    // `reach_mm`, `mass_kg`, ... Lists and strings (`ip_rating`) are not
+    // BOM attributes and are dropped here — except `controller`, the
+    // names of the controllers the maker pairs the arm with, kept for the
+    // arm's derived controller line.
     let mut specs = Vec::new();
+    let mut controllers = Vec::new();
     if let Ok(dict) = manifest.get_item("specs") {
         if let Ok(items) = dict.call_method0("items") {
             if let Ok(iter) = items.try_iter() {
@@ -709,6 +712,15 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
                     let Ok((key, value)) = item.extract::<(String, Bound<'_, PyAny>)>() else {
                         continue;
                     };
+                    if key == "controller" {
+                        // One name or a list of them.
+                        if let Ok(one) = value.extract::<String>() {
+                            controllers.push(one);
+                        } else if let Ok(many) = value.extract::<Vec<String>>() {
+                            controllers.extend(many);
+                        }
+                        continue;
+                    }
                     // Booleans are ints in Python; keep them out of the
                     // numeric column set.
                     if value.is_instance_of::<pyo3::types::PyBool>() {
@@ -775,6 +787,7 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             product: text_at(&["name"]),
             category: text_at(&["category"]),
             specs,
+            controllers,
             mounting,
             kit,
             compatibility,

@@ -114,7 +114,7 @@ The step table above is `timeline.step_spans`. The 150 mm is two
 [`object_pose`][botrail.SequenceTimeline.object_pose] queries:
 
 ```python
---8<-- "examples/basics/sequence_demo.py:168:172"
+--8<-- "examples/basics/sequence_demo.py:169:173"
 ```
 
 Anything the bake computed is queryable afterwards — that is what the

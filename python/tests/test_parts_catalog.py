@@ -2019,3 +2019,115 @@ def test_a_lathe_and_a_chuck_are_ordered_from_their_packs(tmp_path: Path) -> Non
         bt.parts.chuck(other, "c2", (0.0, 3.0, 1.0), catalog=cpack, diameter=0.200)
     with pytest.raises(ValueError, match="past the 52 mm maximum opening"):
         bt.parts.chuck(other, "c3", (0.0, 3.0, 1.0), catalog=cpack, opening=0.060)
+
+
+# ------------------------------------------------------------ controller
+
+
+CONTROLLER_MANIFEST = """\
+id: test/controller/r-30ib-plus/r1
+kind: spec
+category: robot_controller
+name: R-30iB Plus
+manufacturer:
+  name: FANUC
+specs:
+  ip_rating: IP54
+mechanical:
+  footprint_mm: [600, 470]
+  height_mm: 500
+  mass_kg: 130
+  mount: floor
+electrical:
+  supply:
+    input: AC 200-575 V 3-phase
+  io:
+    channels:
+      - {id: DI101, kind: di, port: 101}
+      - {id: DI102, kind: di, port: 102}
+      - {id: DO101, kind: do, port: 101}
+  cable:
+    standard_m: 7
+    options_m: [14, 20, 30]
+configuration:
+  generator: controller
+  params:
+    variant:
+      values: [A-cabinet, B-cabinet, Mate]
+      default: A-cabinet
+  components:
+    - role: body
+      category: robot_controller
+      variants:
+        - {variant: A-cabinet, part_number: A05B-2600-A, kg: 130}
+        - {variant: B-cabinet, part_number: A05B-2600-B, kg: 190}
+        - {variant: Mate, part_number: A05B-2650-M, kg: 40}
+  rules:
+    size_mm_by_variant:
+      A-cabinet: [600, 470, 500]
+      B-cabinet: [740, 550, 1100]
+      Mate: [470, 402, 400]
+    clearance_mm: {front: 600, sides: 100, rear: 100}
+    mount: [floor, stacked]
+"""
+
+
+def test_a_controller_is_ordered_in_the_enclosure_the_maker_sells(tmp_path: Path) -> None:
+    """A controller spec pack: the variant picks the enclosure — its size,
+    part number and mass — the standard robot cable rides on the line, an
+    option length must be one the pack lists, the pack's I/O table becomes
+    the node's channels, and the maker's service clearance is recorded
+    for the layout check."""
+    import json
+
+    pack = _pack(tmp_path, "r30ib", CONTROLLER_MANIFEST)
+    scene = scene_()
+    box = bt.parts.controller(scene, "R30iB", robots=["simple_arm"], catalog=pack, position=(2.0, 0.0))
+    lo, hi = scene.obstacle_bounds("R30iB/body")
+    assert hi[0] - lo[0] == pytest.approx(0.6) and hi[1] - lo[1] == pytest.approx(0.47) and hi[2] == pytest.approx(0.5)
+    row = next(r for r in scene.bom().rows if r["names"] == ["R30iB"])
+    assert (row["category"], row["manufacturer"], row["model"]) == ("robot_controller", "FANUC", "A05B-2600-A")
+    assert row["catalog"].startswith("test/controller/r-30ib-plus/r1")
+    assert row["description"] == "R-30iB Plus"
+    assert row["attributes"] == {
+        "cable_m": 7.0, "ip_rating": "IP54", "mass_kg": 130.0, "mount": "floor",
+        "service_clearance_mm": 600.0, "variant": "A-cabinet",
+    }
+    node = next(n for n in json.loads(scene.io_map().to_json())["nodes"] if n["name"] == "R30iB")
+    assert [c["id"] for c in node["channels"]] == ["DI101", "DI102", "DO101"]
+    assert node["place"] == "R30iB/body" and node["model"] == "A05B-2600-A"
+    # The pack's drawing is absent, so the generic door is drawn — decoration only.
+    assert "R30iB/trim/door0" in box.obstacles and "R30iB/trim/handle0" in box.obstacles
+    assert [r["names"][0] for r in scene.bom().unidentified()] == ["simple_arm"]
+    box.remove(scene)
+
+    # Another enclosure of the same controller, a longer cable, stacked.
+    bt.parts.controller(scene, "R30iB", robots=["simple_arm"], catalog=pack, position=(2.0, 0.0),
+                        variant="B-cabinet", cable_m=14, mount="stacked", detail="plain")
+    lo, hi = scene.obstacle_bounds("R30iB/body")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2]) == pytest.approx((0.74, 0.55, 1.1))
+    row = next(r for r in scene.bom().rows if r["names"] == ["R30iB"])
+    assert row["model"] == "A05B-2600-B" and row["attributes"]["mass_kg"] == 190.0
+    assert row["attributes"]["cable_m"] == 14.0 and row["attributes"]["mount"] == "stacked"
+
+    # What the pack does not sell is refused: an enclosure, a cable, a mounting.
+    with pytest.raises(ValueError, match="variant"):
+        bt.parts.controller(scene, "x", robots=["simple_arm"], catalog=pack, variant="C-cabinet")
+    with pytest.raises(ValueError, match="no 9 m robot cable"):
+        bt.parts.controller(scene, "x", robots=["simple_arm"], catalog=pack, cable_m=9)
+    with pytest.raises(ValueError, match="not a way this cabinet is installed"):
+        bt.parts.controller(scene, "x", robots=["simple_arm"], catalog=pack, mount="wall")
+    # A pack with one enclosure sizes the body from its fixed dimensions.
+    single = CONTROLLER_MANIFEST.split("configuration:")[0] + (
+        "configuration:\n  generator: controller\n  components:\n"
+        "    - role: body\n      category: robot_controller\n      part_number: UR-CB-E\n"
+        "      dimensions_mm: {width: 460, depth: 449, height: 254}\n      mass: {base_kg: 12}\n"
+    )
+    one = _pack(tmp_path, "cb", single)
+    bt.parts.controller(scene, "CB", robots=["simple_arm"], catalog=one, position=(-2.0, 0.0), detail="plain")
+    lo, hi = scene.obstacle_bounds("CB/body")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2]) == pytest.approx((0.46, 0.449, 0.254))
+    row = next(r for r in scene.bom().rows if r["names"] == ["CB"])
+    assert row["model"] == "UR-CB-E" and row["attributes"]["mass_kg"] == 12.0
+    with pytest.raises(ValueError, match="drop variant="):
+        bt.parts.controller(scene, "CB2", robots=["simple_arm"], catalog=one, variant="A-cabinet")

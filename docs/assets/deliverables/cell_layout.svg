@@ -17,12 +17,28 @@
 <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2b7de9"/></marker></defs>
 <g class="equipment">
 <polygon points="330.0,402.0 342.0,402.0 342.0,390.0 330.0,390.0"><title>part</title></polygon>
-<polygon points="196.0,362.0 316.0,362.0 316.0,282.0 196.0,282.0"><title>cabinet/base</title></polygon>
-<polygon points="196.0,362.0 316.0,362.0 316.0,282.0 196.0,282.0"><title>cabinet/body</title></polygon>
-<polygon points="211.0,292.2 301.0,292.2 301.0,291.8 211.0,291.8"><title>cabinet/plate</title></polygon>
-<polygon points="198.0,362.8 314.0,362.8 314.0,362.0 198.0,362.0"><title>cabinet/trim/door0</title></polygon>
-<polygon points="301.5,366.0 306.5,366.0 306.5,362.8 301.5,362.8"><title>cabinet/trim/handle0</title></polygon>
-<polygon points="286.0,486.0 346.0,486.0 346.0,426.0 286.0,426.0"><title>chute</title></polygon>
+<polygon points="196.3,361.7 315.7,361.7 315.7,282.3 196.3,282.3"><title>cabinet/trim/shell/core</title></polygon>
+<polygon points="196.0,361.2 196.3,361.2 196.3,282.8 196.0,282.8"><title>cabinet/trim/shell/left_skin</title></polygon>
+<polygon points="315.7,361.2 316.0,361.2 316.0,282.8 315.7,282.8"><title>cabinet/trim/shell/right_skin</title></polygon>
+<polygon points="196.8,282.3 315.2,282.3 315.2,282.0 196.8,282.0"><title>cabinet/trim/shell/back_skin</title></polygon>
+<polygon points="196.0,362.0 316.0,362.0 316.0,282.0 196.0,282.0"><title>cabinet/trim/shell/roof</title></polygon>
+<polygon points="196.0,362.0 316.0,362.0 316.0,282.0 196.0,282.0"><title>cabinet/trim/shell/sill</title></polygon>
+<polygon points="196.8,362.0 315.2,362.0 315.2,361.5 196.8,361.5"><title>cabinet/trim/shell/door_0</title></polygon>
+<polygon points="200.3,362.2 205.7,362.2 205.7,362.0 200.3,362.0"><title>cabinet/trim/shell/handle_recess</title></polygon>
+<polygon points="201.2,363.0 204.8,363.0 204.8,362.2 201.2,362.2"><title>cabinet/trim/shell/flat_handle</title></polygon>
+<polygon points="202.2,363.4 203.8,363.4 203.8,363.0 202.2,363.0"><title>cabinet/trim/shell/lock</title></polygon>
+<polygon points="200.0,355.0 208.0,355.0 208.0,353.0 200.0,353.0"><title>cabinet/trim/shell/lifting_eye_lf</title></polygon>
+<polygon points="304.0,355.0 312.0,355.0 312.0,353.0 304.0,353.0"><title>cabinet/trim/shell/lifting_eye_rf</title></polygon>
+<polygon points="200.0,291.0 208.0,291.0 208.0,289.0 200.0,289.0"><title>cabinet/trim/shell/lifting_eye_lb</title></polygon>
+<polygon points="304.0,291.0 312.0,291.0 312.0,289.0 304.0,289.0"><title>cabinet/trim/shell/lifting_eye_rb</title></polygon>
+<polygon points="196.0,362.0 316.0,362.0 316.0,361.1 196.0,361.1"><title>cabinet/trim/shell/base_front</title></polygon>
+<polygon points="196.0,282.9 316.0,282.9 316.0,282.0 196.0,282.0"><title>cabinet/trim/shell/base_back</title></polygon>
+<polygon points="196.0,361.1 196.6,361.1 196.6,282.9 196.0,282.9"><title>cabinet/trim/shell/base_left</title></polygon>
+<polygon points="315.4,361.1 316.0,361.1 316.0,282.9 315.4,282.9"><title>cabinet/trim/shell/base_right</title></polygon>
+<polygon points="196.0,362.0 316.0,362.0 316.0,356.0 196.0,356.0"><title>cabinet/trim/shell/base_top_front</title></polygon>
+<polygon points="196.0,288.0 316.0,288.0 316.0,282.0 196.0,282.0"><title>cabinet/trim/shell/base_top_back</title></polygon>
+<polygon points="589.2,308.5 589.2,403.5 642.8,403.5 642.8,308.5"><title>UR/body</title></polygon>
+<polygon points="326.0,556.0 386.0,556.0 386.0,496.0 326.0,496.0"><title>chute</title></polygon>
 <polygon points="180.0,592.0 192.0,592.0 192.0,580.0 180.0,580.0"><title>fence/posts/c0</title></polygon>
 <polygon points="660.0,592.0 672.0,592.0 672.0,580.0 660.0,580.0"><title>fence/posts/c1</title></polygon>
 <polygon points="660.0,272.0 672.0,272.0 672.0,260.0 660.0,260.0"><title>fence/posts/c2</title></polygon>
@@ -54,15 +70,18 @@
 </g>
 <g class="frame">
 <path d="M248.0,362.0 L264.0,362.0 M256.0,354.0 L256.0,370.0"><title>cabinet/front</title></path>
+<path d="M581.2,356.0 L597.2,356.0 M589.2,348.0 L589.2,364.0"><title>UR/front</title></path>
 </g>
 <g class="label">
 <text x="426.0" y="426.0" font-size="24.0">simple_arm</text>
 <text x="406.0" y="356.0" font-size="20.0">conv</text>
 <text x="476.0" y="380.0" font-size="16.0">part_at_pick</text>
 <text x="256.0" y="382.0" font-size="12.0">front</text>
+<text x="589.2" y="376.0" font-size="12.0">front</text>
 <text x="336.0" y="396.0" font-size="20.0">part</text>
-<text x="256.0" y="324.0" font-size="20.0">cabinet (FZ40-616)</text>
-<text x="316.0" y="456.0" font-size="20.0">chute (BIN-30)</text>
+<text x="256.0" y="322.7" font-size="20.0">cabinet (FZ40-616)</text>
+<text x="616.0" y="356.0" font-size="20.0">UR</text>
+<text x="356.0" y="526.0" font-size="20.0">chute (BIN-30)</text>
 <text x="426.0" y="236.0" font-size="20.0">fence (ST20 1.0m)</text>
 </g>
 <g class="dim">

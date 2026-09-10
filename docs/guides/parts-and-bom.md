@@ -97,17 +97,36 @@ catalog reference, maker or model — stays under its own resident name, so
 `bom.unidentified()` is the purchasing to-do list.
 
 ```text
-| # | category             | manufacturer | model     | catalog              | qty | names            | mass_kg |
-|---|----------------------|--------------|-----------|----------------------|-----|------------------|---------|
-| 1 | manipulator          | FANUC        | M-20iD/25 | fanuc/m/m-20id-25@…  | 1   | arm              | 250     |
-| 2 | conveyor             | MISUMI       | GVL-1200  |                      | 1   | belt             | 45      |
-| 3 | sensor.photoelectric | KEYENCE      | PZ-G61N   | keyence/pz-g61n      | 1   | eye              |         |
-| 4 | plc                  |              | R04CPU    |                      | 1   | PLC1             |         |
-| 5 | part                 |              | HFS8-1200 |                      | 2   | table_a; table_b | 30      |
-| 6 | structure.fence      |              | FP-2000   |                      | 12  | fence            | 8       |
+| # | category             | manufacturer | model       | catalog              | qty | names            | mass_kg |
+|---|----------------------|--------------|-------------|----------------------|-----|------------------|---------|
+| 1 | manipulator          | FANUC        | M-20iD/25   | fanuc/m/m-20id-25@…  | 1   | arm              | 250     |
+| 2 | robot_controller     | FANUC        | R-30iB Plus |                      | 1   | arm/controller   |         |
+| 3 | conveyor             | MISUMI       | GVL-1200    |                      | 1   | belt             | 45      |
+| 4 | sensor.photoelectric | KEYENCE      | PZ-G61N     | keyence/pz-g61n      | 1   | eye              |         |
+| 5 | plc                  |              | R04CPU      |                      | 1   | PLC1             |         |
+| 6 | part                 |              | HFS8-1200   |                      | 2   | table_a; table_b | 30      |
+| 7 | structure.fence      |              | FP-2000     |                      | 12  | fence            | 8       |
 
 Totals: mass_kg = 451
 ```
+
+Every arm needs a controller box, so the bill lists one per arm before
+anybody declares it: the line `<robot>/controller` (category
+`robot_controller`). A catalog arm names it where its maker lists exactly
+one controller (the manifest's `specs.controller`); an arm sold as a set
+with its controller — a UR e-Series, a Doosan M — carries the set's
+identity, so the line is no second purchase; otherwise it stays unidentified
+with what is known in its description (the candidate controllers, the
+set's note), which is what the to-do list should say. Pin identity on it
+like any other line (`scene.set_part("arm/controller", manufacturer="FANUC",
+model="R-30iB Mate Plus")`), or declare the cabinet in the
+[I/O map](io-map.md) (`scene.add_io_node("UR", kind="robot_controller",
+robots=["arm"])`): the node's own line then stands for it, and a pin on the
+derived name follows the arm onto it. [`bt.parts.controller`](standard-parts.md)
+does the whole thing at once — the box on the floor plan, the node and the
+line are one name. A vehicle carries its controller on board, and a gripper
+or a hand loaded on its own is driven by someone else's cabinet — neither
+gets a line.
 
 The [`Bom`][botrail.Bom] renders as CSV, Markdown or JSON (`to_csv()`,
 `to_markdown()`, `to_json()`, `save(path)`; `scene.export_bom(path)` picks the

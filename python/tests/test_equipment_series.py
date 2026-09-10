@@ -163,7 +163,7 @@ def test_cabinet_top_clearance_excludes_body_dimension_and_bom(tmp_path, detail)
     bt.parts.cabinet(s, "cab", position=(1, 2, 0.3), catalog=p, detail=detail)
     assert s.obstacle_bounds("cab/body")[1][2] == pytest.approx(2.4)
     assert s.obstacle_bounds("cab/lifting_clearance")[1][2] == pytest.approx(2.452)
-    assert len([r for r in s.bom().rows if r["category"] != "robot"]) == 1
+    assert len([r for r in s.bom().rows if r["category"] not in ("robot", "robot_controller")]) == 1
 
 
 def test_partial_drive_spec_is_rejected(tmp_path):

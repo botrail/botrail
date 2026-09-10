@@ -467,3 +467,104 @@ def test_power_supply_requirement_counts_the_loads_at_its_voltage() -> None:
     req = scene.requirements()
     assert by_key(req["ps24"])["output_a"].value == pytest.approx(0.8)
     assert any("2 units" in note for note in req["ps24"].notes)
+
+
+# --------------------------------------------------------- controller boxes
+
+
+def test_a_placed_controller_asks_for_its_robot_cable() -> None:
+    """A controller box on the floor plan needs a cable from the arm's base:
+    the run along the axes plus slack, against the `cable_m` on its line.
+    The capacity requirements of the same node stay the I/O report's
+    business — only the cable raises a spec finding."""
+    scene = cell()  # `UR` declared and identified, not placed
+    assert [f.code for f in scene.check() if f.target == "UR"] == ["controller_unplaced"]
+    assert "cable_m" not in by_key(scene.requirements()["UR"])
+    scene.remove_io_node("UR")
+    box = bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.475, 0.423, 0.268),
+                              position=(1.0, 0.0), channels=bt.io.ur_standard(), cable_m=6,
+                              manufacturer="Universal Robots", model="CB3")
+    scene.auto_assign_io()
+    row = scene.requirements()["UR"]
+    cable = by_key(row)["cable_m"]
+    # Base at (0, 0, 0.4) on the pedestal, box origin at (1, 0, 0.134): 1.266 m along the axes + 1 m.
+    assert cable.value == pytest.approx(2.27) and cable.status == "ok" and cable.provided == 6.0
+    assert "simple_arm base to UR/body 1.27 m along the axes + 1 m slack" == cable.basis
+    assert by_key(row)["di"].lint is False and cable.lint is True
+    report = scene.check()
+    assert [f.code for f in report if f.target == "UR"] == []
+    # The same box across the cell: the 6 m cable falls short, and says so.
+    box.remove(scene)
+    bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.475, 0.423, 0.268),
+                        position=(5.0, 0.0), channels=bt.io.ur_standard(), cable_m=6,
+                        manufacturer="Universal Robots", model="CB3")
+    scene.auto_assign_io()
+    short = next(f for f in scene.check() if f.code == "spec_short" and f.target == "UR")
+    assert "cable_m 6 < required 6.27" in short.message and "5.27 m along the axes" in short.message
+    assert scene.check(cable_slack_m=0.5).errors() == []
+    assert scene.requirements(cable_slack_m=0)["UR"].status == "ok"
+    with pytest.raises(ValueError, match="cable_slack_m"):
+        scene.requirements(cable_slack_m=-1)
+    # The longer cable the maker sells clears it.
+    scene.set_part("UR", kind="io_node", manufacturer="Universal Robots", model="CB3", cable_m=12, mount="floor")
+    assert scene.check().errors() == []
+    # An arm with no controller declared at all: the derived line is unplaced.
+    bare = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    unplaced = next(f for f in bare.check() if f.code == "controller_unplaced")
+    assert unplaced.target == "simple_arm/controller" and "bt.parts.controller" in unplaced.message
+
+
+def test_service_space_in_front_of_a_cabinet_door() -> None:
+    """The space in front of a control cabinet's door — the door's width, the
+    box's height, `service_clearance_m` deep — must be free of solid
+    obstacles; decoration, the floor and the cabinet's own parts do not
+    count, the maker's stated clearance overrides the default, and the
+    space turns with the door."""
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    bt.parts.cabinet(scene, "cab", size=(0.6, 0.4, 1.6), position=(-1.0, 1.0), model="FZ40-616")
+    assert [f.code for f in scene.check() if f.target == "cab"] == []
+    # A bin 0.3 m in front of the door (the door faces -Y): blocked.
+    scene.add_box("bin", size=(0.3, 0.3, 0.4), position=(-1.0, 0.3, 0.2))
+    blocked = next(f for f in scene.check() if f.code == "service_space")
+    assert blocked.severity == "warning" and blocked.target == "cab"
+    assert blocked.message == "cab: 0.9 m in front of cab/front is blocked by bin"
+    # A shallower space clears it — as an argument, or as the maker's figure on the part.
+    assert [f.code for f in scene.check(service_clearance_m=0.3) if f.target == "cab"] == []
+    scene.set_part("cab", model="FZ40-616", service_clearance_mm=300)
+    assert [f.code for f in scene.check() if f.target == "cab"] == []
+    scene.set_part("cab", model="FZ40-616")
+    # Decoration and floor markings do not block; a slab beside the door does not either.
+    scene.set_obstacle_enabled("bin", False)
+    assert [f.code for f in scene.check() if f.target == "cab"] == []
+    scene.set_obstacle_enabled("bin", True)
+    scene.set_obstacle_pose("bin", (-1.0, 0.3, 0.005))
+    scene.add_box("marking", size=(2.0, 2.0, 0.01), position=(-1.0, 0.5, 0.005))
+    scene.set_obstacle_pose("bin", (-1.6, 0.3, 0.2))  # x from -1.75 to -1.45, west of the 0.6 m door
+    assert [f.code for f in scene.check() if f.target == "cab"] == []
+    # A door turned a quarter faces +X: the space lies east of it.
+    bt.parts.cabinet(scene, "cab2", size=(0.6, 0.4, 1.6), position=(0.0, 2.0), yaw=math.pi / 2, model="FZ40-616")
+    scene.add_box("cart", size=(0.4, 0.4, 0.8), position=(0.6, 2.0, 0.4))
+    assert [f.target for f in scene.check() if f.code == "service_space"] == ["cab2"]
+    scene.set_obstacle_pose("cart", (0.6, 2.6, 0.4))
+    assert [f.target for f in scene.check() if f.code == "service_space"] == []
+    # A controller box has a door too.
+    bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.46, 0.449, 0.254), position=(2.0, 0.0),
+                        manufacturer="Universal Robots", model="e-Series")
+    scene.add_box("tote", size=(0.3, 0.3, 0.3), position=(2.0, -0.5, 0.15))
+    assert [f.target for f in scene.check() if f.code == "service_space"] == ["UR"]
+    with pytest.raises(ValueError, match="service_clearance_m"):
+        scene.check(service_clearance_m=-0.1)
+
+
+def test_cli_check_fails_on_a_short_cable(tmp_path: Path) -> None:
+    from botrail._cli import main
+
+    scene = cell()
+    scene.remove_io_node("UR")
+    bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.475, 0.423, 0.268),
+                        position=(5.0, 0.0), channels=bt.io.ur_standard(), cable_m=6,
+                        manufacturer="Universal Robots", model="CB3")
+    scene.auto_assign_io()
+    path = tmp_path / "far.botrail"
+    scene.save_project(path)
+    assert main(["check", str(path)]) == 1

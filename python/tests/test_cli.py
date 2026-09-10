@@ -111,11 +111,15 @@ def test_check_flags_problems_and_unidentified_lines(capsys, tmp_path: Path) -> 
     code, out3 = run(capsys, "check", str(tmp_path / "broken.botrail"))
     assert code == 1 and not out3["ok"]
     assert any(f["severity"] == "error" for f in out3["findings"]), out3
-    # An unidentified equipment line is an info finding, not a failure.
+    # An unidentified equipment line is an info finding, not a failure —
+    # the bare arm, and the controller it needs.
     plain = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     plain.save_project(tmp_path / "plain.botrail")
     code, out4 = run(capsys, "check", str(tmp_path / "plain.botrail"))
-    assert code == 0 and [f["code"] for f in out4["findings"]] == ["unidentified_part"]
+    assert code == 0 and [(f["code"], f["target"]) for f in out4["findings"]] == [
+        ("unidentified_part", "simple_arm"), ("unidentified_part", "simple_arm/controller"),
+        ("controller_unplaced", "simple_arm/controller"),
+    ]
 
 
 def test_check_reports_load_failures_as_json_with_exit_2(capsys, tmp_path: Path) -> None:

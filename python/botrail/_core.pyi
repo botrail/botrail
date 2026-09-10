@@ -396,10 +396,12 @@ class Scene:
     def _snapshot(self) -> "Scene": ...
     def _asset_paths(self) -> list[Path]: ...
     def requirements(
-        self, *, sequences: Optional[list[str]] = None, margin: float = 0.1, timeline: Optional[Any] = None
+        self, *, sequences: Optional[list[str]] = None, margin: float = 0.1, timeline: Optional[Any] = None,
+        cable_slack_m: float = 1.0,
     ): ...  # -> botrail.select.Requirements
     def check(
-        self, *, sequences: Optional[list[str]] = None, timeline: Optional[Any] = None
+        self, *, sequences: Optional[list[str]] = None, timeline: Optional[Any] = None,
+        cable_slack_m: float = 1.0, service_clearance_m: float = 0.9,
     ): ...  # -> botrail.select.CheckReport
     def _upsert_sequence_json(self, json: str) -> None: ...
     def remove_sequence(self, name: str) -> None: ...

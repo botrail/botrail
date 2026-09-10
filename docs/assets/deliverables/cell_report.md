@@ -2,14 +2,14 @@
 
 | | |
 |---|---|
-| Robots | simple_arm (6 DOF) |
+| Robots | simple_arm (6 DOF, cabinet UR) |
 | Cycle time | baseline: 11.75 s, ng_part: 10.97 s |
-| Min clearance | 0.239 m at 4.59 s (baseline) |
+| Min clearance | 0.175 m at 0.00 s (baseline) |
 | Footprint | 2.46 × 1.66 m (4.1 m²), height 1.80 m |
 | I/O | 4 points (2 DI, 2 DO), 0 unbound, 0 finding(s) |
-| BOM | 11 lines, 0 unidentified, mass_kg 258 |
+| BOM | 11 lines, 0 unidentified, cable_m 6, mass_kg 258 |
 | Scenarios | 2/3 passed |
-| Deliverables | 11 files hashed |
+| Deliverables | 12 files hashed |
 
 ## Cycle `baseline`
 
@@ -19,7 +19,7 @@ Programs: `pick`. Duration **11.75 s**.
 |---|---|---|
 | simple_arm | 9.38 | 80 % |
 
-Min clearance 0.239 m at 4.59 s.
+Min clearance 0.175 m at 0.00 s.
 
 Branches taken: pick/judge → arm 0.
 
@@ -43,7 +43,7 @@ Programs: `pick`. Duration **10.97 s**.
 |---|---|---|
 | simple_arm | 8.29 | 76 % |
 
-Min clearance 0.239 m at 4.59 s.
+Min clearance 0.175 m at 0.00 s.
 
 Branches taken: pick/judge → arm 1.
 
@@ -99,7 +99,7 @@ Branches taken: pick/judge → arm 1.
 | structure.fence | 7 |
 | structure.fence.post | 8 |
 
-Totals: mass_kg = 258.
+Totals: cable_m = 6, mass_kg = 258.
 
 
 ## Footprint
@@ -111,14 +111,15 @@ x -1.23 … 1.23 m, y -0.63 … 1.03 m — 2.46 × 1.66 m, 4.08 m², tallest ite
 
 | file | bytes | sha256 |
 |---|---|---|
-| ../../docs/assets/deliverables/cell.botrail | 28669 | 8b3e860e3d86b268544d2a6368aac87a72486c4eb8c9b94588e01e36363416c7 |
-| ../../docs/assets/deliverables/cell.py | 13750 | e425ba7152ba78d1c79914ed9eb7973cd975c9af0a7c32d011d6f5c6846c9517 |
-| ../../docs/assets/deliverables/cell_bom.csv | 1166 | 6b908a8a8fafee0dc907e3c6ebb565eefbdb693512f48c556aa7c7685f23f5a9 |
-| ../../docs/assets/deliverables/cell_bom.md | 1717 | 7db9a68217597f7b9de052c82f11068db04bf25e111c4150640b8b3546dfe7e2 |
-| ../../docs/assets/deliverables/cell_io.csv | 484 | f19f8a948e1778a41142209d68489783625ed9505d3804336050bfe1aad7fc2d |
+| ../../docs/assets/deliverables/cell.botrail | 6600 | bce422b887d9d4a5927473249d7f11d1b301dc9767d2c2a1d1cf7a7b4c3623dd |
+| ../../docs/assets/deliverables/cell.py | 21199 | 0c1c698449f5213f29b7e8ca319bb864418b604b64e6fc934bf77d12758d2b71 |
+| ../../docs/assets/deliverables/cell_bom.csv | 1208 | 00ee01ac073385158d6881b43663d3bbb21199445c6138de7e2333f698b181d9 |
+| ../../docs/assets/deliverables/cell_bom.md | 1828 | 403cf7b6469b92022341d44a27996a31a999f828f4d0506c159304e2c995bd30 |
+| ../../docs/assets/deliverables/cell_io.csv | 572 | 368d863f9c1c7193a1b707b3d1bc495760f5b4de99e187e50ffad28fa5d9d47c |
 | ../../docs/assets/deliverables/cell_topology.mmd | 421 | a88549a0bb2f8ea31c57399127d4b6082016f4513b1cd58bb8bd6ff4618bd097 |
-| ../../docs/assets/deliverables/cell.plcopen.xml | 13834 | a4bb95528a67dacf382224c77626184a0a84e8d0f23b43babef5172710c5c685 |
-| ../../docs/assets/deliverables/cell_layout.svg | 5442 | 8c83f6fe067cfc3b08f34c937f75b54bb2452f1c1acd7df3d54e65538d0767ae |
-| ../../docs/assets/deliverables/cell_layout.dxf | 8586 | 4b1821cc07be3ba0e97ba9f68b46b794571f9d11709abc60a1378cbd3a9b954d |
-| ../../docs/assets/deliverables/cell_cycle.usda | 593339 | d3a29a464c69fa00dfbf4973dd8411fdd4eadbb099ef4bbd014d58610626149a |
+| ../../docs/assets/deliverables/cell.plcopen.xml | 13834 | 1f120e1b7647852bf774e30f01fe28001e0c37b3f5077d4fcba38eaccda31e4c |
+| ../../docs/assets/deliverables/cell_interlocks.md | 1305 | 38251f69527bea4d4b6cb5953a63a365062f112bc35db0ec10128a64f07cfdfb |
+| ../../docs/assets/deliverables/cell_layout.svg | 7623 | 332e3eb1c6a4c633549c0c1d3a26e9eb1e5425fed8b6016b1132bb256a6468f4 |
+| ../../docs/assets/deliverables/cell_layout.dxf | 12810 | 8d45398712928abbd737885915590948b076fec60be98858d322ddd9f529621f |
+| ../../docs/assets/deliverables/cell_cycle.usda | 826009 | 6f232e08b1bfa98d2eeeb2f7d17619a38ad95af908cf9673def8f2c721d494c5 |
 | ../../docs/assets/deliverables/pick_cell.script | 1209 | 1bd8db12bf396c71610900df19f1e8bf2d1dc6b22bf30811d2fcca7e5c4264d2 |

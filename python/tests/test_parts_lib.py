@@ -550,3 +550,91 @@ def test_lathe_and_chuck_stand_the_turning_envelopes() -> None:
     driven.remove(other)
     solid = bt.parts.lathe(other, "lathe", door=None, panel=None)
     assert solid.door_lanes is None and "lathe/shell/front" in solid.obstacles and other.sensor_names == []
+
+
+# ------------------------------------------------------------ controller
+
+
+def test_controller_is_a_box_a_node_and_one_bom_line() -> None:
+    """The controller an arm needs, placed: the box `<name>/body`, the
+    frame at its door, the `robot_controller` node whose `place` is the
+    box — and one line on the bill, which takes the arm's derived
+    `<robot>/controller` line off it."""
+    import json
+
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    assert ["simple_arm", "simple_arm/controller"] == [r["names"][0] for r in scene.bom().rows]
+    box = bt.parts.controller(
+        scene, "UR", robots=["simple_arm"], size=(0.46, 0.449, 0.254), position=(1.0, -0.5),
+        yaw=math.pi / 2, cable_m=6, manufacturer="Universal Robots", model="e-Series control box",
+    )
+    assert (box.obstacles, box.frames, box.nodes) == (["UR/body"], ["UR/front"], ["UR"])
+    # Turned a quarter: the depth runs along x, the door faces +x, the
+    # front frame sits at the door's centre on the floor.
+    lo, hi = scene.obstacle_bounds("UR/body")
+    assert lo == pytest.approx([1.0 - 0.2245, -0.5 - 0.23, 0.0]) and hi == pytest.approx([1.0 + 0.2245, -0.5 + 0.23, 0.254])
+    assert scene.frame("UR/front")[0] == pytest.approx([1.2245, -0.5, 0.0])
+    node = next(n for n in json.loads(scene.io_map().to_json())["nodes"] if n["name"] == "UR")
+    assert node["kind"] == {"kind": "robot_controller", "robots": ["simple_arm"]}
+    assert node["place"] == "UR/body" and node["model"] == "e-Series control box"
+    rows = {r["names"][0]: r for r in scene.bom().rows}
+    assert "simple_arm/controller" not in rows
+    assert rows["UR"]["category"] == "robot_controller"
+    assert (rows["UR"]["manufacturer"], rows["UR"]["model"]) == ("Universal Robots", "e-Series control box")
+    assert rows["UR"]["attributes"] == {"cable_m": 6.0, "mount": "floor"}
+    assert [r["names"][0] for r in scene.bom().unidentified()] == ["simple_arm"]
+    # On the sheet: the box on the equipment layer, labelled by the node's name.
+    sheet = json.loads(scene.layout("json"))
+    by_name = {}
+    for item in sheet["items"]:
+        by_name.setdefault(item["name"], []).append(item)
+    assert by_name["UR/body"][0]["layer"] == "equipment"
+    assert "UR" in {i["shape"]["text"] for i in sheet["items"] if i["shape"]["shape"] == "text"}
+    # Taking it down brings the derived line back.
+    box.remove(scene)
+    assert "UR/body" not in scene.obstacle_names and "UR" not in scene.io_map().nodes
+    assert ["simple_arm", "simple_arm/controller"] == [r["names"][0] for r in scene.bom().rows]
+
+    with pytest.raises(ValueError, match="robots is required"):
+        bt.parts.controller(scene, "UR", robots=[], size=(0.4, 0.4, 0.3))
+    with pytest.raises(ValueError, match="mount must be one of"):
+        bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.4, 0.4, 0.3), mount="ceiling")
+    with pytest.raises(ValueError, match="size is required"):
+        bt.parts.controller(scene, "UR", robots=["simple_arm"])
+    with pytest.raises(ValueError, match="no robot named arm2"):
+        bt.parts.controller(scene, "UR", robots=["arm2"], size=(0.4, 0.4, 0.3))
+    assert "UR/body" not in scene.obstacle_names  # a refusal leaves nothing behind
+    with pytest.raises(ValueError, match="cable_m must be positive"):
+        bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.4, 0.4, 0.3), cable_m=0)
+
+
+def test_controller_adopts_a_node_the_cell_wired_first() -> None:
+    """Authoring order does not matter: a cabinet declared with its
+    channels and bindings keeps them when the box is placed later — the
+    box must drive the same arms, and explicit channels override."""
+    import json
+
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    scene.add_beam_sensor("eye", frm=(0.2, 0.2, 0.1), to=(0.2, 0.4, 0.1))
+    scene.add_segment("go", goal=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+    sq = scene.sequence("pick")
+    sq.step("wait", transition=bt.seq.rising("eye"))
+    sq.step("go", actions=[bt.seq.motion("go")], transition=bt.seq.done())
+    scene.add_io_node("UR", kind="robot_controller", robots=["simple_arm"], channels=bt.io.ur_standard())
+    scene.bind_input("eye", "UR", "DI2")
+    scene.add_robot(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"), name="arm2", base_position=(3.0, 3.0, 0.0))
+    with pytest.raises(ValueError, match="drives simple_arm — not arm2"):
+        bt.parts.controller(scene, "UR", robots=["arm2"], size=(0.46, 0.449, 0.254))
+    assert "UR/body" not in scene.obstacle_names
+    bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.46, 0.449, 0.254), position=(1.0, 0.0),
+                        mount="under_table", manufacturer="Universal Robots", model="CB3 control box")
+    node = next(n for n in json.loads(scene.io_map().to_json())["nodes"] if n["name"] == "UR")
+    assert len(node["channels"]) == 16 and node["place"] == "UR/body"
+    assert scene.io_map().bindings == [("eye", "input", "UR", "DI2")]
+    assert scene.io_report().errors() == []
+    rows = {r["names"][0]: r for r in scene.bom().rows}
+    assert rows["UR"]["attributes"] == {"mount": "under_table"} and rows["UR"]["model"] == "CB3 control box"
+    # A node of another kind under that name is not a controller to adopt.
+    scene.add_io_node("PLC1", kind="plc", channels=bt.io.di8(base="%IX0.0"))
+    with pytest.raises(ValueError, match="not a robot controller"):
+        bt.parts.controller(scene, "PLC1", robots=["simple_arm"], size=(0.4, 0.4, 0.3))

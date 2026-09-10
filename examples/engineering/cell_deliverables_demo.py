@@ -23,6 +23,7 @@ Run with:  python examples/engineering/cell_deliverables_demo.py [out_dir]
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -42,12 +43,18 @@ def furnish(scene: bt.Scene, fence_pitch: float = FENCE_PITCH) -> None:
     cycle."""
     # The control cabinet stands in the corner, ordered from the catalog:
     # the enclosure is an article of its own (body, plinth base, mounting
-    # plate — three lines with masses and part numbers), and the UR
-    # controller it houses keeps its own line as the `UR` I/O node below.
-    # The reject chute is a bin west of the arm.
+    # plate — three lines with masses and part numbers). The UR control
+    # box stands by the east fence, its door towards the arm: the box on
+    # the sheet, the `UR` I/O node the cycle wired and its BOM line are one
+    # thing, and the 6 m robot cable it ships with is on that line. The
+    # reject chute is a bin south-west of the arm, clear of the cabinet's
+    # door — a bin in front of it would be a `service_space` warning.
     bt.parts.cabinet(scene, "cabinet", catalog="nito/fz/standard",
                      size=(0.6, 0.4, 1.6), position=(-0.85, 0.72), base_height=0.1)
-    scene.add_box("chute", size=(0.3, 0.3, 0.4), position=(-0.55, 0.05, 0.2))
+    bt.parts.controller(scene, "UR", robots=["simple_arm"], size=(0.475, 0.268, 0.423),
+                        position=(0.95, 0.55), yaw=-math.pi / 2, cable_m=6,
+                        manufacturer="Universal Robots", model="CB3 control box")
+    scene.add_box("chute", size=(0.3, 0.3, 0.4), position=(-0.35, -0.3, 0.2))
     scene.set_part("chute", model="BIN-30", category="bin")
     # A fence around the cell — panels of `fence_pitch` along each side, a
     # post at every corner and between panels, the door on the south side —
@@ -58,11 +65,10 @@ def furnish(scene: bt.Scene, fence_pitch: float = FENCE_PITCH) -> None:
         height=1.8, panel_pitch=fence_pitch, door=(0, 1), door_model="ST20 door",
         manufacturer="TROAX", model=f"ST20 {fence_pitch:.1f}m", post_model="ST20 post", mass_kg=12,
     )
-    # Equipment identity: the arm, the belt, the eye, the controller.
+    # Equipment identity: the arm, the belt, the eye.
     scene.set_part("simple_arm", manufacturer="ACME", model="SA-6", mass_kg=28)
     scene.set_part("conv", manufacturer="MISUMI", model="GVL-900-200", mass_kg=32)
     scene.set_part("part_at_pick", manufacturer="KEYENCE", model="PZ-G61N")
-    scene.set_part("UR", manufacturer="Universal Robots", model="CB3 control box")
 
 
 def build() -> bt.Scene:

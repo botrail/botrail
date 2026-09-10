@@ -3476,11 +3476,12 @@ impl Scene {
     }
 
     /// The bill of materials derived from the scene: robots and their
-    /// tools (catalog identity when loaded from the catalog), conveyors /
-    /// axes / vehicles, sensors and I/O nodes — each listed whether or
-    /// not it has been identified — plus every obstacle or group a part
-    /// was pinned to. Identical products merge into one row with the
-    /// quantity summed.
+    /// tools (catalog identity when loaded from the catalog), the
+    /// controller every arm needs (`<robot>/controller`, until a
+    /// `robot_controller` node declares it), conveyors / axes / vehicles,
+    /// sensors and I/O nodes — each listed whether or not it has been
+    /// identified — plus every obstacle or group a part was pinned to.
+    /// Identical products merge into one row with the quantity summed.
     fn bom(&self) -> Bom {
         Bom {
             inner: self.hub.bom(),
@@ -4166,19 +4167,21 @@ impl Scene {
     /// and compared with what the chosen part says. Returns a
     /// `bt.select.Requirements` (rows, `findings()`, `to_markdown()`,
     /// `to_json()`); botrail derives and compares — it does not choose.
-    #[pyo3(signature = (*, sequences = None, margin = 0.1, timeline = None))]
+    #[pyo3(signature = (*, sequences = None, margin = 0.1, timeline = None, cable_slack_m = 1.0))]
     fn requirements(
         slf: Py<Self>,
         py: Python<'_>,
         sequences: Option<Vec<String>>,
         margin: f64,
         timeline: Option<Py<PyAny>>,
+        cable_slack_m: f64,
     ) -> PyResult<Py<PyAny>> {
         let module = py.import("botrail.select")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("sequences", sequences)?;
         kwargs.set_item("margin", margin)?;
         kwargs.set_item("timeline", timeline)?;
+        kwargs.set_item("cable_slack_m", cable_slack_m)?;
         Ok(module
             .getattr("requirements")?
             .call((slf,), Some(&kwargs))?
@@ -4190,17 +4193,21 @@ impl Scene {
     /// the requirement comparison (`spec_short` / `spec_unknown`). Returns
     /// a `bt.select.CheckReport` (`ok`, `findings`, `to_json()`,
     /// `to_markdown()`); `botrail check` prints the same thing.
-    #[pyo3(signature = (*, sequences = None, timeline = None))]
+    #[pyo3(signature = (*, sequences = None, timeline = None, cable_slack_m = 1.0, service_clearance_m = 0.9))]
     fn check(
         slf: Py<Self>,
         py: Python<'_>,
         sequences: Option<Vec<String>>,
         timeline: Option<Py<PyAny>>,
+        cable_slack_m: f64,
+        service_clearance_m: f64,
     ) -> PyResult<Py<PyAny>> {
         let module = py.import("botrail.select")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("sequences", sequences)?;
         kwargs.set_item("timeline", timeline)?;
+        kwargs.set_item("cable_slack_m", cable_slack_m)?;
+        kwargs.set_item("service_clearance_m", service_clearance_m)?;
         Ok(module
             .getattr("check")?
             .call((slf,), Some(&kwargs))?

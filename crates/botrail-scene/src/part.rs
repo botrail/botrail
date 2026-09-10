@@ -519,7 +519,9 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     if scene.lidars().iter().any(|l| l.name == target) {
         hits.push(PartTargetKind::Lidar);
     }
-    if scene.io_map().nodes.iter().any(|n| n.name == target) {
+    if scene.io_map().nodes.iter().any(|n| n.name == target)
+        || controller_row_names(scene).iter().any(|n| n == target)
+    {
         hits.push(PartTargetKind::IoNode);
     }
     if tool_row_names(scene).iter().any(|n| n == target) {
@@ -560,6 +562,168 @@ fn tool_row_names(scene: &Scene) -> Vec<String> {
     names
 }
 
+/// The names the BOM gives the controller every arm needs
+/// (`<robot>/controller`) — what a `PartTargetKind::IoNode` part is pinned
+/// to before, or instead of, a `robot_controller` node being declared for
+/// the arm. The name stays valid while the arm exists, so a pin survives
+/// the node's declaration (the node's line then wears it).
+fn controller_row_names(scene: &Scene) -> Vec<String> {
+    scene
+        .robots
+        .iter()
+        .filter(|r| needs_controller(scene, r))
+        .map(|r| format!("{}/controller", r.name))
+        .collect()
+}
+
+/// Whether a robot is an arm with a controller box of its own: an arm
+/// from the catalog (`manipulator`), or an articulated model loaded from
+/// a URDF / USD that is not the legs or the airframe of a vehicle. A
+/// vehicle carries its controller on board, a positioner, a gripper or a
+/// hand loaded on its own is driven by someone else's, and a frames-only
+/// body is not a machine at all — none of those get a line.
+fn needs_controller(scene: &Scene, robot: &crate::SceneRobot) -> bool {
+    // The vehicle rule of `bom`: legs (a gait mount) or the whole airframe
+    // (a rigid mount on a vehicle with no body of its own) *are* the
+    // vehicle.
+    if let Some(mount) = &robot.mount {
+        let bodiless = scene.devices.iter().any(|d| {
+            d.name == mount.device
+                && matches!(&d.kind, DeviceKind::Vehicle { body, .. } if body.is_empty())
+        });
+        if mount.gait.is_some() || bodiless {
+            return false;
+        }
+    }
+    // The catalog says what a package is; a bare model is an arm when it
+    // has joints to drive.
+    match catalog_of(&robot.model.source).and_then(|(_, _, meta)| meta.category.as_deref()) {
+        Some(category) => category == "manipulator",
+        None => !robot.model.actuated_joints.is_empty(),
+    }
+}
+
+/// The catalog package an arm's identity comes from: its own, or — for
+/// a composite — its base's, else the arm welded onto a bare body.
+fn catalog_of(
+    source: &botrail_model::RobotSource,
+) -> Option<(&String, &String, &botrail_model::CatalogMeta)> {
+    use botrail_model::RobotSource;
+    match source {
+        RobotSource::Catalog {
+            id, revision, meta, ..
+        } => Some((id, revision, meta)),
+        RobotSource::Composite {
+            base, tool, role, ..
+        } => catalog_of(base).or_else(|| {
+            matches!(role, botrail_model::MountRole::Arm)
+                .then(|| catalog_of(tool))
+                .flatten()
+        }),
+        RobotSource::UrdfXml(_) | RobotSource::Usd { .. } => None,
+    }
+}
+
+/// Whether an order-set item is the controller (`Control Box`,
+/// `Controller, teach pendant and robot cables`, `制御箱`); the earlier
+/// the word, the surer — a cable named after the box it runs to loses to
+/// the box.
+fn controller_word_at(name: &str) -> Option<usize> {
+    let lower = name.to_lowercase();
+    [
+        "controller",
+        "control box",
+        "control cabinet",
+        "control unit",
+        "制御箱",
+        "制御装置",
+        "コントローラ",
+    ]
+    .iter()
+    .filter_map(|word| lower.find(word))
+    .min()
+}
+
+/// The derived line for the controller an arm needs, `<robot>/controller`.
+/// Identified from the arm's catalog provenance where it can be: the
+/// controller the maker lists (`specs.controller`) when there is exactly
+/// one; the arm's order set when that set includes the controller (the
+/// line is then no purchase of its own — it reads as the arm's package).
+/// Otherwise unidentified, with what is known in the description — the
+/// candidates, the set note — so the purchasing to-do says what to ask.
+fn controller_row(robot: &crate::SceneRobot) -> BomRow {
+    let mut row = BomRow {
+        category: "robot_controller".into(),
+        names: vec![format!("{}/controller", robot.name)],
+        manufacturer: None,
+        model: None,
+        catalog: None,
+        qty: 1,
+        description: None,
+        attributes: BTreeMap::new(),
+        order: None,
+    };
+    let mut notes = vec![format!("controller for {}", robot.name)];
+    if let Some((id, revision, meta)) = catalog_of(&robot.model.source) {
+        match meta.controllers.as_slice() {
+            [] => {}
+            [one] => {
+                row.manufacturer = meta.manufacturer.clone();
+                row.model = Some(one.clone());
+            }
+            many => {
+                let maker = meta
+                    .manufacturer
+                    .as_ref()
+                    .map(|m| format!("{m} "))
+                    .unwrap_or_default();
+                notes.push(format!("{maker}{}", many.join(" or ")));
+            }
+        }
+        let include = meta.order.as_ref().and_then(|order| {
+            order
+                .includes
+                .iter()
+                .filter_map(|i| controller_word_at(&i.name).map(|at| (at, i)))
+                .min_by_key(|(at, _)| *at)
+                .map(|(_, i)| i)
+        });
+        if let Some(include) = include {
+            row.catalog = Some(CatalogRef {
+                id: id.clone(),
+                revision: Some(revision.clone()),
+            });
+            if row.manufacturer.is_none() {
+                row.manufacturer = meta.manufacturer.clone();
+            }
+            if row.model.is_none() {
+                row.model = include.part_number.clone();
+            }
+            let set = meta
+                .order
+                .as_ref()
+                .and_then(|o| o.part_number.clone())
+                .or_else(|| meta.product.clone())
+                .unwrap_or_else(|| robot.name.clone());
+            let mut text = format!("in the {set} set: {}", include.name);
+            if let Some(note) = &include.note {
+                text.push_str(" — ");
+                text.push_str(note);
+            }
+            notes.push(text);
+        }
+    }
+    row.description = Some(notes.join("; "));
+    row
+}
+
+/// The `robot_controller` node declared for an arm, if any.
+fn declared_controller<'a>(scene: &'a Scene, robot: &str) -> Option<&'a crate::iomap::IoNode> {
+    scene.io.nodes.iter().find(|n| {
+        matches!(&n.kind, IoNodeKind::RobotController { robots } if robots.iter().any(|r| r == robot))
+    })
+}
+
 fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
     match kind {
         PartTargetKind::Robot => scene.robot_index(target).is_some(),
@@ -568,7 +732,10 @@ fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
         PartTargetKind::Sensor => scene.sensors().iter().any(|s| s.name == target),
         PartTargetKind::Camera => scene.cameras().iter().any(|c| c.name == target),
         PartTargetKind::Lidar => scene.lidars().iter().any(|l| l.name == target),
-        PartTargetKind::IoNode => scene.io_map().nodes.iter().any(|n| n.name == target),
+        PartTargetKind::IoNode => {
+            scene.io_map().nodes.iter().any(|n| n.name == target)
+                || controller_row_names(scene).iter().any(|n| n == target)
+        }
         PartTargetKind::Obstacle => scene.obstacles().iter().any(|o| o.name == target),
         PartTargetKind::Group => {
             let prefix = format!("{target}/");
@@ -872,6 +1039,11 @@ impl Scene {
                 && port.target.starts_with(&prefix)
             {
                 port.target = format!("{new}/{}", &port.target[prefix.len()..]);
+            } else if kind == PartTargetKind::Robot
+                && port.target_kind == PartTargetKind::IoNode
+                && port.target == format!("{old}/controller")
+            {
+                port.target = format!("{new}/controller");
             }
             if kind == PartTargetKind::Robot {
                 if let Some(io) = &mut port.io {
@@ -890,6 +1062,12 @@ impl Scene {
             {
                 // The tools ride the robot's name: `arm/tool` follows `arm`.
                 entry.target = format!("{new}/{}", &entry.target[prefix.len()..]);
+            } else if kind == PartTargetKind::Robot
+                && entry.kind == PartTargetKind::IoNode
+                && entry.target == format!("{old}/controller")
+            {
+                // So does the arm's derived controller line.
+                entry.target = format!("{new}/controller");
             }
         }
     }
@@ -897,10 +1075,12 @@ impl Scene {
     // ------------------------------------------------------------------ BOM
 
     /// The bill of materials derived from the scene: robots and tools
-    /// (identity from their catalog provenance), conveyors / axes /
-    /// vehicles, sensors, I/O nodes — each once, identified or not — plus
-    /// every obstacle or group a part is pinned to. Identical products
-    /// merge into one row with the quantity summed.
+    /// (identity from their catalog provenance), the controller every arm
+    /// needs (`<robot>/controller`, unless a `robot_controller` node
+    /// declares it), conveyors / axes / vehicles, sensors, I/O nodes —
+    /// each once, identified or not — plus every obstacle or group a
+    /// part is pinned to. Identical products merge into one row with the
+    /// quantity summed.
     pub fn bom(&self) -> Bom {
         let mut lines: Vec<BomRow> = Vec::new();
         let explicit = |kind: PartTargetKind, name: &str| -> Option<&Part> {
@@ -937,6 +1117,17 @@ impl Scene {
                 }
             }
             lines.extend(robot_rows);
+            // The controller the arm needs: a line of its own until a
+            // `robot_controller` node declares the cabinet — that node's
+            // line then stands for it (see the nodes below).
+            if needs_controller(self, robot) && declared_controller(self, &robot.name).is_none() {
+                let mut row = controller_row(robot);
+                let name = row.names[0].clone();
+                if let Some(part) = explicit(PartTargetKind::IoNode, &name) {
+                    row.apply(part);
+                }
+                lines.push(row);
+            }
         }
         for device in &self.devices {
             let part = explicit(PartTargetKind::Device, &device.name);
@@ -1006,6 +1197,16 @@ impl Scene {
             }
             if let Some(part) = explicit(PartTargetKind::IoNode, &node.name) {
                 row.apply(part);
+            } else if let IoNodeKind::RobotController { robots } = &node.kind {
+                // A part pinned on an arm's derived controller line
+                // (`<robot>/controller`) follows the arm onto the cabinet
+                // declared for it afterwards.
+                if let Some(part) = robots
+                    .iter()
+                    .find_map(|r| explicit(PartTargetKind::IoNode, &format!("{r}/controller")))
+                {
+                    row.apply(part);
+                }
             }
             lines.push(row);
         }
@@ -1023,8 +1224,9 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iomap::IoNode;
     use crate::seq::{Device, DeviceKind, Sensor, SensorKind, SensorWatch};
-    use botrail_model::{Geometry, RobotModel};
+    use botrail_model::{Geometry, RobotModel, RobotSource};
     use nalgebra::{Isometry3, Point3, Vector3};
     use std::sync::Arc;
 
@@ -1054,15 +1256,203 @@ mod tests {
         }
     }
 
+    fn catalog_arm(meta: botrail_model::CatalogMeta) -> Scene {
+        let mut model = RobotModel::from_urdf_str(URDF).unwrap();
+        let inner = std::mem::replace(&mut model.source, RobotSource::UrdfXml(String::new()));
+        model.source = RobotSource::Catalog {
+            id: "fanuc/lr-mate/200id/r1".into(),
+            revision: "sha".into(),
+            tcp: None,
+            flange: None,
+            mount: None,
+            grasp: Vec::new(),
+            arms: Vec::new(),
+            meta,
+            inner: Box::new(inner),
+        };
+        Scene::new(Arc::new(model))
+    }
+
+    fn cabinet(name: &str, robots: &[&str]) -> IoNode {
+        IoNode {
+            name: name.into(),
+            kind: IoNodeKind::RobotController {
+                robots: robots.iter().map(|s| s.to_string()).collect(),
+            },
+            programs: Vec::new(),
+            uplink: None,
+            channels: Vec::new(),
+            place: None,
+            model: Some("e-Series".into()),
+        }
+    }
+
+    fn include(name: &str, note: Option<&str>) -> botrail_model::mounting::OrderInclude {
+        botrail_model::mounting::OrderInclude {
+            name: name.into(),
+            catalog: None,
+            part_number: None,
+            qty: 1,
+            note: note.map(str::to_string),
+        }
+    }
+
     #[test]
     fn robot_without_catalog_is_an_unidentified_line() {
         let scene = scene();
         let bom = scene.bom();
-        assert_eq!(bom.rows.len(), 1);
+        // The arm, and the controller it needs.
+        assert_eq!(bom.rows.len(), 2);
         assert_eq!(bom.rows[0].category, "robot");
         assert_eq!(bom.rows[0].names, vec!["arm".to_string()]);
         assert!(bom.rows[0].is_unidentified());
+        assert_eq!(bom.unidentified().len(), 2);
+    }
+
+    #[test]
+    fn an_arm_needs_a_controller_until_a_cabinet_is_declared() {
+        let mut scene = scene();
+        let bom = scene.bom();
+        let ctrl = &bom.rows[1];
+        assert_eq!(ctrl.category, "robot_controller");
+        assert_eq!(ctrl.names, vec!["arm/controller".to_string()]);
+        assert!(ctrl.is_unidentified());
+        assert_eq!(ctrl.description.as_deref(), Some("controller for arm"));
+        // Identity is pinned on the derived line's name, as an I/O node.
+        assert_eq!(
+            scene
+                .set_part("arm/controller", None, part("CB3 control box"))
+                .unwrap(),
+            PartTargetKind::IoNode
+        );
+        let bom = scene.bom();
+        assert_eq!(bom.rows[1].model.as_deref(), Some("CB3 control box"));
         assert_eq!(bom.unidentified().len(), 1);
+        // Declaring the cabinet replaces the derived line with the node's
+        // own, and the pin follows the arm onto it.
+        scene.upsert_io_node(cabinet("UR", &["arm"])).unwrap();
+        let bom = scene.bom();
+        let controllers: Vec<&BomRow> = bom
+            .rows
+            .iter()
+            .filter(|r| r.category == "robot_controller")
+            .collect();
+        assert_eq!(controllers.len(), 1);
+        assert_eq!(controllers[0].names, vec!["UR".to_string()]);
+        assert_eq!(controllers[0].model.as_deref(), Some("CB3 control box"));
+        // The pin stays: its name is valid while the arm exists.
+        assert_eq!(scene.parts().len(), 1);
+        // The node's own pin is the last word.
+        scene.set_part("UR", None, part("CB5")).unwrap();
+        let bom = scene.bom();
+        let cabinet_row = bom
+            .rows
+            .iter()
+            .find(|r| r.category == "robot_controller")
+            .unwrap();
+        assert_eq!(cabinet_row.model.as_deref(), Some("CB5"));
+    }
+
+    #[test]
+    fn a_catalog_arm_names_its_controller() {
+        // One controller listed: the line is identified by it.
+        let scene = catalog_arm(botrail_model::CatalogMeta {
+            manufacturer: Some("FANUC".into()),
+            product: Some("LR Mate 200iD".into()),
+            category: Some("manipulator".into()),
+            controllers: vec!["R-30iB Mate Plus".into()],
+            ..Default::default()
+        });
+        let bom = scene.bom();
+        let ctrl = &bom.rows[1];
+        assert_eq!(ctrl.names, vec!["arm/controller".to_string()]);
+        assert_eq!(ctrl.manufacturer.as_deref(), Some("FANUC"));
+        assert_eq!(ctrl.model.as_deref(), Some("R-30iB Mate Plus"));
+        assert!(ctrl.catalog.is_none());
+        assert!(!ctrl.is_unidentified());
+        // Several: nothing is chosen — the candidates go in the description
+        // and the line stays on the purchasing to-do list.
+        let scene = catalog_arm(botrail_model::CatalogMeta {
+            manufacturer: Some("FANUC".into()),
+            category: Some("manipulator".into()),
+            controllers: vec!["R-30iB Plus".into(), "R-30iB Mate Plus".into()],
+            ..Default::default()
+        });
+        let ctrl = scene.bom().rows[1].clone();
+        assert!(ctrl.is_unidentified());
+        assert_eq!(
+            ctrl.description.as_deref(),
+            Some("controller for arm; FANUC R-30iB Plus or R-30iB Mate Plus")
+        );
+        // In the order set: identified through the arm's package, no
+        // purchase of its own.
+        let scene = catalog_arm(botrail_model::CatalogMeta {
+            manufacturer: Some("Doosan Robotics".into()),
+            product: Some("M1509".into()),
+            category: Some("manipulator".into()),
+            order: Some(botrail_model::mounting::CatalogOrder {
+                part_number: Some("M1509".into()),
+                unit: "set".into(),
+                includes: vec![
+                    include("M1509 arm", None),
+                    include("Robot cable 6 m (arm to controller)", None),
+                    include(
+                        "Controller, teach pendant and robot cables",
+                        Some("requires a supplier quotation"),
+                    ),
+                ],
+                requires: Vec::new(),
+                note: None,
+            }),
+            ..Default::default()
+        });
+        let ctrl = scene.bom().rows[1].clone();
+        assert_eq!(
+            ctrl.catalog.as_ref().map(CatalogRef::display).as_deref(),
+            Some("fanuc/lr-mate/200id/r1@sha")
+        );
+        assert_eq!(ctrl.manufacturer.as_deref(), Some("Doosan Robotics"));
+        assert!(ctrl.model.is_none());
+        assert!(!ctrl.is_unidentified());
+        assert_eq!(
+            ctrl.description.as_deref(),
+            Some(
+                "controller for arm; in the M1509 set: Controller, teach pendant and robot \
+                 cables — requires a supplier quotation"
+            )
+        );
+    }
+
+    #[test]
+    fn only_arms_get_a_controller_line() {
+        // A gripper loaded on its own is driven by someone else's cabinet;
+        // a vehicle carries its controller on board.
+        for category in ["gripper.parallel", "vehicle.amr", "external_axis"] {
+            let mut scene = catalog_arm(botrail_model::CatalogMeta {
+                category: Some(category.into()),
+                ..Default::default()
+            });
+            assert!(
+                scene
+                    .bom()
+                    .rows
+                    .iter()
+                    .all(|r| r.category != "robot_controller"),
+                "{category}"
+            );
+            assert!(scene.set_part("arm/controller", None, part("x")).is_err());
+        }
+    }
+
+    #[test]
+    fn the_controller_pin_follows_a_rename() {
+        let mut scene = scene();
+        scene.set_part("arm/controller", None, part("CB3")).unwrap();
+        scene.rename_robot(0, "r1");
+        assert_eq!(scene.parts()[0].target, "r1/controller");
+        let bom = scene.bom();
+        assert_eq!(bom.rows[1].names, vec!["r1/controller".to_string()]);
+        assert_eq!(bom.rows[1].model.as_deref(), Some("CB3"));
     }
 
     #[test]

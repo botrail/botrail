@@ -1160,24 +1160,7 @@ def cabinet(
             if lifting > 0:
                 scene.set_obstacle_visible(f"{name}/lifting_clearance", False)
         else:
-            # Door leaves a shade proud of the face, and a flat handle on
-            # each — one door on a narrow body, a pair from a metre up (the
-            # generic look; a pack's own drawing knows its real split).
-            doors = 2 if w >= 1.0 else 1
-            leaf_t, gap = 0.004, 0.01
-            leaf_w = (w - gap * (doors + 1)) / doors
-            zc = z0 + plinth + h / 2
-            for i in range(doors):
-                off = -w / 2 + gap + leaf_w / 2 + i * (leaf_w + gap)
-                px, py = world(off, -(d / 2 + leaf_t / 2))
-                _trim(scene, built, f"{name}/trim/door{i}", (leaf_w, leaf_t, h - 2 * gap),
-                      (px, py, zc), q, color)
-                # The handle sits by the leaf's swinging edge: the meeting
-                # edge of a pair, the lock side of a single door.
-                edge = off + (leaf_w / 2 - 0.05) * (1 if doors == 1 or i == 0 else -1)
-                hx, hy = world(edge, -(d / 2 + leaf_t + 0.008))
-                _trim(scene, built, f"{name}/trim/handle{i}", (0.025, 0.016, 0.14),
-                      (hx, hy, zc), q, DARK_STEEL)
+            _door_leaves(scene, built, name, w, d, h, plinth, (x, y, z0), yaw, color)
 
     if spec is None:
         scene.set_part(name, kind="group", category="structure.cabinet",
@@ -2109,6 +2092,257 @@ def _body_by_size(spec, size) -> Optional[tuple[float, float]]:
     return (diameter, length) if diameter is not None and length is not None else None
 
 
+
+def _door_leaves(scene, built: Built, name: str, w: float, d: float, h: float, plinth: float,
+                 origin: Point3, yaw: float, color: Color) -> None:
+    """The generic front of an enclosure nobody drew: door leaves a shade
+    proud of the face and a flat handle on each — one door on a narrow
+    body, a pair from a metre up (a pack's own drawing knows its real
+    split). The handle shrinks with a low box."""
+    x, y, z0 = (float(v) for v in origin)
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s * dy, y + s * dx + c * dy
+
+    doors = 2 if w >= 1.0 else 1
+    leaf_t, gap = 0.004, 0.01
+    leaf_w = (w - gap * (doors + 1)) / doors
+    zc = z0 + plinth + h / 2
+    handle_h = min(0.14, max(0.04, h * 0.5))
+    for i in range(doors):
+        off = -w / 2 + gap + leaf_w / 2 + i * (leaf_w + gap)
+        px, py = world(off, -(d / 2 + leaf_t / 2))
+        _trim(scene, built, f"{name}/trim/door{i}", (leaf_w, leaf_t, h - 2 * gap),
+              (px, py, zc), q, color)
+        # The handle sits by the leaf's swinging edge: the meeting edge of
+        # a pair, the lock side of a single door.
+        edge = off + (leaf_w / 2 - 0.05) * (1 if doors == 1 or i == 0 else -1)
+        hx, hy = world(edge, -(d / 2 + leaf_t + 0.008))
+        _trim(scene, built, f"{name}/trim/handle{i}", (0.025, 0.016, handle_h),
+              (hx, hy, zc), q, DARK_STEEL)
+
+
+# ---------------------------------------------------------------- controller
+
+# How a controller box is installed — recorded on its BOM line, and what a
+# spec pack's `rules.mount` may restrict.
+CONTROLLER_MOUNTS = ("floor", "wall", "rack", "cabinet", "under_table", "stacked")
+
+
+def controller(
+    scene,
+    name: str,
+    robots: Sequence[str],
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    size: Optional[Point3] = None,
+    catalog: Optional["CatalogRef"] = None,
+    variant: Optional[str] = None,
+    detail: Optional[str] = None,
+    yaw: float = 0.0,
+    mount: str = "floor",
+    channels: Optional[list] = None,
+    programs: Optional[list] = None,
+    uplink=None,
+    cable_m: Optional[float] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = CABINET,
+    **attributes,
+) -> Built:
+    """A robot controller box — the cabinet an arm cannot run without — as
+    the three things it is at once: the box `<name>/body` (`size = (width,
+    depth, height)`, standing on `position` — its footprint centre, x, y[,
+    the level it sits at] — door face on -Y before `yaw`), the
+    `robot_controller` I/O node `<name>` driving `robots` (its `place` is
+    the box; `channels=`, `programs=`, `uplink=` as `add_io_node` takes
+    them), and one BOM line (`robot_controller`) carrying `mount`, the
+    robot cable length `cable_m` and whatever identity is given. The frame
+    `<name>/front` sits at the centre of the door face at the box's level
+    — where somebody stands to service it. Declaring the node here takes
+    the arm's derived controller line off the bill: the box, the node and
+    the line are one thing.
+
+    A cell that wired the node first (`add_io_node(name, ...)` with its
+    channels and bindings) keeps that wiring: the box adopts the node,
+    which must drive the same `robots`; `channels=` / `programs=` /
+    `uplink=` given here override what it had.
+
+    With `catalog=` — the id of a controller spec pack, or a package
+    directory — a cabinet you can order: `variant=` picks the enclosure
+    the maker sells it in (A-cabinet, Mate, ...), the box takes that
+    variant's size (`rules.size_mm_by_variant`, else the body's fixed
+    dimensions, else the pack's footprint and height), the line its part
+    number and mass, `cable_m` defaults to the standard robot cable
+    (`electrical.cable.standard_m`; an option length must be one the pack
+    lists), `channels` to the pack's own I/O table (`electrical.io`),
+    `mount` is checked against `rules.mount`, and the service clearance
+    the maker asks for in front (`rules.clearance_mm.front`) rides on the
+    line as `service_clearance_mm`.
+
+    `detail="full"` (the default with a catalog) draws the door and its
+    handle — or the pack's own drawing (`trim:`) — as decoration that never
+    collides; the massing stays the body."""
+    robots = [str(r) for r in (robots or [])]
+    if not robots:
+        raise ValueError("controller: robots is required — the arm(s) this cabinet drives")
+    if mount not in CONTROLLER_MOUNTS:
+        raise ValueError(f"controller: mount must be one of {CONTROLLER_MOUNTS}, not {mount!r}")
+    unknown = [r for r in robots if r not in scene.robots]
+    if unknown:
+        raise ValueError(f"controller: no robot named {', '.join(unknown)} in this scene")
+    # A node the cell wired first is adopted — checked before anything is
+    # built, so a refusal leaves the scene as it was.
+    existing = _io_node(scene, name)
+    if existing is not None:
+        kind = existing.get("kind") or {}
+        if kind.get("kind") != "robot_controller":
+            raise ValueError(f"controller: I/O node {name!r} exists and is not a robot controller")
+        declared = list(kind.get("robots") or [])
+        if sorted(declared) != sorted(robots):
+            raise ValueError(
+                f"controller: I/O node {name!r} drives {', '.join(declared)} — "
+                f"not {', '.join(robots)}"
+            )
+    spec = None
+    params: dict = {}
+    fitted: dict = {"mount": mount}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("controller")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if variant is not None:
+            if "variant" not in params:
+                raise ValueError(f"{spec.id}: this pack sells one enclosure — drop variant=")
+            params["variant"] = spec.choose("variant", variant)
+        allowed = spec.rule("mount")
+        if isinstance(allowed, list) and allowed and mount not in allowed:
+            raise ValueError(
+                f"{spec.id}: {mount!r} is not a way this cabinet is installed — "
+                f"the pack lists {', '.join(str(m) for m in allowed)}"
+            )
+        if size is None:
+            size = _controller_size(spec, params)
+        electrical = spec.manifest.get("electrical") or {}
+        cable = electrical.get("cable") if isinstance(electrical.get("cable"), dict) else {}
+        standard = cable.get("standard_m")
+        options = [float(v) for v in (cable.get("options_m") or []) if isinstance(v, (int, float))]
+        if cable_m is None:
+            cable_m = float(standard) if isinstance(standard, (int, float)) else None
+        elif isinstance(standard, (int, float)) or options:
+            sold = ([float(standard)] if isinstance(standard, (int, float)) else []) + options
+            if not any(abs(float(cable_m) - length) < 1e-6 for length in sold):
+                raise ValueError(
+                    f"{spec.id}: no {_plain(cable_m)} m robot cable is sold — "
+                    f"the pack lists {', '.join(str(_plain(v)) for v in sold)} m"
+                )
+        io = electrical.get("io") if isinstance(electrical.get("io"), dict) else {}
+        if channels is None and (io.get("channels") or io.get("standard")):
+            from .io import from_catalog as _channels_from_catalog
+
+            channels = _channels_from_catalog(spec.directory)
+        clearance = spec.rule("clearance_mm")
+        if isinstance(clearance, dict) and isinstance(clearance.get("front"), (int, float)):
+            fitted["service_clearance_mm"] = float(clearance["front"])
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    if size is None:
+        raise ValueError("controller: size is required without a catalog")
+    w, d, h = (float(v) for v in size)
+    if min(w, d, h) <= 0:
+        raise ValueError("controller: size must be positive")
+    if cable_m is not None:
+        if float(cable_m) <= 0:
+            raise ValueError("controller: cable_m must be positive")
+        fitted["cable_m"] = float(cable_m)
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+    built = Built(name)
+    body = scene.add_box(f"{name}/body", size=(w, d, h), position=(x, y, z0 + h / 2),
+                         quaternion=q, color=color)
+    built.obstacles.append(body)
+    fx, fy = x + s * (d / 2), y - c * (d / 2)
+    scene.add_frame(f"{name}/front", position=(fx, fy, z0), quaternion=q)
+    built.frames.append(f"{name}/front")
+    if mode == "full":
+        drawn = _load_trim(
+            scene, built, spec, "body", f"{name}/trim/shell", (x, y, z0), q,
+            width=w, depth=d, height=h, base=0.0, parameters=params,
+        )
+        if drawn:
+            scene.set_obstacle_visible(body, False)
+        else:
+            _door_leaves(scene, built, name, w, d, h, 0.0, (x, y, z0), yaw, color)
+
+    # The node: declared here, or adopted from the cell that wired it first.
+    if existing is not None:
+        if channels is None:
+            channels = existing.get("channels") or None
+        if programs is None:
+            programs = existing.get("programs") or None
+        if uplink is None and existing.get("uplink"):
+            parent, bus = existing["uplink"].get("parent"), existing["uplink"].get("bus")
+            uplink = (parent, bus) if bus else parent
+    part_number = model or (spec.part_number("body", **params) if spec is not None else None)
+    scene.add_io_node(name, kind="robot_controller", robots=robots, programs=programs,
+                      uplink=uplink, channels=channels, place=body, model=part_number or None)
+    built.nodes.append(name)
+
+    if spec is None:
+        scene.set_part(name, kind="io_node", category="robot_controller",
+                       **{**fitted, **_identity(model, manufacturer, attributes)})
+        return built
+    scene.set_part(
+        name, kind="io_node", category=spec.category("body", "robot_controller"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=part_number or None, description=spec.name,
+        **{**_recorded(spec, params), **_kg(spec.mass_kg("body", **params)), **fitted, **attributes},
+    )
+    return built
+
+
+def _controller_size(spec, params: dict) -> Optional[Point3]:
+    """The enclosure a variant comes in — `rules.size_mm_by_variant`
+    (`{A-cabinet: [600, 470, 500]}`, width / depth / height), else the
+    body's fixed `dimensions_mm`, else the pack's `mechanical` footprint
+    and height. None leaves it to `size=`."""
+    table = spec.rule("size_mm_by_variant")
+    variant = params.get("variant")
+    if isinstance(table, dict) and variant is not None:
+        entry = table.get(str(_plain(variant)))
+        if isinstance(entry, (list, tuple)) and len(entry) == 3:
+            return (float(entry[0]) / 1000.0, float(entry[1]) / 1000.0, float(entry[2]) / 1000.0)
+    sides = [_mm(spec.dimension_mm("body", key)) for key in ("width", "depth", "height")]
+    if all(side is not None for side in sides):
+        return (sides[0], sides[1], sides[2])  # type: ignore[return-value]
+    footprint = spec.mechanical.get("footprint_mm")
+    height = spec.mechanical.get("height_mm")
+    if (isinstance(footprint, (list, tuple)) and len(footprint) == 2
+            and isinstance(height, (int, float))):
+        return (float(footprint[0]) / 1000.0, float(footprint[1]) / 1000.0, float(height) / 1000.0)
+    return None
+
+
+def _io_node(scene, name: str) -> Optional[dict]:
+    """The I/O node `name` as the map holds it, or None."""
+    import json
+
+    for node in json.loads(scene.io_map().to_json()).get("nodes") or []:
+        if isinstance(node, dict) and node.get("name") == name:
+            return node
+    return None
+
+
 # ------------------------------------------------------------- power supply
 
 
@@ -2325,7 +2559,7 @@ def remote_io(
 
 
 __all__ = [
-    "Built", "cabinet", "conveyor", "fence", "light_curtain", "pallet",
+    "Built", "cabinet", "controller", "conveyor", "fence", "light_curtain", "pallet",
     "pedestal", "photoelectric", "power_supply", "proximity", "rack",
     "remote_io", "stairs", "table", "wall",
 ]

@@ -72,7 +72,7 @@ derived.
 
 | section | from | what |
 |---|---|---|
-| `robots` | the scene | name, DOF, base position, catalog identity and reach when known |
+| `robots` | the scene | name, DOF, base position, catalog identity and reach when known, and the cabinet driving the arm (`controller`: its node or derived line, model, and where it stands — `place`, `null` until placed) |
 | `cycles` | the timelines you pass | duration, step spans, robot busy time and utilization (a row per arm under a dual-arm robot's own), the branches taken, and the tightest clearance re-scanned against the scene each timeline was baked from (`clearance_dt`, `None` to skip) |
 | `io` | the [I/O map](io-map.md) | point counts by kind and status, node usage, lint findings |
 | `scenarios` | a `ScenarioRuns` | the matrix — which scenario completed at what cycle, which stalled and why |

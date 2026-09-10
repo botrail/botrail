@@ -4080,6 +4080,13 @@
                 "requires_adapter": []
               }
             },
+            "controllers": {
+              "description": "The controllers the maker pairs the arm with (`specs.controller`)\n— the derived controller line's name. Absent in older files.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "electrical": {
               "default": null
             },

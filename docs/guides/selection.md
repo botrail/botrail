@@ -39,6 +39,7 @@ came from:
 | vehicle, aerial | `max_climb_mps`, `max_descent_mps` | the authored climb and descent rates |
 | vehicle, aerial | `flight_time_min` | the airborne time of the baked cycle — pass `requirements(timeline=tl)`; without it the comparison is left as a note |
 | I/O node | `di`, `do`, `ai`, `ao`, `safe_di`, `safe_do` | the points assigned to it |
+| robot controller, placed (`bt.parts.controller`, or `place=` on the node) | `cable_m` | the robot cable: from the arm's base to the box along the axes (a cable runs in a duct, not as the crow flies) plus `cable_slack_m` (1 m by default); the farthest arm of a shared cabinet |
 | pedestal / table | `load_kg` | the robots standing on it (base inside its top, at its height) and their tools |
 | power supply (`power_supply`) | `output_a` | the sum of `current_a` over the parts at its voltage — a part's `voltage_v` against the supply's `output_v`; a part that does not say its voltage counts against every supply, with a note |
 
@@ -97,9 +98,21 @@ Each requirement ends in one of four states:
 | `unknown` | the line is identified (maker / model / catalog) but states no value | `spec_unknown` (warning) |
 | `unidentified` | nobody has said what the part is | carried into the `unidentified_part` note — the question to ask a vendor |
 
-I/O nodes are the exception: their capacity is the I/O report's business
-(`unbound`, `capacity`), so their rows appear in the table but raise no spec
-finding.
+An I/O node's capacity is the exception: that is the I/O report's business
+(`unbound`, `capacity`), so those requirements appear in the table but raise
+no spec finding — a controller's `cable_m` does.
+
+The cabinets' placement is checked beside the requirements.
+`controller_unplaced` (info) names an arm's controller nobody has put on the
+floor plan — the derived `<robot>/controller` line, or a node declared
+without `place`. `service_space` (warning) names what stands in the service
+space in front of a control cabinet's or a controller's door (the frame
+`<name>/front` the generators leave): the door's width by the box's height,
+`service_clearance_m` deep — 0.9 m by default, the working space electrical
+codes ask for — or the maker's own figure when the part states
+`service_clearance_mm` (a controller ordered from a catalog pack does). Both
+knobs are arguments of `scene.check()`; `cable_slack_m` is what the cable
+requirement adds to the run from arm to box.
 
 ## The check
 

@@ -350,8 +350,13 @@ pub struct CatalogMeta {
     /// The manifest's `category` (`manipulator`, `gripper.parallel`, ...).
     pub category: Option<String>,
     /// Numeric `specs.*` entries, in manifest order (non-numeric specs
-    /// such as `controller` lists are dropped).
+    /// such as `ip_rating` are dropped).
     pub specs: Vec<(String, f64)>,
+    /// The controllers the maker pairs this arm with (`specs.controller`,
+    /// as the manifest lists them — `["R-30iB Plus", "R-30iB Mate Plus"]`).
+    /// What the arm's derived controller line on the bill is named by
+    /// when exactly one is listed.
+    pub controllers: Vec<String>,
     /// Mechanical declarations, without inferring them from flange labels.
     pub mounting: Option<mounting::MountingSpec>,
     pub order: Option<mounting::CatalogOrder>,

@@ -32,9 +32,13 @@ and counts what is in the scene — the same list as `scene.check()`:
 `findings[].severity` is `error` / `warning` / `info` (the I/O lint codes,
 `sequence` for a program that cannot be walked, `unidentified_part`,
 `spec_short` when a part's stated spec falls short of what the cell asks,
-`spec_unknown` when an identified part states no value, and
+`spec_unknown` when an identified part states no value,
 `requirement_incomplete` when a requirement could not be derived — a
-grasped part with no `mass_kg`); exit 1 when any is an error.
+grasped part with no `mass_kg` — and the placement checks:
+`controller_unplaced` (info) for an arm's controller nobody has put on the
+floor plan, `service_space` (warning) when something stands in the service
+space in front of a control cabinet's or controller's door); exit 1 when
+any is an error.
 `requirements` counts the BOM lines by the outcome of that comparison.
 
 ## `botrail simulate <cell>`

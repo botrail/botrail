@@ -65,22 +65,29 @@ def rows_by_names(bom: bt.Bom) -> dict:
 
 def test_bare_cell_lists_equipment_unidentified_and_no_geometry() -> None:
     bom = cell().bom()
-    # Robot, conveyor, sensor, PLC — the equipment; no obstacle, no
-    # source/sink.
+    # Robot, the controller it needs, conveyor, sensor, PLC — the
+    # equipment; no obstacle, no source/sink.
     assert [row["category"] for row in bom.rows] == [
         "robot",
+        "robot_controller",
         "conveyor",
         "sensor.photoelectric",
         "plc",
     ]
-    assert [row["names"] for row in bom.rows] == [["simple_arm"], ["belt"], ["eye"], ["PLC1"]]
+    assert [row["names"] for row in bom.rows] == [
+        ["simple_arm"], ["simple_arm/controller"], ["belt"], ["eye"], ["PLC1"],
+    ]
     # The PLC's own `model=` column already identifies it; the rest are
-    # the purchasing to-do list.
-    assert [row["names"][0] for row in bom.unidentified()] == ["simple_arm", "belt", "eye"]
+    # the purchasing to-do list — the arm's controller included, with what
+    # is known of it in the description.
+    assert [row["names"][0] for row in bom.unidentified()] == [
+        "simple_arm", "simple_arm/controller", "belt", "eye",
+    ]
+    assert rows_by_names(bom)[("simple_arm/controller",)]["description"] == "controller for simple_arm"
     plc = rows_by_names(bom)[("PLC1",)]
     assert plc["model"] == "R04CPU"
-    assert repr(bom) == "Bom(4 rows, 3 unidentified)"
-    assert len(bom) == 4
+    assert repr(bom) == "Bom(5 rows, 4 unidentified)"
+    assert len(bom) == 5
 
 
 def test_set_part_resolves_the_kind_and_needs_one_when_ambiguous() -> None:
@@ -152,8 +159,9 @@ def test_bom_merges_identical_products_and_overlays_pins() -> None:
     assert rows[("simple_arm",)]["attributes"] == {"mass_kg": 250.0, "finish": "RAL 1021"}
     assert bom.total("price") is None
     assert bom.attribute_keys() == ["finish", "mass_kg"]
-    # Only the sensor is still without a maker or model.
-    assert [r["names"] for r in bom.unidentified()] == [["eye"]]
+    # Only the arm's controller and the sensor are still without a maker
+    # or model.
+    assert [r["names"] for r in bom.unidentified()] == [["simple_arm/controller"], ["eye"]]
     # Removing a resident drops its pin — and its line, when it was
     # geometry.
     scene.remove_obstacle("table_a")
@@ -267,17 +275,19 @@ def test_sequence_demo_bom_is_complete() -> None:
     bom = scene.bom()
     assert bom.unidentified() == []
 
-    # The four typed lines — the robot, the photo-eye, and the two whole
-    # USD subtrees pinned as one part each.
+    # The five typed lines — the robot, its controller, the photo-eye, and
+    # the two whole USD subtrees pinned as one part each.
     typed = [row for row in bom.rows if row["catalog"] is None]
     assert [row["names"] for row in typed] == [
         ["panda"],
+        ["panda/controller"],
         ["beam_pick"],
         ["/World/Pedestal"],
         ["/World/Pallet"],
     ]
     assert [row["category"] for row in typed] == [
         "robot",
+        "robot_controller",
         "sensor.photoelectric",
         "structure.pedestal",
         "pallet",
@@ -332,7 +342,9 @@ def test_a_tool_in_the_stack_can_be_pinned_by_its_row_name() -> None:
     scene = bt.Scene(arm.attach_tool(bracket, flange=arm.tcp_link))
     rows = rows_by_names(scene.bom())
     assert rows[("simple_arm/tool",)]["category"] == "tool"
-    assert [row["names"][0] for row in scene.bom().unidentified()] == ["simple_arm", "simple_arm/tool"]
+    assert [row["names"][0] for row in scene.bom().unidentified()] == [
+        "simple_arm", "simple_arm/tool", "simple_arm/controller",
+    ]
     with pytest.raises(ValueError, match="not a robot, tool, device"):
         scene.set_part("simple_arm/tool9", model="X")
     with pytest.raises(ValueError, match="no tool named"):
@@ -340,7 +352,7 @@ def test_a_tool_in_the_stack_can_be_pinned_by_its_row_name() -> None:
     assert scene.set_part("simple_arm/tool", category="tool.multi", manufacturer="ACME", model="MPH-3", mass_kg=0.3) == "tool"
     row = rows_by_names(scene.bom())[("simple_arm/tool",)]
     assert (row["category"], row["manufacturer"], row["model"], row["attributes"]["mass_kg"]) == ("tool.multi", "ACME", "MPH-3", 0.3)
-    assert [r["names"][0] for r in scene.bom().unidentified()] == ["simple_arm"]
+    assert [r["names"][0] for r in scene.bom().unidentified()] == ["simple_arm", "simple_arm/controller"]
     # The pin rides a rename of the robot, and round-trips through the project.
     scene.rename_robot("simple_arm", "arm")
     assert scene.part("arm/tool") is not None and scene.part("simple_arm/tool") is None

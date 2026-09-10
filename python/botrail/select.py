@@ -93,6 +93,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "flight_time_min": ("flight_time_min",),
     "load_kg": ("load_kg", "capacity_kg", "max_load_kg", "payload_kg"),
     "output_a": ("output_a", "current_a"),
+    # The robot cable a placed controller box needs, arm base to box.
+    "cable_m": ("cable_m", "cable_length_m"),
     "di": ("di",),
     "do": ("do",),
     "ai": ("ai",),
@@ -120,6 +122,10 @@ class Requirement:
     provided_key: Optional[str] = None
     #: `ok` | `short` | `unknown` (identified part, no value) | `unidentified`
     status: str = "unknown"
+    #: Whether `findings()` reports a shortfall. An I/O node's channel
+    #: capacity is the I/O report's business, so those are derived for the
+    #: table but not linted twice.
+    lint: bool = True
 
     @property
     def ok(self) -> bool:
@@ -252,32 +258,34 @@ class Requirements:
 
     def findings(self) -> list[Finding]:
         """`spec_short` (error), `spec_unknown` (warning) and
-        `requirement_incomplete` (info), in row order. I/O nodes get no
-        spec findings — the I/O report already lints their capacity."""
+        `requirement_incomplete` (info), in row order. An I/O node's
+        channel capacity gets no spec finding — the I/O report already
+        lints it — but its robot cable does."""
         out: list[Finding] = []
         for row in self.rows:
-            if row.kind != "io_node":
-                for r in row.requirements:
-                    if r.status == "short":
-                        out.append(
-                            Finding(
-                                "error",
-                                "spec_short",
-                                f"{row.target}: {r.key} {_fmt(r.provided)} < required {_fmt(r.value)}"
-                                f" ({r.basis})",
-                                row.target,
-                            )
+            for r in row.requirements:
+                if not r.lint:
+                    continue
+                if r.status == "short":
+                    out.append(
+                        Finding(
+                            "error",
+                            "spec_short",
+                            f"{row.target}: {r.key} {_fmt(r.provided)} < required {_fmt(r.value)}"
+                            f" ({r.basis})",
+                            row.target,
                         )
-                    elif r.status == "unknown":
-                        out.append(
-                            Finding(
-                                "warning",
-                                "spec_unknown",
-                                f"{row.target}: needs {r}" + (f" ({r.basis})" if r.basis else "")
-                                + f" but the part does not say — add {r.key}= on set_part or pick a catalog item",
-                                row.target,
-                            )
+                    )
+                elif r.status == "unknown":
+                    out.append(
+                        Finding(
+                            "warning",
+                            "spec_unknown",
+                            f"{row.target}: needs {r}" + (f" ({r.basis})" if r.basis else "")
+                            + f" but the part does not say — add {r.key}= on set_part or pick a catalog item",
+                            row.target,
                         )
+                    )
             for note in row.notes:
                 out.append(Finding("info", "requirement_incomplete", f"{row.target}: {note}", row.target))
         return out
@@ -404,7 +412,8 @@ class CheckReport:
 
 
 def requirements(
-    scene, *, sequences: Optional[list[str]] = None, margin: float = 0.1, timeline=None
+    scene, *, sequences: Optional[list[str]] = None, margin: float = 0.1, timeline=None,
+    cable_slack_m: float = 1.0,
 ) -> Requirements:
     """Derive what every BOM line must be able to do from the cell it is in,
     and compare it with what the chosen part says (its catalog specs or the
@@ -415,13 +424,18 @@ def requirements(
     requirements (0.1 = 10 %). `timeline` is an optional baked
     `simulate_sequences` result: cycle facts only it can supply — an aerial
     vehicle's airborne time — are derived from it, and left as a note when
-    it is absent. Nothing is chosen and nothing is sized: a number the cell
-    cannot supply (a grasped part with no `mass_kg`) becomes a note, not a
-    guess.
+    it is absent. `cable_slack_m` is what a placed controller's robot cable
+    needs beyond the run along the axes from the arm's base to the box (a
+    drop, a loop, the terminations). Nothing is chosen and nothing is
+    sized: a number the cell cannot supply (a grasped part with no
+    `mass_kg`) becomes a note, not a guess.
     """
     if margin < 0:
         raise ValueError("margin must be >= 0")
+    if cable_slack_m < 0:
+        raise ValueError("cable_slack_m must be >= 0")
     cell = _Cell(scene, sequences, timeline)
+    cell.cable_slack_m = float(cable_slack_m)
     rows: list[Row] = []
     for bom_row in scene.bom().rows:
         names = list(bom_row["names"])
@@ -473,12 +487,23 @@ def requirements(
     return Requirements(rows, margin=margin, sequences=cell.sequence_names)
 
 
-def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> CheckReport:
+def check(
+    scene, *, sequences: Optional[list[str]] = None, timeline=None,
+    cable_slack_m: float = 1.0, service_clearance_m: float = 0.9,
+) -> CheckReport:
     """Every static check in one report: the I/O lint, each sequence walked
     for dangling references, unidentified equipment lines (with what the
-    cell asks of them) and the requirement comparison. `timeline` (a baked
-    cycle) adds the cycle-fact requirements — an aerial vehicle's flight
-    time. Errors make `ok` false; `botrail check` prints exactly this."""
+    cell asks of them), the requirement comparison, and the placement of
+    the cabinets — a controller nobody has placed (`controller_unplaced`),
+    and the service space in front of a control cabinet's or controller's
+    door blocked by something (`service_space`; `service_clearance_m`
+    deep, or what the part states as `service_clearance_mm`). `timeline`
+    (a baked cycle) adds the cycle-fact requirements — an aerial vehicle's
+    flight time; `cable_slack_m` is the robot cable allowance beyond the
+    run from arm to box. Errors make `ok` false; `botrail check` prints
+    exactly this."""
+    if service_clearance_m < 0:
+        raise ValueError("service_clearance_m must be >= 0")
     findings: list[Finding] = []
     io_error: Optional[str] = None
     try:
@@ -496,7 +521,7 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
         except ValueError as e:
             if io_error is None:
                 findings.append(Finding("error", "sequence", f"{name}: {e}", name))
-    req = requirements(scene, sequences=sequences, timeline=timeline)
+    req = requirements(scene, sequences=sequences, timeline=timeline, cable_slack_m=cable_slack_m)
     unidentified = {tuple(r["names"]) for r in scene.bom().unidentified()}
     for row in req.rows:
         if tuple(row.names) in unidentified:
@@ -505,6 +530,7 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
                 message += " — needs " + ", ".join(str(r) for r in row.requirements)
             findings.append(Finding("info", "unidentified_part", message, row.target))
     findings += req.findings()
+    findings += _placement_findings(scene, sequences, req, service_clearance_m)
     # A tool whose installation documents require a part that is missing from
     # its attachment path (a bare 2F-85 without its coupling) is a warning:
     # the product says so, and the cell as authored cannot be built that way.
@@ -515,6 +541,61 @@ def check(scene, *, sequences: Optional[list[str]] = None, timeline=None) -> Che
             code = "required_part_missing" if item.key.startswith("required:") else item.key
             findings.append(Finding("warning", code, item.message, item.target))
     return CheckReport(findings, req)
+
+
+def _placement_findings(scene, sequences, req: "Requirements", clearance_m: float) -> list[Finding]:
+    """Where the cabinets stand. A robot controller nobody has placed (the
+    derived `<robot>/controller` line, or a declared node without `place`)
+    is an info; a control cabinet or controller whose door face
+    (`<name>/front`) has something standing in the service space in front
+    of it is a warning. The space is the door's width by the box's height,
+    `clearance_m` deep — or what the part states as `service_clearance_mm`,
+    the maker's own figure from a catalog pack."""
+    out: list[Finding] = []
+    cell = _Cell(scene, sequences)
+    frames = set(scene.frames)
+    for row in req.rows:
+        name = row.target
+        if row.category == "robot_controller":
+            node = cell.nodes.get(name)
+            if node is None or not node.get("place"):
+                out.append(
+                    Finding(
+                        "info",
+                        "controller_unplaced",
+                        f"{name}: the controller is not placed — bt.parts.controller(scene, {name!r}, ...) "
+                        "puts the box on the floor plan, or place= on add_io_node names where it stands",
+                        name,
+                    )
+                )
+                continue
+        elif row.category != "structure.cabinet":
+            continue
+        front = f"{name}/front"
+        extent = cell.extent_of(f"{name}/body")
+        if front not in frames or extent is None:
+            continue
+        stated = _number(row.attributes.get("service_clearance_mm"))
+        depth = stated / 1000.0 if stated is not None else float(clearance_m)
+        if depth <= 0:
+            continue
+        w, _, h = extent
+        (fx, fy, fz), q = scene.frame(front)
+        # The door faces the frame's -Y: the space is the box that side of it.
+        ox, oy, oz = _rotate(q, (0.0, -depth / 2.0, 0.0))
+        centre = (fx + ox, fy + oy, fz + oz + h / 2.0)
+        blockers = cell.obstacles_meeting(centre, q, (w, depth, h), exclude=f"{name}/")
+        if blockers:
+            shown = ", ".join(blockers[:3]) + (f" and {len(blockers) - 3} more" if len(blockers) > 3 else "")
+            out.append(
+                Finding(
+                    "warning",
+                    "service_space",
+                    f"{name}: {_fmt(depth)} m in front of {front} is blocked by {shown}",
+                    name,
+                )
+            )
+    return out
 
 
 # ----------------------------------------------------------------- the cell
@@ -555,6 +636,7 @@ class _Cell:
         self.points = self._points(sequences)
         self._grasps: dict[str, list[str]] = {}
         self._mass_cache: dict[str, Optional[float]] = {}
+        self.cable_slack_m = 1.0
 
     def _points(self, sequences: Optional[list[str]]) -> list[dict]:
         try:
@@ -574,6 +656,10 @@ class _Cell:
         head, _, tail = name.rpartition("/")
         if head in self.robots and tail.startswith("tool"):
             return "tool"
+        if head in self.robots and tail == "controller":
+            # The controller an arm needs before a cabinet is declared for
+            # it: a node, sized from the points on the arm's implicit host.
+            return "io_node"
         # An arm of a dual-arm robot assembled from catalog arms is its
         # own line, sized like a robot.
         if head in self.robots and tail in self.arms_of(head):
@@ -646,7 +732,9 @@ class _Cell:
         if kind == "device":
             return self._device(name, margin)
         if kind == "io_node":
-            return self._node(name)
+            reqs, notes = self._node(name)
+            cable, cable_notes = self._controller(name)
+            return reqs + cable, notes + cable_notes
         return self._structure(name, category)
 
     # ------------------------------------------------------------ lookups
@@ -1302,11 +1390,15 @@ class _Cell:
         return (float(p[0]), float(p[1]), float(p[2])), q
 
     def _node(self, name: str) -> tuple[list[Requirement], list[str]]:
+        # A derived controller line (`<robot>/controller`) owns the points
+        # the derivation put on the arm's implicit host, `<robot>`.
+        head, _, tail = name.rpartition("/")
+        hosts = {name, f"<{head}>"} if tail == "controller" and head in self.robots else {name}
         counts: dict[str, int] = {}
         for point in self.points:
             status = point.get("status")
             on_node = point.get("node") == name and status == "bound"
-            hosted = status != "bound" and point.get("host") == name
+            hosted = status != "bound" and point.get("host") in hosts
             if not (on_node or hosted):
                 continue
             key = str(point.get("kind") or "").lower()
@@ -1316,10 +1408,55 @@ class _Cell:
                 key = "safe_" + key
             counts[key] = counts.get(key, 0) + 1
         reqs = [
-            Requirement(key, float(n), basis=f"{n} point(s) assigned to this node")
+            Requirement(key, float(n), basis=f"{n} point(s) assigned to this node", lint=False)
             for key, n in sorted(counts.items())
         ]
         return reqs, []
+
+    def _controller(self, name: str) -> tuple[list[Requirement], list[str]]:
+        """The robot cable a placed controller needs: from each arm's base to
+        the box along the axes — a cable runs in a duct or a trench, not as
+        the crow flies — plus the slack, the farthest arm's figure. A
+        controller without a `place` gets no figure (`controller_unplaced`
+        says so); a `place` that names nothing in the scene is a note."""
+        node = self.nodes.get(name)
+        kind = (node or {}).get("kind") or {}
+        if not node or kind.get("kind") != "robot_controller":
+            return [], []
+        place = node.get("place")
+        if not place:
+            return [], []
+        box = self._place_origin(place)
+        if box is None:
+            return [], [f"cable length needs the box — place {place!r} is not an obstacle or a frame of this scene"]
+        farthest: Optional[tuple[float, str]] = None
+        for robot in kind.get("robots") or []:
+            if robot not in self.robots:
+                continue
+            base = self.scene.robot_base_pose_of(robot)[0]
+            run = sum(abs(float(b) - float(p)) for b, p in zip(base, box))
+            if farthest is None or run > farthest[0]:
+                farthest = (run, robot)
+        if farthest is None:
+            return [], []
+        run, robot = farthest
+        return [
+            Requirement(
+                "cable_m",
+                _round(run + self.cable_slack_m, 2),
+                basis=f"{robot} base to {place} {run:.2f} m along the axes + {_fmt(self.cable_slack_m)} m slack",
+            )
+        ], []
+
+    def _place_origin(self, place: str) -> Optional[tuple[float, float, float]]:
+        entry = self.obstacles.get(place)
+        if entry is not None:
+            p = (entry.get("pose") or {}).get("position")
+            if p is not None:
+                return (float(p[0]), float(p[1]), float(p[2]))
+        if place in self.scene.frames:
+            return tuple(self.scene.frame(place)[0])  # type: ignore[return-value]
+        return None
 
     def _structure(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:
         reqs: list[Requirement] = []
@@ -1412,6 +1549,26 @@ class _Cell:
                 total += m
         return total, unknown
 
+    def obstacles_meeting(self, position, quaternion, size, *, exclude: str = "", ground_z: float = 0.02) -> list[str]:
+        """Solid obstacles whose bounds overlap a yaw-oriented box: not the
+        ones under `exclude` (the cabinet's own parts), not what rides a
+        robot, not decoration (`enabled=False`), not the floor."""
+        hits: list[str] = []
+        for obstacle, entry in self.obstacles.items():
+            if (exclude and obstacle.startswith(exclude)) or entry.get("attached_to"):
+                continue
+            if entry.get("enabled") is False:
+                continue
+            try:
+                lo, hi = self.scene.obstacle_bounds(obstacle)
+            except ValueError:
+                continue
+            if hi[2] <= ground_z:
+                continue
+            if _box_meets_aabb(position, quaternion, size, lo, hi):
+                hits.append(obstacle)
+        return hits
+
     def _objects_in(self, position, quaternion, size) -> list[str]:
         """Free obstacles whose origin lies inside an oriented box."""
         names: list[str] = []
@@ -1459,7 +1616,7 @@ def _merge(reqs: list[Requirement]) -> list[Requirement]:
     order: list[str] = []
     for r in reqs:
         if r.key not in merged:
-            merged[r.key] = Requirement(r.key, r.value, r.op, r.basis)
+            merged[r.key] = Requirement(r.key, r.value, r.op, r.basis, lint=r.lint)
             order.append(r.key)
             continue
         m = merged[r.key]
@@ -1555,6 +1712,38 @@ def _rotate(q, v) -> tuple[float, float, float]:
 def _rotate_inverse(q, v) -> tuple[float, float, float]:
     x, y, z, w = (float(c) for c in q)
     return _rotate((-x, -y, -z, w), v)
+
+
+def _box_meets_aabb(centre, q, size, lo, hi) -> bool:
+    """Whether a box (`size` = width, depth, height, turned by the yaw of
+    `q` about `centre`) overlaps a world-aligned box — the separating-axis
+    test on the four plan axes plus the height interval. Faces that merely
+    touch do not count."""
+    eps = 1e-6
+    cx, cy, cz = (float(c) for c in centre)
+    w, d, h = (float(c) for c in size)
+    if cz - h / 2.0 >= float(hi[2]) - eps or cz + h / 2.0 <= float(lo[2]) + eps:
+        return False
+    ux = _rotate(q, (1.0, 0.0, 0.0))
+    uy = _rotate(q, (0.0, 1.0, 0.0))
+    axes = ((ux[0], ux[1]), (uy[0], uy[1]))
+    halves = (w / 2.0, d / 2.0)
+    corners = [
+        (cx + sx * halves[0] * axes[0][0] + sy * halves[1] * axes[1][0],
+         cy + sx * halves[0] * axes[0][1] + sy * halves[1] * axes[1][1])
+        for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)
+    ]
+    for i in (0, 1):
+        if max(c[i] for c in corners) <= float(lo[i]) + eps or min(c[i] for c in corners) >= float(hi[i]) - eps:
+            return False
+    aabb = [(float(lo[0]), float(lo[1])), (float(hi[0]), float(lo[1])),
+            (float(lo[0]), float(hi[1])), (float(hi[0]), float(hi[1]))]
+    for axis, half in zip(axes, halves):
+        c0 = cx * axis[0] + cy * axis[1]
+        proj = [p[0] * axis[0] + p[1] * axis[1] for p in aabb]
+        if max(proj) <= c0 - half + eps or min(proj) >= c0 + half - eps:
+            return False
+    return True
 
 
 def _quat_mul(a, b) -> tuple[float, float, float, float]:
