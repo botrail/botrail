@@ -360,11 +360,13 @@ def test_aerial_requirements_meet_the_x500_manifest() -> None:
 
 @pytest.mark.skipif(not HAS_CATALOG, reason="botrail catalog not in the HF cache")
 def test_catalog_robot_and_tool_rows() -> None:
-    """A catalog cobot and gripper: specs come with the identity, the tool
-    line gets the grasp's stroke and payload, reach is measured at the
-    flange the catalog declares."""
-    robot = bt.Robot.from_catalog("universal_robots/ur5e")
-    tool = bt.Robot.from_catalog("robotiq/2f-85")
+    """Catalog specs and their gaps survive selection: tool requirements
+    follow the grasp, and reach uses the declared robot flange."""
+    # Pin the package IDs and dataset snapshot so newer aliases cannot change
+    # this regression's declared and deliberately unspecified properties.
+    revision = "301f5d98101403c791dde7f514a27f77e083ab30"
+    robot = bt.Robot.from_catalog("universal_robots/ur/ur5e/r2", revision=revision)
+    tool = bt.Robot.from_catalog("robotiq/2f/2f-85/r2", revision=revision)
     scene = bt.Scene(robot.attach_tool(tool), name="ur5e")
     scene.add_box("carton", size=(0.25, 0.18, 0.15), position=(0.6, 0.0, 0.5))
     scene.set_part("carton", category="workpiece", mass_kg=2.3)
@@ -374,24 +376,35 @@ def test_catalog_robot_and_tool_rows() -> None:
     seq.step("grip", actions=[bt.seq.attach("carton")], transition=bt.seq.immediately())
     req = scene.requirements()
     arm, grip = by_key(req["ur5e"]), by_key(req["ur5e/tool"])
-    assert arm["payload_kg"].value == pytest.approx(0.925 + 2.3) and arm["payload_kg"].status == "ok"
+    # The reference gripper declares no mass. The numeric comparison uses
+    # the known workpiece subtotal; the incomplete tool load remains visible.
+    assert arm["payload_kg"].value == pytest.approx(2.3) and arm["payload_kg"].status == "ok"
+    assert "tool mass unknown" in arm["payload_kg"].basis
+    assert any("tool has no mass_kg" in note for note in req["ur5e"].notes)
+    assert any(
+        f.code == "requirement_incomplete" and f.target == "ur5e"
+        and "tool has no mass_kg" in f.message
+        for f in req.findings()
+    )
     assert "(flange)" in arm["reach_mm"].basis and arm["reach_mm"].provided == 850
-    assert grip["payload_kg"].value == pytest.approx(2.3) and grip["payload_kg"].provided == 5.0
+    assert grip["payload_kg"].value == pytest.approx(2.3)
+    assert grip["payload_kg"].provided is None and grip["payload_kg"].status == "unknown"
     # 85 mm of stroke cannot open past the carton's smallest side.
     assert grip["stroke_mm"].value == 150 and grip["stroke_mm"].status == "short"
     # Holding force: m·g × SF 2 / (μ 0.5 × 2 surfaces) = 2.3 × 19.62 N.
     assert grip["grip_force_n"].value == pytest.approx(45.1)
+    assert grip["grip_force_n"].provided is None and grip["grip_force_n"].status == "unknown"
     assert req["ur5e/tool"].minimum == {
         "payload_kg": 2.3,
         "stroke_mm": 150.0,
         "grip_force_n": 45.1,
     }
-    # spec_short: the 150 mm carton beats the 85 mm stroke. No
-    # spec_unknown: the published 2F-85 row carries the grip-force flat
-    # mirrors (packed at build time, republished 2026-09-02), so the
-    # grip_force_n requirement finds its number.
+    # Stroke is declared and too short; payload and holding-force capacities
+    # are deliberately unspecified for the public reference model.
     assert [f.code for f in req.findings() if f.target == "ur5e/tool"] == [
+        "spec_unknown",
         "spec_short",
+        "spec_unknown",
     ]
 
 
