@@ -487,6 +487,15 @@ impl PhysicsBackend for RapierBackend {
         self.body(body).is_sleeping()
     }
 
+    fn body_velocity(&self, body: BodyId) -> Velocity {
+        let rb = self.body(body);
+        let (v, w) = (rb.linvel(), rb.angvel());
+        Velocity {
+            linear: nalgebra::Vector3::new(v.x, v.y, v.z),
+            angular: nalgebra::Vector3::new(w.x, w.y, w.z),
+        }
+    }
+
     fn drain_contacts(&mut self) -> TickContacts {
         let raw = std::mem::take(&mut *self.collector.events.lock().expect("collector poisoned"));
         let mut out = TickContacts::default();

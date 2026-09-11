@@ -1,6 +1,7 @@
 //! Python bindings for botrail (`botrail._core`).
 
 mod catalog;
+mod rl;
 mod hub;
 mod server;
 
@@ -762,6 +763,32 @@ const DEFAULT_ROUGHNESS: f32 = 0.80;
 
 fn scene_err(e: botrail_scene::SceneError) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// The engine name a `physics` argument selects: `None` for the kinematic
+/// bake — what a vectorised rollout builds one backend per world from.
+fn physics_engine(arg: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+    let Some(v) = arg else { return Ok(None) };
+    if let Ok(b) = v.extract::<bool>() {
+        return Ok(b.then(|| "rapier".to_string()));
+    }
+    let name: String = v
+        .extract()
+        .map_err(|_| PyValueError::new_err("physics must be a bool or an engine name string"))?;
+    match name.as_str() {
+        "rapier" => Ok(Some(name)),
+        other => Err(PyValueError::new_err(format!(
+            "unknown physics engine `{other}` (available: \"rapier\")"
+        ))),
+    }
+}
+
+/// A fresh backend of the named engine (`None`: no physics).
+fn backend_named(engine: &Option<String>) -> Option<Box<dyn botrail_physics::PhysicsBackend>> {
+    engine.as_deref().map(|_| {
+        Box::new(botrail_physics_rapier::RapierBackend::new())
+            as Box<dyn botrail_physics::PhysicsBackend>
+    })
 }
 
 /// Resolves the `physics` argument of a bake: `None`/`False` is the
@@ -4888,7 +4915,7 @@ impl Scene {
     /// `scenario` applies a named initial-state delta (`add_scenario`) to
     /// the snapshot first — the live scene is never touched. `None` and
     /// `"baseline"` both mean the scene as it stands.
-    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None))]
+    #[pyo3(signature = (name, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None, policies = None))]
     #[allow(clippy::too_many_arguments)]
     fn simulate_sequence(
         &self,
@@ -4899,6 +4926,7 @@ impl Scene {
         scenario: Option<&str>,
         toolpath_spin: Option<&str>,
         physics: Option<&Bound<'_, PyAny>>,
+        policies: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -4923,7 +4951,13 @@ impl Scene {
         }
         let (timeline, scene) = self
             .hub
-            .simulate_sequences_with(&[name], scenario, &options, physics_backend(physics)?)
+            .simulate_sequences_driven(
+                &[name],
+                scenario,
+                &options,
+                physics_backend(physics)?,
+                rl::policy_drivers(policies)?,
+            )
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
@@ -4945,7 +4979,7 @@ impl Scene {
     /// joint-space L2). The default 0.05 samples a big arm's sweep every
     /// ~10 cm of TCP travel — coarse enough to step across sheet metal, so
     /// cells full of 12 mm flanges pass 0.005.
-    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None))]
+    #[pyo3(signature = (names, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None, policies = None))]
     #[allow(clippy::too_many_arguments)]
     fn simulate_sequences(
         &self,
@@ -4956,6 +4990,7 @@ impl Scene {
         scenario: Option<&str>,
         toolpath_spin: Option<&str>,
         physics: Option<&Bound<'_, PyAny>>,
+        policies: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<SequenceTimeline> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
@@ -4981,11 +5016,135 @@ impl Scene {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (timeline, scene) = self
             .hub
-            .simulate_sequences_with(&refs, scenario, &options, physics_backend(physics)?)
+            .simulate_sequences_driven(
+                &refs,
+                scenario,
+                &options,
+                physics_backend(physics)?,
+                rl::policy_drivers(policies)?,
+            )
             .map_err(PyValueError::new_err)?;
         Ok(SequenceTimeline {
             inner: timeline,
             scene,
+        })
+    }
+
+    /// Moves a camera: its `position` and `quaternion` (xyzw) in its
+    /// mount frame (the world for a fixture, the link for a wrist
+    /// camera) — a domain-randomisation hook for the picture channels.
+    #[pyo3(signature = (name, position, quaternion = None))]
+    fn set_camera_pose(
+        &self,
+        name: &str,
+        position: [f64; 3],
+        quaternion: Option<[f64; 4]>,
+    ) -> PyResult<()> {
+        let mut camera = self
+            .hub
+            .snapshot()
+            .cameras()
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))?;
+        let rotation = match quaternion {
+            Some(q) => pose_from(position, Some(q)).rotation,
+            None => camera.pose.rotation,
+        };
+        camera.pose = nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(position[0], position[1], position[2]),
+            rotation,
+        );
+        self.hub.upsert_camera(camera).map_err(scene_err)
+    }
+
+    /// The segmentation id of every body a depth picture can show, by
+    /// name (obstacles as is, links as `robot/link`); background is 0.
+    fn _segmentation_ids(&self) -> Vec<(String, i32)> {
+        botrail_scene::raster::segmentation_ids(&self.hub.snapshot())
+    }
+
+    /// Widths per channel of a `botrail.rl` observation spec (JSON)
+    /// resolved against this scene — what sizes the observation space
+    /// before any rollout is opened (a LiDAR channel's width is the
+    /// scanner's thinned beam count, known only to the scene).
+    fn _observation_dims(&self, spec: &str) -> PyResult<Vec<usize>> {
+        let snapshot = self.hub.snapshot();
+        botrail_scene::rl::ObsSpec::from_json(spec, &snapshot)
+            .map(|s| s.dims())
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Opens the rollout `simulate_sequences` would bake, stopped at
+    /// `t = 0` with every program in its first step, for Python to
+    /// advance one scan tick at a time (design-rl.md R0). Between ticks
+    /// the `LiveRollout` reads the world — joints, link and object poses,
+    /// object velocities, signals, this tick's contacts — and drives a
+    /// robot's joints toward a rate-limited target; the PLC programs,
+    /// devices, sensors and physics run exactly as in the batch bake.
+    /// `sequences` is one name or a list. `finish()` yields the ordinary
+    /// timeline (and broadcasts it to connected studios).
+    #[pyo3(signature = (sequences, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, toolpath_spin = None, physics = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_rollout(
+        &self,
+        sequences: &Bound<'_, PyAny>,
+        dt: f64,
+        max_duration: f64,
+        plan_resolution: Option<f64>,
+        scenario: Option<&str>,
+        toolpath_spin: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<LiveRollout> {
+        let names: Vec<String> = if let Ok(one) = sequences.extract::<String>() {
+            vec![one]
+        } else {
+            sequences.extract::<Vec<String>>().map_err(|_| {
+                PyValueError::new_err("sequences must be a sequence name or a list of names")
+            })?
+        };
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration,
+            ..Default::default()
+        };
+        if let Some(resolution) = plan_resolution {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "plan_resolution must be positive, got {resolution}"
+                )));
+            }
+            options.plan.resolution = resolution;
+        }
+        if let Some(mode) = toolpath_spin {
+            options.toolpath.spin = spin_mode(mode)?;
+        }
+        let scenario = scenario
+            .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+            .map(str::to_string);
+        let mut snapshot = self.hub.snapshot();
+        if let Some(name) = &scenario {
+            snapshot
+                .apply_scenario(name)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let live = snapshot
+            .open_rollout(&refs, &options, physics_backend(physics)?)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(LiveRollout {
+            inner: Some(live),
+            scene: snapshot,
+            hub: self.hub.clone(),
+            label: refs.join(" + "),
+            scenario,
+            spec: None,
         })
     }
 
@@ -6154,6 +6313,569 @@ fn serve_studio(
         shutdown: Some(shutdown_tx),
         thread: Some(thread),
     })
+}
+
+/// The picture geometry a Python caller names.
+fn render_geometry(name: &str) -> PyResult<botrail_scene::raster::RenderGeometry> {
+    match name {
+        "visual" => Ok(botrail_scene::raster::RenderGeometry::Visual),
+        "collision" => Ok(botrail_scene::raster::RenderGeometry::Collision),
+        other => Err(PyValueError::new_err(format!(
+            "geometry must be \"visual\" or \"collision\", got {other:?}"
+        ))),
+    }
+}
+
+/// A rendered picture: `(depth (h, w) f32, ids (h, w) i32)`.
+type Picture<'py> = (Bound<'py, numpy::PyArray2<f32>>, Bound<'py, numpy::PyArray2<i32>>);
+
+/// A rollout advanced from Python one scan tick at a time — what
+/// `Scene.open_rollout` returns. Between ticks, read the world and drive
+/// a robot; `finish()` closes it into a `SequenceTimeline`.
+#[pyclass(module = "botrail._core")]
+struct LiveRollout {
+    /// `None` once finished.
+    inner: Option<botrail_scene::rollout::LiveRollout>,
+    /// The pre-rollout snapshot the timeline is baked against.
+    scene: botrail_scene::Scene,
+    hub: Arc<SceneHub>,
+    label: String,
+    scenario: Option<String>,
+    /// The channel list `observe()` packs, once `set_observation` bound one.
+    spec: Option<botrail_scene::rl::ObsSpec>,
+}
+
+fn pose_arrays(pose: &nalgebra::Isometry3<f64>) -> hub::PoseArrays {
+    let t = pose.translation;
+    let q = pose.rotation.coords;
+    ([t.x, t.y, t.z], [q.x, q.y, q.z, q.w])
+}
+
+impl LiveRollout {
+    fn live(&self) -> PyResult<&botrail_scene::rollout::LiveRollout> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("this rollout is finished"))
+    }
+
+    fn live_mut(&mut self) -> PyResult<&mut botrail_scene::rollout::LiveRollout> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("this rollout is finished"))
+    }
+
+    /// Resolves `robot=` against the snapshot: `None` is the sole robot.
+    fn robot(&self, robot: Option<&str>) -> PyResult<usize> {
+        let robots = self.scene.robots();
+        let names = || {
+            robots
+                .iter()
+                .map(|r| format!("{:?}", r.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match robot {
+            Some(name) => self.scene.robot_index(name).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown robot `{name}` (have: {})", names()))
+            }),
+            None => match robots.len() {
+                0 => Err(PyValueError::new_err("the scene has no robot")),
+                1 => Ok(0),
+                _ => Err(PyValueError::new_err(format!(
+                    "the scene has several robots ({}); pass robot=",
+                    names()
+                ))),
+            },
+        }
+    }
+
+    fn link_pose_of(&self, robot: usize, link: usize) -> PyResult<hub::PoseArrays> {
+        let poses = self
+            .live()?
+            .link_poses(robot)
+            .ok_or_else(|| PyValueError::new_err("unknown robot"))?;
+        Ok(pose_arrays(&poses[link]))
+    }
+}
+
+#[pymethods]
+impl LiveRollout {
+    /// The rollout clock (seconds): ticks × dt.
+    #[getter]
+    fn t(&self) -> PyResult<f64> {
+        Ok(self.live()?.t())
+    }
+
+    /// The scan period (seconds).
+    #[getter]
+    fn dt(&self) -> PyResult<f64> {
+        Ok(self.live()?.dt())
+    }
+
+    /// Whether every program has run to its end. Ticking on is allowed:
+    /// the world keeps advancing with no program left to react.
+    #[getter]
+    fn finished(&self) -> PyResult<bool> {
+        Ok(self.live()?.finished())
+    }
+
+    /// Advances `n` scan ticks (PLC scan: outputs, world and physics,
+    /// inputs, transitions) and returns the clock. The bake's own errors
+    /// — a timeout past `max_duration`, a robot-vs-robot collision, a
+    /// failed plan — raise `ValueError` as they would fail a batch bake.
+    #[pyo3(signature = (n = 1))]
+    fn tick(&mut self, n: usize) -> PyResult<f64> {
+        let live = self.live_mut()?;
+        for _ in 0..n {
+            live.tick().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+        Ok(live.t())
+    }
+
+    /// Hands a robot's joints — one arm's (`group`) or all of them — to
+    /// Python: from now on `command()` sets their target and every tick
+    /// moves them toward it by at most each joint's velocity limit (the
+    /// model's, capped by `max_velocity` in rad/s or m/s when given).
+    /// Refused while a motion or ramp drives any of those joints.
+    #[pyo3(signature = (robot = None, group = None, max_velocity = None))]
+    fn drive(
+        &mut self,
+        robot: Option<&str>,
+        group: Option<&str>,
+        max_velocity: Option<f64>,
+    ) -> PyResult<()> {
+        let r = self.robot(robot)?;
+        let group = match group {
+            Some(name) => Some(
+                self.scene.robots()[r]
+                    .model
+                    .group_index(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown group `{name}`")))?,
+            ),
+            None => None,
+        };
+        self.live_mut()?
+            .drive(r, group, max_velocity)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Releases every drive on the robot; its joints stay where the
+    /// driver left them.
+    #[pyo3(signature = (robot = None))]
+    fn undrive(&mut self, robot: Option<&str>) -> PyResult<()> {
+        let r = self.robot(robot)?;
+        self.live_mut()?.undrive(r);
+        Ok(())
+    }
+
+    /// Sets the drive's joint target (full configuration; only the driven
+    /// joints are read, each clamped to its position limits). The target
+    /// holds across ticks until the next command.
+    #[pyo3(signature = (q, robot = None))]
+    fn command(&mut self, q: Vec<f64>, robot: Option<&str>) -> PyResult<()> {
+        let r = self.robot(robot)?;
+        self.live_mut()?
+            .command(r, &q)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Commanded joint positions after the last tick.
+    #[pyo3(signature = (robot = None))]
+    fn joint_positions(&self, robot: Option<&str>) -> PyResult<Vec<f64>> {
+        let r = self.robot(robot)?;
+        Ok(self
+            .live()?
+            .joint_positions(r)
+            .map(<[f64]>::to_vec)
+            .unwrap_or_default())
+    }
+
+    /// Joint velocities over the last tick, `(q - q_prev) / dt`.
+    #[pyo3(signature = (robot = None))]
+    fn joint_velocities(&self, robot: Option<&str>) -> PyResult<Vec<f64>> {
+        let r = self.robot(robot)?;
+        Ok(self.live()?.joint_velocities(r).unwrap_or_default())
+    }
+
+    /// World pose `(position, quaternion xyzw)` of a link after the last
+    /// tick.
+    #[pyo3(signature = (link, robot = None))]
+    fn link_pose(&self, link: &str, robot: Option<&str>) -> PyResult<hub::PoseArrays> {
+        let r = self.robot(robot)?;
+        let index = self.scene.robots()[r]
+            .model
+            .link_index(link)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown link `{link}`")))?;
+        self.link_pose_of(r, index)
+    }
+
+    /// World pose of the robot's TCP link after the last tick.
+    #[pyo3(signature = (robot = None))]
+    fn tcp_pose(&self, robot: Option<&str>) -> PyResult<hub::PoseArrays> {
+        let r = self.robot(robot)?;
+        let tcp = self.scene.robots()[r].model.default_tcp_link();
+        self.link_pose_of(r, tcp)
+    }
+
+    /// World pose of an obstacle after the last tick (a physics-dynamic
+    /// body where the engine put it).
+    fn object_pose(&self, name: &str) -> PyResult<hub::PoseArrays> {
+        self.live()?
+            .obstacle_pose(name)
+            .map(|p| pose_arrays(&p))
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
+    }
+
+    /// World-frame `(linear, angular)` velocity of a physics-dynamic
+    /// obstacle, the engine's. Other obstacles have no engine velocity:
+    /// difference their poses across ticks instead.
+    fn object_velocity(&self, name: &str) -> PyResult<([f64; 3], [f64; 3])> {
+        let v = self.live()?.obstacle_velocity(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "`{name}` is not a physics-dynamic obstacle of this rollout"
+            ))
+        })?;
+        Ok((
+            [v.linear.x, v.linear.y, v.linear.z],
+            [v.angular.x, v.angular.y, v.angular.z],
+        ))
+    }
+
+    /// Current level of a signal lane (an internal signal, a sensor, a
+    /// device's running state).
+    fn signal(&self, name: &str) -> PyResult<bool> {
+        self.live()?
+            .signal(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown signal `{name}`")))
+    }
+
+    /// The body pairs in contact after the last tick, `(a, b, peak
+    /// force N)` — physics rollouts only, empty otherwise. Links are
+    /// named `robot/link`.
+    fn contacts(&self) -> PyResult<Vec<(String, String, f64)>> {
+        Ok(self
+            .live()?
+            .contacts()
+            .iter()
+            .map(|c| (c.a.clone(), c.b.clone(), c.force))
+            .collect())
+    }
+
+    /// Collision pairs a driven robot stands in after the last tick —
+    /// its links and what it carries, against itself and the scenery
+    /// (physics-dynamic bodies excluded: pushing a part is physics, not
+    /// a fault). A fact reported, never an error; empty when nothing is
+    /// driven.
+    fn collisions(&self) -> PyResult<Vec<(String, String)>> {
+        Ok(self.live()?.collisions().to_vec())
+    }
+
+    /// Each program's `(sequence, step)`; `step` is `None` once it has
+    /// finished.
+    fn steps(&self) -> PyResult<Vec<(String, Option<String>)>> {
+        Ok(self.live()?.current_steps())
+    }
+
+    /// The smallest distance (m) between any robot link — or what it
+    /// carries — and any enabled obstacle after the last tick; `None`
+    /// with nothing to measure against. Physics-dynamic parts count.
+    fn clearance(&self) -> PyResult<Option<f64>> {
+        Ok(self.live()?.clearance())
+    }
+
+    /// Binds the observation channels `observe()` packs: the JSON
+    /// channel list `botrail.rl` lowers its `Task.observe` to
+    /// (`[{"kind": "joints", "robot": ..., "velocities": true}, ...]`),
+    /// resolved against this rollout's scene once. Returns the widths
+    /// per channel.
+    fn set_observation(&mut self, spec: &str) -> PyResult<Vec<usize>> {
+        let spec = botrail_scene::rl::ObsSpec::from_json(spec, &self.scene)
+            .map_err(PyValueError::new_err)?;
+        let dims = spec.dims();
+        self.spec = Some(spec);
+        Ok(dims)
+    }
+
+    /// Binds the control `act()` goes through — the JSON control spec
+    /// `botrail.rl` lowers a task's control to — for `robot` driven as
+    /// `group`. Returns the action width.
+    #[pyo3(signature = (spec, robot = None, group = None))]
+    fn set_control(&mut self, spec: &str, robot: Option<&str>, group: Option<&str>) -> PyResult<usize> {
+        let r = self.robot(robot)?;
+        let group = match group {
+            Some(name) => Some(
+                self.scene.robots()[r]
+                    .model
+                    .group_index(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown group `{name}`")))?,
+            ),
+            None => None,
+        };
+        self.live_mut()?
+            .set_control(spec, r, group)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// One action through the bound control: the joint command it maps
+    /// to (a `TcpDelta` integrates its setpoint and solves the IK here,
+    /// in Rust) becomes the drive's target. Returns whether the IK
+    /// converged (`True` for the joint controls); a failed step holds.
+    #[pyo3(signature = (action, robot = None))]
+    fn act(&mut self, action: Vec<f64>, robot: Option<&str>) -> PyResult<bool> {
+        self.robot(robot)?;
+        self.live_mut()?
+            .act(&action)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The bound channels packed into one flat row (a 1-D ndarray), as
+    /// the world stands — the same packing a `VecRollout` does per world.
+    fn observe<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+        let spec = self
+            .spec
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("no observation bound: call set_observation first"))?;
+        let mut out = vec![0.0; spec.dim()];
+        spec.fill(self.live()?.view(), &mut out);
+        Ok(rl::row(py, out))
+    }
+
+    /// Sets the seed this world's sensor noise streams (LiDAR range
+    /// noise) derive from; the tick is folded in per draw. Default 0.
+    fn set_noise_seed(&mut self, seed: u64) -> PyResult<()> {
+        self.live_mut()?.set_noise_seed(seed);
+        Ok(())
+    }
+
+    /// Sets the light this world's colour pictures are lit by: `light`
+    /// is a direction *toward* the light (world frame, any length),
+    /// `ambient` the ambient share in [0, 1] — one directional light,
+    /// flat Lambert; `shadows` casts hard shadows from it (a shadow map
+    /// rendered per picture, about the cost of a second picture). A
+    /// domain-randomisation hook (`Task.render`).
+    #[pyo3(signature = (light, ambient = 0.35, shadows = false))]
+    fn set_lighting(&mut self, light: [f64; 3], ambient: f64, shadows: bool) -> PyResult<()> {
+        let lighting = botrail_scene::raster::Lighting::new(
+            nalgebra::Vector3::new(light[0], light[1], light[2]),
+            ambient,
+        )
+        .with_shadows(shadows);
+        self.live_mut()?.set_lighting(lighting);
+        Ok(())
+    }
+
+    /// Sets the cell size (m) visual meshes are decimated to in this
+    /// world's pictures — vertex clustering, a cheap cut of a dense
+    /// mesh's triangle count for a picture a policy reads at 64 pixels
+    /// a side; `None` restores full detail. Takes effect on the next
+    /// picture (the pictures' triangles are rebuilt).
+    #[pyo3(signature = (cell))]
+    fn set_render_decimate(&mut self, cell: Option<f64>) -> PyResult<()> {
+        if let Some(c) = cell {
+            if !(c.is_finite() && c > 0.0) {
+                return Err(PyValueError::new_err("decimate cell must be positive (or None)"));
+            }
+        }
+        self.live_mut()?.set_render_decimate(cell);
+        Ok(())
+    }
+
+    /// The triangle count this world's pictures of `geometry` are drawn
+    /// from, once a picture has been rendered (`None` before) — what
+    /// `set_render_decimate` cut.
+    #[pyo3(signature = (geometry = "visual"))]
+    fn render_triangles(&self, geometry: &str) -> PyResult<Option<usize>> {
+        let geometry = render_geometry(geometry)?;
+        Ok(self.live()?.view().render_triangles(geometry))
+    }
+
+    /// The flat-shaded colour picture of the named camera, `(h, w, 3)`
+    /// uint8 (black background), lit by this world's lighting — the
+    /// `botrail.rl.Rgb` channel's reading.
+    #[pyo3(signature = (name, width, height, geometry = "visual"))]
+    fn render_rgb<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        width: usize,
+        height: usize,
+        geometry: &str,
+    ) -> PyResult<Bound<'py, numpy::PyArray3<u8>>> {
+        use numpy::{IntoPyArray, PyArrayMethods};
+        let index = self
+            .scene
+            .cameras()
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))?;
+        let geometry = render_geometry(geometry)?;
+        if width == 0 || height == 0 {
+            return Err(PyValueError::new_err("width and height must be positive"));
+        }
+        let frame = self
+            .live()?
+            .view()
+            .render_shaded(index, geometry, width, height)
+            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))?;
+        frame
+            .rgb
+            .unwrap_or_default()
+            .into_pyarray(py)
+            .reshape([height, width, 3])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The horizontal field of view (degrees) of the named camera.
+    fn camera_fov(&self, name: &str) -> PyResult<f64> {
+        self.scene
+            .cameras()
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.fov_deg)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))
+    }
+
+    /// The world pose `(position, quaternion xyzw)` of the named camera
+    /// as the world stands — its mount resolved (a link by FK, a
+    /// vehicle at its current frame).
+    fn camera_pose(&self, name: &str) -> PyResult<hub::PoseArrays> {
+        let index = self
+            .scene
+            .cameras()
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))?;
+        self.live()?
+            .view()
+            .camera_pose(index)
+            .map(|p| pose_arrays(&p))
+            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))
+    }
+
+    /// The picture the named camera takes of the world as it stands, as
+    /// `(depth, ids)`: `depth` an `(h, w)` float32 array of Z along the
+    /// optical axis in meters (0 = no return / outside [near, far], row 0
+    /// the top — the studio's z16 depth capture), `ids` an `(h, w)` int32
+    /// segmentation (0 background; `Scene._segmentation_ids` names the
+    /// rest). `geometry` is `"visual"` (default) or `"collision"`.
+    #[pyo3(signature = (name, width, height, geometry = "visual"))]
+    fn render<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        width: usize,
+        height: usize,
+        geometry: &str,
+    ) -> PyResult<Picture<'py>> {
+        use numpy::{IntoPyArray, PyArrayMethods};
+        let index = self
+            .scene
+            .cameras()
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))?;
+        let geometry = render_geometry(geometry)?;
+        if width == 0 || height == 0 {
+            return Err(PyValueError::new_err("width and height must be positive"));
+        }
+        let frame = self
+            .live()?
+            .view()
+            .render(index, geometry, width, height)
+            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))?;
+        let depth = frame
+            .depth
+            .into_pyarray(py)
+            .reshape([height, width])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ids = frame
+            .id
+            .into_pyarray(py)
+            .reshape([height, width])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((depth, ids))
+    }
+
+    /// A sweep of the named LiDAR on the world as it stands: one range
+    /// per beam (meters; a beam with no return reads the scanner's max
+    /// range), every `stride`-th azimuth of `rings` (all by default),
+    /// with Gaussian range noise `noise` (1σ m) drawn from this world's
+    /// seed and the tick — the `botrail.rl.Lidar` channel's reading.
+    /// `points` reads the hit points instead: `(beams, 3)` in the
+    /// scanner frame, zeros for no return.
+    #[pyo3(signature = (name, stride = 1, rings = None, noise = 0.0, points = false))]
+    fn lidar<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        stride: usize,
+        rings: Option<Vec<u32>>,
+        noise: f64,
+        points: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let live = self.live()?;
+        let index = self
+            .scene
+            .lidars()
+            .iter()
+            .position(|l| l.name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown lidar `{name}`")))?;
+        let grid = botrail_scene::scan::ScanGrid {
+            stride: stride.max(1),
+            rings,
+        };
+        let max_range = self.scene.lidars()[index].range[1];
+        let scan = live
+            .view()
+            .lidar_scan(index, &grid, noise)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown lidar `{name}`")))?;
+        if points {
+            use numpy::{IntoPyArray, PyArrayMethods};
+            let beams = scan.ranges.len();
+            let mut xyz = Vec::with_capacity(3 * beams);
+            for k in 0..beams {
+                let r = scan.ranges[k];
+                if r > 0.0 {
+                    let a = scan.angles[k].to_radians();
+                    let e = scan.elevations[k].to_radians();
+                    xyz.extend([r * e.cos() * a.cos(), r * e.cos() * a.sin(), r * e.sin()]);
+                } else {
+                    xyz.extend([0.0, 0.0, 0.0]);
+                }
+            }
+            return xyz
+                .into_pyarray(py)
+                .reshape([beams, 3])
+                .map(|a| a.into_any())
+                .map_err(|e| PyValueError::new_err(e.to_string()));
+        }
+        let ranges: Vec<f64> = scan
+            .ranges
+            .iter()
+            .map(|r| if *r > 0.0 { *r } else { max_range })
+            .collect();
+        Ok(rl::row(py, ranges).into_any())
+    }
+
+    /// Closes the rollout into the timeline the batch bake would have
+    /// produced up to this tick, and (by default) broadcasts it to
+    /// connected studios as the session's latest bake.
+    #[pyo3(signature = (publish = true))]
+    fn finish(&mut self, publish: bool) -> PyResult<SequenceTimeline> {
+        let live = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("this rollout is finished"))?;
+        let mut timeline = live.finish();
+        timeline.scenario = self.scenario.clone();
+        if publish {
+            self.hub.publish_timeline(&self.scene, &timeline, &self.label);
+        }
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene: self.scene.clone(),
+        })
+    }
 }
 
 /// A baked sequence rollout: per-robot joint tracks, grasped-object
@@ -9568,6 +10290,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Group>()?;
     m.add_class::<Trajectory>()?;
     m.add_class::<SequenceTimeline>()?;
+    m.add_class::<LiveRollout>()?;
+    m.add_class::<rl::VecRollout>()?;
     m.add_class::<ScenarioRuns>()?;
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;

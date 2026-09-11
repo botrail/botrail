@@ -6,7 +6,7 @@ import type { RampTargetMsg } from "./RampTargetMsg";
  * Robot-addressed actions carry `robot` — the instance name, or `None`
  * for the scene's sole robot (ambiguous, and rejected, with several).
  */
-export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_toolpath", robot: string | null, toolpath: string, } | { "type": "start_ramp", robot: string | null, targets: Array<RampTargetMsg>, duration: number, } | { "type": "attach", robot: string | null, object: string, link: string | null, touch_links: Array<string> | null, 
+export type ActionMsg = { "type": "start_motion", motion: string, } | { "type": "start_toolpath", robot: string | null, toolpath: string, } | { "type": "start_ramp", robot: string | null, targets: Array<RampTargetMsg>, duration: number, } | { "type": "policy", policy: string, robot: string | null, group?: string | null, hz: number, max_duration: number, } | { "type": "attach", robot: string | null, object: string, link: string | null, touch_links: Array<string> | null, 
 /**
  * The arm that grasps (a dual-arm robot); `link` defaults to its tip.
  */

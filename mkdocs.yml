@@ -126,6 +126,7 @@ nav:
       - Motion planning: guides/motion-planning.md
       - Sequences: guides/sequences.md
       - Sensors and devices: guides/sensors-and-devices.md
+      - Reinforcement learning: guides/rl.md
       - Vehicles and AMRs: guides/vehicles-and-amr.md
       - Legged robots: guides/legged.md
       - Attach and tracking: guides/attach-and-tracking.md

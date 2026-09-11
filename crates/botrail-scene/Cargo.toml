@@ -24,9 +24,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 ts-rs = { version = "12", optional = true }
 schemars = { workspace = true, optional = true }
+rayon = { version = "1", optional = true }
 
 [features]
-parallel = ["botrail-collide/parallel"]
+parallel = ["botrail-collide/parallel", "dep:rayon"]
 # Enables TypeScript binding generation for the wire types.
 # Run scripts/gen_protocol.sh to (re)generate studio/src/generated.
 ts = ["dep:ts-rs"]
@@ -37,3 +38,7 @@ schema = ["dep:schemars", "botrail-model/schema"]
 
 [dev-dependencies]
 botrail-physics-rapier.workspace = true
+
+[[example]]
+name = "vec_scaling"
+required-features = ["parallel"]

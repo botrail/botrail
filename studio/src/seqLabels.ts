@@ -10,6 +10,8 @@ export function actionLabel(action: ActionMsg): string {
       return `⟿ ${action.toolpath}`;
     case "start_ramp":
       return `ramp ${action.targets.length}j`;
+    case "policy":
+      return `policy ${action.policy}`;
     case "attach":
       return `⊕ ${short(action.object)}`;
     case "detach":

@@ -234,6 +234,46 @@
           ]
         },
         {
+          "description": "Hand the robot (or one arm) to a registered policy — a learned or\nscripted controller supplied at bake time — for at most\n`max_duration` seconds at `hz` decisions per second; await with\n`done`.",
+          "type": "object",
+          "properties": {
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hz": {
+              "type": "number",
+              "format": "double"
+            },
+            "max_duration": {
+              "type": "number",
+              "format": "double"
+            },
+            "policy": {
+              "type": "string"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "policy"
+            }
+          },
+          "required": [
+            "type",
+            "policy",
+            "hz",
+            "max_duration"
+          ]
+        },
+        {
           "description": "Grasp an obstacle at its current relative pose (instantaneous).",
           "type": "object",
           "properties": {

@@ -1160,6 +1160,11 @@ fn walk_action(
             entry.1.insert(toolpath.clone());
             u.owns.insert(r);
         }
+        Action::Policy { robot, .. } => {
+            let r = scene.resolve_seq_robot(robot)?;
+            u.drives.entry(r).or_default().0.push(at.clone());
+            u.owns.insert(r);
+        }
         Action::Attach { robot, .. }
         | Action::Track { robot, .. }
         | Action::Untrack { robot, .. } => {

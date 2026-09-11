@@ -2635,6 +2635,17 @@ fn py_action(action: &ActionMsg) -> String {
             extras.push_str(&group_kwarg(group));
             format!("bt.seq.attach({object:?}{extras})")
         }
+        ActionMsg::Policy {
+            policy,
+            robot,
+            group,
+            hz,
+            max_duration,
+        } => format!(
+            "bt.seq.policy({policy:?}, hz={hz:?}, max_duration={max_duration:?}{}{})",
+            robot_kwarg(robot),
+            group_kwarg(group)
+        ),
         ActionMsg::Detach { object } => format!("bt.seq.detach({object:?})"),
         ActionMsg::Track {
             robot,

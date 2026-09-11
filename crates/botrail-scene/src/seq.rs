@@ -809,6 +809,22 @@ pub enum Action {
         targets: Vec<(String, f64)>,
         duration: f64,
     },
+    /// Hand the robot — or one arm (`group`) — to a registered policy for
+    /// this step: a learned or scripted controller supplied at bake time
+    /// (`simulate_sequence(policies=...)`), asked for a joint target every
+    /// `1/hz` seconds until it declares itself done or `max_duration`
+    /// runs out. The joints move toward each target under the drive's
+    /// rate limit (the model's velocity limits), so a policy steers but
+    /// never teleports the arm; a collision with the scenery while it
+    /// drives fails the bake. Await it with [`Condition::Done`]
+    /// (design-rl.md R3).
+    Policy {
+        policy: String,
+        robot: Option<String>,
+        group: Option<String>,
+        hz: f64,
+        max_duration: f64,
+    },
     /// Grasp: rigidly attach an obstacle at its current relative pose
     /// (defaults as in [`Scene::attach_obstacle`]). Instantaneous.
     Attach {
@@ -919,6 +935,7 @@ impl Action {
     pub(crate) fn robot_mut(&mut self) -> Option<&mut String> {
         match self {
             Action::StartRamp { robot, .. }
+            | Action::Policy { robot, .. }
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
             | Action::Untrack { robot, .. }
@@ -1688,6 +1705,19 @@ impl Scene {
                 let r = self.resolve_seq_robot(robot)?;
                 Ok(Some((r, (0..self.robots()[r].model.dof()).collect())))
             }
+            Action::Policy { robot, group, .. } => {
+                let r = self.resolve_seq_robot(robot)?;
+                let g = match group {
+                    Some(name) => Some(
+                        self.robots()[r]
+                            .model
+                            .group_index(name)
+                            .ok_or_else(|| format!("unknown group `{name}`"))?,
+                    ),
+                    None => None,
+                };
+                Ok(Some((r, self.group_joints(r, g))))
+            }
             _ => Ok(None),
         }
     }
@@ -1784,6 +1814,11 @@ impl Scene {
                                 targets.iter().map(|(j, _)| j.as_str()).collect();
                             let arm = self.ramp_arm(r, &joints);
                             claim_robot(&mut owners, r, arm, index)?;
+                        }
+                    }
+                    Action::Policy { robot, group, .. } => {
+                        if let Ok(r) = self.resolve_seq_robot(robot) {
+                            claim_robot(&mut owners, r, group.clone(), index)?;
                         }
                     }
                     Action::Attach { robot, group, .. }
@@ -2166,6 +2201,18 @@ impl Scene {
                 }
                 Ok(())
             }
+            // A policy commands its joints outright: it cannot ride a
+            // track's offset any more than a ramp can.
+            Action::Policy { policy, robot, .. } => {
+                let r = self.resolve_seq_robot(robot)?;
+                if let Some(claim) = tracked[r].first() {
+                    return Err(format!(
+                        "policy `{policy}` cannot drive `{}` while it tracks `{}`; untrack first",
+                        self.robots()[r].name, claim.object
+                    ));
+                }
+                Ok(())
+            }
             // Planned motions bake their whole trajectory when they start,
             // which cannot absorb a part that keeps moving underneath. Only
             // the tracking arm's own joints conflict — the other arm may
@@ -2498,6 +2545,32 @@ impl Scene {
                     .ok_or_else(|| format!("unknown toolpath `{toolpath}`"))?;
                 if found.target_count() == 0 {
                     return Err(format!("toolpath `{toolpath}` has no targets"));
+                }
+                Ok(())
+            }
+            Action::Policy {
+                policy,
+                robot,
+                group,
+                hz,
+                max_duration,
+            } => {
+                if policy.is_empty() {
+                    return Err("policy step names no policy".to_string());
+                }
+                let r = self.resolve_seq_robot(robot)?;
+                if let Some(name) = group {
+                    self.robots()[r].model.group_index(name).ok_or_else(|| {
+                        format!("unknown group `{name}` on `{}`", self.robots()[r].name)
+                    })?;
+                }
+                if !(hz.is_finite() && *hz > 0.0) {
+                    return Err(format!("policy rate must be positive, got {hz} Hz"));
+                }
+                if !(max_duration.is_finite() && *max_duration > 0.0) {
+                    return Err(format!(
+                        "policy max_duration must be positive, got {max_duration}"
+                    ));
                 }
                 Ok(())
             }

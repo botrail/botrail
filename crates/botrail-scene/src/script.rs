@@ -811,6 +811,21 @@ impl<'a> Lowering<'a> {
                     text: format!("detach {object} (simulation release)"),
                 });
             }
+            Action::Policy { group, .. } if self.is_other_arm(group) => {}
+            Action::Policy { policy, max_duration, .. } => {
+                // The controller runs the policy program; the stretch it
+                // drives is baked tick by tick in the timeline but is not
+                // a taught path, so the script marks the hand-over.
+                out.push(Command::Comment {
+                    text: format!(
+                        "policy {policy}: controller-side program (up to {max_duration} s), \
+                         not a taught path — run it here"
+                    ),
+                });
+                self.warnings.push(format!(
+                    "{label}: policy `{policy}` is not scripted; the controller runs it"
+                ));
+            }
             Action::Track { group, .. } | Action::Untrack { group, .. }
                 if self.is_other_arm(group) => {}
             Action::Track { .. } | Action::Untrack { .. } => {

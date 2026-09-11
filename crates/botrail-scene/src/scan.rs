@@ -40,7 +40,7 @@ pub struct ScanNoise {
 
 /// SplitMix64 — the classic 64-bit finalizer; enough hash for a
 /// noise stream and dependency-free.
-fn splitmix64(x: u64) -> u64 {
+pub(crate) fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -49,7 +49,7 @@ fn splitmix64(x: u64) -> u64 {
 
 /// A standard-normal draw for one beam, hashed from the noise key —
 /// Box–Muller over two unit uniforms.
-fn gauss(key: u64) -> f64 {
+pub(crate) fn gauss(key: u64) -> f64 {
     let unit = |v: u64| ((v >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
     let u1 = unit(splitmix64(key));
     let u2 = unit(splitmix64(key ^ 0xD1B5_4A32_D192_ED03));
@@ -311,13 +311,116 @@ pub fn scan_sweep(
         .collect()
 }
 
-/// The beam loop over one resolved instant.
+/// How a sweep thins the authored beam grid: every `stride`-th azimuth,
+/// and only the listed rings (`None`: all). The full grid is `stride 1`,
+/// all rings — what the scan API takes; an RL observation thins a
+/// 14,400-beam scanner down to what a policy can afford per step.
+#[derive(Debug, Clone, Default)]
+pub struct ScanGrid {
+    pub stride: usize,
+    pub rings: Option<Vec<u32>>,
+}
+
+impl ScanGrid {
+    /// Beam count of `lidar` under this thinning — the observation width.
+    pub fn beams(&self, lidar: &Lidar) -> usize {
+        let (count, rings) = grid_of(lidar);
+        let stride = self.stride.max(1);
+        let azimuths = count.div_ceil(stride);
+        let nrings = match &self.rings {
+            Some(list) => list.iter().filter(|&&r| (r as usize) < rings.len()).count(),
+            None => rings.len(),
+        };
+        azimuths * nrings
+    }
+}
+
+/// The authored beam grid: azimuth count across the sweep (a full circle
+/// drops the duplicate closing beam) and the ring elevations, degrees,
+/// bottom first.
+fn grid_of(lidar: &Lidar) -> (usize, Vec<f64>) {
+    let steps = ((lidar.fov_deg / lidar.resolution_deg).round().max(1.0)) as usize;
+    let full = lidar.fov_deg >= 360.0 - 1e-9;
+    let count = if full { steps } else { steps + 1 };
+    let rings: Vec<f64> = if lidar.channels <= 1 {
+        vec![0.0]
+    } else {
+        let vstep = lidar.vfov_deg / (lidar.channels - 1) as f64;
+        (0..lidar.channels)
+            .map(|c| -lidar.vfov_deg / 2.0 + vstep * c as f64)
+            .collect()
+    };
+    (count, rings)
+}
+
+/// A sweep of `lidar` on the world a live rollout stands in
+/// (design-rl-sensors.md RS0): the scanner's frame is resolved on the
+/// tick-true poses — a vehicle mount at the vehicle's *current* frame,
+/// not its parking — and the noise stream folds the world's seed and
+/// the tick, so every world and every step draws its own. `None` for an
+/// unknown lidar index.
+pub fn lidar_scan_live(
+    view: &crate::rollout::WorldView<'_>,
+    lidar: usize,
+    grid: &ScanGrid,
+    sigma: f64,
+) -> Option<LidarScan> {
+    let scene = view.scene();
+    let lidar_ref = scene.lidars().get(lidar)?;
+    let (exclude_obstacles, exclude_link) = mount_exclusions(scene, lidar_ref);
+    let link_poses: Vec<Vec<Isometry3<f64>>> = (0..scene.robots().len())
+        .map(|r| view.link_poses(r).unwrap_or_default())
+        .collect();
+    let frame = match &lidar_ref.mount {
+        LidarMount::World => lidar_ref.pose,
+        LidarMount::Vehicle { device } => {
+            view.vehicle_frame(device)
+                .unwrap_or_else(|| parked_vehicle_frame(scene, device))
+                * lidar_ref.pose
+        }
+        LidarMount::Link { .. } => match exclude_link {
+            Some((r, l)) => link_poses[r][l] * lidar_ref.pose,
+            None => lidar_ref.pose,
+        },
+    };
+    let state = ScanState {
+        frame,
+        obstacle_poses: scene.obstacles().iter().map(|o| o.pose).collect(),
+        obstacle_active: scene
+            .obstacles()
+            .iter()
+            .enumerate()
+            .map(|(i, o)| o.enabled && !exclude_obstacles.contains(&i))
+            .collect(),
+        link_poses,
+        exclude_link,
+    };
+    let noise = (sigma > 0.0).then(|| ScanNoise {
+        sigma,
+        seed: view.noise_seed(),
+    });
+    Some(sweep_grid(scene, lidar_ref, state, Some(view.t()), noise, grid))
+}
+
+/// The beam loop over one resolved instant, full grid.
 fn sweep(
     scene: &Scene,
     lidar: &Lidar,
     state: ScanState,
     t: Option<f64>,
     noise: Option<ScanNoise>,
+) -> LidarScan {
+    sweep_grid(scene, lidar, state, t, noise, &ScanGrid::default())
+}
+
+/// The beam loop over one resolved instant, on a thinned grid.
+fn sweep_grid(
+    scene: &Scene,
+    lidar: &Lidar,
+    state: ScanState,
+    t: Option<f64>,
+    noise: Option<ScanNoise>,
+    grid: &ScanGrid,
 ) -> LidarScan {
     let [min_range, max_range] = lidar.range;
     let origin = Point3::from(state.frame.translation.vector);
@@ -366,21 +469,21 @@ fn sweep(
     // The beam grid spans the sweep exactly, symmetric about +X; a full
     // circle drops the duplicate closing beam. Built in degrees (see
     // `LidarScan::angles`). Rings span the vertical field the same way,
-    // symmetric about the scan plane, bottom first.
+    // symmetric about the scan plane, bottom first. A thinned grid keeps
+    // every `stride`-th azimuth and the listed rings.
+    let (count, all_rings) = grid_of(lidar);
     let steps = ((lidar.fov_deg / lidar.resolution_deg).round().max(1.0)) as usize;
-    let full = lidar.fov_deg >= 360.0 - 1e-9;
-    let count = if full { steps } else { steps + 1 };
     let step = lidar.fov_deg / steps as f64;
-    let rings: Vec<f64> = if lidar.channels <= 1 {
-        vec![0.0]
-    } else {
-        let vstep = lidar.vfov_deg / (lidar.channels - 1) as f64;
-        (0..lidar.channels)
-            .map(|c| -lidar.vfov_deg / 2.0 + vstep * c as f64)
-            .collect()
+    let stride = grid.stride.max(1);
+    let rings: Vec<f64> = match &grid.rings {
+        Some(list) => list
+            .iter()
+            .filter_map(|&r| all_rings.get(r as usize).copied())
+            .collect(),
+        None => all_rings,
     };
 
-    let beams = count * rings.len();
+    let beams = count.div_ceil(stride) * rings.len();
     let mut angles = Vec::with_capacity(beams);
     let mut elevations = Vec::with_capacity(beams);
     let mut ranges = Vec::with_capacity(beams);
@@ -388,7 +491,7 @@ fn sweep(
     for elevation in &rings {
         let e = elevation.to_radians();
         let (ce, se) = (e.cos(), e.sin());
-        for i in 0..count {
+        for i in (0..count).step_by(stride) {
             let angle = -lidar.fov_deg / 2.0 + step * i as f64;
             let a = angle.to_radians();
             let dir = state.frame.rotation * Vector3::new(ce * a.cos(), ce * a.sin(), se);

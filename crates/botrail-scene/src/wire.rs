@@ -1141,6 +1141,19 @@ pub enum ActionMsg {
         targets: Vec<RampTargetMsg>,
         duration: f64,
     },
+    /// Hand the robot (or one arm) to a registered policy — a learned or
+    /// scripted controller supplied at bake time — for at most
+    /// `max_duration` seconds at `hz` decisions per second; await with
+    /// `done`.
+    Policy {
+        policy: String,
+        #[serde(default)]
+        robot: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        hz: f64,
+        max_duration: f64,
+    },
     /// Grasp an obstacle at its current relative pose (instantaneous).
     Attach {
         #[serde(default)]
@@ -2058,6 +2071,19 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 .collect(),
             duration: *duration,
         },
+        Action::Policy {
+            policy,
+            robot,
+            group,
+            hz,
+            max_duration,
+        } => ActionMsg::Policy {
+            policy: policy.clone(),
+            robot: robot.clone(),
+            group: group.clone(),
+            hz: *hz,
+            max_duration: *max_duration,
+        },
         Action::Attach {
             robot,
             object,
@@ -2133,6 +2159,19 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             robot: robot.clone(),
             targets: targets.iter().map(|t| (t.joint.clone(), t.value)).collect(),
             duration: *duration,
+        },
+        ActionMsg::Policy {
+            policy,
+            robot,
+            group,
+            hz,
+            max_duration,
+        } => Action::Policy {
+            policy: policy.clone(),
+            robot: robot.clone(),
+            group: group.clone(),
+            hz: *hz,
+            max_duration: *max_duration,
         },
         ActionMsg::Attach {
             robot,

@@ -509,6 +509,28 @@ impl<'a> Pou<'a> {
                     ));
                     started.push(format!("{inst}.done"));
                 }
+                // The controller runs the policy; the PLC starts it by
+                // name and waits, as for a motion program.
+                Action::Policy {
+                    policy,
+                    robot,
+                    max_duration,
+                    ..
+                } => {
+                    let robot = self.robot_name(robot);
+                    let inst = self.instance(
+                        format!("{}_policy", ident(&robot)),
+                        "FB_StartPolicy",
+                        Some(&robot),
+                    );
+                    st.push(format!(
+                        "{inst}(robot := {}, name := {}, start := TRUE); (* controller-side policy, {} s max *)",
+                        st_string(&robot),
+                        st_string(policy),
+                        st_real(*max_duration)
+                    ));
+                    started.push(format!("{inst}.done"));
+                }
                 Action::Attach { robot, object, .. } => {
                     let robot = self.robot_name(robot);
                     let inst = self.instance(
@@ -825,6 +847,10 @@ const STUB_FBS: &[(&str, &str)] = &[
     (
         "FB_StartToolpath",
         "start the named process path on the robot",
+    ),
+    (
+        "FB_StartPolicy",
+        "start the named controller-side policy on the robot",
     ),
     (
         "FB_Attach",

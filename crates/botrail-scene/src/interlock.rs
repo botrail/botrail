@@ -172,6 +172,7 @@ fn condition_text(c: &Condition, after: Option<&Step>) -> String {
                                 robot.as_ref().map(|r| format!(" {r}")).unwrap_or_default()
                             )),
                             Action::StartToolpath { toolpath, .. } => Some(toolpath.clone()),
+                            Action::Policy { policy, .. } => Some(format!("policy {policy}")),
                             _ => None,
                         })
                         .collect()
@@ -392,6 +393,11 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 OutputKind::Toolpath,
                 toolpath.clone(),
                 format!("toolpath {toolpath}{}", with_robot(robot)),
+            )),
+            Action::Policy { robot, policy, .. } => out.push((
+                OutputKind::Motion,
+                policy.clone(),
+                format!("policy {policy}{}", with_robot(robot)),
             )),
             Action::Attach {
                 robot,

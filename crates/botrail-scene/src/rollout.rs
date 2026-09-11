@@ -18,6 +18,7 @@ use crate::seq::{
 use crate::Scene;
 use botrail_collide::ObstacleCollider;
 use botrail_physics::PhysicsBackend;
+use crate::rl::PolicyDriver;
 use nalgebra::Vector3;
 
 #[derive(Debug, Error)]
@@ -1248,6 +1249,54 @@ impl Scene {
         options: &RolloutOptions,
         backend: Option<Box<dyn PhysicsBackend>>,
     ) -> Result<SequenceTimeline, SeqError> {
+        self.prepare_rollout(names, options, backend, Vec::new())?.run()
+    }
+
+    /// [`simulate_sequences_with`](Self::simulate_sequences_with) with
+    /// registered policies: what a `Policy` step hands its robot to. Every
+    /// policy step of `names` must name one of them (a step whose
+    /// controller is missing is a validation error, never a silent skip),
+    /// and each policy's observation channels must resolve against this
+    /// scene (design-rl.md R3).
+    pub fn simulate_sequences_driven(
+        &self,
+        names: &[&str],
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+        policies: Vec<(String, Box<dyn PolicyDriver>)>,
+    ) -> Result<SequenceTimeline, SeqError> {
+        self.prepare_rollout(names, options, backend, policies)?.run()
+    }
+
+    /// Opens the rollout [`simulate_sequences_with`](Self::simulate_sequences_with)
+    /// would bake, stopped at `t = 0` with every program in its first
+    /// step, for the caller to advance one scan tick at a time — a
+    /// controller or a learned policy that reads the world between ticks
+    /// and drives a robot (design-rl.md R0). The PLC programs, devices,
+    /// sensors and physics run exactly as in the batch bake: ticking to
+    /// the end and finishing reproduces it bit for bit.
+    pub fn open_rollout(
+        &self,
+        names: &[&str],
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Result<LiveRollout, SeqError> {
+        let mut inner = self.prepare_rollout(names, options, backend, Vec::new())?;
+        inner.start()?;
+        Ok(LiveRollout {
+            inner,
+            control: None,
+        })
+    }
+
+    /// Validates `names` and builds the rollout they run in.
+    fn prepare_rollout(
+        &self,
+        names: &[&str],
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+        policies: Vec<(String, Box<dyn PolicyDriver>)>,
+    ) -> Result<Rollout, SeqError> {
         if names.is_empty() {
             return Err(SeqError::Validation {
                 step: None,
@@ -1284,7 +1333,56 @@ impl Scene {
                     message,
                 })?;
         }
-        Rollout::new(self.clone(), sequences, options.clone(), backend).run()
+        // Every policy step names a registered policy, and every policy's
+        // channels resolve here — before a single tick runs.
+        let mut needed: Vec<String> = Vec::new();
+        for sequence in &sequences {
+            crate::seq::walk_actions(&sequence.steps, &mut |action: &Action| {
+                if let Action::Policy { policy, .. } = action {
+                    if !needed.contains(policy) {
+                        needed.push(policy.clone());
+                    }
+                }
+                Ok::<(), SeqError>(())
+            })?;
+        }
+        for name in &needed {
+            if !policies.iter().any(|(n, _)| n == name) {
+                return Err(SeqError::Validation {
+                    step: None,
+                    message: format!(
+                        "policy `{name}` is not registered: a policy step needs its controller \
+                         — pass policies={{{name:?}: ...}} to simulate"
+                    ),
+                });
+            }
+        }
+        let mut resolved = Vec::with_capacity(policies.len());
+        for (name, driver) in policies {
+            let spec = crate::rl::ObsSpec::from_json(driver.channels(), self).map_err(|e| {
+                SeqError::Validation {
+                    step: None,
+                    message: format!("policy `{name}`: {e}"),
+                }
+            })?;
+            let control = match driver.control() {
+                Some(json) => Some(serde_json::from_str::<crate::rl::ControlSpec>(json).map_err(
+                    |e| SeqError::Validation {
+                        step: None,
+                        message: format!("policy `{name}`: control spec: {e}"),
+                    },
+                )?),
+                None => None,
+            };
+            resolved.push((name, driver, spec, control));
+        }
+        Ok(Rollout::new(
+            self.clone(),
+            sequences,
+            options.clone(),
+            backend,
+            resolved,
+        ))
     }
 
     /// [`simulate_sequences`](Self::simulate_sequences) under a named
@@ -1417,6 +1515,9 @@ impl RobotRuntime {
                     )
                 })
                 .collect(),
+            // An external drive has no future to bake: it is sampled tick
+            // by tick from whatever its driver says next.
+            MoveKind::External { .. } => Vec::new(),
         };
         for (time, q, v) in tail {
             if time > t + 1e-9 {
@@ -1621,6 +1722,20 @@ struct PhysicsRuntime {
     /// Closed touch episodes, in closing order (sorted by start at bake
     /// end, where the still-open ones join them).
     contacts: Vec<ContactSpan>,
+    /// The pairs in contact after this tick, with the tick's peak force
+    /// — a live rollout's contact observation (design-rl.md §3.3), in
+    /// canonical body-id order so it reads the same every run.
+    touching: Vec<TickContact>,
+}
+
+/// One pair of bodies in contact at the end of a scan tick.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickContact {
+    pub a: String,
+    pub b: String,
+    /// Peak contact-force magnitude (N) reported during this tick's
+    /// substeps; `0.0` for a pair that only rests.
+    pub force: f64,
 }
 
 /// A touch that has begun and not yet ended.
@@ -1691,6 +1806,13 @@ enum KinSource {
     Link { robot: usize, link: usize },
 }
 
+/// Whether `BT_PHYS_DEBUG` is set — read once: the lookup walks the
+/// environment block under a global lock, and the tick asks twice.
+fn phys_debug() -> bool {
+    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var("BT_PHYS_DEBUG").is_ok())
+}
+
 /// Linear + spherical-linear pose interpolation, for substep-granular
 /// kinematic supply (same math as a `Sampled` span's evaluation).
 fn interp_pose(a: &Isometry3<f64>, b: &Isometry3<f64>, f: f64) -> Isometry3<f64> {
@@ -1698,6 +1820,569 @@ fn interp_pose(a: &Isometry3<f64>, b: &Isometry3<f64>, f: f64) -> Isometry3<f64>
         nalgebra::Translation3::from(a.translation.vector.lerp(&b.translation.vector, f)),
         a.rotation.slerp(&b.rotation, f),
     )
+}
+
+/// A rollout advanced from outside, one scan tick at a time: what
+/// [`Scene::open_rollout`] returns. Between ticks the caller may read the
+/// world (joints, link poses, object poses and velocities, signals, this
+/// tick's contacts) and drive a robot's joints with a rate-limited
+/// position target — the loop a controller or a learned policy closes.
+/// Everything else — programs, devices, sensors, physics — is the batch
+/// bake's, tick for tick; [`finish`](Self::finish) yields the ordinary
+/// [`SequenceTimeline`].
+pub struct LiveRollout {
+    inner: Rollout,
+    /// The control `act` goes through, with its state (a TcpDelta's
+    /// setpoint) — `set_control`.
+    control: Option<(crate::rl::Control, crate::rl::ControlState)>,
+}
+
+/// A read-only window on a rollout between ticks — what a controller, a
+/// policy or an observation spec reads. Borrowed from a [`LiveRollout`]
+/// (`view()`), or handed to a [`crate::rl::PolicyDriver`] mid-bake.
+pub struct WorldView<'a>(&'a Rollout);
+
+impl<'a> WorldView<'a> {
+    /// The rollout clock: `ticks * dt`.
+    pub fn t(&self) -> f64 {
+        self.0.t
+    }
+
+    /// The scan period.
+    pub fn dt(&self) -> f64 {
+        self.0.options.dt
+    }
+
+    /// Whether every program has run to its end.
+    pub fn finished(&self) -> bool {
+        self.0.finished()
+    }
+
+    /// The world as it stands after the last tick (joints applied,
+    /// dynamic bodies written back) — for FK, distances, poses.
+    pub fn scene(&self) -> &'a Scene {
+        &self.0.world
+    }
+
+    /// Each program's sequence name and the step it stands in (`None`
+    /// once it has finished).
+    pub fn current_steps(&self) -> Vec<(String, Option<String>)> {
+        self.0
+            .programs
+            .iter()
+            .map(|p| {
+                let step = (!p.finished())
+                    .then(|| p.flat.get(p.step).map(|s| s.name.clone()))
+                    .flatten();
+                (p.sequence.name.clone(), step)
+            })
+            .collect()
+    }
+
+    /// Commanded joints of robot `robot` after the last tick.
+    pub fn joint_positions(&self, robot: usize) -> Option<&'a [f64]> {
+        self.0.robots.get(robot).map(|rt| rt.q.as_slice())
+    }
+
+    /// Joint velocities over the last tick (`(q - q_prev) / dt`).
+    pub fn joint_velocities(&self, robot: usize) -> Option<Vec<f64>> {
+        let dt = self.0.options.dt;
+        self.0.robots.get(robot).map(|rt| {
+            rt.q
+                .iter()
+                .zip(&rt.q_prev)
+                .map(|(now, before)| (now - before) / dt)
+                .collect()
+        })
+    }
+
+    /// World poses of every link of robot `robot`, model order.
+    pub fn link_poses(&self, robot: usize) -> Option<Vec<Isometry3<f64>>> {
+        (robot < self.0.world.robots().len()).then(|| self.0.world.link_poses_for(robot))
+    }
+
+    /// World pose of the named obstacle.
+    pub fn obstacle_pose(&self, name: &str) -> Option<Isometry3<f64>> {
+        self.0
+            .world
+            .obstacles()
+            .iter()
+            .find(|o| o.name == name)
+            .map(|o| o.pose)
+    }
+
+    /// World-frame velocity of a physics-dynamic obstacle (the engine's);
+    /// `None` for anything else — a kinematic obstacle's motion is its
+    /// pose difference, which the caller can take.
+    pub fn obstacle_velocity(&self, name: &str) -> Option<botrail_physics::Velocity> {
+        let phys = self.0.physics.as_ref()?;
+        let body = phys.dynamics.iter().find(|b| b.name == name)?;
+        Some(phys.backend.body_velocity(body.id))
+    }
+
+    /// Current level of a signal lane (an internal signal, a sensor, a
+    /// device's running state).
+    pub fn signal(&self, name: &str) -> Option<bool> {
+        self.0
+            .signals
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.edges.last().map(|e| e.1))
+    }
+
+    /// The body pairs in contact after the last tick (physics bakes
+    /// only; empty otherwise).
+    pub fn contacts(&self) -> &'a [TickContact] {
+        self.0
+            .physics
+            .as_ref()
+            .map(|p| p.touching.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Collision pairs an externally driven robot stands in after the
+    /// last tick — its links and what it carries, against itself and the
+    /// scenery (dynamic bodies excluded). Empty when nothing is driven.
+    pub fn collisions(&self) -> &'a [(String, String)] {
+        &self.0.collisions
+    }
+
+    /// The smallest distance between any robot link (or what it carries)
+    /// and any enabled obstacle after the last tick — a graded proximity
+    /// observation; `None` with nothing to measure against.
+    pub fn clearance(&self) -> Option<f64> {
+        self.0.world.min_obstacle_distance()
+    }
+
+    /// Scan ticks taken so far.
+    pub fn ticks(&self) -> u64 {
+        self.0.ticks
+    }
+
+    /// The seed sensor noise streams of this world derive from
+    /// ([`LiveRollout::set_noise_seed`]; a vectorised rollout gives each
+    /// world its own).
+    pub fn noise_seed(&self) -> u64 {
+        self.0.noise_seed
+    }
+
+    /// The current frame of a vehicle device — where it stands this
+    /// tick, parked or mid-drive; `None` for an unknown device.
+    pub fn vehicle_frame(&self, device: &str) -> Option<Isometry3<f64>> {
+        self.0.devices.iter().find_map(|d| match d {
+            DeviceRuntime::Vehicle {
+                name,
+                position,
+                heading,
+                ..
+            } if name == device => Some(vehicle_frame(position, *heading)),
+            _ => None,
+        })
+    }
+
+    /// A sweep of the `lidar`-th scanner on the world as it stands,
+    /// thinned by `grid`, with Gaussian range noise `sigma` (0: none)
+    /// drawn from this world's seed and the tick. `None` for an unknown
+    /// scanner.
+    pub fn lidar_scan(
+        &self,
+        lidar: usize,
+        grid: &crate::scan::ScanGrid,
+        sigma: f64,
+    ) -> Option<crate::scan::LidarScan> {
+        crate::scan::lidar_scan_live(self, lidar, grid, sigma)
+    }
+
+    /// The world frame of the `camera`-th camera as the world stands:
+    /// its mount resolved — a link by FK, a vehicle at its current frame.
+    pub fn camera_pose(&self, camera: usize) -> Option<Isometry3<f64>> {
+        use crate::seq::CameraMount;
+        let cam = self.0.world.cameras().get(camera)?;
+        let mount = match &cam.mount {
+            CameraMount::World => Isometry3::identity(),
+            CameraMount::Vehicle { device } => self.vehicle_frame(device)?,
+            CameraMount::Link { robot, link } => {
+                let r = self.0.world.robot_index(robot)?;
+                let l = self.0.world.robots()[r].model.link_index(link)?;
+                self.0.world.link_poses_for(r)[l]
+            }
+        };
+        Some(mount * cam.pose)
+    }
+
+    /// The picture the `camera`-th camera takes of the world as it
+    /// stands, `width × height` pixels, of the visual or the collision
+    /// shapes (design-rl-sensors.md RS1). `None` for an unknown camera.
+    pub fn render(
+        &self,
+        camera: usize,
+        geometry: crate::raster::RenderGeometry,
+        width: usize,
+        height: usize,
+    ) -> Option<crate::raster::Frame> {
+        let cam = self.0.world.cameras().get(camera)?;
+        let pose = self.camera_pose(camera)?;
+        let scene = self.0.render_cache[geometry.index()]
+            .get_or_init(|| crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate));
+        Some(scene.render(self, cam, &pose, width.max(1), height.max(1), None))
+    }
+
+    /// [`render`](Self::render) with a flat-shaded colour image too, lit
+    /// by this world's [`Lighting`](crate::raster::Lighting).
+    pub fn render_shaded(
+        &self,
+        camera: usize,
+        geometry: crate::raster::RenderGeometry,
+        width: usize,
+        height: usize,
+    ) -> Option<crate::raster::Frame> {
+        let cam = self.0.world.cameras().get(camera)?;
+        let pose = self.camera_pose(camera)?;
+        let scene = self.0.render_cache[geometry.index()]
+            .get_or_init(|| crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate));
+        Some(scene.render(self, cam, &pose, width.max(1), height.max(1), Some(&self.0.lighting)))
+    }
+
+    /// Triangles the pictures of this world are drawn from, per
+    /// geometry, once built (`None` before the first picture).
+    pub fn render_triangles(&self, geometry: crate::raster::RenderGeometry) -> Option<usize> {
+        self.0.render_cache[geometry.index()]
+            .get()
+            .map(crate::raster::RenderScene::triangle_count)
+    }
+
+    /// The light shaded pictures of this world are lit by.
+    pub fn lighting(&self) -> &crate::raster::Lighting {
+        &self.0.lighting
+    }
+}
+
+impl LiveRollout {
+    /// The read-only window on the world as it stands.
+    pub fn view(&self) -> WorldView<'_> {
+        WorldView(&self.inner)
+    }
+
+    /// Sets the seed this world's sensor noise streams derive from
+    /// (LiDAR range noise, later depth noise). Default 0.
+    pub fn set_noise_seed(&mut self, seed: u64) {
+        self.inner.noise_seed = seed;
+    }
+
+    /// Sets the light shaded pictures of this world are lit by (an RGB
+    /// channel's look; a domain-randomisation hook).
+    pub fn set_lighting(&mut self, lighting: crate::raster::Lighting) {
+        self.inner.lighting = lighting;
+    }
+
+    /// Sets the decimation cell (m) visual meshes are cut to in this
+    /// world's pictures (`None`: full detail), rebuilding the pictures'
+    /// triangles on the next frame.
+    pub fn set_render_decimate(&mut self, cell: Option<f64>) {
+        self.inner.render_decimate = cell.filter(|c| *c > 0.0);
+        self.inner.render_cache = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+    }
+
+    /// The rollout clock: `ticks * dt`.
+    pub fn t(&self) -> f64 {
+        self.inner.t
+    }
+
+    /// The scan period.
+    pub fn dt(&self) -> f64 {
+        self.inner.options.dt
+    }
+
+    /// Whether every program has run to its end. Ticking on is allowed
+    /// — the world keeps advancing (parts settle, belts run) with no
+    /// program left to react.
+    pub fn finished(&self) -> bool {
+        self.inner.finished()
+    }
+
+    /// One PLC scan: outputs, world (physics included), inputs,
+    /// transitions. The bake's own errors (a timeout past
+    /// `max_duration`, a robot-vs-robot collision, a failed plan) come
+    /// back as they would from the batch bake.
+    pub fn tick(&mut self) -> Result<(), SeqError> {
+        self.inner.tick()
+    }
+
+    /// Closes the rollout into the timeline the batch bake would have
+    /// produced up to this tick.
+    pub fn finish(self) -> SequenceTimeline {
+        self.inner.finish()
+    }
+
+    /// The world as it stands after the last tick.
+    pub fn scene(&self) -> &Scene {
+        &self.inner.world
+    }
+
+    /// Each program's sequence name and current step (see [`WorldView`]).
+    pub fn current_steps(&self) -> Vec<(String, Option<String>)> {
+        self.view().current_steps()
+    }
+
+    /// Hands robot `robot`'s joints — one arm's (`group`) or all of them
+    /// — to the caller: from now on [`command`](Self::command) sets their
+    /// target and every tick moves them toward it by at most the joint's
+    /// velocity limit (the model's, capped by `max_velocity` when given).
+    /// Refused while a motion or ramp drives any of those joints (one
+    /// driver per joint) or while a gait walks the legs among them.
+    pub fn drive(
+        &mut self,
+        robot: usize,
+        group: Option<usize>,
+        max_velocity: Option<f64>,
+    ) -> Result<(), SeqError> {
+        self.inner
+            .start_drive(robot, group, max_velocity, "drive")
+            .map(|_| ())
+    }
+
+    /// Releases every drive on `robot`; its joints stay where the driver
+    /// left them, and a later motion starts from there.
+    pub fn undrive(&mut self, robot: usize) {
+        self.inner.stop_drive(robot);
+    }
+
+    /// Sets the drive's target for robot `robot` (full-length q; only the
+    /// driven joints are read, each clamped to its position limits). The
+    /// target holds across ticks until the next command.
+    pub fn command(&mut self, robot: usize, target: &[f64]) -> Result<(), SeqError> {
+        self.inner.command_robot(robot, target)
+    }
+
+    /// Binds the control [`act`](Self::act) turns actions into commands
+    /// through (a `botrail.rl` control spec, JSON), for `robot` driven as
+    /// `group`. Returns the action width.
+    pub fn set_control(
+        &mut self,
+        spec: &str,
+        robot: usize,
+        group: Option<usize>,
+    ) -> Result<usize, SeqError> {
+        let control = crate::rl::Control::from_json(spec, &self.inner.world, robot, group)
+            .map_err(|message| self.inner.live_err(message))?;
+        let dim = control.dim();
+        let state = control.start();
+        self.control = Some((control, state));
+        Ok(dim)
+    }
+
+    /// One action through the bound control: the joint command it maps
+    /// to (a `TcpDelta` integrates its setpoint and solves the IK here)
+    /// is set as the drive's target. Returns whether the IK converged
+    /// (`true` for the joint controls); a failed step holds.
+    pub fn act(&mut self, action: &[f64]) -> Result<bool, SeqError> {
+        let Some((control, state)) = self.control.as_mut() else {
+            return Err(self.inner.live_err("no control bound: call set_control first".into()));
+        };
+        let (command, converged) = control
+            .apply(state, WorldView(&self.inner), action)
+            .map_err(|message| self.inner.live_err(message))?;
+        let robot = control.robot();
+        self.inner.command_robot(robot, &command)?;
+        Ok(converged)
+    }
+
+    /// Commanded joints of robot `robot` after the last tick.
+    pub fn joint_positions(&self, robot: usize) -> Option<&[f64]> {
+        self.view().joint_positions(robot)
+    }
+
+    /// Joint velocities over the last tick (`(q - q_prev) / dt`).
+    pub fn joint_velocities(&self, robot: usize) -> Option<Vec<f64>> {
+        self.view().joint_velocities(robot)
+    }
+
+    /// World poses of every link of robot `robot`, model order.
+    pub fn link_poses(&self, robot: usize) -> Option<Vec<Isometry3<f64>>> {
+        self.view().link_poses(robot)
+    }
+
+    /// World pose of the named obstacle.
+    pub fn obstacle_pose(&self, name: &str) -> Option<Isometry3<f64>> {
+        self.view().obstacle_pose(name)
+    }
+
+    /// World-frame velocity of a physics-dynamic obstacle; `None` for
+    /// anything else.
+    pub fn obstacle_velocity(&self, name: &str) -> Option<botrail_physics::Velocity> {
+        self.view().obstacle_velocity(name)
+    }
+
+    /// Current level of a signal lane.
+    pub fn signal(&self, name: &str) -> Option<bool> {
+        self.view().signal(name)
+    }
+
+    /// The body pairs in contact after the last tick.
+    pub fn contacts(&self) -> &[TickContact] {
+        self.view().contacts()
+    }
+
+    /// Collision pairs a driven robot stands in after the last tick.
+    pub fn collisions(&self) -> &[(String, String)] {
+        self.view().collisions()
+    }
+
+    /// The smallest robot-to-obstacle distance after the last tick.
+    pub fn clearance(&self) -> Option<f64> {
+        self.view().clearance()
+    }
+}
+
+impl Rollout {
+    /// Hands robot `robot`'s joints (one group's, or all) to an external
+    /// driver labelled `label`: an [`ActiveMove`] of kind `External`, so
+    /// a later command moves them toward its target under the joint
+    /// velocity limits (capped by `max_velocity`). Returns the owned q
+    /// indices. Refused while a move drives any of them, or a gait walks
+    /// the legs among them.
+    fn start_drive(
+        &mut self,
+        robot: usize,
+        group: Option<usize>,
+        max_velocity: Option<f64>,
+        label: &str,
+    ) -> Result<Vec<usize>, SeqError> {
+        let Some(sr) = self.world.robots().get(robot) else {
+            return Err(self.live_err(format!("no robot at index {robot}")));
+        };
+        let model = sr.model.clone();
+        if let Some(g) = group {
+            if g >= model.groups().len() {
+                return Err(self.live_err(format!("robot `{}` has no group {g}", model.name)));
+            }
+        }
+        let owned = self.world.group_joints(robot, group);
+        self.claim_joints(robot, &owned, label)?;
+        let rt = &self.robots[robot];
+        if rt.walking() {
+            let legs: Vec<usize> = rt
+                .gait
+                .as_ref()
+                .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
+                .unwrap_or_default();
+            if owned.iter().any(|qi| legs.contains(qi)) {
+                return Err(self.live_err(format!(
+                    "robot `{}` is walking: its legs are the gait's until device_done",
+                    model.name
+                )));
+            }
+        }
+        let mut vmax = vec![f64::INFINITY; model.dof()];
+        for &qi in &owned {
+            let joint = &model.joints[model.actuated_joints[qi]];
+            let mut cap = joint
+                .limits
+                .as_ref()
+                .map(|l| l.velocity)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(f64::INFINITY);
+            if let Some(m) = max_velocity {
+                if m.is_finite() && m > 0.0 {
+                    cap = cap.min(m);
+                }
+            }
+            vmax[qi] = cap;
+        }
+        let t = self.t;
+        let rt = &mut self.robots[robot];
+        // Like a move alongside another: no future to pre-bake, so the
+        // robot bakes tick by tick from here.
+        rt.truncate_after(t);
+        rt.tick_bake = true;
+        let target = rt.q_nom.clone();
+        rt.active.push(ActiveMove {
+            owned: owned.clone(),
+            label: label.to_string(),
+            kind: MoveKind::External { target, vmax },
+        });
+        Ok(owned)
+    }
+
+    /// Releases every external drive on `robot`.
+    fn stop_drive(&mut self, robot: usize) {
+        if let Some(rt) = self.robots.get_mut(robot) {
+            rt.active.retain(|a| !a.is_external());
+            if rt.active.is_empty() {
+                rt.tick_bake = false;
+            }
+        }
+        self.collisions.clear();
+    }
+
+    /// Sets the external drive's target on `robot` (full-length q; the
+    /// driven joints are read, each clamped to its position limits).
+    fn command_robot(&mut self, robot: usize, target: &[f64]) -> Result<(), SeqError> {
+        let Some(sr) = self.world.robots().get(robot) else {
+            return Err(self.live_err(format!("no robot at index {robot}")));
+        };
+        let model = sr.model.clone();
+        if target.len() != model.dof() {
+            return Err(self.live_err(format!(
+                "robot `{}` has {} joints, got {} targets",
+                model.name,
+                model.dof(),
+                target.len()
+            )));
+        }
+        if let Some(bad) = target.iter().find(|v| !v.is_finite()) {
+            return Err(self.live_err(format!("joint target {bad} is not finite")));
+        }
+        let Some(active) = self.robots[robot].active.iter_mut().find(|a| a.is_external()) else {
+            return Err(self.live_err(format!(
+                "robot `{}` is not driven; call drive first",
+                model.name
+            )));
+        };
+        if let MoveKind::External { target: held, .. } = &mut active.kind {
+            for &qi in &active.owned {
+                let mut v = target[qi];
+                if let Some(l) = model.joints[model.actuated_joints[qi]].limits.as_ref() {
+                    if l.lower <= l.upper {
+                        v = v.clamp(l.lower, l.upper);
+                    }
+                }
+                held[qi] = v;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A policy registered for a bake: its name, the driver, the observation
+/// spec resolved against the world, and the control spec its actions go
+/// through (none: the driver answers joint targets).
+type RegisteredPolicy = (
+    String,
+    Box<dyn PolicyDriver>,
+    crate::rl::ObsSpec,
+    Option<crate::rl::ControlSpec>,
+);
+
+/// A policy driving a robot for a step (design-rl.md R3): which
+/// registered driver, at what period, until when.
+struct PolicyRun {
+    name: String,
+    program: usize,
+    step: usize,
+    robot: usize,
+    group_label: Option<String>,
+    policy: usize,
+    period: u64,
+    next_tick: u64,
+    deadline: f64,
+    started: f64,
+    /// Decisions taken so far (0 at the step's entry).
+    steps: u64,
+    /// Index into the program's `move_ends` (∞ until the run ends).
+    move_end: usize,
+    /// The control the policy's actions go through, when it has one.
+    control: Option<(crate::rl::Control, crate::rl::ControlState)>,
 }
 
 struct Rollout {
@@ -1739,6 +2424,34 @@ struct Rollout {
     /// Friction holds (attach on a driven gripper under physics),
     /// open and closed; the horn closes the stragglers.
     friction_holds: Vec<GraspHold>,
+    /// Scan ticks taken so far; `t = ticks * dt` (the product, not a
+    /// running sum, so a live rollout's clock is the batch bake's).
+    ticks: u64,
+    /// Collision pairs an externally driven robot stands in after this
+    /// tick (design-rl.md 判断 D11): its links and what it carries against
+    /// itself and the scenery, dynamic bodies excluded (touching those is
+    /// physics, not a fault). Empty — and never computed — unless a robot
+    /// is driven; a driver's contact is a fact reported, not an error —
+    /// except under a policy step, whose collision fails the bake.
+    collisions: Vec<(String, String)>,
+    /// The registered policies a `Policy` step may hand a robot to, with
+    /// each one's observation spec resolved against this world and its
+    /// control spec (when it acts through one) parsed.
+    policies: Vec<RegisteredPolicy>,
+    /// What this world's sensor noise streams derive from (design-rl-
+    /// sensors.md RS0): a live rollout sets it, a batch bake keeps 0.
+    noise_seed: u64,
+    /// The world's triangles for depth pictures, tessellated on first use
+    /// (visual, collision) — design-rl-sensors.md RS1.
+    render_cache: [std::sync::OnceLock<crate::raster::RenderScene>; 2],
+    /// The light a shaded picture of this world is lit by (RS2); a live
+    /// rollout may set it per episode.
+    lighting: crate::raster::Lighting,
+    /// Decimation cell (m) for visual meshes in pictures (RS3), applied
+    /// when the render cache is built.
+    render_decimate: Option<f64>,
+    /// Policy runs in flight.
+    policy_runs: Vec<PolicyRun>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -1771,11 +2484,25 @@ enum MoveKind {
         from: Vec<f64>,
         to: Vec<f64>,
     },
+    /// An external driver — a policy, a hand-written controller — holding
+    /// a joint target it rewrites between ticks (`LiveRollout::command`).
+    /// Each tick the owned joints move toward `target` by at most
+    /// `vmax * dt` (a position servo with a rate limit: what an
+    /// industrial controller does with a streamed setpoint), so a policy
+    /// can never teleport the arm. Never ends on its own; `undrive`
+    /// removes it.
+    External {
+        /// Full-length q; only the owned entries are read.
+        target: Vec<f64>,
+        /// Per-q speed cap (rad/s, m/s); `INFINITY` leaves a joint uncapped.
+        vmax: Vec<f64>,
+    },
 }
 
 impl ActiveMove {
     /// The move's own view of every joint at `t`; only `owned` entries
-    /// are meant.
+    /// are meant. An external drive answers its target — the rate limit
+    /// is applied where the current joints are known (`advance_world`).
     fn sample(&self, t: f64) -> Vec<f64> {
         match &self.kind {
             MoveKind::Traj { start, traj } => traj.sample(t - start),
@@ -1790,17 +2517,23 @@ impl ActiveMove {
                 let s = u * u * (3.0 - 2.0 * u);
                 from.iter().zip(to).map(|(a, b)| a + (b - a) * s).collect()
             }
+            MoveKind::External { target, .. } => target.clone(),
         }
     }
 
-    /// Absolute end time of this move.
+    /// Absolute end time of this move; an external drive has none.
     fn end(&self) -> f64 {
         match &self.kind {
             MoveKind::Traj { start, traj } => start + traj.duration(),
             MoveKind::Ramp {
                 start, duration, ..
             } => start + duration,
+            MoveKind::External { .. } => f64::INFINITY,
         }
+    }
+
+    fn is_external(&self) -> bool {
+        matches!(self.kind, MoveKind::External { .. })
     }
 }
 
@@ -2201,6 +2934,7 @@ impl Rollout {
         sequences: Vec<Sequence>,
         options: RolloutOptions,
         backend: Option<Box<dyn PhysicsBackend>>,
+        policies: Vec<RegisteredPolicy>,
     ) -> Self {
         // Signal lanes: internal relays, then sensor inputs, then device
         // outputs — all recorded as edge tracks for the timing chart.
@@ -2753,8 +3487,17 @@ impl Rollout {
                 driven: Vec::new(),
                 open_contacts: std::collections::HashMap::new(),
                 contacts: Vec::new(),
+                touching: Vec::new(),
             }),
             friction_holds: Vec::new(),
+            ticks: 0,
+            collisions: Vec::new(),
+            policies,
+            policy_runs: Vec::new(),
+            noise_seed: 0,
+            render_cache: [std::sync::OnceLock::new(), std::sync::OnceLock::new()],
+            lighting: crate::raster::Lighting::default(),
+            render_decimate: None,
             dynamic_names: Vec::new(),
             objects,
             vehicles: Vec::new(),
@@ -2794,6 +3537,17 @@ impl Rollout {
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
+        self.start()?;
+        while !self.finished() {
+            self.tick()?;
+        }
+        Ok(self.finish())
+    }
+
+    /// The bake's opening: the physics world, the startup sensor read, and
+    /// the first scan of every program. After this the world stands at
+    /// `t = 0` with every program in its first step.
+    fn start(&mut self) -> Result<(), SeqError> {
         self.init_physics()?;
         self.update_sensors();
         // Seed every program's edge memory from the evaluated startup
@@ -2816,27 +3570,210 @@ impl Rollout {
             self.advance_through_ready_steps()?;
             self.close_scan(p);
         }
+        Ok(())
+    }
 
-        let mut tick = 0u64;
-        while !self.finished() {
-            tick += 1;
-            self.t = tick as f64 * self.options.dt;
-            if self.t > self.options.max_duration {
-                return Err(self.timeout());
+    /// One PLC scan: outputs advance the world through this tick, then
+    /// inputs are read, then transitions fire — per program in
+    /// declaration order, each closing its own edge memory as it hands
+    /// over. The clock is `ticks * dt`, never a running sum.
+    fn tick(&mut self) -> Result<(), SeqError> {
+        self.ticks += 1;
+        self.t = self.ticks as f64 * self.options.dt;
+        if self.t > self.options.max_duration {
+            return Err(self.timeout());
+        }
+        self.scan_policies()?;
+        self.advance_world()?;
+        self.check_driven_collisions();
+        if let (Some(run), Some((a, b))) = (self.policy_runs.first(), self.collisions.first()) {
+            // Under a policy the safety read is a verdict, not a
+            // statistic: the cell's promise is that nothing collides.
+            let (program, step) = (run.program, run.step);
+            let name = run.name.clone();
+            self.current = program;
+            return Err(SeqError::Action {
+                step,
+                name: self.step_name_in(program, step),
+                message: format!(
+                    "policy `{name}` drove `{a}` into `{b}` at t = {:.2}s",
+                    self.t
+                ),
+            });
+        }
+        self.update_sensors();
+        for p in 0..self.programs.len() {
+            self.current = p;
+            self.advance_through_ready_steps()?;
+            self.close_scan(p);
+        }
+        Ok(())
+    }
+
+    /// Asks every running policy for its next target when its period is
+    /// up, and ends the runs whose time ran out.
+    fn scan_policies(&mut self) -> Result<(), SeqError> {
+        let mut k = 0;
+        while k < self.policy_runs.len() {
+            if self.t >= self.policy_runs[k].deadline - 1e-9 {
+                self.finish_policy(k);
+                continue;
             }
-            // PLC scan: outputs advance the world through this tick, then
-            // inputs are read, then transitions fire — per program in
-            // declaration order, each closing its own edge memory as it
-            // hands over.
-            self.advance_world()?;
-            self.update_sensors();
-            for p in 0..self.programs.len() {
-                self.current = p;
-                self.advance_through_ready_steps()?;
-                self.close_scan(p);
+            if self.ticks >= self.policy_runs[k].next_tick {
+                let period = self.policy_runs[k].period;
+                self.policy_runs[k].next_tick += period;
+                let before = self.policy_runs.len();
+                self.policy_act(k)?;
+                if self.policy_runs.len() < before {
+                    // Declared itself done: removed at `k`.
+                    continue;
+                }
+            }
+            k += 1;
+        }
+        Ok(())
+    }
+
+    /// One decision of the `k`-th policy run: pack its observation, ask
+    /// the driver, command the robot — or end the run when it says done.
+    fn policy_act(&mut self, k: usize) -> Result<(), SeqError> {
+        let (policy, robot, steps, program, step) = {
+            let run = &self.policy_runs[k];
+            (run.policy, run.robot, run.steps, run.program, run.step)
+        };
+        let mut obs = vec![0.0; self.policies[policy].2.dim()];
+        self.policies[policy].2.fill(WorldView(self), &mut obs);
+        let q = self.robots[robot].q.clone();
+        let tcp = {
+            let tcp_link = self.world.robots()[robot].model.default_tcp_link();
+            self.world.link_poses_for(robot)[tcp_link]
+        };
+        let contacts: &[TickContact] = self
+            .physics
+            .as_ref()
+            .map(|p| p.touching.as_slice())
+            .unwrap_or(&[]);
+        let input = crate::rl::PolicyInput {
+            t: self.t,
+            step: steps,
+            obs: &obs,
+            q: &q,
+            tcp,
+            collisions: &self.collisions,
+            contacts,
+        };
+        let decision = self.policies[policy].1.act(&input);
+        match decision {
+            Err(message) => {
+                let name = self.policies[policy].0.clone();
+                self.current = program;
+                Err(SeqError::Action {
+                    step,
+                    name: self.step_name_in(program, step),
+                    message: format!("policy `{name}`: {message}"),
+                })
+            }
+            Ok(Some(output)) => {
+                // An action goes through the policy's control (IK and
+                // all); without one, the output is the joint target.
+                let target = match self.policy_runs[k].control.take() {
+                    Some((control, mut state)) => {
+                        let applied = control.apply(&mut state, WorldView(self), &output);
+                        self.policy_runs[k].control = Some((control, state));
+                        match applied {
+                            Ok((command, _converged)) => command,
+                            Err(message) => {
+                                let name = self.policies[policy].0.clone();
+                                self.current = program;
+                                return Err(SeqError::Action {
+                                    step,
+                                    name: self.step_name_in(program, step),
+                                    message: format!("policy `{name}`: {message}"),
+                                });
+                            }
+                        }
+                    }
+                    None => output,
+                };
+                self.command_robot(robot, &target)?;
+                self.policy_runs[k].steps += 1;
+                Ok(())
+            }
+            Ok(None) => {
+                self.finish_policy(k);
+                Ok(())
             }
         }
-        Ok(self.finish())
+    }
+
+    /// Ends the `k`-th policy run: the robot is released where it stands,
+    /// the step's `done` is satisfied, and the robot lane gets its span.
+    fn finish_policy(&mut self, k: usize) {
+        let run = self.policy_runs.remove(k);
+        self.stop_drive(run.robot);
+        if let Some(end) = self.programs[run.program].move_ends.get_mut(run.move_end) {
+            if end.is_infinite() {
+                *end = self.t;
+            }
+        }
+        let sequence = self.programs[run.program].sequence.name.clone();
+        self.robots[run.robot].moves.push(StepSpan {
+            name: format!("policy {}", run.name),
+            start: run.started,
+            end: self.t,
+            sequence,
+            step: run.step,
+            group: run.group_label,
+        });
+    }
+
+    /// The safety read of every externally driven robot (design-rl.md
+    /// 判断 D11): a driver's motion goes through no planner, so the
+    /// robot-vs-scenery check a planned move gets at plan time has to be
+    /// taken every tick here. Pairs that involve a physics-dynamic body
+    /// are left out — pushing a part is what physics resolves, not a
+    /// fault. Not run at all when nothing is driven, so an ordinary bake
+    /// pays nothing and changes nothing.
+    fn check_driven_collisions(&mut self) {
+        let driven: Vec<usize> = (0..self.robots.len())
+            .filter(|&r| self.robots[r].active.iter().any(ActiveMove::is_external))
+            .collect();
+        if driven.is_empty() {
+            return;
+        }
+        let name_of = |id: botrail_collide::ColliderId| -> Option<(Option<usize>, String)> {
+            match id {
+                botrail_collide::ColliderId::Link { robot, link } => Some((
+                    Some(robot),
+                    format!(
+                        "{}/{}",
+                        self.world.robots()[robot].name,
+                        self.world.robots()[robot].model.links[link].name
+                    ),
+                )),
+                botrail_collide::ColliderId::Obstacle(k) => {
+                    let name = self.world.obstacles()[k].name.clone();
+                    if self.dynamic_names.contains(&name) {
+                        return None;
+                    }
+                    let carrier = self.world.attachment(&name).map(|a| a.robot);
+                    Some((carrier, name))
+                }
+                botrail_collide::ColliderId::Attached(_) => None,
+            }
+        };
+        let mut out = Vec::new();
+        for pair in self.world.check_collisions() {
+            let (Some((ra, a)), Some((rb, b))) = (name_of(pair.a), name_of(pair.b)) else {
+                continue;
+            };
+            let involves_driven = ra.is_some_and(|r| driven.contains(&r))
+                || rb.is_some_and(|r| driven.contains(&r));
+            if involves_driven {
+                out.push((a, b));
+            }
+        }
+        self.collisions = out;
     }
 
     /// The timeout error, naming where every unfinished program is stuck —
@@ -3214,7 +4151,7 @@ impl Rollout {
                 });
             }
         }
-        if std::env::var("BT_PHYS_DEBUG").is_ok() {
+        if phys_debug() {
             for (k, bd) in desc.bodies.iter().enumerate() {
                 eprintln!(
                     "LOWER body {k} `{}`: kind={:?} group={} pos=({:+.3},{:+.3},{:+.3}) parts={}",
@@ -3308,7 +4245,7 @@ impl Rollout {
             body.prev_pose = body.last_pose;
             body.last_pose = current;
         }
-        if std::env::var("BT_PHYS_DEBUG").is_ok() && !supplied.is_empty() {
+        if phys_debug() && !supplied.is_empty() {
             for (id, from, to) in &supplied {
                 eprintln!(
                     "SUPPLY t={:.2} id={:?} from=({:+.3},{:+.3},{:+.3}) to=({:+.3},{:+.3},{:+.3})",
@@ -3341,6 +4278,19 @@ impl Rollout {
                     traj.positions
                         .iter()
                         .any(|q| (model.joint_value(joint, q) - v0).abs() > 1e-9)
+                }
+                // A driver owning the finger's q (or its mimic source's)
+                // commands it every tick — its target, which advance_world
+                // wrote into q, not the read-back stall position.
+                MoveKind::External { .. } => {
+                    let source = model.joints[joint]
+                        .mimic
+                        .as_ref()
+                        .map(|m| m.source_joint)
+                        .unwrap_or(joint);
+                    model.joints[source]
+                        .q_index
+                        .is_some_and(|qi| mv.owned.contains(&qi))
                 }
             }
         }
@@ -3454,8 +4404,15 @@ impl Rollout {
                 peak_force: 0.0,
             });
         }
+        let mut tick_force: std::collections::HashMap<(u32, u32), f64> =
+            std::collections::HashMap::new();
         for (a, b, f) in tick_contacts.forces {
-            if let Some(open) = phys.open_contacts.get_mut(&key(a, b)) {
+            let k = key(a, b);
+            let peak = tick_force.entry(k).or_insert(0.0);
+            if f > *peak {
+                *peak = f;
+            }
+            if let Some(open) = phys.open_contacts.get_mut(&k) {
                 if f > open.peak_force {
                     open.peak_force = f;
                 }
@@ -3474,6 +4431,17 @@ impl Rollout {
                 });
             }
         }
+        // What touches now, in id order (the map iterates in no order).
+        let mut keys: Vec<(u32, u32)> = phys.open_contacts.keys().copied().collect();
+        keys.sort_unstable();
+        phys.touching = keys
+            .into_iter()
+            .map(|(ka, kb)| TickContact {
+                a: phys.names[ka as usize].clone(),
+                b: phys.names[kb as usize].clone(),
+                force: tick_force.get(&(ka, kb)).copied().unwrap_or(0.0),
+            })
+            .collect();
         self.physics = Some(phys);
     }
 
@@ -3545,6 +4513,14 @@ impl Rollout {
             // the nominal configuration stays where its last driver left it.
             let mut q_nom = rt.q_nom.clone();
             for active in &rt.active {
+                if let MoveKind::External { target, vmax } = &active.kind {
+                    // One tick toward the driver's target, rate-limited.
+                    for &qi in &active.owned {
+                        let step = vmax[qi] * dt;
+                        q_nom[qi] += (target[qi] - q_nom[qi]).clamp(-step, step);
+                    }
+                    continue;
+                }
                 let sample = active.sample(t);
                 for &qi in &active.owned {
                     q_nom[qi] = sample[qi];
@@ -4610,6 +5586,16 @@ impl Rollout {
     /// Refuses a move that would drive a joint another in-flight move
     /// already drives: the one-driver-per-joint rule, deterministic
     /// where the old single slot silently dropped one of the two.
+    /// An error raised between ticks by a live rollout's caller, pinned
+    /// on the step the scanned program stands in.
+    fn live_err(&self, message: String) -> SeqError {
+        SeqError::Action {
+            step: self.cur_step(),
+            name: self.cur_step_name(),
+            message,
+        }
+    }
+
     fn claim_joints(&self, r: usize, owned: &[usize], label: &str) -> Result<(), SeqError> {
         if let Some(active) = self.robots[r].driver_of(owned) {
             let model = &self.world.robots()[r].model;
@@ -4618,16 +5604,26 @@ impl Rollout {
                 .find(|j| active.owned.contains(j))
                 .map(|&qi| model.joints[model.actuated_joints[qi]].name.clone())
                 .unwrap_or_default();
-            return Err(SeqError::Action {
-                step: self.cur_step(),
-                name: self.cur_step_name(),
-                message: format!(
+            let message = if active.is_external() {
+                format!(
+                    "`{label}` cannot start: joint `{shared}` of `{}` is driven externally \
+                     by `{}`; wait for it to finish (done) or undrive it first",
+                    self.world.robots()[r].name,
+                    active.label,
+                )
+            } else {
+                format!(
                     "`{label}` cannot start: joint `{shared}` of `{}` is driven by `{}` until \
                      t = {:.2}s; wait for it first (done, or robot_done with group=)",
                     self.world.robots()[r].name,
                     active.label,
                     active.end()
-                ),
+                )
+            };
+            return Err(SeqError::Action {
+                step: self.cur_step(),
+                name: self.cur_step_name(),
+                message,
             });
         }
         Ok(())
@@ -5809,6 +6805,66 @@ impl Rollout {
                     },
                 });
             }
+            Action::Policy {
+                policy,
+                robot,
+                group,
+                hz,
+                max_duration,
+            } => {
+                let r = self.action_robot(robot)?;
+                let model = self.world.robots()[r].model.clone();
+                let g = match group {
+                    Some(name) => Some(
+                        model
+                            .group_index(name)
+                            .ok_or_else(|| err(format!("unknown group `{name}`")))?,
+                    ),
+                    None => None,
+                };
+                let index = self
+                    .policies
+                    .iter()
+                    .position(|(n, _, _, _)| n == policy)
+                    .ok_or_else(|| {
+                        err(format!(
+                            "policy `{policy}` is not registered; pass policies={{{policy:?}: ...}}"
+                        ))
+                    })?;
+                let control = match &self.policies[index].3 {
+                    Some(spec) => {
+                        let control = crate::rl::Control::resolve(spec.clone(), &self.world, r, g)
+                            .map_err(|message| err(format!("policy `{policy}`: {message}")))?;
+                        let state = control.start();
+                        Some((control, state))
+                    }
+                    None => None,
+                };
+                let period = (1.0 / (hz * self.options.dt)).round().max(1.0) as u64;
+                let owned = self.start_drive(r, g, None, &format!("policy {policy}"))?;
+                let group_label = self.joints_group_label(r, &owned);
+                let program = self.current;
+                self.programs[program].move_ends.push(f64::INFINITY);
+                let move_end = self.programs[program].move_ends.len() - 1;
+                self.policy_runs.push(PolicyRun {
+                    name: policy.clone(),
+                    program,
+                    step: step_index,
+                    robot: r,
+                    group_label,
+                    policy: index,
+                    period,
+                    next_tick: self.ticks + period,
+                    deadline: self.t + max_duration,
+                    started: self.t,
+                    steps: 0,
+                    move_end,
+                    control,
+                });
+                // The first decision is taken now, on the world as it stands.
+                let k = self.policy_runs.len() - 1;
+                self.policy_act(k)?;
+            }
             Action::StartRamp {
                 robot,
                 targets,
@@ -6386,6 +7442,9 @@ impl Rollout {
     }
 
     fn finish(mut self) -> SequenceTimeline {
+        while !self.policy_runs.is_empty() {
+            self.finish_policy(0);
+        }
         let duration = self.t;
         let names: Vec<String> = self.world.robots().iter().map(|r| r.name.clone()).collect();
         let robots = self
@@ -6580,6 +7639,11 @@ impl ActiveMove {
                 for &qi in joints {
                     from[qi] = values[qi];
                     to[qi] = values[qi];
+                }
+            }
+            MoveKind::External { target, .. } => {
+                for &qi in joints {
+                    target[qi] = values[qi];
                 }
             }
             MoveKind::Traj { traj, .. } => {
@@ -15715,5 +16779,613 @@ mod dual_arm_tests {
             )],
         )
         .unwrap();
+    }
+}
+
+/// Live rollouts (design-rl.md R0): the batch bake opened tick by tick,
+/// external joint drives with a rate limit, the between-tick readers, and
+/// the driven robot's per-tick safety read.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::seq::{Condition, Sequence, Step};
+    use botrail_model::Geometry;
+    use std::sync::Arc;
+
+    const ARM6: &str = include_str!("../../../examples/assets/simple_arm.urdf");
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn rapier() -> Option<Box<dyn botrail_physics::PhysicsBackend>> {
+        Some(Box::new(botrail_physics_rapier::RapierBackend::new()))
+    }
+
+    /// A part dropped onto a floor, under a one-step wait.
+    fn settle_scene() -> Scene {
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(2.0, 2.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, -0.05),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "part",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.05, 0.03),
+                },
+                Isometry3::translation(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        scene
+            .set_obstacle_physics(
+                "part",
+                Some(botrail_physics::BodyProps {
+                    mass: Some(0.2),
+                    ..botrail_physics::BodyProps::dynamic()
+                }),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "settle".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 1.5 })],
+        });
+        scene
+    }
+
+    /// The six-axis arm with a floor, holding under a `hold` sequence.
+    fn arm_scene(hold_s: f64) -> Scene {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
+        ));
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(3.0, 3.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, -0.06),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "hold".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: hold_s })],
+        });
+        scene
+    }
+
+    fn sample_times(duration: f64) -> Vec<f64> {
+        (0..=30).map(|k| duration * k as f64 / 30.0).collect()
+    }
+
+    #[test]
+    fn ticking_a_live_rollout_reproduces_the_physics_bake() {
+        let scene = settle_scene();
+        let options = RolloutOptions::default();
+        let batch = scene
+            .simulate_sequences_with(&["settle"], &options, rapier())
+            .unwrap();
+        let mut live = scene.open_rollout(&["settle"], &options, rapier()).unwrap();
+        assert_eq!(live.t(), 0.0);
+        assert!(!live.finished());
+        let mut ticks = 0;
+        while !live.finished() {
+            live.tick().unwrap();
+            ticks += 1;
+        }
+        assert_eq!(ticks, 150);
+        let tl = live.finish();
+        assert_eq!(tl.duration, batch.duration);
+        assert_eq!(tl.physics.as_deref(), Some("rapier"));
+        let track = |tl: &SequenceTimeline| {
+            tl.objects
+                .iter()
+                .find(|o| o.name == "part")
+                .cloned()
+                .expect("part is tracked")
+        };
+        let (a, b) = (track(&tl), track(&batch));
+        for t in sample_times(batch.duration) {
+            assert_eq!(
+                SequenceTimeline::object_pose(&a, &[], t),
+                SequenceTimeline::object_pose(&b, &[], t),
+                "t = {t}"
+            );
+        }
+        assert_eq!(tl.contacts.len(), batch.contacts.len());
+    }
+
+    #[test]
+    fn ticking_a_live_rollout_reproduces_the_kinematic_bake() {
+        let mut scene = arm_scene(0.5);
+        scene.upsert_sequence(Sequence {
+            name: "wave".into(),
+            steps: vec![
+                step(
+                    "up",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("shoulder_lift".into(), 0.6), ("elbow".into(), -0.4)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "down",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("shoulder_lift".into(), 0.0)],
+                        duration: 0.3,
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let options = RolloutOptions::default();
+        let batch = scene.simulate_sequences(&["wave"], &options).unwrap();
+        let mut live = scene.open_rollout(&["wave"], &options, None).unwrap();
+        while !live.finished() {
+            live.tick().unwrap();
+        }
+        let tl = live.finish();
+        assert_eq!(tl.duration, batch.duration);
+        assert_eq!(tl.robots[0].trajectory.times, batch.robots[0].trajectory.times);
+        assert_eq!(
+            tl.robots[0].trajectory.positions,
+            batch.robots[0].trajectory.positions
+        );
+        assert_eq!(tl.step_spans.len(), batch.step_spans.len());
+    }
+
+    #[test]
+    fn an_external_drive_is_rate_limited_and_converges() {
+        let scene = arm_scene(5.0);
+        let options = RolloutOptions::default();
+        let mut live = scene.open_rollout(&["hold"], &options, None).unwrap();
+        live.drive(0, None, None).unwrap();
+        // shoulder_pan velocity limit 2.0 rad/s, elbow 2.5 rad/s.
+        let mut target = vec![0.0; 6];
+        target[0] = 1.0;
+        target[2] = -1.0;
+        live.command(0, &target).unwrap();
+        let dt = live.dt();
+        let mut prev = live.joint_positions(0).unwrap().to_vec();
+        let mut ticks = 0;
+        while ticks < 200 {
+            live.tick().unwrap();
+            ticks += 1;
+            let q = live.joint_positions(0).unwrap().to_vec();
+            assert!((q[0] - prev[0]).abs() <= 2.0 * dt + 1e-12, "pan step {}", q[0] - prev[0]);
+            assert!((q[2] - prev[2]).abs() <= 2.5 * dt + 1e-12, "elbow step {}", q[2] - prev[2]);
+            let v = live.joint_velocities(0).unwrap();
+            assert!((v[0] - (q[0] - prev[0]) / dt).abs() < 1e-9);
+            prev = q;
+        }
+        // 1 rad at 2 rad/s takes 0.5 s = 50 ticks; well converged by 200.
+        let q = live.joint_positions(0).unwrap();
+        assert!((q[0] - 1.0).abs() < 1e-9 && (q[2] + 1.0).abs() < 1e-9, "q = {q:?}");
+        // Retarget: the drive follows the new command from where it stands.
+        target[0] = 0.5;
+        live.command(0, &target).unwrap();
+        for _ in 0..100 {
+            live.tick().unwrap();
+        }
+        assert!((live.joint_positions(0).unwrap()[0] - 0.5).abs() < 1e-9);
+        let tl = live.finish();
+        // The driven robot baked tick by tick: a sample every scan.
+        let times = &tl.robots[0].trajectory.times;
+        assert!(times.len() >= 300, "{} samples", times.len());
+        assert!((tl.robots[0].trajectory.sample(0.25)[0] - 0.5).abs() < 1e-6);
+        assert!((tl.robots[0].trajectory.sample(tl.duration)[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_command_is_clamped_to_the_joint_limits() {
+        let scene = arm_scene(5.0);
+        let options = RolloutOptions::default();
+        let mut live = scene.open_rollout(&["hold"], &options, None).unwrap();
+        live.drive(0, None, Some(100.0)).unwrap();
+        let mut target = vec![0.0; 6];
+        target[1] = 10.0; // shoulder_lift limit ±2.2
+        live.command(0, &target).unwrap();
+        for _ in 0..300 {
+            live.tick().unwrap();
+        }
+        assert!((live.joint_positions(0).unwrap()[1] - 2.2).abs() < 1e-9);
+        target[1] = f64::NAN;
+        assert!(live.command(0, &target).is_err());
+        assert!(live.command(0, &[0.0; 3]).is_err());
+    }
+
+    #[test]
+    fn a_drive_and_a_move_refuse_to_share_joints() {
+        let mut scene = arm_scene(5.0);
+        scene.upsert_sequence(Sequence {
+            name: "ramp".into(),
+            steps: vec![
+                step("wait", vec![], Condition::Elapsed { seconds: 0.1 }),
+                step(
+                    "up",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("shoulder_lift".into(), 0.6)],
+                        duration: 1.0,
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let options = RolloutOptions::default();
+        // A drive already holding the joints: the ramp's step fails.
+        let mut live = scene.open_rollout(&["ramp"], &options, None).unwrap();
+        live.drive(0, None, None).unwrap();
+        let err = loop {
+            match live.tick() {
+                Ok(()) => continue,
+                Err(e) => break e,
+            }
+        };
+        assert!(err.to_string().contains("driven externally"), "{err}");
+        // A ramp in flight: the drive is refused, and granted once it ends.
+        let mut live = scene.open_rollout(&["ramp"], &options, None).unwrap();
+        for _ in 0..20 {
+            live.tick().unwrap();
+        }
+        let err = live.drive(0, None, None).unwrap_err();
+        assert!(err.to_string().contains("driven by `ramp`"), "{err}");
+        while !live.finished() {
+            live.tick().unwrap();
+        }
+        live.drive(0, None, None).unwrap();
+        assert!(live.command(0, &[0.0; 6]).is_ok());
+        // Undriven, a command has nowhere to go.
+        live.undrive(0);
+        assert!(live.command(0, &[0.0; 6]).is_err());
+    }
+
+    #[test]
+    fn a_driven_arm_reports_scenery_collisions_without_failing() {
+        let scene = arm_scene(5.0);
+        let options = RolloutOptions::default();
+        let mut live = scene.open_rollout(&["hold"], &options, None).unwrap();
+        assert!(live.collisions().is_empty());
+        live.drive(0, None, None).unwrap();
+        live.tick().unwrap();
+        assert!(live.collisions().is_empty(), "{:?}", live.collisions());
+        // Fold the arm down into the floor: a planner would refuse; the
+        // drive goes, and the tick says so instead of failing.
+        let mut target = vec![0.0; 6];
+        target[1] = 1.5;
+        target[2] = 1.5;
+        live.command(0, &target).unwrap();
+        let mut hit = false;
+        for _ in 0..200 {
+            live.tick().unwrap();
+            if live
+                .collisions()
+                .iter()
+                .any(|(a, b)| a == "floor" || b == "floor")
+            {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the folded arm never touched the floor");
+        live.undrive(0);
+        assert!(live.collisions().is_empty());
+    }
+
+    #[test]
+    fn live_readers_see_the_world_between_ticks() {
+        let scene = settle_scene();
+        let options = RolloutOptions::default();
+        let mut live = scene.open_rollout(&["settle"], &options, rapier()).unwrap();
+        assert_eq!(
+            live.current_steps(),
+            vec![("settle".to_string(), Some("wait".to_string()))]
+        );
+        let z0 = live.obstacle_pose("part").unwrap().translation.z;
+        for _ in 0..20 {
+            live.tick().unwrap();
+        }
+        // Falling: below the start, moving down.
+        let z1 = live.obstacle_pose("part").unwrap().translation.z;
+        assert!(z1 < z0 - 0.1, "z {z0} -> {z1}");
+        let v = live.obstacle_velocity("part").unwrap();
+        assert!(v.linear.z < -1.0, "{:?}", v.linear);
+        assert!(live.obstacle_velocity("floor").is_none());
+        assert!(live.contacts().is_empty());
+        // Landed: touching the floor, at rest.
+        while !live.finished() {
+            live.tick().unwrap();
+        }
+        let touching = live.contacts();
+        assert_eq!(touching.len(), 1, "{touching:?}");
+        let pair = (touching[0].a.as_str(), touching[0].b.as_str());
+        assert!(pair == ("floor", "part") || pair == ("part", "floor"), "{pair:?}");
+        assert!(live.obstacle_velocity("part").unwrap().linear.norm() < 1e-3);
+        assert_eq!(live.current_steps(), vec![("settle".to_string(), None)]);
+        assert!(live.signal("nothing").is_none());
+        assert_eq!(live.link_poses(0), None);
+        assert_eq!(live.joint_positions(0), None);
+    }
+}
+
+/// Policy steps (design-rl.md R3): a registered driver takes a robot for
+/// a step, decides every period, ends on done or on its deadline, and
+/// the bake stays deterministic — while a missing controller or a
+/// collision under the policy fails the bake outright.
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::rl::{PolicyDriver, PolicyInput};
+    use crate::seq::{Condition, Sequence, Step};
+    use botrail_model::Geometry;
+    use std::sync::Arc;
+
+    const ARM6: &str = include_str!("../../../examples/assets/simple_arm.urdf");
+    const CHANNELS: &str = r#"[{"kind": "joints", "robot": "simple_arm", "velocities": false}, {"kind": "tcp_pose", "robot": "simple_arm"}]"#;
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    /// The arm over a floor: a policy step, then a ramp — the ordinary
+    /// hand-back to authored motion.
+    fn cell(hz: f64, max_duration: f64) -> Scene {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
+        ));
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(3.0, 3.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, -0.06),
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![
+                step(
+                    "reach",
+                    vec![Action::Policy {
+                        policy: "reach".into(),
+                        robot: None,
+                        group: None,
+                        hz,
+                        max_duration,
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "back",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("shoulder_pan".into(), 0.0)],
+                        duration: 0.5,
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        scene
+    }
+
+    /// Drives shoulder_pan toward `goal` and declares done within `tol`;
+    /// counts its decisions and what it observed.
+    struct Reach {
+        goal: f64,
+        tol: f64,
+        calls: Vec<(f64, u64, usize)>,
+    }
+
+    impl PolicyDriver for Reach {
+        fn channels(&self) -> &str {
+            CHANNELS
+        }
+
+        fn act(&mut self, input: &PolicyInput<'_>) -> Result<Option<Vec<f64>>, String> {
+            self.calls.push((input.t, input.step, input.obs.len()));
+            assert_eq!(input.obs.len(), 6 + 7);
+            assert_eq!(&input.obs[..6], input.q);
+            if (input.q[0] - self.goal).abs() < self.tol {
+                return Ok(None);
+            }
+            let mut target = input.q.to_vec();
+            target[0] = self.goal;
+            Ok(Some(target))
+        }
+    }
+
+    fn reach(goal: f64) -> Vec<(String, Box<dyn PolicyDriver>)> {
+        vec![(
+            "reach".into(),
+            Box::new(Reach {
+                goal,
+                tol: 1e-6,
+                calls: Vec::new(),
+            }),
+        )]
+    }
+
+    #[test]
+    fn a_policy_step_runs_to_done_and_the_ramp_follows() {
+        let scene = cell(20.0, 10.0);
+        let options = RolloutOptions::default();
+        let tl = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, reach(1.0))
+            .unwrap();
+        // shoulder_pan at 2 rad/s reaches 1 rad in 0.5 s; the policy sees
+        // it there at its next decision (a 0.05 s period) and says done.
+        let reach_span = tl.step_spans.iter().find(|s| s.name == "reach").unwrap();
+        assert!(
+            (0.5..=0.6).contains(&(reach_span.end - reach_span.start)),
+            "{reach_span:?}"
+        );
+        assert!((tl.robots[0].trajectory.sample(reach_span.end)[0] - 1.0).abs() < 1e-6);
+        // The robot lane names the policy stretch, then the ramp brought
+        // the joint back.
+        let lane = &tl.robots[0].moves;
+        assert!(lane.iter().any(|m| m.name == "policy reach"), "{lane:?}");
+        assert!(lane.iter().any(|m| m.name == "ramp"));
+        assert!(tl.robots[0].trajectory.sample(tl.duration)[0].abs() < 1e-6);
+        // Baked tick by tick during the policy: a sample every scan.
+        let times = &tl.robots[0].trajectory.times;
+        assert!(times.iter().filter(|t| **t <= reach_span.end + 1e-9).count() >= 50);
+    }
+
+    #[test]
+    fn a_policy_bake_is_deterministic() {
+        let scene = cell(20.0, 10.0);
+        let options = RolloutOptions::default();
+        let a = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, reach(0.7))
+            .unwrap();
+        let b = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, reach(0.7))
+            .unwrap();
+        assert_eq!(a.duration, b.duration);
+        assert_eq!(a.robots[0].trajectory.positions, b.robots[0].trajectory.positions);
+    }
+
+    #[test]
+    fn the_deadline_ends_a_policy_that_never_says_done() {
+        let scene = cell(20.0, 0.3);
+        let options = RolloutOptions::default();
+        // A goal too far for 0.3 s: the deadline releases the robot.
+        let tl = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, reach(3.0))
+            .unwrap();
+        let reach_span = tl.step_spans.iter().find(|s| s.name == "reach").unwrap();
+        assert!((reach_span.end - 0.3).abs() < 0.011, "{reach_span:?}");
+        // Released where it stood (0.6 rad in 0.3 s at 2 rad/s), the ramp took over.
+        let q = tl.robots[0].trajectory.sample(reach_span.end)[0];
+        assert!((q - 0.6).abs() < 0.02, "q = {q}");
+        assert!(tl.robots[0].trajectory.sample(tl.duration)[0].abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_missing_policy_is_a_validation_error_not_a_skip() {
+        let scene = cell(20.0, 1.0);
+        let options = RolloutOptions::default();
+        let err = scene.simulate_sequences(&["cycle"], &options).unwrap_err();
+        assert!(err.to_string().contains("policy `reach` is not registered"), "{err}");
+        let err = scene
+            .open_rollout(&["cycle"], &options, None)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("not registered"), "{err}");
+        // A policy whose channels do not resolve is refused too.
+        struct Blind;
+        impl PolicyDriver for Blind {
+            fn channels(&self) -> &str {
+                r#"[{"kind": "object_pose", "obstacle": "nothing"}]"#
+            }
+            fn act(&mut self, _: &PolicyInput<'_>) -> Result<Option<Vec<f64>>, String> {
+                Ok(None)
+            }
+        }
+        let err = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Blind))])
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown obstacle"), "{err}");
+    }
+
+    #[test]
+    fn a_collision_under_a_policy_fails_the_bake() {
+        let scene = cell(20.0, 5.0);
+        let options = RolloutOptions::default();
+        // Folds the arm into the floor: shoulder_lift and elbow to 1.5.
+        struct Fold;
+        impl PolicyDriver for Fold {
+            fn channels(&self) -> &str {
+                CHANNELS
+            }
+            fn act(&mut self, input: &PolicyInput<'_>) -> Result<Option<Vec<f64>>, String> {
+                let mut target = input.q.to_vec();
+                target[1] = 1.5;
+                target[2] = 1.5;
+                Ok(Some(target))
+            }
+        }
+        let err = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Fold))])
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("policy `reach` drove") && text.contains("floor"), "{text}");
+        // A driver's own error is the bake's error, named.
+        struct Broken;
+        impl PolicyDriver for Broken {
+            fn channels(&self) -> &str {
+                CHANNELS
+            }
+            fn act(&mut self, _: &PolicyInput<'_>) -> Result<Option<Vec<f64>>, String> {
+                Err("no model loaded".into())
+            }
+        }
+        let err = scene
+            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Broken))])
+            .unwrap_err();
+        assert!(err.to_string().contains("policy `reach`: no model loaded"), "{err}");
+    }
+
+    #[test]
+    fn the_policy_action_round_trips_the_wire_and_validates() {
+        use crate::wire::{action_from_msg, action_msg};
+        let action = Action::Policy {
+            policy: "pick".into(),
+            robot: Some("simple_arm".into()),
+            group: None,
+            hz: 20.0,
+            max_duration: 6.0,
+        };
+        let msg = action_msg(&action);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"policy\""), "{json}");
+        let back: crate::wire::ActionMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+        assert!(matches!(action_from_msg(&back), Action::Policy { policy, hz, .. } if policy == "pick" && hz == 20.0));
+        // Validation: rate and duration must be positive, the group known.
+        let mut scene = cell(0.0, 1.0);
+        let err = scene
+            .simulate_sequences(&["cycle"], &RolloutOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("rate must be positive"), "{err}");
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![step(
+                "reach",
+                vec![Action::Policy {
+                    policy: "reach".into(),
+                    robot: None,
+                    group: Some("left".into()),
+                    hz: 20.0,
+                    max_duration: 1.0,
+                }],
+                Condition::Done,
+            )],
+        });
+        let err = scene
+            .simulate_sequences(&["cycle"], &RolloutOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown group `left`"), "{err}");
     }
 }

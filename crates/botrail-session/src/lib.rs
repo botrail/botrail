@@ -1312,6 +1312,19 @@ pub fn simulate_sequences_and_emit_with(
     options: &botrail_scene::rollout::RolloutOptions,
     backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
+    simulate_sequences_and_emit_driven(host, names, scenario, options, backend, Vec::new())
+}
+
+/// [`simulate_sequences_and_emit_with`] with registered policies for the
+/// sequences' `Policy` steps (design-rl.md R3).
+pub fn simulate_sequences_and_emit_driven(
+    host: &impl SessionHost,
+    names: &[&str],
+    scenario: Option<&str>,
+    options: &botrail_scene::rollout::RolloutOptions,
+    backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+    policies: Vec<(String, Box<dyn botrail_scene::rl::PolicyDriver>)>,
+) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
     let name = names.join(" + ");
     let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
     let mut snapshot = host.snapshot();
@@ -1322,7 +1335,7 @@ pub fn simulate_sequences_and_emit_with(
     let result = applied.and_then(|applied| {
         let t0 = host.now_ms();
         let mut result = snapshot
-            .simulate_sequences_with(names, options, backend)
+            .simulate_sequences_driven(names, options, backend, policies)
             .map_err(|e| e.to_string());
         if let Ok(timeline) = &mut result {
             timeline.scenario = applied.map(str::to_string);

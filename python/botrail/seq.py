@@ -17,7 +17,8 @@ starts a motion or ramp waits for it (``done()``); anything else moves on
 """
 
 import json
-from typing import Any, Dict, Iterable, Mapping, Optional, Union
+from collections.abc import Iterable, Mapping
+from typing import Any, Dict, Optional, Union
 
 Action = Dict[str, Any]
 Condition = Dict[str, Any]
@@ -56,6 +57,33 @@ def ramp(
     }
     if robot is not None:
         action["robot"] = robot
+    return action
+
+
+def policy(
+    name: str,
+    robot: Optional[str] = None,
+    group: Optional[str] = None,
+    hz: float = 20.0,
+    max_duration: float = 10.0,
+) -> Action:
+    """Hand the robot (or the arm ``group``) to the registered policy
+    ``name`` for this step: a learned or scripted controller passed to
+    ``simulate_sequence(policies={name: ...})`` (see ``botrail.rl.Policy``),
+    asked for a joint target ``hz`` times a second until it declares
+    itself done or ``max_duration`` seconds pass. Its targets move the
+    joints under the model's velocity limits; a collision with the scenery
+    while it drives fails the bake. Await it with ``done()``."""
+    action: Action = {
+        "type": "policy",
+        "policy": name,
+        "hz": float(hz),
+        "max_duration": float(max_duration),
+    }
+    if robot is not None:
+        action["robot"] = robot
+    if group is not None:
+        action["group"] = group
     return action
 
 
@@ -260,7 +288,7 @@ def any_of(*conditions: Condition) -> Condition:
     return {"type": "any", "conditions": list(conditions)}
 
 
-_DRIVERS = ("start_motion", "start_ramp")
+_DRIVERS = ("start_motion", "start_ramp", "policy")
 
 
 def _step_dict(name: str, actions: Iterable[Action], transition: Optional[Condition]) -> dict:

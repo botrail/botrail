@@ -801,6 +801,30 @@ impl SceneHub {
         })
     }
 
+    /// Stores a timeline as the session's latest bake and broadcasts it
+    /// to connected studios — what a live rollout does at `finish`, so an
+    /// episode driven from Python plays back (and downloads as USD) like
+    /// a batch bake. The message is only built when someone listens.
+    pub fn publish_timeline(
+        &self,
+        snapshot: &Scene,
+        timeline: &botrail_scene::rollout::SequenceTimeline,
+        name: &str,
+    ) {
+        self.store_baked(snapshot, timeline);
+        if !self.has_listeners() {
+            return;
+        }
+        self.emit(&ServerMessage::SequenceResult {
+            ok: true,
+            sequence: name.to_string(),
+            scenario: timeline.scenario.clone(),
+            error: None,
+            timeline: Some(botrail_session::timeline_msg(snapshot, timeline)),
+            planning_time_ms: None,
+        });
+    }
+
     // ------------------------------------------------------------ sequences
 
     /// Adds or replaces a sequence from its wire-format JSON.
@@ -1059,6 +1083,19 @@ impl SceneHub {
         options: &botrail_scene::rollout::RolloutOptions,
         backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
     ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        self.simulate_sequences_driven(names, scenario, options, backend, Vec::new())
+    }
+
+    /// [`simulate_sequences_with`](Self::simulate_sequences_with) with
+    /// registered policies for the sequences' `Policy` steps.
+    pub fn simulate_sequences_driven(
+        &self,
+        names: &[&str],
+        scenario: Option<&str>,
+        options: &botrail_scene::rollout::RolloutOptions,
+        backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+        policies: Vec<(String, Box<dyn botrail_scene::rl::PolicyDriver>)>,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
         let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
         let mut snapshot = self.snapshot();
         if let Some(scenario) = scenario {
@@ -1066,8 +1103,8 @@ impl SceneHub {
                 .apply_scenario(scenario)
                 .map_err(|e| e.to_string())?;
         }
-        let timeline = botrail_session::simulate_sequences_and_emit_with(
-            self, names, scenario, options, backend,
+        let timeline = botrail_session::simulate_sequences_and_emit_driven(
+            self, names, scenario, options, backend, policies,
         )?;
         Ok((timeline, snapshot))
     }

@@ -26,6 +26,9 @@ classifiers = [
 # Robot.from_catalog downloads packages from the Hugging Face dataset
 # botrail/botrail-catalog; the base wheel stays dependency-free.
 catalog = ["huggingface_hub>=0.24", "pyyaml>=6"]
+# botrail.rl: observations as numpy arrays, gymnasium-compatible Env/spaces
+# (the module runs without gymnasium; the spaces then fall back to a shim).
+rl = ["numpy>=1.24", "gymnasium>=1.0"]
 
 [project.scripts]
 # `botrail check | simulate | export | schema | studio` — the cell without a
@@ -41,7 +44,7 @@ Licensing = "https://github.com/botrail/botrail/blob/main/docs/license.md"
 [dependency-groups]
 # pyyaml: the from_catalog tests fake out huggingface_hub with a local
 # fixture, but the manifest parsing still imports the real `yaml`.
-dev = ["pytest>=8", "pyyaml>=6"]
+dev = ["pytest>=8", "pyyaml>=6", "numpy>=1.24", "gymnasium>=1.0"]
 # The API reference is generated from the pyo3 docstrings, so building the docs
 # also needs the extension importable (maturin develop). The markers keep the
 # whole range resolvable: mkdocstrings 1.0 requires 3.10+, while the wheel

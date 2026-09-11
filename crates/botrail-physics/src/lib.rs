@@ -235,7 +235,7 @@ pub struct Velocity {
 /// What the rollout needs from a physics engine — nothing more. One
 /// backend instance serves one rollout: `reset` builds the world, then the
 /// scan loop alternates kinematic supply, `step`, and pose read-back.
-pub trait PhysicsBackend: Send {
+pub trait PhysicsBackend: Send + Sync {
     /// Engine name for timeline self-description (e.g. `"rapier"`).
     fn name(&self) -> &'static str;
 
@@ -266,6 +266,11 @@ pub trait PhysicsBackend: Send {
     /// Whether the engine has put this body to sleep (at rest). The
     /// rollout folds sleeping stretches into `Hold` spans.
     fn is_sleeping(&self, body: BodyId) -> bool;
+
+    /// Current world-frame velocity of a body: the engine's for a
+    /// dynamic body, the supplied pose difference for a kinematic one.
+    /// An observation channel (design-rl.md §3.3), never a bake input.
+    fn body_velocity(&self, body: BodyId) -> Velocity;
 
     /// Takes the contact events accumulated since the last drain (the
     /// substeps of one scan tick, in practice).
