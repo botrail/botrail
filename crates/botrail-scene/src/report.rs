@@ -1,8 +1,10 @@
 //! The cell report — one sheet that gathers what the other tools measure:
 //! cycle times and step spans (the bake), the tightest clearance (the
 //! verifier), I/O counts and findings (the map), the scenario matrix, the
-//! BOM's totals, the plan-view footprint, and the hashes of the
-//! externally supplied attachments (whose input revision is not verified here).
+//! BOM's totals, the plan-view footprint, the sections a domain module
+//! contributes (an assembly's joint and its tightening rows), and the
+//! hashes of the externally supplied attachments (whose input revision
+//! is not verified here).
 //!
 //! It is a *reading* surface, not a judging one: the same numbers a CI
 //! run asserts on with pytest, laid out for the person approving the
@@ -209,6 +211,16 @@ pub struct Deliverable {
     pub bytes: Option<u64>,
 }
 
+/// A section a domain module contributes — an assembly's joint and its
+/// tightening rows, a machining process — as Markdown rendered under its
+/// title, and as JSON carried verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReportSection {
+    pub title: String,
+    pub markdown: String,
+    pub json: serde_json::Value,
+}
+
 /// Every optional field serializes as `null` rather than disappearing:
 /// the JSON keeps one shape whether or not a bake was supplied, which is
 /// what a script (or an agent) reading it wants.
@@ -224,6 +236,7 @@ pub struct CellReport {
     pub machines: Vec<MachineSummary>,
     pub bom: BomSummary,
     pub footprint: FootprintSummary,
+    pub sections: Vec<ReportSection>,
     pub deliverables: Vec<Deliverable>,
 }
 
@@ -242,6 +255,7 @@ pub struct CellReportInput<'a> {
     pub sequences: Option<Vec<String>>,
     pub cycles: Vec<CycleInput<'a>>,
     pub scenarios: Vec<ScenarioRow>,
+    pub sections: Vec<ReportSection>,
     pub deliverables: Vec<Deliverable>,
     /// Ground threshold for the footprint (see [`crate::layout`]).
     pub ground_z: f64,
@@ -396,6 +410,7 @@ impl Scene {
             machines: self.machine_summaries(),
             bom: bom_summary,
             footprint,
+            sections: input.sections,
             deliverables: input.deliverables,
         }
     }
@@ -991,6 +1006,14 @@ impl CellReport {
             self.footprint.height
         );
 
+        // ---- contributed sections --------------------------------------
+        for s in &self.sections {
+            let _ = write!(out, "\n## {}\n\n{}", s.title, s.markdown);
+            if !s.markdown.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+
         // ---- deliverables ----------------------------------------------
         if !self.deliverables.is_empty() {
             out.push_str("\n## Deliverables\n\n| file | bytes | sha256 |\n|---|---|---|\n");
@@ -1053,6 +1076,11 @@ mod tests {
                 ok: true,
                 duration: Some(1.5),
                 error: None,
+            }],
+            sections: vec![ReportSection {
+                title: "Assembly".into(),
+                markdown: "Joint `lid`: 4 × M5.\n".into(),
+                json: serde_json::json!({"joint": "lid", "screws": 4}),
             }],
             deliverables: vec![Deliverable {
                 path: "bom.csv".into(),
@@ -1167,6 +1195,7 @@ mod tests {
                 clearance: None,
             }],
             scenarios: vec![],
+            sections: vec![],
             deliverables: vec![],
             ground_z: 0.0,
         });

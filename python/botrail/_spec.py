@@ -206,6 +206,14 @@ class Spec:
         value = self.manifest.get("interface")
         return value if isinstance(value, dict) else None
 
+    def mounting(self) -> Optional[dict]:
+        """The pack's `mounting` section — the mating faces it declares
+        (`interfaces`, each with its `geometry.holes` / `locators` and
+        `fasteners`), the drawing-level data a bolted joint is read from
+        (`bt.assembly.joint(catalog=...)`) — or `None`."""
+        value = self.manifest.get("mounting")
+        return value if isinstance(value, dict) else None
+
     def specs(self) -> dict:
         """The datasheet numbers a generator does not use but a bill should
         carry — a rack's load per level, an ingress rating."""

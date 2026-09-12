@@ -4425,3 +4425,545 @@ def lathe(
                        catalog=spec.catalog_ref, manufacturer=manufacturer,
                        model=spec.part_number("panel", **params), buttons=float(len(built.buttons)))
     return built
+
+
+# ---------------------------------------------------------- compound solids
+
+# Zinc-plated steel: the finish a machine screw ships in (linear RGB).
+ZINC: Color = (0.62, 0.63, 0.66)
+
+
+@dataclass(frozen=True)
+class Box:
+    """A box `size = (x, y, z)` centred at `at`, in the compound's frame."""
+
+    size: Point3
+    at: Point3 = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class Cylinder:
+    """A cylinder of `radius` and `length` standing on `at` — the centre of
+    its bottom face — and rising along the compound's +Z."""
+
+    radius: float
+    length: float
+    at: Point3 = (0.0, 0.0, 0.0)
+
+
+Solid = Union[Box, Cylinder]
+
+
+def _cache_dir(sub: str):
+    """`BOTRAIL_CACHE_DIR` override, else `~/.cache/botrail` — the same root
+    the collision cache uses — with a subdirectory for what is written."""
+    import os
+    from pathlib import Path
+
+    base = os.environ.get("BOTRAIL_CACHE_DIR")
+    root = Path(base) if base else Path.home() / ".cache" / "botrail"
+    out = root / sub
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _obj_text(solids: Sequence[Solid], segments: int) -> str:
+    """The solids as one OBJ: closed shells, one per solid, outward faces."""
+    lines: list[str] = ["# botrail compound"]
+    faces: list[str] = []
+    offset = 0
+
+    def vert(x: float, y: float, z: float) -> None:
+        lines.append(f"v {x:.7f} {y:.7f} {z:.7f}")
+
+    for solid in solids:
+        if isinstance(solid, Box):
+            (sx, sy, sz), (cx, cy, cz) = solid.size, solid.at
+            hx, hy, hz = sx / 2, sy / 2, sz / 2
+            corners = [(cx + dx * hx, cy + dy * hy, cz + dz * hz)
+                       for dz in (-1, 1) for dy in (-1, 1) for dx in (-1, 1)]
+            # Corner index bits: x = 1, y = 2, z = 4; each face two triangles,
+            # counter-clockwise seen from outside. Separate face vertices keep
+            # the box edges hard when a viewer computes vertex normals. Shared
+            # corners make a machined plate shade like a rounded cushion.
+            quads = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+            for quad in quads:
+                for corner in quad:
+                    vert(*corners[corner])
+                faces.append(f"f {offset + 1} {offset + 2} {offset + 3}")
+                faces.append(f"f {offset + 1} {offset + 3} {offset + 4}")
+                offset += 4
+        else:
+            r, (cx, cy, cz) = solid.radius, solid.at
+            n = segments
+            # Side rings followed by independent cap rings. The sides stay
+            # smooth while the end faces retain their axial normals.
+            for z in (cz, cz + solid.length, cz, cz + solid.length):
+                for i in range(n):
+                    a = 2 * math.pi * i / n
+                    vert(cx + r * math.cos(a), cy + r * math.sin(a), z)
+            vert(cx, cy, cz)
+            vert(cx, cy, cz + solid.length)
+            bottom, top = offset + 1, offset + 1 + n
+            cap_bottom, cap_top = offset + 1 + 2 * n, offset + 1 + 3 * n
+            cb, ct = offset + 4 * n + 1, offset + 4 * n + 2
+            for i in range(n):
+                j = (i + 1) % n
+                faces.append(f"f {bottom + i} {bottom + j} {top + j}")
+                faces.append(f"f {bottom + i} {top + j} {top + i}")
+                faces.append(f"f {cb} {cap_bottom + j} {cap_bottom + i}")
+                faces.append(f"f {ct} {cap_top + i} {cap_top + j}")
+            offset += 4 * n + 2
+    return "\n".join(lines + faces) + "\n"
+
+
+def compound(
+    scene,
+    name: str,
+    solids: Sequence[Solid],
+    position: Point3,
+    *,
+    quaternion=None,
+    color: Color = STEEL,
+    finish: Optional[_Finish] = None,
+    segments: int = 32,
+) -> str:
+    """One obstacle made of several primitives — a plate with a boss, a
+    screw's shank and head — where `add_box` and `add_cylinder` would make
+    one obstacle each and a thing the cell hands around (attaches, feeds,
+    tracks) has to be *one* resident.
+
+    The `solids` (`Box`, `Cylinder`) are written as a mesh into botrail's
+    cache (`~/.cache/botrail/parts`, or `BOTRAIL_CACHE_DIR`), keyed by
+    their figures so the same shape is one file, and loaded with
+    `add_mesh` at `position` / `quaternion` — collision is the mesh's
+    convex decomposition, like any mesh. Returns the obstacle's name."""
+    import hashlib
+
+    if not solids:
+        raise ValueError("compound: at least one solid")
+    for solid in solids:
+        if isinstance(solid, Box):
+            if min(solid.size) <= 0:
+                raise ValueError(f"compound: a box needs positive sides, not {solid.size}")
+        elif isinstance(solid, Cylinder):
+            if solid.radius <= 0 or solid.length <= 0:
+                raise ValueError("compound: a cylinder needs a positive radius and length")
+        else:
+            raise TypeError(f"compound: {solid!r} is not a Box or a Cylinder")
+    if segments < 6:
+        raise ValueError("compound: at least 6 segments round a cylinder")
+    text = _obj_text(solids, int(segments))
+    key = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    path = _cache_dir("parts") / f"compound-{key}.obj"
+    if not path.exists():
+        path.write_text(text, encoding="utf-8")
+    made = scene.add_mesh(name, path, position=position, quaternion=quaternion, color=color)
+    if finish is not None:
+        _finish(scene, made, finish)
+    return made
+
+
+def bolt(
+    scene,
+    name: str,
+    *,
+    position: Point3,
+    thread: Optional[float] = None,
+    length: Optional[float] = None,
+    head_diameter: Optional[float] = None,
+    head_height: Optional[float] = None,
+    catalog: Optional["CatalogRef"] = None,
+    quaternion=None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    standard: Optional[str] = None,
+    property_class: Optional[str] = None,
+    mass_kg: Optional[float] = None,
+    color: Color = ZINC,
+    **attributes,
+) -> str:
+    """One screw as one obstacle: a shank `thread` wide and `length` long
+    with its **tip at the origin** and +Z up the shank, and a cylindrical
+    head `head_diameter` × `head_height` on top of it — the envelope a
+    bit picks, a feeder presents and a hole receives. Pinned as a
+    `fastener` with its figures, so a magazine of the same screw lands on
+    the bill as one line with a count. `bt.assembly.Fastener.place` calls
+    this with a standard's figures.
+
+    With `catalog=` — the id of a fastener spec pack, or a package
+    directory — a screw you can order: the thread, pitch, head and drive
+    come from the pack, `length` (metres) and `property_class` are matched
+    against what it sells (its defaults when omitted), and the row carries
+    the article number and the mass the pack states."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("bolt")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if length is not None and "length_mm" in spec.params():
+            params["length_mm"] = spec.choose("length_mm", round(length * 1000.0, 3))
+        if property_class is not None and "property_class" in spec.params():
+            params["property_class"] = spec.choose("property_class", property_class)
+        length = _sized(params, "length_mm", length)
+        property_class = property_class or (
+            str(params["property_class"]) if "property_class" in params else None
+        )
+        thread = thread if thread is not None else _mm(spec.dimension_mm("screw", "thread"))
+        head_diameter = head_diameter if head_diameter is not None else _mm(spec.dimension_mm("screw", "head_dk"))
+        head_height = head_height if head_height is not None else _mm(spec.dimension_mm("screw", "head_k"))
+        for key, source in (("pitch_mm", "pitch"), ("drive_s_mm", "drive_s")):
+            value = spec.dimension_mm("screw", source)
+            if value is not None:
+                attributes.setdefault(key, float(value))
+        standard = standard or spec.specs().get("head_standard")
+        manufacturer = manufacturer or spec.manufacturer
+        mass_kg = mass_kg if mass_kg is not None else spec.mass_kg("screw", **params)
+        model = model or spec.part_number("screw", **params)
+    if None in (thread, length, head_diameter, head_height):
+        raise ValueError("bolt: thread, length, head_diameter and head_height are needed (or a catalog= that sizes them)")
+    if min(thread, length, head_diameter, head_height) <= 0:
+        raise ValueError("bolt: thread, length, head_diameter and head_height must be positive")
+    made = compound(
+        scene, name,
+        [Cylinder(thread / 2, length), Cylinder(head_diameter / 2, head_height, at=(0.0, 0.0, length))],
+        position, quaternion=quaternion, color=color, finish=_MACHINED_METAL, segments=24,
+    )
+    figures: dict = {
+        "thread_mm": round(thread * 1e3, 2),
+        "length_mm": round(length * 1e3, 2),
+        "head_dk_mm": round(head_diameter * 1e3, 2),
+        "head_k_mm": round(head_height * 1e3, 2),
+    }
+    if standard is not None:
+        figures["standard"] = standard
+    if property_class is not None:
+        figures["property_class"] = property_class
+    if spec is None:
+        scene.set_part(
+            made, kind="obstacle", category="fastener",
+            **_identity(model, manufacturer, {**figures, **_kg(mass_kg), **attributes}),
+        )
+        return made
+    scene.set_part(
+        made, kind="obstacle", category=spec.category("screw", "fastener"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer, model=model, description=spec.name,
+        **{**figures, **_kg(mass_kg), **attributes},
+    )
+    return made
+
+
+@dataclass
+class ScrewFeeder(Built):
+    """What `screw_feeder` built, plus what a fastening program addresses:
+    the `device` (an indexing source — `start` it for the next screw), the
+    `present` lane (a zone sensor over the pick point, on while a screw
+    stands there), the `pick` frame at the presented screw's tip (+Z up
+    the screw) and the `screws` in the order the feeder hands them out."""
+
+    device: str = ""
+    present: str = ""
+    pick: str = ""
+    screws: list[str] = field(default_factory=list)
+
+
+def screw_feeder(
+    scene,
+    name: str,
+    position: Point2 | Point3,
+    *,
+    screws: Union[Sequence[str], int],
+    fastener=None,
+    yaw: float = 0.0,
+    size: Optional[Point3] = None,
+    pick: Optional[Point2] = None,
+    proud: float = 0.001,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> ScrewFeeder:
+    """A screw presenter: a box `size = (length, width, height)` standing
+    at `position` (x, y[, the z of its foot]), turned by `yaw`, that hands
+    out the `screws` — obstacles made with `bt.parts.bolt` — one at a
+    time at a pick point on its top face.
+
+    The feeder is an indexing `Source`: the screws are moved into a
+    magazine row inside the body (its parking slots), and each
+    `bt.seq.start(<name>)` releases the next one to the pick point,
+    standing on its tip `proud` of the top face — so a program that
+    names the screw each step takes gets exactly one per request. The
+    zone sensor `<name>/present` over the pick point reads while a screw
+    stands there (the input a program waits on before picking, and that
+    drops when the bit lifts it away). `pick` is the pick point on the top
+    face in the body's frame (x along its length, y across), by default
+    centred and toward the -Y edge. The frame `<name>/pick` marks the
+    presented screw's tip, +Z up the screw.
+
+    Pinned on the device as a `feeder.screw`. A vibratory bowl's mechanics,
+    the rail, the escapement are not modelled: supply is a request and a
+    place.
+
+    `screws` may also be a count: the feeder then makes that many screws
+    itself (`<name>/screw<i>`) from `fastener` — a `bt.assembly.Fastener`,
+    or the pack's own thread as an ISO 4762 M<d>×20 when none is given.
+
+    With `catalog=` — the id of a screw-feeder spec pack, or a package
+    directory — a presenter you can order: the rail size (`thread_mm`) is
+    matched against the ones sold, the body and the pick point come from
+    the pack, its `present_s` is what the bill records, and the row
+    carries the article number."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("screw_feeder")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if fastener is not None and "thread_mm" in spec.params():
+            params["thread_mm"] = spec.choose("thread_mm", round(float(fastener.thread_mm), 3))
+        if size is None:
+            size = (
+                _mm(spec.dimension_mm("feeder", "length", 220.0)) or 0.22,
+                _mm(spec.dimension_mm("feeder", "width", 160.0)) or 0.16,
+                _mm(spec.dimension_mm("feeder", "height", 150.0)) or 0.15,
+            )
+        if pick is None:
+            px_mm, py_mm = spec.dimension_mm("feeder", "pick_x"), spec.dimension_mm("feeder", "pick_y")
+            if px_mm is not None and py_mm is not None:
+                pick = (float(px_mm) / 1000.0, float(py_mm) / 1000.0)
+        manufacturer = manufacturer or spec.manufacturer
+    if size is None:
+        size = (0.22, 0.16, 0.15)
+    if isinstance(screws, int):
+        if screws < 1:
+            raise ValueError("screw_feeder: at least one screw")
+        if fastener is None:
+            from .assembly import iso4762
+
+            thread = params.get("thread_mm", 5)
+            fastener = iso4762(round(float(thread)) if float(thread).is_integer() else 5, 20)
+        x0, y0 = float(position[0]), float(position[1])
+        z00 = float(position[2]) if len(position) > 2 else 0.0
+        names = [
+            fastener.place(scene, f"{name}/screw{i}", (x0, y0, z00), manufacturer=manufacturer)
+            for i in range(screws)
+        ]
+    else:
+        names = [str(s) for s in screws]
+    if not names or len(set(names)) != len(names):
+        raise ValueError("screw_feeder: name the screws it hands out, each once")
+    for screw in names:
+        if screw not in scene.obstacle_names:
+            raise ValueError(f"screw_feeder: no obstacle {screw!r} to feed — make it with bt.parts.bolt first")
+    length, width, height = (float(v) for v in size)
+    if min(length, width, height) <= 0 or proud < 0:
+        raise ValueError("screw_feeder: sizes must be positive")
+    pitch = 0.012
+    row = (len(names) - 1) * pitch
+    if row > length - 0.06:
+        raise ValueError(
+            f"screw_feeder: {len(names)} screws need a {row * 1e3 + 60:.0f} mm magazine; the body is {length * 1e3:.0f} mm long"
+        )
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    if pick is None:
+        pick = (0.0, -(width / 2 - 0.03))
+    px, py = float(pick[0]), float(pick[1])
+    if abs(px) > length / 2 - 0.01 or abs(py) > width / 2 - 0.01:
+        raise ValueError("screw_feeder: the pick point must lie on the top face")
+
+    def world(lx: float, ly: float, lz: float) -> Point3:
+        dx, dy, dz = _rotate(q, (lx, ly, lz))
+        return (x + dx, y + dy, z0 + dz)
+
+    built = ScrewFeeder(name, screws=names)
+    built.obstacles.append(
+        scene.add_box(f"{name}/body", size=(length, width, height), position=world(0.0, 0.0, height / 2),
+                      quaternion=q, color=color)
+    )
+    _finish(scene, f"{name}/body", _PAINT)
+    # The rail the screws queue along and the nest the presented one stands
+    # in: decoration, the way a machine's sheet metal is.
+    _trim(scene, built, f"{name}/rail", (length - 0.04, 0.012, 0.004),
+          world(0.0, py + 0.03, height + 0.002), q, TABLE_STEEL, finish=_MACHINED_METAL)
+    _trim(scene, built, f"{name}/nest", (0.03, 0.03, 0.006),
+          world(px, py, height + 0.003), q, (0.12, 0.12, 0.13), finish=_PLASTIC)
+
+    # The magazine: a row inside the body, along its length.
+    park = world(-row / 2, 0.02, height / 2)
+    step = _rotate(q, (pitch, 0.0, 0.0))
+    for i, screw in enumerate(names):
+        _, sq = scene.obstacle_pose(screw)
+        scene.set_obstacle_pose(screw, (park[0] + step[0] * i, park[1] + step[1] * i, park[2] + step[2] * i), sq)
+    tip = world(px, py, height + proud)
+    scene.add_source(name, pool=names, park=park, position=tip, pitch=step, interval=0.0, running=False)
+    built.devices.append(name)
+    built.device = name
+    # The presence zone: round the shank and the head of a standing screw.
+    zone = f"{name}/present"
+    scene.add_zone_sensor(zone, position=(tip[0], tip[1], tip[2] + 0.02), size=(0.02, 0.02, 0.04),
+                          quaternion=q, watch=names)
+    built.sensors.append(zone)
+    built.present = zone
+    scene.add_frame(f"{name}/pick", position=tip, quaternion=q)
+    built.frames.append(f"{name}/pick")
+    built.pick = f"{name}/pick"
+    figures = {"screws": float(len(names)), "length_mm": round(length * 1e3, 1),
+               "width_mm": round(width * 1e3, 1), "height_mm": round(height * 1e3, 1)}
+    if spec is None:
+        scene.set_part(name, kind="device", category="feeder.screw",
+                       **_identity(model, manufacturer, {**figures, **attributes}))
+        if model is not None:
+            scene.set_part(zone, kind="sensor", category="sensor.area", model=f"{model} presence sensor",
+                           manufacturer=manufacturer, description="built into the presenter, not a separate purchase")
+        return built
+    number = model or spec.part_number("feeder", **params)
+    scene.set_part(
+        name, kind="device", category=spec.category("feeder", "feeder.screw"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer, model=number, description=spec.name,
+        **{**_recorded(spec, params), **spec.behaviors(), **figures,
+           **_kg(spec.mass_kg("feeder", **params)), **attributes},
+    )
+    # The presence sensor over the pick point is the presenter's own — it
+    # is named after it on the bill, not bought separately.
+    scene.set_part(zone, kind="sensor", category="sensor.area", catalog=spec.catalog_ref,
+                   manufacturer=manufacturer, model=f"{number} presence sensor",
+                   description="built into the presenter, not a separate purchase")
+    return built
+
+
+@dataclass
+class Workpiece(Built):
+    """What `workpiece` built: the `housing` and `cover` obstacles, the
+    `dowels` on the housing, the `seat` (the mating plane's centre, +Z out
+    of the housing — where the cover's underside lands) and the pack's
+    `mounting` data the joint is read from."""
+
+    housing: str = ""
+    cover: str = ""
+    dowels: list[str] = field(default_factory=list)
+    seat: Optional[tuple] = None
+    mounting: Optional[dict] = None
+    catalog: Optional[tuple] = None
+
+
+def workpiece(
+    scene,
+    name: str,
+    position: Point2 | Point3,
+    *,
+    catalog: "CatalogRef",
+    yaw: float = 0.0,
+    cover_at: Optional[Point2 | Point3] = None,
+    color: Color = (0.50, 0.51, 0.53),
+    cover_color: Color = (0.62, 0.63, 0.66),
+    **attributes,
+) -> Workpiece:
+    """A two-part assembly from a workpiece spec pack — a housing on its
+    fixture at `position` (x, y[, the z of its underside]) turned by `yaw`,
+    and its cover waiting at `cover_at` (the same point when omitted:
+    seated). The pack's components size them (`housing`: length, width,
+    height; `cover`: length, width, thickness, boss_diameter, boss_height;
+    `dowel`: diameter, proud) and its `mounting` declares the joint: the
+    housing's `flange` face with its threaded holes and dowel pins, the
+    cover's `mount` face with its clearance holes, the screws. The pins
+    stand on the housing where the flange face's locators say. Frames:
+    `<name>/seat` (the housing's top face centre, +Z up — the mating
+    plane) and `<name>/stock` (where the cover waits). Everything is
+    pinned to the pack, dowels included (two lines with a count).
+    `bt.assembly.joint(catalog=...)` reads the same pack for the holes."""
+    from ._spec import Spec
+
+    spec = Spec.load(catalog)
+    spec.expect_generator("workpiece")
+    params = {key: spec.default(key) for key in spec.params()}
+    for key in [key for key in attributes if key in params]:
+        params[key] = spec.choose(key, attributes.pop(key))
+    for role in ("housing", "cover"):
+        if not spec.has_component(role):
+            raise ValueError(f"{spec.id}: a workpiece set needs a `{role}` component")
+    hl, hw, hh = (_mm(spec.dimension_mm("housing", key)) for key in ("length", "width", "height"))
+    cl, cw, ct = (_mm(spec.dimension_mm("cover", key)) for key in ("length", "width", "thickness"))
+    if None in (hl, hw, hh, cl, cw, ct):
+        raise ValueError(f"{spec.id}: the housing needs length/width/height and the cover length/width/thickness (mm)")
+    boss_d = _mm(spec.dimension_mm("cover", "boss_diameter"))
+    boss_h = _mm(spec.dimension_mm("cover", "boss_height"))
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+
+    def world(lx: float, ly: float, lz: float) -> Point3:
+        dx, dy, dz = _rotate(q, (lx, ly, lz))
+        return (x + dx, y + dy, z0 + dz)
+
+    built = Workpiece(name, catalog=spec.catalog_ref, mounting=spec.mounting())
+    housing = scene.add_box(f"{name}/housing", size=(hl, hw, hh), position=world(0.0, 0.0, hh / 2),
+                            quaternion=q, color=color)
+    _finish(scene, housing, _CAST_METAL)
+    built.obstacles.append(housing)
+    built.housing = housing
+    scene.set_part(
+        housing, kind="obstacle", category=spec.category("housing", "workpiece"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=spec.manufacturer,
+        model=spec.part_number("housing", **params), description=spec.name,
+        **_kg(spec.mass_kg("housing", **params)),
+    )
+    seat = world(0.0, 0.0, hh)
+    built.seat = (seat, q)
+    scene.add_frame(f"{name}/seat", position=seat, quaternion=q)
+    built.frames.append(f"{name}/seat")
+    # The dowels: pins the flange face declares, standing proud of it.
+    mounting = spec.mounting() or {}
+    flange = next((i for i in mounting.get("interfaces", []) if i.get("role") == "flange"), None)
+    pins = [loc for loc in ((flange or {}).get("geometry") or {}).get("locators", []) if loc.get("kind") in ("pin", "boss")]
+    if pins and spec.has_component("dowel"):
+        d = _mm(spec.dimension_mm("dowel", "diameter", 6.0)) or 0.006
+        proud = _mm(spec.dimension_mm("dowel", "proud", 8.0)) or 0.008
+        for loc in pins:
+            lx, ly = (float(v) / 1000.0 for v in loc["position_mm"])
+            dia = loc.get("diameter_mm")
+            radius = (float(dia["min"]) if isinstance(dia, dict) else float(dia)) / 2000.0 if dia else d / 2
+            height = float(loc["depth_mm"]["min"]) / 1000.0 if isinstance(loc.get("depth_mm"), dict) else proud
+            pin = scene.add_cylinder(f"{name}/dowel/{loc['id']}", radius, height,
+                                     world(lx, ly, hh + height / 2), quaternion=q, color=DARK_STEEL)
+            _finish(scene, pin, _MACHINED_METAL)
+            built.obstacles.append(pin)
+            built.dowels.append(pin)
+            scene.set_part(
+                pin, kind="obstacle", category=spec.category("dowel", "fastener"), qty=1,
+                catalog=spec.catalog_ref, manufacturer=spec.manufacturer,
+                model=spec.part_number("dowel", **params), **_kg(spec.mass_kg("dowel", **params)),
+            )
+    # The cover, at its stock (or seated), its underside at the origin.
+    if cover_at is None:
+        cx, cy, cz = seat
+    else:
+        cx, cy = float(cover_at[0]), float(cover_at[1])
+        cz = float(cover_at[2]) if len(cover_at) > 2 else z0
+    solids: list[Solid] = [Box((cl, cw, ct), at=(0.0, 0.0, ct / 2))]
+    if boss_d and boss_h:
+        solids.append(Cylinder(boss_d / 2, boss_h, at=(0.0, 0.0, ct)))
+    cover = compound(scene, f"{name}/cover", solids, (cx, cy, cz), quaternion=q, color=cover_color,
+                     finish=(0.0, 0.45))
+    built.obstacles.append(cover)
+    built.cover = cover
+    scene.set_part(
+        cover, kind="obstacle", category=spec.category("cover", "workpiece"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=spec.manufacturer,
+        model=spec.part_number("cover", **params), description=spec.name,
+        **_kg(spec.mass_kg("cover", **params)),
+    )
+    scene.add_frame(f"{name}/stock", position=(cx, cy, cz), quaternion=q)
+    built.frames.append(f"{name}/stock")
+    return built

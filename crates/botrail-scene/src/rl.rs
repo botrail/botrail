@@ -24,15 +24,37 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObsChannelSpec {
-    Joints { robot: String, velocities: bool },
-    TcpPose { robot: String },
-    LinkPose { robot: String, link: String },
-    ObjectPose { obstacle: String },
-    ObjectVel { obstacle: String },
-    Relative { a: String, b: String },
-    Contacts { a: String, b: String },
-    Signal { signal: String },
-    Clearance { cap: f64 },
+    Joints {
+        robot: String,
+        velocities: bool,
+    },
+    TcpPose {
+        robot: String,
+    },
+    LinkPose {
+        robot: String,
+        link: String,
+    },
+    ObjectPose {
+        obstacle: String,
+    },
+    ObjectVel {
+        obstacle: String,
+    },
+    Relative {
+        a: String,
+        b: String,
+    },
+    Contacts {
+        a: String,
+        b: String,
+    },
+    Signal {
+        signal: String,
+    },
+    Clearance {
+        cap: f64,
+    },
     Collision,
     /// A LiDAR sweep on the live world: one range per beam (meters; a
     /// beam with no return reads the scanner's max range), every
@@ -119,14 +141,28 @@ enum Ref {
 
 #[derive(Debug, Clone)]
 enum ObsChannel {
-    Joints { robot: usize, velocities: bool },
-    LinkPose { robot: usize, link: usize },
+    Joints {
+        robot: usize,
+        velocities: bool,
+    },
+    LinkPose {
+        robot: usize,
+        link: usize,
+    },
     ObjectPose(usize),
     ObjectVel(String),
-    Relative { a: Ref, b: Ref },
-    Contacts { a: String, b: String },
+    Relative {
+        a: Ref,
+        b: Ref,
+    },
+    Contacts {
+        a: String,
+        b: String,
+    },
     Signal(String),
-    Clearance { cap: f64 },
+    Clearance {
+        cap: f64,
+    },
     Collision,
     Lidar {
         index: usize,
@@ -267,7 +303,10 @@ impl ObsSpec {
         let mut channels = Vec::with_capacity(specs.len());
         for spec in specs {
             let (channel, dim) = match spec {
-                ObsChannelSpec::Joints { robot: name, velocities } => {
+                ObsChannelSpec::Joints {
+                    robot: name,
+                    velocities,
+                } => {
                     let r = robot(name)?;
                     let dof = scene.robots()[r].model.dof();
                     (
@@ -283,7 +322,10 @@ impl ObsSpec {
                     let l = scene.robots()[r].model.default_tcp_link();
                     (ObsChannel::LinkPose { robot: r, link: l }, 7)
                 }
-                ObsChannelSpec::LinkPose { robot: name, link: ln } => {
+                ObsChannelSpec::LinkPose {
+                    robot: name,
+                    link: ln,
+                } => {
                     let r = robot(name)?;
                     (
                         ObsChannel::LinkPose {
@@ -331,7 +373,9 @@ impl ObsSpec {
                         .ok_or_else(|| format!("observation: unknown lidar `{name}`"))?;
                     let lidar = &scene.lidars()[index];
                     if *stride == 0 {
-                        return Err(format!("observation: lidar `{name}`: stride must be at least 1"));
+                        return Err(format!(
+                            "observation: lidar `{name}`: stride must be at least 1"
+                        ));
                     }
                     if let Some(list) = rings {
                         if let Some(bad) = list.iter().find(|&&r| r >= lidar.channels.max(1)) {
@@ -342,7 +386,9 @@ impl ObsSpec {
                         }
                     }
                     if !noise.is_finite() || *noise < 0.0 {
-                        return Err(format!("observation: lidar `{name}`: noise must be finite and non-negative"));
+                        return Err(format!(
+                            "observation: lidar `{name}`: noise must be finite and non-negative"
+                        ));
                     }
                     let grid = crate::scan::ScanGrid {
                         stride: *stride,
@@ -371,17 +417,25 @@ impl ObsSpec {
                     dropout,
                 } => {
                     let camera = picture(scene, name, *width, *height)?;
-                    for (label, value) in [("noise", *noise), ("noise_z2", *noise_z2), ("dropout", *dropout)] {
+                    for (label, value) in [
+                        ("noise", *noise),
+                        ("noise_z2", *noise_z2),
+                        ("dropout", *dropout),
+                    ] {
                         if !value.is_finite() || value < 0.0 {
                             return Err(format!("observation: depth `{name}`: {label} must be finite and non-negative"));
                         }
                     }
                     if *dropout > 1.0 {
-                        return Err(format!("observation: depth `{name}`: dropout is a fraction in [0, 1]"));
+                        return Err(format!(
+                            "observation: depth `{name}`: dropout is a fraction in [0, 1]"
+                        ));
                     }
                     if let Some(b) = baseline {
                         if !(b.is_finite() && *b > 0.0) {
-                            return Err(format!("observation: depth `{name}`: baseline must be positive"));
+                            return Err(format!(
+                                "observation: depth `{name}`: baseline must be positive"
+                            ));
                         }
                     }
                     (
@@ -495,7 +549,12 @@ impl ObsSpec {
                 ObsChannel::ObjectPose(i) => write_pose(out, &scene.obstacles()[*i].pose),
                 ObsChannel::ObjectVel(name) => match live.obstacle_velocity(name) {
                     Some(v) => out.copy_from_slice(&[
-                        v.linear.x, v.linear.y, v.linear.z, v.angular.x, v.angular.y, v.angular.z,
+                        v.linear.x,
+                        v.linear.y,
+                        v.linear.z,
+                        v.angular.x,
+                        v.angular.y,
+                        v.angular.z,
                     ]),
                     None => out.fill(0.0),
                 },
@@ -518,13 +577,21 @@ impl ObsSpec {
                     }
                 }
                 ObsChannel::Signal(name) => {
-                    out[0] = if live.signal(name).unwrap_or(false) { 1.0 } else { 0.0 };
+                    out[0] = if live.signal(name).unwrap_or(false) {
+                        1.0
+                    } else {
+                        0.0
+                    };
                 }
                 ObsChannel::Clearance { cap } => {
                     out[0] = live.clearance().map(|d| d.min(*cap)).unwrap_or(*cap);
                 }
                 ObsChannel::Collision => {
-                    out[0] = if live.collisions().is_empty() { 0.0 } else { 1.0 };
+                    out[0] = if live.collisions().is_empty() {
+                        0.0
+                    } else {
+                        1.0
+                    };
                 }
                 ObsChannel::Lidar {
                     index,
@@ -565,7 +632,11 @@ impl ObsSpec {
                     sigma_z2,
                     baseline,
                     dropout,
-                } => match picture_of(&mut pictures, &live, (*camera, *width, *height, *geometry, false)) {
+                } => match picture_of(
+                    &mut pictures,
+                    &live,
+                    (*camera, *width, *height, *geometry, false),
+                ) {
                     Some(frame) => {
                         // The sensor model perturbs valid pixels only,
                         // keyed on the world's seed, the tick, the camera
@@ -573,7 +644,9 @@ impl ObsSpec {
                         let cam = &scene.cameras()[*camera];
                         let (fx, _, _, _) = crate::raster::intrinsics(cam.fov_deg, *width, *height);
                         let base = crate::scan::splitmix64(
-                            live.noise_seed() ^ live.ticks().wrapping_mul(0x9E37_79B9) ^ (*camera as u64) << 48,
+                            live.noise_seed()
+                                ^ live.ticks().wrapping_mul(0x9E37_79B9)
+                                ^ (*camera as u64) << 48,
                         );
                         for (i, (slot, d)) in out.iter_mut().zip(&frame.depth).enumerate() {
                             let mut d = *d as f64;
@@ -593,7 +666,8 @@ impl ObsSpec {
                                 d = fx * b / disparity;
                             }
                             if *dropout > 0.0 {
-                                let u = (crate::scan::splitmix64(key ^ 0xD00F) >> 11) as f64 / (1u64 << 53) as f64;
+                                let u = (crate::scan::splitmix64(key ^ 0xD00F) >> 11) as f64
+                                    / (1u64 << 53) as f64;
                                 if u < *dropout {
                                     *slot = 0.0;
                                     continue;
@@ -609,7 +683,11 @@ impl ObsSpec {
                     width,
                     height,
                     geometry,
-                } => match picture_of(&mut pictures, &live, (*camera, *width, *height, *geometry, false)) {
+                } => match picture_of(
+                    &mut pictures,
+                    &live,
+                    (*camera, *width, *height, *geometry, false),
+                ) {
                     Some(frame) => {
                         for (slot, id) in out.iter_mut().zip(&frame.id) {
                             *slot = *id as f64;
@@ -623,9 +701,16 @@ impl ObsSpec {
                     height,
                     geometry,
                     fov_deg,
-                } => match picture_of(&mut pictures, &live, (*camera, *width, *height, *geometry, false)) {
+                } => match picture_of(
+                    &mut pictures,
+                    &live,
+                    (*camera, *width, *height, *geometry, false),
+                ) {
                     Some(frame) => {
-                        for (slot, p) in out.chunks_mut(3).zip(crate::raster::points(frame, *fov_deg)) {
+                        for (slot, p) in out
+                            .chunks_mut(3)
+                            .zip(crate::raster::points(frame, *fov_deg))
+                        {
                             slot.copy_from_slice(&p);
                         }
                     }
@@ -636,8 +721,12 @@ impl ObsSpec {
                     width,
                     height,
                     geometry,
-                } => match picture_of(&mut pictures, &live, (*camera, *width, *height, *geometry, true))
-                    .and_then(|f| f.rgb.as_ref())
+                } => match picture_of(
+                    &mut pictures,
+                    &live,
+                    (*camera, *width, *height, *geometry, true),
+                )
+                .and_then(|f| f.rgb.as_ref())
                 {
                     Some(rgb) => {
                         for (slot, v) in out.iter_mut().zip(rgb) {
@@ -737,7 +826,9 @@ impl Control {
         let dof = model.dof();
         let check = |indices: &[usize]| -> Result<(), String> {
             match indices.iter().find(|&&i| i >= dof) {
-                Some(bad) => Err(format!("control: joint index {bad} out of range (dof {dof})")),
+                Some(bad) => Err(format!(
+                    "control: joint index {bad} out of range (dof {dof})"
+                )),
                 None => Ok(()),
             }
         };
@@ -749,7 +840,10 @@ impl Control {
                     .ok_or_else(|| format!("control: no group {g}"))?;
                 (group.tip, Some(crate::motion::group_mask(dof, group)))
             }
-            None if groups.len() == 1 => (groups[0].tip, Some(crate::motion::group_mask(dof, &groups[0]))),
+            None if groups.len() == 1 => (
+                groups[0].tip,
+                Some(crate::motion::group_mask(dof, &groups[0])),
+            ),
             None => (model.default_tcp_link(), None),
         };
         let dim = match &spec {
@@ -776,10 +870,14 @@ impl Control {
                 ..
             } => {
                 if frame != "world" && frame != "tcp" {
-                    return Err(format!("control: frame must be \"world\" or \"tcp\", got {frame:?}"));
+                    return Err(format!(
+                        "control: frame must be \"world\" or \"tcp\", got {frame:?}"
+                    ));
                 }
                 if !max_step_m.is_finite() || *max_step_m < 0.0 {
-                    return Err(format!("control: max_step_m must be finite and non-negative, got {max_step_m}"));
+                    return Err(format!(
+                        "control: max_step_m must be finite and non-negative, got {max_step_m}"
+                    ));
                 }
                 let indices: Vec<usize> = gripper.iter().map(|g| g.0).collect();
                 check(&indices)?;
@@ -1124,7 +1222,12 @@ impl VecRollout {
                 message: "step_actions needs a control (open the rollout with one)".into(),
             });
         };
-        let (n, dim, adim, robot) = (self.worlds.len(), self.spec.dim(), control.dim(), self.robot);
+        let (n, dim, adim, robot) = (
+            self.worlds.len(),
+            self.spec.dim(),
+            control.dim(),
+            self.robot,
+        );
         assert_eq!(actions.len(), n * adim, "actions are N × action_dim");
         assert_eq!(obs.len(), n * dim, "observations are N × dim");
         assert!(skip.is_empty() || skip.len() == n, "skip flags are N");
@@ -1333,7 +1436,11 @@ impl VecRollout {
     /// costs a sweep per world. A dead world reads zero.
     pub fn observe_all(&self, obs: &mut [f64]) {
         let dim = self.spec.dim();
-        assert_eq!(obs.len(), self.worlds.len() * dim, "observations are N × dim");
+        assert_eq!(
+            obs.len(),
+            self.worlds.len() * dim,
+            "observations are N × dim"
+        );
         let spec = &self.spec;
         let fill = |(world, out): (&Option<LiveRollout>, &mut [f64])| match world {
             Some(live) => spec.fill(live.view(), out),
@@ -1355,7 +1462,11 @@ impl VecRollout {
     /// The driven robot's joints per world (`N × dof`; zeros for a dead
     /// world).
     pub fn joints_all(&self, out: &mut [f64]) {
-        assert_eq!(out.len(), self.worlds.len() * self.dof, "joints are N × dof");
+        assert_eq!(
+            out.len(),
+            self.worlds.len() * self.dof,
+            "joints are N × dof"
+        );
         for (world, out) in self.worlds.iter().zip(out.chunks_mut(self.dof)) {
             match world.as_ref().and_then(|l| l.joint_positions(self.robot)) {
                 Some(q) => out.copy_from_slice(q),
@@ -1399,7 +1510,9 @@ mod tests {
         let mut scene = Scene::new(Arc::new(
             botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
         ));
-        scene.set_joint_positions(vec![0.0, 0.6, 0.8, 0.0, 0.5, 0.0]).unwrap();
+        scene
+            .set_joint_positions(vec![0.0, 0.6, 0.8, 0.0, 0.5, 0.0])
+            .unwrap();
         scene
             .add_obstacle(
                 "table",
@@ -1524,7 +1637,11 @@ mod tests {
                     live.tick().unwrap();
                 }
                 spec.fill(live.view(), &mut single);
-                assert_eq!(&obs[w * spec.dim()..(w + 1) * spec.dim()], &single[..], "world {w} step {step}");
+                assert_eq!(
+                    &obs[w * spec.dim()..(w + 1) * spec.dim()],
+                    &single[..],
+                    "world {w} step {step}"
+                );
                 assert_eq!(results[w].t, live.t());
             }
         }
@@ -1539,7 +1656,10 @@ mod tests {
         }
         let mut joints = vec![0.0; 18];
         vec.joints_all(&mut joints);
-        assert_eq!(&joints[..6], vec.world(0).unwrap().joint_positions(0).unwrap());
+        assert_eq!(
+            &joints[..6],
+            vec.world(0).unwrap().joint_positions(0).unwrap()
+        );
         let mut tcps = vec![0.0; 21];
         vec.tcp_all(&mut tcps);
         assert_eq!(&tcps[..7], &obs[12..19]);
@@ -1573,8 +1693,14 @@ mod tests {
             live.tick().unwrap();
         }
         let now = live.link_poses(0).unwrap()[tip];
-        assert!((now.translation.x - start.translation.x - 0.04).abs() < 2e-3, "{now:?}");
-        assert!((now.translation.y - start.translation.y).abs() < 2e-3, "{now:?}");
+        assert!(
+            (now.translation.x - start.translation.x - 0.04).abs() < 2e-3,
+            "{now:?}"
+        );
+        assert!(
+            (now.translation.y - start.translation.y).abs() < 2e-3,
+            "{now:?}"
+        );
         assert!(now.rotation.angle_to(&start.rotation) < 1e-4);
         // A gripper entry maps its action onto the joint's limits after the IK.
         assert_eq!(
@@ -1603,22 +1729,36 @@ mod tests {
         live.tick().unwrap();
         assert_eq!(live.joint_positions(0).unwrap(), &before[..]);
         // The joint controls: a delta and a target onto the limits.
-        live.set_control(r#"{"kind": "joint_delta", "indices": [0], "max_step": 0.05}"#, 0, None)
-            .unwrap();
+        live.set_control(
+            r#"{"kind": "joint_delta", "indices": [0], "max_step": 0.05}"#,
+            0,
+            None,
+        )
+        .unwrap();
         live.act(&[1.0]).unwrap();
         for _ in 0..5 {
             live.tick().unwrap();
         }
         assert!((live.joint_positions(0).unwrap()[0] - before[0] - 0.05).abs() < 1e-9);
-        live.set_control(r#"{"kind": "joint_target", "indices": [1], "limits": [[-2.2, 2.2]]}"#, 0, None)
-            .unwrap();
+        live.set_control(
+            r#"{"kind": "joint_target", "indices": [1], "limits": [[-2.2, 2.2]]}"#,
+            0,
+            None,
+        )
+        .unwrap();
         live.act(&[-1.0]).unwrap();
         for _ in 0..300 {
             live.tick().unwrap();
         }
         assert!((live.joint_positions(0).unwrap()[1] + 2.2).abs() < 1e-9);
         // Bad specs are refused up front.
-        assert!(live.set_control(r#"{"kind": "joint_delta", "indices": [9], "max_step": 0.05}"#, 0, None).is_err());
+        assert!(live
+            .set_control(
+                r#"{"kind": "joint_delta", "indices": [9], "max_step": 0.05}"#,
+                0,
+                None
+            )
+            .is_err());
         assert!(live.set_control(r#"{"kind": "tcp_delta", "max_step_m": 0.02, "max_step_rad": 0.05, "rotate": false, "frame": "tool"}"#, 0, None).is_err());
         assert!(live.act(&[0.0, 0.0]).is_err());
     }
@@ -1666,7 +1806,10 @@ mod tests {
         for (i, r) in batch.ranges.iter().enumerate() {
             assert_eq!(out[i], if *r > 0.0 { *r } else { 8.0 }, "beam {i}");
         }
-        assert!(batch.hits.iter().any(Option::is_some), "the table is in view");
+        assert!(
+            batch.hits.iter().any(Option::is_some),
+            "the table is in view"
+        );
         // The thinned block is the corresponding subset of the full grid
         // (ring 0 and ring 3, every 4th azimuth).
         let at = 541 * 4;
@@ -1694,17 +1837,32 @@ mod tests {
         other.set_noise_seed(7);
         let mut seeded = vec![0.0; spec.dim()];
         spec.fill(other.view(), &mut seeded);
-        assert_eq!(&seeded[..at + 272], &out[..at + 272], "noiseless blocks agree");
-        assert_ne!(&seeded[at + 272..], &out[at + 272..], "another seed, another draw");
+        assert_eq!(
+            &seeded[..at + 272],
+            &out[..at + 272],
+            "noiseless blocks agree"
+        );
+        assert_ne!(
+            &seeded[at + 272..],
+            &out[at + 272..],
+            "another seed, another draw"
+        );
         other.tick().unwrap();
         let mut later = vec![0.0; spec.dim()];
         spec.fill(other.view(), &mut later);
-        assert_ne!(&later[at + 272..], &seeded[at + 272..], "another tick, another draw");
+        assert_ne!(
+            &later[at + 272..],
+            &seeded[at + 272..],
+            "another tick, another draw"
+        );
     }
 
     #[test]
     fn a_vehicle_mounted_lidar_rides_the_vehicle_mid_drive() {
-        use crate::seq::{Action, Condition, Device, DeviceCommand, DeviceKind, Drive, Lidar, LidarMount, Sequence, Step, VehiclePath};
+        use crate::seq::{
+            Action, Condition, Device, DeviceCommand, DeviceKind, Drive, Lidar, LidarMount,
+            Sequence, Step, VehiclePath,
+        };
         let mut scene = Scene::empty();
         scene
             .add_obstacle(

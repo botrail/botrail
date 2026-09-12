@@ -1057,6 +1057,8 @@ pub enum FlashKindMsg {
     Flash,
     Trace,
     Spray,
+    /// The bound link spun while the signal is on, nothing drawn.
+    Spin,
 }
 
 pub fn flash_kind_msg(kind: crate::seq::FlashKind) -> FlashKindMsg {
@@ -1064,6 +1066,7 @@ pub fn flash_kind_msg(kind: crate::seq::FlashKind) -> FlashKindMsg {
         crate::seq::FlashKind::Flash => FlashKindMsg::Flash,
         crate::seq::FlashKind::Trace => FlashKindMsg::Trace,
         crate::seq::FlashKind::Spray => FlashKindMsg::Spray,
+        crate::seq::FlashKind::Spin => FlashKindMsg::Spin,
     }
 }
 
@@ -1072,6 +1075,7 @@ pub fn flash_kind_from_msg(kind: FlashKindMsg) -> crate::seq::FlashKind {
         FlashKindMsg::Flash => crate::seq::FlashKind::Flash,
         FlashKindMsg::Trace => crate::seq::FlashKind::Trace,
         FlashKindMsg::Spray => crate::seq::FlashKind::Spray,
+        FlashKindMsg::Spin => crate::seq::FlashKind::Spin,
     }
 }
 

@@ -1,8 +1,8 @@
 //! Python bindings for botrail (`botrail._core`).
 
 mod catalog;
-mod rl;
 mod hub;
+mod rl;
 mod server;
 
 use std::collections::BTreeMap;
@@ -871,6 +871,9 @@ fn part_entry_dict(py: Python<'_>, entry: &botrail_scene::part::PartEntry) -> Py
 
 /// A serde_json value as the matching Python object (dicts, lists,
 /// numbers, strings, bools, None) — how report sections come back.
+/// A contact window as Python passes it: `(point, axis, radius, angle)`.
+type ContactWindowArg = ((f64, f64, f64), (f64, f64, f64), f64, f64);
+
 fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
     use pyo3::types::{PyList, PyString};
     Ok(match value {
@@ -2185,6 +2188,18 @@ impl Scene {
     /// TCP's trail (the cut so far) and spins `spin_link` if given. Pure
     /// presentation, like `add_weld_flash`; in USD the toolpath curves
     /// already carry the picture.
+    /// Binds a spin effect to a signal: while the signal is true during
+    /// playback, the studio turns `link` of `robot` about its own Z —
+    /// a screwdriver's bit running a screw down — and draws nothing else.
+    /// Pure presentation, like `add_weld_flash`; USD export carries
+    /// nothing for it.
+    #[pyo3(signature = (name, signal, robot, link))]
+    fn add_spin(&self, name: &str, signal: &str, robot: &str, link: &str) -> PyResult<()> {
+        self.hub
+            .add_spin(name, signal, robot, link)
+            .map_err(scene_err)
+    }
+
     #[pyo3(signature = (name, signal, robot, spin_link = None))]
     fn add_cut_trace(
         &self,
@@ -3718,12 +3733,15 @@ impl Scene {
     /// stand in for `timelines` when none are given), the BOM's totals,
     /// the plan-view footprint, and the SHA-256 of every file in
     /// `deliverables` (external attachments with unverified provenance).
-    /// `sequences` scopes the report's I/O summary; default all. For a
+    /// `sequences` scopes the report's I/O summary; default all.
+    /// `sections` are what a domain module contributes — dicts with
+    /// `title`, `markdown` and `json` (`bt.assembly.report_section`) —
+    /// rendered under their titles before the deliverables. For a
     /// common snapshot, fresh bakes and verified files, use `bt.export_cell`.
     /// A reading surface — pytest keeps the `assert`s.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (timelines = None, *, scenarios = None, deliverables = None,
-        clearance_dt = Some(0.01), title = None, ground_z = 0.02, sequences = None))]
+        clearance_dt = Some(0.01), title = None, ground_z = 0.02, sequences = None, sections = None))]
     fn cell_report(
         &self,
         py: Python<'_>,
@@ -3734,8 +3752,11 @@ impl Scene {
         title: Option<String>,
         ground_z: f64,
         sequences: Option<Vec<String>>,
+        sections: Option<Vec<Bound<'_, PyAny>>>,
     ) -> PyResult<CellReport> {
-        use botrail_scene::report::{CellReportInput, CycleInput, Deliverable, ScenarioRow};
+        use botrail_scene::report::{
+            CellReportInput, CycleInput, Deliverable, ReportSection, ScenarioRow,
+        };
         if let Some(dt) = clearance_dt {
             if !(dt.is_finite() && dt > 0.0) {
                 return Err(PyValueError::new_err(format!(
@@ -3840,10 +3861,40 @@ impl Scene {
                 bytes: Some(bytes.len() as u64),
             });
         }
+        // Contributed sections: the JSON half goes through Python's own
+        // encoder, as the deliverable digests go through hashlib.
+        let mut contributed = Vec::new();
+        for (i, item) in sections.unwrap_or_default().iter().enumerate() {
+            let field = |key: &str| -> PyResult<String> {
+                item.get_item(key)
+                    .and_then(|v| v.extract::<String>())
+                    .map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "sections[{i}]: needs a string `{key}` (a dict with title, markdown, json)"
+                        ))
+                    })
+            };
+            let title = field("title")?;
+            let markdown = field("markdown")?;
+            let json = match item.get_item("json") {
+                Ok(v) if !v.is_none() => {
+                    let text: String = py.import("json")?.call_method1("dumps", (v,))?.extract()?;
+                    serde_json::from_str(&text)
+                        .map_err(|e| PyValueError::new_err(format!("sections[{i}].json: {e}")))?
+                }
+                _ => serde_json::Value::Null,
+            };
+            contributed.push(ReportSection {
+                title,
+                markdown,
+                json,
+            });
+        }
         let report = self.hub.authored_snapshot().cell_report(CellReportInput {
             title,
             cycles,
             scenarios: scenario_rows,
+            sections: contributed,
             deliverables: files,
             ground_z,
             sequences,
@@ -4296,6 +4347,56 @@ impl Scene {
         {
             return Err(PyValueError::new_err(format!(
                 "no allowed contact for link `{link}` and obstacle `{obstacle}`"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Lets the obstacle `object`, while a robot carries it, meet
+    /// `obstacle` without counting as a collision — the part being
+    /// *fitted*: a cover set down on its housing and dowels, a screw in the
+    /// hole it is driven into. Without `window` the pair may meet anywhere;
+    /// with `window = (point, axis, radius, angle)` only while the carried
+    /// object's origin lies within `radius` (m) of the line through `point`
+    /// along `axis` and its own +Z within `angle` (rad) of that axis — the
+    /// hole's axis and tolerance, so a screw off its hole is still a
+    /// collision. Applies to checking, planning and `min_clearance`;
+    /// toolpath rapids ignore every allowance. Re-declaring a pair replaces
+    /// its window.
+    #[pyo3(signature = (object, obstacle, window = None))]
+    fn allow_object_obstacle_contact(
+        &self,
+        object: &str,
+        obstacle: &str,
+        window: Option<ContactWindowArg>,
+    ) -> PyResult<()> {
+        let window = match window {
+            None => None,
+            Some(((px, py, pz), (ax, ay, az), radius, angle)) => {
+                let axis = nalgebra::Vector3::new(ax, ay, az);
+                let norm = axis.norm();
+                if !(norm.is_finite() && norm > 1e-12) {
+                    return Err(PyValueError::new_err("window axis must not be zero"));
+                }
+                Some(botrail_scene::ContactWindow {
+                    point: nalgebra::Point3::new(px, py, pz),
+                    axis: nalgebra::Unit::new_normalize(axis),
+                    radius,
+                    angle,
+                })
+            }
+        };
+        self.hub
+            .allow_object_obstacle_contact(object, obstacle, window)
+            .map_err(scene_err)
+    }
+
+    /// Removes an allowed object contact added by
+    /// `allow_object_obstacle_contact`.
+    fn disallow_object_obstacle_contact(&self, object: &str, obstacle: &str) -> PyResult<()> {
+        if !self.hub.disallow_object_obstacle_contact(object, obstacle) {
+            return Err(PyValueError::new_err(format!(
+                "no allowed contact for object `{object}` and obstacle `{obstacle}`"
             )));
         }
         Ok(())
@@ -6327,7 +6428,10 @@ fn render_geometry(name: &str) -> PyResult<botrail_scene::raster::RenderGeometry
 }
 
 /// A rendered picture: `(depth (h, w) f32, ids (h, w) i32)`.
-type Picture<'py> = (Bound<'py, numpy::PyArray2<f32>>, Bound<'py, numpy::PyArray2<i32>>);
+type Picture<'py> = (
+    Bound<'py, numpy::PyArray2<f32>>,
+    Bound<'py, numpy::PyArray2<i32>>,
+);
 
 /// A rollout advanced from Python one scan tick at a time — what
 /// `Scene.open_rollout` returns. Between ticks, read the world and drive
@@ -6427,7 +6531,8 @@ impl LiveRollout {
     fn tick(&mut self, n: usize) -> PyResult<f64> {
         let live = self.live_mut()?;
         for _ in 0..n {
-            live.tick().map_err(|e| PyValueError::new_err(e.to_string()))?;
+            live.tick()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
         }
         Ok(live.t())
     }
@@ -6600,7 +6705,12 @@ impl LiveRollout {
     /// `botrail.rl` lowers a task's control to — for `robot` driven as
     /// `group`. Returns the action width.
     #[pyo3(signature = (spec, robot = None, group = None))]
-    fn set_control(&mut self, spec: &str, robot: Option<&str>, group: Option<&str>) -> PyResult<usize> {
+    fn set_control(
+        &mut self,
+        spec: &str,
+        robot: Option<&str>,
+        group: Option<&str>,
+    ) -> PyResult<usize> {
         let r = self.robot(robot)?;
         let group = match group {
             Some(name) => Some(
@@ -6631,10 +6741,9 @@ impl LiveRollout {
     /// The bound channels packed into one flat row (a 1-D ndarray), as
     /// the world stands — the same packing a `VecRollout` does per world.
     fn observe<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-        let spec = self
-            .spec
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("no observation bound: call set_observation first"))?;
+        let spec = self.spec.as_ref().ok_or_else(|| {
+            PyValueError::new_err("no observation bound: call set_observation first")
+        })?;
         let mut out = vec![0.0; spec.dim()];
         spec.fill(self.live()?.view(), &mut out);
         Ok(rl::row(py, out))
@@ -6673,7 +6782,9 @@ impl LiveRollout {
     fn set_render_decimate(&mut self, cell: Option<f64>) -> PyResult<()> {
         if let Some(c) = cell {
             if !(c.is_finite() && c > 0.0) {
-                return Err(PyValueError::new_err("decimate cell must be positive (or None)"));
+                return Err(PyValueError::new_err(
+                    "decimate cell must be positive (or None)",
+                ));
             }
         }
         self.live_mut()?.set_render_decimate(cell);
@@ -6716,7 +6827,9 @@ impl LiveRollout {
             .live()?
             .view()
             .render_shaded(index, geometry, width, height)
-            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))?;
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("camera `{name}`: mount does not resolve"))
+            })?;
         frame
             .rgb
             .unwrap_or_default()
@@ -6749,7 +6862,9 @@ impl LiveRollout {
             .view()
             .camera_pose(index)
             .map(|p| pose_arrays(&p))
-            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("camera `{name}`: mount does not resolve"))
+            })
     }
 
     /// The picture the named camera takes of the world as it stands, as
@@ -6782,7 +6897,9 @@ impl LiveRollout {
             .live()?
             .view()
             .render(index, geometry, width, height)
-            .ok_or_else(|| PyValueError::new_err(format!("camera `{name}`: mount does not resolve")))?;
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("camera `{name}`: mount does not resolve"))
+            })?;
         let depth = frame
             .depth
             .into_pyarray(py)
@@ -6869,7 +6986,8 @@ impl LiveRollout {
         let mut timeline = live.finish();
         timeline.scenario = self.scenario.clone();
         if publish {
-            self.hub.publish_timeline(&self.scene, &timeline, &self.label);
+            self.hub
+                .publish_timeline(&self.scene, &timeline, &self.label);
         }
         Ok(SequenceTimeline {
             inner: timeline,
@@ -9150,6 +9268,13 @@ impl CellReport {
     #[getter]
     fn footprint(&self, py: Python<'_>) -> PyResult<PyObject> {
         self.section(py, "footprint")
+    }
+
+    /// The contributed sections (`sections=`): `title`, `markdown`,
+    /// `json`.
+    #[getter]
+    fn sections(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.section(py, "sections")
     }
 
     /// The hashed deliverables: `path`, `sha256`, `bytes`.

@@ -9,12 +9,13 @@ import { useStudioStore } from "../store";
  * while the bound signal is on — "what has been cut so far". The driver
  * owns the per-frame state (appending points, spinning the bound link);
  * this component only mounts the lines and registers their handles. The
- * trail restarts when the playhead jumps backward.
+ * trail restarts when the playhead jumps backward. A `spin` effect is a
+ * trace with nothing drawn: the same handle, for the spin angle only.
  */
 export function CutTraceView() {
   const flashes = useStudioStore((s) => s.flashes);
   const traces = useMemo(
-    () => flashes.filter((f) => f.kind === "trace"),
+    () => flashes.filter((f) => f.kind === "trace" || f.kind === "spin"),
     [flashes],
   );
   if (traces.length === 0) return null;

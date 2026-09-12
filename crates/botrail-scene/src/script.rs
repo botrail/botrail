@@ -812,7 +812,11 @@ impl<'a> Lowering<'a> {
                 });
             }
             Action::Policy { group, .. } if self.is_other_arm(group) => {}
-            Action::Policy { policy, max_duration, .. } => {
+            Action::Policy {
+                policy,
+                max_duration,
+                ..
+            } => {
                 // The controller runs the policy program; the stretch it
                 // drives is baked tick by tick in the timeline but is not
                 // a taught path, so the script marks the hand-over.

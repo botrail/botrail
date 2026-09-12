@@ -12,7 +12,7 @@ use botrail_traj::JointTrajectory;
 use nalgebra::{Isometry3, Vector3};
 use thiserror::Error;
 
-use crate::Scene;
+use crate::{ColliderId, Scene};
 
 #[derive(Debug, Error)]
 pub enum MotionError {
@@ -43,6 +43,8 @@ pub enum MotionError {
         fraction: f64,
         reason: String,
     },
+    #[error("segment {index}: start configuration collides: {pairs}")]
+    StartCollides { index: usize, pairs: String },
     #[error("time parameterization failed: {0}")]
     Timing(#[from] botrail_traj::TrajError),
 }
@@ -250,6 +252,52 @@ fn constraints_ok(
     })
 }
 
+/// What configuration `q` of `robot` collides with, as `a x b` names —
+/// the pairs the moving `group` is party to (every pair without one) —
+/// so a refused line or start says what it met, not that it met
+/// something. Empty when the state is only out of limits.
+fn collision_names(scene: &Scene, robot: usize, group: Option<&Group>, q: &[f64]) -> Vec<String> {
+    let Ok(pairs) = scene.collisions_at_for(robot, q) else {
+        return Vec::new();
+    };
+    let model = &scene.robots()[robot].model;
+    let moving = group
+        .filter(|g| g.joints.len() < model.dof())
+        .map(|g| scene.link_subtree(robot, g.base));
+    let carried: Vec<usize> = match &moving {
+        Some(links) => scene
+            .attachments()
+            .iter()
+            .filter(|a| a.robot == robot && links.contains(&a.link))
+            .filter_map(|a| scene.obstacle_index(&a.object).ok())
+            .collect(),
+        None => Vec::new(),
+    };
+    let involves = |id: &ColliderId| match (&moving, id) {
+        (None, _) => true,
+        (Some(links), ColliderId::Link { robot: r, link }) => *r == robot && links.contains(link),
+        (Some(_), ColliderId::Obstacle(k)) => carried.contains(k),
+        (Some(_), ColliderId::Attached(_)) => false,
+    };
+    let name = |id: &ColliderId| match id {
+        ColliderId::Link { robot: r, link } => {
+            let link = &scene.robots()[*r].model.links[*link].name;
+            if scene.robots().len() > 1 {
+                format!("{}:{link}", scene.robots()[*r].name)
+            } else {
+                link.clone()
+            }
+        }
+        ColliderId::Obstacle(k) => scene.obstacles()[*k].name.clone(),
+        ColliderId::Attached(k) => format!("attached#{k}"),
+    };
+    pairs
+        .iter()
+        .filter(|p| involves(&p.a) || involves(&p.b))
+        .map(|p| format!("{} x {}", name(&p.a), name(&p.b)))
+        .collect()
+}
+
 fn joint_distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b)
@@ -322,7 +370,13 @@ fn cartesian_line(
             return Err(fail(u, "configuration jump (IK branch change)"));
         }
         if !scene.is_state_valid_for_group(robot, group, &ik.q) {
-            return Err(fail(u, "collision or joint limit violation"));
+            let names = collision_names(scene, robot, group, &ik.q);
+            let reason = if names.is_empty() {
+                "joint limit violation".to_string()
+            } else {
+                format!("collision: {}", names.join(", "))
+            };
+            return Err(fail(u, &reason));
         }
         if !constraints_ok(scene, robot, &ik.q, constraints, tcp) {
             return Err(fail(u, "constraint violation"));
@@ -369,7 +423,20 @@ fn plan_segment(
                 &mut extra,
                 plan_options,
             )
-            .map_err(|source| MotionError::PlanFailed { index, source })
+            .map_err(|source| {
+                // A start in collision is named: which link met what, so a
+                // program that drives into something says so.
+                if matches!(source, botrail_plan::PlanError::InvalidStart) {
+                    let names = collision_names(scene, robot, group, start_q);
+                    if !names.is_empty() {
+                        return MotionError::StartCollides {
+                            index,
+                            pairs: names.join(", "),
+                        };
+                    }
+                }
+                MotionError::PlanFailed { index, source }
+            })
         }
         SegmentKind::CartesianLine => cartesian_line(
             scene,

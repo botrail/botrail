@@ -16,9 +16,9 @@ mod convert;
 pub mod mesh;
 
 use botrail_model::RobotModel;
-use nalgebra::Isometry3;
+use nalgebra::{Isometry3, Point3, Unit, Vector3};
 use parry3d_f64::bounding_volume::{Aabb, BoundingVolume};
-use parry3d_f64::math::Pose;
+use parry3d_f64::math::{Pose, Vector};
 use parry3d_f64::query;
 use parry3d_f64::shape::SharedShape;
 use thiserror::Error;
@@ -647,6 +647,46 @@ impl BroadPhase {
 #[derive(Debug, Default, Clone)]
 pub struct ContactAllowance {
     pairs: std::collections::HashSet<(usize, usize, usize)>,
+    /// Carried objects allowed to meet an obstacle — the fourth exemption
+    /// mechanism, for a part being *fitted*: a screw in its hole, a cover
+    /// on the face it is set down on. Keyed by the attached object's and
+    /// the obstacle's query indices.
+    objects: std::collections::HashMap<(usize, usize), ObjectAllowance>,
+}
+
+/// Where a carried object may stand inside an obstacle it is otherwise
+/// checked against: within `radius` of the line through `point` along
+/// `axis`, its own +Z within `angle` (radians) of that axis — a screw in
+/// its hole, a pin in its bore. Judged on the object's world pose, so the
+/// origin the object was authored with (a screw's tip) is what has to be
+/// on the axis: a screw off its hole is still a collision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactWindow {
+    pub point: Point3<f64>,
+    pub axis: Unit<Vector3<f64>>,
+    pub radius: f64,
+    pub angle: f64,
+}
+
+impl ContactWindow {
+    /// Whether an object standing at `pose` (parry form) is in the window.
+    pub fn admits(&self, pose: &Pose) -> bool {
+        let p = Vector3::new(pose.translation.x, pose.translation.y, pose.translation.z);
+        let d = p - self.point.coords;
+        let along = d.dot(&self.axis);
+        let lateral = (d - self.axis.into_inner() * along).norm();
+        if lateral > self.radius + 1e-12 {
+            return false;
+        }
+        let z = pose.rotation * Vector::new(0.0, 0.0, 1.0);
+        Vector3::new(z.x, z.y, z.z).dot(&self.axis) >= self.angle.cos() - 1e-12
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ObjectAllowance {
+    Always,
+    Within(Vec<ContactWindow>),
 }
 
 impl ContactAllowance {
@@ -658,8 +698,41 @@ impl ContactAllowance {
         self.pairs.contains(&(robot, link, obstacle))
     }
 
+    /// Lets the carried object at query index `attached` meet obstacle
+    /// `obstacle` — anywhere (`None`), or only inside `window`. Windows for
+    /// the same pair accumulate; an unconditional allowance wins.
+    pub fn allow_object(
+        &mut self,
+        attached: usize,
+        obstacle: usize,
+        window: Option<ContactWindow>,
+    ) {
+        let entry = self.objects.entry((attached, obstacle));
+        match window {
+            None => {
+                entry
+                    .and_modify(|e| *e = ObjectAllowance::Always)
+                    .or_insert(ObjectAllowance::Always);
+            }
+            Some(w) => match entry.or_insert_with(|| ObjectAllowance::Within(Vec::new())) {
+                ObjectAllowance::Always => {}
+                ObjectAllowance::Within(windows) => windows.push(w),
+            },
+        }
+    }
+
+    /// Whether the carried object at query index `attached`, standing at
+    /// `pose`, may meet obstacle `obstacle`.
+    pub fn allows_object(&self, attached: usize, obstacle: usize, pose: &Pose) -> bool {
+        match self.objects.get(&(attached, obstacle)) {
+            None => false,
+            Some(ObjectAllowance::Always) => true,
+            Some(ObjectAllowance::Within(windows)) => windows.iter().any(|w| w.admits(pose)),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
+        self.pairs.is_empty() && self.objects.is_empty()
     }
 }
 
@@ -751,7 +824,9 @@ fn obstacle_pairs(
             }
         }
         for (k2, att) in attached.iter().enumerate() {
-            if !boxes_hit(&bp.att_aabbs[k2], &obs_aabb) {
+            if !boxes_hit(&bp.att_aabbs[k2], &obs_aabb)
+                || allowance.allows_object(k2, k, &bp.att_world[k2])
+            {
                 continue;
             }
             if parts_intersect(&bp.att_world[k2], &att.collider.parts, &op, &obs.parts) {
@@ -927,6 +1002,9 @@ pub fn min_robot_obstacle_distance(
         }
         for (a, att_aabb) in bp.att_aabbs.iter().enumerate() {
             let Some(att_aabb) = att_aabb else { continue };
+            if allowance.allows_object(a, k, &bp.att_world[a]) {
+                continue;
+            }
             let bound = boxes_gap(att_aabb, obs_aabb);
             if bound <= DISTANCE_PREDICTION {
                 candidates.push((bound, Side::Attached(a), k));
@@ -1204,6 +1282,75 @@ mod tests {
             &ContactAllowance::default(),
         );
         assert_eq!(strict.len(), 2);
+    }
+
+    #[test]
+    fn object_allowance_admits_a_carried_part_only_within_its_window() {
+        let (model, collider, acm) = stack();
+        let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let ball = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        let robots = solo(&collider, &poses, &acm);
+        // A ball carried 0.3 m out from link b (at z = 0.5), clear of the
+        // link's own cube, and a wall ball it overlaps.
+        let held = [AttachedCollider {
+            robot: 0,
+            link: 1,
+            offset: Isometry3::translation(0.3, 0.0, 0.0),
+            collider: &ball,
+            skip_links: &[1],
+        }];
+        let obs = [(iso(0.3, 0.0, 0.55), &ball)];
+        let strict = check_scene(
+            &robots,
+            &InterRobotAcm::default(),
+            &obs,
+            &held,
+            &ContactAllowance::default(),
+        );
+        assert_eq!(strict.len(), 1, "the carried ball meets the wall");
+        // Allowed anywhere: no pair, and the distance query skips it too —
+        // what is left is link b's cube (x to 0.1) against the wall ball.
+        let mut anywhere = ContactAllowance::default();
+        anywhere.allow_object(0, 0, None);
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &obs, &held, &anywhere).is_empty());
+        let d = min_robot_obstacle_distance(&robots, &obs, &held, &anywhere).unwrap();
+        assert!(
+            (d - 0.15).abs() < 1e-6,
+            "allowed object contact still zeroed the distance: {d}"
+        );
+        // Allowed only on the hole's axis through the wall: the carried ball
+        // stands on it (its origin is the offset point), so it passes...
+        let on_axis = ContactWindow {
+            point: Point3::new(0.3, 0.0, 0.55),
+            axis: Unit::new_normalize(Vector3::z()),
+            radius: 0.001,
+            angle: 0.02,
+        };
+        let mut windowed = ContactAllowance::default();
+        windowed.allow_object(0, 0, Some(on_axis));
+        assert!(check_scene(&robots, &InterRobotAcm::default(), &obs, &held, &windowed).is_empty());
+        // ...and a window 2 mm off the axis does not admit it.
+        let off_axis = ContactWindow {
+            point: Point3::new(0.302, 0.0, 0.55),
+            ..on_axis
+        };
+        let mut shifted = ContactAllowance::default();
+        shifted.allow_object(0, 0, Some(off_axis));
+        assert_eq!(
+            check_scene(&robots, &InterRobotAcm::default(), &obs, &held, &shifted).len(),
+            1
+        );
+        // Nor a window the object's axis is turned out of.
+        let tilted = ContactWindow {
+            axis: Unit::new_normalize(Vector3::x()),
+            ..on_axis
+        };
+        let mut turned = ContactAllowance::default();
+        turned.allow_object(0, 0, Some(tilted));
+        assert_eq!(
+            check_scene(&robots, &InterRobotAcm::default(), &obs, &held, &turned).len(),
+            1
+        );
     }
 
     #[test]

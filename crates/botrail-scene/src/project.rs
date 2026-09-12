@@ -784,6 +784,10 @@ pub struct ProjectFile {
     /// Process-contact exemptions, by names (absent in older files).
     #[serde(default)]
     pub allowed_contacts: Vec<AllowedContactMsg>,
+    /// Carried-object contact exemptions — a part allowed to meet what it
+    /// is fitted into (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_object_contacts: Vec<AllowedObjectContactMsg>,
     /// Spray applicators by name (absent in older files).
     #[serde(default)]
     pub applicators: Vec<ApplicatorMsg>,
@@ -825,6 +829,53 @@ pub struct AllowedContactMsg {
     pub robot: String,
     pub link: String,
     pub obstacle: String,
+}
+
+/// One [`crate::AllowedObjectContact`] by names, with its window if any.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AllowedObjectContactMsg {
+    pub object: String,
+    pub obstacle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<ContactWindowMsg>,
+}
+
+/// A [`crate::ContactWindow`]: the line the carried object's origin must
+/// lie within `radius` of (through `point`, along `axis`, metres) and the
+/// `angle` (radians) its +Z may lean from that axis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ContactWindowMsg {
+    pub point: [f64; 3],
+    pub axis: [f64; 3],
+    pub radius: f64,
+    pub angle: f64,
+}
+
+fn window_msg(w: &crate::ContactWindow) -> ContactWindowMsg {
+    ContactWindowMsg {
+        point: [w.point.x, w.point.y, w.point.z],
+        axis: [w.axis.x, w.axis.y, w.axis.z],
+        radius: w.radius,
+        angle: w.angle,
+    }
+}
+
+fn window_from_msg(m: &ContactWindowMsg) -> Result<crate::ContactWindow, ProjectError> {
+    let axis = nalgebra::Vector3::new(m.axis[0], m.axis[1], m.axis[2]);
+    let norm = axis.norm();
+    if !(norm.is_finite() && norm > 1e-12) {
+        return Err(ProjectError::Incompatible(
+            "contact window axis must not be zero".to_string(),
+        ));
+    }
+    Ok(crate::ContactWindow {
+        point: nalgebra::Point3::new(m.point[0], m.point[1], m.point[2]),
+        axis: nalgebra::Unit::new_normalize(axis),
+        radius: m.radius,
+        angle: m.angle,
+    })
 }
 
 fn identity_pose() -> PoseMsg {
@@ -879,6 +930,7 @@ impl ProjectFile {
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
                     allowed_contacts: Vec::new(),
+                    allowed_object_contacts: Vec::new(),
                     applicators: Vec::new(),
                     brushes: Vec::new(),
                     io: crate::iomap::IoMap::default(),
@@ -1053,6 +1105,15 @@ impl Scene {
                     robot: self.robots()[c.robot].name.clone(),
                     link: self.robots()[c.robot].model.links[c.link].name.clone(),
                     obstacle: c.obstacle.clone(),
+                })
+                .collect(),
+            allowed_object_contacts: self
+                .allowed_object_contacts()
+                .iter()
+                .map(|c| AllowedObjectContactMsg {
+                    object: c.object.clone(),
+                    obstacle: c.obstacle.clone(),
+                    window: c.window.as_ref().map(window_msg),
                 })
                 .collect(),
             applicators: self
@@ -1277,6 +1338,11 @@ impl Scene {
                     ))
                 })?;
             self.allow_link_obstacle_contact(robot, link, &msg.obstacle)
+                .map_err(|e| ProjectError::Incompatible(e.to_string()))?;
+        }
+        for msg in &project.allowed_object_contacts {
+            let window = msg.window.as_ref().map(window_from_msg).transpose()?;
+            self.allow_object_obstacle_contact(&msg.object, &msg.obstacle, window)
                 .map_err(|e| ProjectError::Incompatible(e.to_string()))?;
         }
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
@@ -2234,6 +2300,13 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                     flash.name, flash.signal, flash.robot
                 ));
             }
+            crate::wire::FlashKindMsg::Spin => {
+                let link = flash.spin_link.clone().unwrap_or_default();
+                out.push_str(&format!(
+                    "scene.add_spin({:?}, signal={:?}, robot={:?}, link={link:?})\n",
+                    flash.name, flash.signal, flash.robot
+                ));
+            }
         }
     }
     for a in &project.applicators {
@@ -2304,6 +2377,22 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             contact.link,
             contact.obstacle,
             robot_kwarg_for_name(project, &Some(contact.robot.clone()))
+        ));
+    }
+    for contact in &project.allowed_object_contacts {
+        let window = match &contact.window {
+            Some(w) => format!(
+                ", window=({}, {}, {}, {})",
+                py_tuple(&w.point),
+                py_tuple(&w.axis),
+                w.radius,
+                w.angle
+            ),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "scene.allow_object_obstacle_contact({:?}, {:?}{window})\n",
+            contact.object, contact.obstacle
         ));
     }
     for scenario in &project.scenarios {

@@ -683,6 +683,19 @@ impl SceneHub {
         self.with_scene(|scene| scene.disallow_link_obstacle_contact(robot, link, obstacle))
     }
 
+    pub fn allow_object_obstacle_contact(
+        &self,
+        object: &str,
+        obstacle: &str,
+        window: Option<botrail_scene::ContactWindow>,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| scene.allow_object_obstacle_contact(object, obstacle, window))
+    }
+
+    pub fn disallow_object_obstacle_contact(&self, object: &str, obstacle: &str) -> bool {
+        self.with_scene(|scene| scene.disallow_object_obstacle_contact(object, obstacle))
+    }
+
     // ------------------------------------------------------------ toolpaths
 
     pub fn add_toolpath(&self, tp: botrail_scene::toolpath::Toolpath) {
@@ -1033,6 +1046,16 @@ impl SceneHub {
 
     pub fn add_weld_flash(&self, name: &str, signal: &str, robot: &str) -> Result<(), SceneError> {
         botrail_session::add_weld_flash(self, name, signal, robot)
+    }
+
+    pub fn add_spin(
+        &self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        link: &str,
+    ) -> Result<(), SceneError> {
+        botrail_session::add_spin(self, name, signal, robot, link)
     }
 
     pub fn add_spray_cone(

@@ -27,6 +27,11 @@ The composite's `tcp_link` stays the gripper's, so motions and the
 studio gizmo behave as for any gripper; a pose taught for the pin or the
 fork just names its tip. IK asked for a tip moves only the arm — the
 gripper's fingers are off that chain and keep their value.
+
+`rotary_bur` and `screwdriver` are process-tool envelopes to weld on the
+same way (a spindle's collet, a second `Mount` of the bracket): a tip
+frame whose +Z points back along the tool axis, and one link — the
+cutter, the bit — that is allowed to touch the work.
 """
 
 from __future__ import annotations
@@ -122,6 +127,95 @@ def rotary_bur(
     u.fixed("mount", "tcp", _xyz((0, 0, exposed_shank + cutting_length)),
             f"{math.pi:.12f} 0 0")
     return Robot.from_urdf_string(u.text())
+
+
+def screwdriver(
+    *,
+    body_length: float = 0.200,
+    body_diameter: float = 0.086,
+    nose_length: float = 0.050,
+    nose_diameter: float = 0.030,
+    bit_length: float = 0.060,
+    bit_diameter: float = 0.008,
+    stroke: Optional[float] = 0.055,
+    color: Point3 = BLACK_STEEL,
+) -> Robot:
+    """The screwdriver envelope as a robot model — `screwdriver_urdf`
+    loaded. See there."""
+    return Robot.from_urdf_string(screwdriver_urdf(
+        body_length=body_length, body_diameter=body_diameter, nose_length=nose_length,
+        nose_diameter=nose_diameter, bit_length=bit_length, bit_diameter=bit_diameter,
+        stroke=stroke, color=color,
+    ))
+
+
+def screwdriver_urdf(
+    *,
+    body_length: float = 0.200,
+    body_diameter: float = 0.086,
+    nose_length: float = 0.050,
+    nose_diameter: float = 0.030,
+    bit_length: float = 0.060,
+    bit_diameter: float = 0.008,
+    stroke: Optional[float] = 0.055,
+    color: Point3 = BLACK_STEEL,
+) -> str:
+    """A robotic screwdriver as an envelope, dimensions in metres: the
+    motor body (a cylinder `body_diameter` wide and `body_length` long),
+    a `nose` in front of it and the `bit` sticking out of the nose.
+
+    ``mount`` is the root, the face that bolts to the hand, +Z into the
+    tool along its axis. ``tip`` is the bit's free end, turned half a turn
+    about X so its +Z points *from the tip toward the body* — the
+    toolpath axis convention `rotary_bur` follows, so a screw is driven by
+    aiming the tip's +Z along the hole's outward normal.
+
+    With `stroke` the bit rides a prismatic joint ``shank`` (0 to `stroke`)
+    along the axis: the tool's own feed — a cobot screwdriver with an
+    embedded stroke advances the screw itself while the arm stands still,
+    which is how `bt.assembly.fasten` runs a screw down (a ramp of that
+    joint, timed from the thread). `stroke=None` fixes the bit for a tool
+    the arm has to push.
+
+    Only the ``bit`` link should be allowed to touch a screw head
+    (`scene.allow_link_obstacle_contact`); the body and the nose stay
+    collision-checked, and the screw a bit carries is attached to it.
+    Torque, speed and the fastening result are not geometry: they are the
+    driver program `bt.assembly.driver` writes. Returns URDF text — what
+    `screwdriver` loads, and what a catalog asset of the tool is written
+    from, so the made envelope and the catalogued one are the same
+    geometry."""
+    for key, value in (("body_length", body_length), ("body_diameter", body_diameter),
+                       ("nose_length", nose_length), ("nose_diameter", nose_diameter),
+                       ("bit_length", bit_length), ("bit_diameter", bit_diameter)):
+        if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"screwdriver: {key} must be finite and positive")
+    if stroke is not None and (not math.isfinite(stroke) or stroke <= 0):
+        raise ValueError("screwdriver: stroke must be positive, or None for a fixed bit")
+    u = _Urdf("screwdriver")
+    u.link("mount")
+    u.link("body", f'<cylinder radius="{body_diameter / 2:.9f}" length="{body_length:.9f}"/>',
+           f'<origin xyz="0 0 {body_length / 2:.9f}"/>', color)
+    u.fixed("mount", "body", "0 0 0")
+    u.link("nose", f'<cylinder radius="{nose_diameter / 2:.9f}" length="{nose_length:.9f}"/>',
+           f'<origin xyz="0 0 {nose_length / 2:.9f}"/>', ALUMINIUM)
+    u.fixed("body", "nose", _xyz((0, 0, body_length)))
+    # The bit is the moving link itself (the joint's child) so that it and
+    # the nose are adjacent in the tree and their touching faces are not a
+    # self-collision; it starts a millimetre proud of the nose.
+    u.link("bit", f'<cylinder radius="{bit_diameter / 2:.9f}" length="{bit_length:.9f}"/>',
+           f'<origin xyz="0 0 {bit_length / 2 + 0.001:.9f}"/>', BLACK_STEEL)
+    if stroke is None:
+        u.fixed("nose", "bit", _xyz((0, 0, nose_length)))
+    else:
+        u.joints.append(
+            f'<joint name="shank" type="prismatic"><parent link="nose"/><child link="bit"/>'
+            f'<origin xyz="{_xyz((0, 0, nose_length))}"/><axis xyz="0 0 1"/>'
+            f'<limit lower="0" upper="{stroke:.9f}" effort="50" velocity="0.2"/></joint>'
+        )
+    u.link("tip")
+    u.fixed("bit", "tip", _xyz((0, 0, bit_length + 0.001)), f"{math.pi:.12f} 0 0")
+    return u.text()
 
 
 def _unit(v: Sequence[float]) -> Point3:

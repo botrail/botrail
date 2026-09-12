@@ -84,10 +84,14 @@ impl VecRollout {
         seed: u64,
     ) -> PyResult<Self> {
         if scenes.is_empty() {
-            return Err(PyValueError::new_err("a VecRollout needs at least one scene"));
+            return Err(PyValueError::new_err(
+                "a VecRollout needs at least one scene",
+            ));
         }
         if !(dt.is_finite() && dt > 0.0) {
-            return Err(PyValueError::new_err(format!("dt must be positive, got {dt}")));
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
         }
         let mut options = botrail_scene::rollout::RolloutOptions {
             dt,
@@ -144,7 +148,8 @@ impl VecRollout {
         let spec = ObsSpec::from_json(spec, first).map_err(PyValueError::new_err)?;
         let control = match control {
             Some(json) => Some(
-                Control::from_json(json, first, robot_index, group).map_err(PyValueError::new_err)?,
+                Control::from_json(json, first, robot_index, group)
+                    .map_err(PyValueError::new_err)?,
             ),
             None => None,
         };
@@ -246,7 +251,10 @@ impl VecRollout {
         let results = py
             .allow_threads(|| inner.step_actions(k, actions, &mut obs, &skip))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok((rows(py, obs, n, dim)?, results.into_iter().map(step_tuple).collect()))
+        Ok((
+            rows(py, obs, n, dim)?,
+            results.into_iter().map(step_tuple).collect(),
+        ))
     }
 
     /// Commands every world (`commands` is a flat `N × dof` list),
@@ -284,7 +292,10 @@ impl VecRollout {
         let mut obs = vec![0.0; n * dim];
         let inner = &mut self.inner;
         let results = py.allow_threads(|| inner.step_all(k, commands, &mut obs, &skip));
-        Ok((rows(py, obs, n, dim)?, results.into_iter().map(step_tuple).collect()))
+        Ok((
+            rows(py, obs, n, dim)?,
+            results.into_iter().map(step_tuple).collect(),
+        ))
     }
 
     /// The `(N, dim)` observations as the worlds stand.
@@ -342,7 +353,13 @@ impl VecRollout {
     /// Sets the light world `index`'s colour pictures are lit by (see
     /// `LiveRollout.set_lighting`).
     #[pyo3(signature = (index, light, ambient = 0.35, shadows = false))]
-    fn set_lighting(&mut self, index: usize, light: [f64; 3], ambient: f64, shadows: bool) -> PyResult<()> {
+    fn set_lighting(
+        &mut self,
+        index: usize,
+        light: [f64; 3],
+        ambient: f64,
+        shadows: bool,
+    ) -> PyResult<()> {
         let lighting = botrail_scene::raster::Lighting::new(
             nalgebra::Vector3::new(light[0], light[1], light[2]),
             ambient,
@@ -351,7 +368,9 @@ impl VecRollout {
         if self.inner.set_lighting(index, lighting) {
             Ok(())
         } else {
-            Err(PyValueError::new_err(format!("no live world at index {index}")))
+            Err(PyValueError::new_err(format!(
+                "no live world at index {index}"
+            )))
         }
     }
 
@@ -361,13 +380,17 @@ impl VecRollout {
     fn set_render_decimate(&mut self, index: usize, cell: Option<f64>) -> PyResult<()> {
         if let Some(c) = cell {
             if !(c.is_finite() && c > 0.0) {
-                return Err(PyValueError::new_err("decimate cell must be positive (or None)"));
+                return Err(PyValueError::new_err(
+                    "decimate cell must be positive (or None)",
+                ));
             }
         }
         if self.inner.set_render_decimate(index, cell) {
             Ok(())
         } else {
-            Err(PyValueError::new_err(format!("no live world at index {index}")))
+            Err(PyValueError::new_err(format!(
+                "no live world at index {index}"
+            )))
         }
     }
 
@@ -390,7 +413,12 @@ impl VecRollout {
 }
 
 /// A flat row-major buffer as an `(n, width)` array, moved, not copied.
-fn rows(py: Python<'_>, data: Vec<f64>, n: usize, width: usize) -> PyResult<Bound<'_, PyArray2<f64>>> {
+fn rows(
+    py: Python<'_>,
+    data: Vec<f64>,
+    n: usize,
+    width: usize,
+) -> PyResult<Bound<'_, PyArray2<f64>>> {
     data.into_pyarray(py)
         .reshape([n, width])
         .map_err(|e| PyValueError::new_err(e.to_string()))

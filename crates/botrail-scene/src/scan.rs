@@ -399,7 +399,14 @@ pub fn lidar_scan_live(
         sigma,
         seed: view.noise_seed(),
     });
-    Some(sweep_grid(scene, lidar_ref, state, Some(view.t()), noise, grid))
+    Some(sweep_grid(
+        scene,
+        lidar_ref,
+        state,
+        Some(view.t()),
+        noise,
+        grid,
+    ))
 }
 
 /// The beam loop over one resolved instant, full grid.

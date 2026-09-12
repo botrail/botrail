@@ -142,7 +142,8 @@ const SPIN_QUAT = new THREE.Quaternion();
 
 /** Appends the TCP position to every cut trace whose signal is on at `t`
  * (the trail restarts when the playhead jumps backward) and spins the
- * bound cutter link — a visible strobe, not a model of 18k rpm. */
+ * bound cutter link — a visible strobe, not a model of 18k rpm. A `spin`
+ * effect only turns its link: nothing is drawn. */
 export function updateTraces(
   s: StudioState,
   sample: PlaybackSample,
@@ -152,7 +153,7 @@ export function updateTraces(
   if (playbackRig.traces.size === 0) return;
   const signals = s.timeline?.signals ?? [];
   for (const trace of s.flashes) {
-    if (trace.kind !== "trace") continue;
+    if (trace.kind !== "trace" && trace.kind !== "spin") continue;
     const handle = playbackRig.traces.get(trace.name);
     if (!handle) continue;
     if (t < handle.lastT - 0.05) {
@@ -174,11 +175,12 @@ export function updateTraces(
     const p = poses[tcpIndex].position;
     const n = handle.positions.length;
     const moved =
-      n < 3 ||
+      trace.kind === "trace" &&
+      (n < 3 ||
       (p[0] - handle.positions[n - 3]) ** 2 +
         (p[1] - handle.positions[n - 2]) ** 2 +
         (p[2] - handle.positions[n - 1]) ** 2 >
-        1e-7;
+        1e-7);
     if (moved) {
       handle.positions.push(p[0], p[1], p[2]);
       const geometry = new THREE.BufferGeometry();

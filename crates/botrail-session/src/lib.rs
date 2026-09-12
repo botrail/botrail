@@ -1215,6 +1215,21 @@ pub fn add_spray_cone(
     Ok(())
 }
 
+pub fn add_spin(
+    host: &impl SessionHost,
+    name: &str,
+    signal: &str,
+    robot: &str,
+    link: &str,
+) -> Result<(), botrail_scene::SceneError> {
+    host.with_scene(|scene| scene.add_spin(name, signal, robot, link))?;
+    if host.has_listeners() {
+        let msg = host.with_scene(|scene| wire::effects_message(scene));
+        host.emit(&msg);
+    }
+    Ok(())
+}
+
 pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
     host.with_scene(|scene| scene.upsert_device(device));
     emit_devices(host);

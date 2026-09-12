@@ -225,6 +225,9 @@ pub enum FlashKind {
     /// (`SequenceTimeline::with_trigger_signal`) so it follows what
     /// actually sprayed, not the enable alone.
     Spray,
+    /// The bound link spun about its own Z while the signal is on, and
+    /// nothing drawn (a screwdriver's bit, a nutrunner's socket).
+    Spin,
 }
 
 /// A spray cone's size, meters.
@@ -1387,6 +1390,44 @@ impl Scene {
         Ok(())
     }
 
+    /// Binds a spin effect to `signal`: `link` of `robot` turns about its
+    /// own Z while the signal is on, nothing else drawn — a screwdriver's
+    /// bit running a screw down. Same contract as [`Scene::add_weld_flash`]:
+    /// presentation only, driven by the baked signal, zero effect on the
+    /// cycle; USD export carries nothing for it.
+    pub fn add_spin(
+        &mut self,
+        name: &str,
+        signal: &str,
+        robot: &str,
+        link: &str,
+    ) -> Result<(), SceneError> {
+        let Some(r) = self.robot_index(robot) else {
+            return Err(SceneError::UnknownRobot(robot.to_string()));
+        };
+        if !self.signals.iter().any(|s| s.name == signal)
+            && !self.sensors.iter().any(|s| s.name == signal)
+        {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        if self.robots()[r].model.link_index(link).is_none() {
+            return Err(SceneError::UnknownLink(link.to_string()));
+        }
+        let flash = WeldFlash {
+            name: name.to_string(),
+            signal: signal.to_string(),
+            robot: robot.to_string(),
+            kind: FlashKind::Spin,
+            spin_link: Some(link.to_string()),
+            cone: None,
+        };
+        match self.weld_flashes.iter_mut().find(|f| f.name == name) {
+            Some(slot) => *slot = flash,
+            None => self.weld_flashes.push(flash),
+        }
+        Ok(())
+    }
+
     pub fn weld_flashes(&self) -> &[WeldFlash] {
         &self.weld_flashes
     }
@@ -2208,7 +2249,8 @@ impl Scene {
                 if let Some(claim) = tracked[r].first() {
                     return Err(format!(
                         "policy `{policy}` cannot drive `{}` while it tracks `{}`; untrack first",
-                        self.robots()[r].name, claim.object
+                        self.robots()[r].name,
+                        claim.object
                     ));
                 }
                 Ok(())

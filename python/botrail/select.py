@@ -34,6 +34,8 @@ same column. The keys, and the attribute names that answer them
 | `max_descent_mps`      | an aerial vehicle's descent rate                           | the same                                     |
 | `flight_time_min`      | an aerial vehicle's airborne time per cycle, from the baked timeline (`requirements(timeline=tl)`) | the same |
 | `load_kg`              | parts on a conveyor / an axis; robots standing on a pedestal | `load_kg`, `capacity_kg`, `max_load_kg`, `payload_kg` |
+| `torque_nm`            | a screwdriver's tightening torque: the joint torque on the screws it drives (`bt.assembly.fasten`) | `torque_max_nm`, `max_torque_nm`, `torque_nm` |
+| `screw_length_mm`, `thread_max_mm` (≥) / `thread_min_mm` (≤) | the longest screw, the largest and smallest thread the screwdriver has to take | `screw_length_mm`, `thread_max_mm`, `thread_min_mm` |
 | `di` `do` `ai` `ao` `safe_di` `safe_do` | points assigned to an I/O node                | the node's declared channels                 |
 
 Every requirement is a minimum (`>=`) unless noted. The derivations are
@@ -92,6 +94,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "max_descent_mps": ("max_descent_mps",),
     "flight_time_min": ("flight_time_min",),
     "load_kg": ("load_kg", "capacity_kg", "max_load_kg", "payload_kg"),
+    # A screwdriver's tightening torque and the screws it takes (the
+    # joint's torque lands on the screw lines — `bt.assembly.fasten`).
+    "torque_nm": ("torque_max_nm", "max_torque_nm", "torque_nm"),
+    "screw_length_mm": ("screw_length_mm", "max_screw_length_mm", "screw_length_max_mm"),
+    "thread_max_mm": ("thread_max_mm",),
+    "thread_min_mm": ("thread_min_mm",),
     "output_a": ("output_a", "current_a"),
     # The robot cable a placed controller box needs, arm base to box.
     "cable_m": ("cable_m", "cable_length_m"),
@@ -656,6 +664,10 @@ class _Cell:
         head, _, tail = name.rpartition("/")
         if head in self.robots and tail.startswith("tool"):
             return "tool"
+        # A tool on a tool — a gripper on a bracket (`arm/tool/tool2`).
+        root, *chain = name.split("/")
+        if root in self.robots and chain and all(seg.startswith("tool") for seg in chain):
+            return "tool"
         if head in self.robots and tail == "controller":
             # The controller an arm needs before a cabinet is declared for
             # it: a node, sized from the points on the arm's implicit host.
@@ -736,6 +748,34 @@ class _Cell:
             cable, cable_notes = self._controller(name)
             return reqs + cable, notes + cable_notes
         return self._structure(name, category)
+
+    def _screwdriver(self) -> list[Requirement]:
+        """What the screws in the cell ask of a screwdriver: the joint
+        torque on their lines, the longest of them, the thread range."""
+        screws = [
+            (target, part.get("attributes") or {})
+            for (target, kind), part in self.parts.items()
+            if kind == "obstacle" and (part.get("category") or "") == "fastener"
+        ]
+        reqs: list[Requirement] = []
+        torques = [(t, _number(a.get("torque_nm"))) for t, a in screws]
+        torques = [(t, v) for t, v in torques if v is not None]
+        if torques:
+            t, v = max(torques, key=lambda tv: tv[1])
+            reqs.append(Requirement("torque_nm", _round(v, 3), basis=f"drives {t} at {_fmt(v)} N·m"))
+        lengths = [(t, _number(a.get("length_mm"))) for t, a in screws]
+        lengths = [(t, v) for t, v in lengths if v is not None]
+        if lengths:
+            t, v = max(lengths, key=lambda tv: tv[1])
+            reqs.append(Requirement("screw_length_mm", _round(v, 1), basis=f"{t} is {_fmt(v)} mm long"))
+        threads = [(t, _number(a.get("thread_mm"))) for t, a in screws]
+        threads = [(t, v) for t, v in threads if v is not None]
+        if threads:
+            t, v = max(threads, key=lambda tv: tv[1])
+            reqs.append(Requirement("thread_max_mm", _round(v, 2), basis=f"{t} is M{_fmt(v)}"))
+            t, v = min(threads, key=lambda tv: tv[1])
+            reqs.append(Requirement("thread_min_mm", _round(v, 2), op="<=", basis=f"{t} is M{_fmt(v)}"))
+        return reqs
 
     # ------------------------------------------------------------ lookups
 
@@ -1036,10 +1076,12 @@ class _Cell:
         return self.scene.link_pose(group.base, robot=robot)[0]
 
     def _tool(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:
-        robot = name.rpartition("/")[0]
+        robot = name.split("/")[0]
         grasped = self.grasped_by(robot)
         reqs: list[Requirement] = []
         notes: list[str] = []
+        if category.startswith(("tool.screwdriver", "tool.nutrunner")):
+            reqs += self._screwdriver()
         heaviest, unknown = self._heaviest(grasped)
         if heaviest is not None:
             reqs.append(Requirement("payload_kg", _round(heaviest[1], 3), basis=f"grasps {heaviest[0]} {_fmt(heaviest[1])} kg"))
@@ -1588,7 +1630,7 @@ class _Cell:
 
 
 def _kind_hint(category: str) -> str:
-    if category.startswith(("conveyor", "axis", "vehicle", "machine_tool.door")):
+    if category.startswith(("conveyor", "axis", "vehicle", "machine_tool.door", "feeder")):
         return "device"
     if category.startswith("hmi.button"):
         return "sensor"

@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "examples" / d)
-                for d in ("basics", "export", "legged", "machining", "multi_robot", "vehicles", "welding")]
+                for d in ("assembly", "basics", "export", "legged", "machining", "multi_robot", "vehicles", "welding")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
@@ -30,6 +30,7 @@ import agv_cell_demo  # noqa: E402
 import dual_arm_demo  # noqa: E402
 import legged_patrol_demo  # noqa: E402
 import machine_tending_demo  # noqa: E402
+import cover_bolting_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -335,6 +336,26 @@ def main() -> None:
             time.sleep(2.0)
             page.screenshot(path=OUT / "machine_tending_hand.png")
             print("wrote machine_tending_hand.png")
+            server.stop()
+
+        if want("assembly"):
+            # ---- the cover bolting cell: the screwdriver on a screw, mid-rundown,
+            # the driver's and the presenter's lanes below ------------------------
+            scene, tl, joint, driver, feeder, placement, fastening = cover_bolting_demo.bake()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(3.0)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            span = tl.step_span(f"assemble/{fastening.steps[2]['run']}")
+            t = (span.start + span.end) / 2
+            bands = page.locator(".timeline-bands").bounding_box()
+            page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+            page.evaluate("window.__CAM = {pos: [1.9, -1.6, 1.7], look: [0.55, 0.05, 0.85]}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "assembly.png")
+            print("wrote assembly.png")
             server.stop()
 
         if want("dual_arm"):

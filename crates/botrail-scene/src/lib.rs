@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use motion::{Motion, MotionError, PlannedMotion, Segment};
 
+pub use botrail_collide::ContactWindow;
 use botrail_collide::{Acm, ColliderId, CollisionPair, InterRobotAcm, RobotCollider, RobotQuery};
 // Re-exported: it appears in `Scene::add_obstacle_with_collider`'s public
 // signature, so downstream crates get to name it without a collide dep.
@@ -277,6 +278,20 @@ pub struct AllowedContact {
     pub obstacle: String,
 }
 
+/// A carried object allowed to meet an obstacle while it is attached — the
+/// part being *fitted*: a screw in the hole it is driven into, a cover on
+/// the dowels and the face it is set down on. Unconditional, or only
+/// within a [`ContactWindow`] (the hole's axis and its tolerance), so a
+/// screw off its hole is still a collision. Keyed by names, consulted
+/// whenever the object is attached (checking, planning, `min_clearance`);
+/// toolpath rapids ignore it like every allowance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllowedObjectContact {
+    pub object: String,
+    pub obstacle: String,
+    pub window: Option<ContactWindow>,
+}
+
 /// An obstacle rigidly attached to a robot link — a grasped object. While
 /// attached, the obstacle's world pose is kept in sync with the link
 /// (`link_pose ∘ grasp`), and for collision checking it moves with the robot
@@ -416,6 +431,7 @@ pub struct Scene {
     /// toolpath name and dropped when the path changes.
     toolpath_marks: Vec<(String, Vec<PathMark>)>,
     allowed_contacts: Vec<AllowedContact>,
+    allowed_object_contacts: Vec<AllowedObjectContact>,
     /// Spray applicators by name — the calibrated footprints brushes refer
     /// to. Authoring data, like toolpaths.
     applicators: Vec<(String, coat::Applicator)>,
@@ -468,6 +484,7 @@ impl Scene {
             toolpaths: Vec::new(),
             toolpath_marks: Vec::new(),
             allowed_contacts: Vec::new(),
+            allowed_object_contacts: Vec::new(),
             applicators: Vec::new(),
             brushes: Vec::new(),
             io: iomap::IoMap::default(),
@@ -501,6 +518,7 @@ impl Scene {
             toolpaths: Vec::new(),
             toolpath_marks: Vec::new(),
             allowed_contacts: Vec::new(),
+            allowed_object_contacts: Vec::new(),
             applicators: Vec::new(),
             brushes: Vec::new(),
             io: iomap::IoMap::default(),
@@ -1674,6 +1692,7 @@ impl Scene {
                 allowance.allow(0, contact.link, filtered);
             }
         }
+        self.object_allowance_into(&mut allowance, &attached_map, &map);
         botrail_collide::check_against_obstacles(&queries, &obstacles, &attached, &allowance)
             .into_iter()
             .filter_map(|pair| {
@@ -1796,6 +1815,92 @@ impl Scene {
         self.allowed_contacts = contacts;
     }
 
+    /// Lets the obstacle `object`, while it is carried, meet `obstacle` —
+    /// anywhere, or only inside `window` (see [`AllowedObjectContact`]).
+    /// Re-declaring a pair replaces its window. Both must be obstacles.
+    pub fn allow_object_obstacle_contact(
+        &mut self,
+        object: &str,
+        obstacle: &str,
+        window: Option<ContactWindow>,
+    ) -> Result<(), SceneError> {
+        self.obstacle_index(object)?;
+        self.obstacle_index(obstacle)?;
+        if object == obstacle {
+            return Err(SceneError::BadEffect(format!(
+                "`{object}` cannot be allowed to meet itself"
+            )));
+        }
+        if let Some(w) = &window {
+            if !(w.radius >= 0.0 && w.radius.is_finite() && w.angle >= 0.0 && w.angle.is_finite()) {
+                return Err(SceneError::BadEffect(format!(
+                    "contact window for `{object}` in `{obstacle}`: radius and angle must be finite and non-negative"
+                )));
+            }
+        }
+        let entry = AllowedObjectContact {
+            object: object.to_string(),
+            obstacle: obstacle.to_string(),
+            window,
+        };
+        match self
+            .allowed_object_contacts
+            .iter_mut()
+            .find(|c| c.object == object && c.obstacle == obstacle)
+        {
+            Some(slot) => *slot = entry,
+            None => self.allowed_object_contacts.push(entry),
+        }
+        Ok(())
+    }
+
+    /// Removes an allowed object contact; `false` when it was not present.
+    pub fn disallow_object_obstacle_contact(&mut self, object: &str, obstacle: &str) -> bool {
+        let before = self.allowed_object_contacts.len();
+        self.allowed_object_contacts
+            .retain(|c| !(c.object == object && c.obstacle == obstacle));
+        self.allowed_object_contacts.len() != before
+    }
+
+    pub fn allowed_object_contacts(&self) -> &[AllowedObjectContact] {
+        &self.allowed_object_contacts
+    }
+
+    pub fn set_allowed_object_contacts(&mut self, contacts: Vec<AllowedObjectContact>) {
+        self.allowed_object_contacts = contacts;
+    }
+
+    /// Adds the object allowances to a query's `allowance`: every declared
+    /// pair whose object is among the attached colliders (`attached_map`:
+    /// query index -> obstacle index) and whose obstacle is among the
+    /// queried ones (`obstacle_map`, the same way).
+    fn object_allowance_into(
+        &self,
+        allowance: &mut botrail_collide::ContactAllowance,
+        attached_map: &[usize],
+        obstacle_map: &[usize],
+    ) {
+        for contact in &self.allowed_object_contacts {
+            let Some(object) = self.obstacles.iter().position(|o| o.name == contact.object) else {
+                continue;
+            };
+            let Some(obstacle) = self
+                .obstacles
+                .iter()
+                .position(|o| o.name == contact.obstacle)
+            else {
+                continue;
+            };
+            let (Some(att), Some(obs)) = (
+                attached_map.iter().position(|&m| m == object),
+                obstacle_map.iter().position(|&m| m == obstacle),
+            ) else {
+                continue;
+            };
+            allowance.allow_object(att, obs, contact.window);
+        }
+    }
+
     // ------------------------------------------------- applicators / brushes
 
     /// Declares (or replaces) a spray applicator under `name`. Validated
@@ -1870,9 +1975,15 @@ impl Scene {
     }
 
     /// The allowance re-keyed to the *filtered* obstacle indices of the
-    /// current query (`map`: filtered index -> obstacle index).
-    fn contact_allowance(&self, map: &[usize]) -> botrail_collide::ContactAllowance {
+    /// current query (`map`: filtered index -> obstacle index), plus the
+    /// object allowances of what is attached (`attached_map`, the same way).
+    fn contact_allowance(
+        &self,
+        map: &[usize],
+        attached_map: &[usize],
+    ) -> botrail_collide::ContactAllowance {
         let mut allowance = botrail_collide::ContactAllowance::default();
+        self.object_allowance_into(&mut allowance, attached_map, map);
         for contact in &self.allowed_contacts {
             let Some(orig) = self
                 .obstacles
@@ -1899,7 +2010,7 @@ impl Scene {
             &self.inter_acm,
             &query,
             &attached,
-            &self.contact_allowance(&map),
+            &self.contact_allowance(&map, &attached_map),
         );
         Self::remap_obstacle_ids(pairs, &map, &attached_map)
     }
@@ -1938,7 +2049,7 @@ impl Scene {
         let (query, map) = self.obstacle_query();
         let (attached, attached_map) = self.attached_query();
         let allowance = if honor_allowed_contacts {
-            self.contact_allowance(&map)
+            self.contact_allowance(&map, &attached_map)
         } else {
             botrail_collide::ContactAllowance::default()
         };
@@ -2059,11 +2170,12 @@ impl Scene {
     pub fn min_obstacle_distance(&self) -> Option<f64> {
         let poses = self.all_link_poses();
         let (query, map) = self.obstacle_query();
+        let (attached, attached_map) = self.attached_query();
         botrail_collide::min_robot_obstacle_distance(
             &self.robot_queries(&poses),
             &query,
-            &self.attached_query().0,
-            &self.contact_allowance(&map),
+            &attached,
+            &self.contact_allowance(&map, &attached_map),
         )
     }
 

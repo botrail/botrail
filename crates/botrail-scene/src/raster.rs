@@ -231,7 +231,11 @@ fn mesh_tris(path: &std::path::Path, scale: &Vector3<f64>, cell: Option<f64>) ->
         .indices
         .iter()
         .filter_map(|[a, b, c]| {
-            let v = |i: u32| data.vertices.get(i as usize).map(|p| Point3::new(p[0], p[1], p[2]));
+            let v = |i: u32| {
+                data.vertices
+                    .get(i as usize)
+                    .map(|p| Point3::new(p[0], p[1], p[2]))
+            };
             Some([v(*a)?, v(*b)?, v(*c)?])
         })
         .collect();
@@ -254,16 +258,56 @@ fn tessellate(geometry: &Geometry, cell: Option<f64>) -> Option<Arc<Vec<[Point3<
         Geometry::Box { size } => {
             let (x, y, z) = (size.x / 2.0, size.y / 2.0, size.z / 2.0);
             let p = |sx: f64, sy: f64, sz: f64| Point3::new(sx * x, sy * y, sz * z);
-            let quad = |tris: &mut Vec<[Point3<f64>; 3]>, a: Point3<f64>, b: Point3<f64>, c: Point3<f64>, d: Point3<f64>| {
+            let quad = |tris: &mut Vec<[Point3<f64>; 3]>,
+                        a: Point3<f64>,
+                        b: Point3<f64>,
+                        c: Point3<f64>,
+                        d: Point3<f64>| {
                 tris.push([a, b, c]);
                 tris.push([a, c, d]);
             };
-            quad(&mut tris, p(-1., -1., 1.), p(1., -1., 1.), p(1., 1., 1.), p(-1., 1., 1.)); // +z
-            quad(&mut tris, p(-1., -1., -1.), p(-1., 1., -1.), p(1., 1., -1.), p(1., -1., -1.)); // -z
-            quad(&mut tris, p(1., -1., -1.), p(1., 1., -1.), p(1., 1., 1.), p(1., -1., 1.)); // +x
-            quad(&mut tris, p(-1., -1., -1.), p(-1., -1., 1.), p(-1., 1., 1.), p(-1., 1., -1.)); // -x
-            quad(&mut tris, p(-1., 1., -1.), p(-1., 1., 1.), p(1., 1., 1.), p(1., 1., -1.)); // +y
-            quad(&mut tris, p(-1., -1., -1.), p(1., -1., -1.), p(1., -1., 1.), p(-1., -1., 1.)); // -y
+            quad(
+                &mut tris,
+                p(-1., -1., 1.),
+                p(1., -1., 1.),
+                p(1., 1., 1.),
+                p(-1., 1., 1.),
+            ); // +z
+            quad(
+                &mut tris,
+                p(-1., -1., -1.),
+                p(-1., 1., -1.),
+                p(1., 1., -1.),
+                p(1., -1., -1.),
+            ); // -z
+            quad(
+                &mut tris,
+                p(1., -1., -1.),
+                p(1., 1., -1.),
+                p(1., 1., 1.),
+                p(1., -1., 1.),
+            ); // +x
+            quad(
+                &mut tris,
+                p(-1., -1., -1.),
+                p(-1., -1., 1.),
+                p(-1., 1., 1.),
+                p(-1., 1., -1.),
+            ); // -x
+            quad(
+                &mut tris,
+                p(-1., 1., -1.),
+                p(-1., 1., 1.),
+                p(1., 1., 1.),
+                p(1., 1., -1.),
+            ); // +y
+            quad(
+                &mut tris,
+                p(-1., -1., -1.),
+                p(1., -1., -1.),
+                p(1., -1., 1.),
+                p(-1., -1., 1.),
+            ); // -y
         }
         Geometry::Cylinder { radius, length } => {
             let n = 24usize;
@@ -275,10 +319,26 @@ fn tessellate(geometry: &Geometry, cell: Option<f64>) -> Option<Arc<Vec<[Point3<
             for k in 0..n {
                 let (x0, y0) = ring(k);
                 let (x1, y1) = ring(k + 1);
-                tris.push([Point3::new(x0, y0, -h), Point3::new(x1, y1, -h), Point3::new(x1, y1, h)]);
-                tris.push([Point3::new(x0, y0, -h), Point3::new(x1, y1, h), Point3::new(x0, y0, h)]);
-                tris.push([Point3::new(0.0, 0.0, h), Point3::new(x0, y0, h), Point3::new(x1, y1, h)]);
-                tris.push([Point3::new(0.0, 0.0, -h), Point3::new(x1, y1, -h), Point3::new(x0, y0, -h)]);
+                tris.push([
+                    Point3::new(x0, y0, -h),
+                    Point3::new(x1, y1, -h),
+                    Point3::new(x1, y1, h),
+                ]);
+                tris.push([
+                    Point3::new(x0, y0, -h),
+                    Point3::new(x1, y1, h),
+                    Point3::new(x0, y0, h),
+                ]);
+                tris.push([
+                    Point3::new(0.0, 0.0, h),
+                    Point3::new(x0, y0, h),
+                    Point3::new(x1, y1, h),
+                ]);
+                tris.push([
+                    Point3::new(0.0, 0.0, -h),
+                    Point3::new(x1, y1, -h),
+                    Point3::new(x0, y0, -h),
+                ]);
             }
         }
         Geometry::Sphere { radius } => {
@@ -318,7 +378,13 @@ fn shape_tris(shape: &Shape, cell: Option<f64>) -> Option<Arc<Vec<[Point3<f64>; 
     Some(Arc::new(
         local
             .iter()
-            .map(|t| [shape.origin * t[0], shape.origin * t[1], shape.origin * t[2]])
+            .map(|t| {
+                [
+                    shape.origin * t[0],
+                    shape.origin * t[1],
+                    shape.origin * t[2],
+                ]
+            })
             .collect(),
     ))
 }
@@ -413,10 +479,12 @@ impl RenderScene {
                     }
                     (o.pose, o.color.unwrap_or(OBSTACLE_ALBEDO))
                 }
-                Owner::Link { robot, link } => match link_poses.get(robot).and_then(|p| p.get(link)) {
-                    Some(p) => (*p, body.color.unwrap_or(LINK_ALBEDO)),
-                    None => continue,
-                },
+                Owner::Link { robot, link } => {
+                    match link_poses.get(robot).and_then(|p| p.get(link)) {
+                        Some(p) => (*p, body.color.unwrap_or(LINK_ALBEDO)),
+                        None => continue,
+                    }
+                }
             };
             let albedo8 = [
                 (albedo[0].clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -467,7 +535,11 @@ impl RenderScene {
             (Some(light), Some(albedo), Some(lambert)) => {
                 // The world point a pixel shows, from its depth.
                 let world_point = |u: usize, v: usize, d: f64| -> Point3<f64> {
-                    pose * Point3::new((u as f64 + 0.5 - cx) / fx * d, (cy - (v as f64 + 0.5)) / fy * d, -d)
+                    pose * Point3::new(
+                        (u as f64 + 0.5 - cx) / fx * d,
+                        (cy - (v as f64 + 0.5)) / fy * d,
+                        -d,
+                    )
                 };
                 let shadow = if light.shadows {
                     // The map is fitted to what the picture shows (the
@@ -549,10 +621,19 @@ impl ShadowMap {
         size: usize,
     ) -> ShadowMap {
         let w = light.direction;
-        let up = if w.z.abs() < 0.9 { Vector3::z() } else { Vector3::x() };
+        let up = if w.z.abs() < 0.9 {
+            Vector3::z()
+        } else {
+            Vector3::x()
+        };
         let u = w.cross(&up).normalize();
         let v = w.cross(&u);
-        let (mut min_s, mut max_s, mut min_t, mut max_t) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        let (mut min_s, mut max_s, mut min_t, mut max_t) = (
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        );
         for p in receivers {
             let (s, t) = (p.coords.dot(&u), p.coords.dot(&v));
             min_s = min_s.min(s);
@@ -601,10 +682,30 @@ impl ShadowMap {
         }
         let inv = 1.0 / area;
         let last = self.size as f64 - 1.0;
-        let min_x = s.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).floor().max(0.0) as isize;
-        let max_x = s.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max).ceil().min(last) as isize;
-        let min_y = s.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).floor().max(0.0) as isize;
-        let max_y = s.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).ceil().min(last) as isize;
+        let min_x = s
+            .iter()
+            .map(|p| p.0)
+            .fold(f64::INFINITY, f64::min)
+            .floor()
+            .max(0.0) as isize;
+        let max_x = s
+            .iter()
+            .map(|p| p.0)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil()
+            .min(last) as isize;
+        let min_y = s
+            .iter()
+            .map(|p| p.1)
+            .fold(f64::INFINITY, f64::min)
+            .floor()
+            .max(0.0) as isize;
+        let max_y = s
+            .iter()
+            .map(|p| p.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil()
+            .min(last) as isize;
         for py in min_y..=max_y {
             let yc = py as f64 + 0.5;
             for px in min_x..=max_x {
@@ -676,14 +777,35 @@ fn raster_tri(
         let z = -p.z; // > 0 in front
         s[k] = [cx + fx * p.x / z, cy - fy * p.y / z, 1.0 / z];
     }
-    let area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (s[1][1] - s[0][1]);
+    let area =
+        (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[2][0] - s[0][0]) * (s[1][1] - s[0][1]);
     if area.abs() < 1e-12 {
         return;
     }
-    let min_x = s.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min).floor().max(0.0) as isize;
-    let max_x = s.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max).ceil().min(width as f64 - 1.0) as isize;
-    let min_y = s.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min).floor().max(0.0) as isize;
-    let max_y = s.iter().map(|v| v[1]).fold(f64::NEG_INFINITY, f64::max).ceil().min(height as f64 - 1.0) as isize;
+    let min_x = s
+        .iter()
+        .map(|v| v[0])
+        .fold(f64::INFINITY, f64::min)
+        .floor()
+        .max(0.0) as isize;
+    let max_x = s
+        .iter()
+        .map(|v| v[0])
+        .fold(f64::NEG_INFINITY, f64::max)
+        .ceil()
+        .min(width as f64 - 1.0) as isize;
+    let min_y = s
+        .iter()
+        .map(|v| v[1])
+        .fold(f64::INFINITY, f64::min)
+        .floor()
+        .max(0.0) as isize;
+    let max_y = s
+        .iter()
+        .map(|v| v[1])
+        .fold(f64::NEG_INFINITY, f64::max)
+        .ceil()
+        .min(height as f64 - 1.0) as isize;
     if min_x > max_x || min_y > max_y {
         return;
     }
@@ -779,13 +901,13 @@ mod tests {
         // +Y (image up) → world +z, hence camera +X → world -y. Stated as
         // the basis, not a hand-derived angle (a turn about Y alone would
         // leave the picture lying on its side).
-        let rotation = UnitQuaternion::from_rotation_matrix(&nalgebra::Rotation3::from_matrix_unchecked(
-            nalgebra::Matrix3::from_columns(&[
+        let rotation = UnitQuaternion::from_rotation_matrix(
+            &nalgebra::Rotation3::from_matrix_unchecked(nalgebra::Matrix3::from_columns(&[
                 Vector3::new(0.0, -1.0, 0.0),
                 Vector3::new(0.0, 0.0, 1.0),
                 Vector3::new(-1.0, 0.0, 0.0),
-            ]),
-        ));
+            ])),
+        );
         scene
             .upsert_camera(Camera {
                 name: "cam".into(),
@@ -836,20 +958,28 @@ mod tests {
         // cube pixel has +x, an upper one +y.
         let pts = points(&frame, 60.0);
         let c = pts[24 * 64 + 32];
-        assert!(c[0].abs() < 0.05 && c[1].abs() < 0.05 && (c[2] + 2.0).abs() < 1e-4, "{c:?}");
+        assert!(
+            c[0].abs() < 0.05 && c[1].abs() < 0.05 && (c[2] + 2.0).abs() < 1e-4,
+            "{c:?}"
+        );
         let right = pts[24 * 64 + 40];
         assert!(right[0] > 0.1, "{right:?}");
         let up = pts[16 * 64 + 32];
         assert!(up[1] > 0.1, "{up:?}");
         assert_eq!(pts[0], [0.0, 0.0, 0.0]);
-        assert_eq!(segmentation_ids(&scene), vec![("cube".to_string(), 1), ("far_wall".to_string(), 2)]);
+        assert_eq!(
+            segmentation_ids(&scene),
+            vec![("cube".to_string(), 1), ("far_wall".to_string(), 2)]
+        );
         assert!(view.render(3, RenderGeometry::Visual, 8, 8).is_none());
     }
 
     #[test]
     fn a_shaded_picture_paints_colour_by_light() {
         let mut scene = box_cell();
-        scene.set_obstacle_color("cube", Some([1.0, 0.2, 0.2])).unwrap();
+        scene
+            .set_obstacle_color("cube", Some([1.0, 0.2, 0.2]))
+            .unwrap();
         let live = scene
             .open_rollout(&["hold"], &crate::rollout::RolloutOptions::default(), None)
             .unwrap();
@@ -857,18 +987,27 @@ mod tests {
         // face): full Lambert on the face the camera sees.
         let mut view_live = live;
         view_live.set_lighting(Lighting::new(Vector3::new(-1.0, 0.0, 0.0), 0.2));
-        let frame = view_live.view().render_shaded(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let frame = view_live
+            .view()
+            .render_shaded(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         let rgb = frame.rgb.as_ref().unwrap();
         let at = 3 * (24 * 64 + 32);
         assert_eq!(&rgb[at..at + 3], &[255, 51, 51], "lit red face");
         assert_eq!(&rgb[0..3], &[0, 0, 0], "background is black");
         // Lit from the side: the face only gets the ambient share.
         view_live.set_lighting(Lighting::new(Vector3::new(0.0, 1.0, 0.0), 0.2));
-        let frame = view_live.view().render_shaded(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let frame = view_live
+            .view()
+            .render_shaded(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         let rgb = frame.rgb.as_ref().unwrap();
         assert_eq!(&rgb[at..at + 3], &[51, 10, 10], "ambient only");
         // Depth and ids are the same picture whatever the light.
-        let plain = view_live.view().render(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let plain = view_live
+            .view()
+            .render(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         assert_eq!(plain.depth, frame.depth);
         assert_eq!(plain.id, frame.id);
     }
@@ -876,7 +1015,9 @@ mod tests {
     #[test]
     fn shadows_fall_from_an_off_screen_caster() {
         let mut scene = box_cell();
-        scene.set_obstacle_color("cube", Some([1.0, 0.2, 0.2])).unwrap();
+        scene
+            .set_obstacle_color("cube", Some([1.0, 0.2, 0.2]))
+            .unwrap();
         // The far wall only widens the shadow map; leave it out.
         scene.set_obstacle_visible("far_wall", false).unwrap();
         // An awning above and in front of the cube, out of the camera's
@@ -897,9 +1038,15 @@ mod tests {
             .unwrap();
         let light = Lighting::new(Vector3::new(-1.0, 0.0, 1.0), 0.2);
         live.set_lighting(light.clone());
-        let plain = live.view().render_shaded(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let plain = live
+            .view()
+            .render_shaded(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         live.set_lighting(light.with_shadows(true));
-        let shadowed = live.view().render_shaded(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let shadowed = live
+            .view()
+            .render_shaded(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         let px = |f: &Frame, row: usize, col: usize| -> [u8; 3] {
             let rgb = f.rgb.as_ref().unwrap();
             let at = 3 * (row * 64 + col);
@@ -907,10 +1054,18 @@ mod tests {
         };
         // Lambert cos 45° on the face: 0.2 + 0.8·0.707 of the albedo.
         assert_eq!(px(&plain, 24, 32), [195, 39, 39]);
-        assert_eq!(px(&plain, 13, 32), [195, 39, 39], "no shadow without the map");
+        assert_eq!(
+            px(&plain, 13, 32),
+            [195, 39, 39],
+            "no shadow without the map"
+        );
         assert_eq!(px(&shadowed, 24, 32), [195, 39, 39], "the centre stays lit");
         // Row 13 looks at z ≈ 0.38 on the face: under the awning.
-        assert_eq!(px(&shadowed, 13, 32), [51, 10, 10], "ambient only in the shadow");
+        assert_eq!(
+            px(&shadowed, 13, 32),
+            [51, 10, 10],
+            "ambient only in the shadow"
+        );
         // A pixel is only ever shadowed by something nearer the light,
         // never by its own face: the lit rows are identical in both.
         for row in 20..40 {
@@ -923,14 +1078,19 @@ mod tests {
     #[test]
     fn decimation_cuts_a_dense_mesh_and_leaves_primitives() {
         // A 1 m plane meshed 20 × 20 (800 triangles), as an OBJ file.
-        let dir = std::env::temp_dir().join(format!("botrail-raster-decimate-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("botrail-raster-decimate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plane.obj");
         let n = 20usize;
         let mut obj = String::new();
         for j in 0..=n {
             for i in 0..=n {
-                obj.push_str(&format!("v {} {} 0\n", i as f64 / n as f64, j as f64 / n as f64));
+                obj.push_str(&format!(
+                    "v {} {} 0\n",
+                    i as f64 / n as f64,
+                    j as f64 / n as f64
+                ));
             }
         }
         for j in 0..n {
@@ -951,7 +1111,11 @@ mod tests {
         .unwrap();
         assert_eq!(full.len(), 800);
         let coarse = decimate(&full, 0.5);
-        assert!(!coarse.is_empty() && coarse.len() < 40, "{} triangles at a 0.5 m cell", coarse.len());
+        assert!(
+            !coarse.is_empty() && coarse.len() < 40,
+            "{} triangles at a 0.5 m cell",
+            coarse.len()
+        );
         assert_eq!(decimate(&full, 0.0).len(), 800, "no cell, no cut");
         // Through the rollout: the picture's triangle count follows the
         // world's decimation setting, and the mesh cache keys on it.
@@ -970,16 +1134,31 @@ mod tests {
             .open_rollout(&["hold"], &crate::rollout::RolloutOptions::default(), None)
             .unwrap();
         assert_eq!(live.view().render_triangles(RenderGeometry::Visual), None);
-        live.view().render(0, RenderGeometry::Visual, 16, 12).unwrap();
-        let all = live.view().render_triangles(RenderGeometry::Visual).unwrap();
+        live.view()
+            .render(0, RenderGeometry::Visual, 16, 12)
+            .unwrap();
+        let all = live
+            .view()
+            .render_triangles(RenderGeometry::Visual)
+            .unwrap();
         assert_eq!(all, 800 + 2 * 12, "the plane and two boxes");
         live.set_render_decimate(Some(0.5));
-        live.view().render(0, RenderGeometry::Visual, 16, 12).unwrap();
-        let cut = live.view().render_triangles(RenderGeometry::Visual).unwrap();
+        live.view()
+            .render(0, RenderGeometry::Visual, 16, 12)
+            .unwrap();
+        let cut = live
+            .view()
+            .render_triangles(RenderGeometry::Visual)
+            .unwrap();
         assert_eq!(cut, coarse.len() + 2 * 12, "boxes are not decimated");
         live.set_render_decimate(None);
-        live.view().render(0, RenderGeometry::Visual, 16, 12).unwrap();
-        assert_eq!(live.view().render_triangles(RenderGeometry::Visual), Some(all));
+        live.view()
+            .render(0, RenderGeometry::Visual, 16, 12)
+            .unwrap();
+        assert_eq!(
+            live.view().render_triangles(RenderGeometry::Visual),
+            Some(all)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1002,15 +1181,24 @@ mod tests {
         let live = scene
             .open_rollout(&["hold"], &crate::rollout::RolloutOptions::default(), None)
             .unwrap();
-        let frame = live.view().render(0, RenderGeometry::Visual, 64, 48).unwrap();
+        let frame = live
+            .view()
+            .render(0, RenderGeometry::Visual, 64, 48)
+            .unwrap();
         let center = frame.depth[24 * 64 + 32];
-        assert!((center - 0.45).abs() < 1e-4, "back face from inside: {center}");
+        assert!(
+            (center - 0.45).abs() < 1e-4,
+            "back face from inside: {center}"
+        );
         assert_eq!(frame.id[24 * 64 + 32], 3);
         // The top row looks up at the slab's ceiling (z = 0.1): with
         // fx = fy = 32 / tan 30° the row-0 ray climbs 23.5 / fx per metre,
         // meeting the ceiling 0.236 m out — inside the near-clipped face.
         let top = frame.depth[32];
-        assert!((top - 0.236).abs() < 0.01, "ceiling through the near plane: {top}");
+        assert!(
+            (top - 0.236).abs() < 0.01,
+            "ceiling through the near plane: {top}"
+        );
         assert_eq!(frame.id[32], 3);
         // Hidden obstacles vanish from the visual picture but stay in the
         // collision one; disabled ones the other way round.
@@ -1019,14 +1207,44 @@ mod tests {
         let live = scene
             .open_rollout(&["hold"], &crate::rollout::RolloutOptions::default(), None)
             .unwrap();
-        assert_eq!(live.view().render(0, RenderGeometry::Visual, 64, 48).unwrap().depth[24 * 64 + 32], 0.0);
-        assert!((live.view().render(0, RenderGeometry::Collision, 64, 48).unwrap().depth[24 * 64 + 32] - 2.0).abs() < 1e-4);
+        assert_eq!(
+            live.view()
+                .render(0, RenderGeometry::Visual, 64, 48)
+                .unwrap()
+                .depth[24 * 64 + 32],
+            0.0
+        );
+        assert!(
+            (live
+                .view()
+                .render(0, RenderGeometry::Collision, 64, 48)
+                .unwrap()
+                .depth[24 * 64 + 32]
+                - 2.0)
+                .abs()
+                < 1e-4
+        );
         let mut scene = box_cell();
         scene.set_obstacle_enabled("cube", false).unwrap();
         let live = scene
             .open_rollout(&["hold"], &crate::rollout::RolloutOptions::default(), None)
             .unwrap();
-        assert_eq!(live.view().render(0, RenderGeometry::Collision, 64, 48).unwrap().depth[24 * 64 + 32], 0.0);
-        assert!((live.view().render(0, RenderGeometry::Visual, 64, 48).unwrap().depth[24 * 64 + 32] - 2.0).abs() < 1e-4);
+        assert_eq!(
+            live.view()
+                .render(0, RenderGeometry::Collision, 64, 48)
+                .unwrap()
+                .depth[24 * 64 + 32],
+            0.0
+        );
+        assert!(
+            (live
+                .view()
+                .render(0, RenderGeometry::Visual, 64, 48)
+                .unwrap()
+                .depth[24 * 64 + 32]
+                - 2.0)
+                .abs()
+                < 1e-4
+        );
     }
 }

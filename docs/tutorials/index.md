@@ -18,6 +18,7 @@ primitive-geometry arm straight from the checkout, with no downloads at all.
 | [Parameter sweeps](parameter-sweep.md) | The cell as a function of its layout: `bt.sweep` tables it, `bt.optimize` searches it | none |
 | [Export and replay USD](replay-usd.md) | Baking animations for usdview/Omniverse/Blender, and playing them back | Franka |
 | [Hand over the cell](hand-over.md) | The whole document set — layout sheet, BOM, I/O list, program, USD, report — from one script | none |
+| [Bolt a cover down](assembly.md) | A bolted joint as data, the screwdriver's program beside the arm's, the tightening sheet, the interlocks and the FAT rows in the hand-over set | UR5e, RG6, stand and control box from the catalog; OnRobot dual tooling references |
 
 If you haven't yet, do the [Getting started](../getting-started/installation.md)
 pages first — they introduce the vocabulary (scenes, motions, sequences,

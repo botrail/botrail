@@ -11,6 +11,7 @@ use botrail_traj::JointTrajectory;
 use nalgebra::Isometry3;
 use thiserror::Error;
 
+use crate::rl::PolicyDriver;
 use crate::seq::{
     vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
     Step,
@@ -18,7 +19,6 @@ use crate::seq::{
 use crate::Scene;
 use botrail_collide::ObstacleCollider;
 use botrail_physics::PhysicsBackend;
-use crate::rl::PolicyDriver;
 use nalgebra::Vector3;
 
 #[derive(Debug, Error)]
@@ -1249,7 +1249,8 @@ impl Scene {
         options: &RolloutOptions,
         backend: Option<Box<dyn PhysicsBackend>>,
     ) -> Result<SequenceTimeline, SeqError> {
-        self.prepare_rollout(names, options, backend, Vec::new())?.run()
+        self.prepare_rollout(names, options, backend, Vec::new())?
+            .run()
     }
 
     /// [`simulate_sequences_with`](Self::simulate_sequences_with) with
@@ -1265,7 +1266,8 @@ impl Scene {
         backend: Option<Box<dyn PhysicsBackend>>,
         policies: Vec<(String, Box<dyn PolicyDriver>)>,
     ) -> Result<SequenceTimeline, SeqError> {
-        self.prepare_rollout(names, options, backend, policies)?.run()
+        self.prepare_rollout(names, options, backend, policies)?
+            .run()
     }
 
     /// Opens the rollout [`simulate_sequences_with`](Self::simulate_sequences_with)
@@ -1366,12 +1368,14 @@ impl Scene {
                 }
             })?;
             let control = match driver.control() {
-                Some(json) => Some(serde_json::from_str::<crate::rl::ControlSpec>(json).map_err(
-                    |e| SeqError::Validation {
-                        step: None,
-                        message: format!("policy `{name}`: control spec: {e}"),
-                    },
-                )?),
+                Some(json) => Some(
+                    serde_json::from_str::<crate::rl::ControlSpec>(json).map_err(|e| {
+                        SeqError::Validation {
+                            step: None,
+                            message: format!("policy `{name}`: control spec: {e}"),
+                        }
+                    })?,
+                ),
                 None => None,
             };
             resolved.push((name, driver, spec, control));
@@ -1888,8 +1892,7 @@ impl<'a> WorldView<'a> {
     pub fn joint_velocities(&self, robot: usize) -> Option<Vec<f64>> {
         let dt = self.0.options.dt;
         self.0.robots.get(robot).map(|rt| {
-            rt.q
-                .iter()
+            rt.q.iter()
                 .zip(&rt.q_prev)
                 .map(|(now, before)| (now - before) / dt)
                 .collect()
@@ -2022,8 +2025,9 @@ impl<'a> WorldView<'a> {
     ) -> Option<crate::raster::Frame> {
         let cam = self.0.world.cameras().get(camera)?;
         let pose = self.camera_pose(camera)?;
-        let scene = self.0.render_cache[geometry.index()]
-            .get_or_init(|| crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate));
+        let scene = self.0.render_cache[geometry.index()].get_or_init(|| {
+            crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate)
+        });
         Some(scene.render(self, cam, &pose, width.max(1), height.max(1), None))
     }
 
@@ -2038,9 +2042,17 @@ impl<'a> WorldView<'a> {
     ) -> Option<crate::raster::Frame> {
         let cam = self.0.world.cameras().get(camera)?;
         let pose = self.camera_pose(camera)?;
-        let scene = self.0.render_cache[geometry.index()]
-            .get_or_init(|| crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate));
-        Some(scene.render(self, cam, &pose, width.max(1), height.max(1), Some(&self.0.lighting)))
+        let scene = self.0.render_cache[geometry.index()].get_or_init(|| {
+            crate::raster::RenderScene::build(&self.0.world, geometry, self.0.render_decimate)
+        });
+        Some(scene.render(
+            self,
+            cam,
+            &pose,
+            width.max(1),
+            height.max(1),
+            Some(&self.0.lighting),
+        ))
     }
 
     /// Triangles the pictures of this world are drawn from, per
@@ -2177,7 +2189,9 @@ impl LiveRollout {
     /// (`true` for the joint controls); a failed step holds.
     pub fn act(&mut self, action: &[f64]) -> Result<bool, SeqError> {
         let Some((control, state)) = self.control.as_mut() else {
-            return Err(self.inner.live_err("no control bound: call set_control first".into()));
+            return Err(self
+                .inner
+                .live_err("no control bound: call set_control first".into()));
         };
         let (command, converged) = control
             .apply(state, WorldView(&self.inner), action)
@@ -2333,7 +2347,11 @@ impl Rollout {
         if let Some(bad) = target.iter().find(|v| !v.is_finite()) {
             return Err(self.live_err(format!("joint target {bad} is not finite")));
         }
-        let Some(active) = self.robots[robot].active.iter_mut().find(|a| a.is_external()) else {
+        let Some(active) = self.robots[robot]
+            .active
+            .iter_mut()
+            .find(|a| a.is_external())
+        else {
             return Err(self.live_err(format!(
                 "robot `{}` is not driven; call drive first",
                 model.name
@@ -3767,8 +3785,8 @@ impl Rollout {
             let (Some((ra, a)), Some((rb, b))) = (name_of(pair.a), name_of(pair.b)) else {
                 continue;
             };
-            let involves_driven = ra.is_some_and(|r| driven.contains(&r))
-                || rb.is_some_and(|r| driven.contains(&r));
+            let involves_driven =
+                ra.is_some_and(|r| driven.contains(&r)) || rb.is_some_and(|r| driven.contains(&r));
             if involves_driven {
                 out.push((a, b));
             }
@@ -16940,7 +16958,10 @@ mod live_tests {
         }
         let tl = live.finish();
         assert_eq!(tl.duration, batch.duration);
-        assert_eq!(tl.robots[0].trajectory.times, batch.robots[0].trajectory.times);
+        assert_eq!(
+            tl.robots[0].trajectory.times,
+            batch.robots[0].trajectory.times
+        );
         assert_eq!(
             tl.robots[0].trajectory.positions,
             batch.robots[0].trajectory.positions
@@ -16966,15 +16987,26 @@ mod live_tests {
             live.tick().unwrap();
             ticks += 1;
             let q = live.joint_positions(0).unwrap().to_vec();
-            assert!((q[0] - prev[0]).abs() <= 2.0 * dt + 1e-12, "pan step {}", q[0] - prev[0]);
-            assert!((q[2] - prev[2]).abs() <= 2.5 * dt + 1e-12, "elbow step {}", q[2] - prev[2]);
+            assert!(
+                (q[0] - prev[0]).abs() <= 2.0 * dt + 1e-12,
+                "pan step {}",
+                q[0] - prev[0]
+            );
+            assert!(
+                (q[2] - prev[2]).abs() <= 2.5 * dt + 1e-12,
+                "elbow step {}",
+                q[2] - prev[2]
+            );
             let v = live.joint_velocities(0).unwrap();
             assert!((v[0] - (q[0] - prev[0]) / dt).abs() < 1e-9);
             prev = q;
         }
         // 1 rad at 2 rad/s takes 0.5 s = 50 ticks; well converged by 200.
         let q = live.joint_positions(0).unwrap();
-        assert!((q[0] - 1.0).abs() < 1e-9 && (q[2] + 1.0).abs() < 1e-9, "q = {q:?}");
+        assert!(
+            (q[0] - 1.0).abs() < 1e-9 && (q[2] + 1.0).abs() < 1e-9,
+            "q = {q:?}"
+        );
         // Retarget: the drive follows the new command from where it stands.
         target[0] = 0.5;
         live.command(0, &target).unwrap();
@@ -17113,7 +17145,10 @@ mod live_tests {
         let touching = live.contacts();
         assert_eq!(touching.len(), 1, "{touching:?}");
         let pair = (touching[0].a.as_str(), touching[0].b.as_str());
-        assert!(pair == ("floor", "part") || pair == ("part", "floor"), "{pair:?}");
+        assert!(
+            pair == ("floor", "part") || pair == ("part", "floor"),
+            "{pair:?}"
+        );
         assert!(live.obstacle_velocity("part").unwrap().linear.norm() < 1e-3);
         assert_eq!(live.current_steps(), vec![("settle".to_string(), None)]);
         assert!(live.signal("nothing").is_none());
@@ -17249,7 +17284,13 @@ mod policy_tests {
         assert!(tl.robots[0].trajectory.sample(tl.duration)[0].abs() < 1e-6);
         // Baked tick by tick during the policy: a sample every scan.
         let times = &tl.robots[0].trajectory.times;
-        assert!(times.iter().filter(|t| **t <= reach_span.end + 1e-9).count() >= 50);
+        assert!(
+            times
+                .iter()
+                .filter(|t| **t <= reach_span.end + 1e-9)
+                .count()
+                >= 50
+        );
     }
 
     #[test]
@@ -17263,7 +17304,10 @@ mod policy_tests {
             .simulate_sequences_driven(&["cycle"], &options, None, reach(0.7))
             .unwrap();
         assert_eq!(a.duration, b.duration);
-        assert_eq!(a.robots[0].trajectory.positions, b.robots[0].trajectory.positions);
+        assert_eq!(
+            a.robots[0].trajectory.positions,
+            b.robots[0].trajectory.positions
+        );
     }
 
     #[test]
@@ -17287,7 +17331,10 @@ mod policy_tests {
         let scene = cell(20.0, 1.0);
         let options = RolloutOptions::default();
         let err = scene.simulate_sequences(&["cycle"], &options).unwrap_err();
-        assert!(err.to_string().contains("policy `reach` is not registered"), "{err}");
+        assert!(
+            err.to_string().contains("policy `reach` is not registered"),
+            "{err}"
+        );
         let err = scene
             .open_rollout(&["cycle"], &options, None)
             .err()
@@ -17304,7 +17351,12 @@ mod policy_tests {
             }
         }
         let err = scene
-            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Blind))])
+            .simulate_sequences_driven(
+                &["cycle"],
+                &options,
+                None,
+                vec![("reach".into(), Box::new(Blind))],
+            )
             .unwrap_err();
         assert!(err.to_string().contains("unknown obstacle"), "{err}");
     }
@@ -17327,10 +17379,18 @@ mod policy_tests {
             }
         }
         let err = scene
-            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Fold))])
+            .simulate_sequences_driven(
+                &["cycle"],
+                &options,
+                None,
+                vec![("reach".into(), Box::new(Fold))],
+            )
             .unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("policy `reach` drove") && text.contains("floor"), "{text}");
+        assert!(
+            text.contains("policy `reach` drove") && text.contains("floor"),
+            "{text}"
+        );
         // A driver's own error is the bake's error, named.
         struct Broken;
         impl PolicyDriver for Broken {
@@ -17342,9 +17402,17 @@ mod policy_tests {
             }
         }
         let err = scene
-            .simulate_sequences_driven(&["cycle"], &options, None, vec![("reach".into(), Box::new(Broken))])
+            .simulate_sequences_driven(
+                &["cycle"],
+                &options,
+                None,
+                vec![("reach".into(), Box::new(Broken))],
+            )
             .unwrap_err();
-        assert!(err.to_string().contains("policy `reach`: no model loaded"), "{err}");
+        assert!(
+            err.to_string().contains("policy `reach`: no model loaded"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -17362,7 +17430,9 @@ mod policy_tests {
         assert!(json.contains("\"type\":\"policy\""), "{json}");
         let back: crate::wire::ActionMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
-        assert!(matches!(action_from_msg(&back), Action::Policy { policy, hz, .. } if policy == "pick" && hz == 20.0));
+        assert!(
+            matches!(action_from_msg(&back), Action::Policy { policy, hz, .. } if policy == "pick" && hz == 20.0)
+        );
         // Validation: rate and duration must be positive, the group known.
         let mut scene = cell(0.0, 1.0);
         let err = scene

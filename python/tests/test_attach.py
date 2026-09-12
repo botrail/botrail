@@ -80,3 +80,54 @@ def test_attach_errors(scene: bt.Scene) -> None:
     with pytest.raises(ValueError):
         scene.detach("nope")
     scene.detach("held")
+
+
+def test_allowed_object_contact_admits_a_carried_part_within_its_window(scene: bt.Scene) -> None:
+    """A carried part meeting what it is fitted into is not a collision
+    once declared — anywhere, or only inside a window on the mate's axis;
+    the clearance measure skips the pair the same way, and the allowance
+    survives a project round trip and the Python export."""
+    held_at = _held_position(scene)
+    scene.add_box("held", (0.04, 0.04, 0.04), held_at)
+    scene.attach("held")
+    scene.add_box("wall", (0.04, 0.04, 0.04), (held_at[0], held_at[1], held_at[2] + 0.03))
+    assert scene.in_collision()
+    # Anywhere.
+    scene.allow_object_obstacle_contact("held", "wall")
+    assert not scene.in_collision()
+    assert scene.min_obstacle_distance() is None or scene.min_obstacle_distance() > 0.0
+    assert scene.disallow_object_obstacle_contact("held", "wall") is None and scene.in_collision()
+    with pytest.raises(ValueError):
+        scene.disallow_object_obstacle_contact("held", "wall")
+    # Only on the wall's axis through the held box's origin: admitted...
+    axis = ((held_at[0], held_at[1], held_at[2] + 0.03), (0.0, 0.0, 1.0), 0.001, 0.02)
+    scene.allow_object_obstacle_contact("held", "wall", window=axis)
+    assert not scene.in_collision()
+    # ...and 2 mm off it, not.
+    off = ((held_at[0] + 0.002, held_at[1], held_at[2] + 0.03), (0.0, 0.0, 1.0), 0.001, 0.02)
+    scene.allow_object_obstacle_contact("held", "wall", window=off)
+    assert scene.in_collision()
+    names = {n for pair in scene.check_collisions() for _, n in pair}
+    assert {"held", "wall"} <= names
+    with pytest.raises(ValueError):
+        scene.allow_object_obstacle_contact("held", "held")
+    with pytest.raises(ValueError):
+        scene.allow_object_obstacle_contact("held", "wall", window=(held_at, (0.0, 0.0, 0.0), 0.001, 0.02))
+    # The declaration is the scene's: it comes back from the project file
+    # and is written by the Python export.
+    scene.allow_object_obstacle_contact("held", "wall", window=axis)
+    text = scene.generate_python()
+    assert 'scene.allow_object_obstacle_contact("held", "wall", window=(' in text
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "cell.botrail"
+        scene.save_project(path)
+        saved = json.loads(path.read_text())
+        assert saved["allowed_object_contacts"][0]["window"]["radius"] == 0.001
+        back = bt.Scene.load_project(path)
+    assert not back.in_collision()
+    back.disallow_object_obstacle_contact("held", "wall")
+    assert back.in_collision()

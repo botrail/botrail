@@ -30,6 +30,30 @@ checked against the environment, excused against its `touch_links`.
 In sequences the same pair exists as actions: `bt.seq.attach(...)` /
 `bt.seq.detach(...)`.
 
+### A carried part that is meant to meet something
+
+A grasped object collides with the environment as part of the robot —
+which is right until the object is being *fitted*: a cover set down on
+its housing, a screw driven into its hole. `allow_object_obstacle_contact`
+declares that contact intended, for the pair, while the object is
+attached:
+
+```python
+scene.allow_object_obstacle_contact("cover", "housing")                 # anywhere
+scene.allow_object_obstacle_contact("screw0", "cover", window=(         # only in the hole
+    hole_position, hole_axis, 0.0002, math.radians(1.0)))
+```
+
+Without `window` the pair may meet anywhere. With one — a point, an
+axis, a radius and an angle — only while the carried object's *origin*
+lies within the radius of that axis and its own +Z within the angle of
+it, so a screw 2 mm off its hole is still the collision it is. The
+allowance is the scene's (saved with the project, written by the Python
+export), it applies to checking, planning and `min_clearance`, and
+toolpath rapids ignore it like every allowance. `bt.assembly.place` and
+`bt.assembly.fasten` declare these for a fit and a fastening; see
+[Assembly and fastening](assembly.md#fitting-is-a-contact-the-check-knows-about).
+
 ## Track — conveyor tracking
 
 ```python

@@ -20,23 +20,50 @@ fn cell() -> Scene {
     let mut scene = Scene::new(Arc::new(
         botrail_model::RobotModel::from_urdf_str(ARM6).unwrap(),
     ));
-    scene.set_joint_positions(vec![0.0, 0.6, 0.8, 0.0, 0.5, 0.0]).unwrap();
     scene
-        .add_obstacle("floor", Geometry::Box { size: Vector3::new(3.0, 3.0, 0.1) }, Isometry3::translation(0.0, 0.0, -0.06))
+        .set_joint_positions(vec![0.0, 0.6, 0.8, 0.0, 0.5, 0.0])
         .unwrap();
     scene
-        .add_obstacle("table", Geometry::Box { size: Vector3::new(0.6, 0.6, 0.1) }, Isometry3::translation(0.55, 0.0, 0.05))
+        .add_obstacle(
+            "floor",
+            Geometry::Box {
+                size: Vector3::new(3.0, 3.0, 0.1),
+            },
+            Isometry3::translation(0.0, 0.0, -0.06),
+        )
+        .unwrap();
+    scene
+        .add_obstacle(
+            "table",
+            Geometry::Box {
+                size: Vector3::new(0.6, 0.6, 0.1),
+            },
+            Isometry3::translation(0.55, 0.0, 0.05),
+        )
         .unwrap();
     for i in 0..4 {
         let name = format!("part{i}");
         scene
-            .add_obstacle(&name, Geometry::Box { size: Vector3::new(0.05, 0.05, 0.05) }, Isometry3::translation(0.45 + 0.07 * i as f64, 0.2, 0.135))
+            .add_obstacle(
+                &name,
+                Geometry::Box {
+                    size: Vector3::new(0.05, 0.05, 0.05),
+                },
+                Isometry3::translation(0.45 + 0.07 * i as f64, 0.2, 0.135),
+            )
             .unwrap();
-        scene.set_obstacle_physics(&name, Some(BodyProps::dynamic())).unwrap();
+        scene
+            .set_obstacle_physics(&name, Some(BodyProps::dynamic()))
+            .unwrap();
     }
     scene.upsert_sequence(Sequence {
         name: "run".into(),
-        steps: vec![Step { name: "wait".into(), actions: vec![], transition: Condition::Elapsed { seconds: 60.0 }, select: Vec::new() }],
+        steps: vec![Step {
+            name: "wait".into(),
+            actions: vec![],
+            transition: Condition::Elapsed { seconds: 60.0 },
+            select: Vec::new(),
+        }],
     });
     scene
 }
@@ -53,16 +80,31 @@ fn bare_world() -> Box<dyn PhysicsBackend> {
             kind,
             pose,
             parts: vec![(parry3d_f64::math::Pose::identity(), cuboid(half))],
-            props: BodyProps { kind, ..BodyProps::default() },
+            props: BodyProps {
+                kind,
+                ..BodyProps::default()
+            },
             group: 0,
         });
     };
-    body(BodyKind::Static, Isometry3::translation(0.0, 0.0, -0.5), 0.5);
+    body(
+        BodyKind::Static,
+        Isometry3::translation(0.0, 0.0, -0.5),
+        0.5,
+    );
     for i in 0..8 {
-        body(BodyKind::Kinematic, Isometry3::translation(0.3 * i as f64, 0.5, 0.2), 0.05);
+        body(
+            BodyKind::Kinematic,
+            Isometry3::translation(0.3 * i as f64, 0.5, 0.2),
+            0.05,
+        );
     }
     for i in 0..4 {
-        body(BodyKind::Dynamic, Isometry3::translation(0.1 * i as f64, 0.0, 0.3 + 0.12 * i as f64), 0.025);
+        body(
+            BodyKind::Dynamic,
+            Isometry3::translation(0.1 * i as f64, 0.0, 0.3 + 0.12 * i as f64),
+            0.025,
+        );
     }
     let mut backend = rapier().unwrap();
     backend.reset(&desc).unwrap();
@@ -77,11 +119,18 @@ fn time<F: FnMut()>(label: &str, n: usize, ticks: usize, mut f: F) {
         f();
     }
     let per = t0.elapsed().as_secs_f64() / reps as f64;
-    println!("{label:40} N={n:3}: {:.2} ms per {ticks} ticks -> {:.0} world-ticks/s", per * 1e3, (n * ticks) as f64 / per);
+    println!(
+        "{label:40} N={n:3}: {:.2} ms per {ticks} ticks -> {:.0} world-ticks/s",
+        per * 1e3,
+        (n * ticks) as f64 / per
+    );
 }
 
 fn main() {
-    let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
+    let n: usize = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
     let threads = rayon::current_num_threads();
     println!("rayon threads = {threads}");
 
@@ -98,7 +147,10 @@ fn main() {
     // (b) live rollouts, undriven.
     let scenes: Vec<Scene> = (0..n).map(|_| cell()).collect();
     let options = RolloutOptions::default();
-    let mut lives: Vec<_> = scenes.iter().map(|s| s.open_rollout(&["run"], &options, rapier()).unwrap()).collect();
+    let mut lives: Vec<_> = scenes
+        .iter()
+        .map(|s| s.open_rollout(&["run"], &options, rapier()).unwrap())
+        .collect();
     time("live rollout, undriven (5 ticks)", n, 5, || {
         lives.par_iter_mut().for_each(|l| {
             for _ in 0..5 {
@@ -108,7 +160,10 @@ fn main() {
     });
 
     // (c) live rollouts, driven (safety read every tick).
-    let mut lives: Vec<_> = scenes.iter().map(|s| s.open_rollout(&["run"], &options, rapier()).unwrap()).collect();
+    let mut lives: Vec<_> = scenes
+        .iter()
+        .map(|s| s.open_rollout(&["run"], &options, rapier()).unwrap())
+        .collect();
     for l in &mut lives {
         l.drive(0, None, None).unwrap();
     }
@@ -121,7 +176,10 @@ fn main() {
     });
 
     // (d) kinematic only, undriven — the rollout without an engine.
-    let mut lives: Vec<_> = scenes.iter().map(|s| s.open_rollout(&["run"], &options, None).unwrap()).collect();
+    let mut lives: Vec<_> = scenes
+        .iter()
+        .map(|s| s.open_rollout(&["run"], &options, None).unwrap())
+        .collect();
     time("live rollout, no physics (5 ticks)", n, 5, || {
         lives.par_iter_mut().for_each(|l| {
             for _ in 0..5 {

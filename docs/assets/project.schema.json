@@ -13,6 +13,13 @@
         "$ref": "#/$defs/AllowedContactMsg"
       }
     },
+    "allowed_object_contacts": {
+      "description": "Carried-object contact exemptions — a part allowed to meet what it\nis fitted into (absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AllowedObjectContactMsg"
+      }
+    },
     "applicators": {
       "description": "Spray applicators by name (absent in older files).",
       "type": "array",
@@ -490,6 +497,32 @@
       "required": [
         "robot",
         "link",
+        "obstacle"
+      ]
+    },
+    "AllowedObjectContactMsg": {
+      "description": "One [`crate::AllowedObjectContact`] by names, with its window if any.",
+      "type": "object",
+      "properties": {
+        "object": {
+          "type": "string"
+        },
+        "obstacle": {
+          "type": "string"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContactWindowMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "object",
         "obstacle"
       ]
     },
@@ -1244,6 +1277,44 @@
         "nc"
       ]
     },
+    "ContactWindowMsg": {
+      "description": "A [`crate::ContactWindow`]: the line the carried object's origin must\nlie within `radius` of (through `point`, along `axis`, metres) and the\n`angle` (radians) its +Z may lean from that axis.",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "type": "number",
+          "format": "double"
+        },
+        "axis": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "point": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "radius": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "point",
+        "axis",
+        "radius",
+        "angle"
+      ]
+    },
     "DeclRole": {
       "oneOf": [
         {
@@ -1804,11 +1875,20 @@
       ]
     },
     "FlashKindMsg": {
-      "type": "string",
-      "enum": [
-        "flash",
-        "trace",
-        "spray"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "flash",
+            "trace",
+            "spray"
+          ]
+        },
+        {
+          "description": "The bound link spun while the signal is on, nothing drawn.",
+          "type": "string",
+          "const": "spin"
+        }
       ]
     },
     "FlashMsg": {
