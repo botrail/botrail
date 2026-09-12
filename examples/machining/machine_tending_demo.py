@@ -3,38 +3,31 @@
 The cell in the photograph every machine-tool builder prints: a compact
 vertical machining centre with a robot at its side door, swapping the
 finished part in the vise for a blank between cycles. Here it is built
-from products and public figures rather than a CAD file — a MELFA ASSISTA
-RV-5AS-D on a catalog robot stand, in front of a `bt.parts.machine_tool`
+from products and public figures rather than a CAD file — a Universal Robots
+UR12e on a catalog robot stand, in front of a `bt.parts.machine_tool`
 that stands the FANUC ROBODRILL α-D21MiB5 Plus of the public catalogue
 as the *envelopes* a tending cell verifies against
 (design/design-machine-tending.md §3): the side-door opening and its
 sill, the table at its exchange position, the spindle head retracted over
 it, the walls, the door leaf, the operator panel and its buttons.
 
-The hand is the end-effector of the other photograph: one bracket
-carrying a 2F-85 gripper for the workpiece, a pin for the buttons and a
-fork for the door handle, and the robot *switches* between them by
-turning its wrist so the right one faces the job. The bracket is a
-catalog product (`botrail/hand/mph3`, whose URDF is generated from a
-`bt.tools` layout), ordered like the arm and the gripper. Each tool is a
-tip frame the teach aims at (`link=`): the pin presses square into a cap
-with the fingers left open, the fork takes the handle bar between its
-prongs and the door goes wherever the fork goes.
+The UR12e carries a catalog Robotiq Hand-E with its ES-077 coupling.
+It grasps both the workpiece and the door handle directly. Three Robotiq
+Button Activator references stay on the control panel; their moving feet
+physically enter the button zones. This follows the manufacturer's Machine
+Tending Solution architecture. It is a simulation reference, not a complete
+qualified Robotiq installation: pneumatic channels, status-light sensing,
+controller configuration, loads and installation fit require commissioning.
 
-The machine has no robot interface — the retrofit. The robot presses
-UNCLAMP with the pin, hooks the handle with the fork and *slides the door
-open* (the leaf rides the fork through a straight-line move), unloads and
-loads with the gripper, presses CLAMP, slides the door shut and presses
-CYCLE START — each press a 2.6 mm push into a 22 mm button whose zone
-sensor is the machine's input. The machine's side is a *program of its
-own* (`bt.tending.manual`), scanned beside the robot's: it runs its cycle
-on the start button and ignores a start pressed with the door open, the
-way a guard interlock does. Two programs, scanned together.
+The machine has no robot interface. Panel actuators press UNCLAMP, CLAMP
+and CYCLE START; the arm opens the door, swaps the parts, and closes it.
+The machine program (`bt.tending.manual`) scans alongside the arm's program
+and refuses CYCLE START unless both doors are confirmed shut and no E-stop.
 
 What the bake is for: the door leaf, the clamp and every button are lanes
 on the chart, in the order the cycle puts them; the press of each button
 is checked against its neighbours — a lane that should stay flat stays
-flat — and the pads, the pin and the prongs against everything else,
+flat — and the gripper and panel actuators against their surroundings,
 every tick.
 
 What is handed over (`deliver`, written next to the USD): the layout
@@ -61,10 +54,10 @@ Needs the catalog (`pip install botrail[catalog]`; the packages are
 fetched from the Hugging Face dataset botrail/botrail-catalog and
 cached).
 
-The run downloads the built r2 hand and ES-062 coupling. The MPH-3
-remains a custom bracket with unverified mounting fit; it does not
-inherit the manufacturer's UR-kit support. The grasp and door/button
-approaches are taught from the loaded geometry and TCP.
+The Hand-E kit includes the selected female-wrist ES-077 coupling. The
+40 mm square workpiece leaves 5 mm clearance per side at full opening.
+Panel actuator dimensions are visual approximations; their travel is derived
+from the cell's button geometry. See machine_tending_demo.md.
 """
 
 from __future__ import annotations
@@ -77,15 +70,13 @@ from pathlib import Path
 import botrail as bt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import _robotiq as rq
+import _robotiq_tending as tooling
 
 HERE = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------- products
-ARM = "rv-5as-d"                 # Mitsubishi Electric MELFA ASSISTA, 5 kg / 910 mm
-# Exact runtime models; TCP and close are taught from their geometry.
-COUPLING = rq.COUPLING_ES062
-GRIPPER = rq.HAND_R2
+ARM = "universal_robots/ur/ur12e/r1"
+GRIPPER = tooling.KIT
 STAND = "sus/zf/robostand-crx"   # a robot stand, bought to the height the door wants
 ROBOT = "arm"
 # The machine and the vise as catalog products (`--catalog`): the
@@ -93,60 +84,43 @@ ROBOT = "arm"
 # — and a generic machine vise.
 MACHINE_CATALOG = "fanuc/robodrill/alpha-d21mib5-plus"
 VISE_CATALOG = "botrail/fixture/vise-125"
-# The multi-purpose hand: the MPH-3 of the catalog (its URDF is generated
-# from a `bt.tools` layout, so its links are named the way `bt.tools`
-# names them). The gripper is the TCP; the pin and the fork are tips.
-HAND = "mph3"
-HAND_CATALOG = "botrail/hand/mph3"
-PIN_TIP = bt.tools.tip(HAND, "pusher")
-FORK_TIP = bt.tools.tip(HAND, "fork")
-FORK = f"{HAND}_fork"
-
 # ------------------------------------------------------------------ cell
 # The machine stands at the origin, door on its right (+X). The stand is
 # at the door, its top at the height the ROBODRILL robot package puts the
 # pedestal (770 mm), the arm's base 5 mm proud of it (a mounted base is
 # checked as part of the robot, and resting reads as touching).
 STAND_H = 0.77
-STAND_OUT = 0.25                 # the stand centre, past the `entry` frame
-STOCKER_OUT = 0.75               # the stocker, on the far side of the stand
+STAND_OUT = 0.60                 # keep the short hand clear of the folded-wrist region
+STOCKER_OUT = 1.15               # bench clear of the robot base
 STOCKER = (0.50, 0.70, 0.80)     # a bench with the blank and the finished part
 SLOT = 0.18                      # the two slots, either side of the bench centre
 
-PART = (0.05, 0.05, 0.06)        # the workpiece: a 50 x 50 x 60 block
+PART = (0.04, 0.04, 0.06)        # 40 mm square; standard Hand-E opens 50 mm
 PART_MASS = 0.9
 SEAT = 0.005                     # a carried part is set down proud of the surface
 HOVER = 0.10                     # the straight-line approach above a grasp
 GRIP = 0.005                     # the pads' centre below the part's top face
-OPEN, SHUT = 0.0, 0.40           # finger joint: 92 mm across the pads, and 50
-PRESS_STANDOFF = 0.06            # keep the r2 hand's swing clear of the panel before pressing
-HOOK_STANDOFF = 0.06             # where the fork comes at the handle from (the bar is 16 mm; the seat 50)
+OPEN, SHUT = tooling.OPEN, PART[0] / 2
+HANDLE_WIDTH = 0.020            # machine_tool's handle bar, kept at its real model width
+HANDLE_SHUT = HANDLE_WIDTH / 2
+HANDLE_STANDOFF = 0.06
 
 CYCLE_S = 20.0                   # a short part program, so the bake stays short
 CLAMP_S = 0.8
 
 BUTTONS = ("cycle_start", "clamp", "unclamp", "estop")
-# The links a grip legitimately rests on.
-PADS = [f"{side}_inner_{part}" for side in ("left", "right")
-        for part in ("finger", "finger_pad", "knuckle")]
-
 # Where the arm parks between cycles: turned to the machine's rear,
 # folded over its own stand, tool down — a jog, not a work point, so it
 # is typed in joints and checked at build. The seeds IK starts from.
-READY = [-math.pi / 2, -0.6, 2.2, 0.0, 1.55, 0.0, OPEN]
-SEEDS = (READY, [0.0, -0.3, 1.9, 0.0, 1.5, 0.0, OPEN], [0.0] * 6 + [OPEN])
+READY = [-math.pi / 2, -1.2, 1.0, -1.0, -1.57, 0.0, OPEN]
+SEEDS = (READY, [0.0, -1.4, 1.8, -1.9, -1.57, 0.0, OPEN], [0.0] * 6 + [OPEN])
 # The branches a 6-axis arm can take to one pose — shoulder forward or
 # back, elbow more or less bent, wrist down or level — as seeds tried
 # after the ones a teach names, so a pose is refused only when *every*
 # branch fouls or falls short.
-BRANCHES = [[0.0, j2, j3, 0.0, j5, 0.0, OPEN]
-            for j2 in (-0.6, 0.0, 0.6) for j3 in (1.0, 1.6, 2.2) for j5 in (0.8, 1.5)]
-# A finer sweep behind the coarse one — tried only when the coarse seeds
-# all fall short, so a pose the coarse ones reach keeps its branch.
-BRANCHES += [[0.0, j2, j3, 0.0, j5, 0.0, OPEN]
-             for j2 in (-0.6, -0.3, 0.0, 0.3, 0.6) for j3 in (0.6, 1.0, 1.4, 1.8, 2.2)
-             for j5 in (0.4, 0.8, 1.2, 1.5, 1.9)
-             if [0.0, j2, j3, 0.0, j5, 0.0, OPEN] not in BRANCHES]
+BRANCHES = [[0.0, j2, j3, j4, j5, 0.0, OPEN]
+            for j2 in (-0.6, -1.4, -2.2) for j3 in (-1.5, 1.0, 2.0)
+            for j4 in (-2.0, 0.0, 2.0) for j5 in (-1.57, 1.57)]
 
 # Linear-RGB colours.
 BLANK = (0.55, 0.56, 0.58)
@@ -177,7 +151,7 @@ def rotate(q, v):
 
 def down(spin: float) -> tuple:
     """Tool +Z at the floor, the finger pads closing along world X turned
-    by `spin` — the 2F-85's pads part along its own Y."""
+    by `spin` — Hand-E's pads part along its own X."""
     return q_mul((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, math.sin(spin / 2), math.cos(spin / 2)))
 
 
@@ -223,16 +197,9 @@ def along(pose, distance: float):
 
 # ------------------------------------------------------------------ build
 def tool() -> bt.Robot:
-    """The arm with its hand: the 2F-85 on a bracket that also carries a
-    pin and a fork — three tools, one wrist, switched by turning it."""
+    """UR12e + purchased Hand-E kit, including its ES-077 coupling."""
     arm = bt.Robot.from_catalog(ARM)
-    # The gripper down the plate's axis (the hand's declared flange); the
-    # pin out one side of the plate and the fork out the other, both in
-    # the plane the pads open in — so with the pads across a part, pin
-    # and fork lie along the side opening, and the hand passes it end-on.
-    bracket = bt.Robot.from_catalog(HAND_CATALOG)
-    stack = rq.attach(bracket, purchase_kit=False)
-    return arm.attach_tool(stack)
+    return arm.attach_tool(bt.Robot.from_catalog(GRIPPER), prefix="kit_")
 
 
 def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
@@ -258,7 +225,7 @@ def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
     (tx, ty, tz), _ = scene.frame("vmc/table")
     # The vise on the door side of the table: the table traverses to its
     # exchange position, the vise sits where the arm can reach across the
-    # sill. The jaws take the part's 50 mm plus 2 mm a side.
+    # sill. The jaws take the part's width plus 2 mm a side.
     if catalog:
         vise = bt.parts.vise(scene, "vise", (tx + 0.25, ty, tz), opening=PART[1] + 0.004,
                              catalog=VISE_CATALOG, jaw_width=0.125)
@@ -268,7 +235,7 @@ def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
     (jx, jy, jz), _ = scene.frame(vise.frames[0])
     seat_z = jz + SEAT + PART[2] / 2
     scene.add_box("finished", size=PART, position=(jx, jy, seat_z), color=FINISHED)
-    scene.set_part("finished", kind="obstacle", category="workpiece", model="WP-50", mass_kg=PART_MASS)
+    scene.set_part("finished", kind="obstacle", category="workpiece", model="WP-40", mass_kg=PART_MASS)
 
     # -- the stand and the stocker, at the door ----------------------------
     (ex, ey, _), _ = scene.frame("vmc/entry")
@@ -284,7 +251,7 @@ def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
                            model="WB-500", manufacturer="ACME", mass_kg=30)
     (bx, by, bz), _ = scene.frame(bench.frames[0])
     scene.add_box("blank", size=PART, position=(bx, by - SLOT, bz + SEAT + PART[2] / 2), color=BLANK)
-    scene.set_part("blank", kind="obstacle", category="workpiece", model="WP-50-raw", mass_kg=PART_MASS)
+    scene.set_part("blank", kind="obstacle", category="workpiece", model="WP-40-raw", mass_kg=PART_MASS)
     # The two slots as frames: where the finished part is set down, where
     # the blank is picked up — what the teach aims at.
     scene.add_frame("stocker/out", position=(bx, by + SLOT, bz))
@@ -292,11 +259,12 @@ def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
     # The pads touch the part they close on — that is what a grasp is, so
     # it is declared rather than found by the clearance measure.
     for part in ("finished", "blank"):
-        for link in rq.pads(scene.robot_of(ROBOT)):
+        for link in tooling.pads(scene.robot_of(ROBOT)):
             scene.allow_link_obstacle_contact(link, part, robot=ROBOT)
 
     # -- the machine's program: its cycle on the start button, the clamp
     # on its button, and no start with the door open ----------------------
+    tooling.button_activators(scene, vmc)
     hs = bt.tending.manual(scene, vmc, cycle_s=CYCLE_S, clamp_s=CLAMP_S,
                            buttons=("unclamp", "clamp", "cycle_start"))
 
@@ -327,7 +295,7 @@ def slide_door(scene: bt.Scene, vmc: bt.parts.MachineTool, fraction: float) -> N
 
 
 def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", stocker: str = "stocker",
-          prefix: str = "", home: bool = True, press_standoff: float = PRESS_STANDOFF) -> None:
+          prefix: str = "", home: bool = True) -> None:
     """Every pose the arm works from, solved against the machine's own
     kinematics from the cell's frames — nothing typed in joints. The
     poses inside are taught with the door open: an arm through a closed
@@ -336,12 +304,16 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     `vise` and `stocker` name the fixture in this machine and the bench
     its parts come and go from; `prefix` goes on every motion name, so
     one arm can be taught two machines (`a_enter`, `b_enter`); `home`
-    teaches the shared park motion (once); `press_standoff` is where a
-    press starts, off the cap — wider where the swing to the panel passes
-    close to its plate."""
+    teaches the shared park motion once. Fixed panel actuators need no
+    robot press poses."""
     limits = scene.robot_of(ROBOT).joint_limits
-    shut = rq.close_for_width(scene.robot_of(ROBOT), PART[0], SHUT)
     name = vmc.name
+    handle = f"{name}/side_door/handle"
+    scene.set_obstacle_enabled(handle, True)
+    # The machine's decorative stubs remain visual-only. The handle bar
+    # itself participates in collision and in the declared finger contact.
+    for pad in tooling.pads(scene.robot_of(ROBOT)):
+        scene.allow_link_obstacle_contact(pad, handle, robot=ROBOT)
     # Which way this machine lies from the base, as the first joint's
     # angle: every seed below faces it, so an arm between two machines is
     # taught the far one as readily as the near one.
@@ -377,7 +349,7 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     def solve(target, quat, *seeds: list, fingers: float = OPEN, link: str | None = None,
               strict: bool = False) -> list:
         """`link` names the tool tip the pose is taught for — the gripper's
-        TCP by default, the pin's or the fork's. `strict` tries the given
+        TCP by default. `strict` tries the given
         seeds only — for a pose that must stay on its predecessor's branch."""
         short, fouled = None, []
         for seed in (seeds if strict else (*seeds, *branches)):
@@ -409,7 +381,7 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
 
     # Parked over the stand, and waiting at the door — both with the
     # door shut, which is how the arm meets them.
-    q_part = down(math.pi / 2)
+    q_part = down(0.0)
     ready = list(READY)
     scene.set_joint_positions(ready, robot=ROBOT)
     if hits := [f"{a[1]} x {b[1]}" for a, b in scene.check_collisions()]:
@@ -417,7 +389,7 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     if home:
         scene.add_segment("home", goal=ready, robot=ROBOT)
     (jx, jy, jz), _ = scene.frame(f"{vise}/jaw")
-    grasp_z = jz + SEAT + PART[2] - GRIP
+    grasp_z = jz + SEAT + PART[2] - GRIP - tooling.PAD_DEPTH
     (ex, ey, _ez), _ = scene.frame(f"{name}/entry")
     wait = solve((ex, ey, grasp_z + HOVER), q_part, ready, *SEEDS)
     joint("approach", wait)
@@ -437,25 +409,28 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     # on the bench top.
     for tag in ("out", "blank"):
         (sx, sy, sz), _ = scene.frame(f"{stocker}/{tag}")
-        set_z = sz + SEAT + PART[2] - GRIP
+        set_z = sz + SEAT + PART[2] - GRIP - tooling.PAD_DEPTH
         hi = solve((sx, sy, set_z + HOVER), q_part, ready, wait)
         lo = solve((sx, sy, set_z), q_part, hi)
         joint(f"to_{tag}", hi)
         line(f"set_{tag}" if tag == "out" else "down_blank", lo)
         line(f"clear_{tag}" if tag == "out" else "up_blank", hi)
 
-    # The door, by the fork: its seat driven onto the handle bar along the
-    # wall's normal, at either end of the stroke, with the gripper hanging
-    # down out of the way. The fork tip frame has +Z along the prongs and
-    # +Y up the plate's -Z, so +Y toward the ceiling hangs the gripper
-    # toward the floor.
+    # Grasp the vertical handle with the pad centres, closing sideways.
+    # Keep the palm outside the door and the fingers clear of its stubs.
     (hx, hy, hz), handle_q = scene.frame(f"{name}/door/side/handle")
-    into = rotate(handle_q, (0.0, 0.0, 1.0))         # into the leaf
-    fq = aimed(into, (0.0, 0.0, 1.0))
+    hz += 0.040  # grip the upper bar, leaving the palm above its top
+    normal = rotate(handle_q, (0.0, 0.0, 1.0))
+    # Approach obliquely from above, leaving the wrist above the handle
+    # rather than folded beside the forearm. Closing remains horizontal.
+    into = tuple(0.8 * v - (0.6 if i == 2 else 0.0) for i, v in enumerate(normal))
+    fq = aimed(into, (0.0, 0.0, -1.0))
+    # The TCP is 12.5 mm ahead of the pads: place the pad centres on the bar.
+    hx, hy, hz = tuple(p + tooling.PAD_DEPTH * n for p, n in zip((hx, hy, hz), into))
     ax, ay, az = vmc.door_axis
     travel = vmc.door_travel
     ends = {"closed": (hx, hy, hz), "open": (hx + ax * travel, hy + ay * travel, hz + az * travel)}
-    seed = [windings[0], -0.3, 1.9, 0.0, 1.5, 0.0, OPEN]
+    seed = [windings[0], -1.4, 1.8, -1.9, -1.57, 0.0, OPEN]
     # The four handle poses are solved on one IK branch — each end's
     # standoff from its handle pose, the open end from the closed one — so
     # the straight lines between them (take, slide, leave) never have to
@@ -464,27 +439,30 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     # least room), and each pose after it only from the one before, so
     # the whole door path — take, slide, leave, at both ends — stays on
     # one branch. A first seed whose chain breaks is dropped for the next.
-    # The fingers are tucked (shut) for the door: an empty gripper hanging
-    # open beside a leaf is what grazes it on the way in.
-    offs = {tag: along((ends[tag], fq), -HOOK_STANDOFF)[0] for tag in ends}
-    path = [("open", offs["open"], 1.0), ("open", ends["open"], 1.0),
-            ("closed", ends["closed"], 0.0), ("closed", offs["closed"], 0.0)]
+    offs = {tag: along((ends[tag], fq), -HANDLE_STANDOFF)[0] for tag in ends}
+    path = [("open", "off", offs["open"], 1.0), ("open", "near", ends["open"], 1.0)]
+    # Endpoints alone can admit a self-collision halfway along a long slide.
+    for i in range(19, 0, -1):
+        fraction = i / 20
+        target = tuple(p + a * travel * fraction for p, a in zip(ends["closed"], vmc.door_axis))
+        path.append(("sweep", str(i), target, fraction))
+    path += [("closed", "near", ends["closed"], 0.0), ("closed", "off", offs["closed"], 0.0)]
     poses: dict[tuple[str, str], list] = {}
     failure = None
     for first in (seed, ready, wait, *branches):
         prev, chain = first, {}
         try:
-            for i, (tag, target, fraction) in enumerate(path):
+            for tag, key, target, fraction in path:
                 slide_door(scene, vmc, fraction)
-                prev = solve(target, fq, prev, fingers=shut, link=FORK_TIP, strict=True)
-                chain[(tag, "near" if i in (1, 2) else "off")] = prev
+                prev = solve(target, fq, prev, fingers=OPEN, strict=True)
+                chain[(tag, key)] = prev
         except RuntimeError as err:
             failure = err
             continue
         poses = chain
         break
     if not poses:
-        raise RuntimeError(f"no branch carries the fork along {name}'s door: {failure}")
+        raise RuntimeError(f"no branch carries Hand-E along {name}'s door: {failure}")
     for tag in ("closed", "open"):
         joint(f"to_handle_{tag}", poses[(tag, "off")])
         line(f"take_handle_{tag}", poses[(tag, "near")])
@@ -495,18 +473,6 @@ def teach(scene: bt.Scene, vmc: bt.parts.MachineTool, *, vise: str = "vise", sto
     line("slide_close", poses[("closed", "near")])
     slide_door(scene, vmc, 0.0)
 
-    # The buttons, by the pin: its tip driven the button's travel into
-    # the cap along the press frame's axis, from a standoff off the cap.
-    # The pin tip frame has +Z along the pin and +Y up the plate's +Z, so
-    # +Y at the floor hangs the gripper down.
-    for button in ("unclamp", "clamp", "cycle_start"):
-        (px, py, pz), frame_q = scene.frame(f"{name}/panel/{button}/press")
-        pq = aimed(rotate(frame_q, (0.0, 0.0, 1.0)), (0.0, 0.0, -1.0))
-        off = solve(along(((px, py, pz), pq), -press_standoff)[0], pq, seed, ready, wait, link=PIN_TIP)
-        near = solve((px, py, pz), pq, off, link=PIN_TIP)
-        joint(f"to_{button}", off)
-        line(f"press_{button}", near)
-        line(f"back_{button}", off)
     scene.set_joint_positions(ready, robot=ROBOT)
 
 
@@ -520,7 +486,7 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
     `home` ends with the park motion."""
     S = bt.seq
     finger = scene.robot_of(ROBOT).joint_names[-1]
-    shut = rq.close_for_width(scene.robot_of(ROBOT), PART[0], SHUT)
+    shut = SHUT
     sq = sq if sq is not None else scene.sequence("tend")
     finished, blank = parts
 
@@ -558,28 +524,26 @@ def program(scene: bt.Scene, vmc: bt.parts.MachineTool, hs: bt.tending.Handshake
         step("up_2", actions=[motion("up")])
         step("exit_2", actions=[motion("exit")])
 
-    # -- the door on the fork (fingers tucked), the buttons under the pin
-    # (fingers open) ---------------------------------------------------------
     def press(button: str) -> None:
-        step(f"to_{button}", actions=[motion(f"to_{button}")])
-        step(f"press_{button}", actions=[motion(f"press_{button}")])
+        device = tooling.actuator_name(vmc.name, button)
+        p, _ = scene.frame(f"{vmc.name}/panel/{button}")
+        end, _ = scene.frame(f"{vmc.name}/panel/{button}/press")
+        travel = math.dist(p, end) + 0.001
+        step(f"press_{button}", actions=[S.move_to(device, travel)], transition=S.device_done(device))
         step(f"hold_{button}", transition=S.elapsed(0.2))
-        step(f"back_{button}", actions=[motion(f"back_{button}")])
+        step(f"back_{button}", actions=[S.move_to(device, 0.0)], transition=S.device_done(device))
 
     def slide(tag: str, move: str) -> None:
-        # The fork takes the handle bar between its prongs, and the leaf
-        # (with what rides on it) is carried by the fork for the slide.
-        # The empty gripper is tucked shut for the door and opened again
-        # after it — hanging open, its pads are what grazes the leaf.
-        step(f"tuck_{tag}", actions=[grip(shut)])
+        step(f"open_hand_{tag}", actions=[grip(OPEN)])
         step(f"to_handle_{tag}", actions=[motion(f"to_handle_{tag}")])
         step(f"take_handle_{tag}", actions=[motion(f"take_handle_{tag}")])
-        step(f"hold_door_{tag}", actions=[S.attach(o, link=FORK, robot=ROBOT) for o in vmc.door_objects])
+        step(f"grip_handle_{tag}", actions=[grip(HANDLE_SHUT)])
+        step(f"hold_door_{tag}", actions=[S.attach(o, touch_links=tooling.pads(scene.robot_of(ROBOT)), robot=ROBOT)
+                                         for o in vmc.door_objects])
         step(move, actions=[motion(move)])
-        step(f"let_go_{tag}", actions=[S.detach(o) for o in vmc.door_objects])
+        step(f"let_go_{tag}", actions=[S.detach(o) for o in vmc.door_objects] + [grip(OPEN)])
         end = "open" if tag == "closed" else "closed"
         step(f"leave_handle_{tag}", actions=[motion(f"leave_handle_{end}")])
-        step(f"untuck_{tag}", actions=[grip(OPEN)])
 
     step("wait_done", transition=S.signal(hs.signal("running"), False))
     press("unclamp")

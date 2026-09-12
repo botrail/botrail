@@ -315,8 +315,7 @@ def main() -> None:
             server.stop()
 
         if want("machine_tending_hand"):
-            # ---- the multi-purpose hand: the fork on the handle, the door
-            # half open, the gripper and the pin hanging clear -------------
+            # ---- Hand-E gripping the door, fixed panel actuators beside it ----
             scene, hs, tl = machine_tending_demo.bake()
             server = bt.studio(scene, block=False, open_browser=False)
             page.goto(server.url)
@@ -332,7 +331,7 @@ def main() -> None:
             t = (span.start + span.end) / 2
             bands = page.locator(".timeline-bands").bounding_box()
             page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
-            page.evaluate("window.__CAM = {pos: [2.4, -1.9, 1.9], look: [0.9, -0.3, 1.1]}")
+            page.evaluate("window.__CAM = {pos: [1.4, -0.85, 1.45], look: [0.98, -0.3, 1.08]}")
             time.sleep(2.0)
             page.screenshot(path=OUT / "machine_tending_hand.png")
             print("wrote machine_tending_hand.png")

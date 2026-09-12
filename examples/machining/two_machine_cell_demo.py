@@ -3,9 +3,9 @@
 Two ROBODRILL-sized machining centres face each other across an aisle,
 their side doors toward the arm on its stand between them, a bench per
 machine beside the aisle with the blank going in and the finished part
-coming out. The arm is the MELFA ASSISTA with the three-tool hand of
+coming out. The arm is the UR12e with the Hand-E gripper of
 `machine_tending_demo.py`, and everything it does at one machine —
-UNCLAMP by the pin, the door by the fork, the swap by the gripper, CLAMP,
+UNCLAMP by a fixed actuator, the door and swap by the gripper, CLAMP,
 the door shut, CYCLE START — it does at the other, taught the same way
 (`machine_tending_demo.teach` / `program`, prefixed `a_` and `b_`). Both
 machines are worked by hand, each running its own program
@@ -34,11 +34,10 @@ import botrail as bt
 import machine_tending_demo as one
 
 ROBOT = one.ROBOT
-AISLE = 0.30            # the stand's centre to each machine's `entry` frame
+AISLE = one.STAND_OUT   # hand reach and wrist clearance shared with the single cell
 BENCH_OUT = 0.55        # the benches' centres, either side of the aisle
 BENCH = (0.70, 0.50, 0.80)   # a bench turned along the aisle
 CYCLE_S = 90.0          # a part program longer than the swap: the arm, not the spindle, sets the pace
-PRESS_STANDOFF = 0.06   # the swing from the far door to the panel passes its plate's corner: start wider
 MACHINE = {"door": "manual", "door_side": "right", "panel": "door", "buttons": one.BUTTONS, "detail": "full",
            "model": "α-D21MiB5 Plus", "manufacturer": "FANUC", "mass_kg": 2000}
 
@@ -72,7 +71,7 @@ def build() -> tuple[bt.Scene, dict[str, bt.tending.Handshake]]:
         (jx, jy, jz), _ = scene.frame(vise.frames[0])
         scene.add_box(f"finished_{tag}", size=one.PART, position=(jx, jy, jz + one.SEAT + one.PART[2] / 2),
                       color=one.FINISHED)
-        scene.set_part(f"finished_{tag}", kind="obstacle", category="workpiece", model="WP-50",
+        scene.set_part(f"finished_{tag}", kind="obstacle", category="workpiece", model="WP-40",
                        mass_kg=one.PART_MASS)
         # This machine's bench, beside the aisle: the blank nearer the
         # machine, the out slot nearer the other one.
@@ -84,17 +83,18 @@ def build() -> tuple[bt.Scene, dict[str, bt.tending.Handshake]]:
         scene.add_frame(f"stocker_{tag}/out", position=(out_x, by, bz))
         scene.add_box(f"blank_{tag}", size=one.PART, position=(blank_x, by, bz + one.SEAT + one.PART[2] / 2),
                       color=one.BLANK)
-        scene.set_part(f"blank_{tag}", kind="obstacle", category="workpiece", model="WP-50-raw",
+        scene.set_part(f"blank_{tag}", kind="obstacle", category="workpiece", model="WP-40-raw",
                        mass_kg=one.PART_MASS)
         for part in (f"finished_{tag}", f"blank_{tag}"):
-            for link in one.rq.pads(scene.robot_of(ROBOT)):
+            for link in one.tooling.pads(scene.robot_of(ROBOT)):
                 scene.allow_link_obstacle_contact(link, part, robot=ROBOT)
+        one.tooling.button_activators(scene, vmc)
         handshakes[tag] = bt.tending.manual(scene, vmc, cycle_s=CYCLE_S, clamp_s=one.CLAMP_S,
                                             buttons=("unclamp", "clamp", "cycle_start"))
 
     # Taught once per machine with its own prefix; the park motion once.
-    one.teach(scene, a, vise="vise_a", stocker="stocker_a", prefix="a_", home=True, press_standoff=PRESS_STANDOFF)
-    one.teach(scene, b, vise="vise_b", stocker="stocker_b", prefix="b_", home=False, press_standoff=PRESS_STANDOFF)
+    one.teach(scene, a, vise="vise_a", stocker="stocker_a", prefix="a_", home=True)
+    one.teach(scene, b, vise="vise_b", stocker="stocker_b", prefix="b_", home=False)
     sq = scene.sequence("tend")
     one.program(scene, a, handshakes["a"], sq=sq, prefix="a_", parts=("finished_a", "blank_a"), home=False)
     one.program(scene, b, handshakes["b"], sq=sq, prefix="b_", parts=("finished_b", "blank_b"), home=True)

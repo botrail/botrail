@@ -76,8 +76,12 @@ that row name:
 
 ```python
 scene.set_part("arm/tool", kind="tool", category="tool.multi",
-               catalog="botrail/hand/mph3/r1", manufacturer="botrail", model="MPH-3", mass_kg=0.3)
+               model="Custom bracket", description="In-house design; mounting fit unverified")
 ```
+
+An authored reference such as the former MPH-3 is not an orderable commercial
+product. Leave its catalog identity and mass unset unless they are established;
+the assembly and machine-tending demos use identified commercial tools.
 
 The pin follows the robot through a rename and rides the project; on a
 catalog tool's row it is the last word.

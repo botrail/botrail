@@ -26,10 +26,10 @@ tl = scene.simulate_sequences(["tend", hs.program])
 
 The worked example is
 [`examples/machining/machine_tending_demo.py`](https://github.com/neka-nat/botrail/blob/main/examples/machining/machine_tending_demo.py):
-a MELFA ASSISTA on a catalog robot stand at a ROBODRILL-sized machine
+a UR12e on a catalog robot stand at a ROBODRILL-sized machine
 with no robot interface — the retrofit — worked through its door and its
-panel by a three-tool hand: a 2F-85 for the part, a pin for the buttons,
-a fork for the door handle.
+panel using a Robotiq Hand-E for the part and door handle, and three
+panel-mounted Robotiq Button Activators for the buttons.
 
 ## The machine as envelopes
 
@@ -198,50 +198,43 @@ the command; and nothing starts with the **E-stop** pressed
 (`vmc.estop`, the panel's mushroom). They are what the
 [interlock table](#handing-over) reads back as rows.
 
-## The multi-purpose hand
+## The commercial hand and panel actuators
 
-The end-effector in the other photograph is three tools on one bracket
-— a gripper for the workpiece, a pin for the buttons, a fork for the
-door handle — and the robot *switches* between them by turning its wrist
-so the right one faces the job. [`bt.tools.multi_tool`][botrail.tools.multi_tool]
-builds that bracket as a joint-less robot model and `attach_tool` welds
-it on; the gripper bolts onto a `Mount`, and every `Pin` and `Fork` ends
-in a tip frame with +Z along the tool:
+The demo follows the [Robotiq Machine Tending Solution](https://robotiq.com/solutions/machine-tending):
+a single Hand-E handles the workpiece and opens/closes the door by gripping
+its handle. Button Activators stay fixed over UNCLAMP, CLAMP and CYCLE START.
+The robot carries no lateral pusher or fork and needs no tool exchange.
 
 ```python
-bracket = bt.tools.multi_tool("hand", [bt.tools.Mount("gripper"),
-                                       bt.tools.Pin("pusher"),
-                                       bt.tools.Fork("fork")])
-hand = bracket.attach_tool(coupling, flange="hand_gripper").attach_tool(gripper)
-robot = arm.attach_tool(hand)            # tcp stays the gripper's
-
-scene.set_tcp_target(press, quat, link=bt.tools.tip("hand", "pusher"))   # the pin on a button
-sq.step("hook", actions=[bt.seq.attach(leaf, link="hand_fork")])         # the door on the fork
+arm = bt.Robot.from_catalog("universal_robots/ur/ur12e/r1")
+kit = bt.Robot.from_catalog("robotiq/hand-e/hand-e-ur-es-077-kit/r1")
+robot = arm.attach_tool(kit, prefix="kit_")
 ```
 
-![The multi-purpose hand: the fork on the door handle, the gripper and the pin hanging clear](../assets/studio/machine_tending_hand.png)
+The kit includes the ES-077 coupling selected for a female-wrist UR12e.
+Robotiq confirms that [UR12e retains UR10e solution compatibility](https://blog.robotiq.com/knowledge/understanding-the-difference-between-ur10e-and-ur12e).
+The longer arm keeps both the vise and the door's full stroke reachable
+with the compact Hand-E.
+The catalog Hand-E uses standard overmolded fingers with 50 mm opening;
+the demo's 40 × 40 × 60 mm workpiece leaves 5 mm clearance per side.
+The TCP-to-pad offset is accounted for when teaching both the part and handle.
 
-Nothing else changes. A pose is taught for whichever tip does the job
-(`link=`), IK asked for a tip moves the arm and leaves the fingers where
-they are, the bracket's pin and prongs are collision geometry like any
-link, and the studio's TCP selector aims the gizmo at any of them. The
-demo works the machine this way: the pin presses square into the caps
-with no tilt to think about, the fork takes the handle bar between its
-prongs and the leaf goes wherever the fork goes.
+![Hand-E gripping the door handle](../assets/studio/machine_tending_hand.png)
 
-The hand in the demo is a catalog product — `botrail/hand/mph3`
-(`tool.multi`), whose URDF is generated from exactly this `bt.tools`
-layout — so it is ordered like the arm and the gripper and lands on the
-bill with its number:
+The three Button Activators are authored runtime reference geometry in
+`examples/machining/_robotiq_tending.py`, using `bt.parts` and boxes. Each
+moving foot drives only its own button's zone sensor. The simulated CNC still
+waits for sensed presses; the arm program does not write the button inputs.
+Bracket/body dimensions are visual estimates, while the stroke comes from
+the cell's button geometry. Their pneumatic speed is a simulation setting.
 
-```python
-hand = bt.Robot.from_catalog("botrail/hand/mph3")       # mount and flange declared
-robot = arm.attach_tool(hand.attach_tool(coupling).attach_tool(gripper))
-```
+![Panel-mounted Button Activators](../assets/studio/machine_tending_buttons.png)
 
-A bracket you lay out yourself has no number of its own; pin it by its
-row on the bill (`scene.set_part("arm/tool", kind="tool", ...)`, see
-[Parts and the BOM](parts-and-bom.md#tools-in-the-stack)).
+This is a component-based simulation reference, not a qualified standard
+Robotiq package. Three independent pneumatic channels, controller/URCap
+configuration, status-light detection, actual door effort, full mounted
+load/CoG and physical installation remain to be verified. The default kit
+includes one Button Activator; the other two are additional components.
 
 ## What the bake says
 

@@ -50,7 +50,7 @@ def test_one_arm_serves_both_machines_in_turn(cell) -> None:
     # busy most of the cycle, and the first machine cutting most of it.
     assert tl.utilization(two.ROBOT) > 0.5
     # Nothing closer than the jaws around a blank — the far machine's
-    # door leaf included, which the tucked gripper now clears.
+    # door leaf included, with the standard Hand-E fingers.
     assert float(tl.min_clearance()) > 0.0015
     assert two.running_fraction(tl, hs["a"].signal("running")) > 0.5
     assert two.running_fraction(tl, hs["b"].signal("running")) > 0.25
@@ -69,8 +69,8 @@ def test_the_documents_carry_three_programs_and_two_controllers(cell, tmp_path: 
         assert start["condition"] == (
             f"(RISING(vmc_{tag}/panel/cycle_start) AND vmc_{tag}/side_door/closed AND "
             f"vmc_{tag}/front_door/closed AND NOT vmc_{tag}/panel/estop)")
-    assert rows[("tend", "a_to_unclamp")]["condition"] == "NOT vmc_a/running"
-    assert rows[("tend", "b_to_unclamp")]["inputs"][0]["written_by"] == ["vmc_b/machining", "vmc_b/done", "vmc_b/cycle_start"]
+    assert rows[("tend", "a_press_unclamp")]["condition"] == "NOT vmc_a/running"
+    assert rows[("tend", "b_press_unclamp")]["inputs"][0]["written_by"] == ["vmc_b/machining", "vmc_b/done", "vmc_b/cycle_start"]
     xml = scene.plcopen()
     for resource in ("arm", "vmc_a_cnc", "vmc_b_cnc"):
         assert f'<resource name="{resource}">' in xml

@@ -2,20 +2,10 @@
 machining centre by hand, asserted the way a cell owner would (T0 of
 design/design-machine-tending.md).
 
-The cell is built from catalog products (a MELFA ASSISTA, a 2F-85, the
-MPH-3 hand, a robot stand), so these tests need the catalog — cached
-locally or fetched once — and skip where it is unreachable, like the
-machining demo's. What they pin:
-
-* the cycle's order on the chart: the door slid open before the arm goes
-  in, the buttons read one press each and never their neighbours, a start
-  pressed only with the door shut — and the parts where the cycle leaves
-  them;
-* the hand: three tools on one wrist — the fork carries the leaf, the pin
-  presses with the fingers never shut, the gripper stays the TCP — and
-  the bracket lands on the bill as the catalog product it is;
-* the wiring: the buttons and the door's switches are the machine's
-  inputs, its `running` the robot's; nothing the machine drives.
+The UR12e and Hand-E kit come from the catalog. Panel actuators must
+physically trip their own buttons while the arm stays still; Hand-E must
+close on the door handle and carry the leaf. The complete cycle and
+machine-side fault scenarios are checked below.
 """
 
 import sys
@@ -74,19 +64,36 @@ def test_the_cycle_runs_in_order_and_the_parts_change_places(cell) -> None:
     assert tl.duration < 180.0
 
 
-def test_the_hand_is_three_tools_on_one_wrist(cell) -> None:
+def test_commercial_hand_and_fixed_button_actuators(cell) -> None:
     scene, _hs, tl = cell
     robot = scene.robot_of("arm")
-    assert robot.tcp_link == "kit_gripper/tcp" and {demo.PIN_TIP, demo.FORK_TIP, demo.FORK} <= set(robot.link_names)
-    # The bracket is a catalog product: its row on the bill carries the id.
+    assert robot.tcp_link == "kit_gripper/tcp"
+    assert not any("mph" in n or "fork" in n or "pusher" in n for n in robot.link_names)
     by = {row["names"][0]: row for row in scene.bom().rows}
-    assert by["arm/tool"]["category"] == "tool.multi" and by["arm/tool"]["catalog"].startswith("botrail/hand/mph3/")
-    # The pin presses with the fingers open — no grasp doubles as a push.
+    assert by["arm/tool"]["catalog"].split("@")[0] == demo.GRIPPER
+    assert not any("mph" in str(row.get("catalog", "")) for row in by.values())
     for button in PRESSED:
-        (t0, _t1), = tl.signal(f"vmc/panel/{button}").high_spans()
-        assert tl.sample(t0, robot="arm")[-1] == pytest.approx(demo.OPEN, abs=1e-6)
-    # The leaf rides the fork: out by the stroke while the arm works
-    # inside, back where it began at the end.
+        device = demo.tooling.actuator_name("vmc", button)
+        assert scene.part(device)["manufacturer"] == "Robotiq"
+        assert scene.part(device)["model"] == "Button Activator"
+        span = tl.step_span(f"tend/press_{button}")
+        assert tl.sample(span.start, robot="arm") == pytest.approx(tl.sample(span.end, robot="arm"))
+        # Fixed housings have no moving object track; only the feet do.
+        with pytest.raises(ValueError, match="not tracked"):
+            tl.object_pose(f"{device}/body", span.start)
+        start = tl.object_pose(f"{device}/foot", span.start)[0]
+        end = tl.object_pose(f"{device}/foot", span.end)[0]
+        assert sum((a-b)**2 for a,b in zip(start,end))**0.5 == pytest.approx(0.0036, abs=1e-5)
+    for tag in ("closed", "open"):
+        span = tl.step_span(f"tend/grip_handle_{tag}")
+        assert tl.sample(span.start, robot="arm")[-1] == pytest.approx(demo.OPEN)
+        assert tl.sample(span.end, robot="arm")[-1] == pytest.approx(demo.HANDLE_SHUT)
+    for move in ("slide_open", "slide_close"):
+        span = tl.step_span(f"tend/{move}")
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            t = span.start + fraction * (span.end - span.start)
+            assert tl.sample(t, robot="arm")[-1] == pytest.approx(demo.HANDLE_SHUT)
+    # Hand-E carries the door through its full stroke and returns it home.
     p0, _ = tl.object_pose("vmc/side_door/leaf", 0.0)
     mid, _ = tl.object_pose("vmc/side_door/leaf", tl.step_span("tend/approach").start)
     stroke = by["vmc/side_door"]["attributes"]["stroke_mm"] / 1e3
@@ -152,7 +159,7 @@ def test_the_document_set_hands_the_machine_over(cell, tmp_path: Path) -> None:
     assert start["host"] == "vmc/cnc" and start["after"] == ["wait_start"]
     # The arm's first move waits on `running` dropping — and names the
     # machine's steps that write it: the handshake, read across the table.
-    first = rows[("tend", "to_unclamp", "to_unclamp")]
+    first = rows[("tend", "press_unclamp", "vmc/button_activators/unclamp")]
     assert first["condition"] == "NOT vmc/running" and first["host"] == "<arm>"
     assert first["inputs"][0]["written_by"] == ["vmc/machining", "vmc/done", "vmc/cycle_start"]
     # The report: the machine, its loose leaf and switches, the buttons,
