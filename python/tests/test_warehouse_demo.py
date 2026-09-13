@@ -42,11 +42,10 @@ HAS_CATALOG = any(HF_CACHE.glob("datasets--botrail--botrail-catalog*"))
 HAS_PACKAGES = HAS_BUILD or HAS_CATALOG
 needs_packages = pytest.mark.skipif(not HAS_PACKAGES, reason="warehouse packages neither built locally nor cached")
 
-if HAS_PACKAGES:
-    import warehouse_demo as demo
+import warehouse_demo as demo
 
-    if HAS_BUILD:
-        demo.CATALOG_ROOT = BUILD.resolve()
+if HAS_BUILD:
+    demo.CATALOG_ROOT = BUILD.resolve()
 
 
 @pytest.fixture(scope="module")
@@ -75,7 +74,7 @@ def test_the_shed_is_ordered_not_drawn(shift) -> None:
 
 @needs_packages
 def test_a_pallet_rides_the_lift_from_stand_to_stand(shift) -> None:
-    scene, machine, tl = shift
+    scene, _machine, tl = shift
     end = tl.duration
     # ①: the received pallet and its cases end on rack A's stand, seated at
     # the stand's own support height, cases still on it.
@@ -136,3 +135,16 @@ def test_without_traffic_control_the_machines_meet() -> None:
 def test_a_narrow_aisle_is_refused_by_name() -> None:
     with pytest.raises(ValueError, match="collides with"):
         demo.bake(aisle=1.5)
+
+
+def test_floor_markings_follow_the_work_area_corners() -> None:
+    """Area extents are x0/x1/y0/y1, not the two points _mark accepts."""
+    scene = demo.bt.Scene()
+    demo.markings(scene, lane=7.0, stand_y=9.5)
+    for name, (x0, x1, y0, y1) in (
+        ("recv", demo.RECV), ("picking", demo.PICKING), ("packing", demo.PACKING),
+        ("shipping", demo.SHIPPING), ("standby", demo.STANDBY), ("materials", demo.MATERIALS),
+    ):
+        bounds = [scene.obstacle_bounds(f"marking/{name}/{i}") for i in range(4)]
+        assert (min(lo[0] for lo, _ in bounds), max(hi[0] for _, hi in bounds)) == pytest.approx((x0 - 0.04, x1 + 0.04))
+        assert (min(lo[1] for lo, _ in bounds), max(hi[1] for _, hi in bounds)) == pytest.approx((y0 - 0.04, y1 + 0.04))

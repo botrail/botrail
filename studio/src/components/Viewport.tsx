@@ -254,6 +254,10 @@ function Floor() {
   // including data maps. Own this material so normal/roughness stay raw.
   const material = useMemo(() => new THREE.MeshStandardMaterial({
     color: "#44484b", roughness: 0.92, metalness: 0, ...maps,
+    // At warehouse scale, the depth buffer can no longer separate this
+    // plane from an authored slab a few millimetres above it. Bias the
+    // fallback floor behind that surface without moving the ground level.
+    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 4,
   }), [maps]);
   const geometry = useMemo(() => {
     const g = new THREE.PlaneGeometry(48, 48);

@@ -57,9 +57,8 @@ import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import yaml
-
 import botrail as bt
+import yaml
 
 HERE = Path(__file__).resolve().parent
 
@@ -164,13 +163,17 @@ READY = [0.0, -1.9, 1.9, -1.6, -math.pi / 2, 0.0]
 CUPS = ["cup_a1", "cup_a2", "cup_b1", "cup_b2", "tcp"]
 
 # Linear-RGB colours.
-CONCRETE = (0.42, 0.42, 0.41)
+CONCRETE = (0.32, 0.33, 0.32)
 LINE_YELLOW = (0.85, 0.62, 0.05)
 LINE_GREEN = (0.10, 0.45, 0.20)
 CARTON = (0.62, 0.45, 0.26)
 WRAP = (0.78, 0.80, 0.84)
 DOOR = (0.55, 0.57, 0.58)
 STEEL_DARK = (0.22, 0.24, 0.27)
+KRAFT = ((0.48, 0.31, 0.16), (0.60, 0.43, 0.25), (0.68, 0.51, 0.32), (0.42, 0.28, 0.16))
+PAPER = (0.86, 0.84, 0.76)
+TAPE = (0.34, 0.22, 0.10)
+SIGN_BLUE = (0.035, 0.12, 0.22)
 
 
 def yaw_quat(yaw: float) -> tuple:
@@ -300,11 +303,65 @@ class PalletAmr:
 
 
 # ================================================================== the shed
+def _visual_box(scene: bt.Scene, name: str, size: tuple, position: tuple,
+                color: tuple, *, yaw: float = 0.0, metalness: float = 0.0,
+                roughness: float = 0.8, opacity: float = 1.0) -> str:
+    """Authored scenery; the existing envelopes still govern clearance."""
+    made = scene.add_box(name, size, position, quaternion=yaw_quat(yaw), color=color)
+    scene.set_obstacle_enabled(made, False)
+    scene.set_obstacle_material(made, metalness=metalness, roughness=roughness, opacity=opacity)
+    return made
+
+
+def _visual_pallet(scene: bt.Scene, name: str, at: tuple, yaw: float) -> None:
+    """Open fork pockets and separate boards inside the pallet envelope."""
+    built = bt.parts.pallet(scene, name, at, size=PALLET, yaw=yaw)
+    # This is the picture of existing stock, not an extra purchase unit.
+    scene.remove_part(name)
+    for frame in built.frames:
+        scene.remove_frame(frame)
+    for i, piece in enumerate(built.obstacles):
+        scene.set_obstacle_enabled(piece, False)
+        scene.set_obstacle_color(piece, ((0.39, 0.27, 0.14), (0.52, 0.38, 0.21), (0.60, 0.45, 0.27))[i % 3])
+        scene.set_obstacle_material(piece, metalness=0.0, roughness=0.92)
+
+
+def _sign(scene: bt.Scene, name: str, at: tuple, glyph: str, yaw: float = 0.0) -> None:
+    """A painted rack/dock marker, assembled in the local X/Z plane."""
+    strokes = {
+        "1": ("tr", "br"), "2": ("top", "tr", "mid", "bl", "bottom"),
+        "3": ("top", "tr", "mid", "br", "bottom"),
+        "A": ("top", "tl", "tr", "mid", "bl", "br"),
+        "B": ("tl", "bl", "mid", "br", "bottom"),
+        "C": ("top", "tl", "bl", "bottom"),
+        "D": ("tr", "br", "mid", "bl", "bottom"),
+    }
+    segments = {
+        "top": (0, 0.24, 0.25, 0.045), "mid": (0, 0, 0.25, 0.045),
+        "bottom": (0, -0.24, 0.25, 0.045),
+        "tl": (-0.125, 0.12, 0.045, 0.24), "tr": (0.125, 0.12, 0.045, 0.24),
+        "bl": (-0.125, -0.12, 0.045, 0.24), "br": (0.125, -0.12, 0.045, 0.24),
+    }
+    _visual_box(scene, f"{name}/panel", (0.62, 0.04, 0.78), at, SIGN_BLUE, yaw=yaw, roughness=0.45)
+    for key in strokes[glyph]:
+        dx, dz, sx, sz = segments[key]
+        rx, ry = rotate(dx, -0.024, yaw)
+        _visual_box(scene, f"{name}/letter/{key}", (sx, 0.008, sz),
+                    (at[0] + rx, at[1] + ry, at[2] + dz), PAPER, yaw=yaw)
+
+
 def _slab(scene: bt.Scene) -> None:
     w, d = BUILDING
     made = scene.add_box("floor/slab", (w, d, 0.05), (w / 2, d / 2, -0.022), color=CONCRETE)
     scene.set_obstacle_enabled(made, False)
     scene.set_obstacle_material(made, metalness=0.0, roughness=0.9)
+    # Saw-cut joints break up the large concrete pour without changing its level.
+    for i in range(1, math.ceil(w / 5.0)):
+        _visual_box(scene, f"floor/joint_x{i}", (0.018, d, 0.001),
+                    (5.0 * i, d / 2, 0.0035), (0.20, 0.21, 0.20))
+    for i in range(1, math.ceil(d / 4.5)):
+        _visual_box(scene, f"floor/joint_y{i}", (w, 0.018, 0.001),
+                    (w / 2, 4.5 * i, 0.0035), (0.20, 0.21, 0.20))
 
 
 def _mark(scene: bt.Scene, name: str, x0: float, y0: float, x1: float, y1: float,
@@ -379,15 +436,73 @@ def building(scene: bt.Scene) -> None:
     x0, x1, y1 = OFFICE
     bt.parts.wall(scene, "office", path=[(x0, WALL_T / 2), (x0, y1), (x1, y1), (x1, WALL_T / 2)],
                   height=3.0, thickness=0.12, openings=[(1, x1 - x0 - 1.0, 0.9)], detail="full")
+    _building_details(scene)
+
+
+def _building_details(scene: bt.Scene) -> None:
+    """Panel joints, steel girts and sectional-door hardware on the cutaway."""
+    w, d = BUILDING
+    skin = (0.57, 0.59, 0.57)
+    # The back walls retain their full height; leave the roof open for inspection.
+    for i in range(1, math.ceil(w / 1.5)):
+        _visual_box(scene, f"wall/north/detail/seam{i}", (0.028, 0.02, WALL_H - 0.7),
+                    (1.5 * i, d - WALL_T / 2 - 0.011, (WALL_H + 0.7) / 2), skin)
+    for i in range(1, math.ceil(d / 1.5)):
+        _visual_box(scene, f"wall/west/detail/seam{i}", (0.02, 0.028, WALL_H - DOCK_DOOR[1] - 0.15),
+                    (WALL_T / 2 + 0.011, 1.5 * i, (WALL_H + DOCK_DOOR[1] + 0.15) / 2), skin)
+    _visual_box(scene, "wall/north/detail/plinth", (w, 0.025, 0.65),
+                (w / 2, d - WALL_T / 2 - 0.015, 0.325), (0.27, 0.29, 0.28))
+    for i, z in enumerate((DOCK_DOOR[1] + 0.3, WALL_H - 0.35)):
+        _visual_box(scene, f"wall/north/detail/girt{i}", (w, 0.12, 0.18),
+                    (w / 2, d - WALL_T / 2 - 0.06, z), STEEL_DARK, metalness=0.65)
+        _visual_box(scene, f"wall/west/detail/girt{i}", (0.12, d, 0.18),
+                    (WALL_T / 2 + 0.06, d / 2, z), STEEL_DARK, metalness=0.65)
+    for side, x, docks, facing in (("in", 0.0, INBOUND_DOCKS, 1), ("out", w, OUTBOUND_DOCKS, -1)):
+        for i, y in enumerate(docks, 1):
+            prefix = f"dock/{side}{i}/detail"
+            width, height = DOCK_DOOR
+            scene.set_obstacle_material(f"dock/{side}{i}/door", metalness=0.55, roughness=0.4)
+            for k in range(1, 8):
+                _visual_box(scene, f"{prefix}/joint{k}", (0.012, width - 0.07, 0.018),
+                            (x + facing * 0.038, y, height * k / 8), STEEL_DARK, metalness=0.5)
+            for edge in (-1, 1):
+                _visual_box(scene, f"{prefix}/track{edge}", (0.16, 0.09, height + 0.12),
+                            (x + facing * 0.12, y + edge * (width / 2 + 0.04), (height + 0.12) / 2),
+                            STEEL_DARK, metalness=0.7, roughness=0.35)
+            _visual_box(scene, f"{prefix}/threshold", (0.22, width, 0.008),
+                        (x + facing * 0.1, y, 0.007), STEEL_DARK, metalness=0.6)
+            _visual_box(scene, f"{prefix}/kickplate", (0.014, width - 0.12, 0.25),
+                        (x + facing * 0.04, y, 0.18), STEEL_DARK, metalness=0.65)
+            _visual_box(scene, f"{prefix}/handle", (0.06, 0.3, 0.035),
+                        (x + facing * 0.07, y, 1.05), STEEL_DARK, metalness=0.5)
+            _sign(scene, f"{prefix}/number", (x + facing * 0.19, y, height + 0.65), str(i), facing * math.pi / 2)
+    # High-visibility paint on the faces of the existing columns.
+    for i, (x, y) in enumerate(COLUMNS):
+        for axis in (0, 1):
+            for side in (-1, 1):
+                size = (0.006, COLUMN, 0.65) if axis == 0 else (COLUMN, 0.006, 0.65)
+                p = (x + side * (COLUMN / 2 + 0.002), y, 0.325) if axis == 0 else (x, y + side * (COLUMN / 2 + 0.002), 0.325)
+                _visual_box(scene, f"column/{i}/paint/{axis}_{side}", size, p, LINE_YELLOW)
+    # The office glazing sits against the original partition; its collision stays intact.
+    x0, _x1, y1 = OFFICE
+    for i in range(3):
+        x = x0 + 0.85 + 1.4 * i
+        _visual_box(scene, f"office/detail/window{i}/frame", (1.24, 0.06, 1.12),
+                    (x, y1 + 0.075, 1.85), STEEL_DARK, metalness=0.5)
+        _visual_box(scene, f"office/detail/window{i}/glass", (1.12, 0.015, 1.0),
+                    (x, y1 + 0.113, 1.85), (0.18, 0.29, 0.32), metalness=0.3, roughness=0.16)
+        _visual_box(scene, f"office/detail/window{i}/mullion", (0.035, 0.02, 1.0),
+                    (x, y1 + 0.125, 1.85), STEEL_DARK, metalness=0.5)
 
 
 def markings(scene: bt.Scene, lane: float, stand_y: float) -> None:
-    _mark(scene, "recv", *RECV, color=LINE_GREEN)
-    _mark(scene, "picking", *PICKING, color=LINE_GREEN)
-    _mark(scene, "packing", *PACKING, color=LINE_GREEN)
-    _mark(scene, "shipping", *SHIPPING, color=LINE_GREEN)
-    _mark(scene, "standby", *STANDBY, color=LINE_GREEN)
-    _mark(scene, "materials", *MATERIALS)
+    # Area constants are x0, x1, y0, y1; _mark takes the two corner points.
+    for name, (x0, x1, y0, y1), color in (
+        ("recv", RECV, LINE_GREEN), ("picking", PICKING, LINE_GREEN),
+        ("packing", PACKING, LINE_GREEN), ("shipping", SHIPPING, LINE_GREEN),
+        ("standby", STANDBY, LINE_GREEN), ("materials", MATERIALS, LINE_YELLOW),
+    ):
+        _mark(scene, name, x0, y0, x1, y1, color=color)
     # The receiving floor grid: 4 x 5 pallet positions, the sketch's "最大 20PL".
     x0, x1, y0, y1 = RECV
     for i in range(1, 4):
@@ -395,7 +510,9 @@ def markings(scene: bt.Scene, lane: float, stand_y: float) -> None:
     for j in range(1, 5):
         _line(scene, f"recv_h{j}", (x0, y0 + (y1 - y0) * j / 5), (x1, y0 + (y1 - y0) * j / 5), width=0.05)
     # The AMR lane down the main aisle and its branches, the sketch's dashed line.
-    _line(scene, "lane", (2.0, lane), (38.0, lane), width=0.06)
+    for i in range(24):
+        x = 2.0 + 1.5 * i
+        _line(scene, f"lane/{i}", (x, lane), (x + 0.85, lane), width=0.06)
     for x in (RECV_STAND[0], *RACK_X, PICK_STAND[0], LANE1_X, EMPTY_STAND[0], *CHARGER_XS):
         top = stand_y if x in RACK_X else lane
         _line(scene, f"branch_{x:.1f}", (x, min(lane, top)), (x, max(lane, top) + 0.01), width=0.06)
@@ -404,9 +521,11 @@ def markings(scene: bt.Scene, lane: float, stand_y: float) -> None:
 # ================================================================== the loads
 def unit_load(scene: bt.Scene, name: str, at: tuple, yaw: float, height: float = 0.9,
               z0: float = 0.0, collide: bool = True) -> None:
-    """A stored pallet, as scenery: a pallet slab and a wrapped stack on it —
-    two boxes, because a warehouse has hundreds of these and the aisle check
-    visits every enabled one."""
+    """Stored stock: two collision envelopes, slatted timber and layered cartons.
+
+    The palette and case pattern are deterministic, including on replay.
+    Decorative pieces stay within the original load's clearance envelope.
+    """
     x, y = at
     q = yaw_quat(yaw)
     slab = scene.add_box(f"{name}/pallet", (PALLET[0], PALLET[1], PALLET[2]), (x, y, z0 + PALLET[2] / 2),
@@ -415,6 +534,42 @@ def unit_load(scene: bt.Scene, name: str, at: tuple, yaw: float, height: float =
                           (x, y, z0 + PALLET[2] + height / 2), quaternion=q, color=WRAP)
     for piece in (slab, stack):
         scene.set_obstacle_enabled(piece, collide)
+        scene.set_obstacle_visible(piece, False)
+    _visual_pallet(scene, f"{name}/visual/timber", (x, y, z0), yaw)
+    seed = sum(name.encode("utf-8"))
+    courses = max(2, round(height / 0.28))
+    lx, ly = PALLET[0] - 0.04, PALLET[1] - 0.04
+    course_h = height / courses
+
+    def piece(tag, size, local, color, **finish):
+        dx, dy = rotate(local[0], local[1], yaw)
+        return _visual_box(scene, f"{name}/visual/{tag}", size,
+                           (x + dx, y + dy, z0 + PALLET[2] + local[2]), color, yaw=yaw, **finish)
+
+    # Four cartons per course, with a narrow joint. Some lots use white board.
+    for course in range(courses):
+        for ix in range(2):
+            for iy in range(2):
+                color = PAPER if seed % 5 == 0 else KRAFT[(seed + course + ix + iy) % len(KRAFT)]
+                px, py = (ix - 0.5) * lx / 2, (iy - 0.5) * ly / 2
+                piece(f"case{course}{ix}{iy}", (lx / 2 - 0.009, ly / 2 - 0.009, course_h - 0.008),
+                      (px, py, (course + 0.5) * course_h), color, roughness=0.95)
+                if course == courses - 1:
+                    piece(f"tape{ix}{iy}", (0.045, ly / 2 - 0.012, 0.002),
+                          (px, py, height - 0.003), TAPE, roughness=0.5)
+    # A thin film skin on four sides: low opacity lets the case joints show.
+    for edge in (-1, 1):
+        piece(f"film_x{edge}", (0.001, ly - 0.002, height - 0.014),
+              (edge * (lx / 2 - 0.001), 0, height / 2), WRAP, roughness=0.26, opacity=0.10)
+        piece(f"film_y{edge}", (lx - 0.002, 0.001, height - 0.014),
+              (0, edge * (ly / 2 - 0.001), height / 2), WRAP, roughness=0.26, opacity=0.10)
+    # A shipping label on each aisle-facing side, with a restrained barcode.
+    for edge in (-1, 1):
+        face = edge * (lx / 2 - 0.001)
+        piece(f"label{edge}", (0.0006, 0.23, 0.16), (face, 0.12, height * 0.62), PAPER)
+        for k, width in enumerate((0.006, 0.012, 0.005, 0.009, 0.014, 0.006)):
+            piece(f"barcode{edge}_{k}", (0.0004, width, 0.065),
+                  (face + edge * 0.0005, 0.047 + k * 0.027, height * 0.62 - 0.025), STEEL_DARK)
 
 
 def pallet_with_cases(scene: bt.Scene, name: str, at: tuple, yaw: float, courses: int,
@@ -430,7 +585,8 @@ def pallet_with_cases(scene: bt.Scene, name: str, at: tuple, yaw: float, courses
             dx, dy = rotate(lx, ly, yaw)
             case = f"{name}/case{course}{k}"
             scene.add_box(case, CASE, (x + dx, y + dy, z0 + PALLET[2] + SEAT + course * (CASE[2] + SEAT) + CASE[2] / 2),
-                          quaternion=q, color=CARTON)
+                          quaternion=q, color=KRAFT[(course + k) % len(KRAFT)])
+            scene.set_obstacle_material(case, metalness=0.0, roughness=0.95)
             scene.set_part(case, category="workpiece", model="RSC-360x280x240", mass_kg=CASE_KG)
             cases.append(case)
     return cases
@@ -462,7 +618,8 @@ def racking(scene: bt.Scene, stand_y: float, rack_y0: float) -> None:
         tag = "ABCD"[row]
         bt.parts.pallet_rack(scene, f"rack/{tag}", (x, rack_y0 + run / 2), yaw=math.pi / 2, bays=RACK_BAYS,
                              height=RACK_H, levels=RACK_LEVELS, catalog=ref(RACK),
-                             detail="full" if row == 0 else "plain")
+                             detail="full")
+        _sign(scene, f"rack/{tag}/marker", (x, rack_y0 - 0.025, RACK_H - 0.45), tag)
         # Stock: two EUR pallets a bay, 1200 to the aisle. Elevated loads are
         # drawn only — nothing drives up there.
         for bay in range(RACK_BAYS):
@@ -524,7 +681,8 @@ def packing(scene: bt.Scene) -> list[str]:
         case = f"p4/case1{k}"
         scene.add_box(case, CASE, (PACKOUT_STAND[0] + dx, PACKOUT_STAND[1] + dy,
                                    STAND_SUPPORT + PALLET[2] + SEAT + (CASE[2] + SEAT) + CASE[2] / 2),
-                      quaternion=yaw_quat(math.pi), color=CARTON)
+                      quaternion=yaw_quat(math.pi), color=KRAFT[(k + 1) % len(KRAFT)])
+        scene.set_obstacle_material(case, metalness=0.0, roughness=0.95)
         scene.set_part(case, category="workpiece", model="RSC-360x280x240", mass_kg=CASE_KG)
         cases.append(case)
     return cases
@@ -558,8 +716,10 @@ def materials(scene: bt.Scene) -> None:
                       width_mm=1200, depth_mm=600, height_mm=2100)
     # Empty pallets, stacked five high.
     for k in range(5):
-        scene.add_box(f"materials/empties/{k}", PALLET, (35.2, 3.6, PALLET[2] * (k + 0.5)),
-                      quaternion=yaw_quat(math.pi / 2), color=bt.parts.WOOD)
+        envelope = scene.add_box(f"materials/empties/{k}", PALLET, (35.2, 3.6, PALLET[2] * (k + 0.5)),
+                                  quaternion=yaw_quat(math.pi / 2), color=bt.parts.WOOD)
+        scene.set_obstacle_visible(envelope, False)
+        _visual_pallet(scene, f"materials/empties/{k}/visual", (35.2, 3.6, PALLET[2] * k), math.pi / 2)
     scene.set_part("materials/empties", kind="group", category="pallet", qty=5, model="EUR pallet",
                    manufacturer="EPAL")
 
