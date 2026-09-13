@@ -10,6 +10,7 @@ the examples, so the first run downloads the asset (~10 MB, cached).
 Writes docs/assets/studio/*.png — commit the results.
 """
 
+import os
 import re
 import sys
 import time
@@ -188,6 +189,34 @@ def main() -> None:
             page.screenshot(path=OUT / "vehicle.png")
             print("wrote vehicle.png")
             server.stop()
+
+        if want("warehouse"):
+            # ---- the warehouse from the consultation sketch: a pallet AMR
+            # carrying a received pallet down the main aisle, the racking
+            # and the picking station behind it ---------------------------
+            build_dir = Path(os.environ.get("BOTRAIL_CATALOG_BUILD")
+                             or ROOT.parent / "botrail-catalog-builder" / "build")
+            if not (build_dir / "mobile_industrial_robots/mir/mir1350/r1/manifest.yaml").is_file():
+                print("skipping warehouse: set BOTRAIL_CATALOG_BUILD to a catalog build with the MiR1350 packages")
+            else:
+                import warehouse_demo
+                warehouse_demo.CATALOG_ROOT = build_dir.resolve()
+                scene, _machine, tl = warehouse_demo.bake()
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                time.sleep(4.0)
+                page.wait_for_selector(".timeline-bands", timeout=60000)
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                span = tl.step_span("receiving/to_pdA")
+                t = span.start + 0.6 * span.duration
+                bands = page.locator(".timeline-bands").bounding_box()
+                page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+                page.evaluate("window.__CAM = {pos: [17.5, -1.5, 5.5], look: [10.0, 8.5, 0.8]}")
+                time.sleep(3.0)
+                page.screenshot(path=OUT / "warehouse.png")
+                print("wrote warehouse.png")
+                server.stop()
 
         if want("legged"):
             # ---- 5b. the legged cell: a quadruped carrying a part out ----

@@ -316,6 +316,39 @@ for piece in sorted((package / "collision").glob("*.stl")):
 `examples/vehicles/amr_demo.py --compare` bakes one authored cell on every carrier
 the catalog ships and prints what each answers.
 
+## A pallet on a lift: the warehouse
+
+A pallet AMR carries no arm. Its top module is a lift — a 1-DOF robot from
+the catalog (`vehicle.top_module`) mounted on the carrier's `deck`, whose
+`pallet` frame is the seat a pallet rests on. The hand-over happens on a
+pallet stand ([`bt.parts.pallet_stand`][botrail.parts.pallet_stand], a
+`structure.pallet_stand` pack such as the Nord Pallet Rack): the machine
+drives under the pallet, the lift *ramps* up 60 mm, and it backs out. The
+pallet and everything on it is `attach`ed to the lift's link the moment the
+lift is commanded, so the load rides as the machine's own body and the
+ramp is legal on the move — no plan, no tray zone, no advection.
+
+```python
+lift = scene.add_robot(bt.Robot.from_catalog("eu-pallet-lift-1350"), name="amr1_lift")
+scene.mount_robot("amr1", robot="amr1_lift", offset_position=(0, 0, deck))
+sq.step("hold", actions=[bt.seq.attach(p, link="pallet", robot="amr1_lift") for p in pallet_pieces])
+sq.step("lift", actions=[bt.seq.ramp({"lift": 0.06}, 4.0, robot="amr1_lift")])
+sq.step("go", actions=[bt.seq.goto("amr1", "rackA")], transition=bt.seq.device_done("amr1"))
+```
+
+![A pallet AMR carrying a received pallet down the main aisle to the rack front](../assets/studio/warehouse.png)
+
+Two machines on one aisle are a *traffic* question, and the rollout makes
+it a hard one: vehicles that meet while both drive are refused at the
+instant and place they meet. What a fleet manager does has to be written
+down as a program — each machine requests the aisle and drives on a grant,
+and a small arbiter sequence hands the aisle to one at a time — and then it
+shows on the timing chart as the wait it costs.
+`examples/vehicles/warehouse_demo.py` runs a consultation sketch's three
+flows this way, prints the call-to-supply time the picking station waits,
+and refuses the same shift with `--no-interlock` (the machines meet) or
+`--aisle 1.5` (a column, a wall — by name).
+
 ## Legs instead of wheels
 
 A quadruped or a humanoid is the same vehicle with a gait on its mount:
@@ -354,3 +387,8 @@ the cell starts waiting on it.
   travel, including sideways travel with `--holonomic`.
 * `examples/vehicles/agv_sweep_demo.py` — dispatch delay and dock depth as
   deterministic response curves.
+* `examples/vehicles/warehouse_demo.py` — a 40 m warehouse from a consultation
+  sketch: two MiR1350 carriers with the EU pallet lift on Nord pallet stands,
+  TRUSCO racking, a UR20 case picker on a Makitech belt; the sketch's three
+  flows, the aisle check against the customer's 3.0 m figure, traffic control
+  for two machines on one aisle, and `--out` for the document set.

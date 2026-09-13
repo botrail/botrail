@@ -1686,7 +1686,12 @@ def pallet(
 
     built = Built(name)
     board = 0.022
-    block = h - 2 * board
+    # The blocks stand a millimetre clear of the boards above and below:
+    # a pallet carried as one attached group (a pallet lift, a fork) is
+    # checked as the machine's own body, and layers in exact contact would
+    # read as that body touching itself.
+    clear = 0.001
+    block = h - 2 * board - 2 * clear
     # Bottom boards run along x at three y positions; blocks sit on them;
     # deck boards run along y? No — EPAL: deck boards along the length,
     # bottom boards across. Kept simple: bottom boards along y at three x
@@ -1701,7 +1706,7 @@ def pallet(
             px, py = place(bx, by)
             built.obstacles.append(
                 scene.add_box(f"{name}/block{i}{j}", size=(0.1, 0.14, block),
-                              position=(px, py, z0 + board + block / 2), quaternion=q, color=color)
+                              position=(px, py, z0 + board + clear + block / 2), quaternion=q, color=color)
             )
     n = max(1, deck_boards)
     pitch = wy / n
@@ -1715,6 +1720,439 @@ def pallet(
     scene.add_frame(f"{name}/top", position=(x, y, z0 + h), quaternion=q)
     built.frames.append(f"{name}/top")
     scene.set_part(name, kind="group", category="pallet", **_identity(model, manufacturer, attributes))
+    return built
+
+
+# ------------------------------------------------------------- pallet stand
+
+
+def pallet_stand(
+    scene,
+    name: str,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    yaw: float = 0.0,
+    length: Optional[float] = None,
+    width: Optional[float] = None,
+    inner: Optional[float] = None,
+    support: Optional[float] = None,
+    height: Optional[float] = None,
+    leg: Optional[float] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = DARK_STEEL,
+    **attributes,
+) -> Built:
+    """A pallet stand: the floor-standing rack a pallet-lift AMR drives under
+    to pick a pallet up or set it down. Two sections stand either side of the
+    vehicle's path, each two posts under a support rail with a stop at the
+    far end; the pallet rests across both rails, `support` over the floor.
+
+    `position` is the stand's centre on the floor; the open end faces local
+    +X (rotated by `yaw`), so a vehicle drives in along -X and backs out the
+    way it came. `length` runs along the path, `width` is the outside of the
+    two sections, `inner` the gap between them the vehicle passes through.
+    Adds the frame `<name>/pallet` at the centre of the pallet seat (+Z up)
+    and `<name>/entry` on the floor at the open end with +X pointing into the
+    stand — the vehicle's heading when it docks. Pins the stand
+    (`structure.pallet_stand`).
+
+    With `catalog=` — the id of a pallet stand spec pack, or a package
+    directory — every dimension comes from the pack (omit them all), the
+    pallet it takes is recorded, and the stand lands on the BOM under the
+    article the maker sells it as."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("pallet_stand")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        dims = {key: _mm(spec.dimension_mm("stand", key, None))
+                for key in ("length", "width", "height", "support", "inner", "leg")}
+        length = length if length is not None else dims["length"]
+        width = width if width is not None else dims["width"]
+        height = height if height is not None else dims["height"]
+        support = support if support is not None else dims["support"]
+        inner = inner if inner is not None else dims["inner"]
+        leg = leg if leg is not None else dims["leg"]
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    length = 1.30 if length is None else float(length)
+    width = 1.178 if width is None else float(width)
+    inner = 1.00 if inner is None else float(inner)
+    support = 0.348 if support is None else float(support)
+    height = max(support, 0.389 if height is None else float(height))
+    leg = 0.06 if leg is None else float(leg)
+    if min(length, width, inner, support, leg) <= 0:
+        raise ValueError("pallet_stand: dimensions must be positive")
+    if inner >= width - 2 * leg:
+        raise ValueError(
+            f"pallet_stand: an inner gap of {inner * 1000:.0f} mm leaves no rail in a "
+            f"{width * 1000:.0f} mm stand"
+        )
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    rail_w = (width - inner) / 2.0
+    rail_t = 0.04
+    rail_y = inner / 2.0 + rail_w / 2.0
+    built = Built(name)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s_ * dy, y + s_ * dx + c * dy
+
+    boxes: list[str] = []
+    for side, sy in (("l", 1.0), ("r", -1.0)):
+        px, py = world(0.0, sy * rail_y)
+        boxes.append(scene.add_box(f"{name}/rail_{side}", size=(length, rail_w, rail_t),
+                                   position=(px, py, z0 + support - rail_t / 2), quaternion=q,
+                                   color=color))
+        for end, sx in (("f", 1.0), ("b", -1.0)):
+            px, py = world(sx * (length / 2 - leg / 2), sy * rail_y)
+            boxes.append(scene.add_box(f"{name}/post_{side}{end}", size=(leg, leg, support - rail_t),
+                                       position=(px, py, z0 + (support - rail_t) / 2), quaternion=q,
+                                       color=color))
+        if height - support > 1e-6:
+            px, py = world(-(length / 2 - leg / 2), sy * rail_y)
+            boxes.append(scene.add_box(f"{name}/stop_{side}", size=(leg, rail_w, height - support),
+                                       position=(px, py, z0 + (height + support) / 2), quaternion=q,
+                                       color=color))
+    built.obstacles.extend(boxes)
+    drawn = mode == "full" and _load_trim(
+        scene, built, spec, "stand", f"{name}/trim", (x, y, z0), q,
+        length=length, width=width, height=height, support=support, inner=inner, leg=leg,
+    )
+    if drawn:
+        for box in boxes:
+            scene.set_obstacle_visible(box, False)
+
+    scene.add_frame(f"{name}/pallet", position=(x, y, z0 + support), quaternion=q)
+    ex, ey = world(length / 2, 0.0)
+    scene.add_frame(f"{name}/entry", position=(ex, ey, z0), quaternion=_yaw_quat(yaw + math.pi))
+    built.frames.extend([f"{name}/pallet", f"{name}/entry"])
+
+    recorded = {
+        "support_mm": str(round(support * 1000)),
+        "inner_mm": str(round(inner * 1000)),
+    }
+    if spec is None:
+        scene.set_part(name, kind="group", category="structure.pallet_stand", qty=1,
+                       **_identity(model, manufacturer, {**recorded, **attributes}))
+        return built
+    recorded.update({key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()})
+    pallet_mm = spec.rule("pallet_mm")
+    if pallet_mm:
+        recorded["pallet_mm"] = "x".join(str(_plain(v)) for v in pallet_mm)
+    scene.set_part(
+        name, kind="group", category=spec.category("stand", "structure.pallet_stand"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("stand", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("stand", **params)), **attributes},
+    )
+    return built
+
+
+# --------------------------------------------------------- charging station
+
+
+def charging_station(
+    scene,
+    name: str,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    yaw: float = 0.0,
+    length: Optional[float] = None,
+    width: Optional[float] = None,
+    height: Optional[float] = None,
+    plate: Optional[float] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    **attributes,
+) -> Built:
+    """A vehicle charging station: the housing, and the charging plate on the
+    floor in front of it that the vehicle backs onto. `position` is the
+    housing's centre on the floor; the plate extends along local +X (rotated
+    by `yaw`), which is the side the vehicle arrives from. Adds the frame
+    `<name>/dock` on the floor at the plate's outer edge with +X pointing
+    away from the housing — the vehicle's charging face stands here, so a
+    vehicle whose contacts are at the back parks with its body centred half a
+    body length along that +X. Pins the charger (`vehicle.charger`).
+
+    With `catalog=` — the id of a charger spec pack, or a package directory —
+    the housing and plate come from the pack (omit the sizes) and the supply
+    the site provides (`supply_vac=`) is checked against what it takes."""
+    spec = None
+    params: dict = {}
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("charging_station")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        dims = {key: _mm(spec.dimension_mm("station", key, None))
+                for key in ("length", "width", "height", "plate")}
+        length = length if length is not None else dims["length"]
+        width = width if width is not None else dims["width"]
+        height = height if height is not None else dims["height"]
+        plate = plate if plate is not None else dims["plate"]
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    length = 0.24 if length is None else float(length)
+    width = 0.62 if width is None else float(width)
+    height = 0.29 if height is None else float(height)
+    plate = 0.25 if plate is None else float(plate)
+    if min(length, width, height) <= 0 or plate < 0:
+        raise ValueError("charging_station: dimensions must be positive")
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    built = Built(name)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s_ * dy, y + s_ * dx + c * dy
+
+    boxes = [scene.add_box(f"{name}/housing", size=(length, width, height),
+                           position=(x, y, z0 + height / 2), quaternion=q, color=color)]
+    if plate > 1e-6:
+        px, py = world(length / 2 + plate / 2, 0.0)
+        boxes.append(scene.add_box(f"{name}/plate", size=(plate, width * 0.8, 0.008),
+                                   position=(px, py, z0 + 0.004), quaternion=q, color=DARK_STEEL))
+    built.obstacles.extend(boxes)
+    drawn = mode == "full" and _load_trim(
+        scene, built, spec, "station", f"{name}/trim", (x, y, z0), q,
+        length=length, width=width, height=height, plate=plate,
+    )
+    if drawn:
+        for box in boxes:
+            scene.set_obstacle_visible(box, False)
+    dx_, dy_ = world(length / 2 + plate, 0.0)
+    scene.add_frame(f"{name}/dock", position=(dx_, dy_, z0), quaternion=q)
+    built.frames.append(f"{name}/dock")
+
+    if spec is None:
+        scene.set_part(name, kind="group", category="vehicle.charger", qty=1,
+                       **_identity(model, manufacturer, attributes))
+        return built
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    currents = spec.rule("charging_current_a")
+    if isinstance(currents, dict) and "supply_vac" in params:
+        for key, amps in currents.items():
+            try:
+                if abs(float(key) - float(params["supply_vac"])) < 1e-6:
+                    recorded["charging_current_a"] = str(_plain(amps))
+            except (TypeError, ValueError):
+                continue
+    scene.set_part(
+        name, kind="group", category=spec.category("station", "vehicle.charger"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("station", **params),
+        **{**recorded, **_kg(spec.mass_kg("station", **params)), **attributes},
+    )
+    return built
+
+
+# ------------------------------------------------------------- pallet rack
+
+
+def pallet_rack(
+    scene,
+    name: str,
+    position: Point2 | Point3 = (0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
+    yaw: float = 0.0,
+    bays: int = 1,
+    width: Optional[float] = None,
+    depth: Optional[float] = None,
+    height: Optional[float] = None,
+    levels: Optional[int] = None,
+    beam_heights: Optional[Sequence[float]] = None,
+    upright: Optional[float] = None,
+    upright_depth: Optional[float] = None,
+    beam: Optional[float] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    **attributes,
+) -> Built:
+    """Pallet racking: `bays` bays of clear `width` in a row along local +X
+    (rotated by `yaw`), `depth` deep, `height` tall, with `levels` beam
+    levels — the floor is level 0 and is not counted. `position` is the
+    centre of the run on the floor; the aisle faces are ±Y. An upright frame
+    (two posts, `upright` by `upright_depth`) stands between every bay and at
+    both ends, and each level is a pair of `beam`-tall beams the pallets rest
+    on, their tops at `beam_heights` (evenly spaced by default, the top one
+    100 mm under the upright top).
+
+    Adds the frame `<name>/bay{i}/level{j}` at the centre of every pallet
+    seat — j = 0 on the floor, then each beam top upward — which is where a
+    pallet is put and what a pick targets. Pins the racking: without a
+    catalog one `structure.rack` line for the run; with `catalog=` — the id
+    of a pallet rack spec pack, or a package directory — the dimensions and
+    beam count are matched against what is sold, beam tops snap to the
+    maker's adjustment pitch, and the run is bought as one 単体 unit plus
+    (bays − 1) 連結 extensions, each on the BOM under its own part number."""
+    spec = None
+    params: dict = {}
+    pitch_mm = None
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("pallet_rack")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        if width is not None and "width_mm" in spec.params():
+            params["width_mm"] = spec.choose("width_mm", round(width * 1000.0, 3))
+        if depth is not None and "depth_mm" in spec.params():
+            params["depth_mm"] = spec.choose("depth_mm", round(depth * 1000.0, 3))
+        if height is not None and "height_mm" in spec.params():
+            params["height_mm"] = spec.choose("height_mm", round(height * 1000.0, 3))
+        if levels is not None and "levels" in spec.params():
+            params["levels"] = spec.choose("levels", levels)
+        width = _sized(params, "width_mm", width)
+        depth = _sized(params, "depth_mm", depth)
+        height = _sized(params, "height_mm", height)
+        if params.get("levels") is not None:
+            levels = int(round(float(params["levels"])))
+        upright = upright if upright is not None else _mm(spec.dimension_mm("unit", "upright", 90.0))
+        upright_depth = (upright_depth if upright_depth is not None
+                         else _mm(spec.dimension_mm("unit", "upright_depth", 70.0)))
+        beam = beam if beam is not None else _mm(spec.dimension_mm("unit", "beam", 100.0))
+        pitch_mm = spec.rule("beam_pitch_mm")
+        manufacturer = manufacturer or spec.manufacturer
+
+    mode = _detail(detail, spec is not None)
+    if width is None or depth is None or height is None:
+        raise ValueError("pallet_rack: width, depth and height are required without a catalog")
+    levels = 2 if levels is None else int(levels)
+    upright = 0.09 if upright is None else float(upright)
+    upright_depth = 0.07 if upright_depth is None else float(upright_depth)
+    beam = 0.10 if beam is None else float(beam)
+    bays = int(bays)
+    if bays < 1 or levels < 0:
+        raise ValueError("pallet_rack: bays must be at least one and levels not negative")
+    w, d, h = float(width), float(depth), float(height)
+    if min(w, d, h, upright, upright_depth, beam) <= 0:
+        raise ValueError("pallet_rack: dimensions must be positive")
+
+    # Beam tops: what was asked, else evenly spaced up to 100 mm under the
+    # upright top; either way on the maker's adjustment pitch, and never
+    # above the upright.
+    if beam_heights is None:
+        tops = [(h - 0.10) * (j + 1) / levels for j in range(levels)]
+    else:
+        tops = [float(v) for v in beam_heights]
+        if len(tops) != levels:
+            raise ValueError(
+                f"pallet_rack: {len(tops)} beam heights given for {levels} levels"
+            )
+    if pitch_mm:
+        pitch = float(pitch_mm) / 1000.0
+        tops = [round(t / pitch) * pitch for t in tops]
+    for t in tops:
+        if t <= beam or t > h + 1e-6:
+            raise ValueError(
+                f"pallet_rack: a beam top at {t * 1000:.0f} mm does not fit a "
+                f"{h * 1000:.0f} mm upright"
+            )
+    if any(b - a <= beam for a, b in zip(tops, tops[1:])):
+        raise ValueError("pallet_rack: beam levels must be at least a beam apart")
+
+    x, y = float(position[0]), float(position[1])
+    z0 = float(position[2]) if len(position) > 2 else 0.0
+    q = _yaw_quat(yaw)
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    pitch_x = w + upright
+    run = bays * pitch_x + upright
+    py = d / 2 - upright_depth / 2
+    built = Built(name)
+
+    def world(dx: float, dy: float) -> tuple[float, float]:
+        return x + c * dx - s_ * dy, y + s_ * dx + c * dy
+
+    def group(i: int) -> str:
+        return f"{name}/unit" if i == 0 else f"{name}/ext/{i}"
+
+    def post(prefix: str, tag: str, fx: float) -> None:
+        for face, sy in (("f", -1.0), ("b", 1.0)):
+            px, py_ = world(fx, sy * py)
+            built.obstacles.append(scene.add_box(
+                f"{prefix}/post_{tag}{face}", size=(upright, upright_depth, h),
+                position=(px, py_, z0 + h / 2), quaternion=q, color=color))
+
+    hidden: list[str] = []
+    for i in range(bays):
+        prefix = group(i)
+        x_near = -run / 2 + upright / 2 + i * pitch_x
+        x_mid = x_near + upright / 2 + w / 2
+        if i == 0:
+            post(prefix, "0", x_near)
+        post(prefix, str(i + 1), x_near + pitch_x)
+        for j, top in enumerate(tops, start=1):
+            for face, sy in (("f", -1.0), ("b", 1.0)):
+                bx, by = world(x_mid, sy * py)
+                built.obstacles.append(scene.add_box(
+                    f"{prefix}/beam{j}{face}", size=(w, upright_depth * 0.7, beam),
+                    position=(bx, by, z0 + top - beam / 2), quaternion=q, color=color))
+        for j, top in enumerate([0.0, *tops]):
+            fx, fy = world(x_mid, 0.0)
+            fname = f"{name}/bay{i}/level{j}"
+            scene.add_frame(fname, position=(fx, fy, z0 + top), quaternion=q)
+            built.frames.append(fname)
+        if mode == "full":
+            role = "unit" if i == 0 else "extension"
+            before = len(built.obstacles)
+            bx, by = world(x_mid, 0.0)
+            zs = {f"z{k + 1}": (tops[k] if k < len(tops) else 0.0) for k in range(3)}
+            if _load_trim(scene, built, spec, role, f"{prefix}/trim", (bx, by, z0), q,
+                          width=w, depth=d, height=h, upright=upright,
+                          upright_depth=upright_depth, beam=beam,
+                          first=1 if i == 0 else 0, **zs):
+                hidden.extend(o for o in built.obstacles[:before] if o.startswith(prefix + "/"))
+    for o in hidden:
+        scene.set_obstacle_visible(o, False)
+
+    if spec is None:
+        scene.set_part(name, kind="group", category="structure.rack", qty=1,
+                       **_identity(model, manufacturer, {
+                           "bays": str(bays), "levels": str(levels), **attributes}))
+        return built
+
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    recorded["beam_tops_mm"] = "/".join(str(round(t * 1000)) for t in tops)
+    scene.set_part(
+        f"{name}/unit", kind="group", category=spec.category("unit", "structure.rack"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or spec.part_number("unit", **params), description=spec.name,
+        **{**recorded, **_kg(spec.mass_kg("unit", **params)), **attributes},
+    )
+    if bays > 1 and spec.has_component("extension"):
+        scene.set_part(
+            f"{name}/ext", kind="group", category=spec.category("extension", "structure.rack"),
+            qty=bays - 1, catalog=spec.catalog_ref, manufacturer=manufacturer,
+            model=spec.part_number("extension", **params), description=spec.name,
+            **{**recorded, **_kg(spec.mass_kg("extension", **params))},
+        )
     return built
 
 
@@ -2559,9 +2997,9 @@ def remote_io(
 
 
 __all__ = [
-    "Built", "cabinet", "controller", "conveyor", "fence", "light_curtain", "pallet",
-    "pedestal", "photoelectric", "power_supply", "proximity", "rack",
-    "remote_io", "stairs", "table", "wall",
+    "Built", "cabinet", "charging_station", "controller", "conveyor", "fence",
+    "light_curtain", "pallet", "pallet_rack", "pallet_stand", "pedestal", "photoelectric",
+    "power_supply", "proximity", "rack", "remote_io", "stairs", "table", "wall",
 ]
 
 
