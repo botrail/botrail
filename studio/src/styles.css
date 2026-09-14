@@ -1891,3 +1891,12 @@ button.danger:hover:not(:disabled) {
   border-bottom-color: var(--accent);
   cursor: default;
 }
+
+/* The simulate cap beside the Simulate button: a number with its unit. */
+.seq-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #aeb8c8;
+}

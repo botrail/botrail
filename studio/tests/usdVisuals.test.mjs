@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
+import {readFile} from "node:fs/promises";
 import {AssetPath, DefaultAssetResolver, composeFile, Stage} from "three-usd-robot";
-import {anchoredLayer} from "../src/three/usdVisuals.ts";
+import {anchoredLayer, loadUsdVisual} from "../src/three/usdVisuals.ts";
 
 test("asset paths retain their authoring layer through composition", async () => {
   const resolver = new DefaultAssetResolver();
@@ -18,4 +19,19 @@ def Material "Paint" {
   assert.equal(prim.GetAttribute("image").Get().path, "https://example.test/assets/7/textures/paint.png");
   assert.deepEqual(prim.GetAttribute("images").Get(), [new AssetPath("https://example.test/assets/7/textures/normal.png"), new AssetPath("")]);
   assert.equal(prim.GetAttribute("roughness").Get(), 0.42);
+});
+
+test("shape library layers load through Studio with their surface materials", async t => {
+  for (const shape of ["adjuster", "basket", "carton", "handle", "hose", "panel", "rim", "tray", "workpiece"]) {
+    const bytes = await readFile(new URL(`../../python/botrail/_shapes/${shape}.usda`, import.meta.url));
+    const fetchMock = t.mock.method(globalThis, "fetch", async () => new Response(bytes));
+    const object = await loadUsdVisual(`https://example.test/${shape}.usda`, `/Shapes/${shape}`);
+    fetchMock.mock.restore();
+    assert.equal(object.isMesh, true, shape);
+    assert.ok(object.geometry.getAttribute("position").count > 0, shape);
+    if (shape === "carton") {
+      const colors = new Set(object.material.map(m => m.color.getHexString()));
+      assert.ok(colors.size >= 4, "cardboard, tape, paper and ink retain distinct materials");
+    }
+  }
 });

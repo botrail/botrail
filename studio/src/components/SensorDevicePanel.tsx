@@ -167,6 +167,7 @@ export function SensorDevicePanel() {
     // a bird's-eye camera out of the box; aim it with the rotate gizmo.
     sendUpsertCamera({
       name,
+      body_visible: true,
       mount: { kind: "world" },
       pose: at([0.8, 0, 1.6]),
       fov_deg: 60,
@@ -183,6 +184,7 @@ export function SensorDevicePanel() {
     // with the rotate gizmo. LMS-class defaults: 270°, 0.05–20 m.
     sendUpsertLidar({
       name,
+      body_visible: true,
       mount: { kind: "world" },
       pose: at([0.8, 0, 0.2]),
       fov_deg: 270,
@@ -671,6 +673,11 @@ function CameraForm({ camera }: { camera: CameraMsg }) {
         🎥 {camera.name}
         <span className="seq-cond"> · {mountLabel}</span>
       </div>
+      <label className="seq-cond">
+        <input type="checkbox" checked={camera.body_visible !== false}
+          onChange={(e) => commit({ body_visible: e.target.checked })} />
+        Show generic housing
+      </label>
       <VecFields
         label="pos"
         value={camera.pose.position}
@@ -748,6 +755,11 @@ function LidarForm({ lidar }: { lidar: LidarMsg }) {
         {"\u{1F300}"} {lidar.name}
         <span className="seq-cond"> · {mountLabel}</span>
       </div>
+      <label className="seq-cond">
+        <input type="checkbox" checked={lidar.body_visible !== false}
+          onChange={(e) => commit({ body_visible: e.target.checked })} />
+        Show generic housing
+      </label>
       <VecFields
         label="pos"
         value={lidar.pose.position}

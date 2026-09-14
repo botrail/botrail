@@ -891,10 +891,15 @@ pub(crate) enum LegState {
 }
 
 impl GaitPlan {
-    /// Every DOF the walk drives: the legs, and the arms it swings.
-    pub fn owned(&self, gait: &ResolvedGait) -> Vec<usize> {
+    /// The DOF the walk owns at `t`: the legs until the last foot settles,
+    /// the swung arms only until the vehicle stops — from then on a move
+    /// may claim an arm (the reach a walk ends in), and the walk leaves
+    /// it alone.
+    pub fn owned_at(&self, gait: &ResolvedGait, t: f64) -> Vec<usize> {
         let mut out = gait.leg_joints();
-        out.extend(self.swing.iter().map(|s| s.joint));
+        if t < self.profile.t_end - 1e-9 {
+            out.extend(self.swing.iter().map(|s| s.joint));
+        }
         out
     }
 

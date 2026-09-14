@@ -740,6 +740,11 @@
       "description": "A camera: a named viewpoint with pinhole optics. Presentation only —\nit publishes no signal (a vision sensor referencing it is the planned\nsignal path).",
       "type": "object",
       "properties": {
+        "body_visible": {
+          "description": "Show the generic housing without affecting the optics or frustum.",
+          "type": "boolean",
+          "default": true
+        },
         "far": {
           "type": "number",
           "format": "double"
@@ -2994,6 +2999,11 @@
       "description": "A LiDAR scanner: a named scan origin with a planar sweep. Presentation\nonly — it publishes no signal (a field sensor referencing it is the\nplanned signal path).",
       "type": "object",
       "properties": {
+        "body_visible": {
+          "description": "Show the generic housing without affecting scanning or field overlays.",
+          "type": "boolean",
+          "default": true
+        },
         "channels": {
           "description": "Vertical channels (scan rings); `1` is a planar scanner.",
           "type": "integer",

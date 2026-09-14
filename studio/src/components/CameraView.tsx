@@ -228,19 +228,23 @@ function CameraShape({
         }}
       />
       {/* Body: a small box with a lens stub toward -Z. */}
-      <mesh position={[0, 0, 0.045]} onClick={onClick}>
-        <boxGeometry args={[0.07, 0.05, 0.09]} />
-        <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
-      </mesh>
-      <mesh
-        position={[0, 0, -0.012]}
-        rotation={[Math.PI / 2, 0, 0]}
-        onClick={onClick}
-      >
-        <cylinderGeometry args={[0.016, 0.016, 0.025, 16]} />
-        <meshStandardMaterial color="#2a2e35" roughness={0.4} metalness={0.4} />
-      </mesh>
-      <lineSegments geometry={frustum}>
+      {camera.body_visible !== false && (
+        <>
+          <mesh position={[0, 0, 0.045]} onClick={onClick}>
+            <boxGeometry args={[0.07, 0.05, 0.09]} />
+            <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
+          </mesh>
+          <mesh
+            position={[0, 0, -0.012]}
+            rotation={[Math.PI / 2, 0, 0]}
+            onClick={onClick}
+          >
+            <cylinderGeometry args={[0.016, 0.016, 0.025, 16]} />
+            <meshStandardMaterial color="#2a2e35" roughness={0.4} metalness={0.4} />
+          </mesh>
+        </>
+      )}
+      <lineSegments geometry={frustum} onClick={onClick}>
         <lineBasicMaterial
           color={color}
           transparent

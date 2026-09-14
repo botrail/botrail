@@ -115,6 +115,8 @@ pub enum SensorWatch {
 #[derive(Debug, Clone)]
 pub struct Camera {
     pub name: String,
+    /// Draw Studio's generic housing; false when a separate visual represents it.
+    pub body_visible: bool,
     /// What the camera is bolted to; [`Camera::pose`] is expressed in
     /// this frame.
     pub mount: CameraMount,
@@ -154,6 +156,8 @@ pub enum CameraMount {
 #[derive(Debug, Clone)]
 pub struct Lidar {
     pub name: String,
+    /// Draw Studio's generic housing; false when a separate visual represents it.
+    pub body_visible: bool,
     /// What the scanner is bolted to; [`Lidar::pose`] is expressed in
     /// this frame.
     pub mount: LidarMount,

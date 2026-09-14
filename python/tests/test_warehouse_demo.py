@@ -148,3 +148,13 @@ def test_floor_markings_follow_the_work_area_corners() -> None:
         bounds = [scene.obstacle_bounds(f"marking/{name}/{i}") for i in range(4)]
         assert (min(lo[0] for lo, _ in bounds), max(hi[0] for _, hi in bounds)) == pytest.approx((x0 - 0.04, x1 + 0.04))
         assert (min(lo[1] for lo, _ in bounds), max(hi[1] for _, hi in bounds)) == pytest.approx((y0 - 0.04, y1 + 0.04))
+
+
+def test_stored_cartons_have_no_vertical_air_gaps() -> None:
+    scene = demo.bt.Scene()
+    demo.bt.parts.unit_load(scene, "stock", (2, 3, 1.3), height=0.9, pallet=demo.PALLET)
+    support = 1.3 + demo.PALLET[2]
+    for course in range(round(0.9 / 0.28)):
+        lo, hi = scene.obstacle_bounds(f"stock/visual/case{course}00")
+        assert lo[2] == pytest.approx(support, abs=1e-9)
+        support = hi[2]

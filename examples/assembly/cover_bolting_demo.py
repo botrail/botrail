@@ -49,15 +49,16 @@ Run with:  python examples/assembly/cover_bolting_demo.py [out.usdc]
                  [--length 20] [--rpm 340] [--catalog [--catalog-root DIR]] [--studio]
 
 Appearance and product references: cover_bolting_demo.md. The TRUSCO AE-1500
-bench, Schneider XALK178F E-stop enclosure, custom nests and equipment detail
-are built in Python; the workpiece display meshes follow the joint dimensions.
+bench, the Schneider XALK178F E-stop station, the screw presenter and the
+GH-160 housing-and-cover set are catalog products whose looks come with their
+packs; the custom nests and the panel bracket are built in Python.
 
-Needs the catalog (`pip install botrail[catalog]`; the UR5e, RG6 and
-stand are fetched from botrail/botrail-catalog and cached). `--catalog`
-also orders the presenter (`botrail/feeder/screw-presenter-m2-m6`), screws
-(`botrail/fastener/iso4762-m5`) and housing-and-cover set
-(`botrail/workpiece/gear-cover-set`), whose mounting declares the joint.
-`--catalog-root DIR` reads those assembly packs from a local build.
+Needs the catalog (`pip install botrail[catalog]`; the UR5e, RG6, stand,
+bench, E-stop station, presenter and the housing-and-cover set
+(`botrail/workpiece/gear-cover-set`) are fetched from botrail/botrail-catalog
+and cached). `--catalog` also orders the screws (`botrail/fastener/iso4762-m5`)
+and reads the joint from the set's mounting instead of the typed pattern.
+`--catalog-root DIR` reads the packs from a local build.
 The OnRobot changer and screwdriver use the same dimensioned reference
 geometry in both modes; the former generic SD5-340 pack is not used.
 See cover_bolting_demo.md for the purchased stack, Compute Box wiring
@@ -91,11 +92,13 @@ A = bt.assembly
 # --------------------------------------------------------------- products
 ARM = "universal_robots/ur/ur5e/r2"  # 5 kg / 850 mm
 STAND = "sus/zf/robostand-crx"    # a robot stand
-# Optional assembly packs; the commercial end-effector stack is the same
-# in both modes.
-FEEDER_CATALOG = "botrail/feeder/screw-presenter-m2-m6/r1"
+BENCH_CATALOG = "trusco/ae/ae-1500"                     # its newest revision: r2 draws the maker's frame
+PANEL_CATALOG = "schneider-electric/harmony/xalk178f"   # r2 stands the station up with its enclosure
+FEEDER_CATALOG = "botrail/feeder/screw-presenter-m2-m6"  # r2 draws the presenter's body
+WORKPIECE_CATALOG = "botrail/workpiece/gear-cover-set"   # r2 draws the casting and the machined cover
+# The screws' pack, ordered with `--catalog`; the commercial end-effector
+# stack is the same in both modes.
 SCREW_CATALOG = "botrail/fastener/iso4762-m5/r1"
-WORKPIECE_CATALOG = "botrail/workpiece/gear-cover-set/r1"
 ROBOT = "arm"
 BIT = "drv_bit"
 SHANK = "drv_shank"
@@ -124,12 +127,9 @@ MIN_ENGAGEMENT_MM = 10.0
 TORQUE_NM = (4.0, 5.0)
 TORQUE_SET = 4.5
 SCREW_LENGTH_MM = 20
-HOUSING_MASS = 3.1
-COVER_MASS = 0.6
 
 # ------------------------------------------------------------------ cell
 STAND_H = 0.77
-BENCH = appearance.BENCH
 BENCH_XY = (0.95, 0.0)           # leaves the catalog stand clear of the table
 HOUSING_XY = (0.55, 0.02)
 STOCK_XY = (0.55, -0.30)          # where the cover waits
@@ -149,11 +149,6 @@ READY = [0.0, -1.2, 1.0, -1.0, -1.57, 0.0]
 BRANCHES = [[0.0, j2, j3, j4, j5, 0.0]
             for j2 in (-0.6, -1.0, -1.4, -1.8) for j3 in (0.6, 1.0, 1.4, 1.8, 2.2)
             for j4 in (-2.5, -1.57, -0.8, 0.0) for j5 in (-1.57, 0.0, 1.57)]
-
-# Linear-RGB colours.
-ALUMINIUM_CAST = (0.50, 0.51, 0.53)
-ALUMINIUM_COVER = (0.62, 0.63, 0.66)
-
 
 # --------------------------------------------------------------- helpers
 def q_mul(a, b):
@@ -177,8 +172,13 @@ def down(spin: float) -> tuple:
 
 # ------------------------------------------------------------------ build
 def catalog_ref(product: str, root):
-    """A pack by id — or, with a local build root, its package directory."""
-    return str(Path(root) / product) if root else product
+    """A pack by id — or, with a local build root, its package directory (the
+    newest revision built there when the id names none)."""
+    if not root:
+        return product
+    path = Path(root) / product
+    revisions = sorted((p for p in path.glob("r*") if p.name[1:].isdigit()), key=lambda p: int(p.name[1:]))
+    return str(revisions[-1] if revisions and not (path / "manifest.yaml").is_file() else path)
 
 
 def hand() -> bt.Robot:
@@ -236,42 +236,27 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
                    appearance.METAL, metal=0.85)
     scene.set_part("stand/adapter", manufacturer="botrail", model="UR5e-to-ZF adapter (custom)",
                    category="adapter", description="5 mm demo plate; mounting pattern requires engineering")
-    bench = appearance.bench(scene, BENCH_XY)
+    bench = bt.parts.table(scene, "bench", position=BENCH_XY, catalog=catalog_ref(BENCH_CATALOG, catalog_root),
+                           source_url=appearance.BENCH_SOURCE)
     (_bx, _by, bz), _ = scene.frame(bench.frames[0])
 
     # -- the housing on its fixture, the cover at its stock ------------------
+    # The set from its pack: the housing with its dowels where the pack's
+    # flange face puts them, the cover at its stock, both drawn as the pack
+    # draws them — the casting, the machined cover.
     hx, hy = HOUSING_XY
-    top = bz + HOUSING[2]
     sx, sy = STOCK_XY
     fx, fy = FEEDER_XY
+    work = bt.parts.workpiece(scene, "set", (hx, hy, bz), catalog=catalog_ref(WORKPIECE_CATALOG, catalog_root),
+                              cover_at=(sx, sy, bz))
+    dowels = list(work.dowels)
     if catalog:
-        # The set from its pack: the housing with its dowels where the pack's
-        # flange face puts them, the cover at its stock; the joint read from
-        # the same pack — its holes, its screw, its torque, its engagement.
-        work = bt.parts.workpiece(scene, "set", (hx, hy, bz), catalog=catalog_ref(WORKPIECE_CATALOG, catalog_root),
-                                  cover_at=(sx, sy, bz))
-        dowels = list(work.dowels)
-        scene.set_obstacle_material(work.housing, metalness=1.0, roughness=0.7)
+        # The joint read from the same pack — its holes, its screw, its
+        # torque, its engagement.
         screw = A.Fastener.from_catalog(catalog_ref(SCREW_CATALOG, catalog_root), length_mm=length_mm)
         joint = A.joint(scene, "cover_joint", a=work.housing, b=work.cover, seat=work.seat,
                         catalog=catalog_ref(WORKPIECE_CATALOG, catalog_root), fastener=screw)
     else:
-        scene.add_box("set/housing", size=HOUSING, position=(hx, hy, bz + HOUSING[2] / 2), color=ALUMINIUM_CAST)
-        scene.set_obstacle_material("set/housing", metalness=1.0, roughness=0.7)
-        dowels = []
-        for i, (dx, dy) in enumerate(DOWELS_MM):
-            name = f"set/housing/dowel{i}"
-            scene.add_cylinder(name, DOWEL[0] / 2, DOWEL[1], (hx + dx / 1e3, hy + dy / 1e3, top + DOWEL[1] / 2),
-                               color=(0.30, 0.30, 0.32))
-            dowels.append(name)
-        scene.set_part("set/housing", kind="obstacle", category="workpiece", model="GH-160 housing",
-                       manufacturer="botrail", mass_kg=HOUSING_MASS)
-        bt.parts.compound(scene, "set/cover", [
-            bt.parts.Box(COVER, at=(0.0, 0.0, COVER[2] / 2)),
-            bt.parts.Cylinder(BOSS[0] / 2, BOSS[1], at=(0.0, 0.0, COVER[2])),
-        ], position=(sx, sy, bz), color=ALUMINIUM_COVER, finish=(0.0, 0.45))
-        scene.set_part("set/cover", kind="obstacle", category="workpiece", model="GH-160 cover",
-                       manufacturer="botrail", mass_kg=COVER_MASS)
         # -- the joint: what the drawing states ----------------------------
         screw = A.iso4762(5, length_mm)
         threads = A.BoltPattern(
@@ -282,15 +267,14 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
             [A.Hole(f"h{i}", xy, "clearance", diameter_mm=5.5, grip_mm=COVER[2] * 1e3) for i, xy in enumerate(HOLES_MM)],
             [A.Locator(f"p{i}", xy, "hole", DOWEL[0] * 1e3 + 0.1, 10.0) for i, xy in enumerate(DOWELS_MM)],
         )
-        joint = A.joint(scene, "cover_joint", a="set/housing", b="set/cover", pattern_a=threads, pattern_b=clearances,
-                        fastener=screw, seat=((hx, hy, top), (0.0, 0.0, 0.0, 1.0)), thickness=COVER[2],
+        joint = A.joint(scene, "cover_joint", a=work.housing, b=work.cover, pattern_a=threads, pattern_b=clearances,
+                        fastener=screw, seat=work.seat, thickness=COVER[2],
                         torque_nm=TORQUE_NM, min_engagement_mm=MIN_ENGAGEMENT_MM)
     for link in tooling.pads(robot):
         scene.allow_link_obstacle_contact(link, joint.b, robot=ROBOT)
 
     appearance.fixtures(scene, housing_xy=HOUSING_XY, stock_xy=STOCK_XY, top=bz,
                         housing_size=HOUSING, cover_size=COVER)
-    appearance.workpiece_detail(scene, joint, housing_size=HOUSING, cover_size=COVER, boss=BOSS)
 
     # -- the presenter with its magazine -----------------------------------
     if catalog:
@@ -299,13 +283,12 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
     else:
         screws = [screw.place(scene, f"screw{i}", (fx, fy, bz), manufacturer="botrail") for i in range(len(joint.order))]
         feeder = bt.parts.screw_feeder(scene, "feeder", (fx, fy, bz), screws=screws,
-                                       model="SP-M5 (reference)", manufacturer="botrail", present_s=1.5)
+                                       catalog=catalog_ref(FEEDER_CATALOG, catalog_root))
     for name in feeder.screws:
         scene.allow_link_obstacle_contact(BIT, name, robot=ROBOT)
-    appearance.feeder_detail(scene, feeder)
 
     # -- the panel: an E-stop the driver is guarded by -----------------------
-    panel = appearance.panel(scene, PANEL_AT, ROBOT)
+    panel = appearance.panel(scene, PANEL_AT, ROBOT, bench_top=bz, catalog=catalog_ref(PANEL_CATALOG, catalog_root))
     estop = panel.sensors[0]
 
     # -- the two controllers: the arm's box from its pack; the driver's
@@ -557,8 +540,8 @@ def main() -> None:
     parser.add_argument("--misalign", type=float, default=0.0,
                         help="teach the last screw this many mm off its hole (the bake refuses it)")
     parser.add_argument("--catalog", action="store_true",
-                        help=f"order the presenter, screws and workpiece set from their packs "
-                             f"({FEEDER_CATALOG}, {SCREW_CATALOG}, {WORKPIECE_CATALOG})")
+                        help=f"order the screws from their pack ({SCREW_CATALOG}) and read the joint from the "
+                             f"set's mounting ({WORKPIECE_CATALOG}) instead of the typed pattern")
     parser.add_argument("--catalog-root", default=None, help="read the packs from a local build: DIR/<id>")
     parser.add_argument("--studio", action="store_true")
     args = parser.parse_args()

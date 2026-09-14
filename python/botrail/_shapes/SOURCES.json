@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/botrail/botrail-assets",
+  "path": "workshop-shapes/usd",
+  "commit": "c47b8d65a9f18e0853cfb0b5563589854de76a39",
+  "dirty": false,
+  "synced": "2026-09-14",
+  "files": {
+    "adjuster.usda": "4f31395fe0ec4c77fe00bdc34ccafada40840729244ef48a1c0f4a1c232804ac",
+    "basket.usda": "fc7931a51fa038b90d267804e61459f6ec295f91d1cfd1bcd8609ca84c2334c8",
+    "carton.usda": "cdc4320861bea329fb7dd9a7676c9e49f96675c1558a7815351a99671e389c42",
+    "handle.usda": "c149c6d34736fe889230a17e1e53f70a50c470b96cd4dd65da5658de9961861b",
+    "hose.usda": "6f117a2359a52d1122e2ec672869c727e47a4d47961a060740682f8c379b9394",
+    "panel.usda": "931b3abc41b25c875500c9d63708f3d15de02a33cbdad63a1300181920af53c7",
+    "rim.usda": "f464d2737c22c78f86438cd01f4af2ce1c39de1949f59dbf1850d9d60111eb05",
+    "tray.usda": "74cee1025277247ab14a5346cd4ac06c25a2160d348d1ba92339ea816f39fef1",
+    "workpiece.usda": "c588b7ce1b3938a175caec928d6ad319023fbd5d0626c73ce68caba1c0af3e5f"
+  }
+}

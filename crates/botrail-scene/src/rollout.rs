@@ -2273,12 +2273,13 @@ impl Rollout {
         }
         let owned = self.world.group_joints(robot, group);
         self.claim_joints(robot, &owned, label)?;
+        let now = self.t;
         let rt = &self.robots[robot];
         if rt.walking() {
             let legs: Vec<usize> = rt
                 .gait
                 .as_ref()
-                .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
+                .and_then(|g| g.plan.as_ref().map(|p| p.owned_at(&g.gait, now)))
                 .unwrap_or_default();
             if owned.iter().any(|qi| legs.contains(qi)) {
                 return Err(self.live_err(format!(
@@ -4564,7 +4565,7 @@ impl Rollout {
                 // the drive moves the rest of the robot (`advance_gaits`).
                 if let Some(gr) = rt.gait.as_ref() {
                     if let Some(plan) = &gr.plan {
-                        for qi in plan.owned(&gr.gait) {
+                        for qi in plan.owned_at(&gr.gait, t) {
                             q[qi] = rt.q[qi];
                         }
                     }
@@ -6909,12 +6910,13 @@ impl Rollout {
                 let group = self.joints_group_label(r, &driven);
                 let concurrent =
                     !self.robots[r].active.is_empty() || !self.robots[r].tracking.is_empty();
+                let now = self.t;
                 let rt = &mut self.robots[r];
                 let walking = rt.walking();
                 let legs: Vec<usize> = rt
                     .gait
                     .as_ref()
-                    .and_then(|g| g.plan.as_ref().map(|p| p.owned(&g.gait)))
+                    .and_then(|g| g.plan.as_ref().map(|p| p.owned_at(&g.gait, now)))
                     .unwrap_or_default();
                 let mut goal = rt.q_nom.clone();
                 for ((joint, value), &qi) in targets.iter().zip(&driven) {
@@ -7727,24 +7729,34 @@ impl Rollout {
                 )
             })
         };
+        // Any move still driving a joint — a ramp, a planned motion, an
+        // external driver — has it; the walk leaves that joint alone.
+        let move_driving = |qi: usize| -> bool {
+            ramp_driving(qi)
+                || self.robots[r].active.iter().any(|active| {
+                    !matches!(&active.kind, MoveKind::Ramp { .. })
+                        && active.owned.contains(&qi)
+                        && active.end() > t + 1e-9
+                })
+        };
         let model = self.world.robots()[r].model.clone();
         for leg in &gr.gait.legs {
-            if let Some(&qi) = leg.joints.iter().find(|&&qi| ramp_driving(qi)) {
+            if let Some(&qi) = leg.joints.iter().find(|&&qi| move_driving(qi)) {
                 return Err(err(format!(
-                    "a ramp is still moving leg `{}` (joint `{}`); wait for done \
+                    "a move is still driving leg `{}` (joint `{}`); wait for done \
                      before the goto",
                     leg.name, model.joints[model.actuated_joints[qi]].name
                 )));
             }
         }
-        // The arms swing unless the hands are full or a ramp has them: a
+        // The arms swing unless the hands are full or a move has them: a
         // carried part rides still, and a stow finishes on its own.
         let hands_full = self.world.attachments().iter().any(|a| a.robot == r);
         let swing: Vec<crate::gait::ArmSwing> = gr
             .gait
             .arm_swing
             .iter()
-            .filter(|(qi, _)| !hands_full && !ramp_driving(*qi))
+            .filter(|(qi, _)| !hands_full && !move_driving(*qi))
             .map(|&(qi, amplitude)| crate::gait::ArmSwing {
                 joint: qi,
                 center: self.robots[r].q[qi],
@@ -8009,6 +8021,15 @@ impl Rollout {
         let rest = plan.rest(gait);
         let mut q = self.robots[r].q.clone();
         let seed = q.clone();
+        // Past the vehicle's stop the swung arms are free: a move started
+        // on arrival drives them from here (the reach a walk ends in), and
+        // the ones nobody claims ease to their centre over the settle.
+        let stopped = t >= plan.profile.t_end - 1e-9;
+        let driven_now: Vec<usize> = self.robots[r]
+            .active
+            .iter()
+            .flat_map(|active| active.owned.iter().copied())
+            .collect();
         if finishing {
             for leg in &gait.legs {
                 for &qi in &leg.joints {
@@ -8016,7 +8037,9 @@ impl Rollout {
                 }
             }
             for s in &plan.swing {
-                q[s.joint] = s.center;
+                if !driven_now.contains(&s.joint) {
+                    q[s.joint] = s.center;
+                }
             }
         } else {
             for (i, leg) in gait.legs.iter().enumerate() {
@@ -8108,8 +8131,16 @@ impl Rollout {
                 }
             }
             let phase = 2.0 * std::f64::consts::PI * (t - plan.profile.t0) / gait.period;
+            let fade = if stopped {
+                ((plan.done - t) / (plan.done - plan.profile.t_end).max(1e-9)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             for s in &plan.swing {
-                q[s.joint] = s.center + s.amplitude * phase.sin();
+                if stopped && driven_now.contains(&s.joint) {
+                    continue;
+                }
+                q[s.joint] = s.center + s.amplitude * phase.sin() * fade;
             }
         }
         let dt = self.options.dt;
@@ -8123,7 +8154,13 @@ impl Rollout {
         // settling tick, where the legs come to rest: a hold follows, and a
         // cubic through a resting sample with a one-tick velocity on it
         // would swing the legs around for the length of the hold.
-        let owned = plan.owned(gait);
+        let mut owned = gait.leg_joints();
+        owned.extend(
+            plan.swing
+                .iter()
+                .map(|s| s.joint)
+                .filter(|j| !driven_now.contains(j)),
+        );
         let velocity: Vec<f64> =
             rt.q.iter()
                 .zip(&previous)
@@ -8142,8 +8179,12 @@ impl Rollout {
             gr.plan = None;
             // A move that outlives the walk keeps the legs where the walk
             // left them, and its remaining samples go back on the bake.
+            // The arms the walk swung are not pinned: they were set to
+            // their centre above, and a move started on arrival — the
+            // reach a walk ends in — is theirs from this tick on.
+            let legs = gait.leg_joints();
             for active in &mut rt.active {
-                active.pin_joints(&owned, &rest);
+                active.pin_joints(&legs, &rest);
             }
             rt.rebake_active_tail(t);
         }
@@ -15353,6 +15394,38 @@ mod biped_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("driven by the gait"), "{err}");
+    }
+
+    #[test]
+    fn a_swung_arm_is_free_the_moment_the_walk_is_over() {
+        // The reach a walk ends in: a ramp started on the arrival tick
+        // drives the arm the walk was swinging. Pinning the swung joints
+        // with the legs (the settle's hold) would freeze it at its centre
+        // for the whole ramp.
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let r = qi(&scene, "R_shoulder_pitch_joint");
+        scene.upsert_sequence(Sequence {
+            name: "reach".into(),
+            steps: vec![
+                step("go", vec![goto("c")], device_done()),
+                step(
+                    "reach",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("R_shoulder_pitch_joint".into(), -1.0)],
+                        duration: 2.0,
+                    }],
+                    Condition::Done,
+                ),
+                step("stand", vec![], Condition::Elapsed { seconds: 0.5 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("reach", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.robots[0];
+        let end = track.trajectory.sample(tl.duration)[r];
+        assert!((end + 1.0).abs() < 1e-6, "the arm did not reach: {end}");
     }
 
     #[test]

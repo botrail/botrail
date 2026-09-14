@@ -31,12 +31,24 @@ few centimetres a real profile differs by change nothing a cell verifies.
 Anything with a shape of its own comes in from CAD as a mesh (see the
 Geometry Provider pattern in the standard-parts guide) and gets its
 identity the same way, with `set_part`.
+
+The forms a box cannot draw but every cell has — a carton with its lids
+and tape, a pressed tray, a perforated basket, an adjuster foot — are a
+small *shape library* shipped with botrail (`SHAPES`, unit-box USD layers
+under `botrail/_shapes/`, authored in botrail-assets): `appearance` draws
+an obstacle as one of them, scaled to its box, so the collision stays the
+box the cell was taught against and the picture travels with the
+resident; `shaped_box` places one as decoration. The props built on it —
+`tray`, `stage`, `carton`, `unit_load`, `marking`, `person`, `gantry` — are
+the generic things a cell is full of and nobody orders by part number,
+generated from their dimensions like everything else here.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Union
 
 if TYPE_CHECKING:
@@ -165,6 +177,24 @@ def _load_trim(
         scene.set_obstacle_enabled(name, False)
         built.obstacles.append(name)
     built.frames.extend(sorted(set(scene.frames) - before))
+    return True
+
+
+def _load_visual(scene, spec, role: str, name: str) -> bool:
+    """Draw a part as the prim the pack ships for it — bound to the resident
+    in its own frame at its authored size, so the picture moves, attaches
+    and saves with it while the collision stays the generator's. The layer's
+    finishes replace any material override. Returns False when the pack
+    names none, so the caller keeps its own look."""
+    ref = None if spec is None else spec.visual(role)
+    if ref is None:
+        return False
+    layer, prim = ref
+    scene.set_obstacle_visual_asset(
+        name, layer, prim,
+        (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+    )
+    scene.set_obstacle_material(name)
     return True
 
 
@@ -786,7 +816,10 @@ def table(
 
     `detail="full"` (the default with a catalog) adds the rails under the
     board and a pad under each foot — decoration that never collides, so the
-    legs and the board stay the only thing a robot can hit."""
+    legs and the board stay the only thing a robot can hit. A pack may put
+    the legs in from the board's edge the way the maker does
+    (`dimensions_mm.inset_length` / `inset_width`, to the leg centre) and
+    draw the whole frame, board included, from its `frame` trim."""
     spec = None
     params: dict = {}
     if catalog is not None:
@@ -798,11 +831,13 @@ def table(
         for key in [key for key in attributes if key in params]:
             params[key] = spec.choose(key, attributes.pop(key))
         size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
-        top_thickness = (
-            top_thickness
-            if top_thickness is not None
-            else _mm(spec.dimension_mm("top", "thickness", 30.0))
-        )
+        if top_thickness is None:
+            # A board sold separately states its thickness on itself; one that
+            # comes with the frame states it on the frame.
+            thickness_mm = spec.dimension_mm("top", "thickness")
+            if thickness_mm is None:
+                thickness_mm = spec.dimension_mm("frame", "top_thickness", 30.0)
+            top_thickness = _mm(thickness_mm)
         leg = leg if leg is not None else _mm(spec.dimension_mm("frame", "leg", 40.0))
         manufacturer = manufacturer or spec.manufacturer
 
@@ -823,6 +858,15 @@ def table(
     def world(dx: float, dy: float) -> tuple[float, float]:
         return x + c * dx - s * dy, y + s * dx + c * dy
 
+    # Where the legs stand: flush with the board's corners, unless the pack
+    # says how far in from the edge the maker puts them (leg centre).
+    inset_x = inset_y = leg / 2
+    if spec is not None:
+        inset_x = _mm(spec.dimension_mm("frame", "inset_length", leg * 500.0)) or leg / 2
+        inset_y = _mm(spec.dimension_mm("frame", "inset_width", leg * 500.0)) or leg / 2
+        if not (leg / 2 - 1e-9 <= inset_x < lx / 2 and leg / 2 - 1e-9 <= inset_y < wy / 2):
+            raise ValueError(f"table: the pack's leg inset ({inset_x * 1e3:.0f} / {inset_y * 1e3:.0f} mm) does not fit the board")
+
     built = Built(name)
     built.obstacles.append(
         scene.add_box(f"{name}/top", size=(lx, wy, top_thickness), position=(x, y, z0 + h - top_thickness / 2),
@@ -831,7 +875,7 @@ def table(
     corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
     _finish(scene, f"{name}/top", _PAINT)
     for i, (sx, sy) in enumerate(corners):
-        px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
+        px, py = world(sx * (lx / 2 - inset_x), sy * (wy / 2 - inset_y))
         built.obstacles.append(
             scene.add_box(f"{name}/leg{i}", size=(leg, leg, h - top_thickness),
                           position=(px, py, z0 + (h - top_thickness) / 2), quaternion=q, color=color)
@@ -844,10 +888,15 @@ def table(
         drawn = _load_trim(
             scene, built, spec, "frame", f"{name}/trim/frame", (x, y, z0), q,
             width=lx, depth=wy, height=h, leg=leg, top_thickness=top_thickness,
+            inset_length=inset_x, inset_width=inset_y,
         )
         if drawn:
             for i in range(len(corners)):
                 scene.set_obstacle_visible(f"{name}/leg{i}", False)
+            # A frame trim that draws the board names it `top`: the massing
+            # board then hides behind it, as the legs do behind the frame.
+            if f"{name}/trim/frame/top" in built.obstacles:
+                scene.set_obstacle_visible(f"{name}/top", False)
         else:
             # An aluminium stand is legs plus the rails that tie them together
             # under the board, and a pad under each foot.
@@ -859,7 +908,7 @@ def table(
                 _trim(scene, built, f"{name}/trim/rail{i}", span, (px, py, under), q, DARK_STEEL,
                       finish=_PAINT)
             for i, (sx, sy) in enumerate(corners):
-                px, py = world(sx * (lx / 2 - leg / 2), sy * (wy / 2 - leg / 2))
+                px, py = world(sx * (lx / 2 - inset_x), sy * (wy / 2 - inset_y))
                 _trim(scene, built, f"{name}/trim/foot{i}", (leg * 1.8, leg * 1.8, leg / 4),
                       (px, py, z0 + leg / 8), q, DARK_STEEL, finish=_RUBBER)
         if _load_trim(
@@ -1658,6 +1707,45 @@ def conveyor(
 # -------------------------------------------------------------------- pallet
 
 
+def _pallet_boards(scene, name: str, x: float, y: float, z0: float, size: Point3, yaw: float,
+                   colors: Sequence[Color], deck_boards: int = 5) -> list[str]:
+    """The timber of a pallet `size = (length, width, height)` standing at
+    `(x, y, z0)` turned by `yaw`: three bottom boards, nine blocks,
+    `deck_boards` top boards, coloured plank by plank from `colors`.
+    Returns the boxes' names."""
+    lx, wy, h = size
+    q = _yaw_quat(yaw)
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def place(local_x: float, local_y: float) -> tuple[float, float]:
+        return x + c * local_x - s * local_y, y + s * local_x + c * local_y
+
+    names: list[str] = []
+
+    def add(tag: str, size_: Point3, at: tuple[float, float, float]) -> None:
+        names.append(scene.add_box(f"{name}/{tag}", size=size_, position=at, quaternion=q,
+                                   color=colors[len(names) % len(colors)]))
+
+    board = 0.022
+    # The blocks stand a millimetre clear of the boards above and below:
+    # a pallet carried as one attached group (a pallet lift, a fork) is
+    # checked as the machine's own body, and layers in exact contact would
+    # read as that body touching itself.
+    clear = 0.001
+    block = h - 2 * board - 2 * clear
+    # Bottom boards run along y at three x positions, blocks sit on them,
+    # deck boards run along x at `deck_boards` y positions.
+    for i, bx in enumerate((-lx / 2 + 0.05, 0.0, lx / 2 - 0.05)):
+        add(f"bottom{i}", (0.1, wy, board), (*place(bx, 0.0), z0 + board / 2))
+        for j, by in enumerate((-wy / 2 + 0.07, 0.0, wy / 2 - 0.07)):
+            add(f"block{i}{j}", (0.1, 0.14, block), (*place(bx, by), z0 + board + clear + block / 2))
+    n = max(1, deck_boards)
+    pitch = wy / n
+    for k in range(n):
+        add(f"deck{k}", (lx, pitch * 0.8, board), (*place(0.0, -wy / 2 + pitch * (k + 0.5)), z0 + h - board / 2))
+    return names
+
+
 def pallet(
     scene,
     name: str,
@@ -1679,44 +1767,8 @@ def pallet(
     x, y = float(position[0]), float(position[1])
     z0 = float(position[2]) if len(position) > 2 else 0.0
     q = _yaw_quat(yaw)
-    c, s = math.cos(yaw), math.sin(yaw)
-
-    def place(local_x: float, local_y: float) -> tuple[float, float]:
-        return x + c * local_x - s * local_y, y + s * local_x + c * local_y
-
     built = Built(name)
-    board = 0.022
-    # The blocks stand a millimetre clear of the boards above and below:
-    # a pallet carried as one attached group (a pallet lift, a fork) is
-    # checked as the machine's own body, and layers in exact contact would
-    # read as that body touching itself.
-    clear = 0.001
-    block = h - 2 * board - 2 * clear
-    # Bottom boards run along x at three y positions; blocks sit on them;
-    # deck boards run along y? No — EPAL: deck boards along the length,
-    # bottom boards across. Kept simple: bottom boards along y at three x
-    # positions, deck boards along x at `deck_boards` y positions.
-    for i, bx in enumerate((-lx / 2 + 0.05, 0.0, lx / 2 - 0.05)):
-        px, py = place(bx, 0.0)
-        built.obstacles.append(
-            scene.add_box(f"{name}/bottom{i}", size=(0.1, wy, board), position=(px, py, z0 + board / 2),
-                          quaternion=q, color=color)
-        )
-        for j, by in enumerate((-wy / 2 + 0.07, 0.0, wy / 2 - 0.07)):
-            px, py = place(bx, by)
-            built.obstacles.append(
-                scene.add_box(f"{name}/block{i}{j}", size=(0.1, 0.14, block),
-                              position=(px, py, z0 + board + clear + block / 2), quaternion=q, color=color)
-            )
-    n = max(1, deck_boards)
-    pitch = wy / n
-    for k in range(n):
-        by = -wy / 2 + pitch * (k + 0.5)
-        px, py = place(0.0, by)
-        built.obstacles.append(
-            scene.add_box(f"{name}/deck{k}", size=(lx, pitch * 0.8, board), position=(px, py, z0 + h - board / 2),
-                          quaternion=q, color=color)
-        )
+    built.obstacles.extend(_pallet_boards(scene, name, x, y, z0, size, yaw, (color,), deck_boards))
     scene.add_frame(f"{name}/top", position=(x, y, z0 + h), quaternion=q)
     built.frames.append(f"{name}/top")
     scene.set_part(name, kind="group", category="pallet", **_identity(model, manufacturer, attributes))
@@ -3631,7 +3683,10 @@ def operator_panel(
     directory — a box you can order: the number of buttons is matched
     against the sizes sold (the box's face follows), the pitch, the cap
     and the travel come from the pack, and the box, its buttons and the
-    E-stop land on the bill with their article numbers."""
+    E-stop land on the bill with their article numbers. An operator the
+    pack sells no article for comes with the box (a complete station) and
+    is listed as included, not bought again; a pack's `box` trim draws the
+    enclosure in place of the plate."""
     names = [str(b) for b in buttons]
     spec = None
     params: dict = {}
@@ -3692,7 +3747,13 @@ def operator_panel(
     scene.add_frame(name, position=world(0.0, face, 0.0), quaternion=q_press)
     built.frames.append(name)
 
-    if _detail(detail, spec is not None) == "full":
+    if _detail(detail, spec is not None) == "full" and spec is not None and _load_trim(
+        scene, built, spec, "box", f"{name}/trim/box", (x, y, z), q,
+        parameters=params, width=w, height=h, thickness=thickness,
+    ):
+        # The pack draws its own enclosure; the plate stays the collision.
+        scene.set_obstacle_visible(f"{name}/plate", False)
+    elif _detail(detail, spec is not None) == "full":
         # A thin face bezel and captive screws. Button frames and travel stay
         # on the original face, so a visual refinement cannot change a press.
         rim = min(0.006, min(w, h) / 12)
@@ -3758,6 +3819,14 @@ def operator_panel(
                 zone, kind="sensor", category=spec.category(role, "hmi.button"), qty=1,
                 catalog=spec.catalog_ref, manufacturer=manufacturer, model=models.get(button),
                 **{**figures, **_kg(spec.mass_kg(role, positions=1))},
+            )
+        elif spec is not None and spec.has_component("box"):
+            # A pack that sells no such article ships the operator with the
+            # box (a complete station): named after it, not bought again.
+            scene.set_part(
+                zone, kind="sensor", category="hmi.button", qty=1, catalog=spec.catalog_ref,
+                manufacturer=manufacturer, model=f"{spec.part_number('box', **params)} operator (included)",
+                description="comes with the station, not a separate purchase", **figures,
             )
         else:
             scene.set_part(
@@ -5002,6 +5071,490 @@ def compound(
     return made
 
 
+# ---------------------------------------------------------------- shapes
+# The forms a box cannot draw, as unit-box USD layers — one mesh at
+# `/Shapes/<name>` with its finishes as material subsets — vendored from
+# botrail-assets/workshop-shapes by scripts/sync_shapes.py.
+SHAPES: tuple[str, ...] = ("adjuster", "basket", "carton", "handle", "hose", "panel", "rim", "tray", "workpiece")
+_SHAPES_DIR = Path(__file__).resolve().parent / "_shapes"
+
+
+def shape_path(shape: str) -> Path:
+    """The USD layer a library shape is drawn from — its mesh is the prim
+    `/Shapes/<shape>` — for the names in `SHAPES`."""
+    if shape not in SHAPES:
+        raise ValueError(f"unknown shape {shape!r}; one of {', '.join(SHAPES)}")
+    return _SHAPES_DIR / f"{shape}.usda"
+
+
+def appearance(
+    scene,
+    name: str,
+    shape: str,
+    size: Point3,
+    *,
+    offset: Point3 = (0.0, 0.0, 0.0),
+    tint: bool = False,
+) -> str:
+    """Draws the obstacle `name` as the library shape `shape`, scaled to
+    `size` — the box the shape fills, normally the obstacle's own — so the
+    picture moves, attaches, saves and exports with the resident while its
+    collision stays the box the cell was taught against. `offset` shifts
+    the picture inside that box (a basket floor sitting on an insert);
+    `tint` paints the whole shape the obstacle's colour instead of the
+    layer's finishes (a laminate `panel` in the bench's colour). The layer's
+    finishes replace any `set_obstacle_material` override. Returns `name`."""
+    x, y, z = size
+    if min(size) <= 0:
+        raise ValueError(f"appearance: a shape needs a box with positive sides, not {size}")
+    scene.set_obstacle_visual_asset(
+        name, shape_path(shape), f"/Shapes/{shape}",
+        (x, 0.0, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, 0.0, z, 0.0, *offset, 1.0), color_override=tint,
+    )
+    scene.set_obstacle_material(name)
+    return name
+
+
+def shaped_box(
+    scene,
+    name: str,
+    shape: str,
+    size: Point3,
+    position: Point3,
+    *,
+    quaternion=None,
+    color: Color | None = None,
+    offset: Point3 = (0.0, 0.0, 0.0),
+) -> str:
+    """A decoration drawn as a library shape — the picture of a handle, a
+    hose, an adjuster foot beside a resident that keeps its own massing:
+    `add_box` out of collision, then `appearance`. With `color` the shape
+    is tinted that colour; without, it keeps the layer's finishes. Returns
+    the obstacle's name."""
+    made = scene.add_box(name, size=size, position=position, quaternion=quaternion, color=color)
+    scene.set_obstacle_enabled(made, False)
+    appearance(scene, made, shape, size, offset=offset, tint=color is not None)
+    return made
+
+
+# ------------------------------------------------------------------- props
+# The generic things a cell is full of and nobody orders by part number:
+# the tray a part waits in, the carton, the stock on a pallet, the paint on
+# the floor, the person a scenario stands in the gate, the portal a camera
+# hangs from. Dimension-driven like every generator — what the cell
+# verifies stays in the arguments — and drawn from the shape library where
+# a box cannot draw the thing.
+CARDBOARD: Color = (0.62, 0.45, 0.26)
+LABEL_PAPER: Color = (0.86, 0.84, 0.76)
+PACKING_TAPE: Color = (0.34, 0.22, 0.10)
+STRETCH_FILM: Color = (0.78, 0.80, 0.84)
+LINE_YELLOW: Color = (0.85, 0.62, 0.05)
+LINE_GREEN: Color = (0.10, 0.45, 0.20)
+HI_VIS: Color = (0.85, 0.75, 0.30)
+TRAY_STEEL: Color = (0.55, 0.57, 0.60)
+FOAM: Color = (0.82, 0.80, 0.74)
+# One lot of cartons is one board colour; the timber of a pallet varies plank by plank.
+_CARDBOARD_LOTS: tuple[Color, ...] = ((0.48, 0.31, 0.16), (0.60, 0.43, 0.25), (0.68, 0.51, 0.32), (0.42, 0.28, 0.16))
+_TIMBER: tuple[Color, ...] = ((0.39, 0.27, 0.14), (0.52, 0.38, 0.21), (0.60, 0.45, 0.27))
+_BARCODE_INK: Color = (0.22, 0.24, 0.27)
+_KRAFT: _Finish = (0.0, 0.95)
+_TUBE_STEEL: _Finish = (0.8, 0.3)
+_INSERT_INSET = 0.01
+
+
+def _prop_detail(detail: str | None) -> str:
+    """A prop has no catalog to be plain without: it is drawn in full unless
+    asked otherwise."""
+    if detail is None:
+        return "full"
+    if detail not in DETAIL_MODES:
+        raise ValueError(f"detail must be one of {DETAIL_MODES}, not {detail!r}")
+    return detail
+
+
+def _floor_point(position) -> tuple[float, float, float]:
+    """`(x, y)` or `(x, y, z)`: where a thing stands, on the floor by default."""
+    x, y = float(position[0]), float(position[1])
+    return x, y, (float(position[2]) if len(position) > 2 else 0.0)
+
+
+def _turned(x: float, y: float, yaw: float, local_x: float, local_y: float) -> tuple[float, float]:
+    c, s = math.cos(yaw), math.sin(yaw)
+    return x + c * local_x - s * local_y, y + s * local_x + c * local_y
+
+
+def _riser(scene, built: Built, name: str, size: Point3, position, yaw: float, seat: float,
+           color: Color, insert_color: Color) -> str:
+    """A block with a foam insert on top: the block collides, the insert is
+    a picture `seat` thick, and the frame `<name>/seat` — the insert's top
+    centre — is where a part sets down. Returns the insert's name."""
+    lx, ly, h = size
+    if min(size) <= 0 or seat <= 0:
+        raise ValueError(f"{name}: needs positive sides and seat, not {size} / {seat}")
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    built.obstacles.append(
+        scene.add_box(name, size=(lx, ly, h), position=(x, y, z0 + h / 2), quaternion=q, color=color)
+    )
+    insert = scene.add_box(f"{name}/insert", size=(lx - 2 * _INSERT_INSET, ly - 2 * _INSERT_INSET, seat),
+                           position=(x, y, z0 + h + seat / 2), quaternion=q, color=insert_color)
+    scene.set_obstacle_enabled(insert, False)
+    built.obstacles.append(insert)
+    scene.add_frame(f"{name}/seat", position=(x, y, z0 + h + seat), quaternion=q)
+    built.frames.append(f"{name}/seat")
+    return insert
+
+
+def tray(
+    scene,
+    name: str,
+    size: Point3,
+    position,
+    *,
+    yaw: float = 0.0,
+    seat: float = 0.018,
+    grips: bool = True,
+    detail: str | None = None,
+    color: Color = TRAY_STEEL,
+    insert_color: Color = FOAM,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A parts tray: a pressed steel tray `size = (length, width, height)`
+    standing at `position` — the centre of its underside, a bench top —
+    turned by `yaw`, with a foam insert `seat` thick on it. The tray is the
+    box the planner checks; the insert is a picture (a set-down is refused
+    closer than a few millimetres to a thing the planner sees, and the
+    insert is what the part visibly rests on); the frame `<name>/seat` is
+    the insert's top centre, where a part sets down. Full detail draws the
+    tray and the insert from the shape library and a bent grip on each side
+    (`grips`), out of collision, under `<name>/trim/`. Pins one part
+    (`tray`) on the group."""
+    mode = _prop_detail(detail)
+    built = Built(name)
+    insert = _riser(scene, built, name, size, position, yaw, seat, color, insert_color)
+    lx, ly, h = size
+    x, y, z0 = _floor_point(position)
+    if mode == "full":
+        appearance(scene, name, "tray", (lx, ly, h))
+        appearance(scene, insert, "panel", (lx - 2 * _INSERT_INSET, ly - 2 * _INSERT_INSET, seat), tint=True)
+        if grips:
+            for i, side in enumerate((-1, 1)):
+                px, py = _turned(x, y, yaw, 0.0, side * (ly / 2 + 0.006))
+                built.obstacles.append(
+                    shaped_box(scene, f"{name}/trim/grip{i}", "handle", (0.09, 0.012, 0.045),
+                               (px, py, z0 + h - 0.06), quaternion=_yaw_quat(yaw))
+                )
+    identity = _identity(model, manufacturer, attributes)
+    scene.set_part(name, kind="group", category=identity.pop("category", "tray"), **identity)
+    return built
+
+
+def stage(
+    scene,
+    name: str,
+    size: Point3,
+    position,
+    *,
+    yaw: float = 0.0,
+    seat: float = 0.018,
+    plate: float = 0.016,
+    leg: float = 0.012,
+    inset: float = 0.03,
+    detail: str | None = None,
+    color: Color = DARK_STEEL,
+    plate_color: Color = (0.12, 0.15, 0.16),
+    insert_color: Color = FOAM,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A presentation stage — the fixture a part is set on under a camera:
+    a top plate `plate` thick on four round legs of radius `leg`, `inset`
+    in from the corners, the whole `size = (length, width, height)` at
+    `position` (its underside centre) turned by `yaw`, with a foam insert
+    `seat` thick on the plate. The block collides as one box; in full
+    detail it is hidden and the plate and legs are drawn under
+    `<name>/trim/`. The frame `<name>/seat` is the insert's top centre.
+    Pins one part (`fixture`) on the group."""
+    mode = _prop_detail(detail)
+    lx, ly, h = size
+    if not 0 < plate < h or leg <= 0 or inset <= 0:
+        raise ValueError(f"{name}: the plate must be thinner than the stage and the legs real")
+    built = Built(name)
+    insert = _riser(scene, built, name, size, position, yaw, seat, color, insert_color)
+    x, y, z0 = _floor_point(position)
+    if mode == "full":
+        scene.set_obstacle_visible(name, False)
+        q = _yaw_quat(yaw)
+        built.obstacles.append(
+            shaped_box(scene, f"{name}/trim/top", "panel", (lx, ly, plate), (x, y, z0 + h - plate / 2),
+                       quaternion=q, color=plate_color)
+        )
+        for i, (sx, sy) in enumerate(((-1, -1), (-1, 1), (1, -1), (1, 1))):
+            px, py = _turned(x, y, yaw, sx * (lx / 2 - inset), sy * (ly / 2 - inset))
+            _trim_cylinder(scene, built, f"{name}/trim/leg{i}", leg, h - plate, (px, py, z0 + (h - plate) / 2),
+                           None, TRAY_STEEL, finish=_TUBE_STEEL)
+        appearance(scene, insert, "panel", (lx - 2 * _INSERT_INSET, ly - 2 * _INSERT_INSET, seat), tint=True)
+    identity = _identity(model, manufacturer, attributes)
+    scene.set_part(name, kind="group", category=identity.pop("category", "fixture"), **identity)
+    return built
+
+
+def carton(
+    scene,
+    name: str,
+    size: Point3,
+    position,
+    *,
+    yaw: float = 0.0,
+    color: Color = CARDBOARD,
+    mass_kg: float | None = None,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    detail: str | None = None,
+    **attributes,
+) -> str:
+    """A shipping carton `size = (length, width, height)` standing at
+    `position` — the centre of its bottom face — turned by `yaw`: one
+    obstacle, so it attaches, tracks and saves as one thing, drawn in full
+    detail as the library's folded, taped and labelled box. Pins one part
+    (`workpiece`), its model the RSC size in millimetres unless given, with
+    `mass_kg` when known — what a payload check reads. Stock that is only
+    scenery: `scene.remove_part(name)` after. Returns the name."""
+    mode = _prop_detail(detail)
+    lx, ly, h = size
+    if min(size) <= 0:
+        raise ValueError(f"{name}: a carton needs positive sides, not {size}")
+    x, y, z0 = _floor_point(position)
+    made = scene.add_box(name, size=(lx, ly, h), position=(x, y, z0 + h / 2), quaternion=_yaw_quat(yaw), color=color)
+    if mode == "full":
+        appearance(scene, made, "carton", (lx, ly, h))
+    else:
+        _finish(scene, made, _KRAFT)
+    rsc = f"RSC-{round(lx * 1000)}x{round(ly * 1000)}x{round(h * 1000)}"
+    identity = _identity(model or rsc, manufacturer, attributes)
+    if mass_kg is not None:
+        identity["mass_kg"] = mass_kg
+    scene.set_part(made, kind="obstacle", category=identity.pop("category", "workpiece"), **identity)
+    return made
+
+
+def unit_load(
+    scene,
+    name: str,
+    position,
+    *,
+    yaw: float = 0.0,
+    pallet: Point3 = (1.2, 0.8, 0.144),
+    height: float = 0.9,
+    collide: bool = True,
+    detail: str | None = None,
+) -> Built:
+    """Stock on a pallet: `pallet = (length, width, height)` at `position`
+    (the floor point under its centre) turned by `yaw`, a load `height`
+    tall on it. Two envelopes are what the aisle check meets — the pallet's
+    and the load's, both hidden in full detail; `collide=False` for stock on
+    a level nothing drives past. Full detail draws the timber, the courses
+    of cartons with their tape, a stretch-film skin and a label with its
+    barcode on each long side, all out of collision and inside the
+    envelope; the courses and the lot's colour follow from `name`, so a
+    replay draws the same stock. Stock is not a purchase: nothing is
+    pinned."""
+    mode = _prop_detail(detail)
+    plx, ply, plh = pallet
+    if min(pallet) <= 0 or height <= 0:
+        raise ValueError(f"{name}: needs a positive pallet and load height")
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    built = Built(name)
+    slab = scene.add_box(f"{name}/pallet", size=(plx, ply, plh), position=(x, y, z0 + plh / 2), quaternion=q, color=WOOD)
+    stack = scene.add_box(f"{name}/load", size=(plx - 0.04, ply - 0.04, height),
+                          position=(x, y, z0 + plh + height / 2), quaternion=q, color=STRETCH_FILM)
+    for envelope in (slab, stack):
+        scene.set_obstacle_enabled(envelope, collide)
+        built.obstacles.append(envelope)
+    if mode != "full":
+        return built
+    for envelope in (slab, stack):
+        scene.set_obstacle_visible(envelope, False)
+    for piece in _pallet_boards(scene, f"{name}/visual/timber", x, y, z0, pallet, yaw, _TIMBER):
+        scene.set_obstacle_enabled(piece, False)
+        scene.set_obstacle_material(piece, metalness=0.0, roughness=0.92)
+        built.obstacles.append(piece)
+    seed = sum(name.encode("utf-8"))
+    courses = max(2, round(height / 0.28))
+    lx, ly = plx - 0.04, ply - 0.04
+    course_h = height / courses
+
+    def piece(tag: str, size: Point3, local: Point3, color: Color, roughness: float = 0.8, opacity: float = 1.0) -> None:
+        px, py = _turned(x, y, yaw, local[0], local[1])
+        made = scene.add_box(f"{name}/visual/{tag}", size=size, position=(px, py, z0 + plh + local[2]), quaternion=q,
+                             color=color)
+        scene.set_obstacle_enabled(made, False)
+        scene.set_obstacle_material(made, metalness=0.0, roughness=roughness, opacity=opacity)
+        built.obstacles.append(made)
+
+    # A pallet is one batch: the board varies subtly within it, not a
+    # checkerboard of unrelated colours; different lots have different
+    # case formats.
+    nx, ny = 2, (3 if seed % 3 == 1 else 2)
+    base = LABEL_PAPER if seed % 5 == 0 else _CARDBOARD_LOTS[seed % len(_CARDBOARD_LOTS)]
+    for course in range(courses):
+        for ix in range(nx):
+            for iy in range(ny):
+                shade = 0.98 + 0.01 * ((seed + course + ix + iy) % 5)
+                color = (base[0] * shade, base[1] * shade, base[2] * shade)
+                px, py = (ix + 0.5) * lx / nx - lx / 2, (iy + 0.5) * ly / ny - ly / 2
+                tape_depth = 0.002 if course == courses - 1 else 0.0
+                piece(f"case{course}{ix}{iy}", (lx / nx - 0.009, ly / ny - 0.009, course_h - tape_depth),
+                      (px, py, (course + 0.5) * course_h - tape_depth / 2), color, roughness=0.95)
+                if course == courses - 1:
+                    piece(f"tape{ix}{iy}", (0.045, ly / ny - 0.012, 0.002), (px, py, height - 0.001), PACKING_TAPE,
+                          roughness=0.5)
+    # A thin film skin on four sides: low opacity lets the case joints show.
+    for edge in (-1, 1):
+        piece(f"film_x{edge}", (0.001, ly - 0.002, height - 0.014), (edge * (lx / 2 - 0.001), 0.0, height / 2),
+              STRETCH_FILM, roughness=0.26, opacity=0.10)
+        piece(f"film_y{edge}", (lx - 0.002, 0.001, height - 0.014), (0.0, edge * (ly / 2 - 0.001), height / 2),
+              STRETCH_FILM, roughness=0.26, opacity=0.10)
+    # A shipping label on each long side, with a restrained barcode.
+    for edge in (-1, 1):
+        face = edge * (lx / 2 - 0.001)
+        piece(f"label{edge}", (0.0006, 0.23, 0.16), (face, 0.12, height * 0.62), LABEL_PAPER)
+        for k, width in enumerate((0.006, 0.012, 0.005, 0.009, 0.014, 0.006)):
+            piece(f"barcode{edge}_{k}", (0.0004, width, 0.065),
+                  (face + edge * 0.0005, 0.047 + k * 0.027, height * 0.62 - 0.025), _BARCODE_INK)
+    return built
+
+
+def marking(
+    scene,
+    name: str,
+    *,
+    rect: tuple[float, float, float, float] | None = None,
+    line: tuple[Point2, Point2] | None = None,
+    dash: tuple[float, float] | None = None,
+    width: float = 0.08,
+    color: Color = LINE_YELLOW,
+    floor: float = 0.0,
+    thickness: float = 0.003,
+) -> Built:
+    """Paint on the floor. `rect = (x0, y0, x1, y1)` outlines an area with
+    four strips `<name>/0` … `<name>/3`; `line = ((ax, ay), (bx, by))` is
+    one stripe `<name>`, or the dashes `<name>/0` … with `dash = (on, off)`.
+    Each is `width` wide and `thickness` thick, lying on `floor` (a slab's
+    top). Out of collision and under the layout sheet's `ground_z`, so the
+    drawing shows them on its ground layer and nothing else notices them."""
+    if (rect is None) == (line is None):
+        raise ValueError(f"{name}: give a rect or a line, not both")
+    if width <= 0 or thickness <= 0:
+        raise ValueError(f"{name}: a marking needs a positive width and thickness")
+    built = Built(name)
+    z = floor + thickness / 2
+
+    def strip(tag: str, size: Point3, at: Point3, quaternion=None) -> None:
+        made = scene.add_box(tag, size=size, position=at, quaternion=quaternion, color=color)
+        scene.set_obstacle_enabled(made, False)
+        built.obstacles.append(made)
+
+    if rect is not None:
+        x0, y0, x1, y1 = rect
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"{name}: rect is (x0, y0, x1, y1) with x1 > x0 and y1 > y0")
+        strip(f"{name}/0", (x1 - x0, width, thickness), ((x0 + x1) / 2, y0, z))
+        strip(f"{name}/1", (x1 - x0, width, thickness), ((x0 + x1) / 2, y1, z))
+        strip(f"{name}/2", (width, y1 - y0, thickness), (x0, (y0 + y1) / 2, z))
+        strip(f"{name}/3", (width, y1 - y0, thickness), (x1, (y0 + y1) / 2, z))
+        return built
+    (ax, ay), (bx, by) = line
+    length = math.hypot(bx - ax, by - ay)
+    if length <= 0:
+        raise ValueError(f"{name}: a line needs two different points")
+    yaw = math.atan2(by - ay, bx - ax)
+    q = _yaw_quat(yaw)
+    if dash is None:
+        strip(name, (length, width, thickness), ((ax + bx) / 2, (ay + by) / 2, z), q)
+        return built
+    on, off = dash
+    if on <= 0 or off < 0:
+        raise ValueError(f"{name}: dash is (on, off) with a positive dash")
+    start, i = 0.0, 0
+    while start + on <= length + 1e-9:
+        cx, cy = _turned(ax, ay, yaw, start + on / 2, 0.0)
+        strip(f"{name}/{i}", (on, width, thickness), (cx, cy, z), q)
+        start += on + off
+        i += 1
+    return built
+
+
+def person(
+    scene,
+    name: str,
+    position,
+    *,
+    height: float = 1.7,
+    footprint: Point2 = (0.4, 0.4),
+    yaw: float = 0.0,
+    color: Color = HI_VIS,
+) -> str:
+    """A person, as the safety scenarios need one: a box `footprint` by
+    `height` standing at `position`, in collision — a walk into it is
+    refused, a light curtain or a zone reads it, a scenario moves it into
+    the gate. Nothing is pinned. Returns the name."""
+    fx, fy = footprint
+    if height <= 0 or fx <= 0 or fy <= 0:
+        raise ValueError(f"{name}: a person needs a positive height and footprint")
+    x, y, z0 = _floor_point(position)
+    return scene.add_box(name, size=(fx, fy, height), position=(x, y, z0 + height / 2), quaternion=_yaw_quat(yaw),
+                         color=color)
+
+
+def gantry(
+    scene,
+    name: str,
+    span: float,
+    height: float,
+    position,
+    *,
+    yaw: float = 0.0,
+    section: float = 0.05,
+    overhang: float = 0.03,
+    color: Color = DARK_STEEL,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A portal over a station — the beam a camera or a light hangs from:
+    two square posts `section` wide, `span` apart along the local X (turned
+    by `yaw`) either side of `position` (the floor point between them),
+    `height` tall, and the beam across their tops overhanging each post by
+    `overhang` — `<name>/post_l`, `<name>/post_r`, `<name>/beam`, all in
+    collision. The frame `<name>/beam` is the beam's centre underside, the
+    mount. Pins one part (`structure.gantry`) on the group."""
+    if span <= 0 or height <= section or section <= 0 or overhang < 0:
+        raise ValueError(f"{name}: a gantry needs a positive span and a height above its section")
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    built = Built(name)
+    for tag, side in (("post_l", -1), ("post_r", 1)):
+        px, py = _turned(x, y, yaw, side * span / 2, 0.0)
+        built.obstacles.append(
+            scene.add_box(f"{name}/{tag}", size=(section, section, height), position=(px, py, z0 + height / 2),
+                          quaternion=q, color=color)
+        )
+    built.obstacles.append(
+        scene.add_box(f"{name}/beam", size=(span + 2 * overhang, section, section), position=(x, y, z0 + height),
+                      quaternion=q, color=color)
+    )
+    scene.add_frame(f"{name}/beam", position=(x, y, z0 + height - section / 2), quaternion=q)
+    built.frames.append(f"{name}/beam")
+    identity = _identity(model, manufacturer, attributes)
+    scene.set_part(name, kind="group", category=identity.pop("category", "structure.gantry"), **identity)
+    return built
+
+
 def bolt(
     scene,
     name: str,
@@ -5122,6 +5675,7 @@ def screw_feeder(
     pick: Optional[Point2] = None,
     proud: float = 0.001,
     catalog: Optional["CatalogRef"] = None,
+    detail: Optional[str] = None,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
     color: Color = DARK_STEEL,
@@ -5156,7 +5710,9 @@ def screw_feeder(
     directory — a presenter you can order: the rail size (`thread_mm`) is
     matched against the ones sold, the body and the pick point come from
     the pack, its `present_s` is what the bill records, and the row
-    carries the article number."""
+    carries the article number. `detail="full"` (the default with a
+    catalog) draws the body from the pack's `feeder` trim where it ships
+    one; the box underneath stays the collision."""
     spec = None
     params: dict = {}
     if catalog is not None:
@@ -5237,6 +5793,11 @@ def screw_feeder(
           world(0.0, py + 0.03, height + 0.002), q, TABLE_STEEL, finish=_MACHINED_METAL)
     _trim(scene, built, f"{name}/nest", (0.03, 0.03, 0.006),
           world(px, py, height + 0.003), q, (0.12, 0.12, 0.13), finish=_PLASTIC)
+    if _detail(detail, spec is not None) == "full" and spec is not None and _load_trim(
+        scene, built, spec, "feeder", f"{name}/trim/body", (x, y, z0), q,
+        parameters=params, length=length, width=width, height=height, pick_x=px, pick_y=py,
+    ):
+        scene.set_obstacle_visible(f"{name}/body", False)
 
     # The magazine: a row inside the body, along its length.
     park = world(-row / 2, 0.02, height / 2)
@@ -5304,6 +5865,7 @@ def workpiece(
     catalog: "CatalogRef",
     yaw: float = 0.0,
     cover_at: Optional[Point2 | Point3] = None,
+    detail: Optional[str] = None,
     color: Color = (0.50, 0.51, 0.53),
     cover_color: Color = (0.62, 0.63, 0.66),
     **attributes,
@@ -5320,11 +5882,16 @@ def workpiece(
     `<name>/seat` (the housing's top face centre, +Z up — the mating
     plane) and `<name>/stock` (where the cover waits). Everything is
     pinned to the pack, dowels included (two lines with a count).
-    `bt.assembly.joint(catalog=...)` reads the same pack for the holes."""
+    `bt.assembly.joint(catalog=...)` reads the same pack for the holes.
+    `detail="full"` (the default) draws the housing and the cover as the
+    prims the pack ships for them (`components[].visual`) — the casting
+    and the machined cover — bound to the parts, so they travel with them;
+    the boxes underneath stay what the cell checks."""
     from ._spec import Spec
 
     spec = Spec.load(catalog)
     spec.expect_generator("workpiece")
+    mode = _detail(detail, True)
     params = {key: spec.default(key) for key in spec.params()}
     for key in [key for key in attributes if key in params]:
         params[key] = spec.choose(key, attributes.pop(key))
@@ -5349,6 +5916,8 @@ def workpiece(
     housing = scene.add_box(f"{name}/housing", size=(hl, hw, hh), position=world(0.0, 0.0, hh / 2),
                             quaternion=q, color=color)
     _finish(scene, housing, _CAST_METAL)
+    if mode == "full":
+        _load_visual(scene, spec, "housing", housing)
     built.obstacles.append(housing)
     built.housing = housing
     scene.set_part(
@@ -5394,6 +5963,8 @@ def workpiece(
         solids.append(Cylinder(boss_d / 2, boss_h, at=(0.0, 0.0, ct)))
     cover = compound(scene, f"{name}/cover", solids, (cx, cy, cz), quaternion=q, color=cover_color,
                      finish=(0.0, 0.45))
+    if mode == "full":
+        _load_visual(scene, spec, "cover", cover)
     built.obstacles.append(cover)
     built.cover = cover
     scene.set_part(

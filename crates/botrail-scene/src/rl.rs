@@ -1769,6 +1769,7 @@ mod tests {
         let mut scene = cell(0.55);
         scene
             .upsert_lidar(Lidar {
+                body_visible: true,
                 name: "front".into(),
                 mount: LidarMount::World,
                 pose: Isometry3::translation(0.0, -0.6, 0.3),
@@ -1904,6 +1905,7 @@ mod tests {
         });
         scene
             .upsert_lidar(Lidar {
+                body_visible: true,
                 name: "nose".into(),
                 mount: LidarMount::Vehicle {
                     device: "cart".into(),

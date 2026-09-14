@@ -52,6 +52,21 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`charging_station`][botrail.parts.charging_station] | `<name>/housing`, the charging plate on the floor `<name>/plate` | `<name>/dock` (on the floor at the plate's edge, +X away from the housing — where the vehicle's charging face stands) | — | `<name>` (`vehicle.charger`; with a catalog the article, mass and the current at the supply chosen) |
 | [`pallet_rack`][botrail.parts.pallet_rack] | posts and beams under `<name>/unit/` (the first bay) and `<name>/ext/{i}/` (each further bay) | `<name>/bay{i}/level{j}` (the centre of every pallet seat: j = 0 the floor, then each beam top) | — | `<name>` (`structure.rack`); with a catalog `<name>/unit` (the 単体 article) and `<name>/ext` (the 連結 extensions, qty = bays − 1) |
 | [`stairs`][botrail.parts.stairs] | a walkable checker-plate tread per step under `<name>/tread…`, a plate stringer and support leg each side, the handrail under `<name>/handrails/` | `<name>/foot`, `<name>/top` (author the vehicle path's z between them) | — | `<name>` (`structure.stairs`), and with a catalog `<name>/handrails` (`structure.stairs.rail`, qty = 2 sides) |
+| [`tray`][botrail.parts.tray] | the tray `<name>` (collides), its foam insert `<name>/insert` (a picture), and in full detail a bent grip each side under `<name>/trim/` | `<name>/seat` (the insert's top centre — where a part sets down) | — | `<name>` (`tray`) |
+| [`stage`][botrail.parts.stage] | the block `<name>` (collides; hidden in full detail behind the plate and legs under `<name>/trim/`), `<name>/insert` | `<name>/seat` | — | `<name>` (`fixture`) |
+| [`carton`][botrail.parts.carton] | one box `<name>`, drawn as the library's carton | — | — | `<name>` (`workpiece`, the RSC size as its model, `mass_kg` when given) |
+| [`unit_load`][botrail.parts.unit_load] | the envelopes `<name>/pallet` and `<name>/load` (collide, hidden in full detail), the timber, cartons, film and labels under `<name>/visual/` | — | — | nothing: stock is not a purchase |
+| [`marking`][botrail.parts.marking] | paint out of collision — `<name>/0`…`<name>/3` round a rect, `<name>` for a line, `<name>/0`… for its dashes | — | — | nothing (the layout sheet draws them on its ground layer) |
+| [`person`][botrail.parts.person] | one box `<name>` (collides) | — | — | nothing |
+| [`gantry`][botrail.parts.gantry] | `<name>/post_l`, `<name>/post_r`, `<name>/beam` (collide) | `<name>/beam` (the beam's centre underside — a camera's mount) | — | `<name>` (`structure.gantry`) |
+
+The last seven are *props*: the generic things a cell is full of and nobody
+orders by part number — the tray a part waits in, the stage under a camera,
+the carton, the stock on a pallet, the paint on the floor, the person a
+scenario stands in the gate, the portal a camera hangs from. They are
+generated from their dimensions like everything else, drawn from the
+[shape library](#shapes-a-box-cannot-draw-the-shape-library) where a box
+cannot draw the thing, and `detail="plain"` keeps just the massing.
 
 Every generator takes `model=`, `manufacturer=` and free attributes
 (`mass_kg=…`) for the part it pins — or `catalog=`, the id of a spec pack, and
@@ -157,6 +172,52 @@ the identity already attached: `Robot.from_catalog` (and
 `catalog_package()` for non-robot packages) brings the maker's mesh *and*
 its manifest, so the BOM line writes itself.
 
+## Shapes a box cannot draw — the shape library
+
+Some of what every cell has is neither a product nor a box: a carton with
+its folded lids and tape, a pressed tray, a perforated basket, the rubber
+foot under a bench leg, a bent handle, a drain hose, a machined part with
+its bores. botrail ships a small library of these forms — `bt.parts.SHAPES`,
+nine unit-box USD layers under `botrail/_shapes/`, authored in
+[botrail-assets](https://github.com/botrail/botrail-assets) (`workshop-shapes/`)
+and vendored by `scripts/sync_shapes.py` — and two ways to use them:
+
+```python
+scene.add_box("part", (0.06, 0.06, 0.04), (0.4, 0.2, 0.9))
+bt.parts.appearance(scene, "part", "workpiece", (0.06, 0.06, 0.04))   # drawn as the machined blank
+bt.parts.shaped_box(scene, "tray/grip", "handle", (0.09, 0.012, 0.045),
+                    (0.4, 0.34, 0.8), quaternion=q)                   # decoration, out of collision
+```
+
+[`appearance`][botrail.parts.appearance] binds the layer's mesh to an
+existing obstacle, scaled to `size` — the box the shape fills — so the
+collision stays the box the cell was taught against while the picture
+moves, attaches, saves and exports with the resident
+([an appearance over a box](scene-and-obstacles.md#an-appearance-over-a-box)).
+The layer's own finishes (kraft, tape, brushed steel, rubber …) are used;
+`tint=True` paints the whole shape the obstacle's colour instead, which is
+what the plain `panel` is for. [`shaped_box`][botrail.parts.shaped_box] is
+`add_box` out of collision plus `appearance`: the picture of a handle or a
+foot beside a resident that keeps its own massing.
+
+A shape is a form, never a dimension: the same file draws a 200 mm tray and
+a 600 mm one, and nothing a cell verifies — a set-down height, a grip — lives
+in it. Scale it anisotropically within reason (a tube's thickness is its
+smallest side) and keep `workpiece` for near-cubic boxes, since its bores
+scale with the box.
+
+| shape | draws | finishes |
+|---|---|---|
+| `carton` | a shipping carton: folded lids, seam, tape, label and barcode | kraft, packing tape, label paper and ink |
+| `workpiece` | a chamfered machined blank with a stepped through-bore and four mounting bores | machined aluminium |
+| `tray` | a pressed tray with drawn sides | brushed steel |
+| `rim` | the rolled rim of a tank (open inside) | brushed steel |
+| `basket` | a perforated sheet, its holes real (you see through it) | brushed steel |
+| `adjuster` | a levelling foot: rubber pad, disc and threaded stem | rubber, brushed steel |
+| `panel` | a laminate board with rounded corners — tint it | laminate |
+| `handle` | a bent-tube grip, its opening along −Z | brushed steel |
+| `hose` | a hanging drain hose | rubber |
+
 ## Series-specific equipment trims
 
 A catalog fence's `height` / `height_mm` is the **panel** height; a pack's
@@ -178,8 +239,27 @@ envelopes, in both detail modes and without touching the BOM:
 | conveyor `unit` | `mid_tension_after_length`, `mid_tension_length`, `mid_tension_drop` | Long-run tension box at local X = length/4, after the declared length threshold |
 | conveyor `stand` | `inset` | Distance from each belt end to the first/last support center |
 | cabinet `body` | `lifting_eye_height` | Conservative top slab above the enclosure, including any base offset |
+| table `frame` | `inset_length`, `inset_width` | The leg centres this far in from the board's edge, the way a maker's frame is inset; the collision legs move with them |
+| table `frame` | `top_thickness` | The board that comes with the frame (a `top` component is a board sold separately) |
 
 A field left out keeps the generator's own massing; handles, fasteners,
 wire openings and foot covers need no colliders of their own.
 `detail="plain"` hides the trim but keeps these envelopes, the chosen
 dimensions and the BOM.
+
+A `table` frame trim that draws the board names it `top`, and the
+generator hides its own board massing behind it. An `operator_panel` pack
+can ship a `box` trim, drawn in place of the plate (the operators are still
+the generator's, so a press stays a press), and an operator the pack sells
+no article for — a complete station's E-stop — gets no BOM line of its own.
+A `screw_feeder` pack can ship a `feeder` trim, drawn in place of the body
+box; its rail and nest stay the generator's.
+
+A part that is *carried* — a workpiece — is one resident, collision and
+all, so its look is not decoration beside it but a picture bound to it:
+`components[].visual` names one USD prim (`<layer>#<prim path>`, authored
+in the part's own frame at its size) and [`workpiece`][botrail.parts.workpiece]
+binds it to the housing and the cover the way
+[an appearance over a box](scene-and-obstacles.md#an-appearance-over-a-box)
+is bound. The picture moves, attaches, saves and exports with the part;
+`detail="plain"` keeps the generator's massing.

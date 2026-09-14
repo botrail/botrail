@@ -204,6 +204,12 @@ Deselected, the frustum draws as a compact aim gizmo; selecting the camera
 world-mounted camera gets the move/rotate gizmo. Mounted cameras ride their
 machine during playback like mounted sensors do.
 
+When the robot or scene already includes the sensor's physical model, pass
+`body_visible=False` to `add_camera` or `add_lidar` to hide the generic housing.
+The camera view, scan, coverage guides and sensing remain active. Studio's
+**Show generic housing** checkbox edits the same setting, which is preserved
+in saved projects and generated Python.
+
 A real camera comes straight from the catalog:
 
 ```python

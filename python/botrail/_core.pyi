@@ -654,6 +654,7 @@ class Scene:
         link: Optional[str] = None,
         from_catalog: Optional[str] = None,
         revision: Optional[str] = None,
+        body_visible: bool = True,
     ) -> None: ...
     def remove_camera(self, name: str) -> None: ...
     @property
@@ -674,6 +675,7 @@ class Scene:
         link: Optional[str] = None,
         from_catalog: Optional[str] = None,
         revision: Optional[str] = None,
+        body_visible: bool = True,
     ) -> None: ...
     def remove_lidar(self, name: str) -> None: ...
     @property

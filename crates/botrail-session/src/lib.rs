@@ -314,23 +314,31 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::RemoveSignal { name } => {
             remove_signal(host, &name).map_err(|e| format!("rejected remove_signal: {e}"))
         }
-        ClientMessage::SimulateSequence { name, scenario } => {
+        ClientMessage::SimulateSequence {
+            name,
+            scenario,
+            max_duration,
+        } => {
             // Failure is reported to clients inside the sequence_result.
             let _ = simulate_sequence_and_emit(
                 host,
                 &name,
                 scenario.as_deref(),
-                &botrail_scene::rollout::RolloutOptions::default(),
+                &rollout_options(max_duration),
             );
             Ok(())
         }
-        ClientMessage::SimulateSequences { names, scenario } => {
+        ClientMessage::SimulateSequences {
+            names,
+            scenario,
+            max_duration,
+        } => {
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             let _ = simulate_sequences_and_emit(
                 host,
                 &names,
                 scenario.as_deref(),
-                &botrail_scene::rollout::RolloutOptions::default(),
+                &rollout_options(max_duration),
             );
             Ok(())
         }
@@ -1272,6 +1280,18 @@ pub fn remove_part(host: &impl SessionHost, target: &str) -> Result<(), SceneErr
 
 /// Rolls out a sequence against a scene snapshot and emits the outcome as
 /// a `sequence_result` message.
+/// The rollout options a client's simulate request asks for: the engine's
+/// defaults, with the time cap it names (a finite, positive number of
+/// seconds) — a cell longer than the default 120 s is simulated from the
+/// studio by raising it, and a stall under a fault still surfaces at it.
+fn rollout_options(max_duration: Option<f64>) -> botrail_scene::rollout::RolloutOptions {
+    let mut options = botrail_scene::rollout::RolloutOptions::default();
+    if let Some(cap) = max_duration.filter(|cap| cap.is_finite() && *cap > 0.0) {
+        options.max_duration = cap;
+    }
+    options
+}
+
 pub fn simulate_sequence_and_emit(
     host: &impl SessionHost,
     name: &str,
@@ -2491,6 +2511,48 @@ mod tests {
     }
 
     #[test]
+    fn a_simulate_request_names_its_time_cap() {
+        // A cell longer than the engine's 120 s default is simulated from
+        // the studio by naming a cap; a cap shorter than the cycle times
+        // the run out, which is also how a stall under a fault surfaces.
+        let host = TestHost::new();
+        handle_client_message(
+            &host,
+            r#"{"type":"upsert_sequence","sequence":{"name":"wait","steps":[
+                {"name":"hold","actions":[],"transition":{"type":"elapsed","seconds":1.0}}
+            ]}}"#,
+        );
+        host.out.borrow_mut().clear();
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequence","name":"wait","max_duration":0.5}"#,
+        );
+        let out = host.out.borrow();
+        let ServerMessage::SequenceResult { ok, error, .. } = &out[0] else {
+            panic!("expected sequence_result, got {out:?}");
+        };
+        assert!(!ok);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("timed out after 0.5s")),
+            "{error:?}"
+        );
+        drop(out);
+        host.out.borrow_mut().clear();
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequences","names":["wait"],"max_duration":5}"#,
+        );
+        let out = host.out.borrow();
+        let ServerMessage::SequenceResult { ok, timeline, .. } = &out[0] else {
+            panic!("expected sequence_result, got {out:?}");
+        };
+        assert!(ok);
+        assert!((timeline.as_ref().unwrap().duration - 1.0).abs() < 0.02);
+    }
+
+    #[test]
     fn sequence_upsert_simulate_and_result_roundtrip() {
         let host = TestHost::new();
         host.with_scene(|scene| {
@@ -2989,6 +3051,7 @@ mod tests {
                 .unwrap();
             scene
                 .upsert_lidar(botrail_scene::seq::Lidar {
+                    body_visible: true,
                     name: "gate".into(),
                     mount: botrail_scene::seq::LidarMount::World,
                     // Clear of the test robot at the origin — a scan

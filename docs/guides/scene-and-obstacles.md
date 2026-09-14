@@ -30,6 +30,27 @@ VHACD convex decomposition**, computed on first load (about a second per mesh)
 and cached on disk — subsequent runs are instant. See
 [Collision checking](collision.md) for why.
 
+## An appearance over a box
+
+```python
+scene.add_box("part", (0.06, 0.06, 0.04), (0.4, 0.2, 0.9))
+scene.set_obstacle_visual_asset("part", "shapes/workpiece.usda", "/Shapes/workpiece",
+                                (0.06, 0, 0, 0,  0, 0.06, 0, 0,  0, 0, 0.04, 0,  0, 0, 0, 1))
+```
+
+An obstacle can be *drawn* from a USD prim while it *collides* as the
+primitive it was added as: the box is what the planner checks and what a
+grasp was taught against; the prim is the picture. The column-major
+transform maps the prim's coordinates into the obstacle's frame — a scale
+for a unit-box shape, a unit conversion for a millimetre-authored asset.
+The prim's own materials are used unless `color_override=True`, which
+tints it with the obstacle's colour; `set_obstacle_material` still applies
+on top. The appearance moves, attaches, saves into a project (the layer
+travels in the `.botrail`), exports with a USD recording and round-trips
+through `generate_python` with its resident. `bt.parts.appearance` does
+this for the [shape library](standard-parts.md#shapes-a-box-cannot-draw-the-shape-library);
+prims imported with `load_usd` carry theirs from the stage.
+
 ## Posing, recoloring, removing
 
 ```python

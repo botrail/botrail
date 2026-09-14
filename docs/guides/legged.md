@@ -279,3 +279,11 @@ like any other.
   corridor. The building is `bt.parts.wall` and `bt.parts.stairs`, and
   **the stair sets the storey** — order a different riser and the floors
   move.
+* `examples/legged/wash_inspect_ship_demo.py` — a catalog Unitree G1 works a
+  finishing line by hand: four stations on a ring walk, one taught set of
+  right-arm reaches planned at every station (`define_group` on the arm, the
+  fingertips' reach measured off the model, the START press calibrated
+  against the button's zone), the bath and the inspector on their own
+  controllers, the camera's verdict latched and branching, and the whole
+  hand-over set. A move started the moment a walk ends is the arm's: the
+  gait swings an arm only while the vehicle moves, and lets go on arrival.

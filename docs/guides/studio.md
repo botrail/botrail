@@ -86,7 +86,11 @@ selected obstacle. The **RUN** section below holds everything about the
 next run: with several programs authored (one per station, PLC style), its
 checkboxes pick which roll together; the dropdown picks the world —
 `baseline` or a Python-authored scenario delta (`add_scenario`);
-**Simulate** bakes the cycle and broadcasts the timeline to the dock:
+the **cap** beside the button is the bake's time limit in seconds (the
+engine's 120 s by default — raise it for a longer cycle; a run still
+waiting past it comes back as *timed out*, which is also how a stall under
+a fault scenario surfaces); **Simulate** bakes the cycle and broadcasts the
+timeline to the dock:
 
 ![A baked sequence with the timeline dock](../assets/studio/sequence.png)
 

@@ -271,15 +271,24 @@ export function sendRemoveSequence(name: string): void {
 }
 
 /** Roll out the sequence; the result arrives as a `sequence_result`.
- * `scenario` runs it under a named initial-state delta. */
-export function sendSimulateSequence(name: string, scenario?: string): void {
-  rawSend({ type: "simulate_sequence", name, scenario });
+ * `scenario` runs it under a named initial-state delta; `maxDuration`
+ * is the bake's time cap in seconds (the engine's 120 s when omitted). */
+export function sendSimulateSequence(
+  name: string,
+  scenario?: string,
+  maxDuration?: number,
+): void {
+  rawSend({ type: "simulate_sequence", name, scenario, max_duration: maxDuration });
 }
 
 /** Roll out several sequences as concurrent programs (scan order = list
  * order, like the PLC they model). */
-export function sendSimulateSequences(names: string[], scenario?: string): void {
-  rawSend({ type: "simulate_sequences", names, scenario });
+export function sendSimulateSequences(
+  names: string[],
+  scenario?: string,
+  maxDuration?: number,
+): void {
+  rawSend({ type: "simulate_sequences", names, scenario, max_duration: maxDuration });
 }
 
 /** Bake the last simulated timeline as a usda layer; the reply

@@ -180,6 +180,21 @@ class Spec:
         rel = self.component(role).get("trim")
         return None if not rel else self.directory / str(rel)
 
+    def visual(self, role: str) -> Optional[tuple[Path, str]]:
+        """The USD prim this part is *drawn as*, if the pack ships one —
+        `(layer, prim path)`, the layer relative to the package. A visual is
+        the part's own picture, bound to its resident so it moves with it,
+        where a trim is decoration standing beside a static thing."""
+        if not self.has_component(role):
+            return None
+        ref = self.component(role).get("visual")
+        if not ref:
+            return None
+        layer, sep, prim = str(ref).partition("#")
+        if not sep or not layer or not prim.startswith("/"):
+            raise ValueError(f"{self.id}: component {role!r} visual must be '<layer>#<prim path>', not {ref!r}")
+        return self.directory / layer, prim
+
     @property
     def mechanical(self) -> dict:
         """The pack's `mechanical` section — footprint, height, mass, mount,

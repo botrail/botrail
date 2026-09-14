@@ -345,7 +345,9 @@ function ShadowFollow() {
       castShadow
       shadow-mapSize={[SHADOW_MAP_SIZE, SHADOW_MAP_SIZE]}
       shadow-bias={-0.00015}
-      shadow-normalBias={0.003}
+      // Offset by a fraction of a shadow texel in world units. A fixed
+      // 3 mm offset leaves self-shadow stripes on warehouse-scale panels.
+      shadow-normalBias={Math.max(0.003, 1.5 * frame.half / SHADOW_MAP_SIZE)}
       shadow-camera-near={0.1}
       shadow-camera-far={40}
     />

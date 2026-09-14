@@ -72,7 +72,7 @@ ARM = "universal_robots/ur/ur20/r2"                          # 20 kg at 1.75 m: 
 QC = "onrobot/quick-changer/109498/r1"                       # OnRobot tools mount through it
 CUP = "onrobot/vgc/vgc10/r1"
 BELT = "makitech/belgotch/type34-s1/r2"
-BENCH = "trusco/ae/ae-1500/r1"
+BENCH = "trusco/ae/ae-1500"                                 # its newest revision: r2 draws the maker's inset frame
 CONTROL_BOX_PACK = "universal_robots/control-box/e-series/r1"
 SHELF = "botrail/rack/medium-shelf/r1"
 
@@ -80,8 +80,13 @@ CATALOG_ROOT: Path | None = None   # set by --catalog-root: a builder's build/ d
 
 
 def ref(pid: str):
-    """A spec pack reference: the id, or the built package directory."""
-    return CATALOG_ROOT / pid if CATALOG_ROOT else pid
+    """A spec pack reference: the id, or the built package directory — the
+    newest revision built there when the id names none."""
+    if not CATALOG_ROOT:
+        return pid
+    path = CATALOG_ROOT / pid
+    revisions = sorted((p for p in path.glob("r*") if p.name[1:].isdigit()), key=lambda p: int(p.name[1:]))
+    return revisions[-1] if revisions and not (path / "manifest.yaml").is_file() else path
 
 
 def load(pid: str) -> bt.Robot:
@@ -103,6 +108,7 @@ BUILDING = (40.0, 22.5)
 WALL_H, WALL_T = 7.0, 0.25
 CUTAWAY = 1.0                    # the south and east walls are drawn this tall, so the shed reads from outside
 COLUMN = 0.5
+SLAB_TOP = 0.003                 # the pour's top face: the paint lies on it
 COLUMNS = ((9.0, 21.5), (23.4, 21.5), (31.3, 21.5), (23.4, 5.4))
 INBOUND_DOCKS = (19.3, 15.85, 12.35)      # west wall, door centres (y)
 OUTBOUND_DOCKS = (18.3, 14.8, 11.3)       # east wall
@@ -166,14 +172,13 @@ CUPS = ["cup_a1", "cup_a2", "cup_b1", "cup_b2", "tcp"]
 CONCRETE = (0.32, 0.33, 0.32)
 LINE_YELLOW = (0.85, 0.62, 0.05)
 LINE_GREEN = (0.10, 0.45, 0.20)
-CARTON = (0.62, 0.45, 0.26)
-WRAP = (0.78, 0.80, 0.84)
 DOOR = (0.55, 0.57, 0.58)
 STEEL_DARK = (0.22, 0.24, 0.27)
 KRAFT = ((0.48, 0.31, 0.16), (0.60, 0.43, 0.25), (0.68, 0.51, 0.32), (0.42, 0.28, 0.16))
 PAPER = (0.86, 0.84, 0.76)
-TAPE = (0.34, 0.22, 0.10)
 SIGN_BLUE = (0.035, 0.12, 0.22)
+PAINT_LIGHT = (0.66, 0.68, 0.65)
+SCREEN = (0.025, 0.075, 0.09)
 
 
 def yaw_quat(yaw: float) -> tuple:
@@ -326,6 +331,18 @@ def _visual_pallet(scene: bt.Scene, name: str, at: tuple, yaw: float) -> None:
         scene.set_obstacle_material(piece, metalness=0.0, roughness=0.92)
 
 
+def _visual_member(scene: bt.Scene, name: str, a: tuple, b: tuple, width: float) -> None:
+    """A painted rectangular member between two endpoints, for the cutaway roof."""
+    dx, dy, dz = (b[i] - a[i] for i in range(3))
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    pitch = -math.atan2(dz, math.hypot(dx, dy))
+    q = mul_quat(yaw_quat(math.atan2(dy, dx)), (0.0, math.sin(pitch / 2), 0.0, math.cos(pitch / 2)))
+    center = tuple((a[i] + b[i]) / 2 for i in range(3))
+    made = _visual_box(scene, name, (length, width, width), center, PAINT_LIGHT,
+                       metalness=0.35, roughness=0.55)
+    scene.set_obstacle_pose(made, center, q)
+
+
 def _sign(scene: bt.Scene, name: str, at: tuple, glyph: str, yaw: float = 0.0) -> None:
     """A painted rack/dock marker, assembled in the local X/Z plane."""
     strokes = {
@@ -355,6 +372,17 @@ def _slab(scene: bt.Scene) -> None:
     made = scene.add_box("floor/slab", (w, d, 0.05), (w / 2, d / 2, -0.022), color=CONCRETE)
     scene.set_obstacle_enabled(made, False)
     scene.set_obstacle_material(made, metalness=0.0, roughness=0.9)
+    # Adjacent pours have restrained tonal variation. Replace the slab's
+    # picture with non-overlapping panels at the same level, avoiding decals
+    # that fight the depth buffer in the warehouse overview.
+    scene.set_obstacle_visible(made, False)
+    for ix in range(math.ceil(w / 5.0)):
+        for iy in range(math.ceil(d / 4.5)):
+            sx, sy = min(5.0, w - ix * 5.0), min(4.5, d - iy * 4.5)
+            shade = 0.985 + 0.005 * ((ix * 7 + iy * 3) % 7)
+            _visual_box(scene, f"floor/pour/{ix}_{iy}", (sx, sy, 0.05),
+                        (ix * 5.0 + sx / 2, iy * 4.5 + sy / 2, -0.022),
+                        tuple(c * shade for c in CONCRETE), roughness=0.84)
     # Saw-cut joints break up the large concrete pour without changing its level.
     for i in range(1, math.ceil(w / 5.0)):
         _visual_box(scene, f"floor/joint_x{i}", (0.018, d, 0.001),
@@ -362,28 +390,6 @@ def _slab(scene: bt.Scene) -> None:
     for i in range(1, math.ceil(d / 4.5)):
         _visual_box(scene, f"floor/joint_y{i}", (w, 0.018, 0.001),
                     (w / 2, 4.5 * i, 0.0035), (0.20, 0.21, 0.20))
-
-
-def _mark(scene: bt.Scene, name: str, x0: float, y0: float, x1: float, y1: float,
-          color=LINE_YELLOW, width: float = 0.08) -> None:
-    """A painted rectangle: four strips under `ground_z`, never colliding."""
-    z = 0.0045
-    for i, (size, pos) in enumerate((
-        ((x1 - x0, width, 0.003), ((x0 + x1) / 2, y0, z)),
-        ((x1 - x0, width, 0.003), ((x0 + x1) / 2, y1, z)),
-        ((width, y1 - y0, 0.003), (x0, (y0 + y1) / 2, z)),
-        ((width, y1 - y0, 0.003), (x1, (y0 + y1) / 2, z)),
-    )):
-        made = scene.add_box(f"marking/{name}/{i}", size, pos, color=color)
-        scene.set_obstacle_enabled(made, False)
-
-
-def _line(scene: bt.Scene, name: str, a: tuple, b: tuple, color=LINE_YELLOW, width: float = 0.08) -> None:
-    length = math.hypot(b[0] - a[0], b[1] - a[1])
-    yaw = math.atan2(b[1] - a[1], b[0] - a[0])
-    made = scene.add_box(f"marking/{name}", (length, width, 0.003),
-                         ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0.0045), quaternion=yaw_quat(yaw), color=color)
-    scene.set_obstacle_enabled(made, False)
 
 
 def _cutaway(scene: bt.Scene, name: str, path, openings=()) -> None:
@@ -437,6 +443,8 @@ def building(scene: bt.Scene) -> None:
     bt.parts.wall(scene, "office", path=[(x0, WALL_T / 2), (x0, y1), (x1, y1), (x1, WALL_T / 2)],
                   height=3.0, thickness=0.12, openings=[(1, x1 - x0 - 1.0, 0.9)], detail="full")
     _building_details(scene)
+    _roof_details(scene)
+    _office_details(scene)
 
 
 def _building_details(scene: bt.Scene) -> None:
@@ -495,83 +503,112 @@ def _building_details(scene: bt.Scene) -> None:
                     (x, y1 + 0.125, 1.85), STEEL_DARK, metalness=0.5)
 
 
+def _roof_details(scene: bt.Scene) -> None:
+    """Only the rear roof strip is retained in the cutaway, leaving routes visible.
+
+    Generic architectural illustration, not a structural or lighting design.
+    Members and suspended fixtures follow the building's current dimensions.
+    """
+    w, d = BUILDING
+    y, lower, upper = d - 1.0, WALL_H - 1.0, WALL_H - 0.18
+    for label, z in (("lower", lower), ("upper", upper)):
+        _visual_member(scene, f"roof/truss/{label}", (WALL_T, y, z), (w - WALL_T, y, z), 0.16)
+    bays = math.ceil((w - 2 * WALL_T) / 2.5)
+    pitch = (w - 2 * WALL_T) / bays
+    for i in range(bays):
+        x = WALL_T + i * pitch
+        a, b = (lower, upper) if i % 2 == 0 else (upper, lower)
+        _visual_member(scene, f"roof/truss/web{i}", (x, y, a), (x + pitch, y, b), 0.065)
+    for i, (x, cy) in enumerate(COLUMNS):
+        if cy < d / 2:
+            continue
+        _visual_box(scene, f"roof/bearing{i}", (COLUMN + 0.16, COLUMN + 0.16, 0.08),
+                    (x, cy, lower - 0.12), STEEL_DARK, metalness=0.5)
+    _visual_member(scene, "roof/west/beam", (0.5, WALL_T, upper), (0.5, y, upper), 0.20)
+    # A service tray attached to the back wall, with visible brackets.
+    _visual_box(scene, "wall/north/services/tray", (w - 0.5, 0.25, 0.08),
+                (w / 2, d - 0.3, 4.3), STEEL_DARK, metalness=0.65)
+    for i in range(math.floor(w / 5.0)):
+        x = (i + 0.5) * 5.0
+        prefix = f"wall/north/clerestory{i}"
+        _visual_box(scene, f"{prefix}/frame", (3.4, 0.06, 1.15),
+                    (x, d - WALL_T / 2 - 0.04, 5.25), STEEL_DARK, metalness=0.5)
+        _visual_box(scene, f"{prefix}/glass", (3.25, 0.015, 1.0),
+                    (x, d - WALL_T / 2 - 0.08, 5.25), (0.34, 0.46, 0.50), roughness=0.19, metalness=0.25)
+        _visual_box(scene, f"{prefix}/mullion", (0.05, 0.025, 1.0),
+                    (x, d - WALL_T / 2 - 0.095, 5.25), PAINT_LIGHT, metalness=0.4)
+        _visual_box(scene, f"wall/north/services/bracket{i}", (0.06, 0.36, 0.16),
+                    (x, d - 0.32, 4.19), STEEL_DARK, metalness=0.65)
+        prefix = f"roof/light{i}"
+        z = lower - 0.55
+        for j, dx in enumerate((-0.65, 0.65)):
+            _visual_member(scene, f"{prefix}/hanger{j}", (x + dx, y, z), (x + dx, y, lower), 0.018)
+        _visual_box(scene, f"{prefix}/housing", (1.6, 0.32, 0.10), (x, y, z), PAINT_LIGHT, metalness=0.4)
+        for j, dy in enumerate((-0.085, 0.085)):
+            _visual_box(scene, f"{prefix}/diffuser{j}", (1.48, 0.09, 0.018),
+                        (x, y + dy, z - 0.056), (0.95, 0.95, 0.86), roughness=0.35)
+
+
+def _office_details(scene: bt.Scene) -> None:
+    """Furniture inside the existing office, grouped as illustrative fit-out."""
+    x0, x1, y1 = OFFICE
+    _visual_box(scene, "office/fitout/floor", (x1 - x0 - 0.13, y1 - WALL_T / 2 - 0.07, 0.012),
+                ((x0 + x1) / 2, (y1 + WALL_T / 2) / 2, 0.012), (0.25, 0.29, 0.30))
+    for i in range(2):
+        x, y = x0 + 1.25 + i * 2.35, 1.35
+        prefix = f"office/fitout/desk{i}"
+        _visual_box(scene, f"{prefix}/top", (1.5, 0.75, 0.035), (x, y, 0.74), (0.53, 0.43, 0.30))
+        for j, dx in enumerate((-0.67, 0.67)):
+            _visual_box(scene, f"{prefix}/end{j}", (0.045, 0.64, 0.70), (x + dx, y, 0.37), PAINT_LIGHT)
+        _visual_box(scene, f"{prefix}/monitor/base", (0.28, 0.18, 0.025), (x, y - 0.16, 0.77), STEEL_DARK)
+        _visual_box(scene, f"{prefix}/monitor/stem", (0.06, 0.04, 0.22), (x, y - 0.2, 0.88), STEEL_DARK)
+        _visual_box(scene, f"{prefix}/monitor/bezel", (0.55, 0.045, 0.34), (x, y - 0.2, 1.11), STEEL_DARK)
+        _visual_box(scene, f"{prefix}/monitor/screen", (0.51, 0.006, 0.29), (x, y - 0.174, 1.11), SCREEN, roughness=0.24)
+        _visual_box(scene, f"{prefix}/keyboard", (0.40, 0.14, 0.02), (x, y + 0.16, 0.77), STEEL_DARK)
+        _visual_box(scene, f"{prefix}/paper", (0.21, 0.29, 0.006), (x + 0.48, y + 0.03, 0.762), PAPER, yaw=0.13)
+        prefix = f"office/fitout/chair{i}"
+        _visual_box(scene, f"{prefix}/seat", (0.46, 0.44, 0.075), (x, y + 0.85, 0.47), SIGN_BLUE)
+        _visual_box(scene, f"{prefix}/back", (0.46, 0.07, 0.45), (x, y + 1.06, 0.73), SIGN_BLUE)
+        for j, (dx, dy) in enumerate(((-0.18, -0.16), (-0.18, 0.16), (0.18, -0.16), (0.18, 0.16))):
+            _visual_box(scene, f"{prefix}/leg{j}", (0.025, 0.025, 0.42),
+                        (x + dx, y + 0.85 + dy, 0.23), STEEL_DARK, metalness=0.6)
+    prefix = "office/fitout/cabinet"
+    _visual_box(scene, f"{prefix}/body", (2.3, 0.45, 1.1), (x0 + 1.6, y1 - 0.32, 0.57), PAINT_LIGHT)
+    for i in range(4):
+        x = x0 + 0.74 + i * 0.575
+        _visual_box(scene, f"{prefix}/door{i}", (0.555, 0.02, 1.04), (x, y1 - 0.556, 0.57), (0.51, 0.55, 0.54))
+        _visual_box(scene, f"{prefix}/handle{i}", (0.025, 0.035, 0.12),
+                    (x + 0.19, y1 - 0.58, 0.71), STEEL_DARK, metalness=0.65)
+
+
 def markings(scene: bt.Scene, lane: float, stand_y: float) -> None:
-    # Area constants are x0, x1, y0, y1; _mark takes the two corner points.
+    """The paint on the slab: area outlines, the receiving grid, the AMR lane
+    and its branches — out of collision, on the layout sheet's ground layer."""
+    # Area constants are x0, x1, y0, y1; a marking's rect is (x0, y0, x1, y1).
     for name, (x0, x1, y0, y1), color in (
         ("recv", RECV, LINE_GREEN), ("picking", PICKING, LINE_GREEN),
         ("packing", PACKING, LINE_GREEN), ("shipping", SHIPPING, LINE_GREEN),
         ("standby", STANDBY, LINE_GREEN), ("materials", MATERIALS, LINE_YELLOW),
     ):
-        _mark(scene, name, x0, y0, x1, y1, color=color)
+        bt.parts.marking(scene, f"marking/{name}", rect=(x0, y0, x1, y1), color=color, floor=SLAB_TOP)
     # The receiving floor grid: 4 x 5 pallet positions, the sketch's "最大 20PL".
     x0, x1, y0, y1 = RECV
     for i in range(1, 4):
-        _line(scene, f"recv_v{i}", (x0 + (x1 - x0) * i / 4, y0), (x0 + (x1 - x0) * i / 4, y1), width=0.05)
+        x = x0 + (x1 - x0) * i / 4
+        bt.parts.marking(scene, f"marking/recv_v{i}", line=((x, y0), (x, y1)), width=0.05, floor=SLAB_TOP)
     for j in range(1, 5):
-        _line(scene, f"recv_h{j}", (x0, y0 + (y1 - y0) * j / 5), (x1, y0 + (y1 - y0) * j / 5), width=0.05)
+        y = y0 + (y1 - y0) * j / 5
+        bt.parts.marking(scene, f"marking/recv_h{j}", line=((x0, y), (x1, y)), width=0.05, floor=SLAB_TOP)
     # The AMR lane down the main aisle and its branches, the sketch's dashed line.
-    for i in range(24):
-        x = 2.0 + 1.5 * i
-        _line(scene, f"lane/{i}", (x, lane), (x + 0.85, lane), width=0.06)
+    bt.parts.marking(scene, "marking/lane", line=((2.0, lane), (37.35, lane)), dash=(0.85, 0.65), width=0.06,
+                     floor=SLAB_TOP)
     for x in (RECV_STAND[0], *RACK_X, PICK_STAND[0], LANE1_X, EMPTY_STAND[0], *CHARGER_XS):
         top = stand_y if x in RACK_X else lane
-        _line(scene, f"branch_{x:.1f}", (x, min(lane, top)), (x, max(lane, top) + 0.01), width=0.06)
+        bt.parts.marking(scene, f"marking/branch_{x:.1f}", line=((x, min(lane, top)), (x, max(lane, top) + 0.01)),
+                         width=0.06, floor=SLAB_TOP)
 
 
 # ================================================================== the loads
-def unit_load(scene: bt.Scene, name: str, at: tuple, yaw: float, height: float = 0.9,
-              z0: float = 0.0, collide: bool = True) -> None:
-    """Stored stock: two collision envelopes, slatted timber and layered cartons.
-
-    The palette and case pattern are deterministic, including on replay.
-    Decorative pieces stay within the original load's clearance envelope.
-    """
-    x, y = at
-    q = yaw_quat(yaw)
-    slab = scene.add_box(f"{name}/pallet", (PALLET[0], PALLET[1], PALLET[2]), (x, y, z0 + PALLET[2] / 2),
-                         quaternion=q, color=bt.parts.WOOD)
-    stack = scene.add_box(f"{name}/load", (PALLET[0] - 0.04, PALLET[1] - 0.04, height),
-                          (x, y, z0 + PALLET[2] + height / 2), quaternion=q, color=WRAP)
-    for piece in (slab, stack):
-        scene.set_obstacle_enabled(piece, collide)
-        scene.set_obstacle_visible(piece, False)
-    _visual_pallet(scene, f"{name}/visual/timber", (x, y, z0), yaw)
-    seed = sum(name.encode("utf-8"))
-    courses = max(2, round(height / 0.28))
-    lx, ly = PALLET[0] - 0.04, PALLET[1] - 0.04
-    course_h = height / courses
-
-    def piece(tag, size, local, color, **finish):
-        dx, dy = rotate(local[0], local[1], yaw)
-        return _visual_box(scene, f"{name}/visual/{tag}", size,
-                           (x + dx, y + dy, z0 + PALLET[2] + local[2]), color, yaw=yaw, **finish)
-
-    # Four cartons per course, with a narrow joint. Some lots use white board.
-    for course in range(courses):
-        for ix in range(2):
-            for iy in range(2):
-                color = PAPER if seed % 5 == 0 else KRAFT[(seed + course + ix + iy) % len(KRAFT)]
-                px, py = (ix - 0.5) * lx / 2, (iy - 0.5) * ly / 2
-                piece(f"case{course}{ix}{iy}", (lx / 2 - 0.009, ly / 2 - 0.009, course_h - 0.008),
-                      (px, py, (course + 0.5) * course_h), color, roughness=0.95)
-                if course == courses - 1:
-                    piece(f"tape{ix}{iy}", (0.045, ly / 2 - 0.012, 0.002),
-                          (px, py, height - 0.003), TAPE, roughness=0.5)
-    # A thin film skin on four sides: low opacity lets the case joints show.
-    for edge in (-1, 1):
-        piece(f"film_x{edge}", (0.001, ly - 0.002, height - 0.014),
-              (edge * (lx / 2 - 0.001), 0, height / 2), WRAP, roughness=0.26, opacity=0.10)
-        piece(f"film_y{edge}", (lx - 0.002, 0.001, height - 0.014),
-              (0, edge * (ly / 2 - 0.001), height / 2), WRAP, roughness=0.26, opacity=0.10)
-    # A shipping label on each aisle-facing side, with a restrained barcode.
-    for edge in (-1, 1):
-        face = edge * (lx / 2 - 0.001)
-        piece(f"label{edge}", (0.0006, 0.23, 0.16), (face, 0.12, height * 0.62), PAPER)
-        for k, width in enumerate((0.006, 0.012, 0.005, 0.009, 0.014, 0.006)):
-            piece(f"barcode{edge}_{k}", (0.0004, width, 0.065),
-                  (face + edge * 0.0005, 0.047 + k * 0.027, height * 0.62 - 0.025), STEEL_DARK)
-
-
 def pallet_with_cases(scene: bt.Scene, name: str, at: tuple, yaw: float, courses: int,
                       z0: float, slots=CASE_SLOTS) -> list[str]:
     """An EUR pallet with `courses` layers of four cases, floating `SEAT`
@@ -579,16 +616,12 @@ def pallet_with_cases(scene: bt.Scene, name: str, at: tuple, yaw: float, courses
     x, y = at
     bt.parts.pallet(scene, name, (x, y, z0), size=PALLET, yaw=yaw)
     cases = []
-    q = yaw_quat(yaw)
     for course in range(courses):
         for k, (lx, ly) in enumerate(slots):
             dx, dy = rotate(lx, ly, yaw)
-            case = f"{name}/case{course}{k}"
-            scene.add_box(case, CASE, (x + dx, y + dy, z0 + PALLET[2] + SEAT + course * (CASE[2] + SEAT) + CASE[2] / 2),
-                          quaternion=q, color=KRAFT[(course + k) % len(KRAFT)])
-            scene.set_obstacle_material(case, metalness=0.0, roughness=0.95)
-            scene.set_part(case, category="workpiece", model="RSC-360x280x240", mass_kg=CASE_KG)
-            cases.append(case)
+            cases.append(bt.parts.carton(scene, f"{name}/case{course}{k}", CASE,
+                                         (x + dx, y + dy, z0 + PALLET[2] + SEAT + course * (CASE[2] + SEAT)),
+                                         yaw=yaw, mass_kg=CASE_KG))
     return cases
 
 
@@ -606,7 +639,7 @@ def receiving(scene: bt.Scene) -> list[str]:
     # Received pallets on the floor grid, minus the row the stand takes.
     filled = ((0, 1), (1, 1), (2, 1), (0, 2), (2, 2), (3, 2), (1, 3), (3, 3), (0, 4), (2, 4))
     for i, j in filled:
-        unit_load(scene, f"recv/pl{i}{j}", (xs[i], ys[j]), 0.0, height=0.7 + 0.15 * ((i + j) % 3))
+        bt.parts.unit_load(scene, f"recv/pl{i}{j}", (xs[i], ys[j]), height=0.7 + 0.15 * ((i + j) % 3), pallet=PALLET)
     # The outbound position: a stand, open to the aisle, with today's pallet on it.
     stand(scene, "stand/recv", RECV_STAND, -math.pi / 2)
     return pallet_with_cases(scene, "p1", RECV_STAND, -math.pi / 2, courses=1, z0=STAND_SUPPORT)
@@ -628,8 +661,9 @@ def racking(scene: bt.Scene, stand_y: float, rack_y0: float) -> None:
                 for pos, off in enumerate((-0.64, 0.64)):
                     if (row + 2 * bay + 3 * level + pos) % 3 == 0:
                         continue
-                    unit_load(scene, f"rack/{tag}/b{bay}l{level}p{pos}", (seat[0], seat[1] + off), math.pi / 2,
-                              height=0.55 + 0.1 * ((bay + level + pos) % 4), z0=seat[2], collide=level == 0)
+                    bt.parts.unit_load(scene, f"rack/{tag}/b{bay}l{level}p{pos}", (seat[0], seat[1] + off, seat[2]),
+                                       yaw=math.pi / 2, height=0.55 + 0.1 * ((bay + level + pos) % 4),
+                                       collide=level == 0, pallet=PALLET)
         # The rack-front P&D position: a stand on the row's axis, open to the aisle.
         stand(scene, f"stand/pd{tag}", (x, stand_y), -math.pi / 2)
 
@@ -651,8 +685,42 @@ def picking_station(scene: bt.Scene) -> tuple[bt.Robot, list[str]]:
     bt.parts.conveyor(scene, "pack_line", catalog=ref(BELT), length=BELT_LEN, width=BELT_W,
                       position=(BELT_X + BELT_LEN / 2, BELT_Y, BELT_TOP), direction=(1.0, 0.0), speed=0.3)
     bt.parts.table(scene, "bench2", catalog=ref(BENCH), position=BENCH2, yaw=math.pi / 2)
+    _bench_details(scene, "bench2")
     cases = pallet_with_cases(scene, "p2", PICK_STAND, -math.pi / 2, courses=1, z0=STAND_SUPPORT)
     return arm, cases
+
+
+def _bench_details(scene: bt.Scene, bench: str) -> None:
+    """Packing supplies seated on the catalog bench's actual top frame.
+
+    These stationary props do not join the picker or pallet payload groups.
+    """
+    at, q = scene.frame(f"{bench}/top")
+    yaw = yaw_of(q)
+
+    def piece(tag, size, local, color, **finish):
+        dx, dy = rotate(local[0], local[1], yaw)
+        return _visual_box(scene, f"{bench}/supplies/{tag}", size,
+                           (at[0] + dx, at[1] + dy, at[2] + local[2]), color, yaw=yaw, **finish)
+
+    # A hollow carton with folded-out flaps, instead of a solid block.
+    cx = -0.23
+    piece("carton/bottom", (0.44, 0.32, 0.006), (cx, 0, 0.004), KRAFT[1])
+    for edge in (-1, 1):
+        piece(f"carton/end{edge}", (0.006, 0.32, 0.28), (cx + edge * 0.217, 0, 0.143), KRAFT[1])
+        piece(f"carton/side{edge}", (0.44, 0.006, 0.28), (cx, edge * 0.157, 0.143), KRAFT[1])
+        piece(f"carton/flap{edge}", (0.44, 0.10, 0.005), (cx, edge * 0.21, 0.281), KRAFT[2])
+    # A small stack of flat blanks, a document tray and a label printer.
+    for i in range(5):
+        piece(f"blanks/{i}", (0.36, 0.30, 0.008), (0.42, -0.13, 0.005 + i * 0.009), KRAFT[1 if i % 2 else 2])
+    piece("printer/body", (0.23, 0.18, 0.13), (0.42, 0.16, 0.067), PAINT_LIGHT, roughness=0.5)
+    piece("printer/lid", (0.23, 0.18, 0.025), (0.42, 0.16, 0.144), STEEL_DARK, roughness=0.4)
+    piece("printer/slot", (0.15, 0.006, 0.018), (0.42, 0.067, 0.061), SCREEN)
+    piece("printer/label", (0.095, 0.075, 0.002), (0.42, 0.025, 0.053), PAPER)
+    piece("clipboard", (0.21, 0.29, 0.008), (0.13, 0.06, 0.006), STEEL_DARK)
+    piece("worksheet", (0.19, 0.26, 0.001), (0.13, 0.06, 0.011), PAPER)
+    for i in range(4):
+        piece(f"worksheet/line{i}", (0.14, 0.003, 0.001), (0.13, 0.13 - 0.045 * i, 0.012), STEEL_DARK)
 
 
 def packing(scene: bt.Scene) -> list[str]:
@@ -672,19 +740,31 @@ def packing(scene: bt.Scene) -> list[str]:
                    manufacturer="Generic")
     scene.add_zone_sensor("weighing", position=(BELT_X + 3.0, BELT_Y, BELT_TOP + 0.2), size=(0.5, BELT_W, 0.4))
     bt.parts.table(scene, "pack_bench", catalog=ref(BENCH), position=PACK_BENCH)
+    _bench_details(scene, "pack_bench")
+    # Hardware faces give the existing generic instruments a readable scale.
+    _visual_box(scene, "scale/detail/display", (0.18, 0.006, 0.08),
+                (BELT_X + 3.0, BELT_Y + BELT_W / 2 + 0.156, BELT_TOP + 0.41), SCREEN, roughness=0.22)
+    for i in range(3):
+        _visual_box(scene, f"scale/detail/key{i}", (0.028, 0.008, 0.014),
+                    (BELT_X + 2.95 + 0.05 * i, BELT_Y + BELT_W / 2 + 0.155, BELT_TOP + 0.343),
+                    LINE_GREEN if i == 2 else STEEL_DARK)
+    _visual_box(scene, "labeler/detail/front", (0.41, 0.012, 0.26),
+                (BELT_X + 4.5, BELT_Y + BELT_W / 2 + 0.269, 1.10), STEEL_DARK, roughness=0.4)
+    _visual_box(scene, "labeler/detail/feed", (0.17, 0.05, 0.008),
+                (BELT_X + 4.5, BELT_Y + BELT_W / 2 + 0.24, 0.98), PAPER)
+    for i in range(5):
+        _visual_box(scene, f"labeler/detail/vent{i}", (0.12, 0.004, 0.008),
+                    (BELT_X + 4.6, BELT_Y + BELT_W / 2 + 0.26, 1.06 + 0.02 * i), PAINT_LIGHT)
     stand(scene, "stand/packout", PACKOUT_STAND, math.pi)
     slots = ((-0.19, -0.15), (-0.19, 0.15), (0.19, -0.15), (0.19, 0.15))
     cases = pallet_with_cases(scene, "p4", PACKOUT_STAND, math.pi, courses=1, z0=STAND_SUPPORT, slots=slots)
     # a second, partial course — the last cases packed
     for k, (lx, ly) in enumerate(((-0.19, -0.15), (-0.19, 0.15))):
         dx, dy = rotate(lx, ly, math.pi)
-        case = f"p4/case1{k}"
-        scene.add_box(case, CASE, (PACKOUT_STAND[0] + dx, PACKOUT_STAND[1] + dy,
-                                   STAND_SUPPORT + PALLET[2] + SEAT + (CASE[2] + SEAT) + CASE[2] / 2),
-                      quaternion=yaw_quat(math.pi), color=KRAFT[(k + 1) % len(KRAFT)])
-        scene.set_obstacle_material(case, metalness=0.0, roughness=0.95)
-        scene.set_part(case, category="workpiece", model="RSC-360x280x240", mass_kg=CASE_KG)
-        cases.append(case)
+        cases.append(bt.parts.carton(scene, f"p4/case1{k}", CASE,
+                                     (PACKOUT_STAND[0] + dx, PACKOUT_STAND[1] + dy,
+                                      STAND_SUPPORT + PALLET[2] + SEAT + (CASE[2] + SEAT)),
+                                     yaw=math.pi, mass_kg=CASE_KG))
     return cases
 
 
@@ -694,7 +774,8 @@ def shipping(scene: bt.Scene) -> None:
         for j, y in enumerate(SHIP_GRID_Y):
             if (i + j) % 4 == 3:
                 continue
-            unit_load(scene, f"ship/pl{i}{j}", (x, y), math.pi, height=0.9 + 0.12 * ((i + j) % 3))
+            bt.parts.unit_load(scene, f"ship/pl{i}{j}", (x, y), yaw=math.pi, height=0.9 + 0.12 * ((i + j) % 3),
+                               pallet=PALLET)
 
 
 def standby(scene: bt.Scene) -> list[tuple[float, float]]:

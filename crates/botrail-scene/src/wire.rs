@@ -758,6 +758,9 @@ pub struct GroupRefMsg {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CameraMsg {
     pub name: String,
+    /// Show the generic housing without affecting the optics or frustum.
+    #[serde(default = "default_body_visible")]
+    pub body_visible: bool,
     pub mount: CameraMountMsg,
     /// Offset in the mount frame (world pose for a `world` mount).
     /// -Z is the view direction, +Y is image-up.
@@ -792,6 +795,9 @@ pub enum CameraMountMsg {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LidarMsg {
     pub name: String,
+    /// Show the generic housing without affecting scanning or field overlays.
+    #[serde(default = "default_body_visible")]
+    pub body_visible: bool,
     pub mount: LidarMountMsg,
     /// Offset in the mount frame (world pose for a `world` mount). The
     /// scan plane is local XY, angle 0 along +X, CCW toward +Y (the ROS
@@ -814,6 +820,10 @@ pub struct LidarMsg {
 
 fn default_channels() -> u32 {
     1
+}
+
+fn default_body_visible() -> bool {
+    true
 }
 
 /// What a LiDAR scanner is bolted to.
@@ -1669,6 +1679,10 @@ pub enum ClientMessage {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scenario: Option<String>,
+        /// The bake's time cap in seconds (the engine's 120 s when absent):
+        /// a run still waiting past it is reported as timed out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_duration: Option<f64>,
     },
     /// Roll out several sequences as concurrently-running programs (one
     /// shared world, PLC scan order = list order); the result arrives as
@@ -1677,6 +1691,9 @@ pub enum ClientMessage {
         names: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scenario: Option<String>,
+        /// The bake's time cap in seconds (the engine's 120 s when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_duration: Option<f64>,
     },
     /// Bake the last simulated timeline as a usda layer; the result
     /// arrives as a `usd_document` (the browser saves it as a download).
@@ -2462,6 +2479,7 @@ pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
 pub fn camera_msg(camera: &crate::seq::Camera) -> CameraMsg {
     CameraMsg {
         name: camera.name.clone(),
+        body_visible: camera.body_visible,
         mount: match &camera.mount {
             crate::seq::CameraMount::World => CameraMountMsg::World,
             crate::seq::CameraMount::Vehicle { device } => CameraMountMsg::Vehicle {
@@ -2483,6 +2501,7 @@ pub fn camera_msg(camera: &crate::seq::Camera) -> CameraMsg {
 pub fn camera_from_msg(msg: &CameraMsg) -> crate::seq::Camera {
     crate::seq::Camera {
         name: msg.name.clone(),
+        body_visible: msg.body_visible,
         mount: match &msg.mount {
             CameraMountMsg::World => crate::seq::CameraMount::World,
             CameraMountMsg::Vehicle { device } => crate::seq::CameraMount::Vehicle {
@@ -2511,6 +2530,7 @@ pub fn cameras_message(scene: &Scene) -> ServerMessage {
 pub fn lidar_msg(lidar: &crate::seq::Lidar) -> LidarMsg {
     LidarMsg {
         name: lidar.name.clone(),
+        body_visible: lidar.body_visible,
         mount: match &lidar.mount {
             crate::seq::LidarMount::World => LidarMountMsg::World,
             crate::seq::LidarMount::Vehicle { device } => LidarMountMsg::Vehicle {
@@ -2533,6 +2553,7 @@ pub fn lidar_msg(lidar: &crate::seq::Lidar) -> LidarMsg {
 pub fn lidar_from_msg(msg: &LidarMsg) -> crate::seq::Lidar {
     crate::seq::Lidar {
         name: msg.name.clone(),
+        body_visible: msg.body_visible,
         mount: match &msg.mount {
             LidarMountMsg::World => crate::seq::LidarMount::World,
             LidarMountMsg::Vehicle { device } => crate::seq::LidarMount::Vehicle {

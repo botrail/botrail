@@ -910,6 +910,7 @@ mod tests {
         );
         scene
             .upsert_camera(Camera {
+                body_visible: true,
                 name: "cam".into(),
                 mount: CameraMount::World,
                 pose: Isometry3::from_parts(nalgebra::Translation3::new(0.0, 0.0, 0.0), rotation),

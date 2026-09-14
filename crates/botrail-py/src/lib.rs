@@ -2406,7 +2406,7 @@ impl Scene {
     /// explicit pose, `position`/`quaternion` place the package's *mount
     /// face* and the optical axis follows the package's own calibration
     /// (`frames.camera_frames`); `look_at` aims the optical axis itself.
-    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, look_at = None, fov = None, resolution = None, near = None, far = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
+    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, look_at = None, fov = None, resolution = None, near = None, far = None, mount = None, robot = None, link = None, from_catalog = None, revision = None, body_visible = true))]
     #[allow(clippy::too_many_arguments)]
     fn add_camera(
         &self,
@@ -2424,6 +2424,7 @@ impl Scene {
         link: Option<String>,
         from_catalog: Option<String>,
         revision: Option<String>,
+        body_visible: bool,
     ) -> PyResult<()> {
         let package = from_catalog
             .as_deref()
@@ -2482,6 +2483,7 @@ impl Scene {
         self.hub
             .upsert_camera(botrail_scene::seq::Camera {
                 name: name.to_string(),
+                body_visible,
                 mount: camera_mount,
                 pose,
                 fov_deg: fov,
@@ -2549,7 +2551,7 @@ impl Scene {
     /// The given pose places the package's *mount face* and the scan
     /// origin follows the package's own frame (`frames.lidar_frames` —
     /// ROS laser convention, which is botrail's, so no rotation fix).
-    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, yaw = None, fov = None, range = None, resolution = None, channels = None, vfov = None, mount = None, robot = None, link = None, from_catalog = None, revision = None))]
+    #[pyo3(signature = (name, position = [0.0, 0.0, 0.0], quaternion = None, yaw = None, fov = None, range = None, resolution = None, channels = None, vfov = None, mount = None, robot = None, link = None, from_catalog = None, revision = None, body_visible = true))]
     #[allow(clippy::too_many_arguments)]
     fn add_lidar(
         &self,
@@ -2568,6 +2570,7 @@ impl Scene {
         link: Option<String>,
         from_catalog: Option<String>,
         revision: Option<String>,
+        body_visible: bool,
     ) -> PyResult<()> {
         let package = from_catalog
             .as_deref()
@@ -2624,6 +2627,7 @@ impl Scene {
         self.hub
             .upsert_lidar(botrail_scene::seq::Lidar {
                 name: name.to_string(),
+                body_visible,
                 mount: lidar_mount,
                 pose,
                 fov_deg: fov,

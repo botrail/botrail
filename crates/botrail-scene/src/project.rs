@@ -2165,7 +2165,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             }
         };
         out.push_str(&format!(
-            "scene.add_camera({:?}, position={}, quaternion={}, fov={}, resolution=({}, {}), near={}, far={}{mount})\n",
+            "scene.add_camera({:?}, position={}, quaternion={}, fov={}, resolution=({}, {}), near={}, far={}, body_visible={}{mount})\n",
             camera.name,
             py_tuple(&camera.pose.position),
             py_tuple(&camera.pose.quaternion),
@@ -2174,6 +2174,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             camera.resolution[1],
             camera.near,
             camera.far,
+            if camera.body_visible { "True" } else { "False" },
         ));
     }
     for lidar in &project.lidars {
@@ -2190,7 +2191,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             String::new()
         };
         out.push_str(&format!(
-            "scene.add_lidar({:?}, position={}, quaternion={}, fov={}, range=({}, {}), resolution={}{rings}{mount})\n",
+            "scene.add_lidar({:?}, position={}, quaternion={}, fov={}, range=({}, {}), resolution={}, body_visible={}{rings}{mount})\n",
             lidar.name,
             py_tuple(&lidar.pose.position),
             py_tuple(&lidar.pose.quaternion),
@@ -2198,6 +2199,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             lidar.range[0],
             lidar.range[1],
             lidar.resolution_deg,
+            if lidar.body_visible { "True" } else { "False" },
         ));
     }
     // Sensors come after cameras and lidars: a vision or field sensor

@@ -68,6 +68,10 @@ export function SequencePanel() {
     }
   }, [scenarios, scenario]);
   const runScenario = scenario === "baseline" ? undefined : scenario;
+  // The bake's time cap: the engine's 120 s by default. A cell whose cycle
+  // is longer is simulated by raising it; a run under a fault that stalls
+  // still surfaces at it.
+  const [cap, setCap] = useState(120);
   useEffect(() => {
     if (!motions.some((m) => m.name === motionChoice)) {
       setMotionChoice(motions[0]?.name ?? "");
@@ -140,9 +144,10 @@ export function SequencePanel() {
       sendSimulateSequences(
         included.map((s) => s.name),
         runScenario,
+        cap,
       );
     } else {
-      sendSimulateSequence(sequence.name, runScenario);
+      sendSimulateSequence(sequence.name, runScenario, cap);
     }
   };
 
@@ -339,6 +344,24 @@ export function SequencePanel() {
               scenario={scenarios.find((s) => s.name === runScenario)}
             />
           )}
+          <label
+            className="seq-cap"
+            title="the bake's time cap in seconds: a run still waiting past it is reported as timed out (the engine's default is 120 s — raise it for a longer cycle)"
+          >
+            cap
+            <input
+              className="seq-wait"
+              type="number"
+              min={1}
+              step={10}
+              value={cap}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v) && v > 0) setCap(v);
+              }}
+            />
+            s
+          </label>
           <button
             className="plan-go"
             onClick={onSimulate}

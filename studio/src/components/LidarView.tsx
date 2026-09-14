@@ -266,19 +266,23 @@ function LidarShape({
     <group>
       {/* Body: a scanner puck whose dark band at z=0 is the exit window
           of the scan plane. */}
-      <mesh position={[0, 0, -0.04]} rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
-        <cylinderGeometry args={[0.05, 0.055, 0.06, 20]} />
-        <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
-      </mesh>
-      <mesh rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
-        <cylinderGeometry args={[0.045, 0.045, 0.02, 20]} />
-        <meshStandardMaterial color="#2a2e35" roughness={0.4} metalness={0.4} />
-      </mesh>
-      <mesh position={[0, 0, 0.017]} rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
-        <cylinderGeometry args={[0.048, 0.045, 0.014, 20]} />
-        <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
-      </mesh>
-      <lineSegments geometry={sector}>
+      {lidar.body_visible !== false && (
+        <>
+          <mesh position={[0, 0, -0.04]} rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
+            <cylinderGeometry args={[0.05, 0.055, 0.06, 20]} />
+            <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
+          </mesh>
+          <mesh rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
+            <cylinderGeometry args={[0.045, 0.045, 0.02, 20]} />
+            <meshStandardMaterial color="#2a2e35" roughness={0.4} metalness={0.4} />
+          </mesh>
+          <mesh position={[0, 0, 0.017]} rotation={[Math.PI / 2, 0, 0]} onClick={onClick}>
+            <cylinderGeometry args={[0.048, 0.045, 0.014, 20]} />
+            <meshStandardMaterial color={color} roughness={0.6} metalness={0.2} />
+          </mesh>
+        </>
+      )}
+      <lineSegments geometry={sector} onClick={onClick}>
         <lineBasicMaterial
           color={color}
           transparent

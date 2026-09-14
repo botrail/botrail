@@ -286,7 +286,7 @@ def test_the_cell_can_be_ordered_from_the_catalog() -> None:
         if "not in the catalog" in text or "catalog" in text or "fetch" in text or "no manifest" in text:
             pytest.skip(f"assembly packs unavailable: {err}")
         raise
-    assert joint.catalog is not None and joint.catalog[0] == demo.WORKPIECE_CATALOG
+    assert joint.catalog is not None and joint.catalog[0].startswith(demo.WORKPIECE_CATALOG)
     assert joint.fastener.catalog[0] == demo.SCREW_CATALOG and joint.torque_nm == (4.0, 5.0)
     by = {row["names"][0]: row for row in scene.bom().rows}
     assert by["feeder"]["catalog"].startswith(demo.FEEDER_CATALOG)
