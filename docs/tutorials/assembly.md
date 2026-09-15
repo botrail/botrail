@@ -3,9 +3,9 @@
 *Walks through [`examples/assembly/cover_bolting_demo.py`](https://github.com/botrail/botrail/blob/main/examples/assembly/cover_bolting_demo.py)
 — a bolted joint as data, the screwdriver's program beside the arm's, and
 the hand-over set with the tightening sheet, the interlock table and the
-FAT rows. Fetches the UR5e, OnRobot RG6, robot stand and control box from
-the catalog (cached after the first run), with dimensioned references for
-the OnRobot Dual Quick Changer v3 and side-mounted Screwdriver 103961.*
+FAT rows. Fetches the UR5e, the OnRobot Dual Quick Changer v3, the
+side-mounted Screwdriver 103961, the RG6, the robot stand and the control
+box from the catalog (cached after the first run).*
 
 A cobot at a bench takes a gearbox cover by its bearing boss, sets it on
 the housing's two dowels, and screws it down: six M5 screws from a
@@ -53,7 +53,7 @@ derives the rest — a frame per hole, the seat, the tightening order, the
 engagement per hole:
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:261:272"
+--8<-- "examples/assembly/cover_bolting_demo.py:293:304"
 ```
 
 The figures are checked before anything moves:
@@ -78,7 +78,7 @@ described in the [product notes](https://github.com/neka-nat/botrail/blob/main/e
 An E-stop signal on the operator panel guards both simulated programs:
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:291:303"
+--8<-- "examples/assembly/cover_bolting_demo.py:323:335"
 ```
 
 Once the programs are written, [`Scene.auto_assign_io`][botrail.Scene.auto_assign_io]
@@ -87,7 +87,7 @@ and the PLCopen export carry them, and the report's I/O row reads
 `0 unbound`:
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:311:313"
+--8<-- "examples/assembly/cover_bolting_demo.py:343:345"
 ```
 
 ## The program
@@ -104,7 +104,7 @@ first interlock — the first screw is picked only once the cover's
 release has raised its `seated` signal:
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:473:485"
+--8<-- "examples/assembly/cover_bolting_demo.py:505:517"
 ```
 
 On the interlock table the two guards read as rows, not as conventions
@@ -126,7 +126,7 @@ presents nothing; a broken START wire leaves the driver waiting for a
 signal the arm did raise:
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:317:326"
+--8<-- "examples/assembly/cover_bolting_demo.py:349:358"
 ```
 
 The scenario table of the report is the FAT sheet: `2/6 passed`, and for
@@ -145,7 +145,7 @@ assembly section of its own
 ([`report_section`][botrail.assembly.report_section]):
 
 ```python
---8<-- "examples/assembly/cover_bolting_demo.py:511:532"
+--8<-- "examples/assembly/cover_bolting_demo.py:543:564"
 ```
 
 The tightening sheet is one line per screw in the order it is driven,

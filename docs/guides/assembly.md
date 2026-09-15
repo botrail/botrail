@@ -86,23 +86,27 @@ rundowns as starts it may serve (`cycles`), nested so it ends on
 from whichever cycle it is waiting in.
 
 The driver's datasheet figures (`tool={"torque_nm": (0.15, 5.0),
-"screw_length_mm": 50, "bit_mm": 4}`) are what
+"screw_length_mm": 50, "bit_mm": 4}` — the demo reads them off the
+screwdriver pack's BOM row) are what
 [`check`][botrail.assembly.check] compares the joint against: an M6
 class 8.8 joint at its 10.5 N·m table torque is more than a 5 N·m cobot
 screwdriver delivers, and the check says so before anything is taught.
 
 ## The hand and the presenter
 
-The demo uses dimensioned reference geometry for the OnRobot Screwdriver
-103961 and Dual Quick Changer v3 109878, with a catalog RG6. The driver
-is supported at its side; a Type A 50 mm bit extender clears the cover's
-bearing boss. Both tools stay attached and the robot selects one by
-turning its wrist. The [product notes](https://github.com/neka-nat/botrail/blob/main/examples/assembly/cover_bolting_demo.md)
-record source drawings, the required Compute Box route and unverified
-hardware loads.
+The demo takes the OnRobot Dual Quick Changer v3 109878, the Screwdriver
+103961 configured with its Type A 50 mm bit extender
+(`onrobot/screwdriver/103961-a50`) and the RG6 from the catalog and
+stacks them with `attach_tool`: the driver on the changer's `flange_a`,
+the gripper on `flange_b`, the gripper last so it stays the TCP. The
+driver is supported at its side; the extender clears the cover's bearing
+boss. Both tools stay attached and the robot selects one by turning its
+wrist. The [product notes](https://github.com/neka-nat/botrail/blob/main/examples/assembly/cover_bolting_demo.md)
+record the packs' source drawings, the required Compute Box route and
+unverified hardware loads.
 
 Like the generic [`bt.tools.screwdriver`][botrail.tools.screwdriver],
-the reference tool has a prismatic `shank`: its own feed advances the
+the catalog tool has a prismatic `shank`: its own feed advances the
 screw while the arm stands still. Its `tip` has +Z pointing back along
 the tool, the axis convention every process tool follows. The gripper stays the TCP; the bit's tip is
 what screw poses are taught for (`link=`). Only the `bit` is allowed to

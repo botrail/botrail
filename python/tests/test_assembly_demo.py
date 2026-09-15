@@ -2,10 +2,10 @@
 and screws it down, asserted the way a cell owner would (A0 of
 design/design-assembly.md).
 
-The cell is built from catalog products (a UR5e, OnRobot RG6 and
-a robot stand), so these tests need the catalog — cached
-locally or fetched once — and skip where it is unreachable, like the
-tending demo's. What they pin:
+The cell is built from catalog products (a UR5e, the OnRobot Dual Quick
+Changer, screwdriver and RG6, a robot stand), so these tests need the
+catalog — cached locally or fetched once — and skip where it is
+unreachable, like the tending demo's. What they pin:
 
 * the cycle's order: the cover seated before any screw, the screws in
   the joint's star order, each picked from the presenter, driven with
@@ -105,7 +105,7 @@ def test_rg6_grasps_the_boss_sides_below_its_top(cell):
     cover_z = tl.object_pose(joint.b, t)[0][2]
     boss_top = cover_z + demo.COVER[2] + demo.BOSS[1]
     tips = [scene.link_pose_at(name, q, robot="arm")[0]
-            for name in demo.tooling.pads(scene.robot_of("arm")) if name.endswith("finger_tip")]
+            for name in demo.pads(scene.robot_of("arm")) if name.endswith("finger_tip")]
     assert len(tips) == 2
     for p in tips:
         # Contact band in the upper half of the 30 mm boss, with at least
@@ -163,13 +163,19 @@ def test_the_bill_and_the_wiring(cell) -> None:
     assert by["feeder"]["category"] == "feeder.screw"
     drivers = [row for row in scene.bom().rows if row["category"] == "tool.screwdriver"]
     assert len(drivers) == 1 and drivers[0]["attributes"]["torque_max_nm"] == 5
+    # The stack is three packs on one wrist; the driver's pack names what it
+    # requires — the changer, the Robot Kit, the extender, the bit kit —
+    # and the Compute Box on the driver's node is that kit's pack.
     assert by["arm/tool"]["manufacturer"] == "OnRobot"
-    assert by["arm/tool"]["attributes"]["part_number"] == "109878"
-    assert drivers[0]["attributes"]["part_number"] == "103961"
-    assert by["arm/tool/tool3"]["catalog"].startswith(demo.tooling.GRIPPER_CATALOG)
-    assert drivers[0]["attributes"]["required_extender"].startswith("109301:")
-    assert drivers[0]["attributes"]["required_bit_kit"].startswith("105121:")
-    assert by[driver.node]["attributes"]["part_number"] == "113761"
+    assert by["arm/tool"]["catalog"].startswith(demo.CHANGER_CATALOG)
+    assert by["arm/tool"]["order"]["part_number"] == "109878"
+    assert drivers[0]["catalog"].startswith(demo.DRIVER_CATALOG)
+    assert drivers[0]["order"]["part_number"] == "103961"
+    assert by["arm/tool/tool3"]["catalog"].startswith(demo.GRIPPER_CATALOG)
+    required = {r["part_number"]: r["catalog"] for r in drivers[0]["order"]["requires"]}
+    assert set(required) == {"109878", "113761", "105121", "109301"}
+    assert by[driver.node]["catalog"].startswith(demo.appearance.KIT_CATALOG)
+    assert required["113761"].startswith(demo.appearance.KIT_CATALOG)
     assert "Compute Box" in by["arm/tool"]["attributes"]["electrical_route"]
     assert "not robot wrist power" in by["arm/tool"]["attributes"]["electrical_route"]
     # The screws carry their joint's torque, and the driver's requirement
@@ -205,33 +211,51 @@ def test_the_bill_and_the_wiring(cell) -> None:
 def test_commercial_tooling_uses_side_support_and_independent_feed_axis():
     """The maker's side mount must not regress to a spindle on a long boom.
 
-    Check manufacturer drawing datums independently of the cell's IK and
-    workpiece: 120° mounting normals, 81 mm driver axis offset, +50 mm
-    extender and 55 mm feed along the screw axis.
+    Check the packs' drawing datums independently of the cell's IK and
+    workpiece, against the figures the packs themselves state: 120°
+    mounting normals, the driver's nose datum with its process zero 17 mm
+    inside and the +50 mm extender, the 80 mm mating-plane-to-axis
+    offset, and the 55 mm feed along the screw axis.
     """
     import math
 
-    tooling = demo.tooling
-    driver = tooling.screwdriver(stroke=0.055)
+    try:
+        changer = bt.Robot.from_catalog(demo.CHANGER_CATALOG)
+        driver = bt.Robot.from_catalog(demo.DRIVER_CATALOG)
+    except Exception as err:
+        if "catalog" in str(err).lower() or "fetch" in str(err).lower() or "resolve" in str(err).lower():
+            pytest.skip(f"catalog unavailable: {err}")
+        raise
     probe = bt.Scene(driver)
+    # The pack's figures, as its BOM row carries them (the demo reads them
+    # the same way): the nose datum, the process zero, the extension, the
+    # side offset and the stroke.
+    figures = probe.bom().rows[0]["attributes"]
+    tip_x = (figures["nominal_nose_x_mm"] - figures["process_zero_recess_mm"] + figures["extension_mm"]) / 1e3
+    axis_z = figures["axis_offset_mm"] / 1e3
+    stroke = figures["stroke_mm"] / 1e3
     p0, q0 = probe.link_pose("tip")
-    assert p0 == pytest.approx((0.153 - 0.017 + 0.050, 0, 0.081))
-    probe.set_joint_positions([0.055])
-    assert probe.link_pose("tip")[0] == pytest.approx((p0[0] + 0.055, 0, 0.081))
-    # Tip +Z points back towards the body; bit +Z is its spin/feed axis.
+    assert p0 == pytest.approx((tip_x, 0, axis_z))
+    assert driver.joint_names == ["shank"] and driver.joint_limits[0] == pytest.approx((0.0, stroke))
+    probe.set_joint_positions([stroke])
+    assert probe.link_pose("tip")[0] == pytest.approx((p0[0] + stroke, 0, axis_z))
+    # Tip +Z points back towards the body; bit +Z is its spin/feed axis
+    # (the pack's rotations carry the precision of its authored file).
     def z_axis(q):
         x, y, z, w = q
         return (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
-    assert z_axis(q0) == pytest.approx((-1, 0, 0), abs=1e-9)
-    assert z_axis(probe.link_pose("bit")[1]) == pytest.approx((1, 0, 0), abs=1e-9)
-    changer = tooling.dual_changer()
-    stack = changer.attach_tool(driver, flange="hand_driver", prefix="drv_")
+    assert z_axis(q0) == pytest.approx((-1, 0, 0), abs=1e-6)
+    assert z_axis(probe.link_pose("bit")[1]) == pytest.approx((1, 0, 0), abs=1e-6)
+    face_angle = bt.Scene(changer).bom().rows[0]["attributes"]["face_angle_deg"]
+    stack = changer.attach_tool(driver, flange="flange_a", prefix="drv_")
     probe = bt.Scene(stack)
-    a = z_axis(probe.link_pose("hand_driver")[1])
-    b = z_axis(probe.link_pose("hand_gripper")[1])
-    assert sum(x * y for x, y in zip(a, b)) == pytest.approx(math.cos(math.radians(120)))
+    a = z_axis(probe.link_pose("flange_a")[1])
+    b = z_axis(probe.link_pose("flange_b")[1])
+    assert sum(x * y for x, y in zip(a, b)) == pytest.approx(math.cos(math.radians(face_angle)))
+    # The working bit about 208 mm off the wrist axis at zero stroke: the
+    # side support, not a boom.
     x, y, _ = probe.link_pose("drv_tip")[0]
-    assert math.hypot(x, y) == pytest.approx(0.208898, abs=1e-6)
+    assert math.hypot(x, y) == pytest.approx(0.208, abs=1e-3)
     assert not any("boom" in name for name in stack.link_names)
 
 
@@ -293,8 +317,7 @@ def test_the_cell_can_be_ordered_from_the_catalog() -> None:
     assert by[fastening.pairs[0][0]]["qty"] == 6 and by[fastening.pairs[0][0]]["catalog"].startswith(demo.SCREW_CATALOG)
     assert by["set/housing"]["catalog"].startswith(demo.WORKPIECE_CATALOG) and by["set/dowel/p0"]["qty"] == 2
     drivers = [row for row in scene.bom().rows if row["category"] == "tool.screwdriver"]
-    assert len(drivers) == 1 and drivers[0]["model"] == demo.DRIVER_MODEL
-    assert not drivers[0].get("catalog")  # runtime product reference in both modes
+    assert len(drivers) == 1 and drivers[0]["catalog"].startswith(demo.DRIVER_CATALOG)  # the same pack in both modes
     rows = A.fastening_report(tl, fastening)
     assert all(r["result"] == "ok" and r["checks"]["engagement"] == "pass" for r in rows)
     req = scene.requirements()

@@ -1,6 +1,7 @@
 """The cover-bolting example's own designs, built at run time: the panel's
-bracket, the locating nest and stock pocket, and the Compute Box. The bench,
-the E-stop station, the presenter and the housing-and-cover set are catalog
+bracket, the locating nest and stock pocket, and the Compute Box (a box for
+a product whose pack has no geometry). The bench, the E-stop station, the
+presenter, the housing-and-cover set and the tools on the wrist are catalog
 products and draw themselves. See cover_bolting_demo.md for product
 references and the distinction between purchased equipment and demo designs.
 """
@@ -14,6 +15,7 @@ METAL = (0.48, 0.51, 0.55)
 DARK = (0.025, 0.032, 0.040)
 BENCH_SOURCE = "https://www.orange-book.com/ja/c/products/index.html?itemCd=AE1500++++++++++++++++++++++++8500"
 PANEL_SOURCE = "https://www.se.com/us/en/product/XALK178F/"
+KIT_CATALOG = "onrobot/robot-kit/113761"   # the Compute Box route both tools share
 
 
 def box(scene, name, size, at, color=METAL, *, metal=0.0, rough=0.45, collision=False):
@@ -80,11 +82,12 @@ def fixtures(scene, *, housing_xy, stock_xy, top, housing_size, cover_size):
                    category="fixture", description="custom polymer stock pocket")
 
 
-def compute_box(scene, node, position):
-    """Robot Kit 113761: Compute Box, supply and supplied cable set.
-
-    Box dimensions from OnRobot's UR Screwdriver manual §8.2.4.2.
-    The simulation's driver I/O node remains an abstract controller program.
+def compute_box(scene, node, position, *, catalog=KIT_CATALOG):
+    """Robot Kit 113761 — Compute Box, supply and supplied cable set — on
+    the driver's I/O node, ordered from its pack (a specification pack:
+    the kit's contents and cable, no geometry). The box is a demo design
+    from OnRobot's UR Screwdriver manual §8.2.4.2. The simulation's node
+    remains an abstract controller program.
     """
     x, y, z = position
     box(scene, f"{node}/body", (0.1119, 0.0883, 0.0325),
@@ -96,8 +99,7 @@ def compute_box(scene, node, position):
         (x + 0.035, y - 0.049, z + 0.016), DARK)
     box(scene, f"{node}/status", (0.020, 0.012, 0.0008),
         (x, y, z + 0.0329), (0.04, 0.34, 0.60))
-    scene.set_part(node, kind="io_node", manufacturer="OnRobot", model="Robot Kit (113761), including Compute Box",
-                   category="plc", part_number="113761", source_url="https://b2b.onrobot.com/robot-kit/",
-                   description="Compute Box, power supply, 5 m M12-to-M8 and Ethernet cables; abstract simulation I/O",
-                   voltage_v=24, cable_m=5, electrical_route="external supply -> Compute Box -> Dual QC -> tools",
-                   commissioning="verify current, firmware/URCap and pinout; simulated handshake is not a device driver")
+    bt.catalog.index().get(catalog).identify(
+        scene, node, kind="io_node", voltage_v=24,
+        electrical_route="external supply -> Compute Box -> Dual QC -> tools",
+        commissioning="verify current, firmware/URCap and pinout; simulated handshake is not a device driver")

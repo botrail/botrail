@@ -53,16 +53,16 @@ bench, the Schneider XALK178F E-stop station, the screw presenter and the
 GH-160 housing-and-cover set are catalog products whose looks come with their
 packs; the custom nests and the panel bracket are built in Python.
 
-Needs the catalog (`pip install botrail[catalog]`; the UR5e, RG6, stand,
-bench, E-stop station, presenter and the housing-and-cover set
-(`botrail/workpiece/gear-cover-set`) are fetched from botrail/botrail-catalog
-and cached). `--catalog` also orders the screws (`botrail/fastener/iso4762-m5`)
-and reads the joint from the set's mounting instead of the typed pattern.
-`--catalog-root DIR` reads the packs from a local build.
-The OnRobot changer and screwdriver use the same dimensioned reference
-geometry in both modes; the former generic SD5-340 pack is not used.
+Needs the catalog (`pip install botrail[catalog]`; the UR5e, the Dual QC,
+the screwdriver, the RG6, stand, bench, E-stop station, presenter and the
+housing-and-cover set (`botrail/workpiece/gear-cover-set`) are fetched from
+botrail/botrail-catalog and cached). `--catalog` also orders the screws
+(`botrail/fastener/iso4762-m5`) and reads the joint from the set's mounting
+instead of the typed pattern. `--catalog-root DIR` reads the packs from a
+local build. The OnRobot changer and screwdriver are the same catalog
+products in both modes; the former generic SD5-340 pack is not used.
 See cover_bolting_demo.md for the purchased stack, Compute Box wiring
-route and limits of the reference geometry and simulated handshake.
+route and limits of the packs' reference geometry and simulated handshake.
 
 A fitted part meets what it is fitted into, and the check knows it is
 meant to: the cover is allowed to meet the housing and its dowels (they
@@ -83,7 +83,6 @@ import math
 from pathlib import Path
 
 import _cover_bolting_cell as appearance
-import _cover_bolting_tooling as tooling
 import botrail as bt
 
 HERE = Path(__file__).resolve().parent
@@ -100,16 +99,18 @@ WORKPIECE_CATALOG = "botrail/workpiece/gear-cover-set"   # r2 draws the casting 
 # stack is the same in both modes.
 SCREW_CATALOG = "botrail/fastener/iso4762-m5/r1"
 ROBOT = "arm"
+# The stack on the wrist, every piece a catalog product: the Dual QC with
+# its two faces 120° apart, the 103961 configured with the Type A 50 mm bit
+# extender — its stroke, torque, threads and bit are the pack's figures —
+# and the RG6 r2, reference geometry without r3's single-QC wrist-power
+# purchase route, which does not apply to this Compute Box / Dual QC cell.
+CHANGER_CATALOG = "onrobot/quick-changer/109878"
+DRIVER_CATALOG = "onrobot/screwdriver/103961-a50"
+GRIPPER_CATALOG = "onrobot/rg/rg6/r2"
 BIT = "drv_bit"
 SHANK = "drv_shank"
 TIP = "drv_tip"
-# OnRobot Screwdriver 103961, side-mounted reference geometry:
-# 0.15–5 N·m, M1.6–M6 to 50 mm, 340 rpm, 55 mm shank stroke,
-# 2.5 kg, 308 × 86 × 114 mm. Not vendor CAD.
-DRIVER_MODEL = tooling.DRIVER_MODEL
-DRIVER_MASS = tooling.DRIVER_MASS
-STROKE = 0.055
-TOOL = {"torque_nm": (0.15, 5.0), "thread_mm": (1.6, 6.0), "screw_length_mm": 50, "bit_mm": 4}
+DRIVER_MASS = 2.5   # the bare tool's datasheet mass; the pack leaves the configured total open
 RPM_RUN = 340.0
 
 # The joint: an aluminium gear housing 160 × 120 × 60 with six M5 threads
@@ -170,6 +171,40 @@ def down(spin: float) -> tuple:
     return q_mul((1.0, 0.0, 0.0, 0.0), zrot(spin))
 
 
+def datasheet(scene: bt.Scene, name: str) -> dict:
+    """The figures a product's pack states, as they land on its BOM row."""
+    return next(row for row in scene.bom().rows if name in row["names"])["attributes"]
+
+
+def pads(robot: bt.Robot) -> list:
+    """The RG6's finger links: what the cover is allowed to meet."""
+    return [name for name in robot.link_names if name.endswith(("finger_tip", "flex_finger"))]
+
+
+def grip_tcp_offset(robot: bt.Robot, width: float) -> float:
+    """RG6 pad-center offset from its fixed TCP at the required opening.
+
+    Teach against a gauge tall enough to contact the sides of the pads,
+    then measure the finger-tip frames. These frames sit within 0.1 mm of
+    the pad centers in this catalog revision. The RG6's curved finger
+    motion means its fixed TCP is not a contact point for every width.
+    """
+    probe = bt.Scene(robot)
+    tcp, q = probe.link_pose(robot.tcp_link)
+    x, y, z, w = q
+    axis = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
+    center = tuple(p - 0.030 * n for p, n in zip(tcp, axis))
+    probe.add_box("grip_gauge", (width, width, 0.035), center, quaternion=q)
+    finger = robot.joint_names[-1]
+    close = probe.grasp_close("grip_gauge", joints=[finger], clearance=0.0)
+    joints = list(probe.joint_positions)
+    joints[-1] = close[finger]
+    probe.set_joint_positions(joints)
+    tips = [probe.link_pose(name)[0] for name in pads(robot) if name.endswith("finger_tip")]
+    midpoint = tuple(sum(p[i] for p in tips) / len(tips) for i in range(3))
+    return sum((p - t) * n for p, t, n in zip(midpoint, tcp, axis))
+
+
 # ------------------------------------------------------------------ build
 def catalog_ref(product: str, root):
     """A pack by id — or, with a local build root, its package directory (the
@@ -182,16 +217,17 @@ def catalog_ref(product: str, root):
 
 
 def hand() -> bt.Robot:
-    """Catalog RG6 and side-mounted 103961 on a commercial Dual QC v3.
-
-    The driver and changer are runtime dimensioned reference models in both
-    modes; --catalog selects the feeder, fasteners and workpiece packs.
+    """The catalog UR5e with the commercial stack on its wrist: the Dual QC
+    v3 carries the side-mounted 103961 on `flange_a` and the RG6 on
+    `flange_b`. The driver goes on first so the gripper stays the TCP; its
+    links are `drv_*` (`drv_tip` for the screw targets). The same products
+    in both modes; --catalog selects the feeder, fasteners and workpiece
+    packs.
     """
     arm = bt.Robot.from_catalog(ARM)
-    stack = tooling.dual_changer().attach_tool(
-        tooling.screwdriver(stroke=STROKE), flange="hand_driver", mount="mount", prefix="drv_")
-    gripper = bt.Robot.from_catalog(tooling.GRIPPER_CATALOG)
-    stack = stack.attach_tool(gripper, flange="hand_gripper", prefix="gripper_")
+    stack = bt.Robot.from_catalog(CHANGER_CATALOG).attach_tool(
+        bt.Robot.from_catalog(DRIVER_CATALOG), flange="flange_a", prefix="drv_")
+    stack = stack.attach_tool(bt.Robot.from_catalog(GRIPPER_CATALOG), flange="flange_b", prefix="gripper_")
     robot = arm.attach_tool(stack)
     # The arm's six joints are the group IK solves with: the shank and the
     # fingers keep their values whichever tip a pose is taught for.
@@ -209,24 +245,20 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
     (`catalog_root`: a local build)."""
     scene = bt.Scene(hand(), name=ROBOT)
     robot = scene.robot_of(ROBOT)
-    scene.set_part(f"{ROBOT}/tool", manufacturer="OnRobot", model=tooling.CHANGER_MODEL,
-                   category="tool.multi", description="two integral angled QC faces; dimensioned reference",
-                   mass_kg=tooling.CHANGER_MASS, source_url=tooling.CHANGER_SOURCE,
-                   part_number="109878", electrical_route="Compute Box; not robot wrist power")
-    scene.set_part(f"{ROBOT}/tool/tool2", manufacturer="OnRobot", model=DRIVER_MODEL,
-                   category="tool.screwdriver", description="side-mounted 103961; dimensioned reference",
-                   mass_kg=DRIVER_MASS, part_number="103961", source_url=tooling.DRIVER_SOURCE,
-                   torque_min_nm=TOOL["torque_nm"][0], torque_max_nm=TOOL["torque_nm"][1],
-                   thread_min_mm=TOOL["thread_mm"][0], thread_max_mm=TOOL["thread_mm"][1],
-                   screw_length_mm=TOOL["screw_length_mm"], bit_mm=TOOL["bit_mm"], rpm=rpm,
-                   stroke_mm=STROKE * 1e3, current_max_a=4.5,
-                   required_extender="109301: Bit Extender A 50 mm; included in bit geometry",
-                   required_bit_kit="105121: Metric Kit; HEX 4 mm, Type A, M5 carrier and screw fix",
-                   accessory_source="https://b2b.onrobot.com/accessories2/",
-                   accessory_mass="unknown; excluded from 2.5 kg driver mass")
-
+    # The stack's rows come from the packs — identity, figures, and what
+    # each product requires (the Robot Kit, the extender, the bit kit); the
+    # cell adds its connection route, its rundown speed and the mass the
+    # driver's pack leaves open.
+    scene.set_part(f"{ROBOT}/tool", electrical_route="Compute Box; not robot wrist power")
+    scene.set_part(f"{ROBOT}/tool/tool2", mass_kg=DRIVER_MASS, rpm=rpm,
+                   accessory_mass="unknown; the extender, the bit kit and cables are not in the 2.5 kg")
     scene.set_part(f"{ROBOT}/tool/tool3", part_number="102021",
                    electrical_route="Dual QC 109878 / Compute Box, not a single-QC wrist-power kit")
+    # What the driver's pack states, for `check` and for the rundown ramp.
+    figures = datasheet(scene, f"{ROBOT}/tool/tool2")
+    tool = {"torque_nm": (figures["torque_min_nm"], figures["torque_max_nm"]),
+            "screw_length_mm": figures["screw_length_mm"], "bit_mm": figures["bit_mm"]}
+    stroke = robot.joint_limits[robot.joint_names.index(SHANK)][1]
     # -- the stand, the bench ---------------------------------------------
     stand = bt.parts.pedestal(scene, "stand", catalog=STAND, height=STAND_H, position=(0.0, 0.0))
     (mx, my, mz), mq = scene.frame(stand.frames[0])
@@ -270,7 +302,7 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
         joint = A.joint(scene, "cover_joint", a=work.housing, b=work.cover, pattern_a=threads, pattern_b=clearances,
                         fastener=screw, seat=work.seat, thickness=COVER[2],
                         torque_nm=TORQUE_NM, min_engagement_mm=MIN_ENGAGEMENT_MM)
-    for link in tooling.pads(robot):
+    for link in pads(robot):
         scene.allow_link_obstacle_contact(link, joint.b, robot=ROBOT)
 
     appearance.fixtures(scene, housing_xy=HOUSING_XY, stock_xy=STOCK_XY, top=bz,
@@ -296,8 +328,8 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
     # See the product notes for the physical connection route. ----------------
     bt.parts.controller(scene, "controller", robots=[ROBOT], position=CONTROLLER_AT,
                         catalog=CONTROLLER_CATALOG, programs=["assemble"], cable_m=6)
-    driver = A.driver(scene, "driver", robot=ROBOT, bit=BIT, shank=SHANK, stroke=STROKE, fastener=joint.fastener,
-                      torque_nm=TORQUE_SET, cycles=len(joint.order) + RETRY, rpm_run=rpm, tool=TOOL,
+    driver = A.driver(scene, "driver", robot=ROBOT, bit=BIT, shank=SHANK, stroke=stroke, fastener=joint.fastener,
+                      torque_nm=TORQUE_SET, cycles=len(joint.order) + RETRY, rpm_run=rpm, tool=tool,
                       estop=estop, channels=bt.io.channels("di", 8, "DI") + bt.io.channels("do", 8, "DO"))
     appearance.compute_box(scene, driver.node, (1.38, 0.22, bz))
     scene.add_spin("driver/spin", driver.signal("run"), ROBOT, link=BIT)
@@ -399,7 +431,7 @@ def teach(scene: bt.Scene, joint: A.Joint, feeder: bt.parts.ScrewFeeder, driver:
     (cx, cy, cz), _ = scene.obstacle_pose(joint.b)
     # RG6 fingertips travel in an arc. Place their actual contact band on
     # the boss, compensating the catalog's fixed TCP at this jaw width.
-    grip_z = cz + COVER[2] + BOSS[1] - GRIP + tooling.grip_tcp_offset(robot, BOSS[0])
+    grip_z = cz + COVER[2] + BOSS[1] - GRIP + grip_tcp_offset(robot, BOSS[0])
     (jx, jy, jz), _ = joint.seat
     grasp = None
     failure = None
