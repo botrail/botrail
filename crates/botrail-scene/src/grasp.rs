@@ -76,11 +76,11 @@ pub const DEFAULT_FINGER_MASS: f64 = 0.2;
 /// fingers' own weight). 1e5 also puts the cap-saturation error
 /// (`max_force / k`) at real scales: 0.3 mm for a 30 N gripper,
 /// 10 mrad for a 1000 N·m knuckle.
-fn default_stiffness(_kind: botrail_physics::JointKind) -> f64 {
+pub(crate) fn default_stiffness(_kind: botrail_physics::JointKind) -> f64 {
     1e5
 }
 
-fn default_damping(kind: botrail_physics::JointKind, max_force: f64) -> f64 {
+pub(crate) fn default_damping(kind: botrail_physics::JointKind, max_force: f64) -> f64 {
     match kind {
         // Free speed = max_force / damping: 0.1 m/s, 4 rad/s.
         botrail_physics::JointKind::Prismatic => max_force / 0.1,

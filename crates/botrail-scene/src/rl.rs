@@ -28,6 +28,12 @@ pub enum ObsChannelSpec {
         robot: String,
         velocities: bool,
     },
+    /// The torque per actuated joint that holds a dynamic robot against
+    /// gravity as the world stands (`dof` wide; zeros for a robot that is
+    /// not dynamic in the rollout).
+    GravityTorque {
+        robot: String,
+    },
     TcpPose {
         robot: String,
     },
@@ -144,6 +150,9 @@ enum ObsChannel {
     Joints {
         robot: usize,
         velocities: bool,
+    },
+    GravityTorque {
+        robot: usize,
     },
     LinkPose {
         robot: usize,
@@ -316,6 +325,11 @@ impl ObsSpec {
                         },
                         if *velocities { 2 * dof } else { dof },
                     )
+                }
+                ObsChannelSpec::GravityTorque { robot: name } => {
+                    let r = robot(name)?;
+                    let dof = scene.robots()[r].model.dof();
+                    (ObsChannel::GravityTorque { robot: r }, dof)
                 }
                 ObsChannelSpec::TcpPose { robot: name } => {
                     let r = robot(name)?;
@@ -543,6 +557,10 @@ impl ObsSpec {
                         out[q.len()..].copy_from_slice(&v);
                     }
                 }
+                ObsChannel::GravityTorque { robot } => match live.gravity_torques(*robot) {
+                    Some(g) => out.copy_from_slice(&g),
+                    None => out.fill(0.0),
+                },
                 ObsChannel::LinkPose { robot, link } => {
                     write_pose(out, &link_pose(*robot, *link));
                 }
@@ -773,10 +791,37 @@ pub enum ControlSpec {
         #[serde(default = "default_ik_iters")]
         max_iters: usize,
     },
+    /// A raw joint torque per driven joint, `action[k] * max_torque[k]`
+    /// (N·m; N for a prismatic joint), on a dynamic robot
+    /// (design-rl-dynamics.md RD2): the joint's motor is off while the
+    /// torque stands. `max_torque` defaults to each joint's effort limit.
+    Torque {
+        indices: Vec<usize>,
+        #[serde(default)]
+        max_torque: Option<Vec<f64>>,
+        /// Add the model's gravity torque on top of the action every tick
+        /// (a torque interface whose firmware compensates gravity).
+        #[serde(default)]
+        gravity_compensation: bool,
+    },
 }
 
 fn default_ik_iters() -> usize {
     100
+}
+
+/// What one action commands: joint targets for the drive (the position
+/// controls) or raw torques (`ControlSpec::Torque`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    /// A full-length joint configuration; the drive reads its own joints.
+    Joints(Vec<f64>),
+    /// `(q index, torque)` per driven joint, with or without the model's
+    /// gravity torque added by the rollout.
+    Torque {
+        torques: Vec<(usize, f64)>,
+        compensate: bool,
+    },
 }
 
 /// A control spec resolved for one robot of a cell: the TCP link and IK
@@ -788,6 +833,8 @@ pub struct Control {
     tip: usize,
     mask: Option<Vec<bool>>,
     dim: usize,
+    /// Torque caps per driven joint (`Torque` only).
+    caps: Vec<f64>,
 }
 
 /// A control's per-world state: the TCP setpoint a `TcpDelta` integrates.
@@ -846,9 +893,44 @@ impl Control {
             ),
             None => (model.default_tcp_link(), None),
         };
+        let mut caps = Vec::new();
         let dim = match &spec {
             ControlSpec::JointDelta { indices, .. } => {
                 check(indices)?;
+                indices.len()
+            }
+            ControlSpec::Torque {
+                indices, max_torque, ..
+            } => {
+                check(indices)?;
+                match max_torque {
+                    Some(caps_given) => {
+                        if caps_given.len() != indices.len() {
+                            return Err(format!(
+                                "control: {} torque caps for {} joints",
+                                caps_given.len(),
+                                indices.len()
+                            ));
+                        }
+                        if let Some(bad) = caps_given.iter().find(|c| !(c.is_finite() && **c > 0.0)) {
+                            return Err(format!("control: max_torque must be positive, got {bad}"));
+                        }
+                        caps = caps_given.clone();
+                    }
+                    None => {
+                        for &qi in indices {
+                            let joint = &model.joints[model.actuated_joints[qi]];
+                            let effort = joint.limits.as_ref().map_or(0.0, |l| l.effort);
+                            if !(effort.is_finite() && effort > 0.0) {
+                                return Err(format!(
+                                    "control: joint `{}` declares no effort limit — pass max_torque",
+                                    joint.name
+                                ));
+                            }
+                            caps.push(effort);
+                        }
+                    }
+                }
                 indices.len()
             }
             ControlSpec::JointTarget { indices, limits } => {
@@ -890,7 +972,13 @@ impl Control {
             tip,
             mask,
             dim,
+            caps,
         })
+    }
+
+    /// Whether the actions are raw torques (a dynamic robot's control).
+    pub fn is_torque(&self) -> bool {
+        matches!(self.spec, ControlSpec::Torque { .. })
     }
 
     /// Width of one action.
@@ -909,15 +997,15 @@ impl Control {
         ControlState::default()
     }
 
-    /// The joint command for `action` (each value clipped to `[-1, 1]`)
-    /// on the world as it stands, and whether the IK converged (`true`
-    /// for the joint controls).
+    /// The command for `action` (each value clipped to `[-1, 1]`) on the
+    /// world as it stands, and whether the IK converged (`true` for every
+    /// control but a `TcpDelta`).
     pub fn apply(
         &self,
         state: &mut ControlState,
         view: WorldView<'_>,
         action: &[f64],
-    ) -> Result<(Vec<f64>, bool), String> {
+    ) -> Result<(Command, bool), String> {
         if action.len() != self.dim {
             return Err(format!(
                 "action has {} values, the control takes {}",
@@ -926,23 +1014,43 @@ impl Control {
             ));
         }
         let a = |k: usize| action[k].clamp(-1.0, 1.0);
+        if let ControlSpec::Torque {
+            indices,
+            gravity_compensation,
+            ..
+        } = &self.spec
+        {
+            let torques = indices
+                .iter()
+                .enumerate()
+                .map(|(k, &qi)| (qi, a(k) * self.caps[k]))
+                .collect();
+            return Ok((
+                Command::Torque {
+                    torques,
+                    compensate: *gravity_compensation,
+                },
+                true,
+            ));
+        }
         let mut q = view
             .joint_positions(self.robot)
             .ok_or_else(|| format!("no robot at index {}", self.robot))?
             .to_vec();
         match &self.spec {
+            ControlSpec::Torque { .. } => unreachable!("handled above"),
             ControlSpec::JointDelta { indices, max_step } => {
                 for (k, &qi) in indices.iter().enumerate() {
                     q[qi] += a(k) * max_step;
                 }
-                Ok((q, true))
+                Ok((Command::Joints(q), true))
             }
             ControlSpec::JointTarget { indices, limits } => {
                 for (k, &qi) in indices.iter().enumerate() {
                     let [lo, hi] = limits[k];
                     q[qi] = lo + (a(k) + 1.0) * 0.5 * (hi - lo);
                 }
-                Ok((q, true))
+                Ok((Command::Joints(q), true))
             }
             ControlSpec::TcpDelta {
                 max_step_m,
@@ -1004,7 +1112,7 @@ impl Control {
                 for (i, &(qi, lo, hi)) in gripper.iter().enumerate() {
                     q[qi] = lo + (a(k + i) + 1.0) * 0.5 * (hi - lo);
                 }
-                Ok((q, converged))
+                Ok((Command::Joints(q), converged))
             }
         }
     }
@@ -1249,7 +1357,7 @@ impl VecRollout {
                 match control.apply(state, live.view(), action) {
                     Ok((cmd, converged)) => {
                         ik_failed = !converged;
-                        error = live.command(robot, &cmd).err().map(|e| e.to_string());
+                        error = live.apply_command(robot, cmd).err().map(|e| e.to_string());
                     }
                     Err(e) => error = Some(e),
                 }

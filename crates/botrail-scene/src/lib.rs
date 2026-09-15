@@ -9,6 +9,7 @@ pub mod apt;
 pub mod carve;
 pub mod coat;
 pub mod connections;
+pub mod dynamics;
 pub mod gait;
 pub mod gcode;
 pub mod grasp;
@@ -84,6 +85,8 @@ pub enum SceneError {
     BadLidar(String),
     #[error("{0}")]
     BadGrasp(String),
+    #[error("{0}")]
+    BadDynamics(String),
     #[error("unknown robot `{0}`")]
     UnknownRobot(String),
     #[error("unknown group `{0}`")]
@@ -335,6 +338,9 @@ pub struct SceneRobot {
     /// Force-limited gripper drive (`set_gripper_drive`) — under a
     /// physics bake the driven fingers go dynamic and hold by friction.
     pub(crate) gripper_drive: Option<crate::grasp::GripperDrive>,
+    /// Dynamic-robot declaration (`set_robot_dynamics`) — under a physics
+    /// bake every link is a body and every joint a motor.
+    pub(crate) dynamics: Option<crate::dynamics::RobotDynamics>,
 }
 
 impl SceneRobot {
@@ -360,6 +366,7 @@ impl SceneRobot {
             SceneRobot {
                 link_materials: vec![None; model.links.len()],
                 gripper_drive: None,
+                dynamics: None,
                 name,
                 model,
                 base,

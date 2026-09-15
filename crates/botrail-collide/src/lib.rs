@@ -540,6 +540,22 @@ pub fn parts_signed_distance(
 /// Total solid volume of a part set (m³) — the sum of each shape's
 /// unit-density mass, exactly how the physics adapter spreads an authored
 /// mass over parts. Exposed so mass estimates elsewhere agree with it.
+/// The mass properties of a body made of `parts` at a uniform `density`
+/// (kg/m³): mass, center and inertia in the body frame — parry's
+/// arithmetic over the parts, each carried by its part pose.
+pub fn parts_mass_properties(
+    parts: &[(Pose, SharedShape)],
+    density: f64,
+) -> parry3d_f64::mass_properties::MassProperties {
+    parts
+        .iter()
+        .map(|(pose, shape)| shape.mass_properties(density).transform_by(pose))
+        .fold(
+            parry3d_f64::mass_properties::MassProperties::default(),
+            |acc, mp| acc + mp,
+        )
+}
+
 pub fn parts_volume(parts: &[(Pose, SharedShape)]) -> f64 {
     parts
         .iter()

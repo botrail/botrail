@@ -2074,6 +2074,49 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Declares a robot dynamic under physics bakes (design-rl-dynamics.md):
+    /// every link with geometry becomes a rigid body weighing what its
+    /// model states (URDF `<inertial>`, USD `PhysicsMassAPI`; else its
+    /// shape at the default density, at least `mass_floor` kg), every
+    /// joint a force-capped servo following the planned motion, and the
+    /// baked track is the physical joint state read back each scan. The
+    /// base assembly stays on its stand (or vehicle). Without a physics
+    /// backend the declaration is inert; `dynamic=False` removes it.
+    ///
+    /// * `max_force` — servo force cap in N·m (revolute) / N (prismatic);
+    ///   default each joint's URDF effort limit, which must then exist.
+    /// * `damping` — the velocity loop's gain (default the cap per
+    ///   0.02 rad/s or 2 mm/s of velocity error).
+    /// * `mass_floor` — least mass of a link without inertials (default 0.2 kg).
+    /// * `armature` — reflected drive inertia per joint, kg·m² revolute /
+    ///   kg prismatic (default 0.1 / 10): a geared motor's rotor through
+    ///   the gear ratio squared, which also keeps a light wrist from
+    ///   drooping under the impulse-solved motor.
+    ///
+    /// A dynamic robot is what `botrail.rl.Torque` drives.
+    #[pyo3(signature = (robot = None, dynamic = true, max_force = None, damping = None, mass_floor = None, armature = None))]
+    fn set_robot_physics(
+        &self,
+        robot: Option<&str>,
+        dynamic: bool,
+        max_force: Option<f64>,
+        damping: Option<f64>,
+        mass_floor: Option<f64>,
+        armature: Option<f64>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .set_robot_dynamics(index, dynamic, max_force, damping, mass_floor, armature)
+            .map_err(scene_err)
+    }
+
+    /// Whether the named robot (or the only one) is declared dynamic.
+    #[pyo3(signature = (robot = None))]
+    fn robot_physics(&self, robot: Option<&str>) -> PyResult<bool> {
+        let index = self.resolve_robot(robot)?;
+        Ok(self.hub.robot_dynamics(index))
+    }
+
     /// Attached obstacles as `(object, link)` name pairs.
     #[getter]
     fn attachments(&self) -> Vec<(String, String)> {
@@ -6588,7 +6631,54 @@ impl LiveRollout {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    /// Commanded joint positions after the last tick.
+    /// Puts driven joints of a dynamic robot under raw torques: `(joint
+    /// index, torque)` pairs, N·m (N for a prismatic joint). Each joint's
+    /// servo is off until a position `command` (or `undrive`) takes it
+    /// back. With `gravity_compensation` the model's gravity torque
+    /// (`gravity_torques`) is added on top every tick, capped at the
+    /// joint's force limit — a torque interface whose firmware
+    /// compensates. Refused unless the robot was declared dynamic
+    /// (`Scene.set_robot_physics`) and the rollout runs physics — the
+    /// `botrail.rl.Torque` control's path.
+    #[pyo3(signature = (torques, robot = None, gravity_compensation = false))]
+    fn command_torque(
+        &mut self,
+        torques: Vec<(usize, f64)>,
+        robot: Option<&str>,
+        gravity_compensation: bool,
+    ) -> PyResult<()> {
+        let r = self.robot(robot)?;
+        self.live_mut()?
+            .command_torque(r, &torques, gravity_compensation)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The torque each joint needs to hold a dynamic robot still against
+    /// gravity as the world stands: the simulated link masses about each
+    /// joint axis, N·m (N for a prismatic joint), one value per joint.
+    /// What a controller adds as gravity compensation; grasped parts are
+    /// not the robot's mass and are not included. Refused for a robot
+    /// that is not dynamic in this rollout.
+    #[pyo3(signature = (robot = None))]
+    fn gravity_torques(&self, robot: Option<&str>) -> PyResult<Vec<f64>> {
+        let r = self.robot(robot)?;
+        self.live()?.gravity_torques(r).ok_or_else(|| {
+            PyValueError::new_err(
+                "gravity torques need a dynamic robot (Scene.set_robot_physics) under physics",
+            )
+        })
+    }
+
+    /// Whether the robot runs as a dynamic body in this rollout.
+    #[pyo3(signature = (robot = None))]
+    fn is_dynamic(&self, robot: Option<&str>) -> PyResult<bool> {
+        let r = self.robot(robot)?;
+        Ok(self.live()?.view().is_dynamic(r).unwrap_or(false))
+    }
+
+    /// Joint positions after the last tick: the command for a kinematic
+    /// robot, the physical state read back from the engine for a dynamic
+    /// one.
     #[pyo3(signature = (robot = None))]
     fn joint_positions(&self, robot: Option<&str>) -> PyResult<Vec<f64>> {
         let r = self.robot(robot)?;

@@ -37,6 +37,8 @@ def build() -> bt.Scene:
     scene.add_lidar("front", position=(0.0, -0.6, 0.3), fov=270.0, range=(0.05, 8.0), resolution=0.5)
     # A wrist camera looking down the tool, for --depth (64×64 by default).
     scene.add_camera("wrist", position=(0.0, 0.0, 0.05), quaternion=(1.0, 0.0, 0.0, 0.0), fov=70.0, resolution=(64, 64), near=0.05, far=3.0, robot="simple_arm", link="tool0")
+    if DYNAMIC:
+        scene.set_robot_physics()
     sq = scene.sequence("run")
     sq.step("wait", transition=bt.seq.elapsed(30.0))
     return scene
@@ -50,6 +52,8 @@ LIDAR = "--lidar" in sys.argv
 DEPTH = "--depth" in sys.argv
 RGB = "--rgb" in sys.argv
 SHADOWS = "--shadows" in sys.argv
+DYNAMIC = "--dynamic" in sys.argv or "--torque" in sys.argv
+TORQUE = "--torque" in sys.argv
 DEPTH_SIZE = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else 64
 
 
@@ -85,7 +89,7 @@ def bench(control_name: str, control, num_envs: int, steps: int) -> None:
             env.reset()
     elapsed = time.perf_counter() - t0
     rate = steps * num_envs / elapsed
-    tag = (" +lidar" if LIDAR else "") + (f" +depth{DEPTH_SIZE}" if DEPTH else "") + (f" +rgb{DEPTH_SIZE}" if RGB else "") + (" +shadows" if SHADOWS else "")
+    tag = (" +lidar" if LIDAR else "") + (f" +depth{DEPTH_SIZE}" if DEPTH else "") + (f" +rgb{DEPTH_SIZE}" if RGB else "") + (" +shadows" if SHADOWS else "") + (" +dynamic" if DYNAMIC else "")
     print(f"{control_name:11s}{tag} N={num_envs:3d}: {rate:9.0f} env-steps/s  ({elapsed / steps * 1000:.2f} ms/step, reset {reset_ms:.1f} ms)")
 
 
@@ -97,7 +101,11 @@ if __name__ == "__main__":
         sizes = [int(x) for x in args[args.index("--envs") + 1].split(",")]
     if "--steps" in args:
         steps = int(args[args.index("--steps") + 1])
-    for n in sizes:
-        bench("JointDelta", rl.JointDelta(max_step=0.02, hz=20), n, steps)
-    for n in sizes:
-        bench("TcpDelta", rl.TcpDelta(max_step_m=0.01, hz=20, frame="tcp"), n, steps)
+    if TORQUE:
+        for n in sizes:
+            bench("Torque", rl.Torque(hz=20), n, steps)
+    else:
+        for n in sizes:
+            bench("JointDelta", rl.JointDelta(max_step=0.02, hz=20), n, steps)
+        for n in sizes:
+            bench("TcpDelta", rl.TcpDelta(max_step_m=0.01, hz=20, frame="tcp"), n, steps)

@@ -2399,12 +2399,14 @@ mod tests {
                 visuals: vec![shape()],
                 collisions: vec![],
                 parent_joint: None,
+                inertial: None,
             },
             Link {
                 name: "/R/arm".into(),
                 visuals: vec![shape()],
                 collisions: vec![],
                 parent_joint: None,
+                inertial: None,
             },
         ];
         let joints = vec![Joint {

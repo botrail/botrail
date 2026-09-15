@@ -439,6 +439,9 @@ impl From<&PhysicsMsg> for botrail_physics::BodyProps {
             linear_damping: m.linear_damping,
             angular_damping: m.angular_damping,
             ccd: m.ccd,
+            // Stated mass properties are a robot link's (from its model),
+            // never an obstacle's wire message.
+            mass_properties: None,
         }
     }
 }

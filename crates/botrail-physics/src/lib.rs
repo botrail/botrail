@@ -73,6 +73,20 @@ pub struct BodyProps {
     pub angular_damping: f64,
     /// Continuous collision detection, for small fast parts.
     pub ccd: bool,
+    /// Explicit mass properties (a robot link's URDF `<inertial>`); when
+    /// present they replace the shape-derived mass, center and inertia
+    /// entirely (`mass` is ignored). Design-rl-dynamics.md RD0.
+    pub mass_properties: Option<MassProperties>,
+}
+
+/// A body's mass properties stated outright: the mass, the center of
+/// mass in the body frame, and the inertia tensor about that center in
+/// the body frame's axes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MassProperties {
+    pub mass: f64,
+    pub com: Vector3<f64>,
+    pub inertia: nalgebra::Matrix3<f64>,
 }
 
 impl Default for BodyProps {
@@ -84,6 +98,7 @@ impl Default for BodyProps {
             linear_damping: 0.0,
             angular_damping: 0.05,
             ccd: false,
+            mass_properties: None,
         }
     }
 }
@@ -284,4 +299,18 @@ pub trait PhysicsBackend: Send + Sync {
     /// joint axis) — what the rollout writes back into the baked track so
     /// a stalled finger plays back where it really stopped.
     fn joint_position(&self, joint: usize) -> f64;
+
+    /// Commands a velocity through driven joint `joint`'s motor instead
+    /// of a position: the motor's damping is the velocity loop's gain,
+    /// its cap the ceiling, and the position target is dropped. A dynamic
+    /// robot's servo (design-rl-dynamics.md) is a position loop the
+    /// rollout closes over this velocity loop.
+    fn set_joint_velocity(&mut self, joint: usize, velocity: f64);
+
+    /// Puts driven joint `joint` under a raw torque (N·m; N for a
+    /// prismatic joint): its position motor is switched off and `torque`
+    /// acts on the joint every step until changed. `None` hands the joint
+    /// back to its motor at whatever target it holds. Design-rl-dynamics.md
+    /// RD0 — the `Torque` action of a dynamic robot.
+    fn set_joint_torque(&mut self, joint: usize, torque: Option<f64>);
 }

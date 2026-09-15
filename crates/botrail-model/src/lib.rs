@@ -9,7 +9,7 @@ pub mod mounting;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nalgebra::{Isometry3, Translation3, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Matrix3, Translation3, Unit, UnitQuaternion, Vector3};
 use thiserror::Error;
 
 pub use mesh_path::{rewrite_urdf_filenames, ModelOptions};
@@ -193,6 +193,22 @@ pub struct Link {
     pub collisions: Vec<Shape>,
     /// Joint connecting this link to its parent; `None` for the root link.
     pub parent_joint: Option<usize>,
+    /// The link's mass properties, when the source states them (URDF
+    /// `<inertial>`, USD `PhysicsMassAPI`) — what a dynamic robot's body
+    /// weighs under a physics bake (design-rl-dynamics.md). `None` for a
+    /// massless frame and for sources without them; the bake then derives
+    /// a mass from the collision shape.
+    pub inertial: Option<Inertial>,
+}
+
+/// Mass properties of one link: the mass, the center-of-mass frame in the
+/// link frame (`origin`), and the inertia tensor about that center,
+/// expressed in the origin's axes — URDF's `<inertial>` exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inertial {
+    pub mass: f64,
+    pub origin: Isometry3<f64>,
+    pub inertia: Matrix3<f64>,
 }
 
 /// Where a robot model came from — kept so projects can persist and
@@ -1087,6 +1103,7 @@ impl RobotModel {
                     .map(|c| convert_shape(&c.origin, &c.geometry, base_dir, options))
                     .collect(),
                 parent_joint: None,
+                inertial: inertial_of(&l.inertial),
             })
             .collect();
 
@@ -1659,6 +1676,16 @@ fn flatten_mimics(joints: &mut [Joint]) -> Result<(), ModelError> {
 /// Converts a URDF pose (xyz + fixed-axis rpy) to an isometry.
 /// nalgebra's `from_euler_angles(r, p, y)` builds Rz(y)·Ry(p)·Rx(r), which
 /// matches the URDF convention.
+/// A URDF `<inertial>` as a link's mass properties: `None` when the link
+/// declares no (positive) mass — a frame, not a body.
+fn inertial_of(inertial: &xurdf::Inertial) -> Option<Inertial> {
+    (inertial.mass.is_finite() && inertial.mass > 0.0).then(|| Inertial {
+        mass: inertial.mass,
+        origin: pose_to_isometry(&inertial.origin),
+        inertia: inertial.inertia,
+    })
+}
+
 pub fn pose_to_isometry(pose: &xurdf::Pose) -> Isometry3<f64> {
     Isometry3::from_parts(
         Translation3::from(pose.xyz),
@@ -1867,6 +1894,41 @@ mod tests {
         let l = model.joints[sparse].limits.unwrap();
         assert_eq!((l.lower, l.upper), (-1.0, 1.0));
         assert_eq!((l.velocity, l.effort), (0.0, 0.0));
+    }
+
+    /// `<inertial>` lands on the link as stated (mass, center frame,
+    /// tensor); a link without one — a frame — carries `None`.
+    #[test]
+    fn urdf_inertials_ride_their_links() {
+        let urdf = r#"
+        <robot name="heavy">
+          <link name="base"/>
+          <link name="l1">
+            <inertial>
+              <origin xyz="0 0 0.1" rpy="0 0 1.5707963"/>
+              <mass value="2.5"/>
+              <inertia ixx="0.01" ixy="0.001" ixz="0" iyy="0.02" iyz="0" izz="0.03"/>
+            </inertial>
+          </link>
+          <joint name="j1" type="revolute">
+            <parent link="base"/><child link="l1"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="-1" upper="1" effort="10" velocity="1"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        assert!(model.links[model.link_index("base").unwrap()].inertial.is_none());
+        let inertial = model.links[model.link_index("l1").unwrap()]
+            .inertial
+            .as_ref()
+            .expect("l1 states its mass");
+        assert_eq!(inertial.mass, 2.5);
+        assert!((inertial.origin.translation.z - 0.1).abs() < 1e-12);
+        assert!((inertial.origin.rotation.angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(inertial.inertia[(0, 0)], 0.01);
+        assert_eq!(inertial.inertia[(0, 1)], 0.001);
+        assert_eq!(inertial.inertia[(1, 0)], 0.001);
+        assert_eq!(inertial.inertia[(2, 2)], 0.03);
     }
 
     #[test]

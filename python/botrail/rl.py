@@ -63,6 +63,7 @@ __all__ = [
     "Contacts",
     "Depth",
     "Env",
+    "GravityTorque",
     "JointDelta",
     "JointTarget",
     "Joints",
@@ -79,6 +80,7 @@ __all__ = [
     "Task",
     "TcpDelta",
     "TcpPose",
+    "Torque",
     "VecEnv",
     "load",
     "make",
@@ -190,6 +192,32 @@ class Channel:
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.key!r}, dim={self.dim})"
+
+
+class GravityTorque(Channel):
+    """The torque per joint that holds a dynamic robot still against
+    gravity as the world stands (`dof` values, N·m or N): the simulated
+    link masses about each joint axis, what a controller adds as gravity
+    compensation. Needs a robot declared dynamic (`Scene.set_robot_physics`).
+    Pair it with `Torque()` to let a policy see the load it carries, or
+    read `live.gravity_torques()` from a controller of your own."""
+
+    def __init__(self, robot: Optional[str] = None, *, name: Optional[str] = None):
+        self.robot = robot
+        self._name = name
+
+    def bind(self, scene, robot: str) -> None:
+        self.robot = self.robot or robot
+        if not scene.robot_physics(self.robot):
+            raise ValueError(f"GravityTorque needs robot {self.robot!r} declared dynamic: scene.set_robot_physics({self.robot!r})")
+        self.dim = scene.robot_of(self.robot).dof
+        self.key = self._name or f"{self.robot}/gravity"
+
+    def read(self, live, robot: str) -> np.ndarray:
+        return np.asarray(live.gravity_torques(self.robot), dtype=np.float64)
+
+    def lower(self, robot: str) -> dict:
+        return {"kind": "gravity_torque", "robot": self.robot or robot}
 
 
 class Joints(Channel):
@@ -618,6 +646,46 @@ class JointTarget:
 
 
 @dataclass
+class Torque:
+    """Action = a raw torque per driven joint, `[-1, 1]` scaled by
+    `max_torque` (N·m, or N for a prismatic joint; a scalar or one value
+    per joint; default each joint's URDF effort limit). The joint's servo
+    is off while the policy drives it, so gravity is the policy's to
+    hold — unless `gravity_compensation`, which adds the model's gravity
+    torque on top of the action every tick (a torque interface whose
+    firmware compensates; the sum stays under the joint's cap). Off by
+    default: raw torques are what the physics answers to. Needs a robot
+    declared dynamic (`Scene.set_robot_physics`) and physics on (the
+    default) — a kinematic robot has no joint torques. `Joints()` then
+    reads the physical joint state."""
+
+    max_torque: Optional[Union[float, Sequence[float]]] = None
+    hz: float = 20.0
+    max_velocity: Optional[float] = None
+    gravity_compensation: bool = False
+
+    def bind(self, scene, robot: str, group: Optional[str]) -> None:
+        if not scene.robot_physics(robot):
+            raise ValueError(f"Torque control needs robot {robot!r} declared dynamic: scene.set_robot_physics({robot!r})")
+        self.indices = _joint_indices(scene, robot, group)
+        self.dim = len(self.indices)
+        if self.max_torque is None:
+            self.caps = None
+        elif isinstance(self.max_torque, (int, float)):
+            self.caps = [float(self.max_torque)] * self.dim
+        else:
+            self.caps = [float(v) for v in self.max_torque]
+            if len(self.caps) != self.dim:
+                raise ValueError(f"Torque.max_torque has {len(self.caps)} values for {self.dim} joints")
+
+    def lower(self) -> dict:
+        spec = {"kind": "torque", "indices": self.indices, "gravity_compensation": bool(self.gravity_compensation)}
+        if self.caps is not None:
+            spec["max_torque"] = self.caps
+        return spec
+
+
+@dataclass
 class TcpDelta:
     """Action = a Cartesian step of the TCP: 3 translations in `[-1, 1]`
     scaled by `max_step_m`, plus 3 rotations scaled by `max_step_rad`
@@ -679,7 +747,9 @@ class Task:
     episodes); `reward(obs, info)` and `done(obs, info)` read the channel
     dict and the step's info. An episode is truncated at `horizon_s` or
     when every sequence has run to its end. `render` lights the colour
-    pictures (see the field)."""
+    pictures (see the field). The `control` is `JointDelta`, `JointTarget`
+    or `TcpDelta` (position commands the drive rate-limits) or `Torque`
+    (raw joint torques on a robot declared dynamic)."""
 
     robot: Optional[str] = None
     control: Any = field(default_factory=JointDelta)

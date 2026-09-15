@@ -4015,6 +4015,17 @@
           "description": "World pose of the robot's root link.",
           "$ref": "#/$defs/PoseMsg"
         },
+        "dynamics": {
+          "description": "Dynamic-robot declaration (`set_robot_dynamics`): under a physics\nbake the whole robot is an articulated body driven by motors.\nAbsent in older files and for kinematic robots.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RobotDynamicsMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "gripper_drive": {
           "description": "Force-limited gripper drive (`set_gripper_drive`), the friction-\ngrasp declaration. Absent in older files and for undriven robots.",
           "anyOf": [
@@ -4099,6 +4110,40 @@
         "reference",
         "unknown"
       ]
+    },
+    "RobotDynamicsMsg": {
+      "description": "A dynamic-robot declaration as a project carries it: the servo\noverrides (`None` = the kind-scaled defaults), the mass floor and the\nreflected drive inertia.",
+      "type": "object",
+      "properties": {
+        "armature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "damping": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "mass_floor": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_force": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
     },
     "RobotMountMsg": {
       "description": "A robot riding a vehicle (`Scene::mount_robot`): the device, where the\nbase sits in its frame, and — for a machine whose legs are the robot —\nthe gait that walks it.",

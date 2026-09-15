@@ -224,6 +224,9 @@ struct DrivenJoint {
     frame2: Pose,
     kind: JointKind,
     motor: JointMotor,
+    /// A raw torque owning the joint instead of its motor
+    /// (`set_joint_torque`), applied before every step.
+    torque: Option<f64>,
 }
 
 impl Default for RapierBackend {
@@ -233,6 +236,55 @@ impl Default for RapierBackend {
 }
 
 impl RapierBackend {
+    /// Applies every torqued joint's torque as an equal-and-opposite
+    /// pair on its two bodies (a revolute joint: torques about the world
+    /// axis; a prismatic one: forces along it at the joint anchor). The
+    /// involved bodies' user forces are rebuilt from scratch each step so
+    /// nothing accumulates.
+    fn apply_joint_torques(&mut self) {
+        if self.joints.iter().all(|j| j.torque.is_none()) {
+            return;
+        }
+        let mut involved: Vec<RigidBodyHandle> = Vec::new();
+        for dj in self.joints.iter().filter(|j| j.torque.is_some()) {
+            for h in [dj.parent, dj.child] {
+                if !involved.contains(&h) {
+                    involved.push(h);
+                }
+            }
+        }
+        for h in &involved {
+            let rb = &mut self.bodies[*h];
+            rb.reset_forces(true);
+            rb.reset_torques(true);
+        }
+        for k in 0..self.joints.len() {
+            let (Some(tau), parent, child, frame1, kind) = (
+                self.joints[k].torque,
+                self.joints[k].parent,
+                self.joints[k].child,
+                self.joints[k].frame1,
+                self.joints[k].kind,
+            ) else {
+                continue;
+            };
+            let joint_world = *self.bodies[parent].position() * frame1;
+            let axis = joint_world.rotation * Vector::X;
+            let anchor = joint_world.translation;
+            for (h, sign) in [(child, 1.0), (parent, -1.0)] {
+                let rb = &mut self.bodies[h];
+                if !rb.is_dynamic() {
+                    continue;
+                }
+                match kind {
+                    JointKind::Revolute => rb.add_torque(axis * (sign * tau), true),
+                    JointKind::Prismatic => rb.add_force_at_point(axis * (sign * tau), anchor, true),
+                    JointKind::Fixed => {}
+                }
+            }
+        }
+    }
+
     pub fn new() -> Self {
         RapierBackend {
             gravity: Vector::new(0.0, 0.0, -9.81),
@@ -291,20 +343,37 @@ impl PhysicsBackend for RapierBackend {
                 BodyKind::Kinematic => RigidBodyBuilder::kinematic_position_based(),
                 BodyKind::Dynamic => RigidBodyBuilder::dynamic(),
             };
-            let body = builder
+            let mut builder = builder
                 .pose(to_pose(&desc.pose))
                 .linear_damping(desc.props.linear_damping)
                 .angular_damping(desc.props.angular_damping)
-                .ccd_enabled(desc.props.ccd)
-                .build();
+                .ccd_enabled(desc.props.ccd);
+            // Stated mass properties (a link's URDF inertial) are the
+            // body's whole mass: the colliders then carry no density.
+            if let Some(mp) = &desc.props.mass_properties {
+                let inertia = rapier3d_f64::math::Matrix::from_cols_array(&[
+                    mp.inertia[(0, 0)], mp.inertia[(1, 0)], mp.inertia[(2, 0)],
+                    mp.inertia[(0, 1)], mp.inertia[(1, 1)], mp.inertia[(2, 1)],
+                    mp.inertia[(0, 2)], mp.inertia[(1, 2)], mp.inertia[(2, 2)],
+                ]);
+                builder = builder.additional_mass_properties(
+                    rapier3d_f64::dynamics::MassProperties::with_inertia_matrix(
+                        Vector::new(mp.com.x, mp.com.y, mp.com.z),
+                        mp.mass,
+                        inertia,
+                    ),
+                );
+            }
+            let body = builder.build();
             let handle = self.bodies.insert(body);
             self.body_ids
                 .insert(handle, BodyId(self.handles.len() as u32));
             self.handles.push(handle);
             // An authored mass spreads over the parts as a uniform density,
             // so the center of mass and inertia still come from the shape.
-            let density = match desc.props.mass {
-                Some(mass) => {
+            let density = match (&desc.props.mass_properties, desc.props.mass) {
+                (Some(_), _) => 0.0,
+                (None, Some(mass)) => {
                     let volume: f64 = desc
                         .parts
                         .iter()
@@ -316,7 +385,7 @@ impl PhysicsBackend for RapierBackend {
                         DEFAULT_DENSITY
                     }
                 }
-                None => DEFAULT_DENSITY,
+                (None, None) => DEFAULT_DENSITY,
             };
             for (part_pose, shape) in &desc.parts {
                 let mut collider = ColliderBuilder::new(shape.clone())
@@ -403,6 +472,7 @@ impl PhysicsBackend for RapierBackend {
                 frame2,
                 kind: desc.kind,
                 motor: desc.motor,
+                torque: None,
             });
         }
         Ok(())
@@ -462,6 +532,7 @@ impl PhysicsBackend for RapierBackend {
                 }
             }
         }
+        self.apply_joint_torques();
         self.params.dt = dt;
         self.pipeline.step(
             self.gravity,
@@ -530,11 +601,50 @@ impl PhysicsBackend for RapierBackend {
             JointKind::Revolute => JointAxis::AngX,
             JointKind::Fixed => return, // welds take no target
         };
-        let (stiffness, damping, cap) = (dj.motor.stiffness, dj.motor.damping, dj.motor.max_force);
+        let (stiffness, damping) = (dj.motor.stiffness, dj.motor.damping);
+        // A torqued joint keeps its target on file but its motor stays
+        // off until the torque is lifted.
+        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
         if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
             j.data
                 .set_motor_position(axis, position, stiffness, damping);
             j.data.set_motor_max_force(axis, cap);
+        }
+    }
+
+    fn set_joint_velocity(&mut self, joint: usize, velocity: f64) {
+        let dj = &self.joints[joint];
+        let axis = match dj.kind {
+            JointKind::Prismatic => JointAxis::LinX,
+            JointKind::Revolute => JointAxis::AngX,
+            JointKind::Fixed => return,
+        };
+        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
+        if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
+            j.data.set_motor_velocity(axis, velocity, dj.motor.damping);
+            j.data.set_motor_max_force(axis, cap);
+        }
+    }
+
+    fn set_joint_torque(&mut self, joint: usize, torque: Option<f64>) {
+        let dj = &mut self.joints[joint];
+        let axis = match dj.kind {
+            JointKind::Prismatic => JointAxis::LinX,
+            JointKind::Revolute => JointAxis::AngX,
+            JointKind::Fixed => return,
+        };
+        dj.torque = torque.filter(|t| t.is_finite());
+        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
+        let (handle, parent, child) = (dj.handle, dj.parent, dj.child);
+        if let Some(j) = self.impulse_joints.get_mut(handle, true) {
+            j.data.set_motor_max_force(axis, cap);
+        }
+        // User forces persist across steps in rapier: a lifted torque
+        // must not linger on the bodies.
+        for h in [parent, child] {
+            let rb = &mut self.bodies[h];
+            rb.reset_forces(true);
+            rb.reset_torques(true);
         }
     }
 
@@ -564,6 +674,156 @@ mod tests {
     use botrail_physics::{BodyDesc, BodyProps};
     use nalgebra::Vector3;
     use parry3d_f64::shape::SharedShape;
+
+    /// Spike (design-rl-dynamics.md RD0): a six-link serial arm held
+    /// horizontal against gravity by force-capped PD position motors,
+    /// as impulse joints and as a reduced-coordinate multibody. Prints
+    /// the rest sag, the joint anchor drift, the tracking lag under a
+    /// 1 Hz sweep and the cost per substep. Run with
+    /// `cargo test -p botrail-physics-rapier arm_spike -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn arm_spike() {
+        for multibody in [false, true] {
+            for (k, c) in [(1e5, 37.5), (1e4, 37.5), (1e6, 37.5)] {
+                arm_variant(multibody, k, c);
+            }
+        }
+    }
+
+    fn arm_variant(multibody: bool, stiffness: f64, damping: f64) {
+        use rapier3d_f64::dynamics::{
+            ImpulseJointSet, MultibodyJointSet, RevoluteJointBuilder, RigidBodyBuilder,
+            RigidBodySet,
+        };
+        use rapier3d_f64::geometry::ColliderBuilder;
+        use rapier3d_f64::prelude::MotorModel;
+        let lengths = [0.16, 0.425, 0.39, 0.13, 0.10, 0.08];
+        let masses = [3.7, 8.4, 2.3, 1.2, 1.2, 0.25];
+        let cap = 150.0;
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = rapier3d_f64::geometry::ColliderSet::new();
+        let mut impulse_joints = ImpulseJointSet::new();
+        let mut multibody_joints = MultibodyJointSet::new();
+        let base = bodies.insert(RigidBodyBuilder::fixed().pose(to_pose(&Isometry3::translation(0.0, 0.0, 1.0))));
+        colliders.insert_with_parent(ColliderBuilder::cuboid(0.05, 0.05, 0.05), base, &mut bodies);
+        // Links laid along +x, each a box centred half a length past its
+        // joint; every joint pitches about y so gravity loads them all.
+        let mut handles = Vec::new();
+        let mut x0 = 0.0;
+        let mut parent = base;
+        let mut parent_anchor = Vector::new(0.0, 0.0, 0.0);
+        for i in 0..6 {
+            let len = lengths[i];
+            let link = bodies.insert(
+                RigidBodyBuilder::dynamic().pose(to_pose(&Isometry3::translation(x0, 0.0, 1.0))),
+            );
+            let volume = len * 0.06 * 0.06;
+            colliders.insert_with_parent(
+                ColliderBuilder::cuboid(len / 2.0, 0.03, 0.03)
+                    .position(Pose::from_translation(Vector::new(len / 2.0, 0.0, 0.0)))
+                    .density(masses[i] / volume)
+                    .collision_groups(rapier3d_f64::geometry::InteractionGroups::none()),
+                link,
+                &mut bodies,
+            );
+            let mut joint = RevoluteJointBuilder::new(Vector::new(0.0, 1.0, 0.0)).build();
+            joint.set_local_anchor1(parent_anchor);
+            joint.set_local_anchor2(Vector::ZERO);
+            joint.set_contacts_enabled(false);
+            joint.set_motor_model(MotorModel::ForceBased);
+            joint.set_motor_position(0.0, stiffness, damping);
+            joint.set_motor_max_force(cap);
+            let h = if multibody {
+                let h = multibody_joints.insert(parent, link, joint, true).expect("tree");
+                Err(h)
+            } else {
+                Ok(impulse_joints.insert(parent, link, joint, true))
+            };
+            handles.push((h, parent, link));
+            parent = link;
+            parent_anchor = Vector::new(len, 0.0, 0.0);
+            x0 += len;
+        }
+        let mut pipeline = PhysicsPipeline::new();
+        let mut islands = IslandManager::new();
+        let mut broad = BroadPhaseBvh::new();
+        let mut narrow = NarrowPhase::new();
+        let mut ccd = CCDSolver::new();
+        let params = IntegrationParameters {
+            dt: 1.0 / 400.0,
+            ..Default::default()
+        };
+        let mut step = |bodies: &mut RigidBodySet,
+                        impulse_joints: &mut ImpulseJointSet,
+                        multibody_joints: &mut MultibodyJointSet| {
+            pipeline.step(
+                Vector::new(0.0, 0.0, -9.81),
+                &params,
+                &mut islands,
+                &mut broad,
+                &mut narrow,
+                bodies,
+                &mut colliders,
+                impulse_joints,
+                multibody_joints,
+                &mut ccd,
+                &(),
+                &(),
+            );
+        };
+        // Joint angle about y from the bodies' relative rotation, and the
+        // anchor separation (impulse joints may drift, a multibody cannot).
+        let measure = |bodies: &RigidBodySet, i: usize, parent_anchor: Vector| -> (f64, f64) {
+            let (_, p, c) = handles[i];
+            let pp = bodies[p].position();
+            let cp = bodies[c].position();
+            let rel = pp.rotation.inverse() * cp.rotation;
+            let angle = 2.0 * rel.y.atan2(rel.w);
+            let a1 = pp * parent_anchor;
+            let a2 = cp * Vector::ZERO;
+            (angle, (a1 - a2).length())
+        };
+        let anchors: Vec<Vector> = (0..6)
+            .map(|i| if i == 0 { Vector::ZERO } else { Vector::new(lengths[i - 1], 0.0, 0.0) })
+            .collect();
+        let set_target = |impulse_joints: &mut ImpulseJointSet, multibody_joints: &mut MultibodyJointSet, i: usize, target: f64| {
+            match handles[i].0 {
+                Ok(h) => {
+                    let j = impulse_joints.get_mut(h, true).unwrap();
+                    j.data.set_motor_position(rapier3d_f64::dynamics::JointAxis::AngX, target, stiffness, damping);
+                }
+                Err(h) => {
+                    let (mb, id) = multibody_joints.get_mut(h).unwrap();
+                    mb.link_mut(id).unwrap().joint.data.set_motor_position(rapier3d_f64::dynamics::JointAxis::AngX, target, stiffness, damping);
+                }
+            }
+        };
+        let t0 = std::time::Instant::now();
+        // 1 s hold at zero.
+        for _ in 0..400 {
+            step(&mut bodies, &mut impulse_joints, &mut multibody_joints);
+        }
+        let hold: Vec<(f64, f64)> = (0..6).map(|i| measure(&bodies, i, anchors[i])).collect();
+        let tip = bodies[handles[5].2].position() * Vector::new(lengths[5], 0.0, 0.0);
+        // 2 s sweep of joint 1 (the shoulder): 0.5 rad at 1 Hz.
+        let mut lag_max: f64 = 0.0;
+        for n in 0..800 {
+            let t = n as f64 / 400.0;
+            let target = 0.5 * (2.0 * std::f64::consts::PI * t).sin();
+            set_target(&mut impulse_joints, &mut multibody_joints, 1, target);
+            step(&mut bodies, &mut impulse_joints, &mut multibody_joints);
+            let (q, _) = measure(&bodies, 1, anchors[1]);
+            lag_max = lag_max.max((q - target).abs());
+        }
+        let per_step = t0.elapsed().as_secs_f64() / 1200.0 * 1e6;
+        let drift = hold.iter().map(|h| h.1).fold(0.0, f64::max);
+        eprintln!(
+            "{} k={stiffness:.0e} c={damping}: sag q1={:+.4} q2={:+.4} q3={:+.4} rad, tip z={:.4} (1.0 nominal), anchor drift max {:.2e} m, sweep lag max {:.4} rad, {per_step:.1} us/substep",
+            if multibody { "multibody" } else { "impulse  " },
+            hold[0].0, hold[1].0, hold[2].0, tip.z, drift, lag_max
+        );
+    }
 
     fn box_world(drop_height: f64, with_floor: bool) -> WorldDesc {
         let mut world = WorldDesc::new();
@@ -1164,6 +1424,108 @@ mod tests {
             q.abs() < 0.001,
             "k=1e3 must hold a 0.1 N*m gravity lever; rested at {q:+.5} rad"
         );
+    }
+
+    /// Stated mass properties replace the shape's: a 2 kg body with its
+    /// center 0.1 m off the frame reads back exactly that, whatever the
+    /// collider's volume.
+    #[test]
+    fn explicit_mass_properties_replace_the_shape_density() {
+        let mut world = WorldDesc::new();
+        world.gravity = Vector3::zeros();
+        world.bodies.push(BodyDesc {
+            kind: BodyKind::Dynamic,
+            pose: Isometry3::translation(0.0, 0.0, 1.0),
+            parts: vec![(Pose::identity(), SharedShape::cuboid(0.5, 0.5, 0.5))],
+            props: BodyProps {
+                mass_properties: Some(botrail_physics::MassProperties {
+                    mass: 2.0,
+                    com: Vector3::new(0.1, 0.0, 0.0),
+                    inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(0.01, 0.02, 0.03)),
+                }),
+                ..BodyProps::dynamic()
+            },
+            group: 0,
+        });
+        let mut backend = RapierBackend::new();
+        backend.reset(&world).unwrap();
+        // Rapier folds collider and additional mass properties together
+        // on the first step.
+        backend.step(0.0025);
+        let rb = &backend.bodies[backend.handles[0]];
+        assert!((rb.mass() - 2.0).abs() < 1e-9, "mass {}", rb.mass());
+        let com = rb.center_of_mass();
+        assert!((com.x - 0.1).abs() < 1e-9 && (com.z - 1.0).abs() < 1e-9, "com {com:?}");
+        let principal = rb.mass_properties().local_mprops.principal_inertia();
+        let mut sorted = [principal.x, principal.y, principal.z];
+        sorted.sort_by(f64::total_cmp);
+        assert!((sorted[0] - 0.01).abs() < 1e-9 && (sorted[2] - 0.03).abs() < 1e-9, "{sorted:?}");
+    }
+
+    /// A raw joint torque with the motor off: a 1 kg point-like link 0.1 m
+    /// below its pivot (I = 0.011 kg·m² about the pivot) under 0.011 N·m
+    /// in zero gravity turns at 1 rad/s² — θ = ½ t² — and the motor takes
+    /// the joint back when the torque is lifted.
+    #[test]
+    fn a_joint_torque_moves_a_motorless_joint() {
+        use botrail_physics::{JointDesc, JointKind, JointMotor};
+        let mut world = WorldDesc::new();
+        world.gravity = Vector3::zeros();
+        world.bodies.push(BodyDesc {
+            kind: BodyKind::Kinematic,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            parts: vec![(Pose::identity(), SharedShape::cuboid(0.02, 0.02, 0.02))],
+            props: BodyProps::default(),
+            group: 1,
+        });
+        world.bodies.push(BodyDesc {
+            kind: BodyKind::Dynamic,
+            pose: Isometry3::translation(0.0, 0.0, 0.45),
+            parts: vec![(
+                Pose::from_translation(Vector::new(0.0, 0.0, -0.1)),
+                SharedShape::cuboid(0.01, 0.01, 0.01),
+            )],
+            props: BodyProps {
+                mass_properties: Some(botrail_physics::MassProperties {
+                    mass: 1.0,
+                    com: Vector3::new(0.0, 0.0, -0.1),
+                    inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(1e-3, 1e-3, 1e-3)),
+                }),
+                angular_damping: 0.0,
+                ..BodyProps::dynamic()
+            },
+            group: 1,
+        });
+        world.joints.push(JointDesc {
+            parent: BodyId(0),
+            child: BodyId(1),
+            kind: JointKind::Revolute,
+            local1: Isometry3::translation(0.0, 0.0, -0.05),
+            local2: Isometry3::identity(),
+            axis: Vector3::new(1.0, 0.0, 0.0),
+            limits: None,
+            motor: JointMotor {
+                stiffness: 1e4,
+                damping: 10.0,
+                max_force: 100.0,
+            },
+        });
+        let mut backend = RapierBackend::new();
+        backend.reset(&world).unwrap();
+        backend.set_joint_target(0, 0.0);
+        backend.set_joint_torque(0, Some(0.011));
+        for _ in 0..200 {
+            backend.step(0.0025);
+        }
+        let q = backend.joint_position(0);
+        assert!((q - 0.125).abs() < 0.01, "θ after 0.5 s at 1 rad/s²: {q:+.4} (0.125 expected)");
+        // Lifted: the motor pulls the joint back toward its target.
+        backend.set_joint_torque(0, None);
+        for _ in 0..400 {
+            backend.step(0.0025);
+        }
+        let back = backend.joint_position(0);
+        assert!(back.abs() < 0.02, "motor restored, rested at {back:+.4}");
     }
 
     /// Minimal 2F-85-shaped chain: kinematic palm — revolute (origin

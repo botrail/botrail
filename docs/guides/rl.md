@@ -176,6 +176,70 @@ PLCopen XML as `FB_StartPolicy`, and the studio labels it in the sequence
 chart. See `examples/rl/` for a reach task, a wrist-camera pick and the
 loop back into the cell.
 
+## Dynamic robots and torque control
+
+By default the robot is a *kinematic* body under physics: it goes exactly
+where the plan says and pushes with infinite mass. Declare it dynamic and
+the bake simulates it as an articulated body:
+
+```python
+scene.set_robot_physics("ur")                 # or robot=None for the only robot
+scene.set_robot_physics("ur", max_force=80.0, armature=0.2)
+```
+
+Every link with geometry becomes a rigid body weighing what its model
+states (URDF `<inertial>`, or the catalog package's `PhysicsMassAPI`; a
+link without either gets its shape at the default density, at least
+`mass_floor` kg). Every joint becomes a force-capped servo — `max_force`
+is the cap (default the URDF effort limit), the joint's velocity limit its
+rated speed, `damping` the velocity loop's gain — following the planned
+motion, and the baked robot lane is the physical joint state read back
+every scan: a heavy payload makes the arm trail and droop, a collision
+stops it. `armature` is the reflected drive inertia per joint (a geared
+motor's rotor through the gear ratio squared; default 0.1 kg·m²), which
+also keeps a light wrist from drooping under the engine's impulse-solved
+motor. The base assembly stays on its stand or vehicle. Without a physics
+backend the declaration is inert, and a robot never declared is unchanged
+to the bit.
+
+The position controls (`JointDelta`, `JointTarget`, `TcpDelta`) work on a
+dynamic robot as they do on a kinematic one — the drive rate-limits the
+command and the servos follow it. `Torque` hands the policy the joint
+torques themselves:
+
+```python
+task = rl.Task(
+    control=rl.Torque(hz=50),                 # action = torque / max_torque per joint
+    observe=[rl.Joints()],                    # the physical q and q̇
+    reward=lambda obs, info: -abs(obs["ur/joints"][:6] - target).sum(),
+)
+```
+
+While a torque stands the joint's servo is off, so gravity is the policy's
+to hold; a position command (or `undrive`) hands the joint back to its
+servo, which brakes it at the cap and returns at the rated speed.
+
+Gravity compensation is a property of a robot's controller, not of the
+physics, so the simulator does not apply it on its own. The servo is a PI
+cascade like an industrial drive's and holds a load with no model
+knowledge; a torque interface whose firmware compensates is modelled by
+`Torque(gravity_compensation=True)`, which adds the model's gravity
+torque on top of the action every tick (never past the joint's cap), and
+the model's gravity torques are readable as an observation
+(`GravityTorque()`) or from a controller (`live.gravity_torques()`) for a
+gravity-only or hand-guiding mode of your own. Grasped parts are not the
+robot's mass and are not included. A high-gear-ratio industrial arm is
+best described with a larger `armature` (1 to 5 kg·m²); a backdrivable
+collaborative arm with a small one, which is where torque control means
+something.
+
+A walking machine can be dynamic too: its legs stay the gait's kinematic
+mirrors (the walk is planned, not simulated — see [legged
+robots](legged.md)), and everything else the declaration covers — a head,
+a waist, the arms — is a servoed body riding the walk, with the gait's arm
+swing as its command. Torques reach those joints, never a leg. Tracking a
+moving part is not supported on a dynamic robot.
+
 ## Cost
 
 Measured on one machine, 32 worlds, a six-axis arm with a dynamic part,
@@ -188,6 +252,8 @@ Measured on one machine, 32 worlds, a six-axis arm with a dynamic part,
 | + 64 × 64 depth | 8 k |
 | + 64 × 64 RGB | 7.5 k |
 | + 64 × 64 RGB with shadows | 5 k |
+| dynamic robot, `TcpDelta` | 8 k |
+| dynamic robot, `Torque` | 7 k |
 
 The rasteriser is CPU code — no GPU, nothing to install, deterministic —
 and it is the right tool up to a few hundred pixels a side. Photoreal

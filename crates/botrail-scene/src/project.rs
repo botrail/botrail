@@ -558,6 +558,11 @@ pub struct ProjectRobotMsg {
     /// grasp declaration. Absent in older files and for undriven robots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gripper_drive: Option<GripperDriveMsg>,
+    /// Dynamic-robot declaration (`set_robot_dynamics`): under a physics
+    /// bake the whole robot is an articulated body driven by motors.
+    /// Absent in older files and for kinematic robots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics: Option<RobotDynamicsMsg>,
     /// Declared planning groups (`Robot.define_group`): the arms of a
     /// dual-arm robot, by name. Absent when the groups are derived from
     /// the tree or the source produces them itself (a mounted arm).
@@ -581,6 +586,22 @@ pub struct GripperDriveMsg {
     pub damping: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finger_mass: Option<f64>,
+}
+
+/// A dynamic-robot declaration as a project carries it: the servo
+/// overrides (`None` = the kind-scaled defaults), the mass floor and the
+/// reflected drive inertia.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RobotDynamicsMsg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_force: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass_floor: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armature: Option<f64>,
 }
 
 /// One link's authored contact material.
@@ -915,6 +936,7 @@ impl ProjectFile {
                         mount: None,
                         link_materials: Vec::new(),
                         gripper_drive: None,
+                        dynamics: None,
                         groups: Vec::new(),
                     }],
                     obstacles: v1.obstacles,
@@ -1034,6 +1056,12 @@ impl Scene {
                         stiffness: d.stiffness,
                         damping: d.damping,
                         finger_mass: Some(d.finger_mass),
+                    }),
+                    dynamics: r.dynamics.as_ref().map(|d| RobotDynamicsMsg {
+                        max_force: d.max_force,
+                        damping: d.damping,
+                        mass_floor: Some(d.mass_floor),
+                        armature: d.armature,
                     }),
                     groups: if source_declares_groups(&r.model.source) {
                         Vec::new()
@@ -1408,6 +1436,13 @@ impl Scene {
                 .map_err(|e| {
                     ProjectError::Incompatible(format!("robot `{name}` gripper drive: {e}"))
                 })?;
+            }
+            if let Some(d) = &robot_msg.dynamics {
+                let name = self.robots()[i].name.clone();
+                self.set_robot_dynamics(i, true, d.max_force, d.damping, d.mass_floor, d.armature)
+                    .map_err(|e| {
+                        ProjectError::Incompatible(format!("robot `{name}` dynamics: {e}"))
+                    })?;
             }
         }
         self.set_scenarios(

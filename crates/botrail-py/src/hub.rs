@@ -643,6 +643,24 @@ impl SceneHub {
         })
     }
 
+    pub fn set_robot_dynamics(
+        &self,
+        robot: usize,
+        dynamic: bool,
+        max_force: Option<f64>,
+        damping: Option<f64>,
+        mass_floor: Option<f64>,
+        armature: Option<f64>,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| {
+            scene.set_robot_dynamics(robot, dynamic, max_force, damping, mass_floor, armature)
+        })
+    }
+
+    pub fn robot_dynamics(&self, robot: usize) -> bool {
+        self.snapshot().robot_dynamics(robot).is_some()
+    }
+
     pub fn detach_obstacle(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::detach_obstacle(self, name)
     }

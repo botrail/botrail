@@ -1229,12 +1229,99 @@ impl RobotBuilder<'_> {
             }
         }
 
+        let inertial = self.read_inertial(body, correction);
         Link {
             name: body.path.clone(),
             visuals,
             collisions,
             parent_joint: None,
+            inertial,
         }
+    }
+
+    /// The link's `PhysicsMassAPI` (`physics:mass`, `physics:centerOfMass`,
+    /// `physics:diagonalInertia`, `physics:principalAxes`) as botrail mass
+    /// properties, in the body's corrected model frame and in meters. A
+    /// `botrail:inertial` customData dictionary (what the catalog builder
+    /// writes next to the API for a lossless URDF round trip: the full
+    /// tensor and the inertial frame's `rpy`) wins over the diagonal.
+    /// `None` without a positive mass — a frame link.
+    fn read_inertial(
+        &mut self,
+        body: &PrimInfo,
+        correction: &Isometry3<f64>,
+    ) -> Option<botrail_model::Inertial> {
+        let number = |name: &str| body.prim.attribute(name).get::<f32>().ok().flatten().map(f64::from);
+        let triple = |name: &str| {
+            body.prim
+                .attribute(name)
+                .get::<[f32; 3]>()
+                .ok()
+                .flatten()
+                .map(|v| Vector3::new(v[0] as f64, v[1] as f64, v[2] as f64))
+        };
+        let mass = number("physics:mass")?;
+        if !(mass.is_finite() && mass > 0.0) {
+            return None;
+        }
+        let com = triple("physics:centerOfMass").unwrap_or_else(Vector3::zeros);
+        let diagonal = triple("physics:diagonalInertia").unwrap_or_else(Vector3::zeros);
+        let axes = body
+            .prim
+            .attribute("physics:principalAxes")
+            .get::<gf::Quatf>()
+            .ok()
+            .flatten()
+            .map(|q| {
+                UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                    q.w as f64, q.x as f64, q.y as f64, q.z as f64,
+                ))
+            })
+            .unwrap_or_else(UnitQuaternion::identity);
+        // The lossless record, when present: the tensor in the URDF
+        // inertial frame (rpy about the center of mass).
+        let custom = (|| {
+            let sdf::Value::Dictionary(top) = body.prim.custom_data().ok().flatten()? else {
+                return None;
+            };
+            let entry = match top.get("botrail") {
+                Some(sdf::Value::Dictionary(ns)) => ns.get("inertial"),
+                _ => top.get("botrail:inertial"),
+            }?;
+            let sdf::Value::Dictionary(entry) = entry else {
+                return None;
+            };
+            let numbers = |key: &str| -> Option<Vec<f64>> {
+                match entry.get(key)? {
+                    sdf::Value::DoubleVec(v) => Some(v.clone()),
+                    sdf::Value::FloatVec(v) => Some(v.iter().map(|x| *x as f64).collect()),
+                    _ => None,
+                }
+            };
+            let tensor = numbers("inertia")?;
+            if tensor.len() != 6 {
+                return None;
+            }
+            let rpy = numbers("rpy").filter(|v| v.len() == 3).unwrap_or_else(|| vec![0.0; 3]);
+            Some((tensor, rpy))
+        })();
+        let (rotation, inertia) = match custom {
+            Some((t, rpy)) => (
+                UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]),
+                nalgebra::Matrix3::new(t[0], t[1], t[2], t[1], t[3], t[4], t[2], t[4], t[5]),
+            ),
+            None => (axes, nalgebra::Matrix3::from_diagonal(&diagonal)),
+        };
+        // The inertial frame rides the body like a geometry origin does:
+        // raw stage units, then corrected and normalized; the tensor is
+        // frame-attached, so only the length unit touches it.
+        let raw = Isometry3::from_parts(Translation3::from(com), rotation);
+        let origin = self.conjugate(&(correction.inverse() * raw));
+        Some(botrail_model::Inertial {
+            mass,
+            origin,
+            inertia: inertia * (self.mpu * self.mpu),
+        })
     }
 
     /// Reads a gprim as botrail geometry (meshes materialized as STL, with
@@ -1446,6 +1533,92 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         <limit lower="-2.0943951" upper="2.0943951" effort="0" velocity="1"/>
       </joint>
     </robot>"#;
+
+    /// A one-link articulation on a centimetre stage whose link carries
+    /// `PhysicsMassAPI`: the mass is kilograms as stated, the center of
+    /// mass and the tensor convert with the unit (cm → m, cm² → m²), and
+    /// the center lands in the model link frame (the joint frame, 20 cm
+    /// above the body frame here).
+    const HEAVY: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom"
+        {
+            double size = 10
+        }
+    }
+
+    def Xform "link1" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        customData = {
+            dictionary botrail = {
+                dictionary inertial = {
+                    double[] inertia = [100, 5, 0, 200, 0, 300]
+                    double[] rpy = [0, 0, 0]
+                }
+            }
+        }
+    )
+    {
+        float physics:mass = 2.5
+        point3f physics:centerOfMass = (0, 0, 10)
+        float3 physics:diagonalInertia = (100, 200, 300)
+        def Cube "geom"
+        {
+            double size = 10
+        }
+    }
+
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </Robot/base>
+        }
+
+        def PhysicsRevoluteJoint "j1"
+        {
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link1>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0, 50)
+            point3f physics:localPos1 = (0, 0, -20)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn mass_api_becomes_the_link_inertial_in_meters() {
+        let imported = import_arm(HEAVY);
+        let model = &imported.model;
+        assert!(model.links[model.link_index("/Robot/base").unwrap()].inertial.is_none());
+        let inertial = model.links[model.link_index("/Robot/link1").unwrap()]
+            .inertial
+            .as_ref()
+            .expect("link1 carries PhysicsMassAPI");
+        assert_eq!(inertial.mass, 2.5);
+        // 10 cm above the body origin, which sits 20 cm above the joint
+        // (model link) frame: the same composition the geometry takes.
+        let c = inertial.origin.translation.vector;
+        assert!(c.x.abs() < 1e-9 && c.y.abs() < 1e-9 && (c.z - 0.3).abs() < 1e-9, "{c:?}");
+        // The customData tensor (kg·cm²) wins over the diagonal: the
+        // off-diagonal 5 survives, scaled to kg·m².
+        assert!((inertial.inertia[(0, 0)] - 0.01).abs() < 1e-12);
+        assert!((inertial.inertia[(0, 1)] - 0.0005).abs() < 1e-12, "{}", inertial.inertia);
+        assert!((inertial.inertia[(1, 0)] - 0.0005).abs() < 1e-12);
+        assert!((inertial.inertia[(2, 2)] - 0.03).abs() < 1e-12);
+    }
 
     fn import_arm(usda: &str) -> ImportedRobot {
         // Unique per call: parallel tests must not share (and then delete)

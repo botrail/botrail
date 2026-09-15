@@ -1449,6 +1449,20 @@ struct RobotRuntime {
     /// so from the first overlap on, the robot bakes per tick until every
     /// move has ended.
     tick_bake: bool,
+    /// A dynamic robot (design-rl-dynamics.md): `q` is the physical
+    /// state read back from the engine each tick, `q_cmd` what the plan
+    /// commands its motors.
+    dynamic: bool,
+    q_cmd: Vec<f64>,
+    /// Per q index, a raw joint torque owning the joint instead of its
+    /// motor (`command_torque`); only on a dynamic robot.
+    torque: Vec<Option<f64>>,
+    /// Per q index, whether the raw torque rides on top of the model's
+    /// gravity torque (`command_torque(.., compensate = true)`).
+    gravity_comp: Vec<bool>,
+    /// Per q index, a joint of a dynamic robot that stays a kinematic
+    /// mirror: a walking machine's legs, the gait's to move.
+    kinematic_joints: Vec<bool>,
     /// The commanded joints at the start of this tick, before any driver
     /// wrote to them — what a tracked solve measures its velocity from.
     q_prev: Vec<f64>,
@@ -1713,6 +1727,9 @@ struct PhysicsRuntime {
     /// part, an AGV body or a moving arm all push dynamic bodies with
     /// real contact velocities. An unmoved mirror body costs nothing.
     kinematics: Vec<KinematicBody>,
+    /// Every dynamic robot link's simulated mass (design-rl-dynamics.md
+    /// RD3: the gravity-torque read-out).
+    link_masses: Vec<LinkMass>,
     /// Display name per body, `BodyId`-indexed: the obstacle's own name,
     /// or `robot/link` for an arm part — what contact episodes report.
     names: Vec<String>,
@@ -1795,6 +1812,31 @@ struct DrivenRt {
     joint: usize,
     /// Last commanded target, in the joint's own coordinate.
     cmd: f64,
+    /// The engine's joint value after the last step.
+    last: f64,
+    /// A dynamic robot's servo on this joint: its rated speed; `None`
+    /// for a finger drive's position spring.
+    servo: Option<f64>,
+    /// The servo's integral of the command error (dynamics.rs).
+    integral: f64,
+    /// The joint's force cap (N·m, N) — what a raw torque is clipped to.
+    cap: f64,
+    /// Whether the engine currently holds this joint under a raw torque.
+    torqued: bool,
+}
+
+/// One dynamic link's weight for the gravity-torque read-out: the mass
+/// the engine simulates and its center in the link frame.
+struct LinkMass {
+    robot: usize,
+    link: usize,
+    mass: f64,
+    com: Vector3<f64>,
+}
+
+/// `raw` (an angle in (-π, π]) lifted onto the turn nearest `near`.
+fn unwrap_angle(raw: f64, near: f64) -> f64 {
+    raw + ((near - raw) / std::f64::consts::TAU).round() * std::f64::consts::TAU
 }
 
 struct KinematicBody {
@@ -1886,6 +1928,23 @@ impl<'a> WorldView<'a> {
     /// Commanded joints of robot `robot` after the last tick.
     pub fn joint_positions(&self, robot: usize) -> Option<&'a [f64]> {
         self.0.robots.get(robot).map(|rt| rt.q.as_slice())
+    }
+
+    /// Whether robot `robot` runs as a dynamic body in this rollout (a
+    /// `set_robot_dynamics` declaration under a physics backend).
+    pub fn is_dynamic(&self, robot: usize) -> Option<bool> {
+        self.0.robots.get(robot).map(|rt| rt.dynamic)
+    }
+
+    /// The torque each actuated joint of dynamic robot `robot` needs to
+    /// hold the arm still against gravity as the world stands — the
+    /// simulated link masses about each joint axis, in the joint's own
+    /// coordinate (N·m; N for a prismatic joint). What a controller adds
+    /// as gravity compensation; `None` for a robot that is not dynamic
+    /// here. Grasped parts and other bodies the arm touches are not the
+    /// robot's mass and are not included.
+    pub fn gravity_torques(&self, robot: usize) -> Option<Vec<f64>> {
+        self.0.gravity_torques(robot)
     }
 
     /// Joint velocities over the last tick (`(q - q_prev) / dt`).
@@ -2197,8 +2256,40 @@ impl LiveRollout {
             .apply(state, WorldView(&self.inner), action)
             .map_err(|message| self.inner.live_err(message))?;
         let robot = control.robot();
-        self.inner.command_robot(robot, &command)?;
+        self.apply_command(robot, command)?;
         Ok(converged)
+    }
+
+    /// Applies a control's command: joint targets to the drive, or raw
+    /// torques to a dynamic robot's joints.
+    pub fn apply_command(&mut self, robot: usize, command: crate::rl::Command) -> Result<(), SeqError> {
+        match command {
+            crate::rl::Command::Joints(q) => self.inner.command_robot(robot, &q),
+            crate::rl::Command::Torque { torques, compensate } => {
+                self.inner.command_torque(robot, &torques, compensate)
+            }
+        }
+    }
+
+    /// Puts driven joints of a dynamic robot under raw torques, `(q
+    /// index, torque)` pairs (N·m; N for prismatic joints): each joint's
+    /// motor stays off until a position `command` or `undrive`. With
+    /// `compensate` the model's gravity torque is added on top every
+    /// tick (capped at the joint's force limit). Refused on a robot that
+    /// is not dynamic.
+    pub fn command_torque(
+        &mut self,
+        robot: usize,
+        torques: &[(usize, f64)],
+        compensate: bool,
+    ) -> Result<(), SeqError> {
+        self.inner.command_torque(robot, torques, compensate)
+    }
+
+    /// The torque each joint needs to hold the arm against gravity as the
+    /// world stands (see [`WorldView::gravity_torques`]).
+    pub fn gravity_torques(&self, robot: usize) -> Option<Vec<f64>> {
+        self.inner.gravity_torques(robot)
     }
 
     /// Commanded joints of robot `robot` after the last tick.
@@ -2323,7 +2414,11 @@ impl Rollout {
     fn stop_drive(&mut self, robot: usize) {
         if let Some(rt) = self.robots.get_mut(robot) {
             rt.active.retain(|a| !a.is_external());
-            if rt.active.is_empty() {
+            for torque in rt.torque.iter_mut() {
+                *torque = None;
+            }
+            rt.gravity_comp.iter_mut().for_each(|c| *c = false);
+            if rt.active.is_empty() && !rt.dynamic {
                 rt.tick_bake = false;
             }
         }
@@ -2358,8 +2453,9 @@ impl Rollout {
                 model.name
             )));
         };
+        let owned = active.owned.clone();
         if let MoveKind::External { target: held, .. } = &mut active.kind {
-            for &qi in &active.owned {
+            for &qi in &owned {
                 let mut v = target[qi];
                 if let Some(l) = model.joints[model.actuated_joints[qi]].limits.as_ref() {
                     if l.lower <= l.upper {
@@ -2368,6 +2464,127 @@ impl Rollout {
                 }
                 held[qi] = v;
             }
+        }
+        // A position command hands torqued joints back to their motors.
+        for qi in owned {
+            self.robots[robot].torque[qi] = None;
+            self.robots[robot].gravity_comp[qi] = false;
+        }
+        Ok(())
+    }
+
+    /// The torque each actuated joint of dynamic robot `robot` needs to
+    /// hold the arm still against gravity, as the world stands: the
+    /// model's link masses (what the engine simulates) about each
+    /// joint's axis, in the joint's own coordinate. What a controller
+    /// adds as gravity compensation. `None` for a robot that is not
+    /// dynamic in this rollout.
+    fn gravity_torques(&self, robot: usize) -> Option<Vec<f64>> {
+        let masses = &self.physics.as_ref()?.link_masses;
+        self.gravity_torques_with(robot, masses)
+    }
+
+    fn gravity_torques_with(&self, robot: usize, masses: &[LinkMass]) -> Option<Vec<f64>> {
+        let rt = self.robots.get(robot)?;
+        if !rt.dynamic {
+            return None;
+        }
+        let sr = &self.world.robots()[robot];
+        let model = &sr.model;
+        let poses = self.world.link_poses_for(robot);
+        let g = self
+            .options
+            .physics
+            .as_ref()
+            .map(|p| Vector3::new(p.gravity[0], p.gravity[1], p.gravity[2]))
+            .unwrap_or_else(|| Vector3::new(0.0, 0.0, -9.81));
+        // Weight and world center per link of this robot.
+        let weights: Vec<(usize, f64, nalgebra::Point3<f64>)> = masses
+            .iter()
+            .filter(|m| m.robot == robot)
+            .map(|m| (m.link, m.mass, poses[m.link] * nalgebra::Point3::from(m.com)))
+            .collect();
+        let mut out = vec![0.0; model.dof()];
+        for (qi, &ji) in model.actuated_joints.iter().enumerate() {
+            let joint = &model.joints[ji];
+            // The joint frame is the child link's frame.
+            let frame = poses[joint.child_link];
+            let axis = frame.rotation * joint.axis.into_inner();
+            let pivot = frame.translation.vector;
+            let subtree = self.world.link_subtree(robot, joint.child_link);
+            let mut load = 0.0;
+            for (link, mass, center) in &weights {
+                if !subtree.contains(link) {
+                    continue;
+                }
+                let force = g * *mass;
+                load += match joint.joint_type {
+                    botrail_model::JointType::Prismatic => axis.dot(&force),
+                    _ => axis.dot(&(center.coords - pivot).cross(&force)),
+                };
+            }
+            // Gravity's generalized force on q; the hold is its negative.
+            out[qi] = -load;
+        }
+        Some(out)
+    }
+
+    /// Puts driven joints of a dynamic robot under raw torques (N·m; N
+    /// for prismatic joints), `(q index, torque)` pairs: each joint's
+    /// motor is off until a position command or `stop_drive` returns it.
+    /// With `compensate` the model's gravity torque is added on top every
+    /// tick, so the torques command the motion alone (a torque interface
+    /// with gravity compensation in the firmware). The sum never exceeds
+    /// the joint's force cap. Design-rl-dynamics.md RD2/RD3 — the
+    /// `Torque` action.
+    fn command_torque(
+        &mut self,
+        robot: usize,
+        torques: &[(usize, f64)],
+        compensate: bool,
+    ) -> Result<(), SeqError> {
+        let Some(sr) = self.world.robots().get(robot) else {
+            return Err(self.live_err(format!("no robot at index {robot}")));
+        };
+        let name = sr.model.name.clone();
+        let dof = sr.model.dof();
+        if !self.robots[robot].dynamic {
+            return Err(self.live_err(format!(
+                "robot `{name}` is not dynamic: torque control needs \
+                 set_robot_dynamics(dynamic = true) and a physics backend"
+            )));
+        }
+        let Some(owned) = self.robots[robot]
+            .active
+            .iter()
+            .find(|a| a.is_external())
+            .map(|a| a.owned.clone())
+        else {
+            return Err(self.live_err(format!(
+                "robot `{name}` is not driven; call drive first"
+            )));
+        };
+        for &(qi, tau) in torques {
+            if qi >= dof {
+                return Err(self.live_err(format!("joint index {qi} out of range (dof {dof})")));
+            }
+            if !owned.contains(&qi) {
+                return Err(self.live_err(format!(
+                    "joint {qi} of robot `{name}` is not driven by this drive"
+                )));
+            }
+            if self.robots[robot].kinematic_joints[qi] {
+                return Err(self.live_err(format!(
+                    "joint {qi} of robot `{name}` is a leg the gait moves: kinematic, no motor to torque"
+                )));
+            }
+            if !tau.is_finite() {
+                return Err(self.live_err(format!("joint torque {tau} is not finite")));
+            }
+        }
+        for &(qi, tau) in torques {
+            self.robots[robot].torque[qi] = Some(tau);
+            self.robots[robot].gravity_comp[qi] = compensate;
         }
         Ok(())
     }
@@ -3445,9 +3662,14 @@ impl Rollout {
                     q_nom: q.clone(),
                     q_nom_prev: q.clone(),
                     q_prev: q.clone(),
+                    q_cmd: q.clone(),
+                    torque: vec![None; q.len()],
+                    gravity_comp: vec![false; q.len()],
+                    kinematic_joints: vec![false; q.len()],
                     q,
                     active: Vec::new(),
                     tick_bake: false,
+                    dynamic: false,
                     tracking: Vec::new(),
                     moves: Vec::new(),
                     planned: Vec::new(),
@@ -3502,6 +3724,7 @@ impl Rollout {
                 substeps: 0,
                 dynamics: Vec::new(),
                 kinematics: Vec::new(),
+                link_masses: Vec::new(),
                 names: Vec::new(),
                 driven: Vec::new(),
                 open_contacts: std::collections::HashMap::new(),
@@ -3695,7 +3918,7 @@ impl Rollout {
             Ok(Some(output)) => {
                 // An action goes through the policy's control (IK and
                 // all); without one, the output is the joint target.
-                let target = match self.policy_runs[k].control.take() {
+                let command = match self.policy_runs[k].control.take() {
                     Some((control, mut state)) => {
                         let applied = control.apply(&mut state, WorldView(self), &output);
                         self.policy_runs[k].control = Some((control, state));
@@ -3712,9 +3935,14 @@ impl Rollout {
                             }
                         }
                     }
-                    None => output,
+                    None => crate::rl::Command::Joints(output),
                 };
-                self.command_robot(robot, &target)?;
+                match command {
+                    crate::rl::Command::Joints(target) => self.command_robot(robot, &target)?,
+                    crate::rl::Command::Torque { torques, compensate } => {
+                        self.command_torque(robot, &torques, compensate)?
+                    }
+                }
                 self.policy_runs[k].steps += 1;
                 Ok(())
             }
@@ -3855,7 +4083,10 @@ impl Rollout {
             })
             .map(|o| o.name.clone())
             .collect();
-        if dynamic.is_empty() {
+        let dynamic_robots: Vec<usize> = (0..self.world.robots().len())
+            .filter(|&r| self.world.robot_dynamics(r).is_some())
+            .collect();
+        if dynamic.is_empty() && dynamic_robots.is_empty() {
             // Nothing for the engine to own: the timeline still names the
             // engine it ran under, but no world is built and no step runs.
             self.physics = Some(phys);
@@ -3897,6 +4128,24 @@ impl Rollout {
         let mut dynamics = Vec::new();
         let mut kinematics = Vec::new();
         let mut names = Vec::new();
+        // A vehicle's body obstacles (its massing footprint, a chassis)
+        // join the collision group of the robot riding it: a dynamic
+        // link must not be shoved by the envelope drawn around itself —
+        // the footprint of a walking machine covers it to the head.
+        let mut rider_group: std::collections::HashMap<String, u32> = Default::default();
+        for (r, sr) in self.world.robots().iter().enumerate() {
+            let Some(mount) = sr.mount.as_ref() else {
+                continue;
+            };
+            let Some(device) = self.world.devices().iter().find(|d| d.name == mount.device) else {
+                continue;
+            };
+            if let DeviceKind::Vehicle { body, .. } = &device.kind {
+                for name in body {
+                    rider_group.entry(name.clone()).or_insert(r as u32 + 1);
+                }
+            }
+        }
         for (i, o) in self.world.obstacles().iter().enumerate() {
             if !o.enabled {
                 continue;
@@ -3937,7 +4186,7 @@ impl Rollout {
                     pose: o.pose,
                     parts: self.world.obstacle_colliders()[i].parts().to_vec(),
                     props,
-                    group: 0,
+                    group: rider_group.get(&o.name).copied().unwrap_or(0),
                 });
                 kinematics.push(KinematicBody {
                     source: KinSource::Obstacle(i),
@@ -3947,6 +4196,7 @@ impl Rollout {
             }
         }
         let mut driven_rt: Vec<DrivenRt> = Vec::new();
+        let mut link_masses: Vec<LinkMass> = Vec::new();
         // Welds for fixed-jointed finger links, collected per robot but
         // appended after EVERY robot's motored joints — the rollout
         // addresses motors as `joints[0..driven_rt.len()]`.
@@ -3966,6 +4216,65 @@ impl Rollout {
                     if let Some(m) = mj.mimic {
                         if let Some(pos) = drive.joints.iter().position(|&d| d == m.source_joint) {
                             driven_joints.push((mi, drive.motors[pos]));
+                        }
+                    }
+                }
+                for &(ji, _) in &driven_joints {
+                    for l in self.world.link_subtree(r, model.joints[ji].child_link) {
+                        finger_links.insert(l);
+                    }
+                }
+            }
+            // The gripper drive's own finger links keep the G3 mass rule
+            // (`finger_mass` floor on the shape mass) even on a dynamic
+            // robot; the arm's links weigh what the model says.
+            let drive_links = finger_links.clone();
+            // Servo parameters per dynamic joint (model index).
+            let mut servo_of: std::collections::HashMap<usize, crate::dynamics::JointServo> =
+                Default::default();
+            // A dynamic robot: every actuated joint (and every mimic
+            // follower) is a driven joint, every link under one a dynamic
+            // body; what remains — the base assembly — stays a mirror.
+            let dynamics = self.world.robot_dynamics(r).cloned();
+            // A walking machine's legs are the gait's: kinematic mirrors
+            // as ever, with no motor — the declaration covers the rest
+            // of the machine (a head, an arm, a waist).
+            let leg_q: Vec<usize> = self.robots[r]
+                .gait
+                .as_ref()
+                .map(|g| g.gait.leg_joints())
+                .unwrap_or_default();
+            if let Some(dynamics) = &dynamics {
+                for (k, &ji) in model.actuated_joints.iter().enumerate() {
+                    if leg_q.contains(&k) || driven_joints.iter().any(|(j, _)| *j == ji) {
+                        continue;
+                    }
+                    let servo = dynamics.servos[k];
+                    // The engine's motor is the velocity loop: no
+                    // position spring, the loop gain as damping.
+                    driven_joints.push((
+                        ji,
+                        botrail_physics::JointMotor {
+                            stiffness: 0.0,
+                            damping: servo.damping,
+                            max_force: servo.max_force,
+                        },
+                    ));
+                    servo_of.insert(ji, servo);
+                }
+                for (mi, mj) in model.joints.iter().enumerate() {
+                    let Some(m) = mj.mimic else {
+                        continue;
+                    };
+                    if driven_joints.iter().any(|(j, _)| *j == mi) {
+                        continue;
+                    }
+                    if let Some(&(_, motor)) =
+                        driven_joints.iter().find(|(j, _)| *j == m.source_joint)
+                    {
+                        driven_joints.push((mi, motor));
+                        if let Some(servo) = servo_of.get(&m.source_joint).copied() {
+                            servo_of.insert(mi, servo);
                         }
                     }
                 }
@@ -3997,19 +4306,117 @@ impl Rollout {
                 let finger = finger_links.contains(&link);
                 if finger {
                     props.kind = BodyKind::Dynamic;
-                    // A mesh-derived finger weighs grams; rapier's contact
-                    // stiffness scales with the pair's masses, so the drive
-                    // gives each finger body a real moving mass
-                    // (`GripperDrive::finger_mass`) or the clamp cannot
-                    // develop whatever the motor cap says.
-                    let floor = self
-                        .world
-                        .gripper_drive(r)
-                        .map(|d| d.finger_mass)
-                        .unwrap_or(0.0);
-                    let shape_mass =
-                        botrail_collide::parts_volume(parts) * botrail_physics::DEFAULT_DENSITY;
-                    props.mass = Some(shape_mass.max(floor));
+                    let arm_link = dynamics.as_ref().filter(|_| !drive_links.contains(&link));
+                    if let Some(dynamics) = arm_link {
+                        // A dynamic robot's link weighs what its model
+                        // states (mass, center and tensor in the link
+                        // frame), or its shape at the default density
+                        // raised to the mass floor; plus the drive's
+                        // reflected inertia about its own joint axis.
+                        let mut mp = match sr.model.links[link].inertial.as_ref() {
+                            Some(inertial) => {
+                                let rotation = inertial.origin.rotation.to_rotation_matrix();
+                                botrail_physics::MassProperties {
+                                    mass: inertial.mass,
+                                    com: inertial.origin.translation.vector,
+                                    inertia: rotation.matrix()
+                                        * inertial.inertia
+                                        * rotation.matrix().transpose(),
+                                }
+                            }
+                            None => {
+                                let mut shape = botrail_collide::parts_mass_properties(
+                                    parts,
+                                    botrail_physics::DEFAULT_DENSITY,
+                                );
+                                if shape.mass() < dynamics.mass_floor {
+                                    shape.set_mass(dynamics.mass_floor, true);
+                                }
+                                let i = shape.reconstruct_inertia_matrix();
+                                botrail_physics::MassProperties {
+                                    mass: shape.mass(),
+                                    com: Vector3::new(
+                                        shape.local_com.x,
+                                        shape.local_com.y,
+                                        shape.local_com.z,
+                                    ),
+                                    inertia: nalgebra::Matrix3::new(
+                                        i.x_axis.x, i.y_axis.x, i.z_axis.x,
+                                        i.x_axis.y, i.y_axis.y, i.z_axis.y,
+                                        i.x_axis.z, i.y_axis.z, i.z_axis.z,
+                                    ),
+                                }
+                            }
+                        };
+                        link_masses.push(LinkMass {
+                            robot: r,
+                            link,
+                            mass: mp.mass,
+                            com: mp.com,
+                        });
+                        if let Some(pj) = sr.model.links[link].parent_joint {
+                            let joint = &sr.model.joints[pj];
+                            let armature = joint
+                                .q_index
+                                .map(|_| pj)
+                                .or_else(|| joint.mimic.map(|m| m.source_joint))
+                                .and_then(|source| {
+                                    sr.model
+                                        .actuated_joints
+                                        .iter()
+                                        .position(|&j| j == source)
+                                })
+                                .map(|k| dynamics.servos[k].armature)
+                                .unwrap_or(0.0);
+                            if armature > 0.0 {
+                                // Isotropic on purpose: an inertia tensor
+                                // heavy about one axis and featherweight
+                                // about the others ill-conditions the
+                                // maximal-coordinate solver (measured: a
+                                // 0.1 kg·m² axis-only armature on a 1e-5
+                                // wrist link rang at 10 Hz), and a
+                                // reflected inertia is only ever felt
+                                // about the joint axis once the other
+                                // axes are locked by the joint anyway.
+                                mp.inertia += armature * nalgebra::Matrix3::identity();
+                            }
+                        }
+                        props.mass_properties = Some(mp);
+                    } else {
+                        // A mesh-derived finger weighs grams; rapier's
+                        // contact stiffness scales with the pair's masses,
+                        // so the drive gives each finger body a real moving
+                        // mass (`GripperDrive::finger_mass`) or the clamp
+                        // cannot develop whatever the motor cap says. A
+                        // dynamic robot's link without inertials gets the
+                        // declaration's floor the same way.
+                        let floor = if drive_links.contains(&link) {
+                            self.world
+                                .gripper_drive(r)
+                                .map(|d| d.finger_mass)
+                                .unwrap_or(0.0)
+                        } else {
+                            dynamics.as_ref().map(|d| d.mass_floor).unwrap_or(0.0)
+                        };
+                        let shape_mass = botrail_collide::parts_volume(parts)
+                            * botrail_physics::DEFAULT_DENSITY;
+                        props.mass = Some(shape_mass.max(floor));
+                        if dynamics.is_some() {
+                            // A finger's weight counts toward the arm's
+                            // gravity torques like any other link's.
+                            let c = botrail_collide::parts_mass_properties(
+                                parts,
+                                botrail_physics::DEFAULT_DENSITY,
+                            )
+                            .local_com;
+                            link_masses.push(LinkMass {
+                                robot: r,
+                                link,
+                                mass: shape_mass.max(floor),
+                                com: Vector3::new(c.x, c.y, c.z),
+                            });
+                        }
+                    }
                 }
                 desc.bodies.push(BodyDesc {
                     kind: if finger {
@@ -4086,10 +4493,16 @@ impl Rollout {
                     },
                     motor,
                 });
+                let cmd = model.joint_value(ji, self.robots[r].q.as_slice());
                 driven_rt.push(DrivenRt {
                     robot: r,
                     joint: ji,
-                    cmd: model.joint_value(ji, self.robots[r].q.as_slice()),
+                    cmd,
+                    last: cmd,
+                    servo: servo_of.get(&ji).map(|s| s.max_velocity),
+                    integral: 0.0,
+                    cap: motor.max_force,
+                    torqued: false,
                 });
             }
 
@@ -4198,8 +4611,22 @@ impl Rollout {
         phys.kinematics = kinematics;
         phys.names = names;
         phys.driven = driven_rt;
+        phys.link_masses = link_masses;
         self.dynamic_names = dynamic;
         self.physics = Some(phys);
+        // Dynamic robots bake tick by tick from the first tick: their
+        // track is the engine's, never a move's pre-baked future.
+        for r in dynamic_robots {
+            let rt = &mut self.robots[r];
+            rt.dynamic = true;
+            rt.tick_bake = true;
+            rt.q_cmd = rt.q.clone();
+            if let Some(legs) = rt.gait.as_ref().map(|g| g.gait.leg_joints()) {
+                for qi in legs {
+                    rt.kinematic_joints[qi] = true;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -4212,7 +4639,7 @@ impl Rollout {
         let Some(mut phys) = self.physics.take() else {
             return;
         };
-        if phys.dynamics.is_empty() {
+        if phys.dynamics.is_empty() && phys.driven.is_empty() {
             self.physics = Some(phys);
             return;
         }
@@ -4313,15 +4740,69 @@ impl Rollout {
                 }
             }
         }
+        // Gravity torques per robot, computed once a tick when a
+        // compensated torque asks for them.
+        let mut comp_cache: Vec<Option<Vec<f64>>> = vec![None; self.robots.len()];
         for k in 0..phys.driven.len() {
             let (robot, joint) = (phys.driven[k].robot, phys.driven[k].joint);
             let model = &self.world.robots()[robot].model;
-            if self.robots[robot]
+            let rt = &self.robots[robot];
+            if rt.dynamic {
+                // A dynamic robot's motors follow the command outright
+                // (`q_cmd` is the plan itself, never a read-back), unless
+                // a raw torque owns the joint.
+                let qi = model.joints[joint].q_index;
+                if let Some(tau) = qi.and_then(|qi| rt.torque[qi]) {
+                    // On top of the model's gravity torque when asked
+                    // (an opt-in of the Torque control), and never past
+                    // the actuator's cap.
+                    let comp = qi.is_some_and(|qi| rt.gravity_comp[qi]);
+                    let mut total = tau;
+                    if comp {
+                        if comp_cache[robot].is_none() {
+                            comp_cache[robot] = self.gravity_torques_with(robot, &phys.link_masses);
+                        }
+                        if let (Some(g), Some(qi)) = (&comp_cache[robot], qi) {
+                            total += g[qi];
+                        }
+                    }
+                    let cap = phys.driven[k].cap;
+                    phys.backend.set_joint_torque(k, Some(total.clamp(-cap, cap)));
+                    phys.driven[k].torqued = true;
+                    phys.driven[k].integral = 0.0;
+                    continue;
+                }
+                if phys.driven[k].torqued {
+                    phys.backend.set_joint_torque(k, None);
+                    phys.driven[k].torqued = false;
+                }
+                phys.driven[k].cmd = model.joint_value(joint, rt.q_cmd.as_slice());
+                if let Some(rated) = phys.driven[k].servo {
+                    // The position loop (dynamics.rs): PI on the command
+                    // error → approach velocity, at most the rated speed
+                    // (the integral is wound back whenever the clamp
+                    // holds); the engine's motor closes the velocity loop
+                    // under the force cap.
+                    let d = &mut phys.driven[k];
+                    let error = d.cmd - d.last;
+                    let mut integral = d.integral + error * dt;
+                    let raw = crate::dynamics::APPROACH_GAIN * error
+                        + crate::dynamics::INTEGRAL_GAIN * integral;
+                    let velocity = raw.clamp(-rated, rated);
+                    if velocity != raw {
+                        integral = (velocity - crate::dynamics::APPROACH_GAIN * error)
+                            / crate::dynamics::INTEGRAL_GAIN;
+                    }
+                    d.integral = integral;
+                    phys.backend.set_joint_velocity(k, velocity);
+                    continue;
+                }
+            } else if rt
                 .active
                 .iter()
                 .any(|active| plan_commands(active, model, joint))
             {
-                phys.driven[k].cmd = model.joint_value(joint, self.robots[robot].q.as_slice());
+                phys.driven[k].cmd = model.joint_value(joint, rt.q.as_slice());
             }
             let cmd = phys.driven[k].cmd;
             phys.backend.set_joint_target(k, cmd);
@@ -4343,10 +4824,23 @@ impl Rollout {
         if !phys.driven.is_empty() {
             let t = self.t;
             let mut touched = vec![false; self.robots.len()];
-            for (k, d) in phys.driven.iter().enumerate() {
+            for k in 0..phys.driven.len() {
+                let raw = phys.backend.joint_position(k);
+                phys.driven[k].last = raw;
+                let d = &phys.driven[k];
                 let model = &self.world.robots()[d.robot].model;
                 if let Some(qi) = model.joints[d.joint].q_index {
-                    self.robots[d.robot].q[qi] = phys.backend.joint_position(k);
+                    let rt = &mut self.robots[d.robot];
+                    // The engine reads a revolute joint in (-π, π]; a
+                    // dynamic robot's wrist turns further, so the value
+                    // continues from the previous tick's.
+                    rt.q[qi] = if rt.dynamic
+                        && model.joints[d.joint].joint_type != botrail_model::JointType::Prismatic
+                    {
+                        unwrap_angle(raw, rt.q_prev[qi])
+                    } else {
+                        raw
+                    };
                     touched[d.robot] = true;
                 }
             }
@@ -4360,8 +4854,23 @@ impl Rollout {
                     .expect("driven q keeps the robot's DOF");
                 let rt = &mut self.robots[r];
                 rt.truncate_after(t);
-                let zeros = vec![0.0; q.len()];
-                rt.append_waypoint(t, q, zeros);
+                // A gait baked this tick already (legs, and the arms as
+                // they stood before the step): the read-back is the
+                // tick's truth, so it takes that sample's place.
+                if rt.times.len() > 1 && rt.times.last().is_some_and(|last| (last - t).abs() <= 1e-9) {
+                    rt.times.pop();
+                    rt.positions.pop();
+                    rt.velocities.pop();
+                }
+                let velocity: Vec<f64> = if rt.dynamic {
+                    q.iter()
+                        .zip(&rt.q_prev)
+                        .map(|(now, before)| (now - before) / dt)
+                        .collect()
+                } else {
+                    vec![0.0; q.len()]
+                };
+                rt.append_waypoint(t, q, velocity);
             }
         }
         let t = self.t;
@@ -4533,8 +5042,15 @@ impl Rollout {
             let mut q_nom = rt.q_nom.clone();
             for active in &rt.active {
                 if let MoveKind::External { target, vmax } = &active.kind {
-                    // One tick toward the driver's target, rate-limited.
+                    // One tick toward the driver's target, rate-limited. A
+                    // torqued joint has no target: its nominal follows the
+                    // physical joint so a later position command starts
+                    // from where the arm is.
                     for &qi in &active.owned {
+                        if rt.torque[qi].is_some() {
+                            q_nom[qi] = rt.q[qi];
+                            continue;
+                        }
                         let step = vmax[qi] * dt;
                         q_nom[qi] += (target[qi] - q_nom[qi]).clamp(-step, step);
                     }
@@ -4554,7 +5070,38 @@ impl Rollout {
                 .iter()
                 .flat_map(|latch| latch.joints.iter().copied())
                 .collect();
-            if tracked.len() < rt.q.len() {
+            if rt.dynamic {
+                // The plan is the motors' command; the physical joints
+                // stay where the engine left them until the read-back. A
+                // walker's legs are kinematic as ever: they take the
+                // nominal like a mirror, unless the walk owns them.
+                let gait_owned: Vec<usize> = rt
+                    .gait
+                    .as_ref()
+                    .and_then(|gr| gr.plan.as_ref().map(|p| p.owned_at(&gr.gait, t)))
+                    .unwrap_or_default();
+                let mut q_cmd = rt.q_cmd.clone();
+                let mut q = rt.q.clone();
+                for qi in 0..q.len() {
+                    if tracked.contains(&qi) {
+                        continue;
+                    }
+                    if rt.kinematic_joints[qi] {
+                        if !gait_owned.contains(&qi) {
+                            q[qi] = rt.q_nom[qi];
+                        }
+                    } else {
+                        q_cmd[qi] = rt.q_nom[qi];
+                    }
+                }
+                rt.q_cmd = q_cmd;
+                if q != rt.q {
+                    rt.q = q;
+                    self.world
+                        .set_joint_positions_for(r, rt.q.clone())
+                        .expect("sampled q has robot DOF");
+                }
+            } else if tracked.len() < rt.q.len() {
                 let mut q = rt.q.clone();
                 for (qi, value) in q.iter_mut().enumerate() {
                     if !tracked.contains(&qi) {
@@ -4587,7 +5134,7 @@ impl Rollout {
                 }
             }
             rt.active.retain(|active| t < active.end() - 1e-9);
-            if rt.active.is_empty() {
+            if rt.active.is_empty() && !rt.dynamic {
                 rt.tick_bake = false;
             }
         }
@@ -5524,6 +6071,12 @@ impl Rollout {
             .find(|o| o.name == object)
             .map(|o| o.pose)
             .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
+        if self.robots[r].dynamic {
+            return Err(err(format!(
+                "robot `{}` is dynamic: tracking a part is not supported on a dynamic robot",
+                model.name
+            )));
+        }
         let rt = &mut self.robots[r];
         // The tracked arm's nominal re-bases onto where it stands; the
         // other arm's nominal is its own driver's business.
@@ -8146,6 +8699,18 @@ impl Rollout {
         let dt = self.options.dt;
         let rt = &mut self.robots[r];
         let previous = rt.q.clone();
+        if rt.dynamic {
+            // A dynamic walker's swung arms are servoed, not mirrored:
+            // the swing is their command, the joints stay where the
+            // engine has them; the legs are the gait's.
+            for s in &plan.swing {
+                if driven_now.contains(&s.joint) {
+                    continue;
+                }
+                rt.q_cmd[s.joint] = q[s.joint];
+                q[s.joint] = rt.q[s.joint];
+            }
+        }
         rt.q = q;
         self.world
             .set_joint_positions_for(r, rt.q.clone())
@@ -14090,6 +14655,98 @@ mod gait_tests {
         }
     }
 
+    /// A dynamic walker (design-rl-dynamics.md): the legs stay the gait's
+    /// kinematic mirrors — the kinematic bake's values to the bit — while
+    /// the head, a servoed dynamic body, rides the walk and holds its
+    /// command through the sway; torques reach the head, never a leg.
+    #[test]
+    fn a_dynamic_robot_walks_with_kinematic_legs() {
+        // The vehicle's massing footprint covers body and head: a mirror
+        // the dynamic head must ride inside, not be shoved out of.
+        let mut device = dog(0.5, FRAC_PI_2, false, "a");
+        if let DeviceKind::Vehicle { body, .. } = &mut device.kind {
+            body.push("dog/footprint".into());
+        }
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(QUAD).unwrap(),
+        ));
+        scene
+            .add_obstacle(
+                "dog/footprint",
+                Geometry::Box {
+                    size: Vector3::new(1.0, 0.5, 0.8),
+                },
+                Isometry3::translation(0.1, 0.0, 0.4),
+            )
+            .unwrap();
+        scene.upsert_device(device);
+        scene.mount_robot_with(0, "dog", None, Some(quad_gait())).unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "patrol".into(),
+            steps: vec![
+                step("drive", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let options = RolloutOptions::default();
+        let kinematic = scene.simulate_sequences_with(&["patrol"], &options, None).unwrap();
+        scene.set_robot_dynamics(0, true, None, None, None, None).unwrap();
+        let dynamic = scene
+            .simulate_sequences_with(
+                &["patrol"],
+                &options,
+                Some(Box::new(botrail_physics_rapier::RapierBackend::new())),
+            )
+            .unwrap();
+        assert!((dynamic.duration - kinematic.duration).abs() < 1e-9);
+        let model = &scene.robots()[0].model;
+        let neck = model
+            .actuated_joints
+            .iter()
+            .position(|&j| model.joints[j].name == "neck")
+            .unwrap();
+        for k in 0..=80 {
+            let t = k as f64 * 0.1;
+            let a = kinematic.robots[0].trajectory.sample(t);
+            let b = dynamic.robots[0].trajectory.sample(t);
+            for qi in 0..model.dof() {
+                if qi == neck {
+                    assert!(b[qi].abs() < 0.05, "neck servo at t={t}: {:+.4}", b[qi]);
+                } else {
+                    assert_eq!(a[qi], b[qi], "leg q{qi} at t={t}");
+                }
+            }
+        }
+        // The physics wrote the head's lane: not exactly the command.
+        assert!(dynamic.robots[0].trajectory.positions.iter().any(|q| q[neck] != 0.0));
+        // Standing after the walk: a torque reaches the head, never a leg.
+        let mut live = scene
+            .open_rollout(
+                &["patrol"],
+                &options,
+                Some(Box::new(botrail_physics_rapier::RapierBackend::new())),
+            )
+            .unwrap();
+        while !live.finished() && live.t() < 7.6 {
+            live.tick().unwrap();
+        }
+        live.drive(0, None, None).unwrap();
+        live.command_torque(0, &[(neck, 5.0)], false).unwrap();
+        for _ in 0..20 {
+            live.tick().unwrap();
+        }
+        assert!(live.joint_positions(0).unwrap()[neck] > 0.05);
+        let leg = model
+            .actuated_joints
+            .iter()
+            .position(|&j| model.joints[j].name == "FL_hip_joint")
+            .unwrap();
+        let err = live.command_torque(0, &[(leg, 1.0)], false).unwrap_err().to_string();
+        assert!(err.contains("leg the gait moves"), "{err}");
+        let g = live.gravity_torques(0).unwrap();
+        assert!(g.iter().enumerate().all(|(qi, v)| qi == neck || *v == 0.0), "{g:?}");
+    }
+
     /// Drive to `station`, then stand for `dwell` seconds.
     fn patrol(scene: &mut Scene, station: &str, dwell: f64, dt: f64) -> SequenceTimeline {
         scene.upsert_sequence(Sequence {
@@ -15165,6 +15822,57 @@ mod biped_tests {
         model.joints[model.joint_index(joint).unwrap()]
             .q_index
             .unwrap()
+    }
+
+    /// A dynamic biped (design-rl-dynamics.md): the walk's arm swing is
+    /// the servoed arms' command, which the physical shoulders follow —
+    /// close, never exactly — while the legs stay the gait's, the
+    /// kinematic bake's values to the bit.
+    #[test]
+    fn a_dynamic_biped_swings_servoed_arms_over_kinematic_legs() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let (l, r) = (
+            qi(&scene, "L_shoulder_pitch_joint"),
+            qi(&scene, "R_shoulder_pitch_joint"),
+        );
+        let kinematic = walk(&mut scene, 0.01);
+        scene.set_robot_dynamics(0, true, None, None, None, None).unwrap();
+        let options = RolloutOptions::default();
+        let dynamic = scene
+            .simulate_sequences_with(
+                &["walk"],
+                &options,
+                Some(Box::new(botrail_physics_rapier::RapierBackend::new())),
+            )
+            .unwrap();
+        assert!((dynamic.duration - kinematic.duration).abs() < 1e-9);
+        let legs: Vec<usize> = scene.robots()[0]
+            .model
+            .joints
+            .iter()
+            .filter(|j| j.name.contains("hip") || j.name.contains("knee") || j.name.contains("ankle"))
+            .filter_map(|j| j.q_index)
+            .collect();
+        assert!(legs.len() >= 10, "{legs:?}");
+        let (mut swung, mut worst) = (0.0f64, 0.0f64);
+        for k in 0..=100 {
+            let t = k as f64 * dynamic.duration / 100.0;
+            let a = kinematic.robots[0].trajectory.sample(t);
+            let b = dynamic.robots[0].trajectory.sample(t);
+            for &qi in &legs {
+                // The same gait values; the two lanes' sample layouts
+                // differ (per-tick read-back against a hold), so the
+                // interpolation may round differently by an ulp.
+                assert!((a[qi] - b[qi]).abs() < 1e-9, "leg q{qi} at t={t:.2}: {} vs {}", a[qi], b[qi]);
+            }
+            for qi in [l, r] {
+                swung = swung.max(a[qi].abs());
+                worst = worst.max((a[qi] - b[qi]).abs());
+            }
+        }
+        assert!(swung > 0.2, "the kinematic arms swing ({swung:.3})");
+        assert!(worst < 0.1, "the servoed arms trail the swing by {worst:.3} rad at most");
+        assert!(dynamic.robots[0].trajectory.positions.iter().any(|q| q[l] != 0.0));
     }
 
     /// World pose of a foot link at `t`, off the baked timeline.
