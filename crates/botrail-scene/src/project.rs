@@ -602,6 +602,10 @@ pub struct RobotDynamicsMsg {
     pub mass_floor: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub armature: Option<f64>,
+    /// The base's kind under physics: `true` a free rigid body, `false`
+    /// a mirror on its stand or vehicle, absent = derived by the bake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floating: Option<bool>,
 }
 
 /// One link's authored contact material.
@@ -1062,6 +1066,7 @@ impl Scene {
                         damping: d.damping,
                         mass_floor: Some(d.mass_floor),
                         armature: d.armature,
+                        floating: d.floating,
                     }),
                     groups: if source_declares_groups(&r.model.source) {
                         Vec::new()
@@ -1439,10 +1444,16 @@ impl Scene {
             }
             if let Some(d) = &robot_msg.dynamics {
                 let name = self.robots()[i].name.clone();
-                self.set_robot_dynamics(i, true, d.max_force, d.damping, d.mass_floor, d.armature)
-                    .map_err(|e| {
-                        ProjectError::Incompatible(format!("robot `{name}` dynamics: {e}"))
-                    })?;
+                self.set_robot_dynamics_with(
+                    i,
+                    true,
+                    d.max_force,
+                    d.damping,
+                    d.mass_floor,
+                    d.armature,
+                    d.floating,
+                )
+                .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` dynamics: {e}")))?;
             }
         }
         self.set_scenarios(

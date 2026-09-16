@@ -190,17 +190,22 @@ scene.set_robot_physics("ur", max_force=80.0, armature=0.2)
 Every link with geometry becomes a rigid body weighing what its model
 states (URDF `<inertial>`, or the catalog package's `PhysicsMassAPI`; a
 link without either gets its shape at the default density, at least
-`mass_floor` kg). Every joint becomes a force-capped servo — `max_force`
-is the cap (default the URDF effort limit), the joint's velocity limit its
-rated speed, `damping` the velocity loop's gain — following the planned
-motion, and the baked robot lane is the physical joint state read back
-every scan: a heavy payload makes the arm trail and droop, a collision
-stops it. `armature` is the reflected drive inertia per joint (a geared
-motor's rotor through the gear ratio squared; default 0.1 kg·m²), which
-also keeps a light wrist from drooping under the engine's impulse-solved
-motor. The base assembly stays on its stand or vehicle. Without a physics
-backend the declaration is inert, and a robot never declared is unchanged
-to the bit.
+`mass_floor` kg; a stated inertia tensor implausibly small for the link's
+mass and shape — some vendor USD files state microgram-scale tensors on
+kilogram links — is replaced by the shape's, which the impulse solver
+needs to keep the chain conditioned). Every joint becomes a force-capped
+servo — `max_force` is the cap (default the URDF effort limit, unless it
+is a "no limit" figure a hundred times the robot's weight), the joint's
+velocity limit its rated speed, `damping` the velocity loop's gain —
+following the planned motion, and the baked robot lane is the physical
+joint state read back every scan: a heavy payload makes the arm trail and
+droop, a collision stops it. `armature` is the reflected drive inertia
+per joint (a geared motor's rotor through the gear ratio squared; default
+0.1 kg·m² about a revolute joint, added to the link's tensor, and 1 kg
+along a prismatic one, added to its mass), which also keeps a light wrist
+from drooping under the engine's impulse-solved motor. The base assembly
+stays on its stand or vehicle. Without a physics backend the declaration
+is inert, and a robot never declared is unchanged to the bit.
 
 The position controls (`JointDelta`, `JointTarget`, `TcpDelta`) work on a
 dynamic robot as they do on a kinematic one — the drive rate-limits the
@@ -220,9 +225,12 @@ to hold; a position command (or `undrive`) hands the joint back to its
 servo, which brakes it at the cap and returns at the rated speed.
 
 Gravity compensation is a property of a robot's controller, not of the
-physics, so the simulator does not apply it on its own. The servo is a PI
-cascade like an industrial drive's and holds a load with no model
-knowledge; a torque interface whose firmware compensates is modelled by
+physics, so the simulator does not apply it on its own. The servo is the
+cascade of an industrial drive — the command's rate fed forward, a
+position loop on the error, a bounded integral trim for the last
+milliradians under load, the engine's motor as the velocity loop — and
+holds a load with no model knowledge; a torque interface whose firmware
+compensates is modelled by
 `Torque(gravity_compensation=True)`, which adds the model's gravity
 torque on top of the action every tick (never past the joint's cap), and
 the model's gravity torques are readable as an observation
@@ -237,8 +245,18 @@ A walking machine can be dynamic too: its legs stay the gait's kinematic
 mirrors (the walk is planned, not simulated — see [legged
 robots](legged.md)), and everything else the declaration covers — a head,
 a waist, the arms — is a servoed body riding the walk, with the gait's arm
-swing as its command. Torques reach those joints, never a leg. Tracking a
-moving part is not supported on a dynamic robot.
+swing as its command. Torques reach those joints, never a leg.
+
+A dynamic robot runs the same programs as a kinematic one. It tracks a
+moving part (the per-tick solve is what its motors are told), and a
+grasp means what it says: without a gripper drive declared, the part
+rides the hand — a mirror the FK places between the fingers, which it
+does not fight — until `detach` hands it back to physics with the hand's
+velocity. Declare a gripper drive (`set_gripper_drive`) and a grasp is a
+hold *declaration* instead: the part stays physics' own, the fingers'
+force and friction carry it or drop it, and `grasp_report` measures the
+slip; a motion planned during the hold sees the part as carried either
+way.
 
 ## Cost
 

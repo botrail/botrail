@@ -4129,6 +4129,13 @@
           ],
           "format": "double"
         },
+        "floating": {
+          "description": "The base's kind under physics: `true` a free rigid body, `false`\na mirror on its stand or vehicle, absent = derived by the bake.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "mass_floor": {
           "type": [
             "number",

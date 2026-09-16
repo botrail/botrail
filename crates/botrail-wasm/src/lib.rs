@@ -134,6 +134,20 @@ impl SessionHost for WasmHost {
         web_log(&format!("botrail-wasm: {message}"));
     }
 
+    /// The browser-only session bakes physics too: the whole cell, the
+    /// same engine the Python host serves.
+    fn physics(
+        &self,
+    ) -> Option<(
+        Box<dyn botrail_physics::PhysicsBackend>,
+        botrail_scene::rollout::PhysicsOptions,
+    )> {
+        Some((
+            Box::new(botrail_physics_rapier::RapierBackend::new()),
+            botrail_scene::rollout::PhysicsOptions::world(),
+        ))
+    }
+
     fn store_baked(&self, scene: &Scene, timeline: &botrail_scene::rollout::SequenceTimeline) {
         *self.baked.borrow_mut() = Some((scene.clone(), timeline.clone()));
     }

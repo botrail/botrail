@@ -6,7 +6,8 @@
 //! broadcast, Instant clock, stderr logging) plus the Python-facing sugar.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use botrail_kin::IkOptions;
@@ -58,6 +59,20 @@ pub struct SceneHub {
     /// Last successful rollout (pre-rollout snapshot + timeline), baked on
     /// demand by the studio's USD download.
     baked: Mutex<Option<(Scene, botrail_scene::rollout::SequenceTimeline)>>,
+    /// What the studio's physics toggle bakes under (`bt.studio(scene,
+    /// physics=)`): the whole cell by default; `None` serves the studio
+    /// without physics.
+    studio_physics: Mutex<Option<botrail_scene::rollout::PhysicsOptions>>,
+    /// The streaming bake in flight, if any (`start_bake`).
+    bake_stream: Mutex<Option<BakeStream>>,
+    /// This hub's own `Arc`, for the stream thread to hold.
+    self_weak: Weak<SceneHub>,
+}
+
+/// A streaming bake on its thread and the flag that ends it.
+struct BakeStream {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 impl SessionHost for SceneHub {
@@ -130,6 +145,112 @@ impl SessionHost for SceneHub {
         eprintln!("botrail: {message}");
     }
 
+    fn physics(
+        &self,
+    ) -> Option<(
+        Box<dyn botrail_physics::PhysicsBackend>,
+        botrail_scene::rollout::PhysicsOptions,
+    )> {
+        let options = self
+            .studio_physics
+            .lock()
+            .expect("studio physics mutex poisoned")
+            .clone()?;
+        Some((
+            Box::new(botrail_physics_rapier::RapierBackend::new()),
+            options,
+        ))
+    }
+
+    fn start_bake_stream(
+        &self,
+        names: &[String],
+        scenario: Option<&str>,
+        max_duration: Option<f64>,
+        physics: bool,
+    ) {
+        self.join_bake_stream();
+        let label = botrail_session::bake_label(names);
+        let backend = if physics || names.is_empty() {
+            let Some((backend, physics)) = self.physics() else {
+                botrail_session::emit_physics_refused(self, &label, scenario);
+                return;
+            };
+            Some((backend, physics))
+        } else {
+            None
+        };
+        let Some(hub) = self.self_weak.upgrade() else {
+            return;
+        };
+        let scenario: Option<String> = scenario
+            .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+            .map(str::to_string);
+        let mut scene = self.snapshot();
+        if let Some(name) = &scenario {
+            if let Err(e) = scene.apply_scenario(name) {
+                botrail_session::emit_physics_failed(
+                    self,
+                    &label,
+                    scenario.as_deref(),
+                    e.to_string(),
+                );
+                return;
+            }
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions::default();
+        if let Some(cap) = max_duration.filter(|cap| cap.is_finite() && *cap > 0.0) {
+            options.max_duration = cap;
+        }
+        let backend = backend.map(|(backend, physics)| {
+            options.physics = Some(physics);
+            backend
+        });
+        let names: Vec<String> = names.to_vec();
+        let pace = names.is_empty();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("botrail-bake-stream".to_string())
+            .spawn(move || {
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let result = botrail_session::run_bake_stream(
+                    &*hub,
+                    &scene,
+                    &refs,
+                    scenario.as_deref(),
+                    &options,
+                    backend,
+                    &|| flag.load(Ordering::Relaxed),
+                    &|seconds| std::thread::sleep(std::time::Duration::from_secs_f64(seconds)),
+                    pace,
+                );
+                if let Err(error) = result {
+                    botrail_session::emit_physics_failed(&*hub, &label, scenario.as_deref(), error);
+                }
+            })
+            .expect("spawn the bake stream thread");
+        *self.bake_stream.lock().expect("bake stream mutex poisoned") =
+            Some(BakeStream { stop, thread });
+    }
+
+    fn stop_bake_stream(&self) {
+        if let Some(stream) = self
+            .bake_stream
+            .lock()
+            .expect("bake stream mutex poisoned")
+            .as_ref()
+        {
+            stream.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// A batch bake asked for while a stream runs: the stream's last chunk
+    /// lands first, so the results reach the studio in order.
+    fn before_bake(&self) {
+        self.join_bake_stream();
+    }
+
     fn store_baked(&self, scene: &Scene, timeline: &botrail_scene::rollout::SequenceTimeline) {
         *self.baked.lock().expect("baked mutex poisoned") = Some((scene.clone(), timeline.clone()));
     }
@@ -140,16 +261,41 @@ impl SessionHost for SceneHub {
 }
 
 impl SceneHub {
-    pub fn new(scene: Scene) -> Self {
+    pub fn new(scene: Scene) -> Arc<Self> {
         let (tx, _) = broadcast::channel(64);
-        SceneHub {
+        Arc::new_cyclic(|weak| SceneHub {
             scene: Mutex::new(scene),
             tx,
             meshes: Mutex::new(Vec::new()),
             visual_roots: Mutex::new(std::collections::HashMap::new()),
             last_recording: Mutex::new(None),
             baked: Mutex::new(None),
+            studio_physics: Mutex::new(Some(botrail_scene::rollout::PhysicsOptions::world())),
+            bake_stream: Mutex::new(None),
+            self_weak: weak.clone(),
+        })
+    }
+
+    /// Ends a running streaming bake and waits for its last chunk.
+    fn join_bake_stream(&self) {
+        let stream = self
+            .bake_stream
+            .lock()
+            .expect("bake stream mutex poisoned")
+            .take();
+        if let Some(stream) = stream {
+            stream.stop.store(true, Ordering::Relaxed);
+            let _ = stream.thread.join();
         }
+    }
+
+    /// Sets what the studio's physics toggle means on this host (`None`
+    /// serves the studio without physics).
+    pub fn set_studio_physics(&self, options: Option<botrail_scene::rollout::PhysicsOptions>) {
+        *self
+            .studio_physics
+            .lock()
+            .expect("studio physics mutex poisoned") = options;
     }
 
     /// The last successful `recording_result` (serialized), for handshakes.
@@ -643,6 +789,7 @@ impl SceneHub {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_robot_dynamics(
         &self,
         robot: usize,
@@ -651,9 +798,12 @@ impl SceneHub {
         damping: Option<f64>,
         mass_floor: Option<f64>,
         armature: Option<f64>,
+        floating: Option<bool>,
     ) -> Result<(), SceneError> {
         self.with_scene(|scene| {
-            scene.set_robot_dynamics(robot, dynamic, max_force, damping, mass_floor, armature)
+            scene.set_robot_dynamics_with(
+                robot, dynamic, max_force, damping, mass_floor, armature, floating,
+            )
         })
     }
 
@@ -1150,6 +1300,30 @@ impl SceneHub {
         Ok((timeline, snapshot))
     }
 
+    /// Bakes `duration` seconds of the cell with no program at all
+    /// (design-world-physics.md W0), broadcasting the result to the
+    /// studio like a sequence bake. Returns the timeline plus the
+    /// snapshot it ran against.
+    pub fn simulate_physics(
+        &self,
+        duration: f64,
+        scenario: Option<&str>,
+        options: &botrail_scene::rollout::RolloutOptions,
+        backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
+        let mut snapshot = self.snapshot();
+        if let Some(scenario) = scenario {
+            snapshot
+                .apply_scenario(scenario)
+                .map_err(|e| e.to_string())?;
+        }
+        let timeline = botrail_session::simulate_physics_and_emit_with(
+            self, duration, scenario, options, backend,
+        )?;
+        Ok((timeline, snapshot))
+    }
+
     // ------------------------------------------------------------ usd export
 
     /// Bakes a trajectory into a USD animation layer at `path`: robot link
@@ -1327,6 +1501,7 @@ impl SceneHub {
                     // draw at the parked frame here.
                     vehicles: Vec::new(),
                     contacts: Vec::new(),
+                    physics: None,
                     robots: rec
                         .robots
                         .iter()

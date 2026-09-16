@@ -101,6 +101,111 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
   };
 }
 
+/** The 30 Hz lattice a streamed window was sampled on: the `n` points
+ * after `from` (the server's `timeline_window_msg`). */
+function windowTimes(from: number, n: number): number[] {
+  const first = Math.floor((from + 1e-9) * 30) + 1;
+  return Array.from({ length: n }, (_, k) => (first + k) / 30);
+}
+
+/** `poses` stretched to `n` samples: a one-pose (constant) track repeats,
+ * a full track passes through. */
+function expandPoses(poses: PoseMsg[], n: number): PoseMsg[] {
+  if (poses.length === n) return poses;
+  if (poses.length === 1) return Array.from({ length: n }, () => poses[0]);
+  return poses;
+}
+
+/** `flags` (empty = all visible) stretched to `n` samples. */
+function expandFlags(flags: boolean[] | null | undefined, n: number): boolean[] {
+  if (!flags || flags.length === 0) return Array.from({ length: n }, () => true);
+  return flags;
+}
+
+/** The tracks so far plus a streamed window (`bake_chunk`): every
+ * array grows by the window's samples, on the shared lattice. A track the
+ * window brings for the first time stood still until now, so it is padded
+ * back to the start with its first pose; a track the window drops (none
+ * should) keeps its last pose. `prev` null starts the tracks from the
+ * window. */
+export function appendTracks(
+  prev: PlaybackTracks | null,
+  chunk: TimelineMsg,
+  from: number,
+): PlaybackTracks {
+  const n = Math.max(
+    chunk.robots[0]?.trajectory.times.length ?? 0,
+    ...chunk.objects.map((o) => o.poses.length),
+    ...(chunk.vehicles ?? []).map((v) => v.poses.length),
+  );
+  const times = chunk.robots[0]?.trajectory.times.length
+    ? chunk.robots[0].trajectory.times
+    : windowTimes(from, n);
+  const prevTimes =
+    prev?.robots[0]?.trajectory.times ?? prev?.objects?.times ?? prev?.vehicles?.times ?? [];
+  const allTimes = [...prevTimes, ...times];
+  const m = prevTimes.length;
+
+  const robots = chunk.robots.map((r) => {
+    const before = prev?.robots.find((p) => p.name === r.name);
+    const traj = r.trajectory;
+    const old = before?.trajectory;
+    const linkPoses =
+      old?.link_poses && traj.link_poses
+        ? [...old.link_poses, ...traj.link_poses]
+        : traj.link_poses && !old
+          ? traj.link_poses
+          : old?.link_poses ?? traj.link_poses;
+    const base =
+      r.base && r.base.length > 0
+        ? [...(before?.base ?? []), ...r.base]
+        : before?.base;
+    return {
+      name: r.name,
+      trajectory: {
+        duration: chunk.duration,
+        times: allTimes,
+        joint_positions: [...(old?.joint_positions ?? []), ...traj.joint_positions],
+        link_poses: linkPoses,
+        object_tracks: null,
+      },
+      base: base && base.length > 0 ? base : undefined,
+    };
+  });
+
+  const grow = <T extends { name: string; poses: PoseMsg[]; visible?: boolean[] | null }>(
+    prevTracks: T[] | undefined,
+    tracks: T[],
+    withVisible: boolean,
+  ): T[] =>
+    tracks.map((track) => {
+      const before = prevTracks?.find((p) => p.name === track.name);
+      const now = expandPoses(track.poses, n);
+      const earlier = before
+        ? expandPoses(before.poses, m)
+        : Array.from({ length: m }, () => now[0]);
+      const grown = { ...track, poses: [...earlier, ...now] };
+      if (withVisible) {
+        const flagsBefore = before?.visible ?? [];
+        const flagsNow = track.visible ?? [];
+        grown.visible =
+          flagsBefore.length === 0 && flagsNow.length === 0
+            ? []
+            : [...expandFlags(flagsBefore, m), ...expandFlags(flagsNow, n)];
+      }
+      return grown;
+    });
+
+  const objects = grow(prev?.objects?.tracks, chunk.objects, true);
+  const vehicles = grow(prev?.vehicles?.tracks, chunk.vehicles ?? [], false);
+  return {
+    duration: chunk.duration,
+    robots,
+    objects: objects.length > 0 ? { times: allTimes, tracks: objects } : null,
+    vehicles: vehicles.length > 0 ? { times: allTimes, tracks: vehicles } : null,
+  };
+}
+
 /** Every robot's override + object poses at time `t` (clamped). */
 export function samplePlayback(
   tracks: PlaybackTracks,

@@ -277,8 +277,15 @@ export function sendSimulateSequence(
   name: string,
   scenario?: string,
   maxDuration?: number,
+  physics?: boolean,
 ): void {
-  rawSend({ type: "simulate_sequence", name, scenario, max_duration: maxDuration });
+  rawSend({
+    type: "simulate_sequence",
+    name,
+    scenario,
+    max_duration: maxDuration,
+    physics: physics || undefined,
+  });
 }
 
 /** Roll out several sequences as concurrent programs (scan order = list
@@ -287,8 +294,47 @@ export function sendSimulateSequences(
   names: string[],
   scenario?: string,
   maxDuration?: number,
+  physics?: boolean,
 ): void {
-  rawSend({ type: "simulate_sequences", names, scenario, max_duration: maxDuration });
+  rawSend({
+    type: "simulate_sequences",
+    names,
+    scenario,
+    max_duration: maxDuration,
+    physics: physics || undefined,
+  });
+}
+
+/** Bake `duration` seconds of the cell with no program at all under the
+ * host's physics — the world under gravity, nothing driven. The reply is
+ * a `sequence_result` labelled `physics`. */
+export function sendSimulatePhysics(duration: number, scenario?: string): void {
+  rawSend({ type: "simulate_physics", duration, scenario });
+}
+
+/** Start a streaming bake: the host rolls the programs `names` out (none:
+ * the cell with no program under gravity, paced to the clock) and sends
+ * `bake_chunk`s as the tracks grow, until the programs end, `sendStopBake`
+ * or the cap (the engine's 120 s when omitted). `physics` bakes under the
+ * host's physics. */
+export function sendStartBake(
+  names: string[],
+  scenario?: string,
+  maxDuration?: number,
+  physics = false,
+): void {
+  rawSend({
+    type: "start_bake",
+    names,
+    scenario,
+    max_duration: maxDuration,
+    physics,
+  });
+}
+
+/** End the streaming bake where it stands. */
+export function sendStopBake(): void {
+  rawSend({ type: "stop_bake" });
 }
 
 /** Bake the last simulated timeline as a usda layer; the reply

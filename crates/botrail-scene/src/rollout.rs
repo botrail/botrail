@@ -252,6 +252,24 @@ pub struct RolloutOptions {
     pub physics: Option<PhysicsOptions>,
 }
 
+/// Which residents a physics bake hands to the engine
+/// (design-world-physics.md §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhysicsScope {
+    /// Exactly what authoring marked: obstacles set dynamic
+    /// (`set_obstacle_physics`) and robots declared dynamic
+    /// (`set_robot_dynamics`). Everything else is a kinematic mirror.
+    #[default]
+    Declared,
+    /// The whole cell: every obstacle folds into a rigid unit by its name
+    /// hierarchy and part identity, and a unit is held fixed only when
+    /// authoring or identity says so (an explicit `dynamic = false`, a
+    /// device moving it by name, a walkable floor, an equipment part pin).
+    /// The rest is the engine's, a box on the floor included. Declared
+    /// bodies keep their word either way (`crate::physics_world`).
+    World,
+}
+
 /// How a physics bake steps: plain data — the backend itself is injected
 /// by the caller, so this stays cloneable options like everything else.
 #[derive(Debug, Clone)]
@@ -262,13 +280,71 @@ pub struct PhysicsOptions {
     pub substeps: u32,
     /// Gravity in m/s² (botrail is z-up).
     pub gravity: [f64; 3],
+    /// What the engine owns (default [`PhysicsScope::Declared`]).
+    pub scope: PhysicsScope,
+    /// A ground plane: a static half-space facing +z at this height, so
+    /// nothing falls forever. `None` (the declared default) leaves the
+    /// floor to the authoring, as before; [`PhysicsOptions::world`] puts
+    /// it at `z = 0`, where the studio draws the shop floor.
+    pub ground: Option<f64>,
+    /// Whether an equipment part pin (`structure.*`, `machine_tool*`,
+    /// `sensor.*`, …) holds a unit fixed under the world scope — bolted
+    /// down. Off, even the racks are loose.
+    pub anchored: bool,
+    /// Whether the dynamic robots' motors are on: `Some(true)` runs the
+    /// servo (design-rl-dynamics.md) on every joint, `Some(false)` switches
+    /// every motor off — the joints keep their travel limits and a viscous
+    /// drag, and the machine folds under gravity. `None` (the default)
+    /// reads it off the bake: powered when a program runs, unpowered in a
+    /// bake with no program at all (`Scene::simulate_physics_with`) — and
+    /// under the world scope robot by robot: powered where a program
+    /// drives the robot (a motion, ramp, policy, toolpath, track or grasp
+    /// of its), unpowered where none does, so the idle machine of a cell
+    /// folds while its neighbour works.
+    pub powered: Option<bool>,
+    /// Viscous drag of an unpowered joint, N·m·s/rad (prismatic joints
+    /// get a hundredfold, N·s/m). Measured (design-world-physics.md §2):
+    /// without it a 29-joint humanoid's arms swing for good; at 1–2 they
+    /// are quiet within a second.
+    pub passive_damping: f64,
 }
+
+/// Prismatic joints see the passive drag scaled by this (N·s/m per
+/// N·m·s/rad): a metre per second on a slide is a large motion.
+const PASSIVE_PRISMATIC_SCALE: f64 = 100.0;
+
+/// Penetration the collision checks of a physics bake forgive (m): the
+/// engine's contact slop (rapier's allowed linear error is a millimetre,
+/// a resting stack settles a few) plus the sink a carried part was picked
+/// up with. Five millimetres; a plan that passes closer than that under
+/// physics is as good as touching anyway.
+pub const PHYSICS_COLLISION_SLACK: f64 = 0.005;
+
+/// Force cap of an unpowered joint's drag motor: effectively unbounded,
+/// so the drag is the viscous law and never a stalled clamp.
+const PASSIVE_DRAG_CAP: f64 = 1.0e9;
 
 impl Default for PhysicsOptions {
     fn default() -> Self {
         PhysicsOptions {
             substeps: 4,
             gravity: [0.0, 0.0, -9.81],
+            scope: PhysicsScope::Declared,
+            ground: None,
+            anchored: true,
+            powered: None,
+            passive_damping: 1.0,
+        }
+    }
+}
+
+impl PhysicsOptions {
+    /// The world scope with its ground at `z = 0`.
+    pub fn world() -> Self {
+        PhysicsOptions {
+            scope: PhysicsScope::World,
+            ground: Some(0.0),
+            ..Default::default()
         }
     }
 }
@@ -692,6 +768,8 @@ pub struct SequenceTimeline {
     /// a physics bake is deterministic per machine and build, not the
     /// cross-platform bit-identity the kinematic bake guarantees.
     pub physics: Option<String>,
+    /// The scope that physics bake lowered (`None` without an engine).
+    pub physics_scope: Option<PhysicsScope>,
     /// One track per robot, in scene order.
     pub robots: Vec<RobotTrack>,
     /// Objects that were grasped at some point (everything else is static).
@@ -965,8 +1043,13 @@ impl SequenceTimeline {
                 let u = ((t - t0) / dt).clamp(0.0, last as f64);
                 let k = (u.floor() as usize).min(last.saturating_sub(1));
                 let frac = u - k as f64;
+                // A time on a sample is that sample, exactly — whether the
+                // clamp landed it at the span's last pose (a snapshot cut
+                // there) or it sits between two samples of a longer span.
                 if frac <= 1e-12 || k == last {
                     poses[k]
+                } else if frac >= 1.0 - 1e-12 {
+                    poses[k + 1]
                 } else {
                     let (a, b) = (&poses[k], &poses[k + 1]);
                     Isometry3::from_parts(
@@ -1427,6 +1510,61 @@ impl Scene {
         timeline.scenario = Some(scenario.to_string());
         Ok(timeline)
     }
+
+    /// Bakes `duration` seconds of the cell with **no program at all**:
+    /// the world under gravity — devices parked, robots holding their
+    /// pose — for a physics backend to settle, drop or collapse whatever
+    /// it owns (design-world-physics.md W0; the scope comes from
+    /// `options.physics`, [`PhysicsOptions::world`] for the whole cell).
+    /// Without a backend it is `duration` seconds of nothing, which is
+    /// still a valid, empty timeline.
+    pub fn simulate_physics_with(
+        &self,
+        duration: f64,
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Result<SequenceTimeline, SeqError> {
+        self.idle_rollout(duration, options, backend)?.run()
+    }
+
+    /// [`simulate_physics_with`](Self::simulate_physics_with) opened as a
+    /// live rollout: the world under gravity with no program, advanced a
+    /// tick at a time by the caller — a streaming bake, or a controller
+    /// driving the collapsed machines — and read at any tick as the
+    /// timeline so far ([`LiveRollout::timeline`]).
+    pub fn open_physics_rollout(
+        &self,
+        duration: f64,
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Result<LiveRollout, SeqError> {
+        let mut inner = self.idle_rollout(duration, options, backend)?;
+        inner.start()?;
+        Ok(LiveRollout {
+            inner,
+            control: None,
+        })
+    }
+
+    /// A rollout with no program that runs until `duration`.
+    fn idle_rollout(
+        &self,
+        duration: f64,
+        options: &RolloutOptions,
+        backend: Option<Box<dyn PhysicsBackend>>,
+    ) -> Result<Rollout, SeqError> {
+        if !(duration.is_finite() && duration > 0.0) {
+            return Err(SeqError::Validation {
+                step: None,
+                message: format!("duration must be positive, got {duration}"),
+            });
+        }
+        let mut options = options.clone();
+        options.max_duration = options.max_duration.max(duration);
+        let mut rollout = Rollout::new(self.clone(), Vec::new(), options, backend, Vec::new());
+        rollout.hold_until = Some(duration);
+        Ok(rollout)
+    }
 }
 
 /// Per-robot scan-loop state: the commanded joints, the in-flight move,
@@ -1747,6 +1885,23 @@ struct PhysicsRuntime {
     /// — a live rollout's contact observation (design-rl.md §3.3), in
     /// canonical body-id order so it reads the same every run.
     touching: Vec<TickContact>,
+    /// Robots whose base is a free rigid body: read back every tick into
+    /// the robot's base pose and its base track.
+    floating: Vec<FloatingBase>,
+}
+
+/// A floating robot's base body and its track-building state.
+struct FloatingBase {
+    robot: usize,
+    /// The base assembly's body (the topmost link with geometry).
+    id: botrail_physics::BodyId,
+    /// `body ← root`: where the model's root link sits in that body's
+    /// frame (a fixed offset — the chain between them never moves).
+    root_from_body: Isometry3<f64>,
+    /// The root pose after the previous tick.
+    last: Isometry3<f64>,
+    /// Whether an open `Sampled` span is accumulating the base's motion.
+    moving: bool,
 }
 
 /// One pair of bodies in contact at the end of a scan tick.
@@ -1780,6 +1935,11 @@ pub struct GraspHold {
     pub offset: Isometry3<f64>,
     pub start: f64,
     pub end: f64,
+    /// The arm and touch links the grasp named: what a plan started
+    /// during the hold attaches the part with, so the planner sees it
+    /// carried (physics keeps its pose the whole time).
+    pub group: Option<String>,
+    pub touch_links: Option<Vec<String>>,
 }
 
 struct DynamicBody {
@@ -1801,6 +1961,26 @@ struct DynamicBody {
     /// any kinematic mirror body until detach hands it back — with the
     /// carrier's velocity.
     owned: bool,
+    /// The other obstacles of this rigid unit (world scope): their index
+    /// and their fixed pose in the body's frame (`body ← member`). They
+    /// take the body's pose every tick and grow tracks of their own, so a
+    /// pallet's timber and a workpiece's display shell ride the collider.
+    members: Vec<(usize, Isometry3<f64>)>,
+    /// Whether the members are mid-`Sampled` while the root is carried by
+    /// an arm (the root's own track is the attach machinery's `Follow`).
+    ride_moving: bool,
+    /// The robot and link carrying this body when the bake started.
+    attached_to: Option<(usize, usize)>,
+    /// Attached to a dynamic robot: the body is dynamic and welded to its
+    /// carrying link's body, so its weight loads the arm. Neither
+    /// supplied nor read back — the FK (of the physical joints) places
+    /// it in the scene, and the attach machinery's `Follow` span is its
+    /// track.
+    welded: bool,
+    /// The self-collision group the body was lowered with, to return to
+    /// after a ride in a dynamic robot's hand (during which it is in the
+    /// robot's).
+    group: u32,
 }
 
 /// One kinematically mirrored body and the last pose supplied for it.
@@ -1817,12 +1997,18 @@ struct DrivenRt {
     /// A dynamic robot's servo on this joint: its rated speed; `None`
     /// for a finger drive's position spring.
     servo: Option<f64>,
-    /// The servo's integral of the command error (dynamics.rs).
-    integral: f64,
+    /// The previous tick's command, whose rate the servo feeds forward
+    /// (dynamics.rs).
+    prev_cmd: f64,
+    /// The servo's bounded integral trim (a velocity, dynamics.rs).
+    trim: f64,
     /// The joint's force cap (N·m, N) — what a raw torque is clipped to.
     cap: f64,
     /// Whether the engine currently holds this joint under a raw torque.
     torqued: bool,
+    /// An unpowered joint: no command, no servo — the motor is a viscous
+    /// drag at zero velocity and the joint goes where gravity takes it.
+    passive: bool,
 }
 
 /// One dynamic link's weight for the gravity-torque read-out: the mass
@@ -1832,6 +2018,54 @@ struct LinkMass {
     link: usize,
     mass: f64,
     com: Vector3<f64>,
+}
+
+/// The inertia tensor a dynamic link runs with: what the model states,
+/// unless that is implausibly small for the link's mass and shape — under
+/// [`crate::dynamics::INERTIA_FLOOR`] of the shape's tensor at the stated
+/// mass — in which case the shape's. (The Isaac Franka states 1e-6 kg·m²
+/// on its 2 kg links and 1e-7 on the hand; a maximal-coordinate solver
+/// then spins the hand off every finger impulse, and the fingers crawl as
+/// if they weighed 20 kg.) Returns whether the floor applied; a link with
+/// no shape keeps what it states.
+fn floored_inertia(
+    stated: &nalgebra::Matrix3<f64>,
+    mass: f64,
+    parts: &[(parry3d_f64::math::Pose, parry3d_f64::shape::SharedShape)],
+) -> (nalgebra::Matrix3<f64>, bool) {
+    let mut shape = botrail_collide::parts_mass_properties(parts, botrail_physics::DEFAULT_DENSITY);
+    if !(shape.mass() > 0.0 && mass > 0.0) {
+        return (*stated, false);
+    }
+    shape.set_mass(mass, true);
+    let i = shape.reconstruct_inertia_matrix();
+    let of_shape = nalgebra::Matrix3::new(
+        i.x_axis.x, i.y_axis.x, i.z_axis.x, i.x_axis.y, i.y_axis.y, i.z_axis.y, i.x_axis.z,
+        i.y_axis.z, i.z_axis.z,
+    );
+    if stated.trace() < crate::dynamics::INERTIA_FLOOR * of_shape.trace() {
+        (of_shape, true)
+    } else {
+        (*stated, false)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn floored_inertia_for_test(
+    stated: &nalgebra::Matrix3<f64>,
+    mass: f64,
+    parts: &[(parry3d_f64::math::Pose, parry3d_f64::shape::SharedShape)],
+) -> (nalgebra::Matrix3<f64>, bool) {
+    floored_inertia(stated, mass, parts)
+}
+
+/// Whether `BT_SERVO_DEBUG` (a comma list of driven-joint indices) names
+/// driven joint `k`: its servo then traces every tick under
+/// `BT_PHYS_DEBUG`.
+fn servo_debug(k: usize) -> bool {
+    std::env::var("BT_SERVO_DEBUG")
+        .map(|v| v.split(',').any(|s| s.trim() == k.to_string()))
+        .unwrap_or(false)
 }
 
 /// `raw` (an angle in (-π, π]) lifted onto the turn nearest `near`.
@@ -1857,6 +2091,55 @@ enum KinSource {
 fn phys_debug() -> bool {
     static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEBUG.get_or_init(|| std::env::var("BT_PHYS_DEBUG").is_ok())
+}
+
+/// One tick of a physics-owned track: a moving body adds its sample (and
+/// rests into a `Hold` when the engine puts it to sleep); a body that just
+/// moved wakes — the rest span open at `t - dt` is closed (or, on an empty
+/// track, a rest span from the start is written) and a `Sampled` span
+/// starts from the pose it left. Returns whether the body is moving after
+/// this tick.
+#[allow(clippy::too_many_arguments)]
+fn sample_span(
+    spans: &mut Vec<TrackSpan>,
+    last: Isometry3<f64>,
+    pose: Isometry3<f64>,
+    moving: bool,
+    moved: bool,
+    sleeping: bool,
+    t: f64,
+    dt: f64,
+) -> bool {
+    if moving {
+        match spans.last_mut() {
+            Some(TrackSpan::Sampled { poses, .. }) => poses.push(pose),
+            _ => unreachable!("moving physics body ends in a sampled span"),
+        }
+        if sleeping {
+            spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
+            return false;
+        }
+        true
+    } else if moved {
+        let since = t - dt;
+        match spans.last_mut() {
+            Some(open) => open.extend_to(since),
+            None if since > 0.0 => spans.push(TrackSpan::Hold {
+                t0: 0.0,
+                t1: since,
+                pose: last,
+            }),
+            None => {}
+        }
+        spans.push(TrackSpan::Sampled {
+            t0: since,
+            dt,
+            poses: vec![last, pose],
+        });
+        true
+    } else {
+        false
+    }
 }
 
 /// Linear + spherical-linear pose interpolation, for substep-granular
@@ -2185,6 +2468,13 @@ impl LiveRollout {
         self.inner.finish()
     }
 
+    /// The timeline so far, without closing the rollout: every track up
+    /// to this tick, a prefix of what `finish` will return. What a
+    /// streaming bake sends between ticks.
+    pub fn timeline(&self) -> SequenceTimeline {
+        self.inner.timeline_at()
+    }
+
     /// The world as it stands after the last tick.
     pub fn scene(&self) -> &Scene {
         &self.inner.world
@@ -2262,12 +2552,17 @@ impl LiveRollout {
 
     /// Applies a control's command: joint targets to the drive, or raw
     /// torques to a dynamic robot's joints.
-    pub fn apply_command(&mut self, robot: usize, command: crate::rl::Command) -> Result<(), SeqError> {
+    pub fn apply_command(
+        &mut self,
+        robot: usize,
+        command: crate::rl::Command,
+    ) -> Result<(), SeqError> {
         match command {
             crate::rl::Command::Joints(q) => self.inner.command_robot(robot, &q),
-            crate::rl::Command::Torque { torques, compensate } => {
-                self.inner.command_torque(robot, &torques, compensate)
-            }
+            crate::rl::Command::Torque {
+                torques,
+                compensate,
+            } => self.inner.command_torque(robot, &torques, compensate),
         }
     }
 
@@ -2502,7 +2797,13 @@ impl Rollout {
         let weights: Vec<(usize, f64, nalgebra::Point3<f64>)> = masses
             .iter()
             .filter(|m| m.robot == robot)
-            .map(|m| (m.link, m.mass, poses[m.link] * nalgebra::Point3::from(m.com)))
+            .map(|m| {
+                (
+                    m.link,
+                    m.mass,
+                    poses[m.link] * nalgebra::Point3::from(m.com),
+                )
+            })
             .collect();
         let mut out = vec![0.0; model.dof()];
         for (qi, &ji) in model.actuated_joints.iter().enumerate() {
@@ -2560,9 +2861,7 @@ impl Rollout {
             .find(|a| a.is_external())
             .map(|a| a.owned.clone())
         else {
-            return Err(self.live_err(format!(
-                "robot `{name}` is not driven; call drive first"
-            )));
+            return Err(self.live_err(format!("robot `{name}` is not driven; call drive first")));
         };
         for &(qi, tau) in torques {
             if qi >= dof {
@@ -2657,6 +2956,10 @@ struct Rollout {
     /// cargo, sinks) skip these; empty when `physics` is off, so the
     /// kinematic bake never changes. Populated by `init_physics`.
     dynamic_names: Vec<String>,
+    /// A bake with no program at all runs until this clock instead of
+    /// ending at once (`Scene::simulate_physics_with`): the world under
+    /// gravity, nothing choreographed.
+    hold_until: Option<f64>,
     /// Friction holds (attach on a driven gripper under physics),
     /// open and closed; the horn closes the stragglers.
     friction_holds: Vec<GraspHold>,
@@ -3730,6 +4033,7 @@ impl Rollout {
                 open_contacts: std::collections::HashMap::new(),
                 contacts: Vec::new(),
                 touching: Vec::new(),
+                floating: Vec::new(),
             }),
             friction_holds: Vec::new(),
             ticks: 0,
@@ -3741,6 +4045,7 @@ impl Rollout {
             lighting: crate::raster::Lighting::default(),
             render_decimate: None,
             dynamic_names: Vec::new(),
+            hold_until: None,
             objects,
             vehicles: Vec::new(),
             signals,
@@ -3776,6 +4081,7 @@ impl Rollout {
 
     fn finished(&self) -> bool {
         self.programs.iter().all(Program::finished)
+            && self.hold_until.is_none_or(|until| self.t + 1e-9 >= until)
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
@@ -3939,9 +4245,10 @@ impl Rollout {
                 };
                 match command {
                     crate::rl::Command::Joints(target) => self.command_robot(robot, &target)?,
-                    crate::rl::Command::Torque { torques, compensate } => {
-                        self.command_torque(robot, &torques, compensate)?
-                    }
+                    crate::rl::Command::Torque {
+                        torques,
+                        compensate,
+                    } => self.command_torque(robot, &torques, compensate)?,
                 }
                 self.policy_runs[k].steps += 1;
                 Ok(())
@@ -4069,24 +4376,110 @@ impl Rollout {
             step: None,
             message,
         };
-        // The engine-owned set. Disabled obstacles are outside collision
-        // everywhere, physics included.
-        let dynamic: Vec<String> = self
-            .world
-            .obstacles()
-            .iter()
-            .filter(|o| {
-                o.enabled
-                    && o.physics
-                        .as_ref()
-                        .is_some_and(|p| p.kind == BodyKind::Dynamic)
+        let opts = self.options.physics.clone().unwrap_or_default();
+        let world_scope = opts.scope == PhysicsScope::World;
+        // Under physics everything resting on something sits a little
+        // into it, and a part is picked up with that sink in its grasp:
+        // the plans of this bake forgive that much.
+        self.world.collision_slack = PHYSICS_COLLISION_SLACK;
+        // Motors on when a program runs, off in a bake with no program at
+        // all — and under the world scope robot by robot: on where a
+        // program drives the robot, off elsewhere, so the idle machine of
+        // a cell folds while its neighbour works — unless the options say
+        // otherwise for all of them.
+        let powered_robots: Vec<bool> = (0..self.world.robots().len())
+            .map(|r| {
+                opts.powered.unwrap_or_else(|| {
+                    if world_scope {
+                        self.program_drives(r)
+                    } else {
+                        !self.programs.is_empty()
+                    }
+                })
             })
-            .map(|o| o.name.clone())
+            .collect();
+        // Under the world scope every robot is dynamic: an undeclared one
+        // gets the declaration's defaults, read leniently (a model with
+        // no effort limits gets the default cap the plan reports).
+        if world_scope {
+            for r in 0..self.world.robots().len() {
+                if self.world.robot_dynamics(r).is_none() {
+                    let (dynamics, _) = crate::dynamics::resolve_dynamics(
+                        &self.world.robots()[r].model,
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
+                    )
+                    .map_err(|e| err(e.to_string()))?;
+                    self.world.install_robot_dynamics(r, dynamics);
+                }
+            }
+        }
+        let floating_robots: std::collections::HashSet<usize> = (0..self.world.robots().len())
+            .filter(|&r| crate::physics_world::robot_floating(&self.world, r, &opts))
+            .collect();
+        // A floating machine's vehicle is a planning device: its body
+        // obstacles (the massing footprint drawn around the machine) are
+        // not matter the machine can land on, so they stay out of the
+        // world. Walking is the gait's, and the gait has no physics yet.
+        let mut excluded_bodies: std::collections::HashSet<String> = Default::default();
+        for &r in &floating_robots {
+            let Some(mount) = self.world.robots()[r].mount.as_ref() else {
+                continue;
+            };
+            for device in self.world.devices() {
+                if let DeviceKind::Vehicle { body, .. } = &device.kind {
+                    if device.name == mount.device {
+                        excluded_bodies.extend(body.iter().cloned());
+                    }
+                }
+            }
+            for program in &self.programs {
+                for step in &program.flat {
+                    for action in &step.actions {
+                        if let Action::Device {
+                            device,
+                            command: crate::seq::DeviceCommand::Goto { .. },
+                        } = action
+                        {
+                            if *device == mount.device {
+                                return Err(err(format!(
+                                    "vehicle `{device}` cannot drive: robot `{}` floats under \
+                                     physics, and walking under physics is not supported yet \
+                                     (design-locomotion.md); bake it without a program, or \
+                                     set floating=False",
+                                    self.world.robots()[r].name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The engine-owned set: the declared bodies, or — in world scope —
+        // every rigid unit the derivation did not hold fixed
+        // (design-world-physics.md §3.2). Disabled obstacles are outside
+        // collision everywhere, physics included; a disabled member of a
+        // dynamic unit rides it without colliding.
+        let units: Vec<crate::physics_world::Unit> =
+            crate::physics_world::derive_units(&self.world, &opts)
+                .into_iter()
+                .filter(|u| u.kind == crate::physics_world::PlanKind::Dynamic)
+                .collect();
+        let dynamic: Vec<String> = units
+            .iter()
+            .flat_map(|u| {
+                u.members
+                    .iter()
+                    .map(|&i| self.world.obstacles()[i].name.clone())
+            })
             .collect();
         let dynamic_robots: Vec<usize> = (0..self.world.robots().len())
             .filter(|&r| self.world.robot_dynamics(r).is_some())
             .collect();
-        if dynamic.is_empty() && dynamic_robots.is_empty() {
+        if units.is_empty() && dynamic_robots.is_empty() {
             // Nothing for the engine to own: the timeline still names the
             // engine it ran under, but no world is built and no step runs.
             self.physics = Some(phys);
@@ -4115,19 +4508,33 @@ impl Rollout {
                 )));
             }
         }
-        // Lower the scene. Dynamic obstacles are the engine's (a grasped
-        // one starts as a kinematic mirror until its detach); every other
+        // Lower the scene. Dynamic units are the engine's (a grasped one
+        // starts as a kinematic mirror until its detach); every other
         // enabled obstacle and every robot link with geometry becomes a
         // *kinematic mirror* — its pose is supplied on change, so an axis
         // paddle, an advected box, a grasped part or a sweeping arm all
         // meet dynamic bodies with real contact velocities. An unmoved
         // mirror body is indistinguishable from static scenery.
-        let opts = self.options.physics.clone().unwrap_or_default();
         let mut desc = WorldDesc::new();
         desc.gravity = Vector3::new(opts.gravity[0], opts.gravity[1], opts.gravity[2]);
         let mut dynamics = Vec::new();
         let mut kinematics = Vec::new();
         let mut names = Vec::new();
+        // The ground: a static half-space facing up, so a cell authored
+        // without a floor slab still has a floor to land on.
+        if let Some(z) = opts.ground {
+            names.push("ground".to_string());
+            desc.bodies.push(BodyDesc {
+                kind: BodyKind::Static,
+                pose: Isometry3::translation(0.0, 0.0, z),
+                parts: vec![(
+                    parry3d_f64::math::Pose::identity(),
+                    parry3d_f64::shape::SharedShape::halfspace(parry3d_f64::math::Vector::Z),
+                )],
+                props: botrail_physics::BodyProps::default(),
+                group: 0,
+            });
+        }
         // A vehicle's body obstacles (its massing footprint, a chassis)
         // join the collision group of the robot riding it: a dynamic
         // link must not be shoved by the envelope drawn around itself —
@@ -4146,61 +4553,102 @@ impl Rollout {
                 }
             }
         }
-        for (i, o) in self.world.obstacles().iter().enumerate() {
-            if !o.enabled {
-                continue;
+        // Which dynamic unit each obstacle belongs to.
+        let mut unit_of: std::collections::HashMap<usize, usize> = Default::default();
+        for (k, unit) in units.iter().enumerate() {
+            for &i in &unit.members {
+                unit_of.insert(i, k);
             }
-            // Resolution fills the mass default from the part identity
-            // (`mass_kg`): a catalog workpiece knows what it weighs, so
-            // marking it dynamic needs no re-typing. Explicit `mass=`
-            // still wins; group identities are a later story — a group's
-            // mass is the whole subtree's.
-            let props = self.world.resolved_body_props(&o.name).unwrap_or_default();
-            let id = BodyId(desc.bodies.len() as u32);
-            names.push(o.name.clone());
-            if props.kind == BodyKind::Dynamic {
+        }
+        for (i, o) in self.world.obstacles().iter().enumerate() {
+            if let Some(&k) = unit_of.get(&i) {
+                let unit = &units[k];
+                if i != unit.frame {
+                    continue; // rides its unit's body
+                }
+                // One compound body in the frame member's pose: every
+                // enabled member's parts, placed by its pose relative to
+                // the frame; the members list carries the same offsets
+                // for the read-back.
+                let frame = o.pose;
                 let attached = self.world.attachment(&o.name).is_some();
+                let mut parts = Vec::new();
+                let mut members = Vec::new();
+                for &m in &unit.members {
+                    let member = &self.world.obstacles()[m];
+                    let offset = frame.inverse() * member.pose;
+                    if m != unit.frame {
+                        members.push((m, offset));
+                    }
+                    if member.enabled {
+                        let local = botrail_collide::to_parry_pose(&offset);
+                        for (part_pose, shape) in self.world.obstacle_colliders()[m].parts() {
+                            parts.push((local * *part_pose, shape.clone()));
+                        }
+                    }
+                }
+                let id = BodyId(desc.bodies.len() as u32);
+                names.push(unit.name.clone());
                 desc.bodies.push(BodyDesc {
                     kind: if attached {
                         BodyKind::Kinematic
                     } else {
                         BodyKind::Dynamic
                     },
-                    pose: o.pose,
-                    parts: self.world.obstacle_colliders()[i].parts().to_vec(),
-                    props,
+                    pose: frame,
+                    parts,
+                    props: unit.props.clone(),
                     group: 0,
                 });
                 dynamics.push(DynamicBody {
                     name: o.name.clone(),
                     index: i,
                     id,
-                    last_pose: o.pose,
-                    prev_pose: o.pose,
+                    last_pose: frame,
+                    prev_pose: frame,
                     moving: false,
                     owned: !attached,
+                    members,
+                    ride_moving: false,
+                    attached_to: self.world.attachment(&o.name).map(|a| (a.robot, a.link)),
+                    welded: false,
+                    group: 0,
                 });
-            } else {
-                desc.bodies.push(BodyDesc {
-                    kind: BodyKind::Kinematic,
-                    pose: o.pose,
-                    parts: self.world.obstacle_colliders()[i].parts().to_vec(),
-                    props,
-                    group: rider_group.get(&o.name).copied().unwrap_or(0),
-                });
-                kinematics.push(KinematicBody {
-                    source: KinSource::Obstacle(i),
-                    id,
-                    last_pose: o.pose,
-                });
+                continue;
             }
+            // A walkable floor that is out of collision (a slab the feet
+            // may stand on) is still a floor to the engine in world scope.
+            if !(o.enabled || (world_scope && o.walkable)) {
+                continue;
+            }
+            if excluded_bodies.contains(&o.name) {
+                continue;
+            }
+            let props = self.world.resolved_body_props(&o.name).unwrap_or_default();
+            let id = BodyId(desc.bodies.len() as u32);
+            names.push(o.name.clone());
+            desc.bodies.push(BodyDesc {
+                kind: BodyKind::Kinematic,
+                pose: o.pose,
+                parts: self.world.obstacle_colliders()[i].parts().to_vec(),
+                props,
+                group: rider_group.get(&o.name).copied().unwrap_or(0),
+            });
+            kinematics.push(KinematicBody {
+                source: KinSource::Obstacle(i),
+                id,
+                last_pose: o.pose,
+            });
         }
         let mut driven_rt: Vec<DrivenRt> = Vec::new();
         let mut link_masses: Vec<LinkMass> = Vec::new();
+        let mut floating_bases: Vec<FloatingBase> = Vec::new();
         // Welds for fixed-jointed finger links, collected per robot but
         // appended after EVERY robot's motored joints — the rollout
         // addresses motors as `joints[0..driven_rt.len()]`.
         let mut welds: Vec<botrail_physics::JointDesc> = Vec::new();
+        // Every robot's link bodies, for the attachment welds below.
+        let mut link_bodies: Vec<std::collections::HashMap<usize, BodyId>> = Vec::new();
         for (r, sr) in self.world.robots().iter().enumerate() {
             let model = &sr.model;
             // A gripper drive's joints (declared actuated + their mimic
@@ -4234,16 +4682,25 @@ impl Rollout {
                 Default::default();
             // A dynamic robot: every actuated joint (and every mimic
             // follower) is a driven joint, every link under one a dynamic
-            // body; what remains — the base assembly — stays a mirror.
+            // body; what remains — the base assembly — stays a mirror,
+            // unless the base floats (design-world-physics.md §3.3): then
+            // the whole machine is bodies, the base assembly welded into
+            // one free body the engine owns.
             let dynamics = self.world.robot_dynamics(r).cloned();
+            let floating = floating_robots.contains(&r);
             // A walking machine's legs are the gait's: kinematic mirrors
             // as ever, with no motor — the declaration covers the rest
-            // of the machine (a head, an arm, a waist).
-            let leg_q: Vec<usize> = self.robots[r]
-                .gait
-                .as_ref()
-                .map(|g| g.gait.leg_joints())
-                .unwrap_or_default();
+            // of the machine (a head, an arm, a waist). A floating
+            // walker has no gait to obey: its legs are joints like any.
+            let leg_q: Vec<usize> = if floating {
+                Vec::new()
+            } else {
+                self.robots[r]
+                    .gait
+                    .as_ref()
+                    .map(|g| g.gait.leg_joints())
+                    .unwrap_or_default()
+            };
             if let Some(dynamics) = &dynamics {
                 for (k, &ji) in model.actuated_joints.iter().enumerate() {
                     if leg_q.contains(&k) || driven_joints.iter().any(|(j, _)| *j == ji) {
@@ -4283,6 +4740,31 @@ impl Rollout {
                         finger_links.insert(l);
                     }
                 }
+                if floating {
+                    for l in 0..model.links.len() {
+                        finger_links.insert(l);
+                    }
+                }
+            }
+            // Unpowered: every motor is switched off. What is left on
+            // each joint is its travel limits and a viscous drag (the
+            // bearings and gears no drive is fighting), so the machine
+            // folds under gravity and comes to rest instead of ringing.
+            let powered = powered_robots[r];
+            if !powered && dynamics.is_some() {
+                for (ji, motor) in driven_joints.iter_mut() {
+                    let prismatic = crate::grasp::joint_kind(model, *ji)
+                        == botrail_physics::JointKind::Prismatic;
+                    *motor = botrail_physics::JointMotor {
+                        stiffness: 0.0,
+                        damping: if prismatic {
+                            opts.passive_damping * PASSIVE_PRISMATIC_SCALE
+                        } else {
+                            opts.passive_damping
+                        },
+                        max_force: PASSIVE_DRAG_CAP,
+                    };
+                }
             }
 
             let poses = self.world.link_poses_for(r);
@@ -4316,12 +4798,24 @@ impl Rollout {
                         let mut mp = match sr.model.links[link].inertial.as_ref() {
                             Some(inertial) => {
                                 let rotation = inertial.origin.rotation.to_rotation_matrix();
+                                let stated = rotation.matrix()
+                                    * inertial.inertia
+                                    * rotation.matrix().transpose();
+                                let (inertia, floored) =
+                                    floored_inertia(&stated, inertial.mass, parts);
+                                if floored && phys_debug() {
+                                    eprintln!(
+                                        "LOWER link `{}`: stated inertia (trace {:.2e} kg·m²) \
+                                         floored to its shape's at {:.3} kg",
+                                        sr.model.links[link].name,
+                                        stated.trace(),
+                                        inertial.mass
+                                    );
+                                }
                                 botrail_physics::MassProperties {
                                     mass: inertial.mass,
                                     com: inertial.origin.translation.vector,
-                                    inertia: rotation.matrix()
-                                        * inertial.inertia
-                                        * rotation.matrix().transpose(),
+                                    inertia,
                                 }
                             }
                             None => {
@@ -4341,9 +4835,8 @@ impl Rollout {
                                         shape.local_com.z,
                                     ),
                                     inertia: nalgebra::Matrix3::new(
-                                        i.x_axis.x, i.y_axis.x, i.z_axis.x,
-                                        i.x_axis.y, i.y_axis.y, i.z_axis.y,
-                                        i.x_axis.z, i.y_axis.z, i.z_axis.z,
+                                        i.x_axis.x, i.y_axis.x, i.z_axis.x, i.x_axis.y, i.y_axis.y,
+                                        i.z_axis.y, i.x_axis.z, i.y_axis.z, i.z_axis.z,
                                     ),
                                 }
                             }
@@ -4354,32 +4847,86 @@ impl Rollout {
                             mass: mp.mass,
                             com: mp.com,
                         });
-                        if let Some(pj) = sr.model.links[link].parent_joint {
+                        // The drive's reflected inertia, walking up from
+                        // the link to the nearest actuated joint (a mimic
+                        // follower's is its source's; a welded link — the
+                        // hand on its flange, a finger pad — carries the
+                        // drive that moves it, so the chain's inertias
+                        // stay within an order of each other: a light body
+                        // between heavy ones is what the iterative solver
+                        // cannot converge, measured as a ringing wrist).
+                        // A revolute drive's is added isotropically to the
+                        // tensor — on purpose: a tensor heavy about one
+                        // axis and featherweight about the others
+                        // ill-conditions the maximal-coordinate solver
+                        // (a 0.1 kg·m² axis-only armature on a 1e-5 wrist
+                        // link rang at 10 Hz), and a reflected inertia is
+                        // only ever felt about the joint axis once the
+                        // other axes are locked anyway. A prismatic
+                        // drive's is a mass along its axis, and adds to
+                        // the mass.
+                        let mut ancestor = Some(link);
+                        let mut drive: Option<(botrail_physics::JointKind, f64)> = None;
+                        while let Some(l) = ancestor {
+                            let Some(pj) = sr.model.links[l].parent_joint else {
+                                break;
+                            };
                             let joint = &sr.model.joints[pj];
-                            let armature = joint
+                            let source = joint
                                 .q_index
                                 .map(|_| pj)
-                                .or_else(|| joint.mimic.map(|m| m.source_joint))
-                                .and_then(|source| {
-                                    sr.model
-                                        .actuated_joints
-                                        .iter()
-                                        .position(|&j| j == source)
-                                })
-                                .map(|k| dynamics.servos[k].armature)
-                                .unwrap_or(0.0);
-                            if armature > 0.0 {
-                                // Isotropic on purpose: an inertia tensor
-                                // heavy about one axis and featherweight
-                                // about the others ill-conditions the
-                                // maximal-coordinate solver (measured: a
-                                // 0.1 kg·m² axis-only armature on a 1e-5
-                                // wrist link rang at 10 Hz), and a
-                                // reflected inertia is only ever felt
-                                // about the joint axis once the other
-                                // axes are locked by the joint anyway.
+                                .or_else(|| joint.mimic.map(|m| m.source_joint));
+                            if let Some(k) = source.and_then(|source| {
+                                sr.model.actuated_joints.iter().position(|&j| j == source)
+                            }) {
+                                drive = Some((
+                                    crate::grasp::joint_kind(
+                                        &sr.model,
+                                        sr.model.actuated_joints[k],
+                                    ),
+                                    dynamics.servos[k].armature,
+                                ));
+                                break;
+                            }
+                            ancestor = Some(joint.parent_link);
+                        }
+                        match drive {
+                            Some((botrail_physics::JointKind::Prismatic, armature))
+                                if armature > 0.0 =>
+                            {
+                                mp.mass += armature;
+                                // And the rotational conditioning of the
+                                // nearest revolute drive above it.
+                                let mut above = Some(link);
+                                while let Some(l) = above {
+                                    let Some(pj) = sr.model.links[l].parent_joint else {
+                                        break;
+                                    };
+                                    let joint = &sr.model.joints[pj];
+                                    let source = joint
+                                        .q_index
+                                        .map(|_| pj)
+                                        .or_else(|| joint.mimic.map(|m| m.source_joint));
+                                    if let Some(k) = source.and_then(|source| {
+                                        sr.model.actuated_joints.iter().position(|&j| j == source)
+                                    }) {
+                                        if crate::grasp::joint_kind(
+                                            &sr.model,
+                                            sr.model.actuated_joints[k],
+                                        ) != botrail_physics::JointKind::Prismatic
+                                        {
+                                            mp.inertia += dynamics.servos[k].armature
+                                                * nalgebra::Matrix3::identity();
+                                            break;
+                                        }
+                                    }
+                                    above = Some(joint.parent_link);
+                                }
+                            }
+                            Some((_, armature)) if armature > 0.0 => {
                                 mp.inertia += armature * nalgebra::Matrix3::identity();
                             }
+                            _ => {}
                         }
                         props.mass_properties = Some(mp);
                     } else {
@@ -4398,8 +4945,8 @@ impl Rollout {
                         } else {
                             dynamics.as_ref().map(|d| d.mass_floor).unwrap_or(0.0)
                         };
-                        let shape_mass = botrail_collide::parts_volume(parts)
-                            * botrail_physics::DEFAULT_DENSITY;
+                        let shape_mass =
+                            botrail_collide::parts_volume(parts) * botrail_physics::DEFAULT_DENSITY;
                         props.mass = Some(shape_mass.max(floor));
                         if dynamics.is_some() {
                             // A finger's weight counts toward the arm's
@@ -4451,7 +4998,8 @@ impl Rollout {
                 let joint = &model.joints[ji];
                 let Some(&child) = body_of.get(&joint.child_link) else {
                     return Err(err(format!(
-                        "driven joint `{}` moves a link with no collision geometry                          (`{}`) — a friction drive needs a real finger body",
+                        "driven joint `{}` moves a link with no collision geometry \
+                         (`{}`) — a friction drive needs a real finger body",
                         joint.name, model.links[joint.child_link].name
                     )));
                 };
@@ -4463,14 +5011,16 @@ impl Rollout {
                     }
                     let Some(pj) = model.links[cur].parent_joint else {
                         return Err(err(format!(
-                            "driven joint `{}` hangs under links with no collision                              geometry all the way to the root",
+                            "driven joint `{}` hangs under links with no collision \
+                             geometry all the way to the root",
                             joint.name
                         )));
                     };
                     let pjoint = &model.joints[pj];
                     if pjoint.q_index.is_some() || pjoint.mimic.is_some() {
                         return Err(err(format!(
-                            "driven joint `{}`: the geometry-less chain above it moves                              (`{}`) — give `{}` collision geometry",
+                            "driven joint `{}`: the geometry-less chain above it moves \
+                             (`{}`) — give `{}` collision geometry",
                             joint.name, pjoint.name, model.links[cur].name
                         )));
                     }
@@ -4500,9 +5050,11 @@ impl Rollout {
                     cmd,
                     last: cmd,
                     servo: servo_of.get(&ji).map(|s| s.max_velocity),
-                    integral: 0.0,
+                    prev_cmd: cmd,
+                    trim: 0.0,
                     cap: motor.max_force,
                     torqued: false,
+                    passive: !powered && dynamics.is_some(),
                 });
             }
 
@@ -4511,14 +5063,22 @@ impl Rollout {
             // bodies too — weld each to its nearest bodied ancestor so it
             // rides its knuckle. Without this they are free bodies and
             // simply fall out of the hand (the 2F-85 measured exactly
-            // that: pads dangling, knuckles doing the touching).
+            // that: pads dangling, knuckles doing the touching). On a
+            // floating machine the base assembly is welded the same way,
+            // and its topmost bodied link — the one with no bodied
+            // ancestor — is the free body the engine owns.
             let mut finger_order: Vec<usize> = finger_links.iter().copied().collect();
             finger_order.sort_unstable();
+            let mut base_body: Option<(usize, BodyId)> = None;
             for link in finger_order {
                 let Some(&child) = body_of.get(&link) else {
                     continue; // geometry-less frame, nothing to weld
                 };
                 let Some(pj) = model.links[link].parent_joint else {
+                    // The root link itself, with geometry.
+                    if floating {
+                        base_body = Some((link, child));
+                    }
                     continue;
                 };
                 if model.joints[pj].q_index.is_some() || model.joints[pj].mimic.is_some() {
@@ -4528,23 +5088,44 @@ impl Rollout {
                 let mut cur = model.joints[pj].parent_link;
                 let parent = loop {
                     if let Some(&id) = body_of.get(&cur) {
-                        break id;
+                        break Some(id);
                     }
                     let Some(ppj) = model.links[cur].parent_joint else {
-                        return Err(err(format!(
-                            "finger link `{}` hangs under links with no collision                              geometry all the way to the root",
-                            model.links[link].name
-                        )));
+                        break None; // rigid on the root, which has no body
                     };
                     let pjoint = &model.joints[ppj];
                     if pjoint.q_index.is_some() || pjoint.mimic.is_some() {
                         return Err(err(format!(
-                            "finger link `{}`: the geometry-less chain above it moves                              (`{}`) — give `{}` collision geometry",
+                            "finger link `{}`: the geometry-less chain above it moves \
+                             (`{}`) — give `{}` collision geometry",
                             model.links[link].name, pjoint.name, model.links[cur].name
                         )));
                     }
                     anchor = pjoint.origin * anchor;
                     cur = pjoint.parent_link;
+                };
+                let parent = match parent {
+                    Some(id) => id,
+                    None if floating => match base_body {
+                        // The first orphan is the base body; later ones
+                        // are welded to it by their FK offset (the chain
+                        // between them is fixed joints only).
+                        None => {
+                            base_body = Some((link, child));
+                            continue;
+                        }
+                        Some((base_link, base_id)) => {
+                            anchor = poses[base_link].inverse() * poses[link];
+                            base_id
+                        }
+                    },
+                    None => {
+                        return Err(err(format!(
+                            "finger link `{}` hangs under links with no collision \
+                             geometry all the way to the root",
+                            model.links[link].name
+                        )))
+                    }
                 };
                 welds.push(botrail_physics::JointDesc {
                     parent,
@@ -4561,6 +5142,77 @@ impl Rollout {
                     },
                 });
             }
+            if floating {
+                let Some((base_link, base_id)) = base_body else {
+                    return Err(err(format!(
+                        "robot `{}` cannot float: no link of its base assembly has \
+                         collision geometry",
+                        sr.name
+                    )));
+                };
+                floating_bases.push(FloatingBase {
+                    robot: r,
+                    id: base_id,
+                    root_from_body: poses[base_link].inverse() * poses[model.root_link],
+                    last: poses[model.root_link],
+                    moving: false,
+                });
+            }
+            link_bodies.push(body_of);
+        }
+        // An obstacle grasped before the bake starts, on a dynamic robot:
+        // welded to its carrying link's body (or the nearest bodied
+        // ancestor, through fixed joints), so its weight loads the arm
+        // and it rides the collapse as one more link. On a kinematic
+        // robot it stays the FK-supplied mirror it always was.
+        for body in &mut dynamics {
+            let Some((r, link)) = body.attached_to else {
+                continue;
+            };
+            if !dynamic_robots.contains(&r) {
+                continue;
+            }
+            let model = &self.world.robots()[r].model;
+            let grasp = self
+                .world
+                .attachment(&body.name)
+                .map(|a| a.grasp)
+                .expect("attached body has its attachment");
+            let mut anchor = grasp;
+            let mut cur = link;
+            let parent = loop {
+                if let Some(&id) = link_bodies[r].get(&cur) {
+                    break Some(id);
+                }
+                let Some(pj) = model.links[cur].parent_joint else {
+                    break None;
+                };
+                let pjoint = &model.joints[pj];
+                if pjoint.q_index.is_some() || pjoint.mimic.is_some() {
+                    break None;
+                }
+                anchor = pjoint.origin * anchor;
+                cur = pjoint.parent_link;
+            };
+            let Some(parent) = parent else {
+                continue; // no rigid body to weld to: the FK carries it
+            };
+            desc.bodies[body.id.0 as usize].kind = BodyKind::Dynamic;
+            body.welded = true;
+            welds.push(botrail_physics::JointDesc {
+                parent,
+                child: body.id,
+                kind: botrail_physics::JointKind::Fixed,
+                local1: anchor,
+                local2: Isometry3::identity(),
+                axis: nalgebra::Vector3::x(),
+                limits: None,
+                motor: botrail_physics::JointMotor {
+                    stiffness: 0.0,
+                    damping: 0.0,
+                    max_force: 0.0,
+                },
+            });
         }
         desc.joints.extend(welds);
         // Every conveyor becomes a surface-velocity zone, in device
@@ -4583,17 +5235,41 @@ impl Rollout {
                 });
             }
         }
+        // A welded object cannot be let go yet (its joint would have to be
+        // removed mid-bake): a program that detaches one is refused up
+        // front rather than silently kept in hand.
+        for body in dynamics.iter().filter(|b| b.welded) {
+            for program in &self.programs {
+                for step in &program.flat {
+                    for action in &step.actions {
+                        if let Action::Detach { object } = action {
+                            if *object == body.name {
+                                return Err(err(format!(
+                                    "`{object}` is grasped by a dynamic robot when the bake \
+                                     starts and welded to it under physics; detaching it in \
+                                     a program is not supported yet (design-world-physics.md \
+                                     W3) — release it before the bake, or keep the robot \
+                                     kinematic"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if phys_debug() {
             for (k, bd) in desc.bodies.iter().enumerate() {
                 eprintln!(
-                    "LOWER body {k} `{}`: kind={:?} group={} pos=({:+.3},{:+.3},{:+.3}) parts={}",
+                    "LOWER body {k} `{}`: kind={:?} group={} pos=({:+.3},{:+.3},{:+.3}) parts={} mass={:?} inertia_diag={:?}",
                     names.get(k).map(String::as_str).unwrap_or("?"),
                     bd.kind,
                     bd.group,
                     bd.pose.translation.x,
                     bd.pose.translation.y,
                     bd.pose.translation.z,
-                    bd.parts.len()
+                    bd.parts.len(),
+                    bd.props.mass_properties.as_ref().map(|m| m.mass).or(bd.props.mass),
+                    bd.props.mass_properties.as_ref().map(|m| (m.inertia[(0, 0)], m.inertia[(1, 1)], m.inertia[(2, 2)]))
                 );
             }
             for (k, j) in desc.joints.iter().enumerate() {
@@ -4612,16 +5288,21 @@ impl Rollout {
         phys.names = names;
         phys.driven = driven_rt;
         phys.link_masses = link_masses;
+        phys.floating = floating_bases;
         self.dynamic_names = dynamic;
         self.physics = Some(phys);
         // Dynamic robots bake tick by tick from the first tick: their
         // track is the engine's, never a move's pre-baked future.
         for r in dynamic_robots {
+            let floating = floating_robots.contains(&r);
             let rt = &mut self.robots[r];
             rt.dynamic = true;
             rt.tick_bake = true;
             rt.q_cmd = rt.q.clone();
-            if let Some(legs) = rt.gait.as_ref().map(|g| g.gait.leg_joints()) {
+            if floating {
+                // The base track is the engine's from the first tick.
+                rt.base.get_or_insert_with(Vec::new);
+            } else if let Some(legs) = rt.gait.as_ref().map(|g| g.gait.leg_joints()) {
                 for qi in legs {
                     rt.kinematic_joints[qi] = true;
                 }
@@ -4679,14 +5360,44 @@ impl Rollout {
         }
         // A grasped dynamic body is a mirror too, for now: the FK moves
         // it, and `prev_pose` keeps one tick of history so its detach can
-        // hand the carrier's velocity back to the engine.
+        // hand the carrier's velocity back to the engine. Its unit's
+        // members follow the ride in the scene, with tracks of their own
+        // (the root's track is the attach machinery's `Follow`).
+        let t = self.t;
         for body in &mut phys.dynamics {
             if body.owned {
                 continue;
             }
             let current = self.world.obstacles()[body.index].pose;
-            if current != body.last_pose {
+            let moved = current != body.last_pose;
+            if moved && !body.welded {
                 supplied.push((body.id, body.last_pose, current));
+            }
+            if !body.members.is_empty() && (moved || body.ride_moving) {
+                let members: Vec<(String, Isometry3<f64>)> = body
+                    .members
+                    .iter()
+                    .map(|(m, offset)| (self.world.obstacles()[*m].name.clone(), *offset))
+                    .collect();
+                let mut riding = body.ride_moving;
+                for (name, offset) in &members {
+                    if moved {
+                        self.world
+                            .set_obstacle_pose(name, current * offset)
+                            .expect("unit member exists");
+                    }
+                    riding = self.track_physics_sample(
+                        name,
+                        body.last_pose * offset,
+                        current * offset,
+                        body.ride_moving,
+                        moved,
+                        !moved,
+                        t,
+                        dt,
+                    );
+                }
+                body.ride_moving = riding;
             }
             body.prev_pose = body.last_pose;
             body.last_pose = current;
@@ -4767,33 +5478,60 @@ impl Rollout {
                         }
                     }
                     let cap = phys.driven[k].cap;
-                    phys.backend.set_joint_torque(k, Some(total.clamp(-cap, cap)));
+                    phys.backend
+                        .set_joint_torque(k, Some(total.clamp(-cap, cap)));
                     phys.driven[k].torqued = true;
-                    phys.driven[k].integral = 0.0;
+                    // The command follows the physical joint meanwhile
+                    // (advance_world), so the hand-back feeds no jump
+                    // forward.
+                    phys.driven[k].prev_cmd = model.joint_value(joint, rt.q_cmd.as_slice());
+                    phys.driven[k].trim = 0.0;
                     continue;
                 }
                 if phys.driven[k].torqued {
                     phys.backend.set_joint_torque(k, None);
                     phys.driven[k].torqued = false;
                 }
+                if phys.driven[k].passive {
+                    // Unpowered: the drag motor holds zero velocity as
+                    // its target and the joint goes where gravity takes
+                    // it, within its limits.
+                    phys.backend.set_joint_velocity(k, 0.0);
+                    continue;
+                }
                 phys.driven[k].cmd = model.joint_value(joint, rt.q_cmd.as_slice());
                 if let Some(rated) = phys.driven[k].servo {
-                    // The position loop (dynamics.rs): PI on the command
-                    // error → approach velocity, at most the rated speed
-                    // (the integral is wound back whenever the clamp
-                    // holds); the engine's motor closes the velocity loop
-                    // under the force cap.
+                    // The position loop (dynamics.rs): the command's own
+                    // rate fed forward, plus the approach gain times the
+                    // command error, plus a bounded integral trim for
+                    // the solver's sag under load — clamped to the rated
+                    // speed; the engine's motor closes the velocity loop
+                    // under the force cap. The trim neither winds while
+                    // the clamp holds nor past its authority.
                     let d = &mut phys.driven[k];
                     let error = d.cmd - d.last;
-                    let mut integral = d.integral + error * dt;
-                    let raw = crate::dynamics::APPROACH_GAIN * error
-                        + crate::dynamics::INTEGRAL_GAIN * integral;
+                    let feedforward = ((d.cmd - d.prev_cmd) / dt).clamp(-rated, rated);
+                    d.prev_cmd = d.cmd;
+                    let authority =
+                        if model.joints[joint].joint_type == botrail_model::JointType::Prismatic {
+                            crate::dynamics::TRIM_AUTHORITY_PRISMATIC
+                        } else {
+                            crate::dynamics::TRIM_AUTHORITY_REVOLUTE
+                        }
+                        .min(rated);
+                    let trim = (d.trim + crate::dynamics::TRIM_GAIN * error * dt)
+                        .clamp(-authority, authority);
+                    let raw = feedforward + crate::dynamics::APPROACH_GAIN * error + trim;
                     let velocity = raw.clamp(-rated, rated);
-                    if velocity != raw {
-                        integral = (velocity - crate::dynamics::APPROACH_GAIN * error)
-                            / crate::dynamics::INTEGRAL_GAIN;
+                    if velocity == raw {
+                        d.trim = trim;
                     }
-                    d.integral = integral;
+                    if phys_debug() && servo_debug(k) {
+                        eprintln!(
+                            "SERVO k={k} t={:.3} cmd={:+.5} last={:+.5} err={:+.5} ff={:+.4} trim={:+.4} v={:+.4} rated={rated} cap={}",
+                            self.t, d.cmd, d.last, error, feedforward, d.trim, velocity, d.cap
+                        );
+                    }
                     phys.backend.set_joint_velocity(k, velocity);
                     continue;
                 }
@@ -4857,7 +5595,9 @@ impl Rollout {
                 // A gait baked this tick already (legs, and the arms as
                 // they stood before the step): the read-back is the
                 // tick's truth, so it takes that sample's place.
-                if rt.times.len() > 1 && rt.times.last().is_some_and(|last| (last - t).abs() <= 1e-9) {
+                if rt.times.len() > 1
+                    && rt.times.last().is_some_and(|last| (last - t).abs() <= 1e-9)
+                {
                     rt.times.pop();
                     rt.positions.pop();
                     rt.velocities.pop();
@@ -4873,7 +5613,23 @@ impl Rollout {
                 rt.append_waypoint(t, q, velocity);
             }
         }
+        // Floating bases: the base body's pose, taken back through the
+        // fixed offset to the model's root, becomes the robot's base pose
+        // (the FK re-runs on it) and a sample of its base track.
         let t = self.t;
+        for fb in &mut phys.floating {
+            let body = phys.backend.body_pose(fb.id);
+            let sleeping = phys.backend.is_sleeping(fb.id);
+            let root = body * fb.root_from_body;
+            let moved = (root.translation.vector - fb.last.translation.vector).norm() > 1e-6
+                || root.rotation.angle_to(&fb.last.rotation) > 1e-6;
+            if moved {
+                self.world.set_robot_base_pose_for(fb.robot, root);
+            }
+            let spans = self.robots[fb.robot].base.get_or_insert_with(Vec::new);
+            fb.moving = sample_span(spans, fb.last, root, fb.moving, moved, sleeping, t, dt);
+            fb.last = root;
+        }
         for body in &mut phys.dynamics {
             if !body.owned {
                 // The FK owns its pose and the attach machinery its track
@@ -4882,41 +5638,41 @@ impl Rollout {
             }
             let pose = phys.backend.body_pose(body.id);
             let sleeping = phys.backend.is_sleeping(body.id);
+            let members: Vec<(String, Isometry3<f64>)> = body
+                .members
+                .iter()
+                .map(|(m, offset)| (self.world.obstacles()[*m].name.clone(), *offset))
+                .collect();
             if pose != body.last_pose {
                 self.world
                     .set_obstacle_pose(&body.name, pose)
                     .expect("dynamic obstacle exists");
+                for (name, offset) in &members {
+                    self.world
+                        .set_obstacle_pose(name, pose * offset)
+                        .expect("unit member exists");
+                }
             }
             let moved = (pose.translation.vector - body.last_pose.translation.vector).norm() > 1e-6
                 || pose.rotation.angle_to(&body.last_pose.rotation) > 1e-6;
-            if body.moving {
-                let track = self
-                    .objects
-                    .iter_mut()
-                    .find(|tr| tr.name == body.name)
-                    .expect("moving body has a track");
-                match track.spans.last_mut() {
-                    Some(TrackSpan::Sampled { poses, .. }) => poses.push(pose),
-                    _ => unreachable!("moving physics body ends in a sampled span"),
-                }
-                if sleeping {
-                    track.spans.push(TrackSpan::Hold { t0: t, t1: t, pose });
-                    body.moving = false;
-                }
-            } else if moved {
-                // Wake: close whatever rest span is open at `t - dt` and
-                // start sampling from the pose the body left.
-                let track = self.object_track_at(&body.name, body.last_pose, t - dt);
-                if let Some(open) = track.spans.last_mut() {
-                    open.extend_to(t - dt);
-                }
-                track.spans.push(TrackSpan::Sampled {
-                    t0: t - dt,
+            // The root and its members share one motion state: they are
+            // one rigid body, sampled and put to rest together.
+            let was_moving = body.moving;
+            let mut moving = was_moving;
+            let root = (body.name.clone(), Isometry3::identity());
+            for (name, offset) in std::iter::once(&root).chain(members.iter()) {
+                moving = self.track_physics_sample(
+                    name,
+                    body.last_pose * offset,
+                    pose * offset,
+                    was_moving,
+                    moved,
+                    sleeping,
+                    t,
                     dt,
-                    poses: vec![body.last_pose, pose],
-                });
-                body.moving = true;
+                );
             }
+            body.moving = moving;
             body.prev_pose = body.last_pose;
             body.last_pose = pose;
         }
@@ -4973,10 +5729,43 @@ impl Rollout {
         self.physics = Some(phys);
     }
 
+    /// One tick of a physics-owned obstacle's track: a moving body adds
+    /// its sample (and rests into a `Hold` when the engine puts it to
+    /// sleep); a body that just moved wakes — the rest span open at
+    /// `t - dt` is closed and a `Sampled` span starts from the pose it
+    /// left. Returns whether the body is moving after this tick.
+    #[allow(clippy::too_many_arguments)]
+    fn track_physics_sample(
+        &mut self,
+        name: &str,
+        last: Isometry3<f64>,
+        pose: Isometry3<f64>,
+        moving: bool,
+        moved: bool,
+        sleeping: bool,
+        t: f64,
+        dt: f64,
+    ) -> bool {
+        if !moving && !moved {
+            return false;
+        }
+        let track = self.object_track_at(name, last, t - dt);
+        sample_span(&mut track.spans, last, pose, moving, moved, sleeping, t, dt)
+    }
+
     /// Grasp handoff for a physics-dynamic obstacle: the arm owns the
     /// pose now, so the engine's body turns kinematic and is supplied the
     /// FK ride like any mirror body (design-physics.md §3).
     fn physics_attach(&mut self, object: &str) {
+        // In a dynamic robot's hand the mirror joins the robot's
+        // self-collision group: an immovable body between servoed
+        // fingers would jam the arm otherwise.
+        let carrier_group = self
+            .world
+            .attachment(object)
+            .map(|a| a.robot)
+            .filter(|&r| self.robots[r].dynamic)
+            .map(|r| r as u32 + 1);
         let Some(phys) = self.physics.as_mut() else {
             return;
         };
@@ -4985,9 +5774,13 @@ impl Rollout {
         };
         body.owned = false;
         body.moving = false;
+        body.ride_moving = false;
         body.prev_pose = body.last_pose;
         phys.backend
             .set_body_kind(body.id, botrail_physics::BodyKind::Kinematic, None);
+        if let Some(group) = carrier_group {
+            phys.backend.set_body_group(body.id, group);
+        }
     }
 
     /// Release handoff: the engine takes the pose back — seeded with the
@@ -5016,8 +5809,10 @@ impl Rollout {
             .unwrap_or_else(Vector3::zeros);
         body.owned = true;
         body.moving = false;
+        body.ride_moving = false;
         body.prev_pose = pose;
         body.last_pose = pose;
+        phys.backend.set_body_group(body.id, body.group);
         phys.backend.set_body_kind(
             body.id,
             botrail_physics::BodyKind::Dynamic,
@@ -5631,6 +6426,11 @@ impl Rollout {
                             .map(|o| o.name.clone()),
                     );
                 }
+                // A physics-dynamic part touching the rider is the
+                // engine's business — a lift's platform takes a pallet up
+                // by contact, a deck load rides by friction. Contact is
+                // the mechanism there, not an aisle fault.
+                skip.extend(self.dynamic_names.iter().cloned());
                 if let Some((part, obstacle)) = self
                     .world
                     .rider_obstacle_contacts(r, &skip)
@@ -5870,13 +6670,17 @@ impl Rollout {
             // Warm start from what the arm did last tick plus this tick's
             // nominal increment: the solve then only absorbs one scan
             // period of part motion (and joints the offset cannot touch —
-            // the gripper, the other arm — stay where they are).
+            // the gripper, the other arm — stay where they are). A
+            // dynamic robot's "last tick" is its last command: the solve
+            // is what its motors are told, the physical joints follow
+            // through the servo and are read back after the step.
+            let stand: &[f64] = if rt.dynamic { &rt.q_cmd } else { &rt.q };
             let seed: Vec<f64> = (0..dof)
                 .map(|qi| {
                     if joints.contains(&qi) {
-                        rt.q[qi] + (rt.q_nom[qi] - rt.q_nom_prev[qi])
+                        stand[qi] + (rt.q_nom[qi] - rt.q_nom_prev[qi])
                     } else {
-                        rt.q[qi]
+                        stand[qi]
                     }
                 })
                 .collect();
@@ -5908,10 +6712,22 @@ impl Rollout {
                     ),
                 });
             }
-            self.robots[r].q = result.q;
+            let rt = &mut self.robots[r];
+            if rt.dynamic {
+                for &qi in &joints {
+                    rt.q_cmd[qi] = result.q[qi];
+                }
+            } else {
+                rt.q = result.q;
+            }
         }
         let rt = &mut self.robots[r];
         rt.q_nom_prev = rt.q_nom.clone();
+        if rt.dynamic {
+            // The command is set; the read-back after the step bakes the
+            // tick, as on every tick of a dynamic robot.
+            return Ok(());
+        }
         self.world
             .set_joint_positions_for(r, rt.q.clone())
             .expect("solved q has robot DOF");
@@ -6071,18 +6887,19 @@ impl Rollout {
             .find(|o| o.name == object)
             .map(|o| o.pose)
             .ok_or_else(|| err(format!("unknown obstacle `{object}`")))?;
-        if self.robots[r].dynamic {
-            return Err(err(format!(
-                "robot `{}` is dynamic: tracking a part is not supported on a dynamic robot",
-                model.name
-            )));
-        }
         let rt = &mut self.robots[r];
-        // The tracked arm's nominal re-bases onto where it stands; the
-        // other arm's nominal is its own driver's business.
+        // The tracked arm's nominal re-bases onto where it stands — on a
+        // dynamic robot onto its command, the servo's lag being no part
+        // of the plan; the other arm's nominal is its own driver's
+        // business.
+        let stand = if rt.dynamic {
+            rt.q_cmd.clone()
+        } else {
+            rt.q.clone()
+        };
         for &qi in &joints {
-            rt.q_nom[qi] = rt.q[qi];
-            rt.q_nom_prev[qi] = rt.q[qi];
+            rt.q_nom[qi] = stand[qi];
+            rt.q_nom_prev[qi] = stand[qi];
         }
         let program = self.current;
         rt.tracking.push(TrackLatch {
@@ -6132,7 +6949,7 @@ impl Rollout {
         let rt = &mut self.robots[r];
         let latch = rt.tracking.remove(index);
         for qi in latch.joints {
-            rt.q_nom[qi] = rt.q[qi];
+            rt.q_nom[qi] = if rt.dynamic { rt.q_cmd[qi] } else { rt.q[qi] };
         }
         Ok(())
     }
@@ -7090,6 +7907,34 @@ impl Rollout {
 
     /// Resolves an action's robot reference; validation already vetted it,
     /// so failures here are defensive.
+    /// Whether any program fires an action that drives robot `r` — a
+    /// motion it owns, a ramp, policy or toolpath addressed to it, a track
+    /// or a grasp by it. What switches its motors on in a world bake
+    /// (`PhysicsOptions::powered` unset): a robot no program moves is
+    /// unpowered and folds, whatever its neighbours are doing.
+    fn program_drives(&self, r: usize) -> bool {
+        self.programs
+            .iter()
+            .flat_map(|p| p.flat.iter())
+            .flat_map(|s| s.actions.iter())
+            .any(|action| match action {
+                Action::StartMotion { motion } => self
+                    .world
+                    .motions()
+                    .iter()
+                    .any(|m| &m.name == motion && m.robot == r),
+                Action::StartRamp { robot, .. }
+                | Action::Policy { robot, .. }
+                | Action::Attach { robot, .. }
+                | Action::Track { robot, .. }
+                | Action::Untrack { robot, .. }
+                | Action::StartToolpath { robot, .. } => {
+                    self.world.resolve_seq_robot(robot) == Ok(r)
+                }
+                _ => false,
+            })
+    }
+
     fn action_robot(&self, robot: &Option<String>) -> Result<usize, SeqError> {
         self.world
             .resolve_seq_robot(robot)
@@ -7145,14 +7990,41 @@ impl Rollout {
                     .set_joint_positions_for(owner, self.robots[owner].q.clone())
                     .map_err(|e| err(e.to_string()))?;
                 let limits = crate::motion::traj_limits(&self.world.robots()[owner].model);
-                let planned = self
-                    .world
-                    .plan_motion(motion, &self.options.plan, &limits)
-                    .map_err(|e| SeqError::PlanFailed {
-                        step: self.cur_step(),
-                        name: self.cur_step_name(),
-                        message: e.to_string(),
-                    })?;
+                // A part held by friction rides the hand in the planner's
+                // eyes: attached at its current offset for the plan — its
+                // touch links allowed, its sweep checked — and a free body
+                // again after; physics keeps its pose the whole time.
+                let held: Vec<GraspHold> = self
+                    .friction_holds
+                    .iter()
+                    .filter(|h| h.robot == owner && h.end.is_nan())
+                    .cloned()
+                    .collect();
+                for hold in &held {
+                    let link = self.world.robots()[owner].model.links[hold.link]
+                        .name
+                        .clone();
+                    self.world
+                        .attach_obstacle_in_group(
+                            owner,
+                            hold.group.as_deref(),
+                            &hold.object,
+                            Some(&link),
+                            hold.touch_links.as_deref(),
+                        )
+                        .map_err(|e| err(format!("`{}` in hand for the plan: {e}", hold.object)))?;
+                }
+                let planned = self.world.plan_motion(motion, &self.options.plan, &limits);
+                for hold in &held {
+                    self.world
+                        .detach_obstacle(&hold.object)
+                        .expect("attached for the plan just now");
+                }
+                let planned = planned.map_err(|e| SeqError::PlanFailed {
+                    step: self.cur_step(),
+                    name: self.cur_step_name(),
+                    message: e.to_string(),
+                })?;
                 let traj = planned.trajectory;
                 // The joints this motion drives — its arm's, or every
                 // joint — and the arm's name for the timeline lane.
@@ -7540,15 +8412,18 @@ impl Rollout {
                 self.world
                     .set_joint_positions_for(r, self.robots[r].q.clone())
                     .map_err(|e| err(e.to_string()))?;
-                // On a driven gripper under physics, attach is a HOLD
-                // DECLARATION, not a weld: the object stays a dynamic
+                // On a declared gripper drive under physics, attach is a
+                // HOLD DECLARATION, not a weld: the object stays a dynamic
                 // body and friction carries it (or fails to — that is
                 // the point). The declaration records the intent the
-                // report measures slip against.
-                let friction = self
-                    .physics
-                    .as_ref()
-                    .is_some_and(|p| p.driven.iter().any(|d| d.robot == r))
+                // report measures slip against. Without a drive — a
+                // dynamic robot under the world scope, its fingers servos
+                // like any joint — attach means what it says: the part is
+                // in hand, and rides the hand as a mirror until detach
+                // hands it back (a runtime weld that loads the arm is a
+                // later refinement, design-world-physics.md W4).
+                let friction = self.physics.is_some()
+                    && self.world.gripper_drive(r).is_some()
                     && self.dynamic_names.iter().any(|n| n == object);
                 if friction {
                     let model = &self.world.robots()[r].model;
@@ -7579,6 +8454,8 @@ impl Rollout {
                         offset,
                         start: self.t,
                         end: f64::NAN,
+                        group: group.clone(),
+                        touch_links: touch_links.clone(),
                     });
                     // Grasping the tracked part ends the chase here too.
                     self.freeze_tracks_on(r, object, anchor);
@@ -8018,24 +8895,40 @@ impl Rollout {
         while !self.policy_runs.is_empty() {
             self.finish_policy(0);
         }
+        self.timeline_at()
+    }
+
+    /// The timeline as the bake stands at this tick, without ending it:
+    /// every track cloned and closed at the clock, the engine's open
+    /// touches closed there too. `finish` is this once the policy runs
+    /// are wound up; a streaming bake sends it as it goes, and each
+    /// snapshot is a prefix of the next (the tracks only grow).
+    fn timeline_at(&self) -> SequenceTimeline {
         let duration = self.t;
         let names: Vec<String> = self.world.robots().iter().map(|r| r.name.clone()).collect();
         let robots = self
             .robots
-            .into_iter()
+            .iter()
             .zip(names)
-            .map(|(mut rt, name)| {
-                let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
-                rt.append_waypoint(duration, q, zeros);
+            .map(|(rt, name)| {
+                let mut times = rt.times.clone();
+                let mut positions = rt.positions.clone();
+                let mut velocities = rt.velocities.clone();
+                // The horn: hold the last configuration to the end.
+                if times.last().is_some_and(|last| duration > last + 1e-9) {
+                    times.push(duration);
+                    positions.push(rt.q.clone());
+                    velocities.push(vec![0.0; rt.q.len()]);
+                }
                 RobotTrack {
                     name,
                     trajectory: JointTrajectory {
-                        times: rt.times,
-                        positions: rt.positions,
-                        velocities: rt.velocities,
+                        times,
+                        positions,
+                        velocities,
                     },
-                    moves: rt.moves,
-                    planned: rt.planned,
+                    moves: rt.moves.clone(),
+                    planned: rt.planned.clone(),
                     footfalls: rt
                         .gait
                         .as_ref()
@@ -8060,11 +8953,15 @@ impl Rollout {
                         .as_ref()
                         .map(|g| g.pitches.clone())
                         .unwrap_or_default(),
-                    rise: rt.gait.map(|g| g.rises).unwrap_or_default(),
+                    rise: rt
+                        .gait
+                        .as_ref()
+                        .map(|g| g.rises.clone())
+                        .unwrap_or_default(),
                     // The cycle usually ends parked: close a travelling span
                     // at its own end and rest there, rather than extending it
                     // to the horn and driving off the timeline.
-                    base: rt.base.map(|mut spans| {
+                    base: rt.base.clone().map(|mut spans| {
                         match spans.last() {
                             Some(span @ (TrackSpan::Linear { .. } | TrackSpan::Pivot { .. })) => {
                                 let (_, end) = span.range();
@@ -8090,18 +8987,26 @@ impl Rollout {
                 }
             })
             .collect();
-        for track in self.objects.iter_mut().chain(self.vehicles.iter_mut()) {
+        let mut objects = self.objects.clone();
+        let mut vehicles = self.vehicles.clone();
+        for track in objects.iter_mut().chain(vehicles.iter_mut()) {
             if let Some(open) = track.spans.last_mut() {
                 open.set_end(duration);
             }
         }
-        crate::wheels::animate(&self.world, &mut self.objects);
+        crate::wheels::animate(&self.world, &mut objects);
         // Friction holds still open at the horn were held to the end.
-        for hold in &mut self.friction_holds {
-            if hold.end.is_nan() {
-                hold.end = duration;
-            }
-        }
+        let grasps = self
+            .friction_holds
+            .iter()
+            .map(|hold| {
+                let mut hold = hold.clone();
+                if hold.end.is_nan() {
+                    hold.end = duration;
+                }
+                hold
+            })
+            .collect();
         SequenceTimeline {
             duration,
             sequences: self
@@ -8111,28 +9016,46 @@ impl Rollout {
                 .collect(),
             scenario: None,
             physics: self.physics.as_ref().map(|p| p.backend.name().to_string()),
+            physics_scope: self.physics.as_ref().map(|_| {
+                self.options
+                    .physics
+                    .as_ref()
+                    .map(|p| p.scope)
+                    .unwrap_or_default()
+            }),
             robots,
-            objects: self.objects,
-            vehicles: self.vehicles,
-            signals: self.signals,
-            step_spans: self.step_spans,
-            branches: self.branches,
-            grasps: std::mem::take(&mut self.friction_holds),
+            objects,
+            vehicles,
+            signals: self.signals.clone(),
+            // A program still in a step has that step's span open: in a
+            // snapshot it runs to the clock (a finished bake has none).
+            step_spans: {
+                let mut spans = self.step_spans.clone();
+                for program in self.programs.iter().filter(|p| !p.finished()) {
+                    if let Some(span) = spans.get_mut(program.open_span) {
+                        if span.end < duration {
+                            span.end = duration;
+                        }
+                    }
+                }
+                spans
+            },
+            branches: self.branches.clone(),
+            grasps,
             contacts: self
                 .physics
+                .as_ref()
                 .map(|phys| {
-                    let names = phys.names;
-                    let mut contacts = phys.contacts;
+                    let names = &phys.names;
+                    let mut contacts = phys.contacts.clone();
                     // Episodes still touching at the horn close here.
-                    contacts.extend(phys.open_contacts.into_iter().map(|((a, b), open)| {
-                        ContactSpan {
-                            a: names[a as usize].clone(),
-                            b: names[b as usize].clone(),
-                            start: open.start,
-                            end: duration,
-                            position: open.position,
-                            peak_force: open.peak_force,
-                        }
+                    contacts.extend(phys.open_contacts.iter().map(|((a, b), open)| ContactSpan {
+                        a: names[*a as usize].clone(),
+                        b: names[*b as usize].clone(),
+                        start: open.start,
+                        end: duration,
+                        position: open.position,
+                        peak_force: open.peak_force,
                     }));
                     contacts.sort_by(|x, y| {
                         x.start
@@ -14680,7 +15603,9 @@ mod gait_tests {
             )
             .unwrap();
         scene.upsert_device(device);
-        scene.mount_robot_with(0, "dog", None, Some(quad_gait())).unwrap();
+        scene
+            .mount_robot_with(0, "dog", None, Some(quad_gait()))
+            .unwrap();
         scene.upsert_sequence(Sequence {
             name: "patrol".into(),
             steps: vec![
@@ -14689,8 +15614,12 @@ mod gait_tests {
             ],
         });
         let options = RolloutOptions::default();
-        let kinematic = scene.simulate_sequences_with(&["patrol"], &options, None).unwrap();
-        scene.set_robot_dynamics(0, true, None, None, None, None).unwrap();
+        let kinematic = scene
+            .simulate_sequences_with(&["patrol"], &options, None)
+            .unwrap();
+        scene
+            .set_robot_dynamics(0, true, None, None, None, None)
+            .unwrap();
         let dynamic = scene
             .simulate_sequences_with(
                 &["patrol"],
@@ -14718,7 +15647,11 @@ mod gait_tests {
             }
         }
         // The physics wrote the head's lane: not exactly the command.
-        assert!(dynamic.robots[0].trajectory.positions.iter().any(|q| q[neck] != 0.0));
+        assert!(dynamic.robots[0]
+            .trajectory
+            .positions
+            .iter()
+            .any(|q| q[neck] != 0.0));
         // Standing after the walk: a torque reaches the head, never a leg.
         let mut live = scene
             .open_rollout(
@@ -14741,10 +15674,16 @@ mod gait_tests {
             .iter()
             .position(|&j| model.joints[j].name == "FL_hip_joint")
             .unwrap();
-        let err = live.command_torque(0, &[(leg, 1.0)], false).unwrap_err().to_string();
+        let err = live
+            .command_torque(0, &[(leg, 1.0)], false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("leg the gait moves"), "{err}");
         let g = live.gravity_torques(0).unwrap();
-        assert!(g.iter().enumerate().all(|(qi, v)| qi == neck || *v == 0.0), "{g:?}");
+        assert!(
+            g.iter().enumerate().all(|(qi, v)| qi == neck || *v == 0.0),
+            "{g:?}"
+        );
     }
 
     /// Drive to `station`, then stand for `dwell` seconds.
@@ -15836,7 +16775,9 @@ mod biped_tests {
             qi(&scene, "R_shoulder_pitch_joint"),
         );
         let kinematic = walk(&mut scene, 0.01);
-        scene.set_robot_dynamics(0, true, None, None, None, None).unwrap();
+        scene
+            .set_robot_dynamics(0, true, None, None, None, None)
+            .unwrap();
         let options = RolloutOptions::default();
         let dynamic = scene
             .simulate_sequences_with(
@@ -15850,7 +16791,9 @@ mod biped_tests {
             .model
             .joints
             .iter()
-            .filter(|j| j.name.contains("hip") || j.name.contains("knee") || j.name.contains("ankle"))
+            .filter(|j| {
+                j.name.contains("hip") || j.name.contains("knee") || j.name.contains("ankle")
+            })
             .filter_map(|j| j.q_index)
             .collect();
         assert!(legs.len() >= 10, "{legs:?}");
@@ -15863,7 +16806,12 @@ mod biped_tests {
                 // The same gait values; the two lanes' sample layouts
                 // differ (per-tick read-back against a hold), so the
                 // interpolation may round differently by an ulp.
-                assert!((a[qi] - b[qi]).abs() < 1e-9, "leg q{qi} at t={t:.2}: {} vs {}", a[qi], b[qi]);
+                assert!(
+                    (a[qi] - b[qi]).abs() < 1e-9,
+                    "leg q{qi} at t={t:.2}: {} vs {}",
+                    a[qi],
+                    b[qi]
+                );
             }
             for qi in [l, r] {
                 swung = swung.max(a[qi].abs());
@@ -15871,8 +16819,15 @@ mod biped_tests {
             }
         }
         assert!(swung > 0.2, "the kinematic arms swing ({swung:.3})");
-        assert!(worst < 0.1, "the servoed arms trail the swing by {worst:.3} rad at most");
-        assert!(dynamic.robots[0].trajectory.positions.iter().any(|q| q[l] != 0.0));
+        assert!(
+            worst < 0.1,
+            "the servoed arms trail the swing by {worst:.3} rad at most"
+        );
+        assert!(dynamic.robots[0]
+            .trajectory
+            .positions
+            .iter()
+            .any(|q| q[l] != 0.0));
     }
 
     /// World pose of a foot link at `t`, off the baked timeline.
@@ -16266,6 +17221,84 @@ mod biped_tests {
         let _ = UnitQuaternion::<f64>::identity();
         let _: Point3<f64> = Point3::origin();
     }
+
+    // ------------- a floating walker (design-world-physics.md W1) -------------
+
+    #[test]
+    fn a_floating_biped_collapses_unpowered_and_may_not_walk() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        // The mount stands it on the ground in its stance: the feet's
+        // soles are at the vehicle's ground, the pelvis wherever the bent
+        // legs put it.
+        let z0 = scene.robots()[0].base_pose().translation.z;
+        assert!(z0 > 0.5, "standing pelvis at z = {z0}");
+        let world = RolloutOptions {
+            physics: Some(PhysicsOptions::world()),
+            ..Default::default()
+        };
+        // It floats: a walker under the world scope.
+        let plan = scene.physics_plan(&PhysicsOptions::world());
+        let row = plan
+            .rows
+            .iter()
+            .find(|r| r.name == scene.robots()[0].name)
+            .unwrap();
+        assert!(row.reason.contains("base floating"), "{}", row.reason);
+        let tl = scene
+            .simulate_physics_with(3.0, &world, crate::dynamics::tests_support::rapier())
+            .unwrap();
+        let track = &tl.robots[0];
+        let spans = track.base.as_ref().expect("a floating base has a track");
+        assert!(spans.iter().any(|s| matches!(s, TrackSpan::Sampled { .. })));
+        let base = SequenceTimeline::base_pose(track, tl.duration).unwrap();
+        assert!(
+            base.translation.z < z0 - 0.2,
+            "the pelvis stayed up at z = {} (from {z0})",
+            base.translation.z
+        );
+        assert!(
+            base.translation.z > -0.05,
+            "fell through the ground: {}",
+            base.translation.z
+        );
+        // The legs are joints like any: the knees moved.
+        let model = &scene.robots()[0].model;
+        let names = model.actuated_joint_names();
+        let knee = names.iter().position(|n| *n == "L_knee_joint").unwrap();
+        let q_end = track.trajectory.positions.last().unwrap();
+        assert!(q_end[knee].abs() > 0.1, "left knee at {}", q_end[knee]);
+        // Walking a floating machine is refused before a tick runs.
+        scene.upsert_sequence(Sequence {
+            name: "walk".into(),
+            steps: vec![
+                step("go", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let err = scene
+            .simulate_sequences_with(&["walk"], &world, crate::dynamics::tests_support::rapier())
+            .unwrap_err();
+        assert!(err.to_string().contains("floats under physics"), "{err}");
+        // Declared not to float, it walks as it always did — kinematic
+        // legs on a kinematic base, the physics world untouched by it.
+        scene
+            .set_robot_dynamics_with(0, true, None, None, None, None, Some(false))
+            .unwrap();
+        let walked = scene
+            .simulate_sequences_with(&["walk"], &world, crate::dynamics::tests_support::rapier())
+            .unwrap();
+        let base = SequenceTimeline::base_pose(&walked.robots[0], walked.duration).unwrap();
+        assert!(
+            (base.translation.z - z0).abs() < 1e-6,
+            "z = {}",
+            base.translation.z
+        );
+        assert!(
+            base.translation.x > 1.5,
+            "walked to x = {}",
+            base.translation.x
+        );
+    }
 }
 
 /// Scene-level physics bakes (design-physics.md P1): a dynamic part falls,
@@ -16326,6 +17359,218 @@ mod physics_tests {
 
     fn rapier() -> Option<Box<dyn botrail_physics::PhysicsBackend>> {
         Some(Box::new(botrail_physics_rapier::RapierBackend::new()))
+    }
+
+    // ============== world scope (design-world-physics.md W0) ==============
+
+    fn world_options() -> RolloutOptions {
+        RolloutOptions {
+            physics: Some(PhysicsOptions::world()),
+            ..Default::default()
+        }
+    }
+
+    fn plain_box(scene: &mut Scene, name: &str, size: f64, at: (f64, f64, f64)) {
+        scene
+            .add_obstacle(
+                name,
+                Geometry::Box {
+                    size: Vector3::new(size, size, size),
+                },
+                Isometry3::translation(at.0, at.1, at.2),
+            )
+            .unwrap();
+    }
+
+    fn pin_group(scene: &mut Scene, target: &str, category: &str) {
+        scene
+            .set_part(
+                target,
+                Some(crate::part::PartTargetKind::Group),
+                crate::part::Part {
+                    catalog: None,
+                    manufacturer: None,
+                    model: None,
+                    category: Some(category.into()),
+                    description: None,
+                    qty: 1,
+                    attributes: Default::default(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn pose_of(tl: &SequenceTimeline, name: &str, t: f64) -> Isometry3<f64> {
+        let track = tl
+            .objects
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("`{name}` has a track"));
+        SequenceTimeline::object_pose(track, &[], t).unwrap()
+    }
+
+    #[test]
+    fn world_scope_drops_the_unsupported_onto_the_ground_and_leaves_the_rest() {
+        let mut scene = Scene::empty();
+        // No floor authored: the ground plane is the floor.
+        plain_box(&mut scene, "hover", 0.1, (0.0, 0.0, 0.6)); // unsupported → falls
+        plain_box(&mut scene, "crate", 0.1, (1.0, 0.0, 0.05)); // on the floor → loose, stays put
+        plain_box(&mut scene, "rack/post", 0.1, (2.0, 0.0, 0.6)); // equipment in the air → fixed
+        pin_group(&mut scene, "rack", "structure.rack");
+        plain_box(&mut scene, "anvil", 0.1, (3.0, 0.0, 0.6)); // declared static in the air → stays
+        scene
+            .set_obstacle_physics("anvil", Some(botrail_physics::BodyProps::default()))
+            .unwrap();
+        let tl = scene
+            .simulate_physics_with(3.0, &world_options(), rapier())
+            .unwrap();
+        assert_eq!(tl.physics.as_deref(), Some("rapier"));
+        assert_eq!(tl.physics_scope, Some(PhysicsScope::World));
+        assert!(tl.sequences.is_empty());
+        assert!((tl.duration - 3.0).abs() < 1e-9);
+        let landed = pose_of(&tl, "hover", tl.duration);
+        assert!(
+            (landed.translation.z - 0.05).abs() < 3e-3,
+            "landed at z = {}",
+            landed.translation.z
+        );
+        let hover = tl.objects.iter().find(|o| o.name == "hover").unwrap();
+        assert!(matches!(hover.spans.last(), Some(TrackSpan::Hold { .. })));
+        // The landing is a named episode against the ground.
+        assert!(tl.contacts.iter().any(|c| {
+            (c.a == "ground" && c.b == "hover") || (c.a == "hover" && c.b == "ground")
+        }));
+        // The crate on the floor is loose: it settles into the contact
+        // slop (a millimetre) and sleeps where it was put — a short track
+        // that ends at rest, not a fall.
+        let crate_ = pose_of(&tl, "crate", tl.duration);
+        assert!(
+            (crate_.translation.vector - Vector3::new(1.0, 0.0, 0.05)).norm() < 3e-3,
+            "crate crept to {:?}",
+            crate_.translation.vector
+        );
+        let crate_track = tl.objects.iter().find(|o| o.name == "crate").unwrap();
+        assert!(matches!(
+            crate_track.spans.last(),
+            Some(TrackSpan::Hold { .. })
+        ));
+        // The rack and the anvil never move: no track at all.
+        for name in ["rack/post", "anvil"] {
+            assert!(!tl.objects.iter().any(|o| o.name == name), "{name} moved");
+        }
+        // The plan says the same thing the bake did.
+        let plan = scene.physics_plan(&PhysicsOptions::world());
+        let kind = |name: &str| plan.rows.iter().find(|r| r.name == name).unwrap().kind;
+        assert_eq!(kind("hover"), crate::physics_world::PlanKind::Dynamic);
+        assert_eq!(kind("crate"), crate::physics_world::PlanKind::Dynamic);
+        assert_eq!(kind("rack"), crate::physics_world::PlanKind::Fixed);
+        assert_eq!(kind("anvil"), crate::physics_world::PlanKind::Fixed);
+    }
+
+    #[test]
+    fn a_unit_falls_as_one_body_and_its_members_ride() {
+        let mut scene = Scene::empty();
+        plain_box(&mut scene, "tote", 0.1, (0.0, 0.0, 0.5));
+        plain_box(&mut scene, "tote/lid", 0.1, (0.0, 0.0, 0.6)); // rigidly on top
+        plain_box(&mut scene, "tote/decal", 0.02, (0.06, 0.0, 0.5)); // visual only
+        scene.set_obstacle_enabled("tote/decal", false).unwrap();
+        let tl = scene
+            .simulate_physics_with(2.0, &world_options(), rapier())
+            .unwrap();
+        for t in [0.1, 0.3, tl.duration] {
+            let root = pose_of(&tl, "tote", t);
+            let lid = root.inverse() * pose_of(&tl, "tote/lid", t);
+            assert!(
+                (lid.translation.vector - Vector3::new(0.0, 0.0, 0.1)).norm() < 1e-9,
+                "lid offset at t = {t}: {:?}",
+                lid.translation.vector
+            );
+            let decal = root.inverse() * pose_of(&tl, "tote/decal", t);
+            assert!(
+                (decal.translation.vector - Vector3::new(0.06, 0.0, 0.0)).norm() < 1e-9,
+                "decal offset at t = {t}"
+            );
+        }
+        // The stack landed on the ground as one piece.
+        let root = pose_of(&tl, "tote", tl.duration);
+        assert!(
+            (root.translation.z - 0.05).abs() < 3e-3,
+            "z = {}",
+            root.translation.z
+        );
+        let plan = scene.physics_plan(&PhysicsOptions::world());
+        let tote = plan.rows.iter().find(|r| r.name == "tote").unwrap();
+        assert_eq!(tote.members, vec!["tote", "tote/lid", "tote/decal"]);
+    }
+
+    #[test]
+    fn world_bakes_are_bit_identical_and_the_declared_scope_is_untouched() {
+        let mut scene = physics_scene(); // a floor slab under the ground + a declared part
+        plain_box(&mut scene, "spare", 0.1, (0.5, 0.5, 0.8));
+        let world = || {
+            scene
+                .simulate_physics_with(1.5, &world_options(), rapier())
+                .unwrap()
+        };
+        let (a, b) = (world(), world());
+        for name in ["part", "spare"] {
+            for t in [0.2, 0.5, 1.0, a.duration] {
+                let (pa, pb) = (pose_of(&a, name, t), pose_of(&b, name, t));
+                assert_eq!(
+                    pa.translation.vector, pb.translation.vector,
+                    "{name} at {t}"
+                );
+                assert_eq!(pa.rotation.coords, pb.rotation.coords, "{name} at {t}");
+            }
+        }
+        // The floor box sits under the ground plane: floor, not a body.
+        assert!(!a.objects.iter().any(|o| o.name == "floor"));
+        // Declared scope: the spare box is scenery, and it never moves.
+        let declared = scene
+            .simulate_sequences_with(&["settle"], &RolloutOptions::default(), rapier())
+            .unwrap();
+        assert_eq!(declared.physics_scope, Some(PhysicsScope::Declared));
+        assert!(!declared.objects.iter().any(|o| o.name == "spare"));
+        assert!(declared.objects.iter().any(|o| o.name == "part"));
+    }
+
+    #[test]
+    fn a_walkable_slab_out_of_collision_is_a_floor_to_the_world() {
+        let mut scene = Scene::empty();
+        // A mezzanine slab a walker may stand on, out of collision (as the
+        // building demo authors floors), and a box above it.
+        scene
+            .add_obstacle(
+                "slab",
+                Geometry::Box {
+                    size: Vector3::new(2.0, 2.0, 0.1),
+                },
+                Isometry3::translation(0.0, 0.0, 0.95),
+            )
+            .unwrap();
+        scene.set_obstacle_walkable("slab", true).unwrap();
+        scene.set_obstacle_enabled("slab", false).unwrap();
+        plain_box(&mut scene, "box", 0.1, (0.0, 0.0, 1.5));
+        let tl = scene
+            .simulate_physics_with(2.0, &world_options(), rapier())
+            .unwrap();
+        let z = pose_of(&tl, "box", tl.duration).translation.z;
+        assert!((z - 1.05).abs() < 3e-3, "box rests on the slab, z = {z}");
+    }
+
+    #[test]
+    fn simulate_physics_refuses_a_bad_duration_and_runs_empty_without_an_engine() {
+        let scene = physics_scene();
+        assert!(scene
+            .simulate_physics_with(0.0, &RolloutOptions::default(), rapier())
+            .is_err());
+        let tl = scene
+            .simulate_physics_with(0.5, &RolloutOptions::default(), None)
+            .unwrap();
+        assert_eq!(tl.physics, None);
+        assert_eq!(tl.physics_scope, None);
+        assert!((tl.duration - 0.5).abs() < 1e-9);
+        assert!(tl.objects.is_empty());
     }
 
     #[test]

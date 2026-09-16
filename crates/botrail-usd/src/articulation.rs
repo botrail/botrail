@@ -1251,7 +1251,14 @@ impl RobotBuilder<'_> {
         body: &PrimInfo,
         correction: &Isometry3<f64>,
     ) -> Option<botrail_model::Inertial> {
-        let number = |name: &str| body.prim.attribute(name).get::<f32>().ok().flatten().map(f64::from);
+        let number = |name: &str| {
+            body.prim
+                .attribute(name)
+                .get::<f32>()
+                .ok()
+                .flatten()
+                .map(f64::from)
+        };
         let triple = |name: &str| {
             body.prim
                 .attribute(name)
@@ -1302,7 +1309,9 @@ impl RobotBuilder<'_> {
             if tensor.len() != 6 {
                 return None;
             }
-            let rpy = numbers("rpy").filter(|v| v.len() == 3).unwrap_or_else(|| vec![0.0; 3]);
+            let rpy = numbers("rpy")
+                .filter(|v| v.len() == 3)
+                .unwrap_or_else(|| vec![0.0; 3]);
             Some((tensor, rpy))
         })();
         let (rotation, inertia) = match custom {
@@ -1602,7 +1611,9 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
     fn mass_api_becomes_the_link_inertial_in_meters() {
         let imported = import_arm(HEAVY);
         let model = &imported.model;
-        assert!(model.links[model.link_index("/Robot/base").unwrap()].inertial.is_none());
+        assert!(model.links[model.link_index("/Robot/base").unwrap()]
+            .inertial
+            .is_none());
         let inertial = model.links[model.link_index("/Robot/link1").unwrap()]
             .inertial
             .as_ref()
@@ -1611,11 +1622,18 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         // 10 cm above the body origin, which sits 20 cm above the joint
         // (model link) frame: the same composition the geometry takes.
         let c = inertial.origin.translation.vector;
-        assert!(c.x.abs() < 1e-9 && c.y.abs() < 1e-9 && (c.z - 0.3).abs() < 1e-9, "{c:?}");
+        assert!(
+            c.x.abs() < 1e-9 && c.y.abs() < 1e-9 && (c.z - 0.3).abs() < 1e-9,
+            "{c:?}"
+        );
         // The customData tensor (kg·cm²) wins over the diagonal: the
         // off-diagonal 5 survives, scaled to kg·m².
         assert!((inertial.inertia[(0, 0)] - 0.01).abs() < 1e-12);
-        assert!((inertial.inertia[(0, 1)] - 0.0005).abs() < 1e-12, "{}", inertial.inertia);
+        assert!(
+            (inertial.inertia[(0, 1)] - 0.0005).abs() < 1e-12,
+            "{}",
+            inertial.inertia
+        );
         assert!((inertial.inertia[(1, 0)] - 0.0005).abs() < 1e-12);
         assert!((inertial.inertia[(2, 2)] - 0.03).abs() < 1e-12);
     }

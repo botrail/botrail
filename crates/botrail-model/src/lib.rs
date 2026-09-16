@@ -1917,7 +1917,9 @@ mod tests {
           </joint>
         </robot>"#;
         let model = RobotModel::from_urdf_str(urdf).unwrap();
-        assert!(model.links[model.link_index("base").unwrap()].inertial.is_none());
+        assert!(model.links[model.link_index("base").unwrap()]
+            .inertial
+            .is_none());
         let inertial = model.links[model.link_index("l1").unwrap()]
             .inertial
             .as_ref()

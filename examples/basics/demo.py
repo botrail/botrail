@@ -159,6 +159,7 @@ def build_scene(name: str = None) -> bt.Scene:
     scene = bt.Scene(robot, name=name)
     scene.load_usd(Path(__file__).parents[1] / "assets" / "factory.usda")
     equip_cell(scene)
+    identify_layout(scene)
     # Stand the robot on the pedestal's mount frame, in a natural ready pose.
     scene.set_robot_base_pose(*scene.frame("/World/MountFrame"))
     scene.set_joint_positions([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.035, 0.035])
@@ -201,6 +202,26 @@ def teach_grasp(scene: bt.Scene, pose, standoff: float = 0.0, robot: str = None)
             f"{ik.pos_error * 1e3:.1f} mm / {ik.rot_error:.3f} rad short"
         )
     return list(scene.joint_positions if robot is None else scene.joint_positions_of(robot))
+
+
+def identify_layout(scene: bt.Scene) -> None:
+    """Pin what the hand-authored layout *is*: the pedestals, the pick
+    sensor and the floor markings are equipment (bolted down), the pallets
+    are carriers, the boxes and crates are stock. The BOM reads this, and
+    so does a physics bake of the whole cell — equipment stays put while
+    stock rests or falls (`physics_world_demo.py --scene demo`)."""
+    for name in ("/World/Pedestal", "/World/PedestalFar"):
+        scene.set_part(name, kind="group", category="structure.pedestal")
+    scene.set_part("/World/Conveyor/PickSensor", kind="group", category="sensor.photoelectric")
+    scene.set_part("/World/FloorMarkings", kind="group", category="structure.marking")
+    scene.set_part("/World/CableDuct", kind="group", category="structure.cable_duct")
+    scene.set_part("stack_light", kind="group", category="hmi.stack_light")
+    for name in ("/World/Pallet", "/World/PalletFar"):
+        scene.set_part(name, kind="group", category="pallet")
+    for name in scene.obstacle_names:
+        leaf = name.rsplit("/", 1)[-1]
+        if leaf.startswith(("Box_", "Crate_")) and not leaf.endswith("_Tape"):
+            scene.set_part(name, category="workpiece")
 
 
 if __name__ == "__main__":

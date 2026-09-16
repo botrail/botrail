@@ -105,7 +105,7 @@ axis along the approach. IK, though, solves for a link. So a taught pose is
 backed off along the tool axis to the hand frame first:
 
 ```python
---8<-- "examples/basics/demo.py:176:203"
+--8<-- "examples/basics/demo.py:177:204"
 ```
 
 `teach_grasp` is the scripted form of dragging the studio's TCP gizmo: solve

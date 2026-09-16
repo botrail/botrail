@@ -900,7 +900,9 @@ impl Control {
                 indices.len()
             }
             ControlSpec::Torque {
-                indices, max_torque, ..
+                indices,
+                max_torque,
+                ..
             } => {
                 check(indices)?;
                 match max_torque {
@@ -912,7 +914,8 @@ impl Control {
                                 indices.len()
                             ));
                         }
-                        if let Some(bad) = caps_given.iter().find(|c| !(c.is_finite() && **c > 0.0)) {
+                        if let Some(bad) = caps_given.iter().find(|c| !(c.is_finite() && **c > 0.0))
+                        {
                             return Err(format!("control: max_torque must be positive, got {bad}"));
                         }
                         caps = caps_given.clone();

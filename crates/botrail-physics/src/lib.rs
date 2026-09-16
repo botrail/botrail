@@ -267,6 +267,12 @@ pub trait PhysicsBackend: Send + Sync {
     /// releases it at rest.
     fn set_body_kind(&mut self, body: BodyId, kind: BodyKind, velocity: Option<Velocity>);
 
+    /// Moves a body into self-collision group `group` (`0`: collides with
+    /// everything) — a part taken in hand joins its carrier's group so it
+    /// rides between the fingers without fighting them, and leaves it
+    /// when let go.
+    fn set_body_group(&mut self, body: BodyId, group: u32);
+
     /// Updates one surface-velocity zone (a conveyor's per-tick state:
     /// current belt velocity, running or stopped). `zone` indexes
     /// [`WorldDesc::zones`]; geometry never changes, only the drive.

@@ -18,3 +18,6 @@ botrail-physics.workspace = true
 botrail-usd.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+botrail-physics-rapier.workspace = true

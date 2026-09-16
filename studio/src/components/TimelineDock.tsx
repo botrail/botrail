@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
 import type { StepSpanMsg } from "../protocol";
+import { setPhysics } from "../bake";
 import { useStudioStore } from "../store";
 import { sendExportUsd } from "../ws";
 import { chipsForLane } from "./IoOverlay";
@@ -127,6 +128,10 @@ function SignalLane({
 
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
+  const physicsOn = useStudioStore((s) => s.physicsOn);
+  const streaming = useStudioStore((s) => s.bakeStream !== null);
+  const simulating = useStudioStore((s) => s.sequenceSimulating);
+  const connected = useStudioStore((s) => s.connection === "connected");
   const lanes = useMemo(
     () => (timeline ? moveLanes(timeline.robots) : []),
     [timeline],
@@ -203,7 +208,9 @@ export function TimelineDock() {
         <span>
           {recordingLabel ? `● ${recordingLabel} — ` : ""}
           {timeline?.scenario ? `⧉ ${timeline.scenario} — ` : ""}
-          {timeline ? "cycle" : "preview"} {duration.toFixed(2)}s
+          {streaming ? "● " : ""}
+          {timeline ? (timeline.stepSpans.length > 0 ? "cycle" : "physics") : "preview"}{" "}
+          {duration.toFixed(2)}s
         </span>
         <span className="timeline-controls">
           {/* A 60-90 s takt is unwatchable at 1x; speed and loop are how a
@@ -229,6 +236,27 @@ export function TimelineDock() {
           >
             ⟳
           </button>
+          {/* The physics toggle: this bake again under the host's physics
+              (or back to kinematic), restarted from the top. The label
+              names the engine the playing bake ran under. */}
+          {!recording && (
+            <button
+              className={
+                physicsOn ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setPhysics(!physicsOn)}
+              disabled={simulating || !connected}
+              title={
+                streaming
+                  ? "physics streaming: stop here (a program is baked again kinematically, the world's clip stays)"
+                  : physicsOn
+                    ? "physics on: bake again kinematically and restart from the top"
+                    : "bake again under physics — the whole cell, every obstacle and robot the engine's — and restart from the top"
+              }
+            >
+              ⚛ {timeline?.physics ?? "physics"}
+            </button>
+          )}
           {timeline && (
             <button
               className={

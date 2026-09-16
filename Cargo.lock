@@ -273,6 +273,7 @@ dependencies = [
  "botrail-kin",
  "botrail-model",
  "botrail-physics",
+ "botrail-physics-rapier",
  "botrail-plan",
  "botrail-scene",
  "botrail-traj",
@@ -307,6 +308,8 @@ version = "0.9.1"
 dependencies = [
  "botrail-collide",
  "botrail-model",
+ "botrail-physics",
+ "botrail-physics-rapier",
  "botrail-scene",
  "botrail-session",
  "botrail-usd",

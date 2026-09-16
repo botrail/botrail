@@ -7,33 +7,33 @@ import type { PoseMsg } from "./PoseMsg";
  * only — it publishes no signal (a field sensor referencing it is the
  * planned signal path).
  */
-export type LidarMsg = { name: string,
+export type LidarMsg = { name: string, 
 /**
  * Show the generic housing without affecting scanning or field overlays.
  */
-body_visible: boolean, mount: LidarMountMsg,
+body_visible: boolean, mount: LidarMountMsg, 
 /**
  * Offset in the mount frame (world pose for a `world` mount). The
  * scan plane is local XY, angle 0 along +X, CCW toward +Y (the ROS
  * laser frame).
  */
-pose: PoseMsg,
+pose: PoseMsg, 
 /**
  * Full scan angle, degrees, up to 360.
  */
-fov_deg: number,
+fov_deg: number, 
 /**
  * Measuring range `[min, max]`, meters.
  */
-range: [number, number],
+range: [number, number], 
 /**
  * Angular resolution, degrees (the scan API's default step).
  */
-resolution_deg: number,
+resolution_deg: number, 
 /**
  * Vertical channels (scan rings); `1` is a planar scanner.
  */
-channels: number,
+channels: number, 
 /**
  * Full vertical field of view, degrees, centered on the scan
  * plane; `0` for a planar scanner.

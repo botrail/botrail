@@ -1355,6 +1355,10 @@ pub struct TimelineMsg {
     /// Touch episodes of a physics bake; empty on a kinematic one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contacts: Vec<ContactMsg>,
+    /// The physics engine this bake stepped under (`"rapier"`); absent on
+    /// a kinematic bake. What the dock's physics toggle reflects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<String>,
 }
 
 /// One touch episode of a physics bake (see `rollout::ContactSpan`):
@@ -1485,6 +1489,18 @@ pub enum ServerMessage {
         /// World-frame hit points, meters, rounded to 0.1 mm (display
         /// data — the analysis-grade sweep stays in the Python API).
         points: Vec<[f64; 3]>,
+    },
+    /// One window of a streaming bake (`start_bake`): the tracks sampled
+    /// after `from` up to the timeline's `duration`, on the same 30 Hz
+    /// lattice as every other chunk, so the client appends them; the step
+    /// bands, branches and signal lanes are the whole bake so far (the
+    /// client replaces them), the touches those that began in the window.
+    /// `done` closes the stream; the whole bake is then the host's
+    /// retained result, replayed to late joiners like any bake.
+    BakeChunk {
+        from: f64,
+        done: bool,
+        timeline: TimelineMsg,
     },
     /// Response to a `simulate_sequence` request (broadcast to every client).
     SequenceResult {
@@ -1686,6 +1702,12 @@ pub enum ClientMessage {
         /// a run still waiting past it is reported as timed out.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_duration: Option<f64>,
+        /// Bake under the host's physics (`SessionHost::physics` — the
+        /// whole cell by default, design-world-physics.md §3.6). Absent or
+        /// false is the kinematic bake; a host without physics answers
+        /// `true` with a failed `sequence_result`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        physics: Option<bool>,
     },
     /// Roll out several sequences as concurrently-running programs (one
     /// shared world, PLC scan order = list order); the result arrives as
@@ -1697,7 +1719,41 @@ pub enum ClientMessage {
         /// The bake's time cap in seconds (the engine's 120 s when absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_duration: Option<f64>,
+        /// Bake under the host's physics (see `simulate_sequence`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        physics: Option<bool>,
     },
+    /// Bake `duration` seconds of the cell with no program at all under
+    /// the host's physics — the world under gravity, nothing driven
+    /// (`Scene::simulate_physics_with`); the result arrives as a
+    /// `sequence_result` labelled `physics`.
+    SimulatePhysics {
+        duration: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<String>,
+    },
+    /// Start a *streaming* bake: the host rolls the programs `names` out
+    /// (none: the cell with no program, under physics — the world under
+    /// gravity, paced to the clock) and sends the tracks as they grow
+    /// (`bake_chunk`) until the programs end, `stop_bake`, or
+    /// `max_duration` (the engine's 120 s when absent; a program still
+    /// waiting past it is a timed-out `sequence_result`, the chunks so
+    /// far staying on the dock). `physics` bakes under the host's physics
+    /// (`SessionHost::physics`). A host that cannot stream (no engine, no
+    /// thread) answers with a failed `sequence_result`.
+    StartBake {
+        #[serde(default)]
+        names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scenario: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_duration: Option<f64>,
+        #[serde(default)]
+        physics: bool,
+    },
+    /// End the streaming bake where it stands: the last chunk arrives
+    /// with `done`, and the whole bake becomes the host's retained result.
+    StopBake,
     /// Bake the last simulated timeline as a usda layer; the result
     /// arrives as a `usd_document` (the browser saves it as a download).
     ExportUsd {
@@ -3520,6 +3576,7 @@ mod tests {
     #[test]
     fn timeline_span_attribution_and_branches_roundtrip() {
         let msg = TimelineMsg {
+            physics: None,
             vehicles: Vec::new(),
             contacts: Vec::new(),
             duration: 1.0,

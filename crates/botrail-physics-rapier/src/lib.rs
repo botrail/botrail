@@ -278,7 +278,9 @@ impl RapierBackend {
                 }
                 match kind {
                     JointKind::Revolute => rb.add_torque(axis * (sign * tau), true),
-                    JointKind::Prismatic => rb.add_force_at_point(axis * (sign * tau), anchor, true),
+                    JointKind::Prismatic => {
+                        rb.add_force_at_point(axis * (sign * tau), anchor, true)
+                    }
                     JointKind::Fixed => {}
                 }
             }
@@ -352,9 +354,15 @@ impl PhysicsBackend for RapierBackend {
             // body's whole mass: the colliders then carry no density.
             if let Some(mp) = &desc.props.mass_properties {
                 let inertia = rapier3d_f64::math::Matrix::from_cols_array(&[
-                    mp.inertia[(0, 0)], mp.inertia[(1, 0)], mp.inertia[(2, 0)],
-                    mp.inertia[(0, 1)], mp.inertia[(1, 1)], mp.inertia[(2, 1)],
-                    mp.inertia[(0, 2)], mp.inertia[(1, 2)], mp.inertia[(2, 2)],
+                    mp.inertia[(0, 0)],
+                    mp.inertia[(1, 0)],
+                    mp.inertia[(2, 0)],
+                    mp.inertia[(0, 1)],
+                    mp.inertia[(1, 1)],
+                    mp.inertia[(2, 1)],
+                    mp.inertia[(0, 2)],
+                    mp.inertia[(1, 2)],
+                    mp.inertia[(2, 2)],
                 ]);
                 builder = builder.additional_mass_properties(
                     rapier3d_f64::dynamics::MassProperties::with_inertia_matrix(
@@ -458,7 +466,9 @@ impl PhysicsBackend for RapierBackend {
                 joint.set_motor_position(axis, 0.0, desc.motor.stiffness, desc.motor.damping);
                 joint.set_motor_max_force(axis, desc.motor.max_force);
                 if let Some((lo, hi)) = desc.limits {
-                    joint.set_limits(axis, [lo, hi]);
+                    if let Some(limits) = representable_limits(desc.kind, lo, hi) {
+                        joint.set_limits(axis, limits);
+                    }
                 }
             }
             let parent = self.handles[desc.parent.0 as usize];
@@ -481,6 +491,26 @@ impl PhysicsBackend for RapierBackend {
     fn set_kinematic_pose(&mut self, body: BodyId, pose: Isometry3<f64>) {
         self.body_mut(body)
             .set_next_kinematic_position(to_pose(&pose));
+    }
+
+    fn set_body_group(&mut self, body: BodyId, group: u32) {
+        let groups = if group == 0 {
+            InteractionGroups::all()
+        } else {
+            let own = Group::from_bits_truncate(1 << ((group - 1) % 32));
+            InteractionGroups {
+                memberships: own,
+                filter: !own,
+                test_mode: Default::default(),
+            }
+        };
+        let handle = self.handles[body.0 as usize];
+        let colliders: Vec<_> = self.bodies[handle].colliders().to_vec();
+        for c in colliders {
+            if let Some(collider) = self.colliders.get_mut(c) {
+                collider.set_collision_groups(groups);
+            }
+        }
     }
 
     fn set_body_kind(&mut self, body: BodyId, kind: BodyKind, velocity: Option<Velocity>) {
@@ -604,7 +634,11 @@ impl PhysicsBackend for RapierBackend {
         let (stiffness, damping) = (dj.motor.stiffness, dj.motor.damping);
         // A torqued joint keeps its target on file but its motor stays
         // off until the torque is lifted.
-        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
+        let cap = if dj.torque.is_some() {
+            0.0
+        } else {
+            dj.motor.max_force
+        };
         if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
             j.data
                 .set_motor_position(axis, position, stiffness, damping);
@@ -619,7 +653,11 @@ impl PhysicsBackend for RapierBackend {
             JointKind::Revolute => JointAxis::AngX,
             JointKind::Fixed => return,
         };
-        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
+        let cap = if dj.torque.is_some() {
+            0.0
+        } else {
+            dj.motor.max_force
+        };
         if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
             j.data.set_motor_velocity(axis, velocity, dj.motor.damping);
             j.data.set_motor_max_force(axis, cap);
@@ -634,7 +672,11 @@ impl PhysicsBackend for RapierBackend {
             JointKind::Fixed => return,
         };
         dj.torque = torque.filter(|t| t.is_finite());
-        let cap = if dj.torque.is_some() { 0.0 } else { dj.motor.max_force };
+        let cap = if dj.torque.is_some() {
+            0.0
+        } else {
+            dj.motor.max_force
+        };
         let (handle, parent, child) = (dj.handle, dj.parent, dj.child);
         if let Some(j) = self.impulse_joints.get_mut(handle, true) {
             j.data.set_motor_max_force(axis, cap);
@@ -668,12 +710,262 @@ impl PhysicsBackend for RapierBackend {
     }
 }
 
+/// How far inside ±π a revolute stop is brought when the model puts it
+/// at or beyond π (rad). The stop engages while `sin(angle / 2)` is at
+/// least `sin(limit / 2)`, i.e. for angles between the limit and its
+/// mirror past π — a band `2 · (π − limit)` wide — so a stop a
+/// milliradian short of π is a band a joint sails through in one substep;
+/// a tenth of a radian gives the solver a band no collapsing arm skips.
+const REVOLUTE_STOP_MARGIN: f64 = 0.1;
+
+/// The joint limits rapier can honour. Its angular limit compares
+/// `sin(angle / 2)` with `sin(limit / 2)`
+/// (`generic_joint_constraint_builder.rs::limit_angular_generic`), so a
+/// revolute stop exists only strictly inside (−π, π): a ±2π range — a UR
+/// axis — reads as `sin(±π) = 0`, a stop AT ZERO that every pose violates,
+/// and the solver snaps the joint back to zero on the first step. A range
+/// wider than a full turn has no stop the engine can express (the joint
+/// is unlimited to it — the real ±360° hard stop is out of reach); a
+/// range reaching π is cut just inside it. Prismatic limits are lengths
+/// and pass through.
+fn representable_limits(kind: JointKind, lo: f64, hi: f64) -> Option<[f64; 2]> {
+    use std::f64::consts::{PI, TAU};
+    if kind != JointKind::Revolute {
+        return Some([lo, hi]);
+    }
+    // Wider than a full turn (a UR axis's ±2π): no stop at all. Exactly a
+    // full turn (±π — an elbow) keeps its stops, pulled just inside π.
+    if hi - lo > TAU + 1e-6 {
+        return None;
+    }
+    let lo = lo.max(-PI + REVOLUTE_STOP_MARGIN);
+    let hi = hi.min(PI - REVOLUTE_STOP_MARGIN);
+    (lo < hi).then_some([lo, hi])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use botrail_physics::{BodyDesc, BodyProps};
     use nalgebra::Vector3;
     use parry3d_f64::shape::SharedShape;
+
+    /// A hinge (kinematic anchor, dynamic 1 kg link) with the given
+    /// revolute limits, motored to `target` in zero gravity; the angle it
+    /// settles at.
+    fn hinge_settles_at(limits: Option<(f64, f64)>, target: f64) -> f64 {
+        use botrail_physics::{JointDesc, JointKind, JointMotor};
+        let mut world = WorldDesc::new();
+        world.gravity = Vector3::zeros();
+        world.bodies.push(BodyDesc {
+            kind: BodyKind::Kinematic,
+            pose: Isometry3::translation(0.0, 0.0, 0.5),
+            parts: vec![(Pose::identity(), SharedShape::cuboid(0.02, 0.02, 0.02))],
+            props: BodyProps::default(),
+            group: 1,
+        });
+        world.bodies.push(BodyDesc {
+            kind: BodyKind::Dynamic,
+            pose: Isometry3::translation(0.0, 0.0, 0.45),
+            parts: vec![(
+                Pose::from_translation(Vector::new(0.0, 0.0, -0.1)),
+                SharedShape::cuboid(0.01, 0.01, 0.01),
+            )],
+            props: BodyProps {
+                mass_properties: Some(botrail_physics::MassProperties {
+                    mass: 1.0,
+                    com: Vector3::new(0.0, 0.0, -0.1),
+                    inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(1e-2, 1e-2, 1e-2)),
+                }),
+                angular_damping: 0.0,
+                ..BodyProps::dynamic()
+            },
+            group: 1,
+        });
+        world.joints.push(JointDesc {
+            parent: BodyId(0),
+            child: BodyId(1),
+            kind: JointKind::Revolute,
+            local1: Isometry3::translation(0.0, 0.0, -0.05),
+            local2: Isometry3::identity(),
+            axis: Vector3::new(1.0, 0.0, 0.0),
+            limits,
+            motor: JointMotor {
+                stiffness: 100.0,
+                damping: 10.0,
+                max_force: 100.0,
+            },
+        });
+        let mut backend = RapierBackend::new();
+        backend.reset(&world).unwrap();
+        backend.set_joint_target(0, target);
+        for _ in 0..2000 {
+            backend.step(0.0025);
+        }
+        backend.joint_position(0)
+    }
+
+    /// Probe: how fast a velocity motor closes on its target, per damping
+    /// and inertia. `cargo test -p botrail-physics-rapier velocity_motor_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn velocity_motor_probe() {
+        use botrail_physics::{JointDesc, JointKind, JointMotor};
+        for (damping, inertia, mass) in [
+            (1e4, 1.0, 5.0),
+            (1e2, 1.0, 5.0),
+            (1.0, 1.0, 5.0),
+            (1e4, 1e-2, 1.0),
+            (5e6, 0.67, 4.0),
+            (5e6, 1e-2, 0.2),
+            (1e6, 0.67, 4.0),
+            (1e5, 0.67, 4.0),
+        ] {
+            let mut world = WorldDesc::new();
+            world.gravity = Vector3::zeros();
+            world.bodies.push(BodyDesc {
+                kind: BodyKind::Kinematic,
+                pose: Isometry3::translation(0.0, 0.0, 0.5),
+                parts: vec![(Pose::identity(), SharedShape::cuboid(0.02, 0.02, 0.02))],
+                props: BodyProps::default(),
+                group: 1,
+            });
+            world.bodies.push(BodyDesc {
+                kind: BodyKind::Dynamic,
+                pose: Isometry3::translation(0.0, 0.0, 0.45),
+                parts: vec![(
+                    Pose::from_translation(Vector::new(0.0, 0.0, -0.2)),
+                    SharedShape::cuboid(0.02, 0.02, 0.2),
+                )],
+                props: BodyProps {
+                    mass_properties: Some(botrail_physics::MassProperties {
+                        mass,
+                        com: Vector3::new(0.0, 0.0, -0.2),
+                        inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(
+                            inertia, inertia, inertia,
+                        )),
+                    }),
+                    angular_damping: 0.0,
+                    ..BodyProps::dynamic()
+                },
+                group: 1,
+            });
+            world.joints.push(JointDesc {
+                parent: BodyId(0),
+                child: BodyId(1),
+                kind: JointKind::Revolute,
+                local1: Isometry3::translation(0.0, 0.0, -0.05),
+                local2: Isometry3::identity(),
+                axis: Vector3::new(1.0, 0.0, 0.0),
+                limits: None,
+                motor: JointMotor {
+                    stiffness: 0.0,
+                    damping,
+                    max_force: if damping > 1e5 { 1e5 } else { 200.0 },
+                },
+            });
+            let mut backend = RapierBackend::new();
+            backend.reset(&world).unwrap();
+            let mut line = format!("damping {damping:>8} inertia {inertia} mass {mass}: w =");
+            for _tick in 0..5 {
+                backend.set_joint_velocity(0, 1.0);
+                for _ in 0..4 {
+                    backend.step(0.0025);
+                }
+                let w = backend.body_velocity(BodyId(1)).angular.x;
+                line.push_str(&format!(" {w:.4}"));
+            }
+            eprintln!("{line}");
+        }
+    }
+
+    /// Probe: a finger-like prismatic motor. `cargo test -p botrail-physics-rapier prismatic_motor_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn prismatic_motor_probe() {
+        use botrail_physics::{JointDesc, JointKind, JointMotor};
+        for (mass, armature, cap) in [
+            (0.2, 0.0, 7.2),
+            (0.2, 10.0, 7.2),
+            (0.2, 10.0, 2000.0),
+            (20.0, 0.0, 7.2),
+        ] {
+            let mut world = WorldDesc::new();
+            world.gravity = Vector3::zeros();
+            world.bodies.push(BodyDesc {
+                kind: BodyKind::Kinematic,
+                pose: Isometry3::translation(0.0, 0.0, 0.5),
+                parts: vec![(Pose::identity(), SharedShape::cuboid(0.02, 0.02, 0.02))],
+                props: BodyProps::default(),
+                group: 1,
+            });
+            world.bodies.push(BodyDesc {
+                kind: BodyKind::Dynamic,
+                pose: Isometry3::translation(0.0, 0.0, 0.45),
+                parts: vec![(Pose::identity(), SharedShape::cuboid(0.01, 0.01, 0.02))],
+                props: BodyProps {
+                    mass_properties: Some(botrail_physics::MassProperties {
+                        mass,
+                        com: Vector3::zeros(),
+                        inertia: nalgebra::Matrix3::from_diagonal(&Vector3::new(
+                            1e-5 + armature,
+                            1e-5 + armature,
+                            1e-5 + armature,
+                        )),
+                    }),
+                    angular_damping: 0.0,
+                    ..BodyProps::dynamic()
+                },
+                group: 1,
+            });
+            world.joints.push(JointDesc {
+                parent: BodyId(0),
+                child: BodyId(1),
+                kind: JointKind::Prismatic,
+                local1: Isometry3::translation(0.0, 0.0, -0.05),
+                local2: Isometry3::identity(),
+                axis: Vector3::new(1.0, 0.0, 0.0),
+                limits: Some((0.0, 0.04)),
+                motor: JointMotor {
+                    stiffness: 0.0,
+                    damping: cap / 0.002,
+                    max_force: cap,
+                },
+            });
+            let mut backend = RapierBackend::new();
+            backend.reset(&world).unwrap();
+            let mut line = format!("mass {mass} armature {armature} cap {cap}: v =");
+            for _tick in 0..5 {
+                backend.set_joint_velocity(0, 0.1);
+                for _ in 0..4 {
+                    backend.step(0.0025);
+                }
+                let v = backend.body_velocity(BodyId(1)).linear.x;
+                line.push_str(&format!(" {v:.4}"));
+            }
+            eprintln!("{line}");
+        }
+    }
+
+    /// Rapier's angular stop is a half-angle sine: a full-turn range is no
+    /// stop at all (a UR axis's ±2π must not read as a stop at zero), and
+    /// a stop inside π holds.
+    #[test]
+    fn a_full_turn_limit_is_no_stop_and_a_half_turn_stop_holds() {
+        use std::f64::consts::TAU;
+        let free = hinge_settles_at(Some((-TAU, TAU)), 1.9);
+        assert!(
+            (free - 1.9).abs() < 0.02,
+            "±2π limits snapped the joint to {free:+.3}"
+        );
+        let stopped = hinge_settles_at(Some((-1.0, 1.0)), 1.9);
+        assert!(
+            (stopped - 1.0).abs() < 0.02,
+            "a ±1 stop should hold at 1.0, got {stopped:+.3}"
+        );
+        let unlimited = hinge_settles_at(None, 1.9);
+        assert!((unlimited - 1.9).abs() < 0.02, "{unlimited:+.3}");
+    }
 
     /// Spike (design-rl-dynamics.md RD0): a six-link serial arm held
     /// horizontal against gravity by force-capped PD position motors,
@@ -705,7 +997,9 @@ mod tests {
         let mut colliders = rapier3d_f64::geometry::ColliderSet::new();
         let mut impulse_joints = ImpulseJointSet::new();
         let mut multibody_joints = MultibodyJointSet::new();
-        let base = bodies.insert(RigidBodyBuilder::fixed().pose(to_pose(&Isometry3::translation(0.0, 0.0, 1.0))));
+        let base = bodies.insert(
+            RigidBodyBuilder::fixed().pose(to_pose(&Isometry3::translation(0.0, 0.0, 1.0))),
+        );
         colliders.insert_with_parent(ColliderBuilder::cuboid(0.05, 0.05, 0.05), base, &mut bodies);
         // Links laid along +x, each a box centred half a length past its
         // joint; every joint pitches about y so gravity loads them all.
@@ -735,7 +1029,9 @@ mod tests {
             joint.set_motor_position(0.0, stiffness, damping);
             joint.set_motor_max_force(cap);
             let h = if multibody {
-                let h = multibody_joints.insert(parent, link, joint, true).expect("tree");
+                let h = multibody_joints
+                    .insert(parent, link, joint, true)
+                    .expect("tree");
                 Err(h)
             } else {
                 Ok(impulse_joints.insert(parent, link, joint, true))
@@ -785,17 +1081,36 @@ mod tests {
             (angle, (a1 - a2).length())
         };
         let anchors: Vec<Vector> = (0..6)
-            .map(|i| if i == 0 { Vector::ZERO } else { Vector::new(lengths[i - 1], 0.0, 0.0) })
+            .map(|i| {
+                if i == 0 {
+                    Vector::ZERO
+                } else {
+                    Vector::new(lengths[i - 1], 0.0, 0.0)
+                }
+            })
             .collect();
-        let set_target = |impulse_joints: &mut ImpulseJointSet, multibody_joints: &mut MultibodyJointSet, i: usize, target: f64| {
+        let set_target = |impulse_joints: &mut ImpulseJointSet,
+                          multibody_joints: &mut MultibodyJointSet,
+                          i: usize,
+                          target: f64| {
             match handles[i].0 {
                 Ok(h) => {
                     let j = impulse_joints.get_mut(h, true).unwrap();
-                    j.data.set_motor_position(rapier3d_f64::dynamics::JointAxis::AngX, target, stiffness, damping);
+                    j.data.set_motor_position(
+                        rapier3d_f64::dynamics::JointAxis::AngX,
+                        target,
+                        stiffness,
+                        damping,
+                    );
                 }
                 Err(h) => {
                     let (mb, id) = multibody_joints.get_mut(h).unwrap();
-                    mb.link_mut(id).unwrap().joint.data.set_motor_position(rapier3d_f64::dynamics::JointAxis::AngX, target, stiffness, damping);
+                    mb.link_mut(id).unwrap().joint.data.set_motor_position(
+                        rapier3d_f64::dynamics::JointAxis::AngX,
+                        target,
+                        stiffness,
+                        damping,
+                    );
                 }
             }
         };
@@ -1455,11 +1770,17 @@ mod tests {
         let rb = &backend.bodies[backend.handles[0]];
         assert!((rb.mass() - 2.0).abs() < 1e-9, "mass {}", rb.mass());
         let com = rb.center_of_mass();
-        assert!((com.x - 0.1).abs() < 1e-9 && (com.z - 1.0).abs() < 1e-9, "com {com:?}");
+        assert!(
+            (com.x - 0.1).abs() < 1e-9 && (com.z - 1.0).abs() < 1e-9,
+            "com {com:?}"
+        );
         let principal = rb.mass_properties().local_mprops.principal_inertia();
         let mut sorted = [principal.x, principal.y, principal.z];
         sorted.sort_by(f64::total_cmp);
-        assert!((sorted[0] - 0.01).abs() < 1e-9 && (sorted[2] - 0.03).abs() < 1e-9, "{sorted:?}");
+        assert!(
+            (sorted[0] - 0.01).abs() < 1e-9 && (sorted[2] - 0.03).abs() < 1e-9,
+            "{sorted:?}"
+        );
     }
 
     /// A raw joint torque with the motor off: a 1 kg point-like link 0.1 m
@@ -1518,7 +1839,10 @@ mod tests {
             backend.step(0.0025);
         }
         let q = backend.joint_position(0);
-        assert!((q - 0.125).abs() < 0.01, "θ after 0.5 s at 1 rad/s²: {q:+.4} (0.125 expected)");
+        assert!(
+            (q - 0.125).abs() < 0.01,
+            "θ after 0.5 s at 1 rad/s²: {q:+.4} (0.125 expected)"
+        );
         // Lifted: the motor pulls the joint back toward its target.
         backend.set_joint_torque(0, None);
         for _ in 0..400 {

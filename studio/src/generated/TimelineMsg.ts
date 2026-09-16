@@ -38,4 +38,9 @@ branches: Array<BranchTakenMsg>,
 /**
  * Touch episodes of a physics bake; empty on a kinematic one.
  */
-contacts?: Array<ContactMsg>, };
+contacts?: Array<ContactMsg>, 
+/**
+ * The physics engine this bake stepped under (`"rapier"`); absent on
+ * a kinematic bake. What the dock's physics toggle reflects.
+ */
+physics?: string | null, };

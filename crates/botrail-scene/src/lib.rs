@@ -20,6 +20,7 @@ pub mod layout;
 pub mod motion;
 pub mod mounting;
 pub mod part;
+pub mod physics_world;
 pub mod plcopen;
 pub mod project;
 pub mod raster;
@@ -416,6 +417,10 @@ impl SceneRobot {
 #[derive(Clone)]
 pub struct Scene {
     robots: Vec<SceneRobot>,
+    /// Penetration the collision checks forgive (m): zero as authored; a
+    /// physics rollout sets it on its world, where everything resting on
+    /// something sits a little into it (`ContactAllowance::slack`).
+    pub(crate) collision_slack: f64,
     /// Allowed collision pairs between links of different robots
     /// (`(robot, link)` keyed). Default: everything is checked.
     inter_acm: InterRobotAcm,
@@ -474,6 +479,7 @@ impl Scene {
     pub fn empty() -> Self {
         Self {
             robots: Vec::new(),
+            collision_slack: 0.0,
             inter_acm: InterRobotAcm::default(),
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),
@@ -508,6 +514,7 @@ impl Scene {
         let (scene_robot, collision_warnings) = SceneRobot::new(name, robot, base);
         Self {
             robots: vec![scene_robot],
+            collision_slack: 0.0,
             inter_acm: InterRobotAcm::default(),
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),
@@ -1990,6 +1997,7 @@ impl Scene {
         attached_map: &[usize],
     ) -> botrail_collide::ContactAllowance {
         let mut allowance = botrail_collide::ContactAllowance::default();
+        allowance.slack = self.collision_slack;
         self.object_allowance_into(&mut allowance, attached_map, map);
         for contact in &self.allowed_contacts {
             let Some(orig) = self
@@ -2079,7 +2087,10 @@ impl Scene {
     /// True when `q` has the right DOF for robot `robot`, respects its
     /// position limits, and is collision-free — with every other robot as a
     /// collision body frozen at its current configuration. This is the
-    /// validity predicate handed to planners.
+    /// validity predicate handed to planners. Only the pairs that involve
+    /// this robot — its links, what it carries — count: another robot's
+    /// held part resting against a stop is not this one's to resolve (and
+    /// under physics a resting part sits a millimetre into what holds it).
     pub fn is_state_valid_for(&self, robot: usize, q: &[f64]) -> bool {
         let model = &self.robots[robot].model;
         if q.len() != model.dof() {
@@ -2092,11 +2103,29 @@ impl Scene {
                 Some((lo, hi)) => *v >= lo - 1e-9 && *v <= hi + 1e-9,
                 None => true,
             });
-        within
-            && self
-                .collisions_at_for(robot, q)
-                .map(|c| c.is_empty())
-                .unwrap_or(false)
+        if !within {
+            return false;
+        }
+        let carried = self.carried_by(robot, None);
+        let involves = |id: &ColliderId| match id {
+            ColliderId::Link { robot: r, .. } => *r == robot,
+            ColliderId::Obstacle(k) => carried.contains(k),
+            ColliderId::Attached(_) => false,
+        };
+        match self.collisions_at_for(robot, q) {
+            Ok(pairs) => !pairs.iter().any(|p| involves(&p.a) || involves(&p.b)),
+            Err(_) => false,
+        }
+    }
+
+    /// The obstacles attached to robot `robot` — on `links` when given,
+    /// anywhere on it otherwise — by obstacle index.
+    pub(crate) fn carried_by(&self, robot: usize, links: Option<&[usize]>) -> Vec<usize> {
+        self.attachments
+            .iter()
+            .filter(|a| a.robot == robot && links.is_none_or(|l| l.contains(&a.link)))
+            .filter_map(|a| self.obstacle_index(&a.object).ok())
+            .collect()
     }
 
     /// [`Scene::is_state_valid_for`] for a motion of one arm: only the
@@ -2130,12 +2159,7 @@ impl Scene {
             return false;
         }
         let moving = self.link_subtree(robot, group.base);
-        let carried: Vec<usize> = self
-            .attachments
-            .iter()
-            .filter(|a| a.robot == robot && moving.contains(&a.link))
-            .filter_map(|a| self.obstacle_index(&a.object).ok())
-            .collect();
+        let carried = self.carried_by(robot, Some(&moving));
         let involves = |id: &ColliderId| match id {
             ColliderId::Link { robot: r, link } => *r == robot && moving.contains(link),
             ColliderId::Obstacle(k) => carried.contains(k),
@@ -2556,6 +2580,7 @@ impl Scene {
             sequences: Vec::new(),
             scenario: None,
             physics: None,
+            physics_scope: None,
             contacts: Vec::new(),
             grasps: Vec::new(),
             robots,

@@ -35,6 +35,7 @@ import {
   type PlaybackSample,
   type PlaybackTracks,
 } from "./playback";
+import { appendTracks } from "./playback";
 import { applySample } from "./playbackRig";
 import { attributionIssues } from "./sfc";
 import * as THREE from "three";
@@ -359,6 +360,24 @@ function startPlayback(tracks: PlaybackTracks) {
   };
 }
 
+/** A bake as the studio asked for it — what the physics toggle re-sends
+ * with the bit flipped (design-world-physics.md §3.6). */
+export type BakeRequest =
+  | {
+      kind: "sequences";
+      names: string[];
+      scenario?: string;
+      /** The bake's time cap (s). */
+      cap: number;
+      physics: boolean;
+    }
+  | {
+      kind: "physics";
+      /** Seconds of the world under gravity, no program. */
+      duration: number;
+      scenario?: string;
+    };
+
 export interface StudioState {
   /** Robot instances, in server (scene) order. */
   robots: RobotUiState[];
@@ -469,6 +488,18 @@ export interface StudioState {
   highlightLane: string | null;
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
+  /** The physics toggle: whether the next bake (and the one the toggle
+   * re-sends) runs under the host's physics. */
+  physicsOn: boolean;
+  /** The last bake as it was requested — what the toggle sends again. */
+  lastBake: BakeRequest | null;
+  /** The request in flight, so a failure can be told apart by kind. */
+  bakePending: BakeRequest | null;
+  /** A streaming bake in progress — a physics bake on a host with a
+   * thread: its programs (or the world under gravity), sent as the tracks
+   * grow (`bake_chunk`) until the programs end or the toggle stops it.
+   * `request` is what asked for it, the last bake once it is done. */
+  bakeStream: { from: number; request: BakeRequest } | null;
   sequenceError: string | null;
   /** The scenario the failed run was asked for (`sequenceError` set),
    * so the diagnosis can say which world did not complete. */
@@ -487,6 +518,9 @@ export interface StudioState {
     /** Touch episodes of a physics bake (empty on a kinematic one) —
      * what the contact markers annotate during playback. */
     contacts: ContactMsg[];
+    /** The engine this bake stepped under (`"rapier"`); null when
+     * kinematic. */
+    physics: string | null;
   } | null;
   /** The USD recording behind the current playback, when there is one. */
   recording: { source: string; mode: string; warnings: string[] } | null;
@@ -584,6 +618,15 @@ export interface StudioState {
    */
   focusTab: (target: "robot" | "obstacle") => void;
   beginSequenceSim: () => void;
+  /** A bake request is on its way: the dock waits, and the request is
+   * kept so the toggle can send it again. */
+  beginBake: (req: BakeRequest) => void;
+  setPhysicsOn: (on: boolean) => void;
+  /** A streaming bake has been asked for; its first window starts
+   * playback. */
+  beginBakeStream: (req: BakeRequest) => void;
+  /** Drops the bake and its playback: the cell as authored. */
+  clearBake: () => void;
   beginMotionPlanning: () => void;
   /** Scrub/advance playback; the sample becomes the display override. */
   setPlayback: (t: number, sample: PlaybackSample) => void;
@@ -642,6 +685,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   io: emptyIo(),
   highlightLane: null,
   sequenceSimulating: false,
+  physicsOn: false,
+  lastBake: null,
+  bakePending: null,
+  bakeStream: null,
   sequenceError: null,
   sequenceErrorScenario: null,
   timeline: null,
@@ -877,38 +924,101 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         }
         // The baked cycle plays through the shared playback machinery;
         // step ends double as the seek-bar tick marks.
-        set({
+        const tl = msg.timeline;
+        set((s) => ({
           sequenceSimulating: false,
           sequenceError: null,
           sequenceErrorScenario: null,
+          lastBake: s.bakePending ?? s.lastBake,
+          bakePending: null,
           timeline: {
-            duration: msg.timeline.duration,
-            stepSpans: msg.timeline.step_spans,
-            robots: msg.timeline.robots.map((r) => ({
+            duration: tl.duration,
+            stepSpans: tl.step_spans,
+            robots: tl.robots.map((r) => ({
               name: r.name,
               moves: r.moves,
             })),
-            signals: msg.timeline.signals,
-            branches: msg.timeline.branches,
+            signals: tl.signals,
+            branches: tl.branches,
             scenario: msg.scenario ?? null,
-            contacts: msg.timeline.contacts ?? [],
+            contacts: tl.contacts ?? [],
+            physics: tl.physics ?? null,
           },
-          segmentEnds: msg.timeline.step_spans.map((s) => s.end),
-          ...startPlayback(tracksFromTimeline(msg.timeline)),
+          segmentEnds: tl.step_spans.map((s) => s.end),
+          ...startPlayback(tracksFromTimeline(tl)),
           motionStats: null,
           motionError: null,
           recording: null,
-        });
+        }));
       } else {
         // The last good bake stays on the dock; the diagnosis (a stall
         // under a fault scenario names the step and the forced point)
-        // is shown beside it, not as a broken screen.
-        set({
-          sequenceSimulating: false,
-          sequenceError: msg.error ?? "simulation failed",
-          sequenceErrorScenario: msg.scenario ?? null,
+        // is shown beside it, not as a broken screen. A refused physics
+        // bake (a host without an engine) puts the toggle back.
+        set((s) => {
+          const pending = s.bakePending ?? s.bakeStream?.request ?? null;
+          const wasPhysics =
+            pending?.kind === "physics" ||
+            (pending?.kind === "sequences" && pending.physics);
+          // A stream that failed (a program still waiting at its cap)
+          // has already landed its last chunk under the toggle: only a
+          // refused physics bake puts the toggle back.
+          const refused = (msg.error ?? "").includes("not available");
+          return {
+            sequenceSimulating: false,
+            sequenceError: msg.error ?? "simulation failed",
+            sequenceErrorScenario: msg.scenario ?? null,
+            bakePending: null,
+            bakeStream: null,
+            physicsOn: wasPhysics && refused ? false : s.physicsOn,
+          };
         });
       }
+    } else if (msg.type === "bake_chunk") {
+      // A streaming bake: the first window starts playback from the top,
+      // every later one grows the tracks under the playhead. The step
+      // bands, branches and signal lanes come whole each time (an open
+      // step's band grows with the clock), the touches by window. `done`
+      // closes the stream and the request becomes the last bake (the host
+      // retains the bake too).
+      const chunk = msg.timeline;
+      set((s) => {
+        const stream = s.bakeStream;
+        const fresh = msg.from === 0 || !s.playback || !stream;
+        const tracks = appendTracks(fresh ? null : s.playback, chunk, msg.from);
+        const before = fresh ? null : s.timeline;
+        const request: BakeRequest = stream?.request ?? {
+          kind: "physics",
+          duration: chunk.duration,
+          scenario: before?.scenario ?? undefined,
+        };
+        const scenario = request.scenario ?? null;
+        return {
+          ...(fresh ? startPlayback(tracks) : { playback: tracks }),
+          timeline: {
+            duration: chunk.duration,
+            stepSpans: chunk.step_spans,
+            robots: chunk.robots.map((r) => ({ name: r.name, moves: r.moves })),
+            signals: chunk.signals,
+            branches: chunk.branches,
+            scenario,
+            contacts: [...(before?.contacts ?? []), ...(chunk.contacts ?? [])],
+            physics: chunk.physics ?? null,
+          },
+          segmentEnds: chunk.step_spans.map((span) => span.end),
+          sequenceError: null,
+          sequenceErrorScenario: null,
+          bakeStream: msg.done ? null : { from: chunk.duration, request },
+          lastBake: msg.done
+            ? request.kind === "physics"
+              ? { ...request, duration: chunk.duration }
+              : request
+            : s.lastBake,
+          motionStats: null,
+          motionError: null,
+          recording: null,
+        };
+      });
     } else if (msg.type === "recording_result") {
       if (msg.ok && msg.timeline) {
         // A baked USD recording (Isaac capture or botrail export) plays
@@ -933,6 +1043,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             branches: msg.timeline.branches,
             scenario: null,
             contacts: msg.timeline.contacts ?? [],
+            physics: null,
           },
           segmentEnds: [],
           ...startPlayback(tracksFromTimeline(msg.timeline)),
@@ -1287,6 +1398,39 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
   beginSequenceSim: () =>
     set({ sequenceSimulating: true, sequenceError: null, sequenceErrorScenario: null }),
+  beginBake: (req) =>
+    set({
+      sequenceSimulating: true,
+      sequenceError: null,
+      sequenceErrorScenario: null,
+      bakePending: req,
+    }),
+  setPhysicsOn: (on) => set({ physicsOn: on }),
+  beginBakeStream: (req) =>
+    set({
+      bakeStream: { from: 0, request: req },
+      sequenceError: null,
+      sequenceErrorScenario: null,
+    }),
+  clearBake: () =>
+    set({
+      timeline: null,
+      lastBake: null,
+      bakePending: null,
+      bakeStream: null,
+      sequenceError: null,
+      sequenceErrorScenario: null,
+      segmentEnds: [],
+      playback: null,
+      playing: false,
+      playbackTime: 0,
+      overridePoses: null,
+      overrideJoints: null,
+      overrideBases: null,
+      overrideVehiclePoses: null,
+      overrideObstaclePoses: null,
+      stowedObstacles: new Set<string>(),
+    }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
 
   setPlayback: (t, sample) =>

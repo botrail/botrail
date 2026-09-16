@@ -494,12 +494,26 @@ fn boxes_gap(a: &Aabb, b: &Aabb) -> f64 {
 }
 
 fn parts_intersect(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts) -> bool {
+    parts_intersect_within(pose_a, a, pose_b, b, 0.0)
+}
+
+/// [`parts_intersect`] with `slack`: a penetration no deeper than `slack`
+/// does not count ([`ContactAllowance::slack`]).
+fn parts_intersect_within(pose_a: &Pose, a: &Parts, pose_b: &Pose, b: &Parts, slack: f64) -> bool {
     for (la, sa) in a {
         let wa = *pose_a * *la;
         for (lb, sb) in b {
             let wb = *pose_b * *lb;
-            if query::intersection_test(&wa, sa.as_ref(), &wb, sb.as_ref()).unwrap_or(false) {
-                return true;
+            if slack <= 0.0 {
+                if query::intersection_test(&wa, sa.as_ref(), &wb, sb.as_ref()).unwrap_or(false) {
+                    return true;
+                }
+            } else if let Ok(Some(contact)) =
+                query::contact(&wa, sa.as_ref(), &wb, sb.as_ref(), 0.0)
+            {
+                if contact.dist < -slack {
+                    return true;
+                }
             }
         }
     }
@@ -662,6 +676,14 @@ impl BroadPhase {
 /// filter their obstacle list map names to filtered indices first.
 #[derive(Debug, Default, Clone)]
 pub struct ContactAllowance {
+    /// Penetration up to this depth (m) is not a collision, for a link's
+    /// or a carried object's meeting with an obstacle and a robot's own
+    /// links — the fifth exemption, for a world simulated by a physics
+    /// engine, where everything that rests on something sits a millimetre
+    /// or so into it (the solver's contact slop) and a carried part was
+    /// picked up with that sink in its grasp. Zero (the default) is the
+    /// exact test; robot-robot pairs are always exact.
+    pub slack: f64,
     pairs: std::collections::HashSet<(usize, usize, usize)>,
     /// Carried objects allowed to meet an obstacle — the fourth exemption
     /// mechanism, for a part being *fitted*: a screw in its hole, a cover
@@ -774,7 +796,13 @@ pub fn check_scene(
                 {
                     continue;
                 }
-                if parts_intersect(&bp.world[r][i], &links[i], &bp.world[r][j], &links[j]) {
+                if parts_intersect_within(
+                    &bp.world[r][i],
+                    &links[i],
+                    &bp.world[r][j],
+                    &links[j],
+                    allowance.slack,
+                ) {
                     pairs.push(CollisionPair {
                         a: ColliderId::Link { robot: r, link: i },
                         b: ColliderId::Link { robot: r, link: j },
@@ -831,7 +859,8 @@ fn obstacle_pairs(
                 {
                     continue;
                 }
-                if parts_intersect(&bp.world[r][i], parts, &op, &obs.parts) {
+                if parts_intersect_within(&bp.world[r][i], parts, &op, &obs.parts, allowance.slack)
+                {
                     pairs.push(CollisionPair {
                         a: ColliderId::Link { robot: r, link: i },
                         b: ColliderId::Obstacle(k),
@@ -845,7 +874,13 @@ fn obstacle_pairs(
             {
                 continue;
             }
-            if parts_intersect(&bp.att_world[k2], &att.collider.parts, &op, &obs.parts) {
+            if parts_intersect_within(
+                &bp.att_world[k2],
+                &att.collider.parts,
+                &op,
+                &obs.parts,
+                allowance.slack,
+            ) {
                 pairs.push(CollisionPair {
                     a: ColliderId::Attached(k2),
                     b: ColliderId::Obstacle(k),

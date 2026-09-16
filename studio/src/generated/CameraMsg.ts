@@ -7,20 +7,20 @@ import type { PoseMsg } from "./PoseMsg";
  * it publishes no signal (a vision sensor referencing it is the planned
  * signal path).
  */
-export type CameraMsg = { name: string,
+export type CameraMsg = { name: string, 
 /**
  * Show the generic housing without affecting the optics or frustum.
  */
-body_visible: boolean, mount: CameraMountMsg,
+body_visible: boolean, mount: CameraMountMsg, 
 /**
  * Offset in the mount frame (world pose for a `world` mount).
  * -Z is the view direction, +Y is image-up.
  */
-pose: PoseMsg,
+pose: PoseMsg, 
 /**
  * Horizontal field of view, degrees.
  */
-fov_deg: number,
+fov_deg: number, 
 /**
  * Image size in pixels (frustum aspect, export pixel size).
  */

@@ -50,7 +50,7 @@ topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, 
  * World-frame hit points, meters, rounded to 0.1 mm (display
  * data — the analysis-grade sweep stays in the Python API).
  */
-points: Array<[number, number, number]>, } | { "type": "sequence_result", ok: boolean, sequence: string, 
+points: Array<[number, number, number]>, } | { "type": "bake_chunk", from: number, done: boolean, timeline: TimelineMsg, } | { "type": "sequence_result", ok: boolean, sequence: string, 
 /**
  * Scenario the rollout ran under; absent = `baseline`.
  */

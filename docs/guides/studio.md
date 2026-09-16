@@ -94,6 +94,27 @@ timeline to the dock:
 
 ![A baked sequence with the timeline dock](../assets/studio/sequence.png)
 
+**⚛ physics** (beside Simulate, and on the dock) is the physics toggle. On,
+the same bake runs again under the host's physics — the whole cell: every
+obstacle a rigid body unless it is bolted down, every robot an articulated
+body, a ground plane at z = 0 — and playback restarts from the top; off,
+it runs again kinematically and restarts. A physics bake *streams*: the
+host sends the tracks as they grow and playback follows, the step bands
+drawing themselves as the programs advance, so a slow or long bake is
+watched rather than waited for; the bake ends when the programs do, and
+switching off mid-way stops it where it stands and bakes the programs
+kinematically again. With no program baked yet, on streams the world under
+gravity in step with the clock: whatever is unsupported falls while an
+unpowered machine folds — until you switch it off, which stops the world
+where it stands (the clip stays on the dock, exportable like any bake), or
+the cap ends it. Switching on again starts a fresh stream from the cell as
+authored. What "on" means is the host's choice: `bt.studio(scene,
+physics=bt.Physics(world=True, powered=False))` makes it a power cut,
+`physics=False` serves the studio without physics (the toggle says so). The
+label on the dock names the engine the playing bake ran under; the
+browser-only session has no thread to stream from and bakes in one go (a
+fixed ten seconds for the world with no program).
+
 ## The chart — SFC
 
 **◫ SFC chart** (in RUN, or the `sfc` button on the dock) overlays the

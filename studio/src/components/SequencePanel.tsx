@@ -3,9 +3,8 @@ import { useEffect, useState } from "react";
 import type { ScenarioMsg, SequenceMsg, StepMsg } from "../protocol";
 import { actionLabel, conditionLabel } from "../seqLabels";
 import { robotByName, useStudioStore } from "../store";
+import { setPhysics, startBake } from "../bake";
 import {
-  sendSimulateSequence,
-  sendSimulateSequences,
   sendUpsertSequence,
 } from "../ws";
 import { Section } from "./Section";
@@ -29,7 +28,8 @@ export function SequencePanel() {
   const error = useStudioStore((s) => s.sequenceError);
   const errorScenario = useStudioStore((s) => s.sequenceErrorScenario);
   const timeline = useStudioStore((s) => s.timeline);
-  const beginSequenceSim = useStudioStore((s) => s.beginSequenceSim);
+  const physicsOn = useStudioStore((s) => s.physicsOn);
+  const streaming = useStudioStore((s) => s.bakeStream !== null);
   const connected = useStudioStore((s) => s.connection === "connected");
   const sfcOpen = useStudioStore((s) => s.sfcOpen);
   const setSfcOpen = useStudioStore((s) => s.setSfcOpen);
@@ -138,18 +138,14 @@ export function SequencePanel() {
   const multi = sequences.length > 1;
   const included = sequences.filter((s) => !excluded.has(s.name));
   const canSimulate = multi ? included.length > 0 : sequence.steps.length > 0;
-  const onSimulate = () => {
-    beginSequenceSim();
-    if (multi) {
-      sendSimulateSequences(
-        included.map((s) => s.name),
-        runScenario,
-        cap,
-      );
-    } else {
-      sendSimulateSequence(sequence.name, runScenario, cap);
-    }
-  };
+  const onSimulate = () =>
+    startBake({
+      kind: "sequences",
+      names: multi ? included.map((s) => s.name) : [sequence.name],
+      scenario: runScenario,
+      cap,
+      physics: physicsOn,
+    });
 
   return (
     <>
@@ -362,6 +358,25 @@ export function SequencePanel() {
             />
             s
           </label>
+          {/* The physics toggle: the next bake — and, flipped, the last
+              one again — under the host's physics: the whole cell, its
+              ground, the robots as articulated bodies. With no program
+              baked, on streams the world under gravity until off stops
+              it; off after that is the cell as authored. */}
+          <button
+            className={physicsOn ? "timeline-button timeline-button-on" : "timeline-button"}
+            onClick={() => setPhysics(!physicsOn)}
+            disabled={simulating || !connected}
+            title={
+              streaming
+                ? "physics streaming: stop here (a program is baked again kinematically, the world's clip stays on the dock)"
+                : physicsOn
+                  ? "physics on: bake again kinematically and restart"
+                  : "physics off: bake the whole cell under physics (every obstacle and robot the engine's, ground at z = 0) and restart; with no program, stream the world under gravity until stopped"
+            }
+          >
+            ⚛ physics
+          </button>
           <button
             className="plan-go"
             onClick={onSimulate}

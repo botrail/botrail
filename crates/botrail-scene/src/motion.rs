@@ -45,6 +45,8 @@ pub enum MotionError {
     },
     #[error("segment {index}: start configuration collides: {pairs}")]
     StartCollides { index: usize, pairs: String },
+    #[error("segment {index}: goal configuration collides: {pairs}")]
+    GoalCollides { index: usize, pairs: String },
     #[error("time parameterization failed: {0}")]
     Timing(#[from] botrail_traj::TrajError),
 }
@@ -264,20 +266,14 @@ fn collision_names(scene: &Scene, robot: usize, group: Option<&Group>, q: &[f64]
     let moving = group
         .filter(|g| g.joints.len() < model.dof())
         .map(|g| scene.link_subtree(robot, g.base));
-    let carried: Vec<usize> = match &moving {
-        Some(links) => scene
-            .attachments()
-            .iter()
-            .filter(|a| a.robot == robot && links.contains(&a.link))
-            .filter_map(|a| scene.obstacle_index(&a.object).ok())
-            .collect(),
-        None => Vec::new(),
-    };
+    let carried = scene.carried_by(robot, moving.as_deref());
+    // The pairs the validity predicate counts: this robot's moving links
+    // and what they carry (`Scene::is_state_valid_for`).
     let involves = |id: &ColliderId| match (&moving, id) {
-        (None, _) => true,
+        (None, ColliderId::Link { robot: r, .. }) => *r == robot,
         (Some(links), ColliderId::Link { robot: r, link }) => *r == robot && links.contains(link),
-        (Some(_), ColliderId::Obstacle(k)) => carried.contains(k),
-        (Some(_), ColliderId::Attached(_)) => false,
+        (_, ColliderId::Obstacle(k)) => carried.contains(k),
+        (_, ColliderId::Attached(_)) => false,
     };
     let name = |id: &ColliderId| match id {
         ColliderId::Link { robot: r, link } => {
@@ -424,16 +420,28 @@ fn plan_segment(
                 plan_options,
             )
             .map_err(|source| {
-                // A start in collision is named: which link met what, so a
-                // program that drives into something says so.
-                if matches!(source, botrail_plan::PlanError::InvalidStart) {
-                    let names = collision_names(scene, robot, group, start_q);
-                    if !names.is_empty() {
-                        return MotionError::StartCollides {
-                            index,
-                            pairs: names.join(", "),
-                        };
+                // A start or goal in collision is named: which link met
+                // what, so a program that drives into something says so.
+                match source {
+                    botrail_plan::PlanError::InvalidStart => {
+                        let names = collision_names(scene, robot, group, start_q);
+                        if !names.is_empty() {
+                            return MotionError::StartCollides {
+                                index,
+                                pairs: names.join(", "),
+                            };
+                        }
                     }
+                    botrail_plan::PlanError::InvalidGoal => {
+                        let names = collision_names(scene, robot, group, &segment.goal_positions);
+                        if !names.is_empty() {
+                            return MotionError::GoalCollides {
+                                index,
+                                pairs: names.join(", "),
+                            };
+                        }
+                    }
+                    _ => {}
                 }
                 MotionError::PlanFailed { index, source }
             })

@@ -73,6 +73,46 @@ pub trait SessionHost {
         self.with_scene(|scene| scene.clone())
     }
 
+    /// What a client's `physics: true` means on this host: a fresh
+    /// backend to bake with and the options to lower under
+    /// (design-world-physics.md 判断 D12 — the host owns the meaning, the
+    /// client sends a bit). `None` (the default) is a host without a
+    /// physics engine; such a request is answered with a failed
+    /// `sequence_result` rather than a silent kinematic bake.
+    fn physics(
+        &self,
+    ) -> Option<(
+        Box<dyn botrail_physics::PhysicsBackend>,
+        botrail_scene::rollout::PhysicsOptions,
+    )> {
+        None
+    }
+
+    /// Starts a streaming bake (`start_bake`): the host runs
+    /// [`run_bake_stream`] off the message loop and stops it on
+    /// [`stop_bake_stream`](Self::stop_bake_stream). The default refuses
+    /// in a failed `sequence_result` — a host without a thread (the
+    /// browser session) or without an engine.
+    fn start_bake_stream(
+        &self,
+        names: &[String],
+        scenario: Option<&str>,
+        _max_duration: Option<f64>,
+        _physics: bool,
+    ) where
+        Self: Sized,
+    {
+        emit_physics_refused(self, &bake_label(names), scenario);
+    }
+
+    /// Ends the streaming bake where it stands (no-op without one).
+    fn stop_bake_stream(&self) {}
+
+    /// Called before any bake this host is asked for, so a streaming bake
+    /// in flight can be wound up first and its last chunk lands before the
+    /// new result.
+    fn before_bake(&self) {}
+
     /// Retains the last successful rollout — the pre-rollout scene
     /// snapshot plus its timeline — so a later `export_usd` request can
     /// bake it without re-simulating. Hosts that never export keep the
@@ -318,13 +358,15 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             name,
             scenario,
             max_duration,
+            physics,
         } => {
             // Failure is reported to clients inside the sequence_result.
-            let _ = simulate_sequence_and_emit(
+            let _ = simulate_client_bake(
                 host,
-                &name,
+                &[name.as_str()],
                 scenario.as_deref(),
-                &rollout_options(max_duration),
+                rollout_options(max_duration),
+                physics.unwrap_or(false),
             );
             Ok(())
         }
@@ -332,13 +374,45 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             names,
             scenario,
             max_duration,
+            physics,
         } => {
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
-            let _ = simulate_sequences_and_emit(
+            let _ = simulate_client_bake(
                 host,
                 &names,
                 scenario.as_deref(),
-                &rollout_options(max_duration),
+                rollout_options(max_duration),
+                physics.unwrap_or(false),
+            );
+            Ok(())
+        }
+        ClientMessage::StartBake {
+            names,
+            scenario,
+            max_duration,
+            physics,
+        } => {
+            host.start_bake_stream(&names, scenario.as_deref(), max_duration, physics);
+            Ok(())
+        }
+        ClientMessage::StopBake => {
+            host.stop_bake_stream();
+            Ok(())
+        }
+        ClientMessage::SimulatePhysics { duration, scenario } => {
+            host.before_bake();
+            let Some((backend, physics)) = host.physics() else {
+                emit_physics_refused(host, "physics", scenario.as_deref());
+                return Ok(());
+            };
+            let mut options = rollout_options(Some(duration));
+            options.physics = Some(physics);
+            let _ = simulate_physics_and_emit_with(
+                host,
+                duration,
+                scenario.as_deref(),
+                &options,
+                Some(backend),
             );
             Ok(())
         }
@@ -1292,6 +1366,202 @@ fn rollout_options(max_duration: Option<f64>) -> botrail_scene::rollout::Rollout
     options
 }
 
+/// A client's sequence bake, kinematic or — with `physics` — under the
+/// host's engine and options; a host without one refuses the physics
+/// request inside the `sequence_result` so the client's toggle can fall
+/// back.
+fn simulate_client_bake(
+    host: &impl SessionHost,
+    names: &[&str],
+    scenario: Option<&str>,
+    mut options: botrail_scene::rollout::RolloutOptions,
+    physics: bool,
+) -> Result<SequenceTimeline, String> {
+    host.before_bake();
+    let backend = if physics {
+        let Some((backend, physics)) = host.physics() else {
+            let label = names.join(" + ");
+            emit_physics_refused(host, &label, scenario);
+            return Err(PHYSICS_UNAVAILABLE.to_string());
+        };
+        options.physics = Some(physics);
+        Some(backend)
+    } else {
+        None
+    };
+    simulate_sequences_and_emit_with(host, names, scenario, &options, backend)
+}
+
+/// What a host without a physics engine says to a physics request.
+pub const PHYSICS_UNAVAILABLE: &str =
+    "physics is not available on this host: bake from Python (`bt.studio(scene)` serves \
+     the studio with an engine), or keep the physics toggle off";
+
+/// Answers a physics request on a host without an engine: a failed
+/// `sequence_result` under `label`, so the client's toggle falls back.
+pub fn emit_physics_refused(host: &impl SessionHost, label: &str, scenario: Option<&str>) {
+    emit_physics_failed(host, label, scenario, PHYSICS_UNAVAILABLE.to_string());
+}
+
+/// A physics bake that could not run, reported to the clients.
+pub fn emit_physics_failed(
+    host: &impl SessionHost,
+    label: &str,
+    scenario: Option<&str>,
+    error: String,
+) {
+    host.emit(&ServerMessage::SequenceResult {
+        ok: false,
+        sequence: label.to_string(),
+        scenario: scenario
+            .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+            .map(str::to_string),
+        error: Some(error),
+        timeline: None,
+        planning_time_ms: None,
+    });
+}
+
+/// Simulated seconds per streamed chunk.
+pub const STREAM_CHUNK_SECONDS: f64 = 0.25;
+
+/// How far a paced stream may run ahead of the wall clock (s): far
+/// enough that playback never waits, close enough that a stop lands
+/// about where the viewer is watching.
+pub const STREAM_LEAD_SECONDS: f64 = 1.0;
+
+/// The label a bake's results carry: its programs, or `physics` for the
+/// cell with no program.
+pub fn bake_label(names: &[String]) -> String {
+    if names.is_empty() {
+        "physics".to_string()
+    } else {
+        names.join(" + ")
+    }
+}
+
+/// A streaming bake (design-world-physics.md §3.6): the programs `names`
+/// — or, with none, the world under gravity — advanced chunk by chunk and
+/// sent as `bake_chunk`s until the programs end, `stop` says so, or the
+/// program-less bake reaches `options.max_duration`. A program still
+/// waiting at the cap fails the way a batch bake does (timed out), after
+/// its last chunk. `pace` holds the simulated clock at most
+/// [`STREAM_LEAD_SECONDS`] ahead of the wall clock with `sleep` — the
+/// open-ended bake, so a stop lands where the viewer is; a program bake
+/// runs as fast as it can. On the way out the whole bake is retained
+/// (`store_baked`) like any sequence result. `scene` is the snapshot to
+/// bake (the scenario already applied), `scenario` its name for the
+/// timeline's self-description.
+#[allow(clippy::too_many_arguments)]
+pub fn run_bake_stream(
+    host: &impl SessionHost,
+    scene: &Scene,
+    names: &[&str],
+    scenario: Option<&str>,
+    options: &botrail_scene::rollout::RolloutOptions,
+    backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+    stop: &dyn Fn() -> bool,
+    sleep: &dyn Fn(f64),
+    pace: bool,
+) -> Result<SequenceTimeline, String> {
+    let debug = std::env::var("BT_PHYS_DEBUG").is_ok();
+    let cap = options.max_duration;
+    let opened_at = host.now_ms();
+    let mut live = if names.is_empty() {
+        scene
+            .open_physics_rollout(cap, options, backend)
+            .map_err(|e| e.to_string())?
+    } else {
+        scene
+            .open_rollout(names, options, backend)
+            .map_err(|e| e.to_string())?
+    };
+    if debug {
+        eprintln!(
+            "STREAM open: {:.1} ms ({} obstacles, {} programs)",
+            host.now_ms() - opened_at,
+            scene.obstacles().len(),
+            names.len()
+        );
+    }
+    let dt = live.dt();
+    let ticks_per_chunk = (STREAM_CHUNK_SECONDS / dt).round().max(1.0) as usize;
+    let t0 = host.now_ms();
+    let mut sent = 0.0;
+    let mut chunks = 0usize;
+    // The last chunk goes out before an error is reported, so the clip up
+    // to the failure stays on the dock under the diagnosis.
+    let mut failure: Option<String> = None;
+    loop {
+        let stopped = stop();
+        if !stopped {
+            for _ in 0..ticks_per_chunk {
+                if live.finished() || (names.is_empty() && live.t() + 1e-9 >= cap) {
+                    break;
+                }
+                if let Err(e) = live.tick() {
+                    failure = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        let done = stopped
+            || failure.is_some()
+            || live.finished()
+            || (names.is_empty() && live.t() + 1e-9 >= cap);
+        let ticked_at = host.now_ms();
+        let snapshot = live.timeline();
+        let chunk = timeline_window_msg(scene, &snapshot, sent);
+        let from = sent;
+        sent = snapshot.duration;
+        let has_samples = chunk.robots.iter().any(|r| !r.trajectory.times.is_empty())
+            || chunk.objects.iter().any(|o| !o.poses.is_empty())
+            || chunk.vehicles.iter().any(|v| !v.poses.is_empty());
+        if done || has_samples {
+            host.emit(&ServerMessage::BakeChunk {
+                from,
+                done,
+                timeline: chunk,
+            });
+            chunks += 1;
+            if debug && chunks == 1 {
+                eprintln!(
+                    "STREAM first chunk: ticks {:.1} ms, window+emit {:.1} ms, t = {:.2} s",
+                    ticked_at - t0,
+                    host.now_ms() - ticked_at,
+                    sent
+                );
+            }
+        }
+        if done {
+            break;
+        }
+        if pace {
+            let ahead = sent - (host.now_ms() - t0) / 1000.0;
+            if ahead > STREAM_LEAD_SECONDS {
+                sleep(ahead - STREAM_LEAD_SECONDS);
+            }
+        }
+    }
+    if debug {
+        eprintln!(
+            "STREAM end: {} chunks, {:.2} s simulated in {:.1} ms",
+            chunks,
+            sent,
+            host.now_ms() - t0
+        );
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let mut timeline = live.finish();
+    timeline.scenario = scenario
+        .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+        .map(str::to_string);
+    host.store_baked(scene, &timeline);
+    Ok(timeline)
+}
+
 pub fn simulate_sequence_and_emit(
     host: &impl SessionHost,
     name: &str,
@@ -1310,7 +1580,7 @@ pub fn baked_result_message(host: &impl SessionHost) -> Option<ServerMessage> {
     let (scene, timeline) = host.baked()?;
     Some(ServerMessage::SequenceResult {
         ok: true,
-        sequence: timeline.sequences.join(" + "),
+        sequence: bake_label(&timeline.sequences),
         scenario: timeline.scenario.clone(),
         error: None,
         timeline: Some(timeline_msg(&scene, &timeline)),
@@ -1361,6 +1631,39 @@ pub fn simulate_sequences_and_emit_driven(
     policies: Vec<(String, Box<dyn botrail_scene::rl::PolicyDriver>)>,
 ) -> Result<botrail_scene::rollout::SequenceTimeline, String> {
     let name = names.join(" + ");
+    bake_and_emit(host, &name, scenario, |snapshot| {
+        snapshot
+            .simulate_sequences_driven(names, options, backend, policies)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Bakes `duration` seconds of the cell with no program at all
+/// ([`Scene::simulate_physics_with`] — design-world-physics.md W0) and
+/// broadcasts the result like a sequence bake, labelled `physics`.
+pub fn simulate_physics_and_emit_with(
+    host: &impl SessionHost,
+    duration: f64,
+    scenario: Option<&str>,
+    options: &botrail_scene::rollout::RolloutOptions,
+    backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
+) -> Result<SequenceTimeline, String> {
+    bake_and_emit(host, "physics", scenario, |snapshot| {
+        snapshot
+            .simulate_physics_with(duration, options, backend)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// The shared shape of a bake request: apply the scenario to a snapshot,
+/// run the bake against it, retain and broadcast the result (or its
+/// diagnosis) as a `sequence_result`.
+fn bake_and_emit(
+    host: &impl SessionHost,
+    name: &str,
+    scenario: Option<&str>,
+    run: impl FnOnce(&Scene) -> Result<SequenceTimeline, String>,
+) -> Result<SequenceTimeline, String> {
     let scenario = scenario.filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO);
     let mut snapshot = host.snapshot();
     let applied = scenario
@@ -1369,9 +1672,7 @@ pub fn simulate_sequences_and_emit_driven(
         .map_err(|e| e.to_string());
     let result = applied.and_then(|applied| {
         let t0 = host.now_ms();
-        let mut result = snapshot
-            .simulate_sequences_driven(names, options, backend, policies)
-            .map_err(|e| e.to_string());
+        let mut result = run(&snapshot);
         if let Ok(timeline) = &mut result {
             timeline.scenario = applied.map(str::to_string);
         }
@@ -1382,7 +1683,7 @@ pub fn simulate_sequences_and_emit_driven(
             host.store_baked(&snapshot, timeline);
             ServerMessage::SequenceResult {
                 ok: true,
-                sequence: name.clone(),
+                sequence: name.to_string(),
                 scenario: timeline.scenario.clone(),
                 error: None,
                 timeline: Some(timeline_msg(&snapshot, timeline)),
@@ -1391,7 +1692,7 @@ pub fn simulate_sequences_and_emit_driven(
         }
         Err(e) => ServerMessage::SequenceResult {
             ok: false,
-            sequence: name.clone(),
+            sequence: name.to_string(),
             scenario: scenario.map(str::to_string),
             error: Some(e.clone()),
             timeline: None,
@@ -1472,17 +1773,69 @@ pub fn timeline_msg(
     // A robot-less cell (a conveyor line, an AGV loop) still has objects
     // and vehicles to animate, so the clock is built from the duration at
     // the same rate the robot resample would have used.
-    let uniform: Vec<f64>;
-    let grid: &[f64] = match sampled.first() {
-        Some((times, _)) => times.as_slice(),
+    let grid: Vec<f64> = match sampled.first() {
+        Some((times, _)) => times.clone(),
         None => {
             let steps = (timeline.duration * 30.0).ceil().max(1.0) as usize;
-            uniform = (0..=steps)
+            (0..=steps)
                 .map(|k| (k as f64 / steps as f64) * timeline.duration)
-                .collect();
-            &uniform
+                .collect()
         }
     };
+    let rows: Vec<Vec<Vec<f64>>> = sampled.into_iter().map(|(_, rows)| rows).collect();
+    timeline_msg_on(scene, timeline, grid, rows, true)
+}
+
+/// The window of a timeline after `from`: the tracks sampled on the
+/// 30 Hz lattice `k / 30` at every point in `(from, duration]` — an
+/// absolute lattice, so consecutive windows of a growing bake concatenate
+/// into one continuous track set (the streaming bake's chunks). Constant
+/// tracks are not collapsed: a chunk's arrays all have the window's
+/// length. Step bands, branches and signal lanes are the whole bake so
+/// far; the touches only those that began in the window.
+pub fn timeline_window_msg(
+    scene: &Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+    from: f64,
+) -> wire::TimelineMsg {
+    const RATE: f64 = 30.0;
+    let mut grid = Vec::new();
+    let mut k = ((from + 1e-9) * RATE).floor() as i64 + 1;
+    while (k as f64) / RATE <= timeline.duration + 1e-9 {
+        grid.push(k as f64 / RATE);
+        k += 1;
+    }
+    let rows: Vec<Vec<Vec<f64>>> = timeline
+        .robots
+        .iter()
+        .map(|track| grid.iter().map(|&t| track.trajectory.sample(t)).collect())
+        .collect();
+    timeline_msg_on(scene, timeline, grid, rows, false)
+}
+
+/// The wire form of a timeline sampled on `grid`, with `rows[r][k]` robot
+/// `r`'s joints at `grid[k]`. `collapse` folds tracks that never move
+/// into a single pose (the whole-timeline message); a window keeps every
+/// sample so it can be appended.
+fn timeline_msg_on(
+    scene: &Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+    grid: Vec<f64>,
+    rows: Vec<Vec<Vec<f64>>>,
+    collapse: bool,
+) -> wire::TimelineMsg {
+    let sampled: Vec<(Vec<f64>, Vec<Vec<f64>>)> =
+        rows.into_iter().map(|r| (grid.clone(), r)).collect();
+    // A window's touches: those that began strictly after the previous
+    // window's end, which is the lattice point before this window's first.
+    // (Step bands, branches and signal lanes go whole either way: the
+    // client replaces them, and an open step's band grows with the clock.)
+    let window_from = if collapse {
+        f64::NEG_INFINITY
+    } else {
+        grid.first().map_or(timeline.duration, |t| t - 1.0 / 30.0)
+    };
+    let grid: &[f64] = &grid;
 
     // A mounted robot's base moves; everything that does FK off it has to
     // ask the track, not the parked scene.
@@ -1536,7 +1889,7 @@ pub fn timeline_msg(
         // magazine) collapses to a single pose — the client reads a
         // one-pose track as constant, and a hundred stages would
         // otherwise each ship a copy of the whole grid.
-        if msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
+        if collapse && msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
             msg.poses.truncate(1);
         }
     }
@@ -1561,7 +1914,7 @@ pub fn timeline_msg(
         })
         .collect();
     for msg in &mut vehicles {
-        if msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
+        if collapse && msg.poses.len() > 1 && msg.poses.iter().all(|p| *p == msg.poses[0]) {
             msg.poses.truncate(1);
         }
     }
@@ -1629,6 +1982,7 @@ pub fn timeline_msg(
 
     wire::TimelineMsg {
         duration: timeline.duration,
+        physics: timeline.physics.clone(),
         robots,
         vehicles,
         objects: object_tracks,
@@ -1667,6 +2021,7 @@ pub fn timeline_msg(
         contacts: timeline
             .contacts
             .iter()
+            .filter(|c| collapse || c.start > window_from)
             .map(|c| wire::ContactMsg {
                 a: c.a.clone(),
                 b: c.b.clone(),
@@ -2043,6 +2398,7 @@ mod tests {
                     ServerMessage::Toolpaths { .. } => "toolpaths",
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
+                    ServerMessage::BakeChunk { .. } => "bake_chunk",
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::ScanResult { .. } => "scan_result",
                     ServerMessage::Sensors { .. } => "sensors",
@@ -2079,6 +2435,363 @@ mod tests {
         fn baked(&self) -> Option<(Scene, SequenceTimeline)> {
             self.baked.borrow().clone()
         }
+    }
+
+    /// The test host with a physics engine: what `bt.studio` serves.
+    struct PhysicsHost(TestHost);
+
+    impl SessionHost for PhysicsHost {
+        fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
+            self.0.with_scene(f)
+        }
+        fn emit(&self, msg: &ServerMessage) {
+            self.0.emit(msg)
+        }
+        fn now_ms(&self) -> f64 {
+            0.0
+        }
+        fn log(&self, message: &str) {
+            self.0.log(message)
+        }
+        fn store_baked(&self, scene: &Scene, timeline: &SequenceTimeline) {
+            self.0.store_baked(scene, timeline)
+        }
+        fn baked(&self) -> Option<(Scene, SequenceTimeline)> {
+            self.0.baked()
+        }
+        fn physics(
+            &self,
+        ) -> Option<(
+            Box<dyn botrail_physics::PhysicsBackend>,
+            botrail_scene::rollout::PhysicsOptions,
+        )> {
+            Some((
+                Box::new(botrail_physics_rapier::RapierBackend::new()),
+                botrail_scene::rollout::PhysicsOptions::world(),
+            ))
+        }
+    }
+
+    /// A cell for the physics toggle: a box hovering over nothing, and a
+    /// one-step program that waits.
+    fn hover_scene() -> Scene {
+        let mut scene = Scene::empty();
+        scene
+            .add_obstacle(
+                "hover",
+                botrail_model::Geometry::Box {
+                    size: nalgebra::Vector3::new(0.1, 0.1, 0.1),
+                },
+                nalgebra::Isometry3::translation(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_sequence(botrail_scene::seq::Sequence {
+            name: "wait".into(),
+            steps: vec![botrail_scene::seq::Step {
+                name: "hold".into(),
+                actions: Vec::new(),
+                transition: botrail_scene::seq::Condition::Elapsed { seconds: 1.0 },
+                select: Vec::new(),
+            }],
+        });
+        scene
+    }
+
+    fn last_result(
+        out: &[ServerMessage],
+    ) -> (bool, String, Option<wire::TimelineMsg>, Option<String>) {
+        match out.last() {
+            Some(ServerMessage::SequenceResult {
+                ok,
+                sequence,
+                timeline,
+                error,
+                ..
+            }) => (*ok, sequence.clone(), timeline.clone(), error.clone()),
+            other => panic!("expected sequence_result, got {other:?}"),
+        }
+    }
+
+    /// The studio's physics toggle (design-world-physics.md §3.6): the
+    /// same request with `physics: true` bakes under the host's engine
+    /// and the timeline says so; a host without physics refuses it in
+    /// the result instead of quietly baking kinematically; a bake with
+    /// no program at all is `simulate_physics`.
+    #[test]
+    fn a_physics_bake_request_uses_the_host_engine_or_is_refused() {
+        let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequence","name":"wait","max_duration":2.0,"physics":true}"#,
+        );
+        let (ok, label, timeline, error) = last_result(&host.0.out.borrow());
+        assert!(ok, "{error:?}");
+        assert_eq!(label, "wait");
+        let timeline = timeline.unwrap();
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        // The hovering box fell: it has an object track.
+        assert!(timeline.objects.iter().any(|o| o.name == "hover"));
+        // The same request without the bit is the kinematic bake.
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequence","name":"wait","max_duration":2.0}"#,
+        );
+        let (ok, _, timeline, _) = last_result(&host.0.out.borrow());
+        assert!(ok);
+        let timeline = timeline.unwrap();
+        assert_eq!(timeline.physics, None);
+        assert!(timeline.objects.is_empty());
+        // No program: the world under gravity for `duration` seconds.
+        handle_client_message(&host, r#"{"type":"simulate_physics","duration":1.5}"#);
+        let (ok, label, timeline, error) = last_result(&host.0.out.borrow());
+        assert!(ok, "{error:?}");
+        assert_eq!(label, "physics");
+        let timeline = timeline.unwrap();
+        assert!((timeline.duration - 1.5).abs() < 1e-9);
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        assert!(timeline.step_spans.is_empty());
+        // A host without an engine refuses, by name, in the result.
+        let plain = TestHost::from_scene(hover_scene());
+        handle_client_message(
+            &plain,
+            r#"{"type":"simulate_sequences","names":["wait"],"physics":true}"#,
+        );
+        let (ok, label, timeline, error) = last_result(&plain.out.borrow());
+        assert!(!ok && timeline.is_none());
+        assert_eq!(label, "wait");
+        assert!(error.unwrap().contains("physics is not available"));
+        handle_client_message(&plain, r#"{"type":"simulate_physics","duration":1.0}"#);
+        let (ok, label, _, error) = last_result(&plain.out.borrow());
+        assert!(!ok);
+        assert_eq!(label, "physics");
+        assert!(error.unwrap().contains("physics is not available"));
+    }
+
+    /// A streaming bake's windows concatenate into the whole: the same
+    /// lattice, no sample twice, none missed, and the final bake retained
+    /// (design-world-physics.md §3.6, streaming).
+    #[test]
+    fn a_physics_stream_sends_appendable_windows_and_retains_the_bake() {
+        use std::cell::Cell;
+        let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+        let (backend, physics) = host.physics().unwrap();
+        let options = botrail_scene::rollout::RolloutOptions {
+            max_duration: 2.0,
+            physics: Some(physics),
+            ..Default::default()
+        };
+        let chunks_seen = Cell::new(0usize);
+        let slept = Cell::new(0.0);
+        let timeline = run_bake_stream(
+            &host,
+            &host.0.scene.borrow().clone(),
+            &[],
+            None,
+            &options,
+            Some(backend),
+            &|| false,
+            &|s| slept.set(slept.get() + s),
+            true,
+        )
+        .unwrap();
+        assert!((timeline.duration - 2.0).abs() < 1e-9);
+        let out = host.0.out.borrow();
+        let mut times: Vec<f64> = Vec::new();
+        let mut poses: Vec<wire::PoseMsg> = Vec::new();
+        let mut done_seen = false;
+        for msg in out.iter() {
+            let ServerMessage::BakeChunk {
+                from,
+                done,
+                timeline,
+            } = msg
+            else {
+                panic!("unexpected {msg:?}");
+            };
+            chunks_seen.set(chunks_seen.get() + 1);
+            assert!(!done_seen, "a chunk after done");
+            done_seen = *done;
+            let hover = timeline.objects.iter().find(|o| o.name == "hover").unwrap();
+            // Every sample in this window lies after `from`, on the lattice.
+            let n = hover.poses.len();
+            let first = ((*from + 1e-9) * 30.0).floor() as i64 + 1;
+            let lattice: Vec<f64> = (0..n).map(|k| (first + k as i64) as f64 / 30.0).collect();
+            for t in &lattice {
+                assert!(*t > *from - 1e-9 && *t <= timeline.duration + 1e-9);
+            }
+            times.extend(lattice);
+            poses.extend(hover.poses.iter().cloned());
+        }
+        assert!(done_seen);
+        assert!(chunks_seen.get() >= 3, "{}", chunks_seen.get());
+        // The host clock stood still while the simulated one ran on, so
+        // past the lead the loop asked to sleep — pacing to the viewer.
+        assert!(slept.get() > 0.0);
+        // The lattice is continuous from the first point …
+        for (k, t) in times.iter().enumerate() {
+            assert!(
+                (t - (k as f64 + 1.0) / 30.0).abs() < 1e-9,
+                "sample {k} at {t}"
+            );
+        }
+        // … and the concatenation is what one window from the start gives.
+        let whole = timeline_window_msg(&host.0.scene.borrow(), &timeline, 0.0);
+        let hover = whole.objects.iter().find(|o| o.name == "hover").unwrap();
+        assert_eq!(hover.poses, poses);
+        // The box fell: the last pose is below the first.
+        assert!(poses.last().unwrap().position[2] < poses[0].position[2] - 0.3);
+        // The whole bake is the retained result, replayed as `physics`.
+        let replay = baked_result_message(&host).unwrap();
+        match replay {
+            ServerMessage::SequenceResult {
+                ok,
+                sequence,
+                timeline,
+                ..
+            } => {
+                assert!(ok);
+                assert_eq!(sequence, "physics");
+                assert_eq!(timeline.unwrap().physics.as_deref(), Some("rapier"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A host without a thread refuses to stream, by name.
+        let plain = TestHost::from_scene(hover_scene());
+        handle_client_message(
+            &plain,
+            r#"{"type":"start_bake","max_duration":1.0,"physics":true}"#,
+        );
+        let (ok, label, _, error) = last_result(&plain.out.borrow());
+        assert!(!ok);
+        assert_eq!(label, "physics");
+        assert!(error.unwrap().contains("physics is not available"));
+        handle_client_message(
+            &plain,
+            r#"{"type":"start_bake","names":["wait"],"physics":true}"#,
+        );
+        let (ok, label, _, _) = last_result(&plain.out.borrow());
+        assert!(!ok);
+        assert_eq!(label, "wait");
+        handle_client_message(&plain, r#"{"type":"stop_bake"}"#);
+    }
+
+    /// A program streams too: its step band grows with the clock, the
+    /// stream ends when the program does, and the whole bake is retained
+    /// under the program's name — physics or kinematic. A program still
+    /// waiting at the cap fails after its last chunk, as a batch bake
+    /// would.
+    #[test]
+    fn a_program_streams_to_its_end_and_a_stalled_one_times_out_after_its_chunks() {
+        let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+        let scene = host.0.scene.borrow().clone();
+        let (backend, physics) = host.physics().unwrap();
+        let options = botrail_scene::rollout::RolloutOptions {
+            max_duration: 5.0,
+            physics: Some(physics.clone()),
+            ..Default::default()
+        };
+        let timeline = run_bake_stream(
+            &host,
+            &scene,
+            &["wait"],
+            None,
+            &options,
+            Some(backend),
+            &|| false,
+            &|_| panic!("a program bake is not paced"),
+            false,
+        )
+        .unwrap();
+        // The program's one-second wait ended the stream, not the cap.
+        assert!(
+            (timeline.duration - 1.0).abs() < 0.05,
+            "{}",
+            timeline.duration
+        );
+        assert_eq!(timeline.physics.as_deref(), Some("rapier"));
+        let out = host.0.out.borrow();
+        let chunks: Vec<_> = out
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::BakeChunk { done, timeline, .. } => Some((*done, timeline.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(chunks.len() >= 3);
+        // Every chunk carries the whole band so far, the open step running
+        // to the clock; the last one is closed at the program's end.
+        for (k, (done, tl)) in chunks.iter().enumerate() {
+            assert_eq!(tl.step_spans.len(), 1, "chunk {k}");
+            assert_eq!(tl.step_spans[0].name, "hold");
+            assert!(
+                (tl.step_spans[0].end - tl.duration).abs() < 1e-6,
+                "chunk {k}"
+            );
+            assert_eq!(*done, k + 1 == chunks.len());
+        }
+        assert_eq!(
+            bake_label(&timeline.sequences),
+            "wait",
+            "retained under the program's name"
+        );
+        drop(out);
+        // Kinematic streams too (the box stays put: no track).
+        let plain = PhysicsHost(TestHost::from_scene(hover_scene()));
+        let kinematic = run_bake_stream(
+            &plain,
+            &scene,
+            &["wait"],
+            None,
+            &botrail_scene::rollout::RolloutOptions::default(),
+            None,
+            &|| false,
+            &|_| {},
+            false,
+        )
+        .unwrap();
+        assert_eq!(kinematic.physics, None);
+        assert!(kinematic.objects.is_empty());
+        // A program that never ends within the cap: the chunks up to the
+        // cap go out, then the timeout is the error — like the batch bake.
+        let mut stalled = hover_scene();
+        stalled.upsert_sequence(botrail_scene::seq::Sequence {
+            name: "forever".into(),
+            steps: vec![botrail_scene::seq::Step {
+                name: "hold".into(),
+                actions: Vec::new(),
+                transition: botrail_scene::seq::Condition::Elapsed { seconds: 60.0 },
+                select: Vec::new(),
+            }],
+        });
+        let host = PhysicsHost(TestHost::from_scene(stalled.clone()));
+        let (backend, physics) = host.physics().unwrap();
+        let options = botrail_scene::rollout::RolloutOptions {
+            max_duration: 0.6,
+            physics: Some(physics),
+            ..Default::default()
+        };
+        let err = run_bake_stream(
+            &host,
+            &stalled,
+            &["forever"],
+            None,
+            &options,
+            Some(backend),
+            &|| false,
+            &|_| {},
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        let out = host.0.out.borrow();
+        let last = out.iter().rev().find_map(|m| match m {
+            ServerMessage::BakeChunk { done, timeline, .. } => Some((*done, timeline.duration)),
+            _ => None,
+        });
+        let (done, duration) = last.expect("chunks before the failure");
+        assert!(done);
+        assert!((duration - 0.6).abs() < 0.02, "{duration}");
+        assert!(host.baked().is_none(), "a failed bake is not retained");
     }
 
     #[test]

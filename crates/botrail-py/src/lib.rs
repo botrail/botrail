@@ -815,6 +815,233 @@ fn physics_backend(
     }
 }
 
+/// How a physics bake runs (`physics=bt.Physics(...)` on `simulate_sequence`,
+/// `simulate_sequences`, `open_rollout` and `simulate_physics`): the
+/// engine, and what it owns. `world=False` (the default) is the declared
+/// scope — only obstacles marked with `set_physics` and robots declared
+/// with `set_robot_physics` are the engine's, exactly `physics=True`.
+/// `world=True` hands it the whole cell (design-world-physics.md): every
+/// obstacle folds into a rigid unit by its name hierarchy and part
+/// identity, and a unit stays a kinematic mirror only when authoring or
+/// identity says so (`set_physics(dynamic=False)`, a device moving it by
+/// name, a walkable floor, an equipment part pin such as `structure.*`);
+/// the rest — a box on the floor included — is dynamic. `ground` is a
+/// static plane at that height (default `0.0` under `world=True`, none
+/// otherwise); `anchored=False` lets even the equipment loose;
+/// `substeps` per 100 Hz scan and `gravity` (m/s²) are the engine's.
+///
+/// Under the world scope every robot is an articulated body too. `powered`
+/// says whether its motors are on: `True` runs the servo of
+/// `set_robot_physics` on every joint (the plan's positions are the
+/// command), `False` switches every motor off — the joints keep their
+/// travel limits and a viscous drag (`passive_damping`, N·m·s/rad) and the
+/// machine folds under gravity; `None` (default) is powered when a program
+/// runs and unpowered in `simulate_physics`. Walkers and aircraft float
+/// (their base is a free body); an arm keeps its stand.
+#[pyclass(frozen, module = "botrail._core", get_all)]
+#[derive(Clone, Debug)]
+struct Physics {
+    engine: String,
+    world: bool,
+    ground: Option<f64>,
+    anchored: bool,
+    substeps: u32,
+    gravity: (f64, f64, f64),
+    powered: Option<bool>,
+    passive_damping: f64,
+}
+
+#[pymethods]
+impl Physics {
+    #[new]
+    #[pyo3(signature = (engine = "rapier", world = false, ground = None, anchored = true, substeps = 4, gravity = (0.0, 0.0, -9.81), powered = None, passive_damping = 1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        engine: &str,
+        world: bool,
+        ground: Option<f64>,
+        anchored: bool,
+        substeps: u32,
+        gravity: (f64, f64, f64),
+        powered: Option<bool>,
+        passive_damping: f64,
+    ) -> PyResult<Self> {
+        if !(passive_damping.is_finite() && passive_damping >= 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "passive_damping must be non-negative, got {passive_damping}"
+            )));
+        }
+        if engine != "rapier" {
+            return Err(PyValueError::new_err(format!(
+                "unknown physics engine `{engine}` (available: \"rapier\")"
+            )));
+        }
+        if substeps == 0 {
+            return Err(PyValueError::new_err("substeps must be at least 1"));
+        }
+        if let Some(z) = ground {
+            if !z.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "ground must be finite, got {z}"
+                )));
+            }
+        }
+        if ![gravity.0, gravity.1, gravity.2]
+            .iter()
+            .all(|g| g.is_finite())
+        {
+            return Err(PyValueError::new_err("gravity must be finite"));
+        }
+        Ok(Physics {
+            engine: engine.to_string(),
+            world,
+            ground,
+            anchored,
+            substeps,
+            gravity,
+            powered,
+            passive_damping,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        let py_bool = |b: bool| if b { "True" } else { "False" };
+        format!(
+            "Physics(engine='{}', world={}, ground={}, anchored={}, substeps={}, gravity={:?}, powered={}, passive_damping={})",
+            self.engine,
+            py_bool(self.world),
+            match self.ground {
+                Some(z) => z.to_string(),
+                None => "None".to_string(),
+            },
+            py_bool(self.anchored),
+            self.substeps,
+            self.gravity,
+            match self.powered {
+                Some(p) => py_bool(p).to_string(),
+                None => "None".to_string(),
+            },
+            self.passive_damping
+        )
+    }
+}
+
+impl Physics {
+    /// The rollout's options: the ground defaults to `z = 0` under the
+    /// world scope and to none under the declared one.
+    fn options(&self) -> botrail_scene::rollout::PhysicsOptions {
+        use botrail_scene::rollout::{PhysicsOptions, PhysicsScope};
+        PhysicsOptions {
+            substeps: self.substeps,
+            gravity: [self.gravity.0, self.gravity.1, self.gravity.2],
+            scope: if self.world {
+                PhysicsScope::World
+            } else {
+                PhysicsScope::Declared
+            },
+            ground: self.ground.or(if self.world { Some(0.0) } else { None }),
+            anchored: self.anchored,
+            powered: self.powered,
+            passive_damping: self.passive_damping,
+        }
+    }
+
+    fn backend(&self) -> Box<dyn botrail_physics::PhysicsBackend> {
+        Box::new(botrail_physics_rapier::RapierBackend::new())
+    }
+}
+
+/// Resolves a bake's `physics` argument into the backend to inject and
+/// the options to bake with: `None`/`False` is the kinematic bake, `True`
+/// or an engine name the declared scope with the engine's defaults, a
+/// `Physics` object exactly what it says. The options land on
+/// `options.physics` so the rollout lowers the scope asked for.
+fn physics_bake(
+    options: &mut botrail_scene::rollout::RolloutOptions,
+    arg: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Box<dyn botrail_physics::PhysicsBackend>>> {
+    if let Some(v) = arg {
+        if let Ok(physics) = v.extract::<PyRef<'_, Physics>>() {
+            options.physics = Some(physics.options());
+            return Ok(Some(physics.backend()));
+        }
+    }
+    physics_backend(arg)
+}
+
+/// The audit of a physics bake's lowering (`Scene.physics_plan`): one row
+/// per rigid unit the engine would see — what it is (`ground`, `fixed`,
+/// `dynamic`), which obstacles it carries, the rule that decided it and
+/// its mass — so a world-scope bake can be read before it is run.
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct PhysicsPlan {
+    inner: botrail_scene::physics_world::PhysicsPlan,
+}
+
+#[pymethods]
+impl PhysicsPlan {
+    /// The rows as dicts: `name`, `kind` (`"ground"` / `"fixed"` /
+    /// `"dynamic"`), `members` (obstacle names, frame first), `reason`,
+    /// `mass_kg` (`None` when derived from the shape).
+    #[getter]
+    fn rows<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .rows
+            .iter()
+            .map(|row| {
+                let d = PyDict::new(py);
+                d.set_item("name", &row.name)?;
+                d.set_item("kind", row.kind.as_str())?;
+                d.set_item("members", &row.members)?;
+                d.set_item("reason", &row.reason)?;
+                d.set_item("mass_kg", row.mass)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Enabled obstacles lowered as individual kinematic mirrors without
+    /// a row of their own (the declared scope's everything-else).
+    #[getter]
+    fn mirrors(&self) -> usize {
+        self.inner.mirrors
+    }
+
+    /// Names of the units the engine owns.
+    fn dynamic(&self) -> Vec<String> {
+        self.inner.dynamic().map(|r| r.name.clone()).collect()
+    }
+
+    /// Dynamic units that start the bake interpenetrating another
+    /// obstacle, as `(unit, obstacle)` pairs — authored into a fixture,
+    /// sunk into a shelf: the engine will push them apart on the first
+    /// tick, so this is the warning to read first.
+    #[getter]
+    fn overlaps(&self) -> Vec<(String, String)> {
+        self.inner.overlaps.clone()
+    }
+
+    fn to_markdown(&self) -> String {
+        self.inner.to_markdown()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.rows.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let dynamic = self.inner.dynamic().count();
+        format!(
+            "PhysicsPlan({} bodies, {} dynamic, {} mirrored, {} overlapping)",
+            self.inner.rows.len(),
+            dynamic,
+            self.inner.mirrors,
+            self.inner.overlaps.len()
+        )
+    }
+}
+
 /// A part attribute from a Python value: int/float → number (bools are
 /// refused — they are ints in Python and would sum), str → text.
 fn part_attr(key: &str, value: &Bound<'_, PyAny>) -> PyResult<botrail_scene::part::PartAttr> {
@@ -1248,7 +1475,7 @@ impl Scene {
                 ));
             }
             return Ok(Scene {
-                hub: Arc::new(SceneHub::new(botrail_scene::Scene::empty())),
+                hub: SceneHub::new(botrail_scene::Scene::empty()),
                 robot: None,
             });
         };
@@ -1258,7 +1485,7 @@ impl Scene {
             scene.rename_robot(0, name);
         }
         Ok(Scene {
-            hub: Arc::new(SceneHub::new(scene)),
+            hub: SceneHub::new(scene),
             robot: Some(robot.clone()),
         })
     }
@@ -1772,6 +1999,93 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Bakes `duration` seconds of the cell with **no program at all**:
+    /// devices parked, robots holding their pose, and the physics engine
+    /// settling, dropping or collapsing whatever it owns. The default is
+    /// the whole cell (`bt.Physics(world=True)`, ground at `z = 0`):
+    /// what is unsupported falls, what rests stays, what is bolted down
+    /// (`set_physics(dynamic=False)`, device-driven, walkable, an
+    /// equipment part pin) never moves. Pass `physics=bt.Physics(...)`
+    /// to choose otherwise (`physics=True` is the declared scope). The
+    /// result is an ordinary timeline — studio playback, USD export and
+    /// pose queries all work — broadcast to the studio like any bake.
+    /// `scenario` applies a named initial-state delta first.
+    #[pyo3(signature = (duration, dt = 0.01, scenario = None, physics = None))]
+    fn simulate_physics(
+        &self,
+        duration: f64,
+        dt: f64,
+        scenario: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<SequenceTimeline> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        if !(duration.is_finite() && duration > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "duration must be positive, got {duration}"
+            )));
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration: duration,
+            ..Default::default()
+        };
+        let backend = match physics {
+            None => {
+                options.physics = Some(botrail_scene::rollout::PhysicsOptions::world());
+                Some(Box::new(botrail_physics_rapier::RapierBackend::new())
+                    as Box<dyn botrail_physics::PhysicsBackend>)
+            }
+            Some(_) => {
+                let backend = physics_bake(&mut options, physics)?;
+                if backend.is_none() {
+                    return Err(PyValueError::new_err(
+                        "simulate_physics needs a physics engine: physics=True, \
+                         an engine name, or bt.Physics(...)",
+                    ));
+                }
+                if options.physics.is_none() {
+                    options.physics = Some(botrail_scene::rollout::PhysicsOptions::default());
+                }
+                backend
+            }
+        };
+        let (timeline, scene) = self
+            .hub
+            .simulate_physics(duration, scenario, &options, backend)
+            .map_err(PyValueError::new_err)?;
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene,
+        })
+    }
+
+    /// What a physics bake would hand the engine, before running it: the
+    /// ground, every rigid unit (its obstacles, `fixed` or `dynamic`, the
+    /// rule that decided it, its mass) and the count of obstacles
+    /// mirrored individually. The default audits the whole cell
+    /// (`bt.Physics(world=True)`); `physics=True` audits the declared
+    /// scope. Robots are not listed — their lowering is the
+    /// declaration's (`set_robot_physics`).
+    #[pyo3(signature = (physics = None))]
+    fn physics_plan(&self, physics: Option<&Bound<'_, PyAny>>) -> PyResult<PhysicsPlan> {
+        let mut options = botrail_scene::rollout::RolloutOptions::default();
+        let physics_options = match physics {
+            None => botrail_scene::rollout::PhysicsOptions::world(),
+            Some(_) => {
+                physics_bake(&mut options, physics)?;
+                options.physics.unwrap_or_default()
+            }
+        };
+        let scene = self.hub.snapshot();
+        Ok(PhysicsPlan {
+            inner: scene.physics_plan(&physics_options),
+        })
+    }
+
     /// Marks an obstacle for physics: `dynamic=True` hands its pose to
     /// the engine during a physics bake (`simulate_sequence(...,
     /// physics=True)`) — it falls, collides, settles. All properties are
@@ -2093,8 +2407,16 @@ impl Scene {
     ///   the gear ratio squared, which also keeps a light wrist from
     ///   drooping under the impulse-solved motor.
     ///
+    /// * `floating` — the base's kind under physics: `True` a free rigid
+    ///   body (it falls, tips and collapses with the rest — a walker on
+    ///   its feet, a multirotor), `False` a mirror on its stand or vehicle
+    ///   whatever the scope, `None` (default) lets the bake derive it: a
+    ///   world-scope bake (`bt.Physics(world=True)`) floats walkers and
+    ///   aircraft, the declared scope floats nothing.
+    ///
     /// A dynamic robot is what `botrail.rl.Torque` drives.
-    #[pyo3(signature = (robot = None, dynamic = true, max_force = None, damping = None, mass_floor = None, armature = None))]
+    #[pyo3(signature = (robot = None, dynamic = true, max_force = None, damping = None, mass_floor = None, armature = None, floating = None))]
+    #[allow(clippy::too_many_arguments)]
     fn set_robot_physics(
         &self,
         robot: Option<&str>,
@@ -2103,10 +2425,13 @@ impl Scene {
         damping: Option<f64>,
         mass_floor: Option<f64>,
         armature: Option<f64>,
+        floating: Option<bool>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
         self.hub
-            .set_robot_dynamics(index, dynamic, max_force, damping, mass_floor, armature)
+            .set_robot_dynamics(
+                index, dynamic, max_force, damping, mass_floor, armature, floating,
+            )
             .map_err(scene_err)
     }
 
@@ -4236,7 +4561,7 @@ impl Scene {
     /// the loaded models and colliders without a lossy save/load round trip.
     fn _snapshot(&self) -> Self {
         Self {
-            hub: Arc::new(SceneHub::new(self.hub.authored_snapshot())),
+            hub: SceneHub::new(self.hub.authored_snapshot()),
             robot: self.robot.clone(),
         }
     }
@@ -5097,13 +5422,14 @@ impl Scene {
         if let Some(mode) = toolpath_spin {
             options.toolpath.spin = spin_mode(mode)?;
         }
+        let backend = physics_bake(&mut options, physics)?;
         let (timeline, scene) = self
             .hub
             .simulate_sequences_driven(
                 &[name],
                 scenario,
                 &options,
-                physics_backend(physics)?,
+                backend,
                 rl::policy_drivers(policies)?,
             )
             .map_err(PyValueError::new_err)?;
@@ -5161,6 +5487,7 @@ impl Scene {
         if let Some(mode) = toolpath_spin {
             options.toolpath.spin = spin_mode(mode)?;
         }
+        let backend = physics_bake(&mut options, physics)?;
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (timeline, scene) = self
             .hub
@@ -5168,7 +5495,7 @@ impl Scene {
                 &refs,
                 scenario,
                 &options,
-                physics_backend(physics)?,
+                backend,
                 rl::policy_drivers(policies)?,
             )
             .map_err(PyValueError::new_err)?;
@@ -5273,6 +5600,7 @@ impl Scene {
         if let Some(mode) = toolpath_spin {
             options.toolpath.spin = spin_mode(mode)?;
         }
+        let backend = physics_bake(&mut options, physics)?;
         let scenario = scenario
             .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
             .map(str::to_string);
@@ -5284,7 +5612,7 @@ impl Scene {
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let live = snapshot
-            .open_rollout(&refs, &options, physics_backend(physics)?)
+            .open_rollout(&refs, &options, backend)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(LiveRollout {
             inner: Some(live),
@@ -5827,7 +6155,7 @@ impl Scene {
             inner: sr.model.clone(),
         });
         Ok(Scene {
-            hub: Arc::new(SceneHub::new(scene)),
+            hub: SceneHub::new(scene),
             robot,
         })
     }
@@ -6413,15 +6741,33 @@ impl Drop for StudioServer {
 }
 
 /// Starts the studio server on a background thread and returns immediately.
-/// `port = 0` picks a free port.
+/// `port = 0` picks a free port. `physics` is what the studio's physics
+/// toggle bakes under: `None`/`True` the whole cell (`bt.Physics(world=True)`),
+/// a `bt.Physics(...)` exactly that, `False` no physics on this host.
 #[pyfunction]
-#[pyo3(signature = (scene, studio_dir, host = "127.0.0.1", port = 0))]
+#[pyo3(signature = (scene, studio_dir, host = "127.0.0.1", port = 0, physics = None))]
 fn serve_studio(
     scene: &Scene,
     studio_dir: PathBuf,
     host: &str,
     port: u16,
+    physics: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<StudioServer> {
+    let studio_physics = match physics {
+        None => Some(botrail_scene::rollout::PhysicsOptions::world()),
+        Some(v) => {
+            if let Ok(on) = v.extract::<bool>() {
+                on.then(botrail_scene::rollout::PhysicsOptions::world)
+            } else if let Ok(p) = v.extract::<PyRef<'_, Physics>>() {
+                Some(p.options())
+            } else {
+                return Err(PyValueError::new_err(
+                    "physics must be a bool or bt.Physics(...)",
+                ));
+            }
+        }
+    };
+    scene.hub.set_studio_physics(studio_physics);
     let listener = std::net::TcpListener::bind((host, port))
         .map_err(|e| PyIOError::new_err(format!("failed to bind {host}:{port}: {e}")))?;
     listener
@@ -7066,6 +7412,23 @@ impl LiveRollout {
             .map(|r| if *r > 0.0 { *r } else { max_range })
             .collect();
         Ok(rl::row(py, ranges).into_any())
+    }
+
+    /// The timeline so far — every track closed at the current tick, an
+    /// open step's band run to it — without ending the rollout: a
+    /// snapshot, of which `finish` is the last. What the studio's
+    /// streaming bake sends window by window.
+    fn timeline(&self) -> PyResult<SequenceTimeline> {
+        let live = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("this rollout is finished"))?;
+        let mut timeline = live.timeline();
+        timeline.scenario = self.scenario.clone();
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene: self.scene.clone(),
+        })
     }
 
     /// Closes the rollout into the timeline the batch bake would have
@@ -7884,6 +8247,17 @@ impl SequenceTimeline {
     #[getter]
     fn physics(&self) -> Option<String> {
         self.inner.physics.clone()
+    }
+
+    /// What that physics bake lowered: `"declared"` (marked bodies only)
+    /// or `"world"` (the whole cell, `bt.Physics(world=True)`); `None`
+    /// on a kinematic bake.
+    #[getter]
+    fn physics_scope(&self) -> Option<&'static str> {
+        self.inner.physics_scope.map(|scope| match scope {
+            botrail_scene::rollout::PhysicsScope::Declared => "declared",
+            botrail_scene::rollout::PhysicsScope::World => "world",
+        })
     }
 
     /// Touch episodes of a physics bake, in opening order: dicts with
@@ -10521,6 +10895,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IoReport>()?;
     m.add_class::<IoMap>()?;
     m.add_class::<Bom>()?;
+    m.add_class::<Physics>()?;
+    m.add_class::<PhysicsPlan>()?;
     m.add_class::<InterlockTable>()?;
     m.add_class::<CellReport>()?;
     m.add_class::<ToolpathReport>()?;

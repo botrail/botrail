@@ -64,8 +64,19 @@ group: string | null, } | { "type": "remove_segment", motion: string, index: num
  * The bake's time cap in seconds (the engine's 120 s when absent):
  * a run still waiting past it is reported as timed out.
  */
-max_duration?: number | null, } | { "type": "simulate_sequences", names: Array<string>, scenario?: string | null, 
+max_duration?: number | null, 
+/**
+ * Bake under the host's physics (`SessionHost::physics` — the
+ * whole cell by default, design-world-physics.md §3.6). Absent or
+ * false is the kinematic bake; a host without physics answers
+ * `true` with a failed `sequence_result`.
+ */
+physics?: boolean | null, } | { "type": "simulate_sequences", names: Array<string>, scenario?: string | null, 
 /**
  * The bake's time cap in seconds (the engine's 120 s when absent).
  */
-max_duration?: number | null, } | { "type": "export_usd", fps: number, } | { "type": "upsert_scenario", scenario: ScenarioMsg, } | { "type": "remove_scenario", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, } | { "type": "upsert_camera", camera: CameraMsg, } | { "type": "remove_camera", name: string, } | { "type": "upsert_lidar", lidar: LidarMsg, } | { "type": "remove_lidar", name: string, } | { "type": "scan_lidar", name: string, t?: number | null, } | { "type": "upsert_io_node", node: IoNode, } | { "type": "remove_io_node", name: string, } | { "type": "bind_io", binding: IoBinding, } | { "type": "unbind_io", point: IoPointId, node?: string | null, } | { "type": "declare_io", decl: IoDecl, } | { "type": "undeclare_io", name: string, } | { "type": "auto_assign_io", reassign: boolean, };
+max_duration?: number | null, 
+/**
+ * Bake under the host's physics (see `simulate_sequence`).
+ */
+physics?: boolean | null, } | { "type": "simulate_physics", duration: number, scenario?: string | null, } | { "type": "start_bake", names: Array<string>, scenario?: string | null, max_duration?: number | null, physics: boolean, } | { "type": "stop_bake" } | { "type": "export_usd", fps: number, } | { "type": "upsert_scenario", scenario: ScenarioMsg, } | { "type": "remove_scenario", name: string, } | { "type": "upsert_sensor", sensor: SensorMsg, } | { "type": "remove_sensor", name: string, } | { "type": "upsert_device", device: DeviceMsg, } | { "type": "remove_device", name: string, } | { "type": "upsert_camera", camera: CameraMsg, } | { "type": "remove_camera", name: string, } | { "type": "upsert_lidar", lidar: LidarMsg, } | { "type": "remove_lidar", name: string, } | { "type": "scan_lidar", name: string, t?: number | null, } | { "type": "upsert_io_node", node: IoNode, } | { "type": "remove_io_node", name: string, } | { "type": "bind_io", binding: IoBinding, } | { "type": "unbind_io", point: IoPointId, node?: string | null, } | { "type": "declare_io", decl: IoDecl, } | { "type": "undeclare_io", name: string, } | { "type": "auto_assign_io", reassign: boolean, };

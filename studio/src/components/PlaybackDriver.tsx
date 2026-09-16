@@ -55,7 +55,11 @@ export function PlaybackDriver() {
     // would leap the playhead to the end the moment it wakes.
     let t = clock.current + Math.min(delta, 0.25) * s.playbackSpeed;
     if (t >= tracks.duration) {
-      if (s.playbackLoop) {
+      if (s.bakeStream) {
+        // A streamed bake still growing: wait at its end for the next
+        // window rather than stopping.
+        t = tracks.duration;
+      } else if (s.playbackLoop) {
         t = t % tracks.duration;
       } else {
         // Land exactly on the end and hand the display back to React.
