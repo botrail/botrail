@@ -1606,9 +1606,12 @@ fn robot_asset_copies(
     let deps = crate::stage_dependencies(stage_path, &[])
         .map_err(|e| UsdExportError::RobotStage(e.to_string()))?;
     let stage_dir = stage_path.parent().unwrap_or(Path::new(""));
+    let canonical_stage_dir =
+        std::fs::canonicalize(stage_dir).unwrap_or_else(|_| stage_dir.to_path_buf());
     let mut copies = Vec::new();
     for dep in deps {
-        match dep.strip_prefix(stage_dir) {
+        let canonical_dep = std::fs::canonicalize(&dep).unwrap_or_else(|_| dep.clone());
+        match canonical_dep.strip_prefix(&canonical_stage_dir) {
             Ok(rel) => copies.push((
                 dep.clone(),
                 Path::new(&format!("{asset_stem}_assets/{dir_name}")).join(rel),
