@@ -1606,9 +1606,24 @@ fn robot_asset_copies(
     let deps = crate::stage_dependencies(stage_path, &[])
         .map_err(|e| UsdExportError::RobotStage(e.to_string()))?;
     let stage_dir = stage_path.parent().unwrap_or(Path::new(""));
+    // `strip_prefix` is textual, and the dependencies come back with their
+    // directories canonicalized — a stage reached through a symlinked
+    // directory (macOS temp dirs) would never contain them. Resolve
+    // directories only: a huggingface_hub cache file is itself a symlink
+    // onto a blob that lives elsewhere under another name.
+    let in_real_dir = |p: &Path| match (p.parent(), p.file_name()) {
+        (Some(dir), Some(name)) => dir
+            .canonicalize()
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| p.to_path_buf()),
+        _ => p.to_path_buf(),
+    };
+    let real_stage_dir = stage_dir
+        .canonicalize()
+        .unwrap_or_else(|_| stage_dir.to_path_buf());
     let mut copies = Vec::new();
     for dep in deps {
-        match dep.strip_prefix(stage_dir) {
+        match in_real_dir(&dep).strip_prefix(&real_stage_dir) {
             Ok(rel) => copies.push((
                 dep.clone(),
                 Path::new(&format!("{asset_stem}_assets/{dir_name}")).join(rel),
@@ -3237,6 +3252,79 @@ mod tests {
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Exports one frame of the robot at `stage` to `out/anim.usda`.
+    #[cfg(unix)]
+    fn export_one_frame(stage: &Path, out: &Path) -> Vec<String> {
+        std::fs::create_dir_all(out).unwrap();
+        let imported = import_robot(
+            stage,
+            &RobotImportOptions {
+                mesh_cache_dir: Some(out.join("meshes")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let model = imported.model;
+        let link_poses = [botrail_kin::forward_kinematics_with_base(
+            &model,
+            &[0.0, 0.0],
+            &Isometry3::identity(),
+        )
+        .unwrap()];
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: None,
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &[0.0],
+            objects: &[],
+            curves: &[],
+            cameras: &[],
+        };
+        write_animation(&out.join("anim.usda"), &input, &ExportOptions::default()).unwrap()
+    }
+
+    /// A stage directory reached through a symlink — macOS temp dirs are
+    /// `/var/folders/…` onto `/private/var/folders/…`. The dependencies come
+    /// back canonicalized and must still count as inside the stage directory.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_stage_dir_still_contains_its_layers() {
+        let dir = temp_dir("lndir");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/robot.usda"), ARM).unwrap();
+        std::os::unix::fs::symlink("real", dir.join("link")).unwrap();
+
+        let out = dir.join("out");
+        let warnings = export_one_frame(&dir.join("link/robot.usda"), &out);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(out.join("anim_assets/robot/robot.usda").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// huggingface_hub-style cache: the stage file is a symlink onto a blob
+    /// in another directory. Following the file's own link would put every
+    /// catalog robot's layers outside the stage directory.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_stage_file_is_copied_under_its_link_name() {
+        let dir = temp_dir("lnfile");
+        std::fs::create_dir_all(dir.join("blobs")).unwrap();
+        std::fs::create_dir_all(dir.join("snap/usd")).unwrap();
+        std::fs::write(dir.join("blobs/0123abcd"), ARM).unwrap();
+        std::os::unix::fs::symlink("../../blobs/0123abcd", dir.join("snap/usd/robot.usda"))
+            .unwrap();
+
+        let out = dir.join("out");
+        let warnings = export_one_frame(&dir.join("snap/usd/robot.usda"), &out);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(out.join("anim_assets/robot/robot.usda").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
