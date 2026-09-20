@@ -34,7 +34,7 @@ import pytest
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 sys.path.insert(0, str(EXAMPLES / "vehicles"))
 
-import amr_demo as demo  # noqa: E402
+import amr_demo as demo
 
 ALT = "rb-theron"  # a second carrier: half the deck height of the default
 
@@ -47,7 +47,10 @@ def _or_skip(build):
         return build()
     except pytest.skip.Exception:
         raise
-    except Exception as err:  # noqa: BLE001 - any fetch/parse failure skips
+    except ValueError as err:
+        # IK, collision and catalog parsing regressions must fail the test.
+        if "cannot reach the catalog dataset" not in str(err):
+            raise
         pytest.skip(f"catalog unavailable: {err}")
 
 
@@ -66,9 +69,11 @@ def test_the_machine_is_measured_not_typed(carrier):
     data sheet the same package publishes."""
     specs = carrier.specs
     assert carrier.deck == pytest.approx(specs["deck_height_mm"] / 1e3, abs=0.01)
-    # The arm bolts a plate's thickness above the surface it stands on,
-    # and that surface is the chassis, not the frame's nominal height.
-    assert carrier.mount[2] == pytest.approx(carrier.surface + demo.PLATE)
+    # The full declared frame determines the mount, not the chassis hull.
+    probe = demo.bt.Scene(carrier.model)
+    position, quaternion = probe.link_pose(carrier.model.flange_link)
+    assert carrier.mount == pytest.approx(position)
+    assert carrier.mount_quaternion == pytest.approx(quaternion)
     assert carrier.surface >= carrier.deck
     # The body is the collision geometry, so its footprint is the real
     # machine's, and the pivot sweeps its half-diagonal.
@@ -78,6 +83,24 @@ def test_the_machine_is_measured_not_typed(carrier):
     # Speed is derated off the data sheet, never above it.
     assert carrier.cruise(3.0) <= specs["max_speed_mps"]
     assert carrier.cruise(0.5) < carrier.cruise(3.0)
+
+
+def test_standard_arm_mount_is_reported_against_catalog_frame(baked, carrier):
+    scene, _ = baked
+    report = demo.bt.mounting.report(scene)
+    item = next(item for item in report.items if item.key == "mount_pose")
+    assert item.status == "pass"
+    assert item.evidence["reference"]["carrier"]["id"] == carrier.id
+    assert item.evidence["reference"]["flange"] == carrier.model.flange_link
+    comparison = item.evidence["comparison"]
+    assert comparison["expected_offset"]["position"] == pytest.approx((0, 0, carrier.deck))
+    assert comparison["actual_offset"]["position"] == pytest.approx(carrier.mount)
+    assert comparison["translation_error_m"] == pytest.approx(0.0, abs=1e-12)
+    assert "amr/plate" not in scene.obstacle_names
+    # The catalog frame comparison cannot replace the missing mounting drawings.
+    for key in ("geometry", "fasteners", "clearance", "requirements_complete"):
+        assert next(i for i in report.items if i.target == item.target and i.key == key).status == "unknown"
+    assert not report.ready
 
 
 def test_the_body_draws_complete_visuals_with_separate_collisions(carrier, tmp_path):
@@ -190,7 +213,7 @@ def test_swapping_the_carrier_moves_everything_that_depends_on_it(carrier):
     other = _or_skip(lambda: demo.Carrier(ALT))
     assert other.deck < carrier.deck - 0.2  # a much lower machine
     assert other.mount[2] < carrier.mount[2]
-    assert other.infeed[0] != carrier.infeed[0]  # it stops somewhere else
+    assert other.infeed[0] + other.mount[0] == pytest.approx(demo.PART_X)
     assert other.outfeed[1] != carrier.outfeed[1]  # and noses in differently
 
 
@@ -208,12 +231,86 @@ def test_the_part_rides_the_deck_and_lands_on_the_belt(baked):
     # It rode the belt to the end of the run rather than sitting where it
     # was placed: the conveyor started when the arm let go.
     assert landed[1] == pytest.approx(demo.BELT_RUN[0], abs=0.05)
+    assert tl.signal("belt_done").value_at(tl.duration)
+
+
+def test_cycle_clearance_includes_the_moving_base_and_cargo(baked):
+    scene, tl = baked
+    assert tl.min_clearance(dt=0.01).distance > 0.003
+    # Clearance is an environment distance. Check self-collision separately,
+    # including the finger and travelling ramps that bypass motion planning.
+    probe = demo.bt.Scene(scene.robot)
+    for k in range(math.ceil(tl.duration / 0.02) + 1):
+        t = min(k * 0.02, tl.duration)
+        probe.set_joint_positions(tl.sample(t))
+        assert not probe.check_collisions(), (t, probe.check_collisions())
+
+
+def test_the_fold_guard_checks_cargo_and_restores_the_part(baked, carrier, monkeypatch):
+    scene = demo.bt.Scene(baked[0].robot, base_position=(
+        carrier.infeed[0] + carrier.mount[0], carrier.infeed[1] + carrier.mount[1],
+        carrier.mount[2],
+    ))
+    scene.add_box(demo.TOTE, (demo.PART,) * 3,
+                  (demo.PART_X, demo.SERVED_FACE - 0.09,
+                   demo.BENCH_TOP + demo.SEAT_GAP + demo.PART / 2))
+    before = scene.obstacle_pose(demo.TOTE)
+    monkeypatch.setattr(demo, "Carrier", lambda _: carrier)
+    # The old fold is clear with the cargo still on the bench, but its
+    # gripper body intersects the cargo when it is aboard the central mount.
+    monkeypatch.setattr(demo, "STOWED", [0.20, -0.88, 1.96, -1.18, -1.57, None, demo.OPEN])
+    with pytest.raises(RuntimeError, match="through part"):
+        demo.build_cycle(scene)
+    assert scene.obstacle_pose(demo.TOTE) == before
+    assert scene.joint_positions == demo.READY
+
+
+def test_saved_and_embedded_cycles_replay_without_catalog_access(baked, tmp_path, monkeypatch):
+    import huggingface_hub as hub
+
+    scene, timeline = baked
+    report = demo.bt.mounting.report(scene).to_dict()
+    path = tmp_path / "standard-amr.botrail"
+    scene.save_project(path)
+
+    def unexpected_fetch(*args, **kwargs):
+        pytest.fail("saved and embedded AMR replay must not fetch the catalog")
+
+    monkeypatch.setattr(hub, "dataset_info", unexpected_fetch)
+    monkeypatch.setattr(demo.bt, "studio", lambda *args, **kwargs: None)
+    restored = demo.bt.Scene.load_project(path)
+    namespace = {}
+    exec(restored.generate_python(embed_catalog=True), namespace)  # noqa: S102 - generated replay contract
+    for replay in (restored, namespace["scene"]):
+        assert demo.bt.mounting.report(replay).to_dict() == report
+        tl = replay.simulate_sequence("amr_transfer", max_duration=150)
+        assert tl.step_spans == timeline.step_spans
+        for t in (0.0, tl.step_span("走行").end, tl.duration):
+            assert tl.sample(t) == pytest.approx(timeline.sample(t), abs=1e-12, rel=0)
+            for actual, expected in zip(tl.base_pose(t), timeline.base_pose(t)):
+                assert actual == pytest.approx(expected, abs=1e-9, rel=0)
+            for actual, expected in zip(tl.object_pose(demo.TOTE, t), timeline.object_pose(demo.TOTE, t)):
+                assert actual == pytest.approx(expected, abs=1e-9, rel=0)
+
+
+def test_only_the_fixed_mount_pair_is_exempted(baked, carrier):
+    scene, _ = baked
+    # Turning the exception off exposes the nominal hull/base overlap;
+    # the collision body stays enabled throughout the demo.
+    obstacle = f"amr/{carrier.chassis}"
+    scene.disallow_link_obstacle_contact("base_link_inertia", obstacle)
+    try:
+        assert (("link", "base_link_inertia"), ("obstacle", obstacle)) in scene.check_collisions()
+    finally:
+        scene.allow_link_obstacle_contact("base_link_inertia", obstacle)
 
 
 def test_nothing_overhangs_when_the_machine_pulls_out(baked):
     _, tl = baked
     drive = tl.step_span("走行")
     assert not tl.signal("overhang").value_at(drive.start)
+    assert all(not tl.signal("overhang").value_at(drive.start + (drive.end - drive.start) * k / 100)
+               for k in range(101))
     # …and the arm is back over the side at the bay, which is what the
     # envelope is for: it is the working position that trips it.
     assert tl.signal("overhang").high_total() > 0.0
@@ -262,3 +359,9 @@ def test_the_holonomic_variant_docks_unrotated() -> None:
     _p1, q1 = tl.base_pose(tl.duration)
     assert max(abs(a - b) for a, b in zip(q0, q1)) < 1e-9
     assert 'drive="holonomic"' in scene.generate_python()
+    assert tl.signal("belt_done").value_at(tl.duration)
+    assert tl.object_pose(demo.TOTE, tl.duration)[0] == pytest.approx(
+        (demo.BELT_X, demo.BELT_RUN[0], demo.BELT_TOP + demo.SEAT_GAP + demo.PART / 2),
+        abs=0.003,
+    )
+    assert tl.min_clearance(dt=0.01).distance > 0.003

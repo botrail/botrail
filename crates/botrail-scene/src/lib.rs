@@ -788,6 +788,7 @@ impl Scene {
         self.robots[robot].mount = Some(crate::seq::RobotMount {
             device: device.to_string(),
             offset,
+            reference: None,
             gait,
             spin: Vec::new(),
         });
@@ -795,6 +796,26 @@ impl Scene {
         if let Some(q) = stance {
             self.set_joint_positions_for(robot, q)?;
         }
+        Ok(())
+    }
+
+    /// Records a carrier frame captured from a loaded model. This does not
+    /// move the robot; a mismatched actual offset remains visible to review.
+    pub fn set_mount_reference(
+        &mut self,
+        robot: usize,
+        reference: crate::mounting::VehicleMountReference,
+    ) -> Result<(), SceneError> {
+        reference.validate(&self.robots[robot].model)?;
+        let mount = self.robots[robot].mount.as_mut().ok_or_else(|| {
+            SceneError::BadMount("mount reference needs a vehicle-mounted robot".into())
+        })?;
+        if mount.gait.is_some() || !mount.spin.is_empty() {
+            return Err(SceneError::BadMount(
+                "carrier frame review is for rigid vehicle mounts, not gait or spin".into(),
+            ));
+        }
+        mount.reference = Some(reference);
         Ok(())
     }
 
@@ -813,6 +834,16 @@ impl Scene {
         if self.robots[robot].mount.is_none() {
             return Err(SceneError::BadMount(
                 "spin needs a mounted robot — call mount_robot first".to_string(),
+            ));
+        }
+        if !spin.is_empty()
+            && self.robots[robot]
+                .mount
+                .as_ref()
+                .is_some_and(|m| m.reference.is_some())
+        {
+            return Err(SceneError::BadMount(
+                "carrier frame review is for rigid vehicle mounts, not spin".into(),
             ));
         }
         let model = &self.robots[robot].model;

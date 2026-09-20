@@ -520,9 +520,32 @@ impl SceneHub {
         offset: Option<Isometry3<f64>>,
         gait: Option<botrail_scene::seq::GaitSpec>,
         spin: Vec<(String, f64)>,
+        reference: Option<botrail_scene::mounting::VehicleMountReference>,
     ) -> Result<(), SceneError> {
         let result = self.with_scene(|scene| {
+            if let Some(reference) = &reference {
+                reference.validate(&scene.robots()[robot].model)?;
+                if offset.as_ref().is_some_and(|p| {
+                    !p.translation
+                        .vector
+                        .iter()
+                        .chain(p.rotation.coords.iter())
+                        .all(|v| v.is_finite())
+                }) {
+                    return Err(SceneError::BadMount(
+                        "carrier mounting offset must be finite".into(),
+                    ));
+                }
+                if gait.is_some() || !spin.is_empty() {
+                    return Err(SceneError::BadMount(
+                        "carrier frame review is for rigid vehicle mounts, not gait or spin".into(),
+                    ));
+                }
+            }
             scene.mount_robot_with(robot, device, offset, gait)?;
+            if let Some(reference) = reference {
+                scene.set_mount_reference(robot, reference)?;
+            }
             if !spin.is_empty() {
                 scene.set_mount_spin(robot, spin.clone())?;
             }

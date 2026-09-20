@@ -103,7 +103,7 @@ def test_missing_adapter_cannot_be_replaced_with_an_offset(catalog, offset):
     assert requirement.status == "fail"
     assert "not on the attachment path" in requirement.message
     assert "The specified adapter is required" in requirement.message
-    assert not report.ready and report.blockers() == [requirement]
+    assert not report.ready and requirement in report.blockers()
     # The static check repeats a missing required part as a warning, never an error.
     static = bt.Scene(robot).check()
     assert static.ok
@@ -112,11 +112,11 @@ def test_missing_adapter_cannot_be_replaced_with_an_offset(catalog, offset):
 
 def test_actual_adapter_path_passes(catalog):
     report = bt.mounting.report(complete())
-    assert [i.key for i in report.items] == ["required:adapter"]
+    assert [i.key for i in report.items if i.key.startswith("required:")] == ["required:adapter"]
     assert item(report, "required:adapter").status == "pass"
-    assert report.ready
+    assert not report.ready  # Presence alone does not verify the mating geometry.
     assert report.assemblies[-1]["upstream_parts"] == ["robot/tool", "robot"]
-    assert "Result: ready" in report.to_markdown()
+    assert "Result: unresolved" in report.to_markdown()
 
 
 def test_adapter_on_another_branch_or_another_robot_does_not_count(catalog):
@@ -190,10 +190,11 @@ def test_part_relabel_cannot_satisfy_a_requirement(catalog):
     assert item(bt.mounting.report(scene), "required:adapter").status == "fail"
 
 
-def test_products_without_declarations_have_nothing_to_report(catalog):
+def test_products_without_declarations_have_unknown_fit(catalog):
     catalog(TOOL, mount="tool_root")
     report = bt.mounting.report(complete())
-    assert report.items == [] and report.ready
+    assert not report.ready
+    assert all(i.status == "unknown" for i in report.items if i.key not in {"declared_pose", "interface"})
     assert len(report.assemblies) == 2
     empty = bt.mounting.report(bt.Scene())
     assert empty.items == [] and empty.assemblies == [] and empty.ready
@@ -247,7 +248,7 @@ def test_three_product_families_report_their_required_parts_and_preserve_them(
         coupling = load(products["robotiq/gripper-coupling.yaml"]["id"])
         assembled = bt.mounting.report(arm.attach_tool(coupling, prefix="cpl_").attach_tool(tool, prefix="g_"))
         assert item(assembled, "required:gripper-coupling").status == "pass"
-        assert assembled.ready
+        assert not assembled.ready  # Required coupling present; detailed fit remains unresolved.
         iso50 = load(products["robotiq/agc-cpl-062-002.yaml"]["id"])
         candidate = bt.mounting.report(arm.attach_tool(iso50, prefix="cpl_").attach_tool(tool, prefix="g_"))
         assert item(candidate, "required:gripper-coupling").status == "pass"
@@ -285,7 +286,7 @@ def test_old_project_does_not_acquire_missing_mounting_data_on_script_replay(cat
     path.write_text(json.dumps(data))
     old = bt.Scene.load_project(path)
     before = bt.mounting.report(old).to_dict()
-    assert before["items"] == []
+    assert before["items"] and all(i["status"] == "unknown" for i in before["items"])
     namespace = {}
     exec("\n".join(l for l in old.generate_python().splitlines() if l != "bt.studio(scene)"), namespace)
     assert bt.mounting.report(namespace["scene"]).to_dict() == before

@@ -94,4 +94,4 @@ def test_project_roundtrip_preserves_base_pose(robot: bt.Robot, tmp_path: Path) 
     assert quaternion == pytest.approx(quat_z(0.4))
 
     code = reloaded.generate_python()
-    assert "base_position=(0.500000, 0.100000, 0.000000)" in code
+    assert "base_position=(0.5, 0.1, 0.0)" in code

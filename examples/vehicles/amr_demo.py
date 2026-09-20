@@ -1,12 +1,13 @@
 """An AMR assembled from the catalog: a carrier, an arm, a gripper.
 
 The machine in this cell is not modelled — it is *specified*. Three
-catalog packages stack into one mobile manipulator, and everything the
-cell needs to put them together is read out of those packages rather
-than typed in: where the arm bolts on (`frames.flange_frame`), how big
+catalog packages stack into one mobile manipulator. The packages supply
+the reference mounting frame (`frames.flange_frame`), how big
 the body that has to fit the aisle is (its own collision geometry), how
 fast it may run and what it may carry (`specs`). Nothing below knows it
-is a Robotnik.
+is a Robotnik. The arm uses the catalog mounting frame, without a custom
+corner offset or an invented adapter plate. `bt.mounting.report(scene)`
+checks this placement; missing mechanical drawings remain unknown.
 
 That is the point of the exercise. `--carrier` swaps the base: the arm
 re-mounts itself at the new deck height, the body driving the aisle
@@ -39,9 +40,9 @@ Three rules of a moving base fall out of it:
     name (`--drive-and-plan`).
   * **A ramp can**, and that is what the stow is: the bake shows the ramp
     running inside the drive it shares a step with, which is what "the
-    fold costs no cycle time" means. Nothing checks a ramp's path,
-    though — that is the other half of the same property — so the cycle
-    checks the fold itself before writing it.
+    fold costs no cycle time" means. The planner does not check a ramp's
+    path, so this demo checks the fold with cargo aboard and scans the
+    baked cycle's clearance before writing it.
   * **A pose is taught in the machine's frame, not the world's.** The
     deck is in the same place at every station, so one taught pose seats
     the part and picks it up again; the bench and the belt are taught
@@ -73,9 +74,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-import yaml  # noqa: E402  (catalog manifests; `from_catalog` needs it too)
-
-import botrail as bt  # noqa: E402
+import botrail as bt
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _robotiq as rq
@@ -137,7 +137,7 @@ TOTE = "part"
 # filled in from the deck pose rather than fixed: parking is no reason to
 # unwind a wrist, and unwinding one costs seconds.
 READY = [0.0, -1.75, 1.75, -1.55, -1.57, 0.0, OPEN]
-STOWED = [0.20, -0.88, 1.96, -1.18, -1.57, None, OPEN]
+STOWED = [0.20, -1.35, 2.15, -2.37, -1.57, None, OPEN]
 
 # The links a grip legitimately rests on.
 PADS = [f"{side}_inner_{part}"
@@ -151,8 +151,10 @@ PADS = [f"{side}_inner_{part}"
 ACCEL, RAMP_SHARE = 1.0, 0.15
 TURN = math.radians(45.0)  # in-cell pivot rate — assumed, as the AGV cell's
 
-UR_BASE_R = 0.075  # UR base flange radius: how far in from an edge it bolts
-PLATE = 0.015  # the adapter plate between deck and arm
+# Retain the cell's 15 mm screening bound for raised chassis structures.
+# This is neither a physical spacer nor a mechanical fit tolerance; the
+# arm stays on the declared frame and its moving links are collision checked.
+MAX_CHASSIS_PROTRUSION = 0.015
 ARM_CLEAR = 0.22  # the arm's own room on the deck, ahead of which the tray starts
 DECK_EDGE = 0.04  # how far in from the deck's edges cargo is allowed
 
@@ -189,7 +191,8 @@ class Carrier:
         # piece in the machine's frame. These measure clearance; the
         # catalog's separate visual geometry supplies the appearance.
         probe = bt.Scene(self.model)
-        self.deck = probe.link_pose(self.link(self.model.flange_link))[0][2]
+        self.mount, self.mount_quaternion = probe.link_pose(self.link(self.model.flange_link))
+        self.deck = self.mount[2]
         self.poses, self.bounds = {}, {}
         for stl in self.pieces:
             pose = probe.link_pose(self.link(stl.stem))
@@ -205,32 +208,30 @@ class Carrier:
         # instead and it reads as a collision, because collision runs on
         # the convex decomposition and the hull of a dished top fills it.
         chassis = max(self.pieces, key=lambda stl: self.volume(self.bounds[stl.stem]))
+        self.chassis = chassis.stem
         self.surface = max(self.deck, self.bounds[chassis.stem][1][2])
         self.proud = self.surface - self.deck
         # A deck with its own structure standing on it is not a deck this
         # cell can use: an arm bolted to the frame would sit *inside* the
         # chassis around it. That wants a riser and a bracket drawing, and
         # a bracket drawing is a different exercise from this one.
-        if self.proud > PLATE:
+        if self.proud > MAX_CHASSIS_PROTRUSION:
             raise ValueError(
                 f"{self.product}: its chassis stands {self.proud * 1e3:.0f} mm above the "
-                f"mount frame, so a {PLATE * 1e3:.0f} mm plate leaves the arm inside it "
+                "mount frame, leaving the arm inside it "
                 f"— this one needs a riser"
             )
 
-        # Where the arm bolts on: one base radius in from the deck's
-        # rear corner on the served side, which leaves the whole front of
-        # the deck as tray and puts both work sides within a side reach.
-        inset = UR_BASE_R + 0.06
-        self.mount = (self.lo[0] + inset, self.lo[1] + inset, self.surface + PLATE)
+        # The arm stays on the declared frame. Cargo uses the remaining
+        # deck ahead of it; collision geometry never supplies a mount offset.
         front, back = self.hi[0] - DECK_EDGE, self.mount[0] + ARM_CLEAR
         self.tray = ((back + front) / 2, (self.lo[1] + self.hi[1]) / 2)
         self.tray_size = (max(front - back, 0.0), self.width - 2 * DECK_EDGE)
-        # Where on the tray the part is set down: an arm's length in front
-        # of the arm, not the middle of the deck. On a 1.8 m machine the
-        # middle of the deck is nowhere near the arm that has to reach it.
+        # The far side of the front tray leaves enough reach radius for
+        # the elbow and wrist to fold without touching each other. Cargo
+        # stays inside the measured deck, with room for its rotated corners.
         self.seat = (min(self.mount[0] + SEAT_AHEAD, self.tray[0] + self.tray_size[0] / 2 - PART),
-                     self.tray[1])
+                     self.hi[1] - DECK_EDGE - PART)
 
     def link(self, name: str) -> str:
         """USD link names are prim paths; a manifest names segments."""
@@ -392,22 +393,14 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
                       direction=(0.0, -1.0), speed=0.30,
                       model="GVL-1100", manufacturer="Generic")
 
-    # -- the machine: body, adapter plate, arm ---------------------------
+    # -- the machine: body and arm on its declared mounting frame --------
     machine.add_body(scene, "amr")
-    x, y = machine.infeed
-    scene.add_box("amr/plate", (0.26, 0.26, PLATE),
-                  (x + machine.mount[0], y + machine.mount[1], machine.mount[2] - PLATE / 2),
-                  color=(0.20, 0.22, 0.26))
-    # The plate is what the arm stands on, so it is scenery to the arm —
-    # the same call a pedestal gets in a fixed cell. It still rides:
-    # riding and colliding are different questions.
-    scene.set_obstacle_enabled("amr/plate", False)
 
     legs = (CORNER_X - machine.infeed[0], machine.outfeed[1] - LANE_Y)
     # A mecanum variant translates the same path without ever pivoting —
     # it docks facing what it faced when parked, and the corner costs
     # nothing but its length.
-    drive = dict(drive="holonomic") if holonomic else dict(allow_reverse=True)
+    drive = {"drive": "holonomic"} if holonomic else {"allow_reverse": True}
     scene.add_vehicle(
         "amr",
         body=["amr"],
@@ -422,7 +415,12 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
     )
     machine.add_wheels(scene, "amr")
     # From here the arm's base is not a scene constant: it is the deck.
-    scene.mount_robot("amr", offset_position=machine.mount)
+    scene.mount_robot("amr", carrier=machine.model)
+    # The bolted, fixed UR base touches the chassis at the declared face.
+    # Its convex collision hull is 0.5 mm above that face on RB-KAIROS.
+    # Only this fixed pair may touch; all moving arm links, cargo and the
+    # rest of the carrier remain collision checked.
+    scene.allow_link_obstacle_contact("base_link_inertia", f"amr/{machine.chassis}")
     # The vehicle is a product, so it goes on the bill of materials as one.
     # The arm and the gripper carry their own identity already — they were
     # loaded from the catalog — and this is the same fact for the machine
@@ -442,11 +440,20 @@ def build_scene(carrier: str = CARRIER, *, holonomic: bool = False) -> bt.Scene:
                   (PART_X, SERVED_FACE - 0.09, BENCH_TOP + SEAT_GAP + PART / 2),
                   color=(0.62, 0.36, 0.14))
     scene.set_part(TOTE, category="workpiece", model="TOTE-60", mass_kg=PART_MASS)
+    # Closing and opening precede attach/detach. These same grasp-contact
+    # links may touch the part during those ramps as well as while held.
+    for pad in rq.pads(scene.robot):
+        scene.allow_link_obstacle_contact(pad, TOTE)
 
     # The load sensor rides the machine, so it still reads "loaded" out on
     # the aisle — which is what a departure permit has to be able to ask.
     scene.add_zone_sensor("tray_loaded", position=(*machine.tray, machine.surface + 0.06),
                           size=(*machine.tray_size, 0.12), watch=[TOTE], mount="amr")
+    # Detect a part whose centre has reached the belt's end. The leading
+    # half of the part then overlaps this zone just beyond the belt.
+    scene.add_zone_sensor("belt_done",
+                          position=(BELT_X, BELT_RUN[0] - PART, BELT_TOP + 0.06),
+                          size=(BELT_W, PART, 0.12), watch=[TOTE])
     # And a safety envelope that rides with it: the strip of aisle just
     # off the served side. The arm is in it whenever it works over the
     # bench and out of it once folded — "nothing overhangs while
@@ -492,7 +499,7 @@ def in_machine(point, station, yaw: float) -> tuple:
 
 
 def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
-                drive_and_plan: bool = False) -> str:
+                drive_and_plan: bool = False, *, holonomic: bool = False) -> str:
     """Teaches the poses in the machine's frame and writes the cycle."""
     machine = Carrier(carrier)
     shut = rq.close_for_width(scene.robot, PART, SHUT)
@@ -534,7 +541,8 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
                        machine.infeed, 0.0)
     deck = (*machine.seat, machine.surface + SEAT_GAP + GRIP)
     belt = in_machine((BELT_X, machine.outfeed[1] + machine.mount[0],
-                       BELT_TOP + SEAT_GAP + GRIP), machine.outfeed, math.pi / 2)
+                       BELT_TOP + SEAT_GAP + GRIP), machine.outfeed,
+                       0.0 if holonomic else math.pi / 2)
 
     # A hover and a seat at each, taught in that order and seeded from
     # each other — then each in both gripper states, because every taught
@@ -557,15 +565,26 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
     # interpolation, which is exactly what makes it legal while driving.
     # So the fold is checked here instead, the whole way in, against the
     # machine it folds onto: whoever writes a ramp owns its path.
-    for i in range(21):
-        blend = i / 20
-        scene.set_joint_positions([a + (b - a) * blend for a, b in zip(parked, stow)])
-        fouled = scene.check_collisions()
-        if fouled:
-            (_, a), (_, b) = fouled[0]
-            raise RuntimeError(f"{machine.product}: folding into the stow puts {a} "
-                               f"through {b} ({blend:.0%} of the way in)")
-    scene.set_joint_positions(READY)
+    # Check with the cargo aboard too, not still on the infeed bench.
+    part_pose = scene.obstacle_pose(TOTE)
+    deck_yaw = (math.atan2(deck[1] - machine.mount[1], deck[0] - machine.mount[0])
+                - math.atan2(bench[1] - machine.mount[1], bench[0] - machine.mount[0]))
+    scene.set_obstacle_pose(TOTE,
+                            (machine.infeed[0] + deck[0], machine.infeed[1] + deck[1],
+                             machine.surface + SEAT_GAP + PART / 2),
+                            (0.0, 0.0, math.sin(deck_yaw / 2), math.cos(deck_yaw / 2)))
+    try:
+        for i in range(21):
+            blend = i / 20
+            scene.set_joint_positions([a + (b - a) * blend for a, b in zip(parked, stow)])
+            fouled = scene.check_collisions()
+            if fouled:
+                (_, a), (_, b) = fouled[0]
+                raise RuntimeError(f"{machine.product}: folding into the stow puts {a} "
+                                   f"through {b} ({blend:.0%} of the way in)")
+    finally:
+        scene.set_obstacle_pose(TOTE, *part_pose)
+        scene.set_joint_positions(READY)
 
     sq = scene.sequence("amr_transfer")
     sq.step("接近", actions=[bt.seq.motion("over_bench_open")])
@@ -609,6 +628,7 @@ def build_cycle(scene: bt.Scene, carrier: str = CARRIER,
                              bt.seq.detach(TOTE), bt.seq.start("outfeed")])
     sq.step("復帰", actions=[bt.seq.motion("over_belt_open")])
     sq.step("格納", actions=[bt.seq.motion("home")])
+    sq.step("排出完了", transition=bt.seq.signal("belt_done"))
     return sq.name
 
 
@@ -651,8 +671,15 @@ def pivot_at(tl, dt: float = 0.02) -> float:
 def bake(carrier: str, drive_and_plan: bool = False, holonomic: bool = False):
     """One carrier, all the way through: scene, cycle, timeline."""
     scene = build_scene(carrier, holonomic=holonomic)
-    name = build_cycle(scene, carrier, drive_and_plan)
-    return scene, scene.simulate_sequence(name, max_duration=150.0)
+    name = build_cycle(scene, carrier, drive_and_plan, holonomic=holonomic)
+    timeline = scene.simulate_sequence(name, max_duration=150.0)
+    # Includes the moving base, cargo and finger/stow ramps, which a
+    # successful motion plan alone does not verify. Declared mounting and
+    # grasp contacts are excluded by the scene's specific contact pairs.
+    clearance = timeline.min_clearance(dt=0.01)
+    if clearance.distance <= 0.0:
+        raise RuntimeError(f"{carrier}: cycle contact at {clearance.t:.2f}s: {clearance.pair}")
+    return scene, timeline
 
 
 def compare() -> None:
@@ -733,12 +760,20 @@ def main() -> None:
         print(f"\ncycle failed: {err}")
         sys.exit(1)
 
+    mounting = bt.mounting.report(scene)
+    for item in mounting.items:
+        if item.key == "mount_pose":
+            print(f"  mount pose [{item.status}] {item.message}")
+    print(f"  mounting  ready={mounting.ready}; "
+          f"{sum(i.status == 'fail' for i in mounting.items)} fail, "
+          f"{sum(i.status == 'unknown' for i in mounting.items)} unknown")
+
     print(f"\ncycle time: {tl.duration:.2f}s")
     for step, start, end in tl.step_spans:
         print(f"  {step:<9} {start:6.2f} – {end:6.2f}s")
 
     lanes = dict(tl.signals)
-    for lane in ("amr", "tray_loaded", "overhang", "outfeed"):
+    for lane in ("amr", "tray_loaded", "overhang", "outfeed", "belt_done"):
         edges = ", ".join(f"{t:.2f}→{'on' if v else 'off'}" for t, v in lanes[lane])
         print(f"  {lane:<12} {edges}")
 
@@ -749,8 +784,11 @@ def main() -> None:
         p, q = tl.base_pose(t)
         print(f"  arm base at {label:<8}{tuple(round(v, 3) for v in p)}, "
               f"heading {math.degrees(yaw_of(q)):+.0f}°")
-    print(f"  corner at {pivot_at(tl):.2f}s, {machine.swing:.2f} m of swing in a "
-          f"{-SERVED_FACE:.2f} m half-aisle")
+    if "--holonomic" in args:
+        print("  holonomic travel: heading fixed, no pivot at the corner")
+    else:
+        print(f"  corner at {pivot_at(tl):.2f}s, {machine.swing:.2f} m of swing in a "
+              f"{-SERVED_FACE:.2f} m half-aisle")
 
     # The stow is free, and this is what free looks like: the ramp runs
     # inside the drive it shares a step with, so no cycle time is spent

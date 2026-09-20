@@ -1,7 +1,7 @@
 """What the loaded products say about how they are mounted.
 
 ``report(robot_or_scene)`` walks the assembly ``attach_tool`` recorded and
-lists two kinds of item, each ``pass``, ``fail`` or ``unknown``:
+lists items, each ``pass``, ``fail`` or ``unknown``:
 
 * ``required:<id>`` — a part the product's installation documents require
   between it and the robot flange (a Robotiq 2F-85 needs its coupling), and
@@ -9,10 +9,23 @@ lists two kinds of item, each ``pass``, ``fail`` or ``unknown``:
 * ``kit_host`` / ``kit_composition`` — whether a purchase kit is documented
   for the robot it is mounted on, and whether it is still assembled the way
   the manufacturer's part number describes.
+* ``mount_pose`` — whether a vehicle-mounted robot's mounting face matches
+  the recorded carrier frame and reference pose. This measures frame alignment;
+  it does not establish mechanical fit or manufacturer approval.
+* ``requirements_complete`` / ``declared_pose`` — completeness of the
+  installation's required-part list and its explicitly permitted poses.
+* ``interface`` — agreement of evidenced bare-interface identifiers;
+  this is separate from physical dimensions and manufacturer host approval.
+* ``geometry`` / ``fasteners`` / ``clearance`` — drawing dimensions and
+  tolerances, selected screws and tightening conditions, and conservative
+  envelopes of adjacent parts and tool access.
 
-Nothing is measured or inferred from geometry: a ``pass`` repeats a
-manufacturer statement about the products actually loaded, and ``unknown``
-means the loaded products carry no such statement.
+Fit checks use verified drawing frames and explicit bounds, never mesh
+measurements or assumed tolerances. Missing evidence, incomplete coverage
+and partially compatible ranges remain ``unknown``. All actual tool/arm
+attachments and rigid vehicle mounts are reviewed, including older files
+without drawing data. ``ready`` is therefore false for such unverified
+assemblies even if the required parts and catalog frames match.
 """
 
 from __future__ import annotations
@@ -64,7 +77,7 @@ class MountingReport:
 
     @property
     def ready(self) -> bool:
-        """No item failed or stayed unknown."""
+        """No reported item failed or stayed unknown; not a full hardware qualification."""
         return not self.blockers()
 
     def blockers(self) -> list[MountingItem]:
@@ -94,7 +107,7 @@ class MountingReport:
         elif self.assemblies:
             lines.append("The loaded products carry no mounting statements to check.")
         else:
-            lines.append("No tool attachments to review.")
+            lines.append("No tool attachments or vehicle mounts to review.")
         return "\n".join(lines) + "\n"
 
     def save(self, path: str | Path, format: str | None = None) -> None:
@@ -106,7 +119,7 @@ class MountingReport:
 
 
 def report(target: Robot | Scene) -> MountingReport:
-    """Review the tool attachments of a ``Robot`` or of every robot in a ``Scene``."""
+    """Review tool attachments, and vehicle mounting frames when given a ``Scene``."""
     from ._core import Robot, Scene
 
     if not isinstance(target, (Robot, Scene)):

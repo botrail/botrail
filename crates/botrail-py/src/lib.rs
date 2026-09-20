@@ -1521,7 +1521,16 @@ impl Scene {
     /// signed so counter-rotating pairs read right. Continuous joints
     /// only; no check reads the phase (the collision stays the swept
     /// solid the catalog authors).
-    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None, spin = None))]
+    ///
+    /// `carrier` records the loaded vehicle model's flange frame and catalog
+    /// provenance for `bt.mounting.report(scene)`. With no offset, the first
+    /// mount-side `allowed_poses` entry is used, or the mounting faces
+    /// coincide if none is declared. An explicit offset is kept and
+    /// reviewed, not corrected. `flange` / `mount` select exact model links;
+    /// defaults are the carrier flange and arm mount (or arm root). This is
+    /// a catalog-frame alignment check, not a mechanical fit certification.
+    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None, spin = None, *, carrier = None, flange = None, mount = None))]
+    #[allow(clippy::too_many_arguments)]
     fn mount_robot(
         &self,
         device: &str,
@@ -1530,17 +1539,54 @@ impl Scene {
         robot: Option<&str>,
         gait: Option<&Bound<'_, PyAny>>,
         spin: Option<std::collections::BTreeMap<String, f64>>,
+        carrier: Option<&Robot>,
+        flange: Option<&str>,
+        mount: Option<&str>,
     ) -> PyResult<()> {
         let index = self.resolve_robot(robot)?;
+        if carrier.is_none() && (flange.is_some() || mount.is_some()) {
+            return Err(PyValueError::new_err("flange= and mount= require carrier="));
+        }
+        let model = self.hub.robot_model(index);
+        let reference = carrier
+            .map(|carrier| {
+                botrail_scene::mounting::VehicleMountReference::new(
+                    &carrier.inner,
+                    &model,
+                    flange,
+                    mount,
+                )
+            })
+            .transpose()
+            .map_err(scene_err)?;
         let gait = gait.map(gait_from_py).transpose()?;
         let offset = match (offset_position, offset_quaternion, &gait) {
             // Derived from the stance: the feet on the floor.
             (None, None, Some(_)) => None,
+            (None, None, None) if reference.is_some() => Some(
+                reference
+                    .as_ref()
+                    .unwrap()
+                    .aligned_offset(&model)
+                    .map_err(scene_err)?,
+            ),
             (position, quaternion, _) => Some(pose_from(position.unwrap_or([0.0; 3]), quaternion)),
         };
         let spin = spin.map(|m| m.into_iter().collect()).unwrap_or_default();
         self.hub
-            .mount_robot_with(index, device, offset, gait, spin)
+            .mount_robot_with(index, device, offset, gait, spin, reference)
+            .map_err(scene_err)
+    }
+
+    /// Generated Python restores the captured carrier frame without fetching
+    /// a catalog or reconstructing the carrier's visual geometry.
+    #[pyo3(signature = (json, robot = None))]
+    fn _set_mount_reference_json(&self, json: &str, robot: Option<&str>) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        let reference = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("vehicle mount reference: {e}")))?;
+        self.hub
+            .with_scene(|scene| scene.set_mount_reference(index, reference))
             .map_err(scene_err)
     }
 

@@ -72,7 +72,7 @@ def test_kit_purchase_unit_preserves_components_and_scoped_results(packages):
     kit = report.kits[0]
     assert kit["manufacturer_support"]["status"] == "pass"
     assert kit["composition"]["status"] == "pass"
-    assert report.ready
+    assert not report.ready  # Manufacturer support does not supply missing drawing-level fit.
     assert len(report.assemblies) == 2  # The internal weld is still checked.
     two = bt.Scene()
     two.add_robot(robot, name="one")

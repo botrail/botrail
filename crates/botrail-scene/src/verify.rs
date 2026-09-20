@@ -87,6 +87,9 @@ fn apply_state(
     span_at: &mut [Option<usize>],
 ) -> Result<(), SceneError> {
     for (r, track) in timeline.robots.iter().enumerate() {
+        if let Some(base) = SequenceTimeline::base_pose(track, t) {
+            world.set_robot_base_pose_for(r, base);
+        }
         world.set_joint_positions_for(r, track.trajectory.sample(t))?;
     }
     for (i, track) in timeline.objects.iter().enumerate() {
@@ -237,7 +240,7 @@ mod tests {
     use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 
     use crate::motion::{Segment, SegmentKind};
-    use crate::rollout::RolloutOptions;
+    use crate::rollout::{RolloutOptions, TrackSpan};
     use crate::seq::{Action, Condition, Device, DeviceCommand, DeviceKind, Sequence, Step};
     use crate::Scene;
 
@@ -442,6 +445,74 @@ mod tests {
         // First overlap at crate center x = -0.07 → t = 0.43 / 0.25.
         assert!((c.t - 1.72).abs() <= 0.03, "t {}", c.t);
         assert_eq!(c.pair, Some(("b".into(), "crate".into())));
+    }
+
+    /// A moving base must be replayed before both FK and attached-object
+    /// poses. Otherwise an AMR audit silently checks the parked robot.
+    #[test]
+    fn clearance_follows_base_translation_and_pivot_with_held_cargo() {
+        for pivot in [false, true] {
+            let mut scene = sample_scene();
+            let start = iso(1.0, 0.0, 0.0);
+            scene.set_robot_base_pose(start);
+            scene
+                .add_obstacle(
+                    "held",
+                    Geometry::Sphere { radius: 0.01 },
+                    iso(1.3, 0.0, 0.5),
+                )
+                .unwrap();
+            let wall = if pivot {
+                iso(0.0, 1.3, 0.5)
+            } else {
+                iso(2.3, 0.0, 0.5)
+            };
+            scene
+                .add_obstacle("wall", Geometry::Sphere { radius: 0.01 }, wall)
+                .unwrap();
+            scene.upsert_sequence(Sequence {
+                name: "ride".into(),
+                steps: vec![step(
+                    "hold",
+                    vec![Action::Attach {
+                        robot: None,
+                        object: "held".into(),
+                        link: Some("b".into()),
+                        touch_links: None,
+                        group: None,
+                    }],
+                    Condition::Elapsed { seconds: 1.0 },
+                )],
+            });
+            let mut tl = scene
+                .simulate_sequence("ride", &RolloutOptions::default())
+                .unwrap();
+            tl.robots[0].base = Some(vec![if pivot {
+                TrackSpan::Pivot {
+                    t0: 0.0,
+                    t1: 1.0,
+                    from: start,
+                    center: nalgebra::Point3::origin(),
+                    omega: std::f64::consts::FRAC_PI_2,
+                }
+            } else {
+                TrackSpan::Linear {
+                    t0: 0.0,
+                    t1: 1.0,
+                    from: start,
+                    velocity: Vector3::x(),
+                }
+            }]);
+            let clearance = scene.timeline_min_clearance(&tl, 0.01).unwrap().unwrap();
+            assert_eq!(clearance.distance, 0.0, "pivot={pivot}");
+            assert!(clearance.t >= 0.97, "{clearance:?}");
+            assert_eq!(clearance.pair, Some(("held".into(), "wall".into())));
+            assert_eq!(
+                *scene.robot_base_pose(),
+                start,
+                "audit must not change the scene"
+            );
+        }
     }
 
     #[test]

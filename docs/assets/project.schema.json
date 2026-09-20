@@ -1797,6 +1797,24 @@
         "kind"
       ]
     },
+    "DimensionRange": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": "number",
+          "format": "double"
+        },
+        "min": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min",
+        "max"
+      ]
+    },
     "Electrical": {
       "description": "Electrical facts about a channel or a field device: what a lint can\ncompare when both sides state them.",
       "type": "object",
@@ -1820,6 +1838,67 @@
           "format": "double"
         }
       }
+    },
+    "FastenerRules": {
+      "type": "object",
+      "properties": {
+        "head_standard": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "length_mm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "min_engagement_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "property_class": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "thread": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountThread"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "torque_nm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
     },
     "FaultMsg": {
       "description": "A forced input of a scenario: a contact stuck at a value, or an open\nwire (input level low — the functional value follows the binding's\npolarity).",
@@ -2326,6 +2405,13 @@
         "name",
         "tip",
         "joints"
+      ]
+    },
+    "HoleKind": {
+      "type": "string",
+      "enum": [
+        "clearance",
+        "threaded"
       ]
     },
     "InterfacePair": {
@@ -3103,6 +3189,15 @@
         "unknown"
       ]
     },
+    "LocatorKind": {
+      "type": "string",
+      "enum": [
+        "boss",
+        "recess",
+        "pin",
+        "hole"
+      ]
+    },
     "Logic": {
       "type": "string",
       "enum": [
@@ -3196,6 +3291,73 @@
         "catalog"
       ]
     },
+    "MountBox": {
+      "type": "object",
+      "properties": {
+        "center_mm": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "id": {
+          "type": "string"
+        },
+        "size_mm": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "center_mm",
+        "size_mm"
+      ]
+    },
+    "MountClearance": {
+      "type": "object",
+      "properties": {
+        "access": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountBox"
+          }
+        },
+        "complete": {
+          "type": "boolean",
+          "default": false
+        },
+        "evidence": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "frame_verified": {
+          "type": "boolean",
+          "default": false
+        },
+        "solids": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountBox"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "MountEvidence": {
       "type": "object",
       "properties": {
@@ -3216,8 +3378,201 @@
         "section"
       ]
     },
+    "MountFastener": {
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "head_standard": {
+          "type": "string"
+        },
+        "holes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "length_mm": {
+          "$ref": "#/$defs/DimensionRange"
+        },
+        "property_class": {
+          "type": "string"
+        },
+        "thread": {
+          "$ref": "#/$defs/MountThread"
+        },
+        "torque_nm": {
+          "$ref": "#/$defs/DimensionRange"
+        },
+        "washer_mm": {
+          "$ref": "#/$defs/DimensionRange"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "holes",
+        "thread",
+        "head_standard",
+        "property_class",
+        "length_mm",
+        "washer_mm",
+        "torque_nm"
+      ]
+    },
+    "MountGeometry": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "default": false
+        },
+        "evidence": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountEvidence"
+          }
+        },
+        "frame_verified": {
+          "type": "boolean",
+          "default": false
+        },
+        "holes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountHole"
+          }
+        },
+        "locators": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountLocator"
+          }
+        },
+        "normal_z": {
+          "type": "integer",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "normal_z"
+      ]
+    },
+    "MountHole": {
+      "type": "object",
+      "properties": {
+        "depth_mm": {
+          "description": "Usable tip depth from the mating plane, including bottom allowance.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diameter_mm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fastener_rules": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FastenerRules"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "grip_mm": {
+          "description": "Bearing surface to mating face; excludes washers.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/HoleKind"
+        },
+        "position_mm": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "position_tolerance_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "thread": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountThread"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "thread_start_mm": {
+          "description": "Unthreaded lead. Only this omitted dimension means zero by contract.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "position_mm",
+        "kind"
+      ]
+    },
     "MountInterface": {
-      "description": "A mating face the manifest names. Drawing-level detail a manifest may\ncarry for it (hole patterns, fasteners, envelopes) is not read here.",
+      "description": "A mating face and its drawing declarations. Missing data stays unknown.",
       "type": "object",
       "properties": {
         "allowed_poses": {
@@ -3231,6 +3586,16 @@
             "$ref": "#/$defs/MountPose"
           }
         },
+        "clearance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountClearance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "evidence": {
           "type": "array",
           "default": [],
@@ -3238,8 +3603,24 @@
             "$ref": "#/$defs/MountEvidence"
           }
         },
+        "fasteners": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountFastener"
+          }
+        },
         "frame": {
           "type": "string"
+        },
+        "geometry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "interface_id": {
           "description": "Shared identifier of the bare mating interface. None = not known.",
@@ -3265,9 +3646,67 @@
           "$ref": "#/$defs/InterfaceRole"
         }
       },
+      "additionalProperties": false,
       "required": [
         "frame",
         "role"
+      ]
+    },
+    "MountLocator": {
+      "type": "object",
+      "properties": {
+        "depth_mm": {
+          "description": "Projection height or usable recess depth.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "diameter_mm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DimensionRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LocatorKind"
+        },
+        "position_mm": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "position_tolerance_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "position_mm"
       ]
     },
     "MountPose": {
@@ -3362,6 +3801,31 @@
       "enum": [
         "tool",
         "arm"
+      ]
+    },
+    "MountThread": {
+      "type": "object",
+      "properties": {
+        "diameter_mm": {
+          "type": "number",
+          "format": "double"
+        },
+        "left_hand": {
+          "type": "boolean",
+          "default": false
+        },
+        "pitch_mm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "diameter_mm"
       ]
     },
     "MountingSpec": {
@@ -4171,6 +4635,16 @@
         },
         "offset": {
           "$ref": "#/$defs/PoseMsg"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VehicleMountReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "spin": {
           "description": "Presentation: `(joint, rad/s)` spun while the vehicle flies or\nmoves (a multirotor's propellers). Absent in older files.",
@@ -5148,6 +5622,77 @@
       },
       "required": [
         "parent"
+      ]
+    },
+    "VehicleMountReference": {
+      "description": "Geometry-free snapshot of the carrier frame used for a vehicle mount.\nCapturing the frame once avoids re-fetching or duplicating carrier meshes\nwhen saving, cloning or generating an offline Python replay.",
+      "type": "object",
+      "properties": {
+        "carrier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declared_flange": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flange": {
+          "type": "string"
+        },
+        "flange_pose": {
+          "description": "Root of the carrier model to the selected flange, metres / XYZW.",
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "mount": {
+          "description": "Actual link on the mounted robot. Resolved again on replay.",
+          "type": "string"
+        },
+        "mounting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MountingSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "order": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatalogOrder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path_complete": {
+          "description": "False for older snapshots or a carrier whose internal assembly was\nnot captured. Absence on such a path cannot prove a required part missing.",
+          "type": "boolean",
+          "default": false
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CatalogSource"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sources",
+        "flange",
+        "flange_pose",
+        "mount"
       ]
     },
     "VehiclePathMsg": {

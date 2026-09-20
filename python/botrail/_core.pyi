@@ -152,7 +152,12 @@ class Scene:
         robot: Optional[str] = None,
         gait: Optional[Any] = None,
         spin: Optional[dict[str, float]] = None,
+        *,
+        carrier: Robot | None = None,
+        flange: str | None = None,
+        mount: str | None = None,
     ) -> None: ...
+    def _set_mount_reference_json(self, json: str, robot: str | None = None) -> None: ...
     @property
     def robot(self) -> Robot: ...
     @property

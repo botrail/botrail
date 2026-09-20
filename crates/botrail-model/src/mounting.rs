@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod detail;
+pub use detail::*;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -99,10 +102,10 @@ pub struct MountPose {
     pub quaternion: [f64; 4],
 }
 
-/// A mating face the manifest names. Drawing-level detail a manifest may
-/// carry for it (hole patterns, fasteners, envelopes) is not read here.
+/// A mating face and its drawing declarations. Missing data stays unknown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MountInterface {
     pub frame: String,
     pub role: InterfaceRole,
@@ -119,6 +122,12 @@ pub struct MountInterface {
     /// The installation documentation enumerates all required separate parts.
     #[serde(default)]
     pub requirements_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<MountGeometry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<MountClearance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fasteners: Vec<MountFastener>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +211,7 @@ impl MountingSpec {
                 return Err("mounting interface_id cannot be empty".into());
             }
             evidence(&face.evidence)?;
+            face.validate_details(&evidence)?;
             if let Some(poses) = &face.allowed_poses {
                 if face.role != InterfaceRole::Mount || poses.is_empty() {
                     return Err("allowed_poses must be a nonempty list on a mount interface".into());

@@ -626,6 +626,8 @@ pub struct RobotMountMsg {
     pub device: String,
     pub offset: PoseMsg,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<crate::mounting::VehicleMountReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gait: Option<GaitMsg>,
     /// Presentation: `(joint, rad/s)` spun while the vehicle flies or
     /// moves (a multirotor's propellers). Absent in older files.
@@ -1037,6 +1039,7 @@ impl Scene {
                     mount: r.mount.as_ref().map(|m| RobotMountMsg {
                         device: m.device.clone(),
                         offset: PoseMsg::from(&m.offset),
+                        reference: m.reference.clone(),
                         gait: m.gait.as_ref().map(gait_msg),
                         spin: m.spin.clone(),
                     }),
@@ -1411,6 +1414,12 @@ impl Scene {
                 .map_err(|m| ProjectError::Incompatible(format!("robot `{name}` gait: {m}")))?;
             self.mount_robot_with(i, &mount.device, Some((&mount.offset).into()), gait)
                 .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
+            if let Some(reference) = &mount.reference {
+                self.set_mount_reference(i, reference.clone())
+                    .map_err(|e| {
+                        ProjectError::Incompatible(format!("robot `{name}` mount reference: {e}"))
+                    })?;
+            }
             if !mount.spin.is_empty() {
                 self.set_mount_spin(i, mount.spin.clone())
                     .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` spin: {e}")))?;
@@ -1572,7 +1581,9 @@ fn py_list(values: &[f64]) -> String {
 }
 
 fn py_tuple(values: &[f64]) -> String {
-    let items: Vec<String> = values.iter().map(|v| format!("{v:.6}")).collect();
+    // Poses must preserve catalog-frame comparisons and replayed motion
+    // just as joint vectors do; decimal rounding changes their evidence.
+    let items: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
     format!("({})", items.join(", "))
 }
 
@@ -1970,10 +1981,6 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 robot_kwarg_for_name(project, &motion.robot)
             ));
         }
-        out.push_str(&format!(
-            "trajectory = scene.plan_motion({:?})\n",
-            motion.name
-        ));
     }
 
     for device in &project.devices {
@@ -2194,6 +2201,14 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             py_tuple(&mount.offset.quaternion),
             robot_kwarg(project, i)
         ));
+        if let Some(reference) = &mount.reference {
+            let json = serde_json::to_string(reference).expect("vehicle mount reference");
+            let literal = serde_json::to_string(&json).expect("mount reference literal");
+            out.push_str(&format!(
+                "scene._set_mount_reference_json({literal}{})\n",
+                robot_kwarg(project, i)
+            ));
+        }
         if mount.gait.is_some() {
             out.push_str(&format!(
                 "scene.set_joint_positions({}{})\n",
@@ -2252,6 +2267,10 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
     // names the optics it judges through, and the generated script must
     // run top to bottom.
     for sensor in &project.sensors {
+        let mount = sensor
+            .mount
+            .as_ref()
+            .map_or_else(String::new, |device| format!(", mount={device:?}"));
         let watch = match &sensor.watch {
             crate::wire::SensorWatchMsg::AllObjects => String::new(),
             crate::wire::SensorWatchMsg::Objects { names } => {
@@ -2274,14 +2293,14 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
         };
         match &sensor.kind {
             crate::wire::SensorKindMsg::Zone { pose, size } => out.push_str(&format!(
-                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch})\n",
+                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch}{mount})\n",
                 sensor.name,
                 py_tuple(&pose.position),
                 py_tuple(size),
                 py_tuple(&pose.quaternion),
             )),
             crate::wire::SensorKindMsg::Beam { from, to, radius } => out.push_str(&format!(
-                "scene.add_beam_sensor({:?}, frm={}, to={}, radius={radius}{watch})\n",
+                "scene.add_beam_sensor({:?}, frm={}, to={}, radius={radius}{watch}{mount})\n",
                 sensor.name,
                 py_tuple(from),
                 py_tuple(to),
@@ -2516,6 +2535,17 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
         ));
     }
 
+    // Motion-only projects retain their previews, after mounts and contact
+    // allowances have been restored. Sequence goals can depend on a future
+    // vehicle pose or attachment state: only plan them when that step runs.
+    if project.sequences.is_empty() {
+        for motion in &project.motions {
+            out.push_str(&format!(
+                "\ntrajectory = scene.plan_motion({:?})\n",
+                motion.name
+            ));
+        }
+    }
     out.push_str("\nbt.studio(scene)\n");
     out
 }
@@ -2745,7 +2775,7 @@ fn py_action(action: &ActionMsg) -> String {
         } => {
             let entries: Vec<String> = targets
                 .iter()
-                .map(|t| format!("{:?}: {:.6}", t.joint, t.value))
+                .map(|t| format!("{:?}: {:?}", t.joint, t.value))
                 .collect();
             format!(
                 "bt.seq.ramp({{{}}}, duration={duration}{})",
@@ -3489,8 +3519,8 @@ mod tests {
              transition=bt.seq.immediately())",
             "arm = sel.when(bt.seq.falling(\"armed\"))",
             "scene.add_scenario(\"disarmed\", signals={\"armed\": False}, \
-             obstacles={\"wall\": ((0.500000, 0.000000, 0.450000), \
-             (0.000000, 0.000000, 0.000000, 1.000000))}, joints={",
+             obstacles={\"wall\": ((0.5, 0.0, 0.45), \
+             (0.0, 0.0, 0.0, 1.0))}, joints={",
             "]}, faults=[bt.io.stuck(\"armed\", True), bt.io.open(\"eye\")])",
         ] {
             assert!(code.contains(needle), "missing `{needle}`:\n{code}");
@@ -3680,7 +3710,7 @@ mod tests {
         for needle in [
             "import botrail as bt",
             "bt.Robot.from_urdf_string(URDF)",
-            "base_position=(1.000000, 0.000000, 0.000000)",
+            "base_position=(1.0, 0.0, 0.0)",
             "scene.add_box(\"wall\"",
             // Appearance is part of the recipe: a rebuild that loses it
             // is not a rebuild.
@@ -3702,5 +3732,28 @@ mod tests {
         let code = generate_python(&plain.to_project());
         assert!(!code.contains("base_position="), "{code}");
         assert!(code.contains("scene = bt.Scene(robot, name=\""), "{code}");
+    }
+
+    #[test]
+    fn generated_previews_wait_for_contacts_and_sequence_motions_wait_for_execution() {
+        let mut project = sample_scene().to_project();
+        project.allowed_contacts.push(AllowedContactMsg {
+            robot: project.robots[0].name.clone().unwrap(),
+            link: "base_link".into(),
+            obstacle: "wall".into(),
+        });
+        let code = generate_python(&project);
+        assert!(
+            code.find("scene.allow_link_obstacle_contact(").unwrap()
+                < code.find("trajectory = scene.plan_motion(").unwrap()
+        );
+
+        project.sequences.push(crate::wire::SequenceMsg {
+            name: "cycle".into(),
+            steps: vec![],
+        });
+        let code = generate_python(&project);
+        assert!(code.contains("scene.add_segment(\"main\""));
+        assert!(!code.contains("scene.plan_motion("));
     }
 }

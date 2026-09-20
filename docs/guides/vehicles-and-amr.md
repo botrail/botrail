@@ -69,6 +69,22 @@ its length. `allow_reverse` does not exist here, since there is no turning
 around to avoid; the z rules stay a ground drive's (`max_grade`, lift
 edges). `examples/vehicles/amr_demo.py --holonomic` runs the AMR cell that way.
 
+### Arm mounting
+
+For an arm riding a vehicle, `scene.mount_robot("amr", carrier=carrier_model)`
+uses the loaded carrier's declared mounting frame. An explicitly supplied
+offset is preserved and can be reviewed with `bt.mounting.report(scene)`;
+see [Vehicle-mounted arms](mounting.md#vehicle-mounted-arms).
+
+`amr_demo.py` uses this catalog frame, places cargo on the remaining front
+deck and checks the whole baked cycle at 10 ms intervals before exporting.
+The fixed arm base may touch its chassis and the specified gripper contact
+links may touch the workpiece; other robot/environment contacts fail the
+bake. The travelling fold is also checked for self-collision with cargo
+aboard. These are model checks, not a mechanical mounting qualification.
+Both the turning and `--holonomic` cycles wait for the part to reach the
+outfeed end sensor.
+
 ### Wheel appearance
 
 A wheel that is its own obstacle in the vehicle's body can turn with the
@@ -299,9 +315,10 @@ for piece in sorted((package / "collision").glob("*.stl")):
     pose = probe.link_pose(piece.stem)        # …and the body, piece by piece
 ```
 
-* **`frames.flange_frame`** surfaces as `carrier.flange_link`: the mount
-  plate, and so the arm's `mount_robot` offset. `specs.deck_height_mm` says
-  the same thing on the data sheet.
+* **`frames.flange_frame`** surfaces as `carrier.flange_link`: the declared
+  mounting frame used by `mount_robot(carrier=carrier)`. Its full pose
+  determines the placement; `specs.deck_height_mm` is only a nominal height
+  and cannot replace that frame or specify an adapter plate.
 * **The `collision/` meshes** are the body — place each at its link's pose
   (a `format="usd"` package names links by prim path, so match the last
   segment) and hand the group to `add_vehicle(body=[...])`. What drives the

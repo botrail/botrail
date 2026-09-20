@@ -16,14 +16,14 @@ def cli(monkeypatch):
 
     machine = SimpleNamespace(
         product="AMR", maker="Generic", deck=0.69, proud=0.0,
-        mount=(0.0, 0.0, 0.705), tray_size=(0.4, 0.5),
+        mount=(0.0, 0.0, 0.69), tray_size=(0.4, 0.5),
         length=1.0, width=0.8, swing=0.64, infeed=(-2.0, 0.0),
         specs={"max_speed_mps": 1.5}, cruise=lambda _: 0.5,
     )
     scene, timeline = Mock(), Mock()
     timeline.duration = 30.24
     timeline.step_spans = []
-    timeline.signals = [(name, []) for name in ("amr", "tray_loaded", "overhang", "outfeed")]
+    timeline.signals = [(name, []) for name in ("amr", "tray_loaded", "overhang", "outfeed", "belt_done")]
     timeline.step_span.return_value = SimpleNamespace(start=10.0, end=17.0)
     timeline.base_pose.return_value = ((0.0, 0.0, 0.7), (0.0, 0.0, 0.0, 1.0))
     timeline.object_pose.return_value = ((1.34, 0.7, 0.65), (0.0, 0.0, 0.0, 1.0))
@@ -35,6 +35,10 @@ def cli(monkeypatch):
     monkeypatch.setattr(demo, "bake", Mock(return_value=(scene, timeline)))
     monkeypatch.setattr(demo, "compare", Mock())
     monkeypatch.setattr(demo.bt, "studio", Mock())
+    monkeypatch.setattr(demo.bt.mounting, "report", Mock(return_value=SimpleNamespace(ready=False, items=[
+        SimpleNamespace(key="mount_pose", status="pass", message="Arm matches catalog mounting frame"),
+        SimpleNamespace(key="fasteners", status="unknown", message="No fastener drawing"),
+    ])))
     return demo, scene, timeline
 
 
@@ -45,7 +49,7 @@ def cli(monkeypatch):
     (["--studio", "--carrier", "rb-theron", "custom.usdc", "--holonomic"],
      "custom.usdc", "rb-theron", True, True),
 ])
-def test_export_before_optional_studio(cli, monkeypatch, args, output, carrier, holonomic, studio):
+def test_export_before_optional_studio(cli, monkeypatch, capsys, args, output, carrier, holonomic, studio):
     demo, scene, timeline = cli
     monkeypatch.setattr(sys, "argv", ["amr_demo.py", *args])
 
@@ -55,6 +59,10 @@ def test_export_before_optional_studio(cli, monkeypatch, args, output, carrier, 
 
     demo.bt.studio.side_effect = open_studio
     demo.main()
+    printed = capsys.readouterr().out
+    if holonomic:
+        assert "heading fixed, no pivot at the corner" in printed
+        assert "corner at " not in printed
     demo.bake.assert_called_once_with(carrier, False, holonomic=holonomic)
     timeline.export_usd.assert_called_once_with(output, fps=60)
     if studio:
@@ -81,6 +89,8 @@ def test_unknown_load_does_not_prevent_cli_export(cli, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "rated unknown" in output
     assert "unknown (component mass not declared)" in output
+    assert "mount pose [pass] Arm matches catalog mounting frame" in output
+    assert "mounting  ready=False; 0 fail, 1 unknown" in output
     timeline.export_usd.assert_called_once_with("cell_amr.usda", fps=60)
 
 

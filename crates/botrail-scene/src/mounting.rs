@@ -1,8 +1,7 @@
-//! Mechanical attachment checks read from the immutable assembly source: the
-//! parts a product's installation documents require between it and the robot
-//! flange, and the hosts a purchase kit is documented for. Nothing is inferred
-//! from geometry — a passing item repeats a manufacturer statement about the
-//! products actually loaded.
+//! Tool attachment checks read required parts and supported kit hosts from
+//! the immutable assembly source. Vehicle checks compare the recorded offset
+//! with catalog mounting frames and allowed poses. Frame alignment is separate
+//! from manufacturer approval, fastener fit and load capacity.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +11,23 @@ use serde_json::{json, Value};
 
 use crate::{wire::PoseMsg, Scene};
 
+mod fit;
 mod kit;
+mod vehicle;
+pub use vehicle::VehicleMountReference;
+
+fn supported_source(source: &CatalogSource) -> bool {
+    !source.url.trim().is_empty()
+        && matches!(
+            source.kind.as_str(),
+            "manufacturer_datasheet"
+                | "manufacturer_cad"
+                | "standard"
+                | "official_oss"
+                | "user_drawing"
+                | "measurement"
+        )
+}
 
 #[derive(Debug, Serialize)]
 pub struct MountingItem {
@@ -47,20 +62,19 @@ pub struct MountingReport {
     pub kits: Vec<Value>,
 }
 
-struct Part<'a> {
+struct Part {
     name: String,
-    source: &'a RobotSource,
+    identity: Option<crate::part::CatalogRef>,
+    flange: Option<String>,
+    path_complete: bool,
     meta: CatalogMeta,
 }
 
-impl Part<'_> {
+impl Part {
     fn catalog(&self) -> Option<(&str, &str, &CatalogMeta)> {
-        match self.source {
-            RobotSource::Catalog {
-                id, revision, meta, ..
-            } => Some((id, revision, meta)),
-            _ => None,
-        }
+        self.identity
+            .as_ref()
+            .and_then(|id| Some((id.id.as_str(), id.revision.as_deref()?, &self.meta)))
     }
 
     fn face(&self, frame: &str, role: InterfaceRole) -> Option<&MountInterface> {
@@ -84,19 +98,10 @@ impl Part<'_> {
     /// The declaration cites a manufacturer, standard or measured source.
     fn supported(&self, refs: &[MountEvidence]) -> bool {
         refs.iter().any(|e| {
-            self.meta.sources.get(e.source).is_some_and(|s| {
-                !s.url.trim().is_empty()
-                    && !e.section.trim().is_empty()
-                    && matches!(
-                        s.kind.as_str(),
-                        "manufacturer_datasheet"
-                            | "manufacturer_cad"
-                            | "standard"
-                            | "official_oss"
-                            | "user_drawing"
-                            | "measurement"
-                    )
-            })
+            self.meta
+                .sources
+                .get(e.source)
+                .is_some_and(|s| !e.section.trim().is_empty() && supported_source(s))
         })
     }
 }
@@ -117,7 +122,7 @@ type Links = BTreeMap<String, (usize, String)>;
 
 #[derive(Default)]
 struct Graph<'a> {
-    parts: Vec<Part<'a>>,
+    parts: Vec<Part>,
     edges: Vec<Edge>,
     kits: Vec<KitRecord<'a>>,
 }
@@ -201,7 +206,20 @@ impl<'a> Graph<'a> {
                 let index = self.parts.len();
                 self.parts.push(Part {
                     name: name.into(),
-                    source,
+                    identity: match source {
+                        RobotSource::Catalog { id, revision, .. } => {
+                            Some(crate::part::CatalogRef {
+                                id: id.clone(),
+                                revision: Some(revision.clone()),
+                            })
+                        }
+                        _ => None,
+                    },
+                    flange: match source {
+                        RobotSource::Catalog { flange, .. } => flange.clone(),
+                        _ => None,
+                    },
+                    path_complete: true,
                     meta: match source {
                         RobotSource::Catalog { meta, .. } => meta.clone(),
                         _ => CatalogMeta::default(),
@@ -227,6 +245,7 @@ impl<'a> Graph<'a> {
                 break;
             }
             path.push(p);
+            complete &= self.parts[p].path_complete;
             let incoming = self.edges.iter().find(|e| e.tool == Some(p));
             if incoming.is_some_and(|e| e.base.is_none()) {
                 complete = false;
@@ -304,9 +323,16 @@ pub fn report_robot(model: &RobotModel) -> MountingReport {
 pub fn report(scene: &Scene) -> MountingReport {
     let mut graph = Graph::default();
     for robot in scene.robots() {
-        graph.visit(&robot.model.source, &robot.name, &mut 0);
+        let links = graph.visit(&robot.model.source, &robot.name, &mut 0);
+        vehicle::connect(robot, &links, &mut graph);
     }
-    evaluate(graph)
+    let mut report = evaluate(graph);
+    vehicle::review(scene, &mut report);
+    report.ready = !report
+        .items
+        .iter()
+        .any(|i| matches!(i.status, "fail" | "unknown"));
+    report
 }
 
 fn evaluate(graph: Graph<'_>) -> MountingReport {
@@ -316,7 +342,7 @@ fn evaluate(graph: Graph<'_>) -> MountingReport {
         items: Vec::new(),
         kits: Vec::new(),
     };
-    for edge in graph.edges.iter().filter(|e| e.role == MountRole::Tool) {
+    for edge in &graph.edges {
         let (path, complete_path) = graph.upstream(edge);
         report.assemblies.push(Assembly {
             target: edge.target.clone(),
@@ -326,6 +352,7 @@ fn evaluate(graph: Graph<'_>) -> MountingReport {
             offset: edge.offset.clone(),
             upstream_parts: path.iter().map(|&p| graph.parts[p].name.clone()).collect(),
         });
+        fit::review(edge, &graph, &mut report);
         let Some(tool) = edge.tool.map(|i| &graph.parts[i]) else {
             continue;
         };

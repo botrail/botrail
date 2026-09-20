@@ -67,11 +67,7 @@ fn host_mount_matches(record: &KitRecord<'_>, graph: &Graph<'_>, edge: &Edge) ->
     let Some(base) = edge.base.map(|i| &graph.parts[i]) else {
         return false;
     };
-    let RobotSource::Catalog {
-        flange: Some(flange),
-        ..
-    } = base.source
-    else {
+    let Some(flange) = &base.flange else {
         return false;
     };
     let Some(mount_frame) = &record.mount_frame else {

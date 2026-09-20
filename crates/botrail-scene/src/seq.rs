@@ -613,6 +613,8 @@ pub struct RobotMount {
     pub device: String,
     /// Where the robot's base sits in the vehicle's frame.
     pub offset: Isometry3<f64>,
+    /// Catalog frame snapshot used to review this mount, not its visual body.
+    pub reference: Option<crate::mounting::VehicleMountReference>,
     /// Set when the robot *is* the vehicle's legs: while the vehicle
     /// drives, the gait swings these legs so that every planted foot stays
     /// where it touched down. Not an action — a property of the mount, the

@@ -215,7 +215,7 @@ def test_vehicle_authoring_errors(scene: bt.Scene) -> None:
         sq.simulate()
 
 
-def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene) -> None:
+def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene, monkeypatch) -> None:
     # A deck 0.3 m up, and a carton resting on it. Nothing declares the
     # carton as cargo — being in the zone is what makes it cargo.
     scene.add_box("agv/base", (0.6, 0.4, 0.3), (0.0, 2.0, 0.15))
@@ -234,6 +234,8 @@ def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene) -> None:
     # Load-present, riding along; and the same zone bolted to the floor.
     scene.add_zone_sensor("loaded", position=(0.0, 0.0, 0.35), size=(0.6, 0.4, 0.2),
                           watch=["crate"], mount="agv")
+    scene.add_beam_sensor("loaded_beam", frm=(0.0, -0.2, 0.35), to=(0.0, 0.2, 0.35),
+                         watch=["crate"], mount="agv")
     scene.add_zone_sensor("at_a", position=(0.0, 2.0, 0.35), size=(0.6, 0.4, 0.2),
                           watch=["crate"])
 
@@ -252,7 +254,14 @@ def test_vehicle_tray_carries_what_is_set_on_it(scene: bt.Scene) -> None:
     assert [v for _, v in lanes["loaded"]] == [False, True]
     assert [v for _, v in lanes["at_a"]] == [False, True, False]
     assert tl.signal("loaded").value_at(tl.duration)
+    assert tl.signal("loaded_beam").value_at(tl.duration)
     assert not tl.signal("at_a").value_at(tl.duration)
+    # Rebuilding must retain the sensor's vehicle frame, for zones and beams.
+    monkeypatch.setattr(bt, "studio", lambda *args, **kwargs: None)
+    namespace = {}
+    exec(scene.generate_python(), namespace)  # noqa: S102 - generated replay contract
+    replay = namespace["scene"].simulate_sequence("haul")
+    assert replay.signals == tl.signals
 
 
 def test_vehicle_climbs_a_ramp_with_a_declared_grade(scene: bt.Scene) -> None:
