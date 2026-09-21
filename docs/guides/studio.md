@@ -245,6 +245,11 @@ through the same dock.
 bt.studio(scene, host="127.0.0.1", port=0, open_browser=True, block=True)
 ```
 
+Use `view=((5.9, 4.7, 4.0), (1.25, 0.0, 0.65))` to open at a chosen
+eye position and orbit target, in world metres. This sets the initial view
+in the printed/opened browser URL; orbit controls remain interactive, and
+`server.url` remains the base endpoint.
+
 `port=0` picks a free port. The server binds localhost and serves the bundled
 UI; in a source checkout build it first (`./scripts/build_studio.sh`) or point
 `BOTRAIL_STUDIO_DIR` at a built studio `dist/`. Several browsers can connect

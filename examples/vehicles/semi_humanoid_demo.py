@@ -94,9 +94,12 @@ BASE = "base"
 LINE = "cartesian_line"
 PROBE = "line?"            # a motion teaching authors to ask the planner a question, and removes
 
-STEEL = (0.32, 0.35, 0.40)
+STEEL = (0.07, 0.16, 0.23)
 CARTON = (0.72, 0.55, 0.34)
-DECK = (0.80, 0.80, 0.78)
+DECK = (0.56, 0.63, 0.66)
+BEAM = (0.84, 0.32, 0.07)
+TEAL = (0.07, 0.43, 0.43)
+YELLOW = (0.92, 0.65, 0.16)
 
 
 # ------------------------------------------------------------ the machines
@@ -563,6 +566,14 @@ def stations(holonomic: bool = False) -> dict:
     return CRAB_STATIONS if holonomic else STATIONS
 
 
+def trim(scene: bt.Scene, name: str, size: tuple, position: tuple, color: tuple,
+         quaternion=None, metalness: float = 0.0, roughness: float = 0.65) -> None:
+    """Static visual detail; only the original posts, decks and cartons collide."""
+    scene.add_box(name, size, position, quaternion=quaternion, color=color)
+    scene.set_obstacle_enabled(name, False)
+    scene.set_obstacle_material(name, metalness=metalness, roughness=roughness)
+
+
 def add_bay(scene: bt.Scene, name: str, boards: tuple, position: tuple) -> None:
     """An open bay: four posts, a low board and a top board, nothing in
     between — what a machine that bows into a bay needs over the low one.
@@ -571,12 +582,96 @@ def add_bay(scene: bt.Scene, name: str, boards: tuple, position: tuple) -> None:
     (w, d), (x, y) = BAY, position
     top = boards[-1]
     for i, (sx, sy) in enumerate(((-1, -1), (1, -1), (-1, 1), (1, 1))):
+        px, py = x + sx * (w - POST) / 2, y + sy * (d - POST) / 2
         scene.add_box(f"{name}/post{i}", (POST, POST, top),
-                      (x + sx * (w - POST) / 2, y + sy * (d - POST) / 2, top / 2), color=STEEL)
+                      (px, py, top / 2), color=STEEL)
+        scene.set_obstacle_material(f"{name}/post{i}", metalness=0.45, roughness=0.4)
+        trim(scene, f"{name}/trim/foot{i}", (0.085, 0.085, 0.012), (px, py, 0.006), STEEL)
+        # The perforated faces make the height-adjustable uprights legible.
+        for slot in range(1, int(top / 0.09)):
+            trim(scene, f"{name}/trim/slot{i}_{slot}", (0.010, 0.001, 0.022),
+                 (px, py - POST / 2 - 0.0006, slot * 0.09), (0.025, 0.035, 0.045))
     for tag, height in zip(("low", "top"), boards):
         scene.add_box(f"{name}/board_{tag}", (w - 2 * POST, d, BOARD), (x, y, height - BOARD / 2), color=DECK)
+        scene.set_obstacle_material(f"{name}/board_{tag}", metalness=0.35, roughness=0.48)
+        for side in (-1, 1):
+            trim(scene, f"{name}/trim/{tag}_beam{side}", (w - 2 * POST, 0.025, 0.045),
+                 (x, y + side * (d / 2 - 0.015), height - BOARD - 0.0225), BEAM, metalness=0.25)
+        # Shelf-edge label holders sit below the deck, outside the grasp.
+        trim(scene, f"{name}/trim/{tag}_label", (0.18, 0.003, 0.033),
+             (x, y - d / 2 - 0.001, height - BOARD - 0.0225), (0.88, 0.89, 0.84))
+        trim(scene, f"{name}/trim/{tag}_swatch", (0.04, 0.001, 0.028),
+             (x - 0.064, y - d / 2 - 0.003, height - BOARD - 0.0225), TEAL if tag == "low" else YELLOW)
+    # Bracing stays at the sides; the front remains open for the bowed torso.
+    rise, run = top - 0.10, d - POST
+    angle = math.atan2(rise, run)
+    for side in (-1, 1):
+        trim(scene, f"{name}/trim/brace{side}", (0.013, math.hypot(run, rise), 0.018),
+             (x + side * (w - POST) / 2, y, top / 2), DECK,
+             quaternion=(math.sin(angle / 2), 0.0, 0.0, math.cos(angle / 2)), metalness=0.6)
     scene.set_part(name, kind="group", category="structure.rack", manufacturer="Generic",
                    model=f"open bay {w * 1e3:.0f} x {d * 1e3:.0f} x {top * 1e3:.0f}")
+
+
+def dress_cell(scene: bt.Scene, machine: Machine, aisle: float) -> None:
+    """Floor paint and stocked shelving, derived from the working cell's dimensions."""
+    front = SPUR + machine.standoff
+    row_y = front - aisle - BAY[1] / 2
+    stand_lo, stand_hi = scene.obstacle_bounds("stand/top")
+    xmin = min(-0.65, stand_lo[0]) - 0.35
+    xmax = CORNER_X + 1.35
+    ymin = min(row_y - BAY[1] / 2, stand_lo[1]) - 0.35
+    ymax = max(front + BAY[1], stand_hi[1]) + 0.35
+    trim(scene, "floor/slab", (xmax - xmin, ymax - ymin, 0.06),
+         ((xmin + xmax) / 2, (ymin + ymax) / 2, -0.029), (0.29, 0.33, 0.35), roughness=0.95)
+    # Paint overlays are above the slab and each other to avoid coplanar flicker.
+    trim(scene, "floor/aisle", (CORNER_X + 1.15, aisle, 0.001),
+         ((CORNER_X - 0.05) / 2, front - aisle / 2, 0.0015), (0.16, 0.23, 0.25), roughness=0.9)
+    for edge, y in (("bay", front), ("row", front - aisle)):
+        bt.parts.marking(scene, f"floor/edge_{edge}", line=((-0.6, y), (CORNER_X + 0.55, y)),
+                         width=0.025, color=YELLOW, floor=0.003, thickness=0.001)
+    for i in range(5):
+        x = 0.3 + i * 0.40
+        # Small chevrons follow the actual straight leg of the vehicle route.
+        for side in (-1, 1):
+            bt.parts.marking(scene, f"floor/route/{i}_{side}",
+                             line=((x - 0.07, side * 0.055), (x, 0.0)), width=0.018,
+                             color=(0.53, 0.67, 0.66), floor=0.003, thickness=0.001)
+    # A teal pad identifies the receiving stand in either dock layout.
+    pad = (stand_lo[0] - 0.12, stand_lo[1] - 0.12, stand_hi[0] + 0.12, stand_hi[1] + 0.12)
+    trim(scene, "floor/handover", (pad[2] - pad[0], pad[3] - pad[1], 0.001),
+         ((pad[0] + pad[2]) / 2, (pad[1] + pad[3]) / 2, 0.0045), (0.055, 0.26, 0.28), roughness=0.9)
+    bt.parts.marking(scene, "floor/handover_edge", rect=pad, width=0.025,
+                     color=TEAL, floor=0.005, thickness=0.001)
+    scene.set_obstacle_color("stand/top", DECK)
+    scene.set_obstacle_material("stand/top", metalness=0.45, roughness=0.4)
+    # Two thin landing marks directly under the taught set-down targets.
+    for tag, side in (("low", -1.0 if machine.arms["low"] == "right" else 1.0),
+                      ("top", -1.0 if machine.arms["top"] == "right" else 1.0)):
+        px, py, _ = in_world("dock", (machine.dock_standoff + machine.stand_inset,
+                                      side * machine.span, 0.0), machine.holonomic)
+        w, d, _ = machine.carton
+        if not machine.holonomic:
+            w, d = d, w
+        bt.parts.marking(scene, f"stand/landing_{tag}",
+                         rect=(px - w / 2 - 0.012, py - d / 2 - 0.012,
+                               px + w / 2 + 0.012, py + d / 2 + 0.012),
+                         width=0.008, color=TEAL if tag == "low" else YELLOW,
+                         floor=machine.stand_top + 0.0002, thickness=0.0006)
+    for level in range(3):
+        scene.set_obstacle_color(f"row/shelves/l{level}", DECK)
+        scene.set_obstacle_material(f"row/shelves/l{level}", metalness=0.35, roughness=0.48)
+        for edge in ("f", "b"):
+            scene.set_obstacle_color(f"row/trim/beam{level}{edge}", BEAM)
+        # Background stock is deliberately modest; the two picked cartons
+        # stay the only moving workpieces and the only stock on the pick bay.
+        z = machine.boards[-1] * (level + 1) / 3
+        for index in range(4):
+            name = f"row/stock/{level}_{index}"
+            bt.parts.carton(scene, name, (0.30 + 0.025 * (index % 2), 0.25, 0.16 + 0.035 * ((index + level) % 3)),
+                            (CORNER_X - 1.65 + index * 0.62, row_y, z + 0.001), detail="full")
+            scene.set_obstacle_enabled(name, False)
+            scene.remove_part(name)
 
 
 def build_scene(machine: Machine, aisle: float = 1.4) -> bt.Scene:
@@ -603,7 +698,7 @@ def build_scene(machine: Machine, aisle: float = 1.4) -> bt.Scene:
     # Across the aisle, the row the machine must not brush while it pivots.
     bt.parts.rack(scene, "row", size=(3.0, BAY[1], machine.boards[-1]),
                   position=(CORNER_X - 0.6, front - aisle - BAY[1] / 2), levels=3,
-                  model="SR-3000", manufacturer="Generic", color=STEEL)
+                  model="SR-3000", manufacturer="Generic", color=STEEL, detail="full")
     w, d, h = machine.carton
     for tag, board in zip(("low", "top"), machine.boards):
         # Facing the bay (+y) the machine's right hand is at +x.
@@ -612,18 +707,22 @@ def build_scene(machine: Machine, aisle: float = 1.4) -> bt.Scene:
                       (CORNER_X + side * machine.span, front + machine.inset, board + h / 2 + 0.002),
                       color=CARTON)
         scene.set_part(f"carton_{tag}", category="workpiece", model="carton 100", mass_kg=0.35)
+        # One visual asset follows the held obstacle through the whole cycle.
+        bt.parts.appearance(scene, f"carton_{tag}", "carton", (w, d, h))
     if machine.holonomic:
         bt.parts.table(scene, "stand", size=(STAND[1], STAND[0], machine.stand_top),
                        position=(dock_xy[0], dock_xy[1] + machine.dock_standoff + STAND[0] / 2),
-                       model="HFS8-500", manufacturer="Generic", color=STEEL)
+                       model="HFS8-500", manufacturer="Generic", color=STEEL, detail="full")
     else:
         bt.parts.table(scene, "stand", size=(STAND[0], STAND[1], machine.stand_top),
                        position=(-(machine.dock_standoff + STAND[0] / 2), 0.0),
-                       model="HFS8-500", manufacturer="Generic", color=STEEL)
+                       model="HFS8-500", manufacturer="Generic", color=STEEL, detail="full")
 
+    dress_cell(scene, machine, aisle)
+    # Built into the head: draw the optical frustum without an extra housing.
     link, offset, orientation, fov = machine.camera
     scene.add_camera("head_cam", robot=ROBOT, link=link, position=offset, quaternion=orientation,
-                     fov=fov, resolution=RESOLUTION, near=0.1, far=3.0)
+                     fov=fov, resolution=RESOLUTION, near=0.1, far=3.0, body_visible=False)
     for tag in ("low", "top"):
         scene.add_vision_sensor(f"sees_{tag}", camera="head_cam", watch=[f"carton_{tag}"])
     return scene
@@ -1082,7 +1181,7 @@ def main() -> None:
     except RuntimeError as err:
         sys.exit(f"teaching failed: {err}")
     if "--studio" in args:
-        bt.studio(scene)
+        bt.studio(scene, view=((5.9, 4.7, 4.0), (1.25, 0.0, 0.65)))
         return
     try:
         tl = scene.simulate_sequence(name, max_duration=180.0)

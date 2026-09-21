@@ -64,7 +64,7 @@ front of one bay ([Which machine for this bay](#which-machine-for-this-bay)).
 ## The robot is its own vehicle
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:592:599"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:687:694"
 ```
 
 The vehicle has `body=[]`: there is no chassis box, because the robot's own
@@ -85,7 +85,7 @@ arrives at the bay nose first as well — one quarter turn in the whole trip.
 Everything about the wheels and the groups comes out of the package:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:522:528"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:525:531"
 ```
 
 ## The torso first, then the arm
@@ -102,7 +102,7 @@ gentlest first, and teaching keeps the first one the hand reaches all of the
 task's targets from, collision-free:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:767:791"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:866:890"
 ```
 
 For the G1-D that prints `low {'Yaw_Joint': 2.0}`: `Yaw_Joint` is the waist's
@@ -131,7 +131,7 @@ Two details of the arm's motions are worth stealing:
   costs seconds.
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:737:765"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:836:864"
 ```
 
 ## Ramps are yours to check
@@ -142,7 +142,7 @@ while its vehicle moves. So the demo samples each torso sweep at the station
 it happens at, before the bake:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:884:897"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:983:996"
 ```
 
 It earns its keep at once. Ramping the G1-D from its bow straight to the top
@@ -158,7 +158,7 @@ Hence the cycle's `straighten` step: upright first, then up.
 ## The head camera is an input
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:625:629"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:724:728"
 ```
 
 A [vision sensor](../guides/sensors-and-devices.md#vision-sensors) behind the
@@ -166,7 +166,7 @@ head camera is a signal: ON while the watched carton is in the view frustum
 with a clear line of sight. Each pick waits for it:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:974:974"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:1073:1073"
 ```
 
 The glance itself is taught like the torso: the machine description lists
@@ -190,7 +190,7 @@ posture); the primitive machine has a pan-tilt head and a group for it.
 ## The fold rides the drive
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:987:988"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:1086:1087"
 ```
 
 A planned motion cannot start while the vehicle drives — a plan is baked in
@@ -358,7 +358,7 @@ whose twin is a mimic. It has no package, so the script declares what a
 package would:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:529:538"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:532:541"
 ```
 
 Its bay is its own — boards at 0.75 m and 1.50 m, where a 0.40 m column makes

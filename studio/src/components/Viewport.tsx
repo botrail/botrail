@@ -34,6 +34,7 @@ import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
 import { floorFinish } from "../three/floorFinish";
+import { initialView } from "../three/initialView";
 
 /**
  * Image-based lighting, so the robot's PBR materials (the Isaac Franka ships
@@ -76,6 +77,7 @@ function IndoorLighting() {
 }
 
 export function Viewport() {
+  const view = useMemo(() => initialView(window.location.search), []);
   const connected = useStudioStore((s) => s.connection === "connected");
   const selection = useStudioStore((s) => s.selection);
   const multi = useStudioStore((s) => s.robots.length > 1);
@@ -137,7 +139,7 @@ export function Viewport() {
         gl={{ antialias: false }}
         dpr={[1, 2]}
         camera={{
-          position: [1.6, -1.6, 1.2],
+          position: view.position,
           up: [0, 0, 1],
           fov: 45,
           near: 0.01,
@@ -190,7 +192,7 @@ export function Viewport() {
           <axesHelper args={[0.3]} />
         </Aid>
 
-        <OrbitControls makeDefault target={[0, 0, 0.2]} />
+        <OrbitControls makeDefault target={view.target} />
 
         <Suspense fallback={null}>
           <SceneView />

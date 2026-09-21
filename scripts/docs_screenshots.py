@@ -423,8 +423,8 @@ def main() -> None:
             page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
             t = tl.step_span("pick top").end
             x, y, _ = tl.base_pose(t, semi_humanoid_demo.ROBOT)[0]
-            # From the far end of the aisle, looking back at the dock.
-            page.evaluate(f"window.__CAM = {{pos: [{x + 2.1}, {y - 0.75}, 1.5], look: [{x - 0.1}, {y + 0.25}, 0.75]}}")
+            # Leave room for the raised head, both decks and the wheeled base.
+            page.evaluate(f"window.__CAM = {{pos: [{x + 2.9}, {y - 1.45}, 2.4], look: [{x - 0.15}, {y + 0.2}, 1.0]}}")
             bands = page.locator(".timeline-bands").bounding_box()
             page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
             time.sleep(2.0)
