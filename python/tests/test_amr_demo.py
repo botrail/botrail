@@ -43,6 +43,7 @@ def _or_skip(build):
     """Run `build`, or skip when the catalog cannot be reached — an
     offline machine (and CI, which fakes the catalog out) has no business
     failing on a download."""
+    pytest.importorskip("huggingface_hub", reason="AMR demo needs the optional catalog extra")
     try:
         return build()
     except pytest.skip.Exception:

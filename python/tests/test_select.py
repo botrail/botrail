@@ -340,6 +340,7 @@ def test_aerial_requirements_meet_the_x500_manifest() -> None:
     """The drone demo against the real airframe package: the authored
     indoor rates are asked, the manifest's PX4 limits answer them, and
     `search_for` finds the machine in the `vehicle.uav` aisle."""
+    pytest.importorskip("huggingface_hub", reason="the drone demo's arm needs the optional catalog extra")
     import drone_survey_demo as demo
 
     scene, tl = demo.bake(pack=X500_DIST / "px4" / "x500" / "x500" / "r1")

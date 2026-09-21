@@ -2869,7 +2869,12 @@ mod tests {
         add("other");
         handle_client_message(&host, r#"{"type":"clear_motion","motion":"main"}"#);
         let names = |host: &TestHost| -> Vec<String> {
-            host.scene.borrow().motions().iter().map(|m| m.name.clone()).collect()
+            host.scene
+                .borrow()
+                .motions()
+                .iter()
+                .map(|m| m.name.clone())
+                .collect()
         };
         assert_eq!(names(&host), ["main", "other"]);
         host.out.borrow_mut().clear();
@@ -2883,7 +2888,11 @@ mod tests {
         assert!(host.message_types().is_empty());
         let logs = host.logs.borrow();
         assert_eq!(logs.len(), 1);
-        assert!(logs[0].contains("rejected remove_motion: unknown motion `main`"), "{}", logs[0]);
+        assert!(
+            logs[0].contains("rejected remove_motion: unknown motion `main`"),
+            "{}",
+            logs[0]
+        );
     }
 
     #[test]

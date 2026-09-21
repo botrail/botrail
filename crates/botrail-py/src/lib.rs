@@ -6140,7 +6140,9 @@ impl Scene {
     /// sequence that starts it stops validating (`unknown motion`) until a
     /// motion of that name is authored again.
     fn remove_motion(&self, motion: &str) -> PyResult<()> {
-        self.hub.remove_motion(motion).map_err(PyValueError::new_err)
+        self.hub
+            .remove_motion(motion)
+            .map_err(PyValueError::new_err)
     }
 
     #[getter]

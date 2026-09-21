@@ -17,6 +17,7 @@ from basics import demo, sequence_demo  # noqa: E402
 
 @pytest.fixture(scope="module")
 def cell():
+    pytest.importorskip("huggingface_hub", reason="the demo's equipment needs the optional catalog extra")
     scene = demo.build_scene()
     name = sequence_demo.build_cycle(scene)
     return scene, name
