@@ -1671,6 +1671,10 @@ pub enum ClientMessage {
     ClearMotion {
         motion: String,
     },
+    /// Remove the motion itself (`clear_motion` leaves it listed, empty).
+    RemoveMotion {
+        motion: String,
+    },
     /// Plan every segment of the motion from the current configuration.
     PlanMotion {
         motion: String,

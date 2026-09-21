@@ -33,6 +33,36 @@ def test_motion_editing(scene: bt.Scene) -> None:
         scene.add_segment("main", goal=[0.0], kind="joint")
     with pytest.raises(ValueError):
         scene.add_segment("main", kind="teleport")
+    # Cleared, the motion is still listed — empty. Removed, it is gone: from
+    # the list, from the saved project and from the generated script.
+    assert scene.motion_names == ["main"] and '"main"' in scene.generate_python()
+    scene.add_segment("other")
+    scene.remove_motion("main")
+    assert scene.motion_names == ["other"] and '"main"' not in scene.generate_python()
+    with pytest.raises(ValueError, match="unknown motion `main`"):
+        scene.remove_motion("main")
+    # The name is free again: a motion authored under it is a new one.
+    scene.add_segment("main")
+    assert scene.motion_names == ["other", "main"] and len(scene.motion_segments("main")) == 1
+
+
+def test_a_sequence_that_starts_a_removed_motion_says_so(scene: bt.Scene) -> None:
+    # Removing a motion does not ask who starts it: the step keeps its
+    # authored reference and the cell stops checking out, by name — the same
+    # as a frame that went missing, and as the cleared motion's `has no
+    # segments`.
+    scene.add_segment("main", goal=[0.5, 0.4, -0.5, 0.2, 0.0, 0.0])
+    sq = scene.sequence("cycle")
+    sq.step("go", actions=[bt.seq.motion("main")], transition=bt.seq.done())
+    assert scene.check().ok
+    scene.remove_motion("main")
+    findings = [f for f in scene.check().findings if f.severity == "error"]
+    assert [(f.code, f.message) for f in findings] == [("io_derivation", "sequence `cycle`: unknown motion `main`")]
+    with pytest.raises(ValueError, match="unknown motion `main`"):
+        scene.simulate_sequence("cycle")
+    # Author it again and the cell is whole.
+    scene.add_segment("main", goal=[0.5, 0.4, -0.5, 0.2, 0.0, 0.0])
+    assert scene.check().ok and scene.simulate_sequence("cycle").duration > 0.0
 
 
 def test_plan_motion_passes_through_waypoints(scene: bt.Scene) -> None:

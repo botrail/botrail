@@ -1,0 +1,406 @@
+<?xml version="1.0"?>
+<!-- A primitive-only semi-humanoid used by the botrail and catalog-builder
+     tests: a differential base (two wheel joints, casters welded in), a
+     lift column, a waist yaw, a pan-tilt head and two 4-DOF arms that each
+     end in a 1-DOF finger (its twin follows as a mimic). No mesh assets, so
+     it works straight from a checkout.
+
+     `base_footprint` is the root: on the floor, midway between the drive
+     wheels, which is where a differential base pivots. The wheel axles
+     point opposite ways (+Y left, -Y right) the way vendor models often
+     export them. Arms hang down at zero, elbows folding forward (+x); the
+     flanges are the hands turned so +Z points at the fingers. -->
+<robot name="semi_humanoid_test">
+
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.10"/>
+  </joint>
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.05"/>
+      <geometry><box size="0.56 0.46 0.16"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.05"/>
+      <geometry><box size="0.56 0.46 0.16"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.22 0 -0.06"/>
+      <geometry><sphere radius="0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.22 0 -0.06"/>
+      <geometry><sphere radius="0.04"/></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.22 0 -0.06"/>
+      <geometry><sphere radius="0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.22 0 -0.06"/>
+      <geometry><sphere radius="0.04"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ===================================================== the wheels === -->
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel"/>
+    <origin xyz="0 0.25 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+  <link name="left_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel"/>
+    <origin xyz="0 -0.25 0"/>
+    <axis xyz="0 -1 0"/>
+  </joint>
+  <link name="right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.10" length="0.04"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ====================================================== the torso === -->
+  <joint name="lift_joint" type="prismatic">
+    <parent link="base_link"/>
+    <child link="column"/>
+    <origin xyz="-0.08 0 0.13"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.0" upper="0.40" effort="400" velocity="0.15"/>
+  </joint>
+  <link name="column">
+    <visual>
+      <origin xyz="0 0 0.25"/>
+      <geometry><box size="0.12 0.12 0.50"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.25"/>
+      <geometry><box size="0.12 0.12 0.50"/></geometry>
+    </collision>
+  </link>
+  <joint name="waist_yaw_joint" type="revolute">
+    <parent link="column"/>
+    <child link="chest"/>
+    <origin xyz="0 0 0.50"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.6" upper="1.6" effort="60" velocity="1.5"/>
+  </joint>
+  <link name="chest">
+    <visual>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.18 0.34 0.30"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15"/>
+      <geometry><box size="0.18 0.34 0.30"/></geometry>
+    </collision>
+  </link>
+
+  <!-- ======================================================= the head === -->
+  <joint name="head_pan_joint" type="revolute">
+    <parent link="chest"/>
+    <child link="neck"/>
+    <origin xyz="0 0 0.30"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.3" upper="1.3" effort="5" velocity="2.0"/>
+  </joint>
+  <link name="neck">
+    <visual>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.03" length="0.06"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.03" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <joint name="head_tilt_joint" type="revolute">
+    <parent link="neck"/>
+    <child link="head"/>
+    <origin xyz="0 0 0.06"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.6" upper="0.9" effort="5" velocity="2.0"/>
+  </joint>
+  <link name="head">
+    <visual>
+      <origin xyz="0.01 0 0.07"/>
+      <geometry><box size="0.14 0.16 0.14"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.01 0 0.07"/>
+      <geometry><box size="0.14 0.16 0.14"/></geometry>
+    </collision>
+  </link>
+  <joint name="head_camera_mount" type="fixed">
+    <parent link="head"/>
+    <child link="head_camera"/>
+    <origin xyz="0.08 0 0.07"/>
+  </joint>
+  <link name="head_camera"/>
+
+  <!-- ==================================================== left arm === -->
+  <joint name="left_mount" type="fixed">
+    <parent link="chest"/>
+    <child link="left_base"/>
+    <origin xyz="0 0.17 0.25"/>
+  </joint>
+  <link name="left_base"/>
+  <joint name="left_shoulder_pitch" type="revolute">
+    <parent link="left_base"/>
+    <child link="left_shoulder"/>
+    <origin xyz="0 0.05 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="left_shoulder">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.035"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.035"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_shoulder_roll" type="revolute">
+    <parent link="left_shoulder"/>
+    <child link="left_upper"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.3" upper="2.6" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="left_upper">
+    <visual>
+      <origin xyz="0 0 -0.16"/>
+      <geometry><cylinder radius="0.03" length="0.24"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.16"/>
+      <geometry><cylinder radius="0.03" length="0.24"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_elbow" type="revolute">
+    <parent link="left_upper"/>
+    <child link="left_fore"/>
+    <origin xyz="0 0 -0.28"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="left_fore">
+    <visual>
+      <origin xyz="0 0 -0.12"/>
+      <geometry><cylinder radius="0.025" length="0.24"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.12"/>
+      <geometry><cylinder radius="0.025" length="0.24"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_wrist" type="revolute">
+    <parent link="left_fore"/>
+    <child link="left_hand"/>
+    <origin xyz="0 0 -0.24"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="10" velocity="3.0"/>
+  </joint>
+  <link name="left_hand">
+    <visual>
+      <origin xyz="0 0 -0.04"/>
+      <geometry><box size="0.05 0.07 0.08"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.04"/>
+      <geometry><box size="0.05 0.07 0.08"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_finger" type="prismatic">
+    <parent link="left_hand"/>
+    <child link="left_finger_a"/>
+    <origin xyz="0 0.012 -0.08"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="0.03" effort="10" velocity="0.1"/>
+  </joint>
+  <link name="left_finger_a">
+    <visual>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_finger_b_joint" type="prismatic">
+    <parent link="left_hand"/>
+    <child link="left_finger_b"/>
+    <origin xyz="0 -0.012 -0.08"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="0.0" upper="0.03" effort="10" velocity="0.1"/>
+    <mimic joint="left_finger" multiplier="1.0"/>
+  </joint>
+  <link name="left_finger_b">
+    <visual>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </collision>
+  </link>
+  <joint name="left_flange_mount" type="fixed">
+    <parent link="left_hand"/>
+    <child link="left_flange"/>
+    <origin xyz="0 0 -0.08" rpy="3.14159265 0 0"/>
+  </joint>
+  <link name="left_flange"/>
+  <joint name="left_tcp_mount" type="fixed">
+    <parent link="left_hand"/>
+    <child link="left_tcp"/>
+    <origin xyz="0 0 -0.13" rpy="3.14159265 0 0"/>
+  </joint>
+  <link name="left_tcp"/>
+
+  <!-- ==================================================== right arm === -->
+  <joint name="right_mount" type="fixed">
+    <parent link="chest"/>
+    <child link="right_base"/>
+    <origin xyz="0 -0.17 0.25"/>
+  </joint>
+  <link name="right_base"/>
+  <joint name="right_shoulder_pitch" type="revolute">
+    <parent link="right_base"/>
+    <child link="right_shoulder"/>
+    <origin xyz="0 -0.05 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.0" upper="3.0" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="right_shoulder">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.035"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.035"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_shoulder_roll" type="revolute">
+    <parent link="right_shoulder"/>
+    <child link="right_upper"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-2.6" upper="0.3" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="right_upper">
+    <visual>
+      <origin xyz="0 0 -0.16"/>
+      <geometry><cylinder radius="0.03" length="0.24"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.16"/>
+      <geometry><cylinder radius="0.03" length="0.24"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_elbow" type="revolute">
+    <parent link="right_upper"/>
+    <child link="right_fore"/>
+    <origin xyz="0 0 -0.28"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="20" velocity="2.0"/>
+  </joint>
+  <link name="right_fore">
+    <visual>
+      <origin xyz="0 0 -0.12"/>
+      <geometry><cylinder radius="0.025" length="0.24"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.12"/>
+      <geometry><cylinder radius="0.025" length="0.24"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_wrist" type="revolute">
+    <parent link="right_fore"/>
+    <child link="right_hand"/>
+    <origin xyz="0 0 -0.24"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="10" velocity="3.0"/>
+  </joint>
+  <link name="right_hand">
+    <visual>
+      <origin xyz="0 0 -0.04"/>
+      <geometry><box size="0.05 0.07 0.08"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.04"/>
+      <geometry><box size="0.05 0.07 0.08"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_finger" type="prismatic">
+    <parent link="right_hand"/>
+    <child link="right_finger_a"/>
+    <origin xyz="0 0.012 -0.08"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="0.03" effort="10" velocity="0.1"/>
+  </joint>
+  <link name="right_finger_a">
+    <visual>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_finger_b_joint" type="prismatic">
+    <parent link="right_hand"/>
+    <child link="right_finger_b"/>
+    <origin xyz="0 -0.012 -0.08"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="0.0" upper="0.03" effort="10" velocity="0.1"/>
+    <mimic joint="right_finger" multiplier="1.0"/>
+  </joint>
+  <link name="right_finger_b">
+    <visual>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.025"/>
+      <geometry><box size="0.012 0.008 0.05"/></geometry>
+    </collision>
+  </link>
+  <joint name="right_flange_mount" type="fixed">
+    <parent link="right_hand"/>
+    <child link="right_flange"/>
+    <origin xyz="0 0 -0.08" rpy="3.14159265 0 0"/>
+  </joint>
+  <link name="right_flange"/>
+  <joint name="right_tcp_mount" type="fixed">
+    <parent link="right_hand"/>
+    <child link="right_tcp"/>
+    <origin xyz="0 0 -0.13" rpy="3.14159265 0 0"/>
+  </joint>
+  <link name="right_tcp"/>
+
+</robot>

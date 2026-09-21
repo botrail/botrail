@@ -62,6 +62,10 @@ pub enum ModelError {
     NameCollision(String, &'static str),
     #[error("unknown group `{0}`")]
     UnknownGroup(String),
+    #[error("allowed collision `{a}` x `{b}`: link `{link}` does not exist on the robot")]
+    UnknownAllowedLink { a: String, b: String, link: String },
+    #[error("allowed collision `{0}` x `{0}`: a link does not collide with itself")]
+    AllowedWithItself(String),
     #[error("group `{group}`: link `{link}` does not exist on the robot")]
     UnknownGroupLink { group: String, link: String },
     #[error("group `{group}`: joint `{joint}` does not exist on the robot")]
@@ -246,9 +250,15 @@ pub enum RobotSource {
         /// Grasp-surface frames declared by the manifest
         /// (`frames.grasp_frames`), reapplied on rebuild.
         grasp: Vec<String>,
-        /// The arms a dual-arm package declares (`frames.arms[]`), each
-        /// applied as a planning group on load and again on rebuild.
+        /// The planning groups the package declares — its arms
+        /// (`frames.arms[]`) and, for a whole-body machine, the torso / head
+        /// / hand groups and composites (`frames.groups[]`, no flange) —
+        /// each applied on load and again on rebuild.
         arms: Vec<CatalogArm>,
+        /// Link pairs the package declares may touch
+        /// (`self_collision.allowed_pairs`), by name — applied on load and
+        /// again on rebuild ([`RobotModel::allowed_collisions`]).
+        allowed_collisions: Vec<(String, String)>,
         /// What the package *is* commercially (maker, product name,
         /// category, headline specs) — the manifest's identity fields, kept
         /// so a bill of materials can name the machine without re-reading
@@ -343,8 +353,9 @@ const LIMB_MIN_JOINTS: usize = 2;
 /// headline specs (`mass_kg`, `reach_mm`, `payload_kg`, ...). Carried on
 /// [`RobotSource::Catalog`] purely so downstream consumers (a bill of
 /// materials) can describe the machine; nothing kinematic reads it.
-/// One arm of a dual-arm catalog package (`frames.arms[]`): what
-/// [`RobotModel::define_group`] is called with on load.
+/// One declared group of a catalog package — an arm (`frames.arms[]`) or
+/// another group of a whole-body machine (`frames.groups[]`, which has no
+/// flange): what [`RobotModel::define_group`] is called with on load.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CatalogArm {
     pub name: String,
@@ -433,6 +444,14 @@ pub struct RobotModel {
     /// [`RobotModel::define_group`], a mounted arm). Empty means the groups
     /// are derived from the tree — see [`RobotModel::groups`].
     pub declared_groups: Vec<GroupSpec>,
+    /// Link pairs the model's maker declares may touch (catalog
+    /// `self_collision.allowed_pairs`, [`RobotModel::allow_collisions`]) —
+    /// an SRDF's `disable_collisions`. A scene adds them to the pairs it
+    /// works out itself (adjacent links, and pairs that touch in nearly
+    /// every sampled pose): a whole-body machine's bulky torso capsules
+    /// overlap in *most* poses, not all, and only its maker can say that
+    /// is the design rather than a collision.
+    pub allowed_collisions: Vec<(usize, usize)>,
 }
 
 impl RobotModel {
@@ -891,6 +910,32 @@ impl RobotModel {
         Ok(model)
     }
 
+    /// Declares link pairs that may touch, by name, and returns the model
+    /// with them added to [`RobotModel::allowed_collisions`] (a pair
+    /// declared twice, or either way round, is kept once).
+    pub fn allow_collisions(&self, pairs: &[(&str, &str)]) -> Result<RobotModel, ModelError> {
+        let mut model = self.clone();
+        for &(a, b) in pairs {
+            let index = |name: &str| {
+                self.link_index(name)
+                    .ok_or_else(|| ModelError::UnknownAllowedLink {
+                        a: a.to_string(),
+                        b: b.to_string(),
+                        link: name.to_string(),
+                    })
+            };
+            let (i, j) = (index(a)?, index(b)?);
+            if i == j {
+                return Err(ModelError::AllowedWithItself(a.to_string()));
+            }
+            let pair = (i.min(j), i.max(j));
+            if !model.allowed_collisions.contains(&pair) {
+                model.allowed_collisions.push(pair);
+            }
+        }
+        Ok(model)
+    }
+
     /// Checks every declared group resolves on this tree.
     pub fn validate_groups(&self) -> Result<(), ModelError> {
         for spec in &self.declared_groups {
@@ -1269,6 +1314,7 @@ impl RobotModel {
             mount_link: None,
             grasp_links: Vec::new(),
             declared_groups: Vec::new(),
+            allowed_collisions: Vec::new(),
         })
     }
 
@@ -1403,6 +1449,7 @@ impl RobotModel {
             .copied()
             .chain(tool.grasp_links.iter().map(|i| i + link_offset))
             .collect();
+        model.allowed_collisions = welded_allowances(self, tool, link_offset);
         // The addressed arm's declaration follows the tool: its TCP is the
         // tool's now, its flange the tool's onward face. Other arms are
         // untouched. With no arm addressed (a single-arm robot) the groups
@@ -1483,6 +1530,7 @@ impl RobotModel {
             .copied()
             .chain(part.grasp_links.iter().map(|i| i + link_offset))
             .collect();
+        model.allowed_collisions = welded_allowances(self, part, link_offset);
         let rename = |name: &str| match prefix {
             Some(p) => format!("{p}{name}"),
             None => name.to_string(),
@@ -1684,6 +1732,24 @@ fn inertial_of(inertial: &xurdf::Inertial) -> Option<Inertial> {
         origin: pose_to_isometry(&inertial.origin),
         inertia: inertial.inertia,
     })
+}
+
+/// Both halves' declared allowances on a welded composite: the base's
+/// links keep their indices, the part's follow at `link_offset`.
+fn welded_allowances(
+    base: &RobotModel,
+    part: &RobotModel,
+    link_offset: usize,
+) -> Vec<(usize, usize)> {
+    base.allowed_collisions
+        .iter()
+        .copied()
+        .chain(
+            part.allowed_collisions
+                .iter()
+                .map(|(i, j)| (i + link_offset, j + link_offset)),
+        )
+        .collect()
 }
 
 pub fn pose_to_isometry(pose: &xurdf::Pose) -> Isometry3<f64> {
@@ -2174,6 +2240,59 @@ mod tests {
             .map(|&l| combined.links[l].name.as_str())
             .collect();
         assert_eq!(names, vec!["finger_l", "finger_r"]);
+    }
+
+    /// Declared allowances resolve by name, either way round and once, and
+    /// both halves' ride a weld: the base's as they were, the tool's
+    /// remapped.
+    #[test]
+    fn declared_allowances_resolve_by_name_and_ride_a_weld() {
+        let arm = RobotModel::from_urdf_str(TWO_LINK).unwrap();
+        let (a, b) = (arm.links[0].name.clone(), arm.links[1].name.clone());
+        let arm = arm
+            .allow_collisions(&[(a.as_str(), b.as_str()), (b.as_str(), a.as_str())])
+            .unwrap();
+        assert_eq!(arm.allowed_collisions, vec![(0, 1)]);
+        let err = arm
+            .allow_collisions(&[(a.as_str(), "nowhere")])
+            .unwrap_err();
+        assert!(
+            matches!(err, ModelError::UnknownAllowedLink { ref link, .. } if link == "nowhere")
+        );
+        let err = arm
+            .allow_collisions(&[(a.as_str(), a.as_str())])
+            .unwrap_err();
+        assert!(matches!(err, ModelError::AllowedWithItself(_)));
+
+        let tool = RobotModel::from_urdf_str(TOOL)
+            .unwrap()
+            .allow_collisions(&[("finger_l", "finger_r")])
+            .unwrap();
+        let combined = arm
+            .attach_tool(
+                &tool,
+                Some("tool"),
+                Some("mount_plate"),
+                Isometry3::identity(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let named: Vec<(&str, &str)> = combined
+            .allowed_collisions
+            .iter()
+            .map(|&(i, j)| {
+                (
+                    combined.links[i].name.as_str(),
+                    combined.links[j].name.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![(a.as_str(), b.as_str()), ("finger_l", "finger_r")]
+        );
     }
 
     #[test]

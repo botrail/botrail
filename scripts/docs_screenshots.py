@@ -32,6 +32,7 @@ import dual_arm_demo  # noqa: E402
 import legged_patrol_demo  # noqa: E402
 import machine_tending_demo  # noqa: E402
 import cover_bolting_demo  # noqa: E402
+import semi_humanoid_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -406,6 +407,29 @@ def main() -> None:
             time.sleep(2.0)
             page.screenshot(path=OUT / "dual_arm.png")
             print("wrote dual_arm.png")
+            server.stop()
+
+        if want("semi_humanoid"):
+            # ---- a semi-humanoid at the bay: the column up, the left hand on
+            # the top board's carton, the low one already in the right hand;
+            # a lane per group and the two vision lanes below -------------------
+            scene, _machine, _poses, tl = semi_humanoid_demo.bake("g1d")
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(3.0)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            t = tl.step_span("pick top").end
+            x, y, _ = tl.base_pose(t, semi_humanoid_demo.ROBOT)[0]
+            # From the far end of the aisle, looking back at the dock.
+            page.evaluate(f"window.__CAM = {{pos: [{x + 2.1}, {y - 0.75}, 1.5], look: [{x - 0.1}, {y + 0.25}, 0.75]}}")
+            bands = page.locator(".timeline-bands").bounding_box()
+            page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "semi_humanoid.png")
+            print("wrote semi_humanoid.png")
             server.stop()
 
         browser.close()

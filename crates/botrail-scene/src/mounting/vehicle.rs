@@ -200,8 +200,9 @@ pub(super) fn review(scene: &Scene, report: &mut MountingReport) {
         let Some(binding) = &robot.mount else {
             continue;
         };
-        // A gait makes the robot the vehicle's legs; it is not a bolted arm.
-        if binding.gait.is_some() || !binding.spin.is_empty() {
+        // A gait makes the robot the vehicle's legs, a wheel drive its
+        // running gear; neither is a bolted arm.
+        if binding.gait.is_some() || !binding.spin.is_empty() || binding.drive.is_some() {
             continue;
         }
         let target = &robot.name;
@@ -270,7 +271,7 @@ pub(super) fn connect(robot: &crate::SceneRobot, links: &Links, graph: &mut Grap
     let Some(binding) = &robot.mount else {
         return;
     };
-    if binding.gait.is_some() || !binding.spin.is_empty() {
+    if binding.gait.is_some() || !binding.spin.is_empty() || binding.drive.is_some() {
         return;
     }
     let reference = binding.reference.as_ref();

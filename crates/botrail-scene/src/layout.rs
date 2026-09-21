@@ -1296,6 +1296,14 @@ fn group_reach_m(source: &RobotSource, group: &str) -> Option<f64> {
             ..
         } if name == group => catalog_reach_m(tool).or_else(|| group_reach_m(base, group)),
         RobotSource::Composite { base, .. } => group_reach_m(base, group),
+        // A reach is an arm's: a whole-body package also declares a torso,
+        // a head, hands (`frames.groups[]` — groups without a flange), and
+        // a circle around a lift column would be a lie.
+        RobotSource::Catalog { arms, .. }
+            if arms.iter().any(|a| a.name == group && a.flange.is_none()) =>
+        {
+            None
+        }
         RobotSource::Catalog { .. } => catalog_reach_m(source),
         _ => None,
     }
@@ -1941,6 +1949,7 @@ mod tests {
         let mut model = RobotModel::from_urdf_str(URDF).unwrap();
         let inner = std::mem::replace(&mut model.source, RobotSource::UrdfXml(String::new()));
         model.source = RobotSource::Catalog {
+            allowed_collisions: Vec::new(),
             id: "acme/arm/r1".into(),
             revision: "sha".into(),
             tcp: None,
@@ -2024,6 +2033,7 @@ mod tests {
         let mut arm = RobotModel::from_urdf_str(URDF).unwrap();
         let inner = std::mem::replace(&mut arm.source, RobotSource::UrdfXml(String::new()));
         arm.source = RobotSource::Catalog {
+            allowed_collisions: Vec::new(),
             id: "acme/arm/r1".into(),
             revision: "sha".into(),
             tcp: None,

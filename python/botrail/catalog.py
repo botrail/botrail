@@ -32,7 +32,7 @@ import json
 import os
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Optional, Union
 
@@ -174,6 +174,10 @@ class Product:
     order: Optional[dict[str, Any]] = None
     kit: Optional[dict[str, Any]] = None
     compatibility: dict[str, Any] | None = None
+    #: On a search result: the specs the search asked for that this product
+    #: does not state. It is a candidate nobody has confirmed — after
+    #: `identify`, the cell's check reports those as `spec_unknown`.
+    unstated: tuple[str, ...] = ()
 
     @classmethod
     def from_entry(cls, entry: dict[str, Any], revision: Optional[str] = None) -> "Product":
@@ -274,6 +278,7 @@ class Product:
             "validation_level": self.validation_level,
             "distribution": self.distribution,
             "attributes": self.attributes(),
+            **({"unstated": list(self.unstated)} if self.unstated else {}),
             **({"order": self.order} if self.order is not None else {}),
             **({"kit": self.kit} if self.kit is not None else {}),
             **({"compatibility": self.compatibility} if self.compatibility is not None else {}),
@@ -281,7 +286,8 @@ class Product:
 
     def __repr__(self) -> str:
         attrs = ", ".join(f"{k}={v:g}" for k, v in sorted(self.attributes().items()))
-        return f"Product({self.id!r}, {self.category}, {self.validation_level or '?'}, {attrs})"
+        silent = f", unstated: {', '.join(self.unstated)}" if self.unstated else ""
+        return f"Product({self.id!r}, {self.category}, {self.validation_level or '?'}, {attrs}{silent})"
 
 
 class Index:
@@ -341,17 +347,40 @@ class Index:
         level: Optional[str] = None,
         text: Optional[str] = None,
         limit: Optional[int] = None,
+        strict: bool = False,
         **specs: Any,
     ) -> list[Product]:
         """Products matching a category (prefix: `gripper` matches
         `gripper.parallel`), a maker, a minimum validation level, a text
         fragment of id or name, and spec filters: `key=value` means the
         product states `key >= value`; `key__max=value` means `<= value`;
-        a string value must equal the product's string spec. Ordered by
-        validation level (best first), then closeness to the minimums
-        (smallest headroom first), then id."""
+        a string value must equal the product's string spec.
+
+        A product that states a value that falls short is out. One that
+        states *nothing* for an asked spec is not the same thing: when other
+        products of its category do state it, the spec applies to that
+        category and this product is a candidate nobody has confirmed — it
+        comes back with the silent keys in `unstated`, after the confirmed
+        ones. (A spec nobody in the category states does not apply to it: a
+        vacuum gripper is not asked its stroke.) `strict=True` keeps only
+        products that state everything asked.
+
+        Ordered by how much is unstated (nothing first), then validation
+        level (best first), then closeness to the minimums (smallest
+        headroom first), then id."""
         min_level = LEVELS.index(level) if level in LEVELS else None
         filters = [_filter(k, v) for k, v in specs.items()]
+        asked_of: dict[tuple[str, str], bool] = {}
+
+        def applies(category_: str, key: str, textual: bool) -> bool:
+            """Whether some product of exactly this category states `key`."""
+            known = asked_of.get((category_, key))
+            if known is None:
+                known = asked_of[(category_, key)] = any(
+                    (q.text(key) if textual else q.value(key)) is not None
+                    for q in self.products if q.category == category_
+                )
+            return known
         out: list[tuple[tuple, Product]] = []
         for p in self.products:
             if category and not _category_matches(p.category, category):
@@ -366,17 +395,22 @@ class Index:
                 continue
             closeness = 0.0
             ok = True
+            silent: list[str] = []
             for key, op, value in filters:
-                if isinstance(value, str):
-                    have = p.text(key)
-                    if have is None or have.strip().lower() != value.strip().lower():
+                textual = isinstance(value, str)
+                have = p.text(key) if textual else p.value(key)
+                if have is None:
+                    if strict or not applies(p.category, key, textual):
+                        ok = False
+                        break
+                    silent.append(key)
+                    continue
+                if textual:
+                    if have.strip().lower() != value.strip().lower():
                         ok = False
                         break
                     continue
-                have_n = p.value(key)
-                if have_n is None:
-                    ok = False
-                    break
+                have_n = have
                 if op == ">=":
                     if have_n + 1e-9 < value:
                         ok = False
@@ -392,7 +426,8 @@ class Index:
                         ok = False
                         break
             if ok:
-                out.append(((-p.level, round(closeness, 9), p.id), p))
+                found = replace(p, unstated=tuple(silent)) if silent else p
+                out.append(((len(silent), -p.level, round(closeness, 9), p.id), found))
         out.sort(key=lambda item: item[0])
         products = [p for _, p in out]
         return products[:limit] if limit is not None else products
@@ -446,6 +481,7 @@ def search(
     level: Optional[str] = None,
     text: Optional[str] = None,
     limit: Optional[int] = None,
+    strict: bool = False,
     **specs: Any,
 ) -> list[Product]:
     """Products in the catalog that match — see :meth:`Index.search`.
@@ -457,19 +493,24 @@ def search(
         bt.catalog.search(kind="spec", category="structure.fence")
     """
     idx = _resolve_index(index, revision)
-    return idx.search(category, kind=kind, manufacturer=manufacturer, level=level, text=text, limit=limit, **specs)
+    return idx.search(category, kind=kind, manufacturer=manufacturer, level=level, text=text, limit=limit,
+                      strict=strict, **specs)
 
 
 def search_for(row, *, category: Optional[str] = None, index: Union[Index, str, Path, None] = None, **extra: Any) -> list[Product]:
     """Candidates for one requirement row (`scene.requirements()["tool"]`):
     its category and every `>=` requirement become the filters; `extra`
-    adds or overrides filters (`level="V3"`, `ip_rating="IP54"`)."""
+    adds or overrides filters (`level="V3"`, `ip_rating="IP54"`), and
+    `key=None` drops one. Candidates that do not state an asked spec come
+    back too, marked (`Product.unstated`) and last — `strict=True` leaves
+    them out (see :meth:`Index.search`)."""
     filters: dict[str, Any] = dict(row.minimum)
     options: dict[str, Any] = {}
-    for key in ("kind", "manufacturer", "level", "text", "limit"):
+    for key in ("kind", "manufacturer", "level", "text", "limit", "strict"):
         if key in extra:
             options[key] = extra.pop(key)
     filters.update(extra)
+    filters = {key: value for key, value in filters.items() if value is not None}
     return search(category or row.category or None, index=index, **options, **filters)
 
 

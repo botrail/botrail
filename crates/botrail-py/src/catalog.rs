@@ -390,14 +390,17 @@ fn load_package(
         .iter()
         .filter_map(|f| resolve("grasp_frames", Some(f)))
         .collect();
-    // A dual-arm package names its arms: each becomes a planning group,
-    // tipped at the arm's TCP, driving the joints the manifest lists.
-    // Resolved here, while the name lookup is alive; declared below.
+    // A package with arms names them: each becomes a planning group,
+    // tipped at the arm's TCP, driving the joints the manifest lists. A
+    // whole-body machine names its other groups the same way (torso, head,
+    // hands, an arm with the torso) — declared after the arms, so the first
+    // group a studio selects is an arm. Resolved here, while the name
+    // lookup is alive; declared below.
     let mut resolved_arms = Vec::new();
-    for arm in &manifest.arms {
+    for arm in manifest.arms.iter().chain(&manifest.groups) {
         let tip = resolve("arms[].tcp_default", Some(&arm.tcp_default)).ok_or_else(|| {
             err(format!(
-                "catalog `{}`: arm `{}` tips at `{}`, which is not a link",
+                "catalog `{}`: group `{}` tips at `{}`, which is not a link",
                 entry.id, arm.name, arm.tcp_default
             ))
         })?;
@@ -446,7 +449,7 @@ fn load_package(
                 (!joint_refs.is_empty()).then_some(joint_refs.as_slice()),
                 flange.as_deref(),
             )
-            .map_err(|e| err(format!("catalog `{}`: arm `{name}`: {e}", entry.id)))?;
+            .map_err(|e| err(format!("catalog `{}`: group `{name}`: {e}", entry.id)))?;
         arms.push(CatalogArm {
             name,
             tip,
@@ -454,6 +457,30 @@ fn load_package(
             flange,
         });
     }
+
+    // The pairs the package declares may touch, under the model's own link
+    // names (a USD import spells them as prim paths). A pair naming a link
+    // the model does not have is dropped with a note, like any other
+    // manifest frame: it can only make the check stricter, never looser.
+    let mut allowed_collisions = Vec::new();
+    for (a, b) in &manifest.allowed_pairs {
+        let (Some(i), Some(j)) = (resolve_frame(&model, a), resolve_frame(&model, b)) else {
+            eprintln!(
+                "botrail: catalog `{}`: self_collision pair `{a}` x `{b}` names a link the \
+                 model does not have; ignored",
+                entry.id
+            );
+            continue;
+        };
+        allowed_collisions.push((model.links[i].name.clone(), model.links[j].name.clone()));
+    }
+    let pairs: Vec<(&str, &str)> = allowed_collisions
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    model = model
+        .allow_collisions(&pairs)
+        .map_err(|e| err(format!("catalog `{}`: {e}", entry.id)))?;
 
     if manifest.meta.kit.is_some() {
         model.name = entry.id.split('/').nth(2).unwrap_or(&entry.id).to_string();
@@ -465,6 +492,7 @@ fn load_package(
         id: entry.id,
         revision: sha,
         arms,
+        allowed_collisions,
         tcp: tcp.map(link_name),
         flange: flange.map(link_name),
         mount: mount.map(link_name),
@@ -613,8 +641,16 @@ struct ManifestBits {
     /// Grasp-surface frames a gripper/hand package declares — the
     /// fingertips a grasp is meant to happen between.
     grasp_frames: Vec<String>,
-    /// The arms of a dual-arm package (`frames.arms[]`).
+    /// The arms of a package that has arms (`frames.arms[]`) — a dual-arm
+    /// manipulator, a wheeled or legged humanoid.
     arms: Vec<ManifestArm>,
+    /// `self_collision.allowed_pairs` — link pairs that may touch.
+    allowed_pairs: Vec<(String, String)>,
+    /// The other planning groups of a whole-body machine
+    /// (`frames.groups[]`): torso, head, hands, and the composites an arm
+    /// is planned together with the torso by. Same shape as an arm, tipped
+    /// at `tip`, without a flange.
+    groups: Vec<ManifestArm>,
     /// Maker / product / category / numeric specs — what a bill of
     /// materials names the package by.
     meta: CatalogMeta,
@@ -773,7 +809,59 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
             }
         }
     }
+    // `frames.groups[]`: a group without a name, a tip or joints is not one.
+    let mut groups = Vec::new();
+    if let Ok(list) = manifest
+        .get_item("frames")
+        .and_then(|frames| frames.get_item("groups"))
+    {
+        if let Ok(iter) = list.try_iter() {
+            for item in iter.flatten() {
+                let text = |key: &str| -> Option<String> {
+                    item.get_item(key)
+                        .ok()
+                        .and_then(|v| v.extract::<Option<String>>().ok())
+                        .flatten()
+                };
+                let joints = item
+                    .get_item("joints")
+                    .ok()
+                    .and_then(|v| v.extract::<Option<Vec<String>>>().ok())
+                    .flatten()
+                    .unwrap_or_default();
+                let (Some(name), Some(tip)) = (text("name"), text("tip")) else {
+                    continue;
+                };
+                if joints.is_empty() {
+                    continue;
+                }
+                groups.push(ManifestArm {
+                    name,
+                    tcp_default: tip,
+                    flange_frame: None,
+                    joints,
+                });
+            }
+        }
+    }
+    // `self_collision.allowed_pairs`: link pairs the package declares may
+    // touch — `[[a, b], ...]`.
+    // (YAML gives lists, which do not extract as tuples.)
+    let allowed_pairs: Vec<(String, String)> = manifest
+        .get_item("self_collision")
+        .and_then(|block| block.get_item("allowed_pairs"))
+        .ok()
+        .and_then(|v| v.extract::<Option<Vec<Vec<String>>>>().ok())
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|pair| match pair.as_slice() {
+            [a, b] => Some((a.clone(), b.clone())),
+            _ => None,
+        })
+        .collect();
     Ok(ManifestBits {
+        allowed_pairs,
         id: text_at(&["id"]).ok_or_else(|| err("manifest requires id".into()))?,
         tcp_default: frame("tcp_default"),
         flange_frame: frame("flange_frame"),
@@ -782,6 +870,7 @@ fn read_manifest(py: Python<'_>, package_dir: &Path) -> PyResult<ManifestBits> {
         lidar_frames: frame_list("lidar_frames"),
         grasp_frames: frame_list("grasp_frames"),
         arms,
+        groups,
         meta: CatalogMeta {
             manufacturer: text_at(&["manufacturer", "name"]),
             product: text_at(&["name"]),

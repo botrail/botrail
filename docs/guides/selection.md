@@ -26,8 +26,9 @@ came from:
 | line kind | requirement | derived from |
 |---|---|---|
 | robot | `payload_kg` | the tool's mass plus the heaviest part the robot grasps (now, or in an `attach` of a counted sequence) |
-| robot | `reach_mm` | the farthest taught segment goal from the base, measured at the flange a catalog robot declares (the TCP for a plain URDF), plus `margin` (10 % by default); per arm on a dual-arm robot, from the arm's own base (an arm mounted from the catalog is its own line, `<robot>/<arm>`) |
-| robot (dual-arm product) | `arm_count` | the arms the cell's motions use |
+| robot | `reach_mm` | the farthest taught segment goal from the base, measured at the flange a catalog robot declares (the TCP for a plain URDF), plus `margin` (10 % by default); per arm on a dual-arm robot, from the arm's own first joint (its shoulder — `group.first_link`, not the origin of the body link the shoulder is bolted to) *as each target was taught* — a torso moves it between targets — not asked of a robot mounted as its vehicle's wheels (next row but one): it carries its arms' bases itself, so that distance is the machine's, not the cell's — (an arm mounted from the catalog is its own line, `<robot>/<arm>`) |
+| robot (dual-arm product) | `arm_count` | the arms the cell's motions use — a motion of a torso-with-arm composite teaches the arm inside it |
+| robot, mounted as its vehicle's wheels (`mount_robot(wheels=)`) | `vertical_reach_min_mm` (≤), `vertical_reach_max_mm` (≥) | the lowest and the highest taught hand position over the floor the machine stands on — what tells a lift column from a bowing waist; the line is shopped for as `vehicle.mobile_manipulator`, and asks no `reach_mm` (a note on the line says why: whether a machine reaches is its teaching's and its bake's to say) |
 | tool (`<robot>/tool`) | `payload_kg` | the heaviest grasped part |
 | tool, `gripper.parallel` | `stroke_mm` | the smallest side of the grasped parts — the least the fingers must open |
 | beam sensor | `sensing_range_mm` | the beam's span |
@@ -155,12 +156,34 @@ bt.catalog.search("gripper", mass_kg__max=1.0, ip_rating="IP54")        # a maxi
 bt.catalog.search_for(scene.requirements()["eye"])                      # straight from a requirement row
 ```
 
-A product that does not state a filtered key does not match — unknown is not
-a pass. Results come ordered by validation level, then by closeness to the
-minimums (the snuggest fit first), then by id, so the same query always
-returns the same list. An empty list is information too: nothing in the
-catalog satisfies the cell as drawn, so change the cell (grasp the carton
-across its other side) or send the requirement out as a question.
+A product that states a value that falls short is out. One that states
+*nothing* for an asked spec is a different thing, the same difference the cell's
+check makes between `short` (an error) and `unknown` (a warning): it is a
+candidate nobody has confirmed. It comes back after the confirmed ones, with
+the silent keys in `unstated` —
+
+```python
+for p in bt.catalog.search_for(req["machine"]):
+    print(p.id, p.unstated)
+# unitree/g1/g1-d/r1 ()
+# ...
+# rainbow_robotics/rb-y1/rb-y1-a/r2 ('vertical_reach_max_mm',)   <- the vendor publishes no working height
+```
+
+— and once identified, that line reads `unknown` until someone supplies the
+number or the cell is baked with the machine in it. This applies to specs the
+product's category is asked at all, which the index says by itself: a spec
+*some* product of that category states. Nobody states a vacuum gripper's
+stroke, so a vacuum gripper is not a candidate for one. `strict=True` leaves
+the unconfirmed out, and `search_for(row, key=None)` drops a requirement from
+the search without changing what the row asks.
+
+Results come ordered by how much is unstated (nothing first), then by
+validation level, then by closeness to the minimums (the snuggest fit first),
+then by id, so the same query always returns the same list. An empty list is
+information too: nothing in the catalog satisfies the cell as drawn, so change
+the cell (grasp the carton across its other side) or send the requirement out
+as a question.
 
 Writing the pick back is one call. The identity and the numbers come along,
 so the next `requirements()` reads them:

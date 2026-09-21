@@ -10,7 +10,7 @@ is a button, the inspection is a camera's verdict.
 
 The robot walks as a vehicle with legs (`bt.Gait`, the way
 `humanoid_carry_demo.py` walks) and works with its right arm as a planning
-group (`define_group`): one set of joint-space reaches, taught once and
+group (the catalog package declares its arms): one set of joint-space reaches, taught once and
 planned at every station, picks off the tray, sets down in the bath,
 presents to the camera and packs the shipping tray — every station puts
 its work at the same offset from where the robot parks, which is the
@@ -183,10 +183,10 @@ def build_robot() -> tuple[bt.Robot, bt.Gait]:
             position = (position[0], position[1], position[2] + LIDAR_SEAT)
         robot = robot.mount(assembly, at=host, offset_position=position, offset_quaternion=quaternion,
                             prefix=f"head_{name}_", group=f"head_{name}")
-    right = [j for j in robot.joint_names
-             if j.startswith("right_") and any(k in j for k in ("shoulder", "elbow", "wrist"))]
-    left = [j.replace("right_", "left_") for j in right]
-    robot = robot.define_group(ARM, tip=HAND, joints=right).define_group("left", tip="left_rubber_hand", joints=left)
+    # The arms are the package's own planning groups (`frames.arms[]`: `left`
+    # and `right`, seven joints each, tipped at the rubber hands) — nothing
+    # to declare here.
+    assert robot.group(ARM).tip == HAND
     return robot, bt.Gait.from_catalog(G1)
 
 

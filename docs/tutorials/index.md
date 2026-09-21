@@ -15,6 +15,7 @@ primitive-geometry arm straight from the checkout, with no downloads at all.
 | [Verify the cell in CI](verify-in-ci.md) | Turning a bake into a pytest regression suite | none |
 | [Two arms, one belt](two-robots.md) | Multiple robots, zone interlocks, tick-checked arm-vs-arm collision | Franka |
 | [Two arms, one robot](dual-arm.md) | A dual-arm robot: planning groups, one program per arm, a handover, a two-handed carry, a script per arm | UR5e from the catalog (or none, with `--robot simple`) |
+| [A semi-humanoid picks a shelf](semi-humanoid.md) | A humanoid upper body on wheels as its own vehicle: torso ramped then arm planned, the head camera gating each pick, the fold on the move, working heights in the requirements | G1-D from the catalog (or none, with `--robot semi`) |
 | [Parameter sweeps](parameter-sweep.md) | The cell as a function of its layout: `bt.sweep` tables it, `bt.optimize` searches it | none |
 | [Export and replay USD](replay-usd.md) | Baking animations for usdview/Omniverse/Blender, and playing them back | Franka |
 | [Hand over the cell](hand-over.md) | The whole document set — layout sheet, BOM, I/O list, program, USD, report — from one script | none |

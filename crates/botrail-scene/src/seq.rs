@@ -628,6 +628,44 @@ pub struct RobotMount {
     /// Continuous joints only — a limited joint would be driven through
     /// its stops.
     pub spin: Vec<(String, f64)>,
+    /// Set when the robot *is* the vehicle's wheels: a humanoid upper body
+    /// on a wheeled base, modelled whole. `Some` is itself the statement
+    /// "this machine rolls on the floor its vehicle drives over" — the
+    /// machine is one purchase, and a walkable surface under it is the
+    /// arrangement, not a collision — so a model whose wheels are welded
+    /// into the chassis mesh declares it with no wheels to turn.
+    pub drive: Option<WheelDrive>,
+}
+
+/// How a mounted robot rolls. The vehicle's checked motion is the only
+/// input: each wheel joint turns by exactly what its hub travelled, the
+/// way [`crate::wheels`] turns an obstacle wheel — no forces, no slip. The
+/// joints are the mount's to drive (one driver per joint): no motion or
+/// ramp may own them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WheelDrive {
+    pub wheels: Vec<MountWheel>,
+    /// The link whose origin is the machine's point on the floor — under
+    /// the turn centre, the URDF's `base_footprint`. It is what rides the
+    /// vehicle frame when the mount states no offset.
+    pub base_frame: Option<String>,
+}
+
+/// One wheel of a [`WheelDrive`]. The axle and the hub are the joint's own
+/// axis and origin; only what the model cannot say is stated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MountWheel {
+    /// The wheel's continuous joint.
+    pub joint: String,
+    /// Effective rolling radius in metres.
+    pub radius: f64,
+    /// Lateral travel / rolling travel coupling, as on
+    /// [`crate::wheels::VehicleWheel`]: 0 for an ordinary wheel, -1 / +1
+    /// for the two diagonals of a 45-degree mecanum arrangement.
+    pub lateral_ratio: f64,
+    /// A swerve module's steering joint (about the vertical): aimed along
+    /// the hub's travel before the wheel rolls.
+    pub steer: Option<String>,
 }
 
 /// How a mounted robot walks. Authored once per machine (a catalog package

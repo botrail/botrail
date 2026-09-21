@@ -89,11 +89,12 @@ def test_filters_read_like_requirements(index: catalog.Index) -> None:
         "robotiq/2f/2f-85/r1", "onrobot/rg6/r1", "robotiq/2f/2f-140/r1", "acme/vac/v1/r1",
     ]
     assert ids(index.search("gripper.parallel", stroke_mm=150, payload_kg=2.3)) == ["onrobot/rg6/r1"]
-    # Unknown is not a pass: the vacuum gripper states no stroke.
+    # A spec nobody in a category states does not apply to it: no vacuum
+    # gripper has a stroke, so the vacuum gripper is not a candidate for one.
     assert set(ids(index.search("gripper", stroke_mm=1))) == set(ids(index.search("gripper.parallel")))
     # `__max`, string specs, maker and level.
     assert ids(index.search("gripper.parallel", mass_kg__max=1.0)) == ["robotiq/2f/2f-85/r1"]
-    assert ids(index.search(ip_rating="IP40")) == ["robotiq/2f/2f-85/r1"]
+    assert ids(index.search(ip_rating="IP40", strict=True)) == ["robotiq/2f/2f-85/r1"]
     assert ids(index.search("sensor.photoelectric", output="pnp")) == ["omron/e3z/e3z-d62/r1"]
     assert ids(index.search(manufacturer="onrobot")) == ["onrobot/rg6/r1"]
     assert ids(index.search("manipulator", level="V3")) == ["universal_robots/ur/ur5e/r2"]
@@ -155,6 +156,33 @@ def test_get_prefers_public_but_search_keeps_all_revisions(distribution, selecte
     }
 
 
+def test_a_product_that_does_not_say_is_unconfirmed_not_unfit(index: catalog.Index) -> None:
+    # One parallel gripper states its IP rating, so the rating is something
+    # that category is asked: the two that say nothing are candidates nobody
+    # has confirmed — marked, and after the one that says so, whatever their
+    # level. (The cell's check tells the same two apart: `spec_short` is an
+    # error, `spec_unknown` a warning.)
+    found = index.search(ip_rating="IP40")
+    assert [(p.id, p.unstated) for p in found] == [
+        ("robotiq/2f/2f-85/r1", ()),
+        ("onrobot/rg6/r1", ("ip_rating",)),
+        ("robotiq/2f/2f-140/r1", ("ip_rating",)),
+    ]
+    assert found[1].to_dict()["unstated"] == ["ip_rating"] and "unstated" not in found[0].to_dict()
+    assert "unstated: ip_rating" in repr(found[1])
+    # The index's own products are not the ones that got marked.
+    assert all(p.unstated == () for p in index.products)
+    # Saying something else is an answer: it is out, as a number that falls short is.
+    assert ids(index.search("gripper.parallel", ip_rating="IP67")) == ["onrobot/rg6/r1", "robotiq/2f/2f-140/r1"]
+    assert ids(index.search("gripper.parallel", stroke_mm=150)) == ["onrobot/rg6/r1"]
+    # Several asked specs: the fewer left unsaid, the earlier.
+    both = index.search("gripper.parallel", stroke_mm=100, ip_rating="IP40")
+    assert [(p.id, p.unstated) for p in both] == [
+        ("robotiq/2f/2f-140/r1", ("ip_rating",)), ("onrobot/rg6/r1", ("ip_rating",)),
+    ]
+    assert index.search("gripper.parallel", stroke_mm=100, ip_rating="IP40", strict=True) == []
+
+
 def test_search_for_a_requirement_row_and_identify(index: catalog.Index) -> None:
     scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
     scene.add_beam_sensor("eye", frm=(0.25, 0.25, 0.03), to=(0.25, 2.25, 0.03))  # 2 m span
@@ -167,6 +195,18 @@ def test_search_for_a_requirement_row_and_identify(index: catalog.Index) -> None
     assert catalog.search_for(row, index=index, output="PNP") == []
     assert ids(catalog.search_for(row, index=index, level="V2", sensing_range_mm=500)) == [
         "omron/e3z/e3z-t61/r1", "omron/e3z/e3z-d62/r1",
+    ]
+    # `key=None` drops a requirement from the search (the row still asks it),
+    # and `strict` rides along: D62 states no response time, T61 does.
+    assert ids(catalog.search_for(row, index=index, sensing_range_mm=None)) == [
+        "omron/e3z/e3z-t61/r1", "omron/e3z/e3z-d62/r1",
+    ]
+    slow = catalog.search_for(row, index=index, sensing_range_mm=None, response_ms__max=2)
+    assert [(p.id, p.unstated) for p in slow] == [
+        ("omron/e3z/e3z-t61/r1", ()), ("omron/e3z/e3z-d62/r1", ("response_ms",)),
+    ]
+    assert ids(catalog.search_for(row, index=index, sensing_range_mm=None, response_ms__max=2, strict=True)) == [
+        "omron/e3z/e3z-t61/r1",
     ]
     # Writing the pick onto the cell: the identity and the numbers come
     # along, so the requirement check now reads them.

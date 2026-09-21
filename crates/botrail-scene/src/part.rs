@@ -583,15 +583,15 @@ fn controller_row_names(scene: &Scene) -> Vec<String> {
 /// hand loaded on its own is driven by someone else's, and a frames-only
 /// body is not a machine at all — none of those get a line.
 fn needs_controller(scene: &Scene, robot: &crate::SceneRobot) -> bool {
-    // The vehicle rule of `bom`: legs (a gait mount) or the whole airframe
-    // (a rigid mount on a vehicle with no body of its own) *are* the
-    // vehicle.
+    // The vehicle rule of `bom`: legs (a gait mount), running gear (a
+    // wheel mount) or the whole airframe (a rigid mount on a vehicle with
+    // no body of its own) *are* the vehicle.
     if let Some(mount) = &robot.mount {
         let bodiless = scene.devices.iter().any(|d| {
             d.name == mount.device
                 && matches!(&d.kind, DeviceKind::Vehicle { body, .. } if body.is_empty())
         });
-        if mount.gait.is_some() || bodiless {
+        if mount.gait.is_some() || mount.drive.is_some() || bodiless {
             return false;
         }
     }
@@ -1132,17 +1132,19 @@ impl Scene {
         for device in &self.devices {
             let part = explicit(PartTargetKind::Device, &device.name);
             // A vehicle whose machine is a robot *is* that robot: legs (a
-            // gait mount), or the whole airframe (a rigid mount on a
-            // vehicle with no body of its own — a UAV). One machine, listed
-            // once on the robot's line — unless the device was pinned to a
-            // part of its own. An AMR carrying an arm stays two rows: the
-            // chassis has a body, so vehicle and rider are two products.
+            // gait mount), running gear (a wheel mount — a semi-humanoid,
+            // even when a footprint box stands in for its body), or the
+            // whole airframe (a rigid mount on a vehicle with no body of
+            // its own — a UAV). One machine, listed once on the robot's
+            // line — unless the device was pinned to a part of its own. An
+            // AMR carrying an arm stays two rows: the chassis has a body,
+            // so vehicle and rider are two products.
             let bodiless = matches!(&device.kind,
                 DeviceKind::Vehicle { body, .. } if body.is_empty());
             let is_the_robot = self.robots.iter().any(|r| {
-                r.mount
-                    .as_ref()
-                    .is_some_and(|m| m.device == device.name && (m.gait.is_some() || bodiless))
+                r.mount.as_ref().is_some_and(|m| {
+                    m.device == device.name && (m.gait.is_some() || m.drive.is_some() || bodiless)
+                })
             });
             if is_the_robot && part.is_none() {
                 continue;
@@ -1260,6 +1262,7 @@ mod tests {
         let mut model = RobotModel::from_urdf_str(URDF).unwrap();
         let inner = std::mem::replace(&mut model.source, RobotSource::UrdfXml(String::new()));
         model.source = RobotSource::Catalog {
+            allowed_collisions: Vec::new(),
             id: "fanuc/lr-mate/200id/r1".into(),
             revision: "sha".into(),
             tcp: None,

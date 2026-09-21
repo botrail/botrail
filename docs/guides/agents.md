@@ -95,7 +95,11 @@ loop is: read `scene.requirements().to_json()` (what every BOM line must be
 able to do, and why); for a line that is `unidentified` or `short`, call
 `bt.catalog.search_for(row)` and pick **from what comes back**; write the pick
 with `product.identify(scene, target)`; run `scene.check()` (or `botrail
-check`) until no `spec_short` remains. A line with no candidates stays an
+check`) until no `spec_short` remains. A candidate whose `unstated` is not
+empty does not say one of the asked specs: it is unconfirmed, not unfit —
+picking it leaves a `spec_unknown` warning, which is the honest state until a
+person supplies the number or the cell bakes with it (`strict=True` returns
+only candidates that state everything). A line with no candidates stays an
 `unidentified_part` finding whose `needs ...` text is the question to hand
 to a person or a vendor — never a model number invented to make the check
 pass. `set_part(catalog=...)` accepts any id, but only a catalog product's

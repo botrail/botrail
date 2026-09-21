@@ -813,7 +813,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     } else if (msg.type === "toolpaths") {
       set({ toolpaths: msg.toolpaths });
     } else if (msg.type === "motions") {
-      set({ motions: msg.motions });
+      set((s) => {
+        // A motion that was listed and no longer is was deleted: forget the
+        // pick, or the panel offers the dead name as a new motion. (A fresh
+        // name — picked, not created yet — was never listed, and stays.)
+        const gone =
+          s.selectedMotion !== null &&
+          s.motions.some((m) => m.name === s.selectedMotion) &&
+          !msg.motions.some((m) => m.name === s.selectedMotion);
+        return gone
+          ? { motions: msg.motions, selectedMotion: null }
+          : { motions: msg.motions };
+      });
     } else if (msg.type === "sequences") {
       set({ sequences: msg.sequences, signalDefs: msg.signals });
     } else if (msg.type === "sensors") {

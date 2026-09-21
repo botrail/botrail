@@ -255,6 +255,12 @@ export function sendClearMotion(motion: string): void {
   rawSend({ type: "clear_motion", motion });
 }
 
+/** Delete the motion itself — name, waypoints and all (sent immediately).
+ *  A sequence step that starts it then fails validation by name. */
+export function sendRemoveMotion(motion: string): void {
+  rawSend({ type: "remove_motion", motion });
+}
+
 /** Plan the full motion; the result arrives as a `motion_result`. */
 export function sendPlanMotion(motion: string): void {
   rawSend({ type: "plan_motion", motion });

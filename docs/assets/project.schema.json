@@ -3828,6 +3828,33 @@
         "diameter_mm"
       ]
     },
+    "MountWheelMsg": {
+      "type": "object",
+      "properties": {
+        "joint": {
+          "type": "string"
+        },
+        "lateral_ratio": {
+          "type": "number",
+          "format": "double"
+        },
+        "radius": {
+          "description": "Rolling radius, metres.",
+          "type": "number",
+          "format": "double"
+        },
+        "steer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "joint",
+        "radius"
+      ]
+    },
     "MountingSpec": {
       "type": "object",
       "properties": {
@@ -4475,6 +4502,23 @@
       "description": "One robot in a project.",
       "type": "object",
       "properties": {
+        "allowed_collisions": {
+          "description": "Link pairs declared to be allowed to touch (`Robot.allow_collisions`),\nby name — those the source does not already declare (a catalog\npackage carries its own). Absent in older files.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
         "base_pose": {
           "description": "World pose of the robot's root link.",
           "$ref": "#/$defs/PoseMsg"
@@ -4623,6 +4667,17 @@
         "device": {
           "type": "string"
         },
+        "drive": {
+          "description": "The wheels, for a machine that rolls its vehicle. Absent in older\nfiles and on every other mount.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WheelDriveMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "gait": {
           "anyOf": [
             {
@@ -4715,6 +4770,23 @@
           "description": "A catalog package (`Robot.from_catalog`): id + pinned revision for\nprovenance and script export, plus the fetched inner source so\nloading needs no network.",
           "type": "object",
           "properties": {
+            "allowed_collisions": {
+              "description": "Link pairs the package declares may touch\n(`self_collision.allowed_pairs`), reapplied on rebuild. Absent\nfor packages that declare none and in older files.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            },
             "arms": {
               "description": "The arms of a dual-arm package (`frames.arms[]`), reapplied as\nplanning groups on rebuild. Absent for single-arm packages and\nin older files.",
               "type": "array",
@@ -5839,6 +5911,25 @@
         "prim_path",
         "transform"
       ]
+    },
+    "WheelDriveMsg": {
+      "description": "[`crate::seq::WheelDrive`] as a project carries it.",
+      "type": "object",
+      "properties": {
+        "base_frame": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wheels": {
+          "description": "May be empty: a machine whose wheels are part of its chassis mesh.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MountWheelMsg"
+          }
+        }
+      }
     }
   }
 }

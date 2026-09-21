@@ -21,6 +21,8 @@ COUPLING_ID = "acme/coupling/plate/r1"
 LOCKED_ID = "acme/arm/locked/r1"
 DUAL_ID = "acme/pair/dual/r1"
 DUAL_URDF = (Path(__file__).resolve().parents[2] / "examples" / "assets" / "dual_arm_test.urdf").read_text()
+SEMI_ID = "acme/semi/wheeled/r1"
+SEMI_URDF = (Path(__file__).resolve().parents[2] / "examples" / "assets" / "semi_humanoid_test.urdf").read_text()
 
 SHA = "0123abcd0123abcd0123abcd0123abcd0123abcd"
 
@@ -164,6 +166,40 @@ def catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
                 "      joints: [right_shoulder, right_elbow, right_wrist, right_finger]\n"
             ),
             "urdf/model.urdf": DUAL_URDF,
+        },
+        {"urdf": "urdf/model.urdf", "usd": None},
+    )
+    # A wheeled semi-humanoid: arms as `frames.arms[]`, and the rest of the
+    # body — torso, head, an arm planned with the torso — as `frames.groups[]`.
+    arm_joints = "shoulder_pitch shoulder_roll elbow wrist finger".split()
+    arms = "".join(
+        f"    - name: {side}\n      base_frame: {side}_base\n      flange_frame: {side}_flange\n"
+        f"      tcp_default: {side}_tcp\n      joints: [{', '.join(f'{side}_{j}' for j in arm_joints)}]\n"
+        for side in ("left", "right")
+    )
+    torso = "lift_joint, waist_yaw_joint"
+    add(
+        SEMI_ID,
+        "public",
+        {
+            "manifest.yaml": (
+                f"schema_version: '0.1'\nid: {SEMI_ID}\ndistribution: public\n"
+                "name: Wheeled\nmanufacturer:\n  name: ACME Robotics\ncategory: vehicle.mobile_manipulator\n"
+                "specs:\n  arm_count: 2\n  reach_mm: 650\n  max_speed_mps: 1.0\n"
+                f"frames:\n  base_frame: base_footprint\n  arms:\n{arms}"
+                "  groups:\n"
+                f"    - {{name: torso, tip: chest, joints: [{torso}]}}\n"
+                "    - {name: head, tip: head_camera, joints: [head_pan_joint, head_tilt_joint]}\n"
+                f"    - {{name: right_with_torso, tip: right_tcp, joints: [{torso}, "
+                f"{', '.join(f'right_{j}' for j in arm_joints)}]}}\n"
+                "self_collision:\n  basis: the maker's collision matrix\n  allowed_pairs:\n"
+                "    - [column, neck]\n    - [chest, left_upper]\n"
+                "locomotion:\n  kind: wheeled\n  drive: differential\n  wheels:\n"
+                "    - {joint: left_wheel_joint, radius_m: 0.1}\n"
+                "    - {joint: right_wheel_joint, radius_m: 0.1}\n"
+                "  postures:\n    travel: {lift_joint: 0.05}\n"
+            ),
+            "urdf/model.urdf": SEMI_URDF,
         },
         {"urdf": "urdf/model.urdf", "usd": None},
     )
@@ -467,3 +503,120 @@ def test_a_dual_arm_package_loads_with_its_arms_as_groups(
     # The BOM line carries the arm count the manifest quoted.
     row = next(r for r in scene.bom().rows if DUAL_ID in str(r.get("catalog", "")) or "pair" in r["names"][0])
     assert row["attributes"].get("arm_count") == 2
+
+
+def test_a_whole_body_package_loads_its_torso_and_head_as_groups(
+    catalog: dict, tmp_path: Path
+) -> None:
+    """`frames.groups[]` — a whole-body machine's torso, head and the
+    composites an arm is planned with the torso by — are declared after the
+    arms, so the wheels are nobody's planning joints, an arm plans without
+    the lift, and the composite plans with it."""
+    robot = bt.Robot.from_catalog("wheeled")
+    assert robot.groups == ["left", "right", "torso", "head", "right_with_torso"]
+    assert robot.group("torso").joints == ["lift_joint", "waist_yaw_joint"]
+    assert robot.group("torso").tip == "chest" and robot.group("torso").flange is None
+    assert robot.group("right").flange == "right_flange"
+    assert len(robot.group("right_with_torso").joints) == 7
+    grouped = {j for g in robot.groups for j in robot.group(g).joints}
+    assert {"left_wheel_joint", "right_wheel_joint"}.isdisjoint(grouped)
+    # The pairs the package declares may touch ride in on the model (YAML
+    # lists, not tuples — the loader once read none of them)...
+    assert robot.allowed_collisions == [("column", "neck"), ("chest", "left_upper")]
+    more = robot.allow_collisions([("neck", "column"), ("head", "chest")])
+    assert more.allowed_collisions == [*robot.allowed_collisions, ("chest", "head")]
+    with pytest.raises(ValueError, match="link `nowhere` does not exist"):
+        robot.allow_collisions([("chest", "nowhere")])
+
+    scene = bt.Scene(robot)
+    names = robot.joint_names
+    start = list(scene.joint_positions)
+    position, quaternion = scene.link_pose("right_tcp")
+    # 0.35 m lower is out of the arm's reach from where the lift stands ...
+    low = (position[0] + 0.15, position[1], position[2] - 0.35)
+    # ... so the arm alone moves only itself, and the composite brings the torso.
+    scene.set_tcp_target(low, quaternion, group="right")
+    alone = list(scene.joint_positions)
+    assert alone[names.index("lift_joint")] == start[names.index("lift_joint")] == 0.0
+    scene.set_joint_positions(start)
+    # An unnamed plan on a machine with several groups is refused by name.
+    with pytest.raises(ValueError, match="group"):
+        scene.plan(start)
+    scene.add_segment("reach", goal=start, group="right_with_torso")
+
+    path = tmp_path / "wheeled.botrail"
+    scene.save_project(path)
+    loaded = bt.Scene.load_project(path)
+    assert loaded.robot.groups == robot.groups
+    # ...and come back with the project, as the package's own.
+    assert loaded.robot.allowed_collisions == robot.allowed_collisions
+    assert "allow_collisions" not in loaded.generate_python()
+    assert loaded.robot.group("head").joints == ["head_pan_joint", "head_tilt_joint"]
+    # A reach circle is an arm's: the layout draws two, not five.
+    svg = scene.layout()
+    reach = svg.split('class="reach"')[1].split("</g>")[0]
+    assert reach.count("<circle") == 2
+
+
+def test_a_whole_body_package_rolls_on_its_declared_wheels(catalog: dict) -> None:
+    """`bt.Wheels.from_catalog` by catalog id, and what the requirements make
+    of the machine: two arms (not five groups), taught through a composite,
+    with the vehicle's speed on the robot's own line."""
+    robot = bt.Robot.from_catalog("wheeled")
+    gear = bt.Wheels.from_catalog("wheeled")
+    assert gear.wheels == {"left_wheel_joint": (0.1, 0.0), "right_wheel_joint": (0.1, 0.0)}
+    assert gear.base_frame == "base_footprint" and gear.posture == {"lift_joint": 0.05}
+    scene = bt.Scene(robot, name="semi")
+    scene.add_vehicle("base", body=[], path=[(0, 0), (2, 0)], stations={"a": 0, "b": 1},
+                      speed=0.5, start="a", drive=gear.vehicle_drive)
+    scene.mount_robot("base", robot="semi", wheels=gear)
+    assert dict(zip(robot.joint_names, scene.joint_positions))["lift_joint"] == 0.05
+    assert [r["names"] for r in scene.bom().rows] == [["semi"]]
+
+    def asked() -> dict:
+        return {r.key: (r.value, r.basis) for r in bt.select.requirements(scene)["semi"].requirements}
+
+    assert asked()["arm_count"] == (2.0, "arms of the robot")
+    assert asked()["max_speed_mps"][0] == 0.5
+    # A composite's motion teaches the arm inside it — one arm, not a third —
+    # and its target is a working height over the floor.
+    names = robot.joint_names
+    q = list(scene.joint_positions)
+    for joint, value in (("lift_joint", 0.30), ("right_shoulder_pitch", -1.2), ("right_elbow", -0.9)):
+        q[names.index(joint)] = value
+    scene.add_segment("reach", goal=q, group="right_with_torso")
+    got = asked()
+    assert got["arm_count"] == (1.0, "arms taught: right")
+    # Reach is not asked of a machine that carries its arms' bases on its own
+    # torso: that distance is this machine's way of standing at the work, and
+    # as a requirement it would error against a vendor's figure and filter the
+    # catalog by it. The line says so instead.
+    assert "reach_mm" not in got
+    assert any(note.startswith("reach_mm is not asked") for note in bt.select.requirements(scene)["semi"].notes)
+    # The same robot on a pedestal is an arm on a body that stands still: its
+    # reach is asked — from the arm's first joint (its shoulder, not the body
+    # link the shoulder is bolted to), *as taught*, the lift raised with it.
+    fixed = bt.Scene(robot, name="semi")
+    fixed.add_segment("reach", goal=q, group="right_with_torso")
+    on_pedestal = {r.key: (r.value, r.basis) for r in bt.select.requirements(fixed)["semi"].requirements}
+    tip, _ = fixed.link_pose_at("right_flange", q)
+    assert robot.group("right").base == "right_base" and robot.group("right").first_link == "right_shoulder"
+    base, _ = fixed.link_pose_at("right_shoulder", q)
+    span = sum((a - b) ** 2 for a, b in zip(tip, base)) ** 0.5
+    assert on_pedestal["reach_mm"][0] == pytest.approx(span * 1100.0, abs=0.1)
+    assert "the right arm's first joint (flange)" in on_pedestal["reach_mm"][1]
+    assert "vertical_reach_max_mm" not in on_pedestal
+    height = scene.link_pose_at("right_tcp", q)[0][2]
+    assert got["vertical_reach_min_mm"][0] == got["vertical_reach_max_mm"][0] == pytest.approx(height * 1000, abs=0.1)
+    assert "taught hand position" in got["vertical_reach_max_mm"][1] and "`reach`" in got["vertical_reach_max_mm"][1]
+    line = bt.select.requirements(scene)["semi"]
+    assert {r.key: r.op for r in line.requirements}["vertical_reach_min_mm"] == "<="
+    # The package states no working heights: asked for, not answered.
+    assert {r.key: r.status for r in line.requirements}["vertical_reach_max_mm"] == "unknown"
+    # A rigid mount of the same machine asks for no working height.
+    rigid = bt.Scene(robot, name="semi")
+    rigid.add_vehicle("base", body=[], path=[(0, 0), (2, 0)], stations={"a": 0, "b": 1}, start="a")
+    rigid.mount_robot("base", robot="semi")
+    rigid.add_segment("reach", goal=q, group="right_with_torso")
+    keys = {r.key for r in bt.select.requirements(rigid)["semi"].requirements}
+    assert "vertical_reach_max_mm" not in keys and "reach_mm" in keys

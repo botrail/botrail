@@ -1621,6 +1621,8 @@ struct RobotRuntime {
     gait: Option<GaitRuntime>,
     /// The propellers, for a machine whose mount declares them.
     spin: Option<SpinRuntime>,
+    /// The running gear, for a machine that rolls its vehicle.
+    wheels: Option<WheelRuntime>,
 }
 
 impl RobotRuntime {
@@ -1688,6 +1690,22 @@ impl RobotRuntime {
         self.gait.as_ref().is_some_and(|g| g.plan.is_some())
     }
 
+    /// The `q` slots the mount moves rather than a motor: a walker's legs,
+    /// a rolling machine's wheels and steering. Kinematic even on a
+    /// dynamic robot.
+    fn mount_driven_joints(&self) -> Vec<usize> {
+        let legs = self.gait.as_ref().map(|g| g.gait.leg_joints());
+        let wheels = self.wheels.as_ref().map(|w| w.drive.owned());
+        legs.into_iter().chain(wheels).flatten().collect()
+    }
+
+    /// Whether the wheels are turning the joint track right now: from the
+    /// vehicle's dispatch until it has parked, the robot bakes tick by
+    /// tick — a wheel angle is known only once the vehicle has moved.
+    fn rolling(&self) -> bool {
+        self.wheels.as_ref().is_some_and(|w| w.rolling)
+    }
+
     /// The in-flight move driving any of `joints`, if one does.
     fn driver_of(&self, joints: &[usize]) -> Option<&ActiveMove> {
         self.active
@@ -1712,6 +1730,19 @@ struct SpinRuntime {
     ground: f64,
     /// `(joint index, signed rad/s)`.
     joints: Vec<(usize, f64)>,
+}
+
+/// A rolling mount's resolved state: the wheel joints, turned each tick by
+/// exactly what the vehicle drove (`crate::wheels::roll`). The mount is
+/// their one driver — no move may claim them — so the angle lives in the
+/// nominal configuration like any other joint's.
+#[derive(Clone)]
+struct WheelRuntime {
+    /// The ridden vehicle's device name.
+    device: String,
+    drive: crate::wheels::ResolvedWheelDrive,
+    /// `true` from the vehicle's dispatch until the tick it parks.
+    rolling: bool,
 }
 
 struct GaitRuntime {
@@ -3958,6 +3989,15 @@ impl Rollout {
                             .collect(),
                     })
                 });
+                let wheels = sr.mount.as_ref().and_then(|mount| {
+                    let spec = mount.drive.as_ref()?;
+                    Some(WheelRuntime {
+                        device: mount.device.clone(),
+                        drive: crate::wheels::resolve_wheel_drive(&sr.model, spec, &q)
+                            .expect("a mounted wheel drive was validated against its model"),
+                        rolling: false,
+                    })
+                });
                 RobotRuntime {
                     times: vec![0.0],
                     positions: vec![q.clone()],
@@ -3979,6 +4019,7 @@ impl Rollout {
                     base: sr.mount.as_ref().map(|_| Vec::new()),
                     gait,
                     spin,
+                    wheels,
                 }
             })
             .collect();
@@ -4690,16 +4731,13 @@ impl Rollout {
             let floating = floating_robots.contains(&r);
             // A walking machine's legs are the gait's: kinematic mirrors
             // as ever, with no motor — the declaration covers the rest
-            // of the machine (a head, an arm, a waist). A floating
+            // of the machine (a head, an arm, a waist). A rolling
+            // machine's wheels are its mount's the same way. A floating
             // walker has no gait to obey: its legs are joints like any.
             let leg_q: Vec<usize> = if floating {
                 Vec::new()
             } else {
-                self.robots[r]
-                    .gait
-                    .as_ref()
-                    .map(|g| g.gait.leg_joints())
-                    .unwrap_or_default()
+                self.robots[r].mount_driven_joints()
             };
             if let Some(dynamics) = &dynamics {
                 for (k, &ji) in model.actuated_joints.iter().enumerate() {
@@ -5302,8 +5340,8 @@ impl Rollout {
             if floating {
                 // The base track is the engine's from the first tick.
                 rt.base.get_or_insert_with(Vec::new);
-            } else if let Some(legs) = rt.gait.as_ref().map(|g| g.gait.leg_joints()) {
-                for qi in legs {
+            } else {
+                for qi in rt.mount_driven_joints() {
                     rt.kinematic_joints[qi] = true;
                 }
             }
@@ -5916,9 +5954,9 @@ impl Rollout {
                 self.world
                     .set_joint_positions_for(r, rt.q.clone())
                     .expect("sampled q has robot DOF");
-                // Two moves in flight bake tick by tick (a tracked or
-                // walking robot already does, on its own path).
-                if rt.tick_bake && rt.tracking.is_empty() && !rt.walking() {
+                // Two moves in flight bake tick by tick (a tracked, walking
+                // or rolling robot already does, on its own path).
+                if rt.tick_bake && rt.tracking.is_empty() && !rt.walking() && !rt.rolling() {
                     let velocity: Vec<f64> =
                         rt.q.iter()
                             .zip(&rt.q_prev)
@@ -6384,6 +6422,7 @@ impl Rollout {
         // the body is *now*.
         self.advance_gaits()?;
         self.advance_spins();
+        self.advance_wheels();
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
         self.check_robot_collisions()?;
@@ -6412,12 +6451,13 @@ impl Rollout {
                     continue;
                 }
                 // A walking rider's feet stand on walkable surfaces by
-                // design: the treads join the "carried" exclusion the way
-                // the floor was never an obstacle. An AMR's arm gets no
-                // such pass — walkable only excuses the machine walking
+                // design, and a rolling rider's wheels roll on them: the
+                // treads join the "carried" exclusion the way the floor
+                // was never an obstacle. An AMR's arm gets no such pass —
+                // walkable only excuses the machine walking or rolling
                 // on it.
                 let mut skip = carried.clone();
-                if self.robots[r].gait.is_some() {
+                if self.robots[r].gait.is_some() || self.robots[r].wheels.is_some() {
                     skip.extend(
                         self.world
                             .obstacles()
@@ -6986,6 +7026,24 @@ impl Rollout {
     }
 
     fn claim_joints(&self, r: usize, owned: &[usize], label: &str) -> Result<(), SeqError> {
+        if let Some(wheels) = &self.robots[r].wheels {
+            let rolled = wheels.drive.owned();
+            if let Some(&qi) = owned.iter().find(|qi| rolled.contains(qi)) {
+                let model = &self.world.robots()[r].model;
+                return Err(SeqError::Action {
+                    step: self.cur_step(),
+                    name: self.cur_step_name(),
+                    message: format!(
+                        "`{label}` cannot start: joint `{}` of `{}` is a wheel of its mount — \
+                         it turns by what `{}` drives; leave it out (a motion names a group \
+                         without the wheels)",
+                        model.joints[model.actuated_joints[qi]].name,
+                        self.world.robots()[r].name,
+                        wheels.device,
+                    ),
+                });
+            }
+        }
         if let Some(active) = self.robots[r].driver_of(owned) {
             let model = &self.world.robots()[r].model;
             let shared = owned
@@ -7212,14 +7270,40 @@ impl Rollout {
                 let lift = nalgebra::Translation3::new(0.0, 0.0, rise);
                 let mut base =
                     lift.inverse() * *self.world.robots()[r].base_pose() * body.inverse();
+                // A rolling machine's wheels turn by the same pieces: each
+                // hub's travel over the piece, about its own axle. A lift
+                // ride is no drive — the wheels stand still in the car.
+                let drive = self.robots[r]
+                    .wheels
+                    .as_ref()
+                    .filter(|w| w.rolling)
+                    .map(|w| w.drive.clone());
+                let mut rolled = drive.as_ref().map(|_| self.robots[r].q_nom.clone());
                 for (tau0, tau1, piece) in pieces {
                     let from = base;
                     base = apply_piece(&from, piece, tau1 - tau0);
                     if let Some(spans) = self.robots[r].base.as_mut() {
                         push_vehicle_span(spans, from, *tau0, *tau1, piece);
                     }
+                    if let (Some(drive), Some(q)) = (&drive, rolled.as_mut()) {
+                        let model = &self.world.robots()[r].model;
+                        crate::wheels::roll(model, drive, q, &from, piece, tau1 - tau0);
+                    }
                 }
                 self.world.set_robot_base_pose_for(r, lift * base * body);
+                if let (Some(drive), Some(rolled)) = (drive, rolled) {
+                    // The angle is the joints' nominal — what every later
+                    // tick and move starts from — and, the joints being
+                    // kinematic even on a dynamic machine, their position.
+                    let rt = &mut self.robots[r];
+                    for qi in drive.owned() {
+                        rt.q_nom[qi] = rolled[qi];
+                        rt.q[qi] = rolled[qi];
+                    }
+                    self.world
+                        .set_joint_positions_for(r, rt.q.clone())
+                        .expect("rolled q keeps the robot's DOF");
+                }
             }
         }
         for (mv, _) in &moves {
@@ -8361,10 +8445,11 @@ impl Rollout {
                 // Nor can one alongside a walk: the legs bake tick by tick,
                 // and the ramp's samples ride with them. Nor alongside
                 // another move: the robot bakes tick by tick from here.
+                // Nor while the wheels roll, for the same reason.
                 if concurrent {
                     rt.truncate_after(self.t);
                     rt.tick_bake = true;
-                } else if rt.tracking.is_empty() && !walking {
+                } else if rt.tracking.is_empty() && !walking && !rt.rolling() {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
@@ -8821,6 +8906,7 @@ impl Rollout {
                     self.set_lane(lane, t, value);
                 }
                 if let Some(profile) = dispatched {
+                    self.start_wheels(device);
                     self.start_gaits(device, profile)?;
                 }
                 if lift_capture {
@@ -9463,6 +9549,79 @@ impl Rollout {
             self.world
                 .set_joint_positions_for(r, q)
                 .expect("spin keeps the robot's DOF");
+        }
+    }
+
+    /// A vehicle was dispatched: every robot that rolls it bakes tick by
+    /// tick from here — a wheel's angle is known only once the vehicle has
+    /// moved, so a move's pre-baked future would hold the wheels still (it
+    /// is re-baked when the vehicle parks).
+    fn start_wheels(&mut self, device: &str) {
+        let t = self.t;
+        for rt in &mut self.robots {
+            let Some(wheels) = rt.wheels.as_mut().filter(|w| w.device == device) else {
+                continue;
+            };
+            wheels.rolling = true;
+            rt.truncate_after(t);
+            let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
+            rt.append_waypoint(t, q, zeros);
+        }
+    }
+
+    /// One scan tick of every rolling mount, after the vehicles moved
+    /// (`apply_vehicle_moves` turned the wheels by this tick's travel):
+    /// the tick is baked, whatever else drives the robot riding along in
+    /// the sample, and on the tick the vehicle parks the wheels come to
+    /// rest and the joint track goes back to its moves.
+    fn advance_wheels(&mut self) {
+        let dt = self.options.dt;
+        let t = self.t;
+        for r in 0..self.robots.len() {
+            let Some(wheels) = self.robots[r].wheels.as_ref().filter(|w| w.rolling) else {
+                continue;
+            };
+            let owned = wheels.drive.owned();
+            let parked = !self.devices.iter().any(|device| {
+                matches!(device, DeviceRuntime::Vehicle { name, legs, .. }
+                    if *name == wheels.device && !legs.is_empty())
+            });
+            let rt = &mut self.robots[r];
+            // A tracked tick bakes itself once its arm is solved, a
+            // dynamic robot's is the engine's read-back; both carry the
+            // wheels as they stand now.
+            if rt.tracking.is_empty() && !rt.dynamic {
+                let velocity: Vec<f64> =
+                    rt.q.iter()
+                        .zip(&rt.q_prev)
+                        .enumerate()
+                        .map(|(qi, (now, before))| {
+                            // Parking, the wheels come to rest: a hold
+                            // follows, and a cubic through a resting sample
+                            // with a one-tick velocity on it would roll
+                            // them on for the length of the hold.
+                            if parked && owned.contains(&qi) {
+                                0.0
+                            } else {
+                                (now - before) / dt
+                            }
+                        })
+                        .collect();
+                let q = rt.q.clone();
+                rt.append_waypoint(t, q, velocity);
+            }
+            if parked {
+                rt.wheels.as_mut().expect("rolling").rolling = false;
+                // A move that outlives the drive was sampled with the
+                // wheels where they stood when it began: it keeps them
+                // where the drive left them, and its remaining samples go
+                // back on the bake.
+                let q = rt.q.clone();
+                for active in &mut rt.active {
+                    active.pin_joints(&owned, &q);
+                }
+                rt.rebake_active_tail(t);
+            }
         }
     }
 
@@ -14977,6 +15136,593 @@ mod mount_tests {
             .mount_robot(0, "nowhere", Isometry3::identity())
             .unwrap_err();
         assert!(err.to_string().contains("nowhere"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod wheel_mount_tests {
+    use super::*;
+    use crate::seq::{Device, DeviceKind, MountWheel, Step, VehiclePath, WheelDrive};
+    use botrail_model::Geometry;
+    use nalgebra::{Point3, Translation3, UnitQuaternion};
+    use std::f64::consts::FRAC_PI_2;
+    use std::sync::Arc;
+
+    /// The shared semi-humanoid fixture: `base_footprint` root on the
+    /// floor between two r = 0.10 drive wheels 0.50 m apart whose axles
+    /// point opposite ways (+Y left, -Y right), a lift column, a waist, a
+    /// head and two arms.
+    const SEMI: &str = include_str!("../../../examples/assets/semi_humanoid_test.urdf");
+    const LEFT: usize = 0;
+    const RIGHT: usize = 1;
+    const LIFT: usize = 2;
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn goto(station: &str) -> Action {
+        Action::Device {
+            device: "base".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn device_done() -> Condition {
+        Condition::DeviceDone {
+            device: "base".into(),
+        }
+    }
+
+    fn ramp(joint: &str, to: f64, duration: f64) -> Action {
+        Action::StartRamp {
+            robot: None,
+            targets: vec![(joint.into(), to)],
+            duration,
+        }
+    }
+
+    /// The machine's own vehicle — no body, the robot is the machine: 2 m
+    /// along +x, a pivot, 1 m along +y; 0.5 m/s and 90°/s, so 4 + 1 + 2 s.
+    fn base(drive: crate::seq::Drive) -> Device {
+        Device {
+            name: "base".into(),
+            kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point3::new(0.0, 0.0, 0.0),
+                        Point3::new(2.0, 0.0, 0.0),
+                        Point3::new(2.0, 1.0, 0.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("b".into(), 1), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: Vec::new(),
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                drive,
+                tray: None,
+            },
+        }
+    }
+
+    fn differential(allow_reverse: bool) -> crate::seq::Drive {
+        crate::seq::Drive::Differential {
+            allow_reverse,
+            max_grade: None,
+        }
+    }
+
+    fn wheel(joint: &str, radius: f64) -> MountWheel {
+        MountWheel {
+            joint: joint.into(),
+            radius,
+            lateral_ratio: 0.0,
+            steer: None,
+        }
+    }
+
+    fn semi_drive() -> WheelDrive {
+        WheelDrive {
+            wheels: vec![
+                wheel("left_wheel_joint", 0.10),
+                wheel("right_wheel_joint", 0.10),
+            ],
+            base_frame: Some("base_footprint".into()),
+        }
+    }
+
+    fn semi_scene(allow_reverse: bool) -> Scene {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(SEMI).unwrap(),
+        ));
+        scene.upsert_device(base(differential(allow_reverse)));
+        scene
+            .mount_robot_on_wheels(0, "base", None, semi_drive())
+            .unwrap();
+        scene
+    }
+
+    fn run(scene: &mut Scene, steps: Vec<Step>) -> Result<SequenceTimeline, SeqError> {
+        scene.upsert_sequence(Sequence {
+            name: "drive".into(),
+            steps,
+        });
+        scene.simulate_sequence("drive", &RolloutOptions::default())
+    }
+
+    #[test]
+    fn the_wheels_turn_by_exactly_what_the_vehicle_drove() {
+        let mut scene = semi_scene(true);
+        let tl = run(
+            &mut scene,
+            vec![
+                step("out", vec![goto("c")], device_done()),
+                step("wait", vec![], Condition::Elapsed { seconds: 1.0 }),
+                step("back", vec![goto("a")], device_done()),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0].trajectory;
+        let at = |t: f64| {
+            let q = track.sample(t);
+            (q[LEFT], q[RIGHT])
+        };
+        // A straight is distance / radius on both wheels. The right axle
+        // points the other way, so rolling forward counts it down.
+        let (l, r) = at(2.0);
+        assert!(
+            (l - 10.0).abs() < 1e-9 && (r + 10.0).abs() < 1e-9,
+            "{l} {r}"
+        );
+        // A left pivot runs the left wheel backward and the right forward,
+        // each by its 0.25 m arm: half way through the 90°, π/4 × 0.25 / r.
+        let arc = 0.25 * FRAC_PI_2 / 0.10;
+        let (l, r) = at(4.5);
+        assert!((l - (20.0 - arc / 2.0)).abs() < 1e-9, "{l}");
+        assert!((r + (20.0 + arc / 2.0)).abs() < 1e-9, "{r}");
+        // Arrived: 2 m + 1 m straight, and the pivot's arc between them.
+        let (l, r) = at(7.0);
+        assert!((l - (30.0 - arc)).abs() < 1e-9, "{l}");
+        assert!((r + (30.0 + arc)).abs() < 1e-9, "{r}");
+        // Parked, the wheels rest — no drift through the wait...
+        for t in [7.005, 7.2, 7.5, 7.9] {
+            assert_eq!(at(t), at(7.0), "t = {t}");
+        }
+        // ...and backing out unwinds them: the way home starts with the
+        // last metre in reverse (8 → 10 s), then turns to face the rest.
+        let (l, r) = at(10.0);
+        assert!((l - (20.0 - arc)).abs() < 1e-9, "{l}");
+        assert!((r + (20.0 + arc)).abs() < 1e-9, "{r}");
+        let (l, r) = at(tl.duration);
+        assert!((l - (40.0 - 2.0 * arc)).abs() < 1e-9, "{l}");
+        assert!((r + (40.0 + 2.0 * arc)).abs() < 1e-9, "{r}");
+        // Nothing else on the machine moved.
+        assert!(track.sample(3.3)[LIFT].abs() < 1e-12);
+        // Determinism: the same cell bakes the same bits.
+        let again = scene
+            .simulate_sequence("drive", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(
+            tl.robots[0].trajectory.positions,
+            again.robots[0].trajectory.positions
+        );
+    }
+
+    #[test]
+    fn a_ramp_rides_along_while_the_wheels_roll() {
+        // Raise the column on the way: the ramp starts with the drive and
+        // outlives the first leg; a second starts mid-route; a third was
+        // pre-baked before the dispatch and must be re-cut into ticks.
+        let mut scene = semi_scene(false);
+        let tl = run(
+            &mut scene,
+            vec![
+                step(
+                    "pre",
+                    vec![ramp("waist_yaw_joint", 0.4, 2.0)],
+                    Condition::Elapsed { seconds: 0.5 },
+                ),
+                step(
+                    "go",
+                    vec![goto("c"), ramp("lift_joint", 0.30, 3.0)],
+                    Condition::Elapsed { seconds: 5.0 },
+                ),
+                step("late", vec![ramp("lift_joint", 0.10, 4.0)], Condition::Done),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0].trajectory;
+        let names = scene.robots()[0].model.actuated_joint_names();
+        let waist = names.iter().position(|n| *n == "waist_yaw_joint").unwrap();
+        // The drive starts at 0.5 s: 1 s in, the wheels have rolled 0.5 m
+        // while both ramps are mid-way — one sample carries all three.
+        let q = track.sample(1.5);
+        assert!((q[LEFT] - 5.0).abs() < 1e-6, "{}", q[LEFT]);
+        assert!(q[LIFT] > 0.02 && q[LIFT] < 0.28, "{}", q[LIFT]);
+        assert!(q[waist] > 0.2 && q[waist] < 0.4, "{}", q[waist]);
+        // Both early ramps finish on the move, at their targets.
+        let q = track.sample(3.6);
+        assert!((q[LIFT] - 0.30).abs() < 1e-9 && (q[waist] - 0.4).abs() < 1e-9);
+        // The vehicle parks at 7.5 s with the late ramp (5.5 → 9.5 s)
+        // still running: the wheels stay where the drive left them, the
+        // column completes its move.
+        let arc = 0.25 * FRAC_PI_2 / 0.10;
+        let parked = 30.0 - arc;
+        for t in [7.5, 8.2, tl.duration] {
+            assert!((track.sample(t)[LEFT] - parked).abs() < 1e-6, "t = {t}");
+        }
+        assert!((tl.duration - 9.5).abs() < 0.011, "{}", tl.duration);
+        assert!((track.sample(tl.duration)[LIFT] - 0.10).abs() < 1e-9);
+        let mid = track.sample(8.5)[LIFT];
+        assert!(mid > 0.10 && mid < 0.25, "{mid}");
+    }
+
+    #[test]
+    fn the_mount_is_the_wheels_only_driver() {
+        let mut scene = semi_scene(false);
+        let err = run(
+            &mut scene,
+            vec![step(
+                "spin",
+                vec![ramp("left_wheel_joint", 3.0, 1.0)],
+                Condition::Done,
+            )],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("is a wheel of its mount"), "{err}");
+        assert!(
+            err.contains("left_wheel_joint") && err.contains("`base`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_walkable_floor_is_rolled_on_not_hit() {
+        // A building's slab is an obstacle, and the wheels are links that
+        // rest on it. Walkable says what the slab is; the declaration on
+        // the mount says this machine rolls on it.
+        let slab = |scene: &mut Scene, walkable: bool| {
+            scene
+                .add_obstacle(
+                    "slab",
+                    Geometry::Box {
+                        size: Vector3::new(6.0, 4.0, 0.1),
+                    },
+                    Isometry3::translation(1.5, 0.5, -0.05),
+                )
+                .unwrap();
+            scene.set_obstacle_walkable("slab", walkable).unwrap();
+        };
+        let drive = || vec![step("go", vec![goto("c")], device_done())];
+        let mut scene = semi_scene(false);
+        slab(&mut scene, false);
+        let err = run(&mut scene, drive()).unwrap_err();
+        assert!(
+            matches!(&err, SeqError::RiderCollision { obstacle, .. } if obstacle == "slab"),
+            "{err}"
+        );
+        let mut scene = semi_scene(false);
+        slab(&mut scene, true);
+        run(&mut scene, drive()).unwrap();
+        // The pass is the rolling machine's alone: the same robot bolted
+        // to the vehicle as cargo still answers for touching the floor.
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(SEMI).unwrap(),
+        ));
+        scene.upsert_device(base(differential(false)));
+        scene.mount_robot(0, "base", Isometry3::identity()).unwrap();
+        slab(&mut scene, true);
+        let err = run(&mut scene, drive()).unwrap_err();
+        assert!(matches!(err, SeqError::RiderCollision { .. }), "{err}");
+    }
+
+    /// A chassis whose root is its body — no `base_footprint` — with the
+    /// axle 0.1 m behind the root: r = 0.08 wheels on hubs 0.05 m up, plus
+    /// an arm joint the base frame must not hang under.
+    const TROLLEY: &str = r#"<robot name="trolley">
+      <link name="body"/>
+      <link name="wheel_l"/>
+      <link name="wheel_r"/>
+      <link name="mast"/>
+      <link name="hook"/>
+      <link name="tilted"/>
+      <joint name="wheel_l_joint" type="continuous">
+        <parent link="body"/><child link="wheel_l"/>
+        <origin xyz="-0.1 0.2 0.05"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="wheel_r_joint" type="continuous">
+        <parent link="body"/><child link="wheel_r"/>
+        <origin xyz="-0.1 -0.2 0.05"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="mast_joint" type="revolute">
+        <parent link="body"/><child link="mast"/>
+        <origin xyz="0 0 0.3"/><axis xyz="0 0 1"/>
+        <limit lower="-1" upper="1" effort="1" velocity="1"/>
+      </joint>
+      <joint name="hook_joint" type="fixed">
+        <parent link="mast"/><child link="hook"/>
+        <origin xyz="0.2 0 0"/>
+      </joint>
+      <joint name="tilted_joint" type="continuous">
+        <parent link="body"/><child link="tilted"/>
+        <origin xyz="0.1 0 0.05"/><axis xyz="0 1 1"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn the_offset_stands_the_machine_on_its_base_frame_or_its_wheels() {
+        // Declared: the base frame rides the vehicle frame. The fixture's
+        // is its root, so the offset is the identity.
+        let scene = semi_scene(false);
+        assert!(
+            scene
+                .robot_mount(0)
+                .unwrap()
+                .offset
+                .translation
+                .vector
+                .norm()
+                < 1e-12
+        );
+        // Undeclared: the wheels' contact plane under their centroid.
+        let trolley = || {
+            let mut scene = Scene::new(Arc::new(
+                botrail_model::RobotModel::from_urdf_str(TROLLEY).unwrap(),
+            ));
+            scene.upsert_device(base(differential(false)));
+            scene
+        };
+        let drive = |wheels: Vec<MountWheel>, base_frame: Option<&str>| WheelDrive {
+            wheels,
+            base_frame: base_frame.map(str::to_string),
+        };
+        let pair = || vec![wheel("wheel_l_joint", 0.08), wheel("wheel_r_joint", 0.08)];
+        let mut scene = trolley();
+        scene
+            .mount_robot_on_wheels(0, "base", None, drive(pair(), None))
+            .unwrap();
+        let offset = scene.robot_mount(0).unwrap().offset.translation.vector;
+        assert!(
+            (offset - Vector3::new(0.1, 0.0, 0.03)).norm() < 1e-12,
+            "{offset:?}"
+        );
+        assert!((scene.robots()[0].base_pose().translation.vector - offset).norm() < 1e-12);
+        // Stated, the offset is kept as stated.
+        let stated = Isometry3::translation(0.0, 0.0, 0.5);
+        scene
+            .mount_robot_on_wheels(0, "base", Some(stated), drive(pair(), None))
+            .unwrap();
+        assert_eq!(scene.robot_mount(0).unwrap().offset, stated);
+        // No wheels to turn is still a declaration (a chassis mesh with
+        // the wheels welded in): nothing to derive, the root rides.
+        scene
+            .mount_robot_on_wheels(0, "base", None, drive(Vec::new(), None))
+            .unwrap();
+        assert_eq!(scene.robot_mount(0).unwrap().offset, Isometry3::identity());
+        // Every name and number is checked against the model, by name.
+        for (wheels, base_frame, expect) in [
+            (vec![wheel("nope", 0.08)], None, "not a joint of this robot"),
+            (
+                vec![wheel("hook_joint", 0.08)],
+                None,
+                "no degree of freedom",
+            ),
+            (vec![wheel("mast_joint", 0.08)], None, "must be continuous"),
+            (vec![wheel("wheel_l_joint", 0.0)], None, "radius"),
+            (
+                vec![wheel("tilted_joint", 0.08)],
+                None,
+                "axle must be level",
+            ),
+            (
+                vec![wheel("wheel_l_joint", 0.08), wheel("wheel_l_joint", 0.08)],
+                None,
+                "one wheel only",
+            ),
+            (
+                vec![wheel("wheel_l_joint", 0.08), wheel("wheel_r_joint", 0.02)],
+                None,
+                "above the others' floor",
+            ),
+            (pair(), Some("nowhere"), "not a link"),
+            (pair(), Some("hook"), "hangs under joint `mast_joint`"),
+            (
+                vec![MountWheel {
+                    steer: Some("mast_joint".into()),
+                    ..wheel("wheel_l_joint", 0.08)
+                }],
+                None,
+                "does not carry this wheel",
+            ),
+        ] {
+            let err = trolley()
+                .mount_robot_on_wheels(0, "base", None, drive(wheels, base_frame))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expect), "{expect}: {err}");
+        }
+    }
+
+    /// Two swerve modules on the machine's centre line: a steering joint
+    /// about the vertical (the rear one's axis points *down*), a wheel
+    /// under each.
+    const SWERVE: &str = r#"<robot name="swerve">
+      <link name="base"/>
+      <link name="fork_f"/><link name="wheel_f"/>
+      <link name="fork_r"/><link name="wheel_r"/>
+      <joint name="steer_f" type="continuous">
+        <parent link="base"/><child link="fork_f"/>
+        <origin xyz="0.2 0 0.1"/><axis xyz="0 0 1"/>
+      </joint>
+      <joint name="roll_f" type="continuous">
+        <parent link="fork_f"/><child link="wheel_f"/>
+        <origin xyz="0 0 -0.05"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="steer_r" type="continuous">
+        <parent link="base"/><child link="fork_r"/>
+        <origin xyz="-0.2 0 0.1"/><axis xyz="0 0 -1"/>
+      </joint>
+      <joint name="roll_r" type="continuous">
+        <parent link="fork_r"/><child link="wheel_r"/>
+        <origin xyz="0 0 -0.05"/><axis xyz="0 1 0"/>
+      </joint>
+    </robot>"#;
+
+    #[test]
+    fn a_swerve_module_aims_its_wheel_along_the_travel() {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(SWERVE).unwrap(),
+        ));
+        scene.upsert_device(base(crate::seq::Drive::Holonomic { max_grade: None }));
+        let module = |roll: &str, steer: &str| MountWheel {
+            steer: Some(steer.into()),
+            ..wheel(roll, 0.05)
+        };
+        scene
+            .mount_robot_on_wheels(
+                0,
+                "base",
+                None,
+                WheelDrive {
+                    wheels: vec![module("roll_f", "steer_f"), module("roll_r", "steer_r")],
+                    base_frame: Some("base".into()),
+                },
+            )
+            .unwrap();
+        let tl = run(&mut scene, vec![step("go", vec![goto("c")], device_done())]).unwrap();
+        let names: Vec<String> = scene.robots()[0]
+            .model
+            .actuated_joint_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let q = |t: f64, joint: &str| {
+            tl.robots[0].trajectory.sample(t)[names.iter().position(|n| n == joint).unwrap()]
+        };
+        // Along +x the wheels already face the travel: no steering, and
+        // 2 m / 0.05 m of rolling by the corner (4 s).
+        assert!(q(2.0, "steer_f").abs() < 1e-9 && q(2.0, "steer_r").abs() < 1e-9);
+        assert!(
+            (q(4.0, "roll_f") - 40.0).abs() < 1e-6,
+            "{}",
+            q(4.0, "roll_f")
+        );
+        // Along +y the heading holds (holonomic) and the modules turn a
+        // quarter — the rear one's joint the other way about its
+        // downward axis — then roll the last metre.
+        assert!(
+            (q(5.0, "steer_f") - FRAC_PI_2).abs() < 1e-9,
+            "{}",
+            q(5.0, "steer_f")
+        );
+        assert!(
+            (q(5.0, "steer_r") + FRAC_PI_2).abs() < 1e-9,
+            "{}",
+            q(5.0, "steer_r")
+        );
+        let end = tl.duration;
+        assert!(
+            (q(end, "roll_f") - 60.0).abs() < 1e-6,
+            "{}",
+            q(end, "roll_f")
+        );
+        assert!(
+            (q(end, "roll_r") - 60.0).abs() < 1e-6,
+            "{}",
+            q(end, "roll_r")
+        );
+    }
+
+    #[test]
+    fn mecanum_wheels_count_the_sideways_travel() {
+        // The trolley's pair as the two diagonals of a mecanum set, on a
+        // holonomic vehicle: along +y the rollers turn them opposite ways.
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(TROLLEY).unwrap(),
+        ));
+        scene.upsert_device(base(crate::seq::Drive::Holonomic { max_grade: None }));
+        let mecanum = |joint: &str, lateral_ratio: f64| MountWheel {
+            lateral_ratio,
+            ..wheel(joint, 0.08)
+        };
+        scene
+            .mount_robot_on_wheels(
+                0,
+                "base",
+                None,
+                WheelDrive {
+                    wheels: vec![
+                        mecanum("wheel_l_joint", -1.0),
+                        mecanum("wheel_r_joint", 1.0),
+                    ],
+                    base_frame: None,
+                },
+            )
+            .unwrap();
+        let tl = run(&mut scene, vec![step("go", vec![goto("c")], device_done())]).unwrap();
+        let q = tl.robots[0].trajectory.sample(tl.duration);
+        assert!((q[0] - (2.0 - 1.0) / 0.08).abs() < 1e-6, "{}", q[0]);
+        assert!((q[1] - (2.0 + 1.0) / 0.08).abs() < 1e-6, "{}", q[1]);
+    }
+
+    #[test]
+    fn a_project_carries_the_wheels() {
+        let mut scene = semi_scene(false);
+        let tl = run(&mut scene, vec![step("go", vec![goto("c")], device_done())]).unwrap();
+        let project = scene.to_project();
+        let json = serde_json::to_string(&project).unwrap();
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let saved = back.robots[0].mount.as_ref().expect("the mount is saved");
+        assert_eq!(
+            saved
+                .drive
+                .as_ref()
+                .expect("the wheels are saved")
+                .wheels
+                .len(),
+            2
+        );
+        // Rebuilt from the file, the machine rolls the same bits.
+        let again = Scene::from_project(&back).unwrap();
+        assert_eq!(again.robot_mount(0).unwrap().drive, Some(semi_drive()));
+        let tl2 = again
+            .simulate_sequence("drive", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(
+            tl.robots[0].trajectory.positions,
+            tl2.robots[0].trajectory.positions
+        );
+        let code = crate::project::generate_python(&project);
+        assert!(
+            code.contains(
+                "wheels=bt.Wheels({\"left_wheel_joint\": 0.1, \"right_wheel_joint\": 0.1}, \
+                 base_frame=\"base_footprint\")"
+            ),
+            "{code}"
+        );
+        // A rigid mount's file says nothing new.
+        let mut rigid = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(SEMI).unwrap(),
+        ));
+        rigid.upsert_device(base(differential(false)));
+        rigid.mount_robot(0, "base", Isometry3::identity()).unwrap();
+        let json = serde_json::to_string(&rigid.to_project()).unwrap();
+        assert!(!json.contains("\"drive\":{"), "{json}");
+        let _ = (
+            Translation3::<f64>::identity(),
+            UnitQuaternion::<f64>::identity(),
+        );
     }
 }
 

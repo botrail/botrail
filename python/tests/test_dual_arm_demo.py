@@ -139,7 +139,7 @@ def test_the_deliverables_name_the_arms(kitting) -> None:
     for arm in ("left", "right"):
         line = by_line[f"{robot}/{arm}"]
         assert "reach_mm" in line
-        assert f"{arm} arm's base" in line["reach_mm"].basis
+        assert f"{arm} arm's first joint" in line["reach_mm"].basis
     # The layout draws (nothing, here: the primitive arms quote no reach)
     # without tripping over the two arms.
     assert "<svg" in scene.layout("svg")

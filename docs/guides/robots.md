@@ -254,7 +254,10 @@ Where the arms come from:
 
 * **The catalog.** A `manipulator.dual_arm` package names its arms
   (`frames.arms[]` — base, flange, TCP and joints per arm), and
-  `bt.Robot.from_catalog("openarm")` loads with exactly those groups.
+  `bt.Robot.from_catalog("openarm")` loads with exactly those groups. A
+  whole-body machine — a humanoid upper body on wheels, on a pedestal or on
+  legs — names the rest of its body the same way (`frames.groups[]`): see
+  [More than arms](#more-than-arms) below.
 * **The product's description.** A URDF with two arms on a body derives its
   groups: the branches under the shared body become groups named by their
   joints' common prefix (`left` / `right` for `left_shoulder…` and
@@ -274,6 +277,39 @@ always has) and on a derived dual-arm robot when a link makes the arm clear
 ambiguous call is an error rather than a guess. `joint_positions` interleaves
 the arms (it is the tree's breadth-first order), so address joints by name or
 through `group("left").joints`.
+
+### More than arms
+
+A semi-humanoid has a torso under its arms and a head over them, and they
+are groups too — not arms (they have no flange and no TCP), but sets of
+joints one ramp or one plan moves. A catalog package declares them after
+its arms:
+
+```python
+robot = bt.Robot.from_catalog("unitree/g1/g1-d")
+robot.groups        # ['left', 'right', 'torso', 'left_hand', 'right_hand',
+                    #  'left_with_torso', 'right_with_torso']
+robot.group("torso").joints     # the lift column's two stages, waist pitch, waist yaw
+```
+
+* An **arm** plans without the torso: `plan_to_pose(..., group="right")`
+  leaves the lift where it stands, so the other arm's base does not move
+  under it. Raise or lower the torso with a ramp (`bt.seq.ramp` on the
+  torso's joints), then plan the arm.
+* A **composite** (`right_with_torso`) is the torso and one arm planned as
+  one: the way to reach a shelf the arm alone cannot — the floor, or
+  overhead. While it runs it drives the torso, so nothing else may.
+* The **wheels** are in no group, and an unnamed plan on such a robot is
+  refused rather than allowed to sample them. They turn with the vehicle the
+  machine is mounted on as its own running gear —
+  `scene.mount_robot(..., wheels=bt.Wheels.from_catalog(...))`, see
+  [The robot is the vehicle](vehicles-and-amr.md#the-robot-is-the-vehicle-a-semi-humanoid).
+* Reach circles, per-arm requirements and `attach` defaults are the arms';
+  a torso or a head gets none.
+
+[A semi-humanoid picks a shelf](../tutorials/semi-humanoid.md) is the pattern
+end to end: the torso ramped to a posture the teaching chose, then the arm
+planned, from the low board of a bay to its top one.
 
 **Two arms from two robots** is the other way to build a dual-arm cell —
 `scene.add_robot(...)` twice, as above — and the right one when the arms have

@@ -46,8 +46,29 @@ Segments append to the named motion (created when missing); `kind` is
 `"joint"` (planned, collision-free) or `"cartesian_line"` (the TCP moves on a
 straight line, followed by IK). Motions plan rest-to-rest at segment
 boundaries. Manage them with `motion_names`, `motion_segments`,
-`remove_segment`, and `clear_motion` — or interactively in the
-[studio](studio.md)'s MOTION panel, which is the same list.
+`remove_segment`, `clear_motion` and `remove_motion` — or interactively in the
+[studio](studio.md)'s MOTION panel, which is the same list (the × on a
+motion's row deletes it).
+
+`clear_motion` empties a motion and leaves it listed; `remove_motion` takes
+the name as well, so nothing of it is left in the project, the generated
+script or the [hand-over set](../tutorials/hand-over.md). That makes a motion
+usable as a question to the planner — author it, plan it, remove it:
+
+```python
+scene.add_segment("line?", goal=carry, kind="cartesian_line")
+try:
+    scene.plan_motion("line?", broadcast=False)      # is there a straight line from here?
+    straight = True
+except ValueError:
+    straight = False
+finally:
+    scene.remove_motion("line?")
+```
+
+A sequence step that starts a removed motion keeps its authored reference, and
+the cell stops checking out by name — ``sequence `cycle`: unknown motion `main` ``
+from `scene.check()` — until a motion of that name is authored again.
 
 `goal=None` is the teach idiom: pose the robot — with the TCP gizmo, or
 [`set_tcp_target`][botrail.Scene.set_tcp_target] — then capture.

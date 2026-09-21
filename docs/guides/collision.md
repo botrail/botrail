@@ -56,6 +56,26 @@ scene.allow_inter_robot_collision("near", "/panda/panda_link0",
 
 the escape hatch for arms that share a mount plate or are meant to touch.
 
+The sampler only finds pairs that touch in nearly every pose (95 % of 256
+samples). A whole-body machine has pairs that touch **by design** and fall
+short of that — torso segments a vendor checks with overlapping capsules
+(one RB-Y1 pair touches in 94 % of poses), a drive wheel steering inside its
+housing — and a plan that includes the torso then starts "in self-collision".
+Those are declared, the way a MoveIt SRDF does:
+
+```python
+robot = robot.allow_collisions([("link_torso_2", "link_torso_4"),
+                                ("base_link", "left_wheel_drive_link")])
+```
+
+It returns a new robot; a name that is no link, or a pair of a link with
+itself, is refused by name. A [catalog](robots.md#the-model-catalog) package
+declares its own (`self_collision.allowed_pairs`, with the basis it was taken
+from) and `Robot.from_catalog` applies them, so a cell rarely writes this. A
+declaration rides a welded tool or mount and is saved with the project. The
+generated script re-authors the pairs a cell declared by hand; a package's own
+come back with `from_catalog` and are not written out again.
+
 ## Switching obstacles out
 
 ```python

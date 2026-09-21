@@ -94,6 +94,11 @@ pub enum RobotSourceMsg {
         /// in older files.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         arms: Vec<CatalogArmMsg>,
+        /// Link pairs the package declares may touch
+        /// (`self_collision.allowed_pairs`), reapplied on rebuild. Absent
+        /// for packages that declare none and in older files.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_collisions: Vec<(String, String)>,
         /// Manifest identity (maker, product name, category, numeric
         /// specs) — what the BOM names the package by. Absent in files
         /// written before parts existed; those lines then show the id only.
@@ -297,9 +302,11 @@ pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
             mount,
             grasp,
             arms,
+            allowed_collisions,
             meta,
             inner,
         } => RobotSourceMsg::Catalog {
+            allowed_collisions: allowed_collisions.clone(),
             id: id.clone(),
             revision: revision.clone(),
             tcp: tcp.clone(),
@@ -352,6 +359,74 @@ pub fn robot_source_msg(source: &botrail_model::RobotSource) -> RobotSourceMsg {
     }
 }
 
+/// The link pairs a model's source declares may touch, by name: a catalog
+/// package's own, and those of the parts of a composite (tool names
+/// prefixed the way the weld prefixes them).
+fn source_allowed_collisions(source: &botrail_model::RobotSource) -> Vec<(String, String)> {
+    match source {
+        botrail_model::RobotSource::Catalog {
+            allowed_collisions,
+            inner,
+            ..
+        } => {
+            let mut pairs = allowed_collisions.clone();
+            pairs.extend(source_allowed_collisions(inner));
+            pairs
+        }
+        botrail_model::RobotSource::Composite {
+            base, tool, prefix, ..
+        } => {
+            let rename = |name: &String| match prefix {
+                Some(p) => format!("{p}{name}"),
+                None => name.clone(),
+            };
+            let mut pairs = source_allowed_collisions(base);
+            pairs.extend(
+                source_allowed_collisions(tool)
+                    .iter()
+                    .map(|(a, b)| (rename(a), rename(b))),
+            );
+            pairs
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The pairs declared on the model by hand — what its source does not
+/// already say — by name, for the project file.
+fn declared_allowed_collisions(model: &botrail_model::RobotModel) -> Vec<(String, String)> {
+    let from_source = source_allowed_collisions(&model.source);
+    model
+        .allowed_collisions
+        .iter()
+        .map(|&(i, j)| (model.links[i].name.clone(), model.links[j].name.clone()))
+        .filter(|(a, b)| {
+            !from_source
+                .iter()
+                .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
+        })
+        .collect()
+}
+
+/// Restores the link pairs a project declares may touch on a rebuilt model.
+pub fn apply_allowed_collisions(
+    model: &mut botrail_model::RobotModel,
+    msg: &ProjectRobotMsg,
+) -> Result<(), ProjectError> {
+    if msg.allowed_collisions.is_empty() {
+        return Ok(());
+    }
+    let pairs: Vec<(&str, &str)> = msg
+        .allowed_collisions
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    *model = model
+        .allow_collisions(&pairs)
+        .map_err(|e| ProjectError::Robot(e.to_string()))?;
+    Ok(())
+}
+
 /// Restores the planning groups a project declares on a rebuilt model
 /// (`Robot.define_group`); a message without any leaves the model's own
 /// (derived, or produced by its source) in place.
@@ -394,6 +469,7 @@ pub fn model_from_source(
             mount,
             grasp,
             arms,
+            allowed_collisions,
             manufacturer,
             product,
             category,
@@ -460,6 +536,14 @@ pub fn model_from_source(
                     )
                     .map_err(|e| ProjectError::Robot(format!("catalog arm `{}`: {e}", arm.name)))?;
             }
+            // ...and the pairs it declares may touch.
+            let pairs: Vec<(&str, &str)> = allowed_collisions
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            model = model
+                .allow_collisions(&pairs)
+                .map_err(|e| ProjectError::Robot(format!("catalog package `{id}`: {e}")))?;
             let inner_source = std::mem::replace(
                 &mut model.source,
                 botrail_model::RobotSource::UrdfXml(String::new()),
@@ -480,6 +564,7 @@ pub fn model_from_source(
                         flange: a.flange.clone(),
                     })
                     .collect(),
+                allowed_collisions: allowed_collisions.clone(),
                 meta: botrail_model::CatalogMeta {
                     manufacturer: manufacturer.clone(),
                     product: product.clone(),
@@ -568,6 +653,11 @@ pub struct ProjectRobotMsg {
     /// the tree or the source produces them itself (a mounted arm).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupSpecMsg>,
+    /// Link pairs declared to be allowed to touch (`Robot.allow_collisions`),
+    /// by name — those the source does not already declare (a catalog
+    /// package carries its own). Absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_collisions: Vec<(String, String)>,
 }
 
 /// A gripper drive as a project carries it: the declaration, re-resolved
@@ -633,6 +723,69 @@ pub struct RobotMountMsg {
     /// moves (a multirotor's propellers). Absent in older files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spin: Vec<(String, f64)>,
+    /// The wheels, for a machine that rolls its vehicle. Absent in older
+    /// files and on every other mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<WheelDriveMsg>,
+}
+
+/// [`crate::seq::WheelDrive`] as a project carries it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WheelDriveMsg {
+    /// May be empty: a machine whose wheels are part of its chassis mesh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wheels: Vec<MountWheelMsg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_frame: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MountWheelMsg {
+    pub joint: String,
+    /// Rolling radius, metres.
+    pub radius: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lateral_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<String>,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+pub fn wheel_drive_msg(drive: &crate::seq::WheelDrive) -> WheelDriveMsg {
+    WheelDriveMsg {
+        wheels: drive
+            .wheels
+            .iter()
+            .map(|w| MountWheelMsg {
+                joint: w.joint.clone(),
+                radius: w.radius,
+                lateral_ratio: w.lateral_ratio,
+                steer: w.steer.clone(),
+            })
+            .collect(),
+        base_frame: drive.base_frame.clone(),
+    }
+}
+
+pub fn wheel_drive_from_msg(msg: &WheelDriveMsg) -> crate::seq::WheelDrive {
+    crate::seq::WheelDrive {
+        wheels: msg
+            .wheels
+            .iter()
+            .map(|w| crate::seq::MountWheel {
+                joint: w.joint.clone(),
+                radius: w.radius,
+                lateral_ratio: w.lateral_ratio,
+                steer: w.steer.clone(),
+            })
+            .collect(),
+        base_frame: msg.base_frame.clone(),
+    }
 }
 
 /// [`crate::seq::GaitSpec`] as a project carries it.
@@ -944,6 +1097,7 @@ impl ProjectFile {
                         gripper_drive: None,
                         dynamics: None,
                         groups: Vec::new(),
+                        allowed_collisions: Vec::new(),
                     }],
                     obstacles: v1.obstacles,
                     motions: v1.motions,
@@ -1042,6 +1196,7 @@ impl Scene {
                         reference: m.reference.clone(),
                         gait: m.gait.as_ref().map(gait_msg),
                         spin: m.spin.clone(),
+                        drive: m.drive.as_ref().map(wheel_drive_msg),
                     }),
                     link_materials: r
                         .model
@@ -1080,6 +1235,7 @@ impl Scene {
                             .map(GroupSpecMsg::from)
                             .collect()
                     },
+                    allowed_collisions: declared_allowed_collisions(&r.model),
                 })
                 .collect(),
             obstacles: self
@@ -1189,6 +1345,7 @@ impl Scene {
                 )
             })?;
             apply_declared_groups(&mut robot, robot_msg)?;
+            apply_allowed_collisions(&mut robot, robot_msg)?;
             models.push(Arc::new(robot));
         }
         let mut scene = Scene::empty();
@@ -1412,8 +1569,20 @@ impl Scene {
                 .map(gait_from_msg)
                 .transpose()
                 .map_err(|m| ProjectError::Incompatible(format!("robot `{name}` gait: {m}")))?;
-            self.mount_robot_with(i, &mount.device, Some((&mount.offset).into()), gait)
-                .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
+            let offset = Some((&mount.offset).into());
+            match &mount.drive {
+                Some(drive) if gait.is_none() => self.mount_robot_on_wheels(
+                    i,
+                    &mount.device,
+                    offset,
+                    wheel_drive_from_msg(drive),
+                ),
+                Some(_) => Err(crate::SceneError::BadMount(
+                    "a mount walks (gait) or rolls (drive), not both".into(),
+                )),
+                None => self.mount_robot_with(i, &mount.device, offset, gait),
+            }
+            .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
             if let Some(reference) = &mount.reference {
                 self.set_mount_reference(i, reference.clone())
                     .map_err(|e| {
@@ -1567,6 +1736,34 @@ fn py_gait(gait: &GaitMsg) -> String {
     }
     if let Some(step) = gait.max_step {
         call.push_str(&format!(", max_step={step}"));
+    }
+    call.push(')');
+    call
+}
+
+fn py_wheels(drive: &WheelDriveMsg) -> String {
+    let wheels: Vec<String> = drive
+        .wheels
+        .iter()
+        .map(|w| {
+            if w.lateral_ratio == 0.0 {
+                format!("{:?}: {:?}", w.joint, w.radius)
+            } else {
+                format!("{:?}: ({:?}, {:?})", w.joint, w.radius, w.lateral_ratio)
+            }
+        })
+        .collect();
+    let mut call = format!("bt.Wheels({{{}}}", wheels.join(", "));
+    let steer: Vec<String> = drive
+        .wheels
+        .iter()
+        .filter_map(|w| w.steer.as_ref().map(|s| format!("{:?}: {s:?}", w.joint)))
+        .collect();
+    if !steer.is_empty() {
+        call.push_str(&format!(", steer={{{}}}", steer.join(", ")));
+    }
+    if let Some(frame) = &drive.base_frame {
+        call.push_str(&format!(", base_frame={frame:?}"));
     }
     call.push(')');
     call
@@ -1811,6 +2008,17 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 g.name,
                 g.tip,
                 joints.join(", ")
+            ));
+        }
+        if !robot_msg.allowed_collisions.is_empty() {
+            let pairs: Vec<String> = robot_msg
+                .allowed_collisions
+                .iter()
+                .map(|(a, b)| format!("({a:?}, {b:?})"))
+                .collect();
+            out.push_str(&format!(
+                "{var} = {var}.allow_collisions([{}])\n",
+                pairs.join(", ")
             ));
         }
         let mut kwargs = String::new();
@@ -2194,8 +2402,12 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 .collect();
             format!(", spin={{{}}}", items.join(", "))
         };
+        let wheels = match &mount.drive {
+            Some(d) => format!(", wheels={}", py_wheels(d)),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "scene.mount_robot({:?}, offset_position={}, offset_quaternion={}{}{gait}{spin})\n",
+            "scene.mount_robot({:?}, offset_position={}, offset_quaternion={}{}{gait}{spin}{wheels})\n",
             mount.device,
             py_tuple(&mount.offset.position),
             py_tuple(&mount.offset.quaternion),
@@ -3217,6 +3429,7 @@ mod tests {
         );
         model.grasp_links = vec![model.link_index("tool0").unwrap()];
         model.source = botrail_model::RobotSource::Catalog {
+            allowed_collisions: Vec::new(),
             id: "franka/fr/fr3/r1".into(),
             revision: "deadbeef".into(),
             tcp: None,

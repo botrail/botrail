@@ -90,6 +90,11 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "width_mm": ("width_mm", "belt_width_mm"),
     "speed_mps": ("max_speed_mps", "speed_max_mps", "speed_mps"),
     "max_speed_mps": ("max_speed_mps", "speed_max_mps", "speed_mps"),
+    # The heights a machine with a torso works at, hand over floor: the
+    # product's lowest must be no higher than the cell's, its highest no
+    # lower.
+    "vertical_reach_min_mm": ("vertical_reach_min_mm",),
+    "vertical_reach_max_mm": ("vertical_reach_max_mm",),
     "max_climb_mps": ("max_climb_mps",),
     "max_descent_mps": ("max_descent_mps",),
     "flight_time_min": ("flight_time_min",),
@@ -700,8 +705,9 @@ class _Cell:
 
     def vehicle_of(self, robot: str) -> Optional[str]:
         """The vehicle merged into this robot's BOM line — the machine *is*
-        the robot: legs (a gait mount), or the whole airframe (a rigid mount
-        on a vehicle with no body of its own — a UAV). Mirrors `Scene::bom`,
+        the robot: legs (a gait mount), running gear (a wheel mount), or the
+        whole airframe (a rigid mount on a vehicle with no body of its own
+        — a UAV). Mirrors `Scene::bom`,
         including the escape: a part pinned on the device keeps it a line of
         its own, so the robot does not absorb its requirements."""
         mount = self.mounts.get(robot)
@@ -711,19 +717,22 @@ class _Cell:
         kind = self.devices.get(device)
         if not kind or kind.get("kind") != "vehicle" or (device, "device") in self.parts:
             return None
-        if mount.get("gait") or not kind.get("body"):
+        if mount.get("gait") or mount.get("drive") or not kind.get("body"):
             return device
         return None
 
     def category_hint(self, name: str, kind: str) -> Optional[str]:
         """A shopping aisle for a line the author left with the derived
-        default category. Only the aerial machine has exactly one aisle;
+        default category. The aerial machine has exactly one aisle, and so
+        does a robot that rolls its own vehicle (a wheel mount); other
         ground vehicles stay unhinted (cart, AGV or AMR is a choice)."""
         if kind == "device":
             device = self.devices.get(name)
         elif kind == "robot":
             ridden = self.vehicle_of(name)
             device = self.devices.get(ridden) if ridden else None
+            if device and (self.mounts.get(name) or {}).get("drive"):
+                return "vehicle.mobile_manipulator"
         else:
             return None
         if device and device.get("kind") == "vehicle" and device.get("aerial"):
@@ -842,12 +851,18 @@ class _Cell:
 
     def arms_of(self, robot: str) -> list[str]:
         """The arms (planning groups) of a dual-arm robot; empty for a
-        robot with one."""
+        robot with one. A whole-body machine also groups its torso, its
+        head, its hands and torso-with-arm composites: where the groups
+        state a flange (a catalog package's arms do), only those are arms."""
         try:
-            groups = list(self.scene.robot_of(robot).groups)
+            model = self.scene.robot_of(robot)
+            groups = list(model.groups)
         except ValueError:
             return []
-        return groups if len(groups) > 1 else []
+        if len(groups) <= 1:
+            return []
+        flanged = [g for g in groups if model.group(g).flange]
+        return flanged or groups
 
     def robot_and_arm(self, name: str) -> tuple[str, Optional[str]]:
         """A BOM line `robot/arm` (an arm mounted from the catalog) split
@@ -886,6 +901,47 @@ class _Cell:
                         names.append(obj)
         self._grasps[key] = names
         return names
+
+    def taught_of(self, robot: str, arm: Optional[str] = None) -> list[tuple[str, list[float]]]:
+        """`(motion, goal q)` of every taught segment of the robot's
+        motions. With `arm`, the motions that move that arm: its own
+        group's, whole-robot ones, and those of a composite that moves it
+        together with the torso."""
+        model = self.scene.robot_of(robot)
+        mine = set(model.group(arm).joints) if arm is not None else set()
+        taught: list[tuple[str, list[float]]] = []
+        for motion in self.project.get("motions") or []:
+            if (motion.get("robot") or self.default_robot) != robot:
+                continue
+            group = motion.get("group")
+            if arm is not None and group not in (None, arm):
+                if group not in model.groups or not mine <= set(model.group(group).joints):
+                    continue
+            for segment in motion.get("segments") or []:
+                if segment.get("goal_positions"):
+                    taught.append((str(motion["name"]), list(segment["goal_positions"])))
+        return taught
+
+    def heights_of(self, robot: str) -> list[tuple[float, str, str]]:
+        """`(height, arm, motion)` of every taught hand position over the
+        floor the machine stands on — its arms' tips, its vehicle's plane."""
+        mount = self.mounts.get(robot) or {}
+        offset = ((mount.get("offset") or {}).get("position") or [0.0, 0.0, 0.0])[2]
+        floor = self.scene.robot_base_pose_of(robot)[0][2] - float(offset)
+        model = self.scene.robot_of(robot)
+        heights: list[tuple[float, str, str]] = []
+        for arm in self.arms_of(robot) or [None]:
+            try:
+                tip = model.group(arm).tip if arm is not None else model.tcp_link
+            except ValueError:
+                continue
+            for motion, q in self.taught_of(robot, arm):
+                try:
+                    position, _ = self.scene.link_pose_at(tip, q, robot=robot)
+                except ValueError:
+                    continue
+                heights.append((float(position[2]) - floor, arm or robot, motion))
+        return heights
 
     def targets_of(
         self, robot: str, arm: Optional[str] = None
@@ -998,17 +1054,53 @@ class _Cell:
         arms = [arm] if arm is not None else (self.arms_of(robot) or [None])
         farthest_arm: Optional[tuple[float, str, Optional[str]]] = None
         for a in arms:
-            targets, where, reach_notes = self.targets_of(robot, a)
-            notes += reach_notes
-            if not targets:
+            if a is None:
+                targets, where, reach_notes = self.targets_of(robot, a)
+                notes += reach_notes
+                base = self._arm_base(robot, a)
+                spans = [_dist(t, base) for t in targets]
+            else:
+                # An arm's base is where each target was taught with it: on
+                # a torso that is the lift up for the top shelf and down
+                # for the bottom one, not where the arm happens to stand
+                # now. A composite's targets count too, from the base they
+                # move. (On a rigid body this is the same measurement.)
+                group = self.scene.robot_of(robot).group(a)
+                link, where = (group.flange, "flange") if group.flange else (group.tip, "TCP")
+                spans = []
+                for motion, q in self.taught_of(robot, a):
+                    try:
+                        tip_at, _ = self.scene.link_pose_at(link, q, robot=robot)
+                        # From the arm's first joint — its shoulder — not the
+                        # origin of the body it is bolted to: a chest's
+                        # origin is a shoulder's width off, and a vendor
+                        # quotes an arm's reach from the shoulder.
+                        base_at, _ = self.scene.link_pose_at(group.first_link, q, robot=robot)
+                    except ValueError as e:
+                        notes.append(f"reach skips motion `{motion}`: {e}")
+                        continue
+                    spans.append(_dist(tip_at, base_at))
+            if not spans:
                 continue
-            base = self._arm_base(robot, a)
-            far = max(_dist(t, base) for t in targets)
+            far = max(spans)
             if farthest_arm is None or far > farthest_arm[0]:
                 farthest_arm = (far, where, a)
-        if farthest_arm is not None:
+        # A machine mounted as its vehicle's wheels carries its arms' bases on
+        # its own torso: how far a hand is from its shoulder is that machine's
+        # way of standing at the work, not something the cell asks — another
+        # machine lifts, bows or squats differently and measures differently.
+        # As a requirement it would be compared with a vendor's figure as an
+        # error and filter the catalog by it, the taught machine included.
+        own_bases = arm is None and bool((self.mounts.get(robot) or {}).get("drive"))
+        if farthest_arm is not None and own_bases:
+            notes.append(
+                "reach_mm is not asked of a machine that moves its own arms' bases — the cell asks "
+                "its working heights (vertical_reach_*), and whether a machine reaches them is its "
+                "teaching's and its bake's to say"
+            )
+        elif farthest_arm is not None:
             far, where, a = farthest_arm
-            whose = "the base" if a is None else f"the {a} arm's base"
+            whose = "the base" if a is None else f"the {a} arm's first joint"
             reqs.append(
                 Requirement(
                     "reach_mm",
@@ -1016,14 +1108,42 @@ class _Cell:
                     basis=f"farthest taught target {far:.2f} m from {whose} ({where}), +{margin:.0%}",
                 )
             )
+        # A machine that rolls its own vehicle works at the heights its
+        # torso gives it: the lowest and the highest taught hand position
+        # over the floor it stands on — what tells a lift column from a
+        # bowing waist from a fixed pedestal.
+        if arm is None and (self.mounts.get(robot) or {}).get("drive"):
+            heights = self.heights_of(robot)
+            if heights:
+                low, high = min(heights), max(heights)
+                for key, op, (height, whose, motion), which in (
+                    ("vertical_reach_min_mm", "<=", low, "lowest"),
+                    ("vertical_reach_max_mm", ">=", high, "highest"),
+                ):
+                    reqs.append(
+                        Requirement(
+                            key,
+                            _round(height * 1000.0, 1),
+                            op=op,
+                            basis=f"{which} taught hand position {height:.2f} m over the floor "
+                            f"({whose}, `{motion}`)",
+                        )
+                    )
         if arm is None and self.arms_of(robot):
-            used = sorted(
-                {
-                    str(m.get("group"))
-                    for m in self.project.get("motions") or []
-                    if (m.get("robot") or self.default_robot) == robot and m.get("group")
-                }
-            )
+            # An arm is taught by a motion of its own group, or of a
+            # composite that moves it with the torso.
+            model = self.scene.robot_of(robot)
+            taught = [
+                set(model.group(str(m["group"])).joints)
+                for m in self.project.get("motions") or []
+                if (m.get("robot") or self.default_robot) == robot
+                and m.get("group") in model.groups
+            ]
+            used = [
+                a
+                for a in self.arms_of(robot)
+                if any(set(model.group(a).joints) <= joints for joints in taught)
+            ]
             reqs.append(
                 Requirement(
                     "arm_count",
@@ -1069,11 +1189,11 @@ class _Cell:
 
     def _arm_base(self, robot: str, arm: Optional[str]) -> tuple[float, float, float]:
         """Where reach is measured from: the robot's base, or an arm's
-        base link (rigid on the body, so the current posture will do)."""
+        first joint (rigid on the body, so the current posture will do)."""
         if arm is None:
             return self.scene.robot_base_pose_of(robot)[0]
         group = self.scene.robot_of(robot).group(arm)
-        return self.scene.link_pose(group.base, robot=robot)[0]
+        return self.scene.link_pose(group.first_link, robot=robot)[0]
 
     def _tool(self, name: str, category: str) -> tuple[list[Requirement], list[str]]:
         robot = name.split("/")[0]

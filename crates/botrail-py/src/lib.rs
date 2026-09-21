@@ -386,6 +386,43 @@ impl Robot {
         })
     }
 
+    /// Declares link pairs that may touch — an SRDF's `disable_collisions`
+    /// — and returns the robot with them added; the input is not modified.
+    /// A scene already allows adjacent links and pairs that touch in nearly
+    /// every pose on its own; this is for what only the machine's maker can
+    /// say: the bulky torso capsules of a whole-body machine overlap in
+    /// *most* poses, and that is the design. A catalog package carries its
+    /// own (`self_collision.allowed_pairs`).
+    ///
+    /// ```python
+    /// robot = robot.allow_collisions([("link_torso_2", "link_torso_4")])
+    /// ```
+    fn allow_collisions(&self, pairs: Vec<(String, String)>) -> PyResult<Robot> {
+        let refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        Ok(Robot {
+            inner: Arc::new(self.inner.allow_collisions(&refs).map_err(model_err)?),
+        })
+    }
+
+    /// The link pairs declared to be allowed to touch, by name: the
+    /// package's own and those added with `allow_collisions`.
+    #[getter]
+    fn allowed_collisions(&self) -> Vec<(String, String)> {
+        self.inner
+            .allowed_collisions
+            .iter()
+            .map(|&(i, j)| {
+                (
+                    self.inner.links[i].name.clone(),
+                    self.inner.links[j].name.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// Bolts `part` — a manipulator — onto this robot's link `at` as an
     /// arm of its own, and returns the composite; neither input is
     /// modified. The part's root goes on `at` at the offset; `prefix`
@@ -616,17 +653,33 @@ type FootfallRow = (String, f64, f64, (f64, f64, f64));
 
 /// A gait from a `bt.Gait` (anything with a `_spec()` returning the plain
 /// dict `bt.gait.Gait._spec` builds) or from such a dict directly.
+/// The plain dict an authoring dataclass (`bt.Gait`, `bt.Wheels`) builds for
+/// the extension. Only "this object has no `_spec`" is reworded — what the
+/// dataclass itself refuses (a bad pattern, an undeclared wheel) is the
+/// author's message and passes through.
+fn spec_of<'py>(
+    obj: &Bound<'py, PyAny>,
+    expected: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    match obj.call_method0("_spec") {
+        Ok(spec) => Ok(spec.downcast_into::<pyo3::types::PyDict>()?),
+        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(obj.py()) => {
+            Err(PyValueError::new_err(expected.to_string()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn gait_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::GaitSpec> {
     use botrail_scene::seq::{FootContact, GaitPattern, GaitSpec, LegSpec};
     use pyo3::types::PyDict;
     let spec: Bound<'_, PyDict> = if obj.is_instance_of::<PyDict>() {
         obj.downcast::<PyDict>()?.clone()
     } else {
-        obj.call_method0("_spec")
-            .map_err(|_| {
-                PyValueError::new_err("gait must be a bt.Gait (or the dict its _spec() builds)")
-            })?
-            .downcast_into::<PyDict>()?
+        spec_of(
+            obj,
+            "gait must be a bt.Gait (or the dict its _spec() builds)",
+        )?
     };
     let field = |key: &str| -> PyResult<Bound<'_, PyAny>> {
         spec.get_item(key)?
@@ -700,6 +753,49 @@ fn gait_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::GaitSpec
         lateral: number("lateral", 0.0)?,
         max_step: optional("max_step")?.map(|v| v.extract()).transpose()?,
     })
+}
+
+/// A `bt.Wheels` (or the dict its `_spec()` builds): the wheel drive, and
+/// the posture — `(joint, value)` — the machine is put in as it is mounted.
+fn wheels_from_py(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<(botrail_scene::seq::WheelDrive, Vec<(String, f64)>)> {
+    use botrail_scene::seq::{MountWheel, WheelDrive};
+    use pyo3::types::PyDict;
+    let spec: Bound<'_, PyDict> = if obj.is_instance_of::<PyDict>() {
+        obj.downcast::<PyDict>()?.clone()
+    } else {
+        spec_of(
+            obj,
+            "wheels must be a bt.Wheels (or the dict its _spec() builds)",
+        )?
+    };
+    let optional = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        Ok(spec.get_item(key)?.filter(|v| !v.is_none()))
+    };
+    let wheels: Vec<(String, f64, f64, Option<String>)> = match optional("wheels")? {
+        Some(v) => v.extract()?,
+        None => Vec::new(),
+    };
+    let posture: Vec<(String, f64)> = match optional("posture")? {
+        Some(v) => v.extract()?,
+        None => Vec::new(),
+    };
+    Ok((
+        WheelDrive {
+            wheels: wheels
+                .into_iter()
+                .map(|(joint, radius, lateral_ratio, steer)| MountWheel {
+                    joint,
+                    radius,
+                    lateral_ratio,
+                    steer,
+                })
+                .collect(),
+            base_frame: optional("base_frame")?.map(|v| v.extract()).transpose()?,
+        },
+        posture,
+    ))
 }
 
 /// An obstacle pose in a scenario dict: a bare position (upright) or a
@@ -1184,6 +1280,7 @@ struct Group {
     tip: String,
     flange: Option<String>,
     base: String,
+    first_link: String,
     derived: bool,
 }
 
@@ -1199,6 +1296,14 @@ impl Group {
             tip: model.links[g.tip].name.clone(),
             flange: g.flange.map(|i| model.links[i].name.clone()),
             base: model.links[g.base].name.clone(),
+            first_link: g
+                .joints
+                .first()
+                .map(|&qi| model.joints[model.actuated_joints[qi]].child_link)
+                .map_or_else(
+                    || model.links[g.base].name.clone(),
+                    |i| model.links[i].name.clone(),
+                ),
             derived: g.derived,
         }
     }
@@ -1233,6 +1338,16 @@ impl Group {
     #[getter]
     fn base(&self) -> String {
         self.base.clone()
+    }
+
+    /// The link the group's first joint moves. Its frame is that joint's,
+    /// and it stays put on the base: where an arm starts — its shoulder,
+    /// which is where a vendor quotes an arm's reach from, not the origin of
+    /// the body the shoulder is bolted to. The base itself for a group
+    /// without joints.
+    #[getter]
+    fn first_link(&self) -> String {
+        self.first_link.clone()
     }
 
     /// Read off the kinematic tree rather than declared.
@@ -1522,6 +1637,14 @@ impl Scene {
     /// only; no check reads the phase (the collision stays the swept
     /// solid the catalog authors).
     ///
+    /// With `wheels` (a `bt.Wheels`) the robot *is* the vehicle's running
+    /// gear — a humanoid upper body on a wheeled base, modelled whole: its
+    /// wheel joints turn by exactly what the vehicle drives, the machine
+    /// is one purchase, and a walkable surface under it is where it
+    /// rolls, not a collision. The robot is put in the wheels' posture,
+    /// and the offset defaults to the one that stands its base frame (or
+    /// its wheels) on the vehicle frame. Not together with `gait`.
+    ///
     /// `carrier` records the loaded vehicle model's flange frame and catalog
     /// provenance for `bt.mounting.report(scene)`. With no offset, the first
     /// mount-side `allowed_poses` entry is used, or the mounting faces
@@ -1529,7 +1652,7 @@ impl Scene {
     /// reviewed, not corrected. `flange` / `mount` select exact model links;
     /// defaults are the carrier flange and arm mount (or arm root). This is
     /// a catalog-frame alignment check, not a mechanical fit certification.
-    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None, spin = None, *, carrier = None, flange = None, mount = None))]
+    #[pyo3(signature = (device, offset_position = None, offset_quaternion = None, robot = None, gait = None, spin = None, *, wheels = None, carrier = None, flange = None, mount = None))]
     #[allow(clippy::too_many_arguments)]
     fn mount_robot(
         &self,
@@ -1539,6 +1662,7 @@ impl Scene {
         robot: Option<&str>,
         gait: Option<&Bound<'_, PyAny>>,
         spin: Option<std::collections::BTreeMap<String, f64>>,
+        wheels: Option<&Bound<'_, PyAny>>,
         carrier: Option<&Robot>,
         flange: Option<&str>,
         mount: Option<&str>,
@@ -1560,10 +1684,21 @@ impl Scene {
             .transpose()
             .map_err(scene_err)?;
         let gait = gait.map(gait_from_py).transpose()?;
-        let offset = match (offset_position, offset_quaternion, &gait) {
-            // Derived from the stance: the feet on the floor.
-            (None, None, Some(_)) => None,
-            (None, None, None) if reference.is_some() => Some(
+        let wheels = wheels.map(wheels_from_py).transpose()?;
+        if gait.is_some() && wheels.is_some() {
+            return Err(PyValueError::new_err(
+                "a mounted robot walks (gait=) or rolls (wheels=), not both",
+            ));
+        }
+        let offset = match (
+            offset_position,
+            offset_quaternion,
+            gait.is_some() || wheels.is_some(),
+        ) {
+            // Derived from the stance (the feet on the floor) or from the
+            // wheels (the base frame on the vehicle frame).
+            (None, None, true) => None,
+            (None, None, false) if reference.is_some() => Some(
                 reference
                     .as_ref()
                     .unwrap()
@@ -1573,8 +1708,13 @@ impl Scene {
             (position, quaternion, _) => Some(pose_from(position.unwrap_or([0.0; 3]), quaternion)),
         };
         let spin = spin.map(|m| m.into_iter().collect()).unwrap_or_default();
+        let gear = match (gait, wheels) {
+            (Some(gait), _) => hub::MountGear::Legs(gait),
+            (None, Some((drive, posture))) => hub::MountGear::Wheels { drive, posture },
+            (None, None) => hub::MountGear::Rigid,
+        };
         self.hub
-            .mount_robot_with(index, device, offset, gait, spin, reference)
+            .mount_robot_with(index, device, offset, gear, spin, reference)
             .map_err(scene_err)
     }
 
@@ -5993,6 +6133,14 @@ impl Scene {
 
     fn clear_motion(&self, motion: &str) -> PyResult<()> {
         self.hub.clear_motion(motion).map_err(PyValueError::new_err)
+    }
+
+    /// Removes the motion itself, name and all (`clear_motion` leaves an
+    /// empty motion listed — and in the project and the hand-over set). A
+    /// sequence that starts it stops validating (`unknown motion`) until a
+    /// motion of that name is authored again.
+    fn remove_motion(&self, motion: &str) -> PyResult<()> {
+        self.hub.remove_motion(motion).map_err(PyValueError::new_err)
     }
 
     #[getter]

@@ -539,6 +539,15 @@ select:focus {
   border-color: var(--bad);
 }
 
+/* The waypoint count and the delete button of a motion's row, kept together
+   at its right end (the row spreads its children apart). */
+.motion-row-end {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
 /* --- obstacle panel --- */
 .obstacle-controls {
   display: flex;

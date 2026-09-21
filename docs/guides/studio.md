@@ -64,7 +64,10 @@ The panel lists every motion in the scene — Python-authored ones included —
 with owner and waypoint count. Pick one to edit it (picking another robot's
 motion also switches the robot, so waypoints always fit), or **+ new
 motion** to start another; it is created the moment its first waypoint
-lands. Below sits the waypoint-segment editor, mirroring
+lands. The **×** at the end of a motion's row deletes it, name and all
+([`remove_motion`](motion-planning.md#named-motions-waypoint-segments)) — a
+sequence step that still starts it says so when the cell is checked. Below
+sits the waypoint-segment editor, mirroring
 [`add_segment`](motion-planning.md#named-motions-waypoint-segments): pose the
 robot, then **+ Joint** or **+ Line** appends a segment ending at this
 configuration (`upright` adds the orientation-cone constraint that keeps the

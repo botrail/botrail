@@ -570,7 +570,25 @@ impl Scene {
             } else {
                 "on its stand"
             };
-            let mut reason = format!("{} joints {joints}, base {base}", dynamics.servos.len());
+            // A rolling machine's wheels (and their steering) are its
+            // mount's: kinematic, turned by what the vehicle drives.
+            let rolled: usize = sr
+                .mount
+                .as_ref()
+                .and_then(|m| m.drive.as_ref())
+                .map_or(0, |d| {
+                    d.wheels
+                        .iter()
+                        .map(|w| 1 + usize::from(w.steer.is_some()))
+                        .sum()
+                });
+            let mut reason = format!(
+                "{} joints {joints}, base {base}",
+                dynamics.servos.len().saturating_sub(rolled)
+            );
+            if rolled > 0 {
+                reason.push_str(&format!(", {rolled} wheel joint(s) turned by the vehicle"));
+            }
             if defaulted {
                 reason.push_str(&format!(
                     ", force cap defaulted to {} N·m (the model states no plausible effort limit)",

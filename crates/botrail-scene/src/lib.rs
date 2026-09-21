@@ -350,6 +350,13 @@ impl SceneRobot {
         let joint_positions = model.neutral_positions();
         let (collider, warnings) = RobotCollider::from_model(&model);
         let mut acm = Acm::adjacent(&model);
+        // What the model's maker declared may touch (a catalog package's
+        // `self_collision.allowed_pairs`, `Robot.allow_collisions`): pairs
+        // that overlap in most poses but not nearly all, which the sampling
+        // below must not be loosened to catch.
+        for &(i, j) in &model.allowed_collisions {
+            acm.allow(i, j);
+        }
         // Self-collision analysis is base-invariant: links move rigidly with
         // the base, so the identity-base sampling stays valid. (Inter-robot
         // pairs are NOT base-invariant, which is why the inter-robot ACM has
@@ -741,21 +748,59 @@ impl Scene {
         offset: Option<Isometry3<f64>>,
         gait: Option<crate::seq::GaitSpec>,
     ) -> Result<(), SceneError> {
+        self.mount_robot_as(robot, device, offset, gait, None)
+    }
+
+    /// [`Scene::mount_robot`] for a machine that rolls: the robot *is* the
+    /// vehicle's running gear — a humanoid upper body on a wheeled base,
+    /// modelled whole — and its wheel joints turn by what the vehicle
+    /// drives. The offset defaults to the one that puts the drive's base
+    /// frame (or, without one, the wheels' contact plane under their
+    /// centroid) on the vehicle frame.
+    pub fn mount_robot_on_wheels(
+        &mut self,
+        robot: usize,
+        device: &str,
+        offset: Option<Isometry3<f64>>,
+        drive: crate::seq::WheelDrive,
+    ) -> Result<(), SceneError> {
+        self.mount_robot_as(robot, device, offset, None, Some(drive))
+    }
+
+    fn mount_robot_as(
+        &mut self,
+        robot: usize,
+        device: &str,
+        offset: Option<Isometry3<f64>>,
+        gait: Option<crate::seq::GaitSpec>,
+        drive: Option<crate::seq::WheelDrive>,
+    ) -> Result<(), SceneError> {
         let (start, body) = match self.devices.iter().find(|d| d.name == device) {
             Some(crate::seq::Device {
                 kind:
                     crate::seq::DeviceKind::Vehicle {
-                        path, start, body, ..
+                        path,
+                        start,
+                        body,
+                        drive: driven,
+                        ..
                     },
                 ..
-            }) => (
-                path.frame_at(start).ok_or_else(|| {
-                    SceneError::BadMount(format!(
-                        "vehicle `{device}` starts at unknown station `{start}`"
-                    ))
-                })?,
-                body.clone(),
-            ),
+            }) => {
+                if drive.is_some() && matches!(driven, crate::seq::Drive::Aerial { .. }) {
+                    return Err(SceneError::BadMount(format!(
+                        "wheels roll on a floor, and vehicle `{device}` flies (an aerial drive)"
+                    )));
+                }
+                (
+                    path.frame_at(start).ok_or_else(|| {
+                        SceneError::BadMount(format!(
+                            "vehicle `{device}` starts at unknown station `{start}`"
+                        ))
+                    })?,
+                    body.clone(),
+                )
+            }
             Some(_) => {
                 return Err(SceneError::BadMount(format!(
                     "`{device}` is not a vehicle; only vehicles carry robots"
@@ -763,18 +808,18 @@ impl Scene {
             }
             None => return Err(SceneError::UnknownDevice(device.to_string())),
         };
-        // A walking robot stands *inside* its vehicle's body — the
-        // footprint the aisle check drives — so contact between its links
-        // and that body is the arrangement, not a collision.
-        if gait.is_some() {
+        // A walking or rolling robot stands *inside* its vehicle's body —
+        // the footprint the aisle check drives — so contact between its
+        // links and that body is the arrangement, not a collision.
+        if gait.is_some() || drive.is_some() {
             for member in &body {
                 for link in 0..self.robots[robot].model.links.len() {
                     self.allow_link_obstacle_contact(robot, link, member)?;
                 }
             }
         }
-        let (offset, stance) = match &gait {
-            Some(spec) => {
+        let (offset, stance) = match (&gait, &drive) {
+            (Some(spec), _) => {
                 let resolved = crate::gait::resolve_gait(
                     &self.robots[robot].model,
                     spec,
@@ -783,7 +828,16 @@ impl Scene {
                 .map_err(|m| SceneError::BadMount(format!("gait: {m}")))?;
                 (offset.unwrap_or(resolved.offset), Some(resolved.stance))
             }
-            None => (offset.unwrap_or_else(Isometry3::identity), None),
+            (None, Some(spec)) => {
+                let resolved = crate::wheels::resolve_wheel_drive(
+                    &self.robots[robot].model,
+                    spec,
+                    self.robots[robot].joint_positions(),
+                )
+                .map_err(|m| SceneError::BadMount(format!("wheels: {m}")))?;
+                (offset.unwrap_or(resolved.offset), None)
+            }
+            (None, None) => (offset.unwrap_or_else(Isometry3::identity), None),
         };
         self.robots[robot].mount = Some(crate::seq::RobotMount {
             device: device.to_string(),
@@ -791,6 +845,7 @@ impl Scene {
             reference: None,
             gait,
             spin: Vec::new(),
+            drive,
         });
         self.set_robot_base_pose_for(robot, start * offset);
         if let Some(q) = stance {
@@ -810,9 +865,9 @@ impl Scene {
         let mount = self.robots[robot].mount.as_mut().ok_or_else(|| {
             SceneError::BadMount("mount reference needs a vehicle-mounted robot".into())
         })?;
-        if mount.gait.is_some() || !mount.spin.is_empty() {
+        if mount.gait.is_some() || !mount.spin.is_empty() || mount.drive.is_some() {
             return Err(SceneError::BadMount(
-                "carrier frame review is for rigid vehicle mounts, not gait or spin".into(),
+                "carrier frame review is for rigid vehicle mounts, not gait, spin or wheels".into(),
             ));
         }
         mount.reference = Some(reference);
@@ -866,6 +921,19 @@ impl Scene {
                 return Err(SceneError::BadMount(format!(
                     "spin joint `{joint}`: rate {rate} rad/s — state a finite, non-zero \
                      signed rate, or drop the joint"
+                )));
+            }
+            let rolls = self.robots[robot].mount.as_ref().is_some_and(|m| {
+                m.drive.as_ref().is_some_and(|d| {
+                    d.wheels
+                        .iter()
+                        .any(|w| &w.joint == joint || w.steer.as_ref() == Some(joint))
+                })
+            });
+            if rolls {
+                return Err(SceneError::BadMount(format!(
+                    "spin joint `{joint}` is a wheel of this mount: it turns by what the \
+                     vehicle drives, not at a rate"
                 )));
             }
         }
@@ -2418,6 +2486,19 @@ impl Scene {
         Ok(())
     }
 
+    /// Removes the motion itself, name and all — what [`Scene::clear_motion`]
+    /// leaves behind still shows in the motion list, the project, the
+    /// generated script and the hand-over set. A sequence that starts it
+    /// keeps its authored reference and stops validating (`unknown motion`)
+    /// until a motion of that name comes back: the same as a frame that went
+    /// missing ([`Scene::remove_frame`]), and the same finding a cleared
+    /// motion already gets (`has no segments`).
+    pub fn remove_motion(&mut self, motion: &str) -> Result<(), MotionError> {
+        let index = self.motion_index(motion)?;
+        self.motions.remove(index);
+        Ok(())
+    }
+
     pub fn set_motions(&mut self, motions: Vec<Motion>) {
         self.motions = motions;
     }
@@ -2966,6 +3047,80 @@ mod tests {
         scene.allow_inter_robot_collision((0, 1), (1, 1));
         assert!(scene.check_collisions().is_empty());
         assert!(scene.is_state_valid_for(0, &[0.0]));
+    }
+
+    /// A post on the base and a paddle two joints away: they overlap for
+    /// about a third of the shoulder's travel — far from the "nearly always"
+    /// the scene's own sampling allows, and not adjacent.
+    const BULKY: &str = r#"<robot name="bulky">
+      <link name="base"/>
+      <link name="post"><collision><origin xyz="0.3 0 0.2"/>
+        <geometry><box size="0.1 0.1 0.4"/></geometry></collision></link>
+      <joint name="post_mount" type="fixed"><parent link="base"/><child link="post"/></joint>
+      <link name="arm"/>
+      <joint name="shoulder" type="revolute"><parent link="base"/><child link="arm"/>
+        <axis xyz="0 0 1"/><limit lower="-3.1" upper="3.1" effort="1" velocity="1"/></joint>
+      <link name="paddle"><collision><origin xyz="0.3 0 0.2"/>
+        <geometry><box size="0.1 0.3 0.1"/></geometry></collision></link>
+      <joint name="wrist" type="revolute"><parent link="arm"/><child link="paddle"/>
+        <axis xyz="1 0 0"/><limit lower="-0.1" upper="0.1" effort="1" velocity="1"/></joint>
+    </robot>"#;
+
+    #[test]
+    fn a_declared_pair_may_touch_and_the_declaration_survives_a_project() {
+        let model = RobotModel::from_urdf_str(BULKY).unwrap();
+        let scene = Scene::new(Arc::new(model.clone()));
+        let names = |scene: &Scene| -> Vec<(String, String)> {
+            scene
+                .check_collisions()
+                .iter()
+                .map(|pair| {
+                    let name = |id: &ColliderId| match id {
+                        ColliderId::Link { link, .. } => scene.robot().links[*link].name.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (name(&pair.a), name(&pair.b))
+                })
+                .collect()
+        };
+        // Undeclared, the pair is a collision where the paddle passes the post.
+        assert_eq!(
+            names(&scene),
+            vec![("post".to_string(), "paddle".to_string())]
+        );
+        assert!(!scene.is_state_valid_for(0, &[0.0, 0.0]));
+
+        // Declared by the model's maker, it is the design.
+        let declared = model.allow_collisions(&[("paddle", "post")]).unwrap();
+        let scene = Scene::new(Arc::new(declared));
+        assert!(names(&scene).is_empty());
+        assert!(scene.is_state_valid_for(0, &[0.0, 0.0]));
+
+        // A hand-made declaration is the project's to carry, and the
+        // script's to repeat.
+        let project = scene.to_project();
+        assert_eq!(
+            project.robots[0].allowed_collisions,
+            vec![("post".to_string(), "paddle".to_string())]
+        );
+        let json = serde_json::to_string(&project).unwrap();
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let again = Scene::from_project(&back).unwrap();
+        assert_eq!(
+            again.robot().allowed_collisions,
+            scene.robot().allowed_collisions
+        );
+        assert!(again.check_collisions().is_empty());
+        let code = crate::project::generate_python(&project);
+        assert!(
+            code.contains("robot = robot.allow_collisions([(\"post\", \"paddle\")])"),
+            "{code}"
+        );
+        // A robot that declares nothing writes nothing.
+        let plain = Scene::new(Arc::new(model)).to_project();
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("allowed_collisions"));
     }
 
     #[test]

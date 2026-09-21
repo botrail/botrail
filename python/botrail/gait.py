@@ -160,6 +160,11 @@ class Gait:
                 f"{ident}: manifest.yaml has no `locomotion` block (category "
                 f"{manifest.get('category')!r}) — only a vehicle.legged package carries a gait"
             )
+        if loc.get("kind") == "wheeled":
+            raise ValueError(
+                f"{ident}: this machine rolls (`locomotion.kind: wheeled`), it has no gait — "
+                f"mount it with `wheels=bt.Wheels.from_catalog(...)`"
+            )
         defaults = loc.get("gait") or {}
         kwargs: dict[str, Any] = {
             "legs": {

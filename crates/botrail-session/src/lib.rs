@@ -335,6 +335,9 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::ClearMotion { motion } => {
             clear_motion(host, &motion).map_err(|e| format!("rejected clear_motion: {e}"))
         }
+        ClientMessage::RemoveMotion { motion } => {
+            remove_motion(host, &motion).map_err(|e| format!("rejected remove_motion: {e}"))
+        }
         ClientMessage::PlanMotion { motion } => {
             // Failure is reported to clients inside the motion_result.
             let _ = plan_motion_and_emit(host, &motion, &botrail_plan::PlanOptions::default());
@@ -1021,6 +1024,13 @@ pub fn remove_segment(host: &impl SessionHost, motion: &str, index: usize) -> Re
 
 pub fn clear_motion(host: &impl SessionHost, motion: &str) -> Result<(), String> {
     host.with_scene(|scene| scene.clear_motion(motion))
+        .map_err(|e| e.to_string())?;
+    emit_motions(host);
+    Ok(())
+}
+
+pub fn remove_motion(host: &impl SessionHost, motion: &str) -> Result<(), String> {
+    host.with_scene(|scene| scene.remove_motion(motion))
         .map_err(|e| e.to_string())?;
     emit_motions(host);
     Ok(())
@@ -2839,6 +2849,41 @@ mod tests {
         assert_eq!(host.message_types(), ["state"]);
         assert_eq!(host.scene.borrow().joint_positions(), &[0.5]);
         assert!(host.logs.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_motion_is_removed_by_name_and_the_list_goes_out() {
+        // What the studio's delete button sends. `clear_motion` leaves the
+        // motion listed, empty; `remove_motion` takes the name as well, and
+        // every client gets the new list.
+        let host = TestHost::new();
+        let add = |motion: &str| {
+            handle_client_message(
+                &host,
+                &format!(
+                    r#"{{"type":"add_segment","motion":"{motion}","segment":{{"kind":"joint","goal_positions":[0.3],"constraints":[]}}}}"#
+                ),
+            );
+        };
+        add("main");
+        add("other");
+        handle_client_message(&host, r#"{"type":"clear_motion","motion":"main"}"#);
+        let names = |host: &TestHost| -> Vec<String> {
+            host.scene.borrow().motions().iter().map(|m| m.name.clone()).collect()
+        };
+        assert_eq!(names(&host), ["main", "other"]);
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"remove_motion","motion":"main"}"#);
+        assert_eq!(names(&host), ["other"]);
+        assert_eq!(host.message_types(), ["motions"]);
+        assert!(host.logs.borrow().is_empty());
+        // A name that is not there is refused by name, and nothing goes out.
+        host.out.borrow_mut().clear();
+        handle_client_message(&host, r#"{"type":"remove_motion","motion":"main"}"#);
+        assert!(host.message_types().is_empty());
+        let logs = host.logs.borrow();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("rejected remove_motion: unknown motion `main`"), "{}", logs[0]);
     }
 
     #[test]

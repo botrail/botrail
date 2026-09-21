@@ -2,7 +2,12 @@ import { useState } from "react";
 
 import type { ConstraintMsg, MotionMsg, SegmentKindMsg } from "../protocol";
 import { robotArms, robotByName, useStudioStore } from "../store";
-import { sendAddSegment, sendPlanMotion, sendRemoveSegment } from "../ws";
+import {
+  sendAddSegment,
+  sendPlanMotion,
+  sendRemoveMotion,
+  sendRemoveSegment,
+} from "../ws";
 import { Section } from "./Section";
 
 // "Upright" keeps the TCP's local +Z within a 30° cone of world +Z.
@@ -145,7 +150,20 @@ export function MotionPanel() {
                   </span>
                 )}
               </span>
-              <span className="seq-cond">{m.segments.length} wp</span>
+              <span className="motion-row-end">
+                <span className="seq-cond">{m.segments.length} wp</span>
+                <button
+                  className="motion-remove"
+                  title="Delete this motion"
+                  disabled={!connected}
+                  onClick={(e) => {
+                    e.stopPropagation(); // the row's click selects it
+                    sendRemoveMotion(m.name);
+                  }}
+                >
+                  ×
+                </button>
+              </span>
             </div>
           ))}
           {!motion && (

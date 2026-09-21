@@ -67,7 +67,8 @@ its heading: no pivot turns, ever — it docks facing whatever it faced when
 parked (the whole point of buying those wheels), and a corner costs only
 its length. `allow_reverse` does not exist here, since there is no turning
 around to avoid; the z rules stay a ground drive's (`max_grade`, lift
-edges). `examples/vehicles/amr_demo.py --holonomic` runs the AMR cell that way.
+edges). `examples/vehicles/amr_demo.py --holonomic` runs the AMR cell that way, and
+`examples/vehicles/semi_humanoid_demo.py --robot ffw` lays a whole cell out for it.
 
 ### Arm mounting
 
@@ -366,6 +367,74 @@ flows this way, prints the call-to-supply time the picking station waits,
 and refuses the same shift with `--no-interlock` (the machines meet) or
 `--aisle 1.5` (a column, a wall — by name).
 
+## The robot is the vehicle: a semi-humanoid
+
+A humanoid upper body on a wheeled base is sold, modelled and loaded as one
+machine — arms, torso, head and wheels in one joint tree. It needs no new
+kind of thing: the vehicle has no body (`body=[]`, the robot's own links are
+what the aisle check drives), and the robot is mounted as that vehicle's
+wheels.
+
+```python
+robot = bt.Robot.from_catalog("unitree/g1/g1-d")
+wheels = bt.Wheels.from_catalog("unitree/g1/g1-d")      # joints, radii, base frame, travel posture
+
+scene = bt.Scene(robot, name="g1d")
+scene.add_vehicle("base", body=[], path=[(0, 0), (4, 0), (4, 3)],
+                  stations={"dock": 0, "bench": 2}, speed=0.8, drive=wheels.vehicle_drive)
+scene.mount_robot("base", robot="g1d", wheels=wheels)
+```
+
+Written out, the declaration is the wheel joints and their rolling radii,
+and the frame that stands on the floor:
+
+```python
+wheels = bt.Wheels({"left_wheel_joint": 0.085, "right_wheel_joint": 0.085},
+                   base_frame="base_footprint")
+```
+
+What `wheels=` changes, compared with bolting the same robot on as cargo:
+
+* **The wheels turn, exactly.** Each wheel joint turns by the distance its
+  hub travelled over its radius — forward on a straight, opposite ways
+  through a pivot, backwards when the vehicle reverses, not at all on a lift
+  ride. Which way a joint's axis points does not matter: mirrored wheels
+  both roll forward. A mecanum wheel states its rollers' handedness
+  (`{"fl_wheel": (0.076, -1), ...}`), a swerve module its steering joint
+  (`steer={"wheel_1": "steer_1"}`), which is aimed along the travel by the
+  shorter turn. It is the same closed form as
+  [wheel appearance](#wheel-appearance), on joints instead of obstacles:
+  no forces, no slip.
+* **It bakes with everything else.** The turning goes into the robot's
+  joint track alongside whatever ramps run on the way — raise the torso and
+  tuck the arms while driving — and is in the studio and in exported USD.
+* **The mount is the wheels' only driver.** A ramp or a motion that names a
+  wheel joint is refused; arms and torso plan as [groups](robots.md#more-than-arms),
+  which leave the wheels out.
+* **The machine stands on its base frame.** With no offset given,
+  `base_frame` rides the vehicle frame — on the floor, under the turn
+  centre. Without a base frame the wheels' contact plane under their
+  centroid is used.
+* **It is put in its posture.** `wheels.posture` (a package's `travel`
+  posture by default) is taken up as the machine is mounted, the way a gait
+  mounts a walker in its stance.
+* **A walkable floor is rolled on, not hit.** A building's slab, a lift
+  car's floor or a mezzanine deck is an obstacle, and the wheels are links
+  resting on it. Mark the floor `walkable`
+  (`scene.set_obstacle_walkable("slab", True)`) and the rolling machine gets
+  the pass a walking one gets; an arm riding an AMR never does.
+* **It is one purchase.** The BOM lists the robot and neither the vehicle
+  nor a controller box — even when a footprint box stands in for the body.
+
+A model whose wheels are part of the chassis mesh has no joints to turn and
+still declares that it rolls: `bt.Wheels(base_frame="base_footprint")`.
+
+The rules of [mounting an arm](#mounting-an-arm-the-amr) hold: a planned
+motion waits for `device_done`, a ramp runs on the move.
+[A semi-humanoid picks a shelf](../tutorials/semi-humanoid.md) walks through
+a cell built this way — the torso ramped, then the arm planned, from the
+low board of a bay to its top one.
+
 ## Legs instead of wheels
 
 A quadruped or a humanoid is the same vehicle with a gait on its mount:
@@ -395,6 +464,17 @@ the cell starts waiting on it.
 * `examples/vehicles/agv_cell_demo.py` — an AGV serving the factory cell: called
   while the arm picks, held outside the gate by an interlock, loaded on the
   deck, released once its own load sensor says it has the part.
+* `examples/vehicles/semi_humanoid_demo.py` — a semi-humanoid from the catalog
+  (or the primitive one, `--robot semi`) taking the low and the top board of
+  a bay in one trip, a carton per hand: its wheels turn with the drive, its
+  torso folds on the way home, its head camera gates each pick, and the
+  requirements say how low and how high the machine has to work. `--compare`
+  puts every machine (a bowing G1-D, a squatting RB-Y1 on differential and on
+  mecanum wheels, an AI Worker's lift column on swerve modules, a Galbot G1's
+  folding leg on omni wheels) in front of one bay: the torso posture teaching chose, the cycle time, and for the ones
+  that do not make it the board they miss and by how much. The three holonomic
+  ones get the cell a base that never turns needs: the stand on the bay's
+  side of the aisle, and a crab between the two.
 * `examples/vehicles/amr_demo.py` — a carrier, an arm and a gripper straight out of
   the catalog: the machine fetches a part from a bench in the aisle, carries
   it on its own deck, and hands it to a conveyor in a machining bay, folding

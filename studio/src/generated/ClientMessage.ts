@@ -59,7 +59,7 @@ robot: string | null, segment: SegmentMsg,
  * The arm a created motion drives (an existing motion keeps
  * its arm).
  */
-group: string | null, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, scenario?: string | null, 
+group: string | null, } | { "type": "remove_segment", motion: string, index: number, } | { "type": "clear_motion", motion: string, } | { "type": "remove_motion", motion: string, } | { "type": "plan_motion", motion: string, } | { "type": "upsert_sequence", sequence: SequenceMsg, } | { "type": "remove_sequence", name: string, } | { "type": "define_signal", name: string, initial: boolean, } | { "type": "remove_signal", name: string, } | { "type": "simulate_sequence", name: string, scenario?: string | null, 
 /**
  * The bake's time cap in seconds (the engine's 120 s when absent):
  * a run still waiting past it is reported as timed out.

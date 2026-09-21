@@ -1,12 +1,28 @@
 //! Wheel appearance derived from the guided vehicle's checked motion.
 //! No wheel forces, slip or collision geometry are introduced.
+//!
+//! Two kinds of wheel turn by the same closed form: a display obstacle of
+//! a vehicle assembled from boxes ([`VehicleWheel`], decorated onto the
+//! finished tracks), and a joint of a robot that *is* the vehicle's
+//! running gear ([`crate::seq::WheelDrive`], turned tick by tick because
+//! the joint track bakes alongside whatever else the robot does).
 
-use nalgebra::{Point3, Unit, Vector3};
+use botrail_model::{JointType, RobotModel};
+use nalgebra::{Isometry3, Point3, Translation3, Unit, Vector3};
 use serde::{Deserialize, Serialize};
 
-use crate::rollout::{ObjectTrack, TrackSpan};
-use crate::seq::DeviceKind;
+use crate::rollout::{ObjectTrack, TrackSpan, VehiclePiece};
+use crate::seq::{DeviceKind, WheelDrive};
 use crate::Scene;
+
+/// `|z|` of a wheel's axle direction: it must lie in the floor plane. The
+/// catalog builder's `wheeled` check holds packages to the same number — a
+/// vendor's `rpy="1.5708 0 0"` is already 4e-6 off level.
+const AXLE_LEVEL: f64 = 0.02;
+/// How far a steering axis may lean off the vertical (cos 2°).
+const STEER_UP_MIN: f64 = 0.999_390_827_019_095_8;
+/// Every wheel stands on one floor to within this, metres.
+const FLOOR_TOL: f64 = 5e-3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -137,8 +153,270 @@ fn angular_rate(span: &TrackSpan, wheel: &VehicleWheel) -> f64 {
         _ => return 0.0,
     };
     let axle = from.rotation * Vector3::from(wheel.axis).normalize();
+    rolling_rate(&velocity, &axle, wheel.lateral_ratio, wheel.radius)
+}
+
+/// Signed rate about `axle` (world, unit) of a wheel whose hub travels at
+/// `velocity`: positive turns the top of the wheel toward `axle x Z`, so
+/// two wheels mirrored across the machine (axles +Y and -Y) both roll
+/// forward, one counting up and one down. `lateral_ratio` does not change
+/// sign with the axle — it is the rollers' handedness, not the joint's.
+fn rolling_rate(
+    velocity: &Vector3<f64>,
+    axle: &Vector3<f64>,
+    lateral_ratio: f64,
+    radius: f64,
+) -> f64 {
     let forward = axle.cross(&Vector3::z());
-    velocity.dot(&(forward + axle * wheel.lateral_ratio)) / wheel.radius
+    velocity.dot(&(forward + axle * lateral_ratio)) / radius
+}
+
+/// One wheel of a [`WheelDrive`], resolved against its model.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedWheel {
+    /// The wheel joint: its model index and its slot in `q`.
+    pub joint: usize,
+    pub q: usize,
+    pub radius: f64,
+    pub lateral_ratio: f64,
+    /// The steering joint, likewise.
+    pub steer: Option<(usize, usize)>,
+}
+
+/// A [`WheelDrive`] resolved against its model.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedWheelDrive {
+    pub wheels: Vec<ResolvedWheel>,
+    /// The mount offset that stands the machine on the vehicle plane with
+    /// its turn centre over the vehicle's: the declared base frame on the
+    /// vehicle frame, else the wheels' contact plane under their centroid,
+    /// else nothing to go by (identity).
+    pub offset: Isometry3<f64>,
+}
+
+impl ResolvedWheelDrive {
+    /// Every `q` slot the mount drives: wheels and their steering.
+    pub fn owned(&self) -> Vec<usize> {
+        self.wheels
+            .iter()
+            .flat_map(|w| std::iter::once(w.q).chain(w.steer.map(|(_, q)| q)))
+            .collect()
+    }
+}
+
+/// Checks a [`WheelDrive`] against the model it is declared for — at
+/// `current`, the configuration the machine is mounted in — and derives the
+/// mount offset.
+pub(crate) fn resolve_wheel_drive(
+    model: &RobotModel,
+    drive: &WheelDrive,
+    current: &[f64],
+) -> Result<ResolvedWheelDrive, String> {
+    let poses = botrail_kin::forward_kinematics(model, current).map_err(|e| e.to_string())?;
+    let actuated = |name: &str, role: &str| -> Result<(usize, usize), String> {
+        let joint = model
+            .joint_index(name)
+            .ok_or_else(|| format!("{role} joint `{name}` is not a joint of this robot"))?;
+        let q = model.joints[joint].q_index.ok_or_else(|| {
+            format!(
+                "{role} joint `{name}` carries no degree of freedom (fixed, or a mimic follower)"
+            )
+        })?;
+        Ok((joint, q))
+    };
+    // The joint whose child is `link` — every link but the root has one.
+    let parent_joint = |link: usize| model.joints.iter().position(|j| j.child_link == link);
+    let mut wheels: Vec<ResolvedWheel> = Vec::with_capacity(drive.wheels.len());
+    let mut taken: Vec<usize> = Vec::new();
+    for wheel in &drive.wheels {
+        let fail = |why: String| format!("wheel `{}`: {why}", wheel.joint);
+        let (joint, q) = actuated(&wheel.joint, "wheel")?;
+        let spec = &model.joints[joint];
+        if matches!(spec.joint_type, JointType::Prismatic) || spec.limits.is_some() {
+            return Err(fail(
+                "a wheel joint must be continuous — position limits would be driven \
+                 through their stops"
+                    .into(),
+            ));
+        }
+        if !(wheel.radius.is_finite() && wheel.radius > 0.0) {
+            return Err(fail(format!(
+                "radius must be finite and positive, got {}",
+                wheel.radius
+            )));
+        }
+        if !wheel.lateral_ratio.is_finite() {
+            return Err(fail("lateral_ratio must be finite".into()));
+        }
+        let steer = wheel
+            .steer
+            .as_deref()
+            .map(|name| actuated(name, "steer"))
+            .transpose()
+            .map_err(&fail)?;
+        if let Some((steer_joint, _)) = steer {
+            let steer_spec = &model.joints[steer_joint];
+            if matches!(steer_spec.joint_type, JointType::Prismatic) {
+                return Err(fail(format!(
+                    "steer joint `{}` must turn, not slide",
+                    steer_spec.name
+                )));
+            }
+            let up = poses[steer_spec.child_link].rotation * steer_spec.axis.into_inner();
+            if up.z.abs() < STEER_UP_MIN {
+                return Err(fail(format!(
+                    "steer joint `{}` must turn about the vertical, its axis points \
+                     ({:.3}, {:.3}, {:.3})",
+                    steer_spec.name, up.x, up.y, up.z
+                )));
+            }
+            // The wheel hangs under its steering: walk up from the wheel.
+            let mut link = spec.parent_link;
+            let mut under = false;
+            while let Some(j) = parent_joint(link) {
+                if j == steer_joint {
+                    under = true;
+                    break;
+                }
+                link = model.joints[j].parent_link;
+            }
+            if !under {
+                return Err(fail(format!(
+                    "steer joint `{}` does not carry this wheel",
+                    steer_spec.name
+                )));
+            }
+        }
+        let axle = poses[spec.child_link].rotation * spec.axis.into_inner();
+        if axle.z.abs() > AXLE_LEVEL {
+            return Err(fail(format!(
+                "the axle must be level, it points ({:.3}, {:.3}, {:.3})",
+                axle.x, axle.y, axle.z
+            )));
+        }
+        for slot in std::iter::once(q).chain(steer.map(|(_, q)| q)) {
+            if taken.contains(&slot) {
+                return Err(fail("a joint may turn for one wheel only".into()));
+            }
+            taken.push(slot);
+        }
+        wheels.push(ResolvedWheel {
+            joint,
+            q,
+            radius: wheel.radius,
+            lateral_ratio: wheel.lateral_ratio,
+            steer,
+        });
+    }
+    let offset = match &drive.base_frame {
+        Some(name) => {
+            let frame = model
+                .link_index(name)
+                .ok_or_else(|| format!("base frame `{name}` is not a link of this robot"))?;
+            // The frame that rides the vehicle must be rigid with the root
+            // the vehicle moves: under a joint it would be left behind.
+            let mut link = frame;
+            while let Some(j) = parent_joint(link) {
+                if !matches!(model.joints[j].joint_type, JointType::Fixed) {
+                    return Err(format!(
+                        "base frame `{name}` hangs under joint `{}`; it must be fixed to the \
+                         root link `{}`",
+                        model.joints[j].name, model.links[model.root_link].name
+                    ));
+                }
+                link = model.joints[j].parent_link;
+            }
+            poses[frame].inverse()
+        }
+        None if wheels.is_empty() => Isometry3::identity(),
+        None => {
+            let hubs: Vec<(Point3<f64>, f64)> = wheels
+                .iter()
+                .map(|w| {
+                    let hub = poses[model.joints[w.joint].child_link].translation.vector;
+                    (Point3::from(hub), hub.z - w.radius)
+                })
+                .collect();
+            let floor = hubs.iter().map(|(_, z)| *z).fold(f64::INFINITY, f64::min);
+            if let Some((i, (_, z))) = hubs
+                .iter()
+                .enumerate()
+                .find(|(_, (_, z))| z - floor > FLOOR_TOL)
+            {
+                return Err(format!(
+                    "wheel `{}` stands {:.1} mm above the others' floor; state `base_frame`, \
+                     or check the radii",
+                    drive.wheels[i].joint,
+                    (z - floor) * 1e3
+                ));
+            }
+            let n = hubs.len() as f64;
+            let (cx, cy) = hubs.iter().fold((0.0, 0.0), |(x, y), (hub, _)| {
+                (x + hub.x / n, y + hub.y / n)
+            });
+            Translation3::new(-cx, -cy, -floor).into()
+        }
+    };
+    Ok(ResolvedWheelDrive { wheels, offset })
+}
+
+/// How far each wheel (and where each steering joint) turns while its
+/// machine's base, at `from`, rides `piece` for `dt`: `(q slot, new value)`
+/// pairs, applied onto `q`. The hub velocity and the axle turn together
+/// through a pivot, so the rate is exact over the whole piece.
+pub(crate) fn roll(
+    model: &RobotModel,
+    drive: &ResolvedWheelDrive,
+    q: &mut [f64],
+    from: &Isometry3<f64>,
+    piece: &VehiclePiece,
+    dt: f64,
+) {
+    let Ok(local) = botrail_kin::forward_kinematics(model, q) else {
+        return;
+    };
+    for wheel in &drive.wheels {
+        let spec = &model.joints[wheel.joint];
+        let hub = from * Point3::from(local[spec.child_link].translation.vector);
+        let velocity = match piece {
+            VehiclePiece::Lin { velocity } => *velocity,
+            VehiclePiece::Piv { center, omega } => Vector3::z().cross(&(hub - center)) * *omega,
+        };
+        let mut axle = from.rotation * (local[spec.child_link].rotation * spec.axis.into_inner());
+        if let Some((steer_joint, steer_q)) = wheel.steer {
+            let travel = Vector3::new(velocity.x, velocity.y, 0.0);
+            if travel.norm() > 1e-9 {
+                // Aim the rolling direction along the hub's travel — or
+                // against it, whichever is the shorter turn: a wheel rolls
+                // backward as well as forward.
+                let steer_spec = &model.joints[steer_joint];
+                let up = from.rotation
+                    * (local[steer_spec.child_link].rotation * steer_spec.axis.into_inner());
+                let forward = axle.cross(&Vector3::z());
+                let turn = forward.y.atan2(forward.x);
+                let mut delta = travel.y.atan2(travel.x) - turn;
+                delta = (delta + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI;
+                if delta > std::f64::consts::FRAC_PI_2 {
+                    delta -= std::f64::consts::PI;
+                } else if delta < -std::f64::consts::FRAC_PI_2 {
+                    delta += std::f64::consts::PI;
+                }
+                // About a steering axis that points down, the same turn
+                // in the world is the opposite joint travel.
+                let signed = delta * up.z.signum();
+                let aimed = match steer_spec.limits {
+                    Some(l) => (q[steer_q] + signed).clamp(l.lower, l.upper),
+                    None => q[steer_q] + signed,
+                };
+                let applied = (aimed - q[steer_q]) * up.z.signum();
+                q[steer_q] = aimed;
+                axle =
+                    nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), applied) * axle;
+            }
+        }
+        q[wheel.q] += rolling_rate(&velocity, &axle, wheel.lateral_ratio, wheel.radius) * dt;
+    }
 }
 
 #[cfg(test)]

@@ -260,6 +260,20 @@ impl SessionHost for SceneHub {
     }
 }
 
+/// What makes a mounted robot its vehicle's running gear, if anything.
+pub enum MountGear {
+    /// Bolted on: an arm on a chassis, an airframe on its flight path.
+    Rigid,
+    /// The robot is the vehicle's legs.
+    Legs(botrail_scene::seq::GaitSpec),
+    /// The robot is the vehicle's wheels; `posture` — `(joint, value)` —
+    /// is how it is put as it is mounted.
+    Wheels {
+        drive: botrail_scene::seq::WheelDrive,
+        posture: Vec<(String, f64)>,
+    },
+}
+
 impl SceneHub {
     pub fn new(scene: Scene) -> Arc<Self> {
         let (tx, _) = broadcast::channel(64);
@@ -511,14 +525,14 @@ impl SceneHub {
 
     /// Puts a robot on a vehicle; the base then follows it. Broadcasts the
     /// new state, since mounting moves the robot to the vehicle at once.
-    /// Puts a robot on a vehicle, optionally with a gait; the offset
-    /// defaults to the stance-derived one when a gait is given.
+    /// With running gear — a gait, or wheels — the offset defaults to the
+    /// one derived from it (the stance feet, the base frame, on the floor).
     pub fn mount_robot_with(
         &self,
         robot: usize,
         device: &str,
         offset: Option<Isometry3<f64>>,
-        gait: Option<botrail_scene::seq::GaitSpec>,
+        gear: MountGear,
         spin: Vec<(String, f64)>,
         reference: Option<botrail_scene::mounting::VehicleMountReference>,
     ) -> Result<(), SceneError> {
@@ -536,13 +550,38 @@ impl SceneHub {
                         "carrier mounting offset must be finite".into(),
                     ));
                 }
-                if gait.is_some() || !spin.is_empty() {
+                if !matches!(gear, MountGear::Rigid) || !spin.is_empty() {
                     return Err(SceneError::BadMount(
-                        "carrier frame review is for rigid vehicle mounts, not gait or spin".into(),
+                        "carrier frame review is for rigid vehicle mounts, not gait, spin or wheels"
+                            .into(),
                     ));
                 }
             }
-            scene.mount_robot_with(robot, device, offset, gait)?;
+            match gear {
+                MountGear::Wheels { drive, posture } => {
+                    // The posture first: the machine is mounted the way it
+                    // travels, as a gait mounts it in its stance.
+                    if !posture.is_empty() {
+                        let names = scene.robots()[robot].model.actuated_joint_names();
+                        let mut q = scene.robots()[robot].joint_positions().to_vec();
+                        for (joint, value) in &posture {
+                            let Some(qi) = names.iter().position(|n| n == joint) else {
+                                return Err(SceneError::BadMount(format!(
+                                    "wheels: posture joint `{joint}` is not an actuated joint \
+                                     of this robot"
+                                )));
+                            };
+                            q[qi] = *value;
+                        }
+                        scene.set_joint_positions_for(robot, q)?;
+                    }
+                    scene.mount_robot_on_wheels(robot, device, offset, drive)?;
+                }
+                MountGear::Legs(gait) => {
+                    scene.mount_robot_with(robot, device, offset, Some(gait))?
+                }
+                MountGear::Rigid => scene.mount_robot_with(robot, device, offset, None)?,
+            }
             if let Some(reference) = reference {
                 scene.set_mount_reference(robot, reference)?;
             }
@@ -1684,6 +1723,10 @@ impl SceneHub {
 
     pub fn remove_segment(&self, motion: &str, index: usize) -> Result<(), String> {
         botrail_session::remove_segment(self, motion, index)
+    }
+
+    pub fn remove_motion(&self, motion: &str) -> Result<(), String> {
+        botrail_session::remove_motion(self, motion)
     }
 
     pub fn clear_motion(&self, motion: &str) -> Result<(), String> {
