@@ -471,8 +471,9 @@ the cell starts waiting on it.
   requirements say how low and how high the machine has to work. `--compare`
   puts every machine (a bowing G1-D, a squatting RB-Y1 on differential and on
   mecanum wheels, an AI Worker's lift column on swerve modules, a Galbot G1's
-  folding leg on omni wheels) in front of one bay: the torso posture teaching chose, the cycle time, and for the ones
-  that do not make it the board they miss and by how much. The three holonomic
+  folding leg on omni wheels, a Galaxea R1 Pro's four-joint torso on swerve
+  modules) in front of one bay: the torso posture teaching chose, the cycle time, and for the ones
+  that do not make it the board they miss and by how much. The four holonomic
   ones get the cell a base that never turns needs: the stand on the bay's
   side of the aisle, and a crab between the two.
 * `examples/vehicles/amr_demo.py` — a carrier, an arm and a gripper straight out of

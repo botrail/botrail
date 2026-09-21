@@ -56,9 +56,10 @@ the tests use): a lift column and 4-axis arms. The bay is each machine's
 own — its boards stand where that machine's torso has to move to reach them.
 
 `--robot rby1m` (the RB-Y1 on mecanum wheels), `--robot ffw` (a ROBOTIS AI
-Worker FFW-SG2: a lift column on three swerve modules) and `--robot galbot` (a
-Galbot G1: a five-joint torso on four omni wheels) have bases that do not
-turn — a holonomic machine docks facing whatever it faced when parked. Their
+Worker FFW-SG2: a lift column on three swerve modules), `--robot galbot` (a
+Galbot G1: a five-joint torso on four omni wheels) and `--robot r1pro` (a
+Galaxea R1 Pro: a four-joint torso on three swerve modules) have bases that do
+not turn — a holonomic machine docks facing whatever it faced when parked. Their
 cell is laid out for that: the hand-off stand is on the bay's side of the
 aisle, the machine parks nose to the racks and crabs between the two.
 
@@ -69,7 +70,7 @@ reason — a board no torso posture puts the hand on, and how far off the best
 one is.
 
 Run with:  python examples/vehicles/semi_humanoid_demo.py [out.usdc]
-               [--robot g1d|rby1|rby1m|ffw|galbot|semi] [--aisle 1.4] [--compare]
+               [--robot g1d|rby1|rby1m|ffw|galbot|r1pro|semi] [--aisle 1.4] [--compare]
                [--deliverables DIR] [--studio]
 
 `--deliverables DIR` writes the hand-over set from the same bake — project,
@@ -228,7 +229,8 @@ SEMI = Machine(
     turn=math.pi / 2,
 )
 
-G1D_ID = "unitree/g1/g1-d"
+# r2: the revision that states the head camera frame the cell mounts its camera on.
+G1D_ID = "unitree/g1/g1-d/r2"
 G1D = Machine(
     key="g1d",
     title=f"Unitree G1-D (catalog `{G1D_ID}`)",
@@ -268,11 +270,11 @@ G1D = Machine(
                   {f"{side}_shoulder_pitch_joint": -2.0, f"{side}_elbow_joint": 0.2},
                   {f"{side}_shoulder_pitch_joint": -1.0, f"{side}_elbow_joint": 1.5}]
            for side in SIDES},
-    # The package states no camera frame (the vendor says "binocular head
-    # camera" and publishes no pose). This is the cell's reading of the
-    # vendor's head mesh: its front-most feature, a bar 62 x 14 mm across the
-    # top of the face, centred here. The field of view is the cell's guess.
-    camera=("head_link", (0.074, 0.0, 0.495), CAMERA_AHEAD, 90.0),
+    # The package's head camera frame (from r2 on): the vendor's frame of the
+    # legged G1's head camera, carried over on the head part the two machines
+    # share — it looks 47.6 degrees down. The vendor does not say which camera
+    # the G1-D carries, so the field of view is the cell's guess.
+    camera=("head_camera", (0.0, 0.0, 0.0), CAMERA_AHEAD, 90.0),
     boards=(0.25, 1.45),
     carton=(0.04, 0.06, 0.10),
     standoff=0.40,
@@ -457,7 +459,64 @@ GALBOT = Machine(
     holonomic=True,
 )
 
-MACHINES = {m.key: m for m in (G1D, RBY1, RBY1M, FFW, GALBOT, SEMI)}
+def knees(joint1: float, joint2: float) -> dict:
+    """Galaxea R1 Pro's torso is three pitches and a yaw. The third pitch
+    turns the other way, so making it the sum of the first two keeps the chest
+    upright; these pairs keep it over the base, the knee forward or back."""
+    return {"torso_joint1": joint1, "torso_joint2": joint2, "torso_joint3": joint1 + joint2}
+
+
+# Shoulder heights of 1.34 m down to 0.93 m over the floor (it travels at 1.45 m).
+R1PRO_LADDER = [(-0.4, 1.1), (-0.6, 1.6), (-0.7, 2.0), (0.7, -2.3), (0.9, -2.7)]
+# A camera on a frame that already is an optical one: +Z looks, +X right, +Y down.
+CAMERA_OPTICAL = (1.0, 0.0, 0.0, 0.0)
+R1PRO_ID = "galaxea/r1/r1-pro"
+# In this cell the R1 Pro does not finish: the procedure holds the torso still
+# while an arm works and pulls a carton 0.15 m straight towards the body, and
+# this arm's elbow (100 degrees of fold) keeps its wrist more than 0.35 m from
+# its shoulder — the reach that is left between too near and too far is a few
+# millimetres wide. It stays in the table, where that is the answer.
+R1PRO = Machine(
+    key="r1pro",
+    title=f"Galaxea R1 Pro (catalog `{R1PRO_ID}`)",
+    arms={"low": "right", "top": "left"},
+    travel=knees(0.0, 0.0),
+    torso={"low": [knees(0.0, 0.0)] + [knees(*step) for step in R1PRO_LADDER],
+           "top": [knees(0.0, 0.0)] + [knees(*step) for step in R1PRO_LADDER[:2]],
+           "stand": [knees(0.0, 0.0)] + [knees(*step) for step in R1PRO_LADDER]},
+    # The head is fixed and its camera looks 20 degrees down: a glance further
+    # down is a bow at the hip (the third pitch, which counts backwards).
+    look={"low": [{}] + [{"torso_joint3": -bow} for bow in (0.15, 0.3, 0.45)], "top": [{}], "ahead": {}},
+    # Two fingers, a joint each, shut at zero: one slides to +50 mm, its twin to -50 mm.
+    hands_open={side: {f"{side}_gripper_finger_joint1": 0.05, f"{side}_gripper_finger_joint2": -0.05} for side in SIDES},
+    hands_shut={side: {f"{side}_gripper_finger_joint1": 0.034, f"{side}_gripper_finger_joint2": -0.034} for side in SIDES},
+    touch={side: [f"{side}_gripper_link", f"{side}_gripper_finger_link1", f"{side}_gripper_finger_link2"] for side in SIDES},
+    grasp={side: None for side in SIDES},
+    approach=AHEAD,
+    carry={"left": (0.30, 0.17, 1.10), "right": (0.30, -0.17, 1.10)},
+    seeds={side: [{f"{side}_arm_joint1": lift, f"{side}_arm_joint4": -bend}
+                  for lift, bend in ((-0.4, 1.4), (-1.0, 1.0), (0.4, 1.4), (-1.6, 0.6))] for side in SIDES},
+    # The package's head camera frame — the vendor's, an optical one.
+    camera=("zed_link", (0.0, 0.0, 0.0), CAMERA_OPTICAL, 90.0),
+    boards=(0.75, 1.50),
+    carton=(0.06, 0.06, 0.10),
+    # Its elbow folds to 100 degrees and no further: nearer than 0.37 m to the
+    # shoulder the wrist does not go, so the machine stands well back and pulls
+    # a carton out no further than clears the board's edge.
+    standoff=0.50,
+    dock_standoff=0.50,
+    inset=0.10,
+    pull=0.15,
+    stand_inset=0.08,
+    span=0.17,
+    stand_top=0.85,
+    speed=0.8,
+    turn=1.2,
+    package=R1PRO_ID,
+    holonomic=True,
+)
+
+MACHINES = {m.key: m for m in (G1D, RBY1, RBY1M, FFW, GALBOT, R1PRO, SEMI)}
 
 
 def load(machine: Machine):
@@ -769,9 +828,13 @@ def teach(scene: bt.Scene, machine: Machine) -> dict:
             try:
                 poses["low_out"] = solve(arm, poses["torso_low"], (grip[0] + back[0], grip[1] + back[1], grip[2] + DROP),
                                          heading, poses["low_over"])
-            except LookupError as err:
-                raise RuntimeError(f"{machine.key}: backing out over the low board: {err}") from err
-            poses[f"low_{arm}_carry_kind"] = LINE if line_exists(arm, poses["low_out"], carry) else "joint"
+            except LookupError:
+                # An arm whose elbow folds no further cannot bring the hand
+                # that near its shoulder: the way back is planned from over
+                # the carton, and the planner keeps the carton off the edge.
+                poses[f"low_{arm}_carry_kind"] = "joint"
+            else:
+                poses[f"low_{arm}_carry_kind"] = LINE if line_exists(arm, poses["low_out"], carry) else "joint"
         grip, _ = scene.obstacle_pose("carton_top")
         out = tuple(g + b for g, b in zip(grip, back))
         task("top", heading, {
@@ -967,7 +1030,7 @@ def compare(boards: tuple, aisle: float = 1.4, machines=None) -> list:
         return text if len(text) < 110 else text[:107] + "..."
 
     print(f"bay: boards at {boards[0]:.2f} m and {boards[1]:.2f} m; aisle {aisle:.2f} m")
-    print(f"{'machine':<8} {'torso, low board':<46} {'torso, top board':<38} {'cycle':>7}   verdict")
+    print(f"{'machine':<8} {'torso, low board':<52} {'torso, top board':<52} {'cycle':>7}   verdict")
     rows = []
     for key in machines or MACHINES:
         low = top = "—"
@@ -985,7 +1048,7 @@ def compare(boards: tuple, aisle: float = 1.4, machines=None) -> list:
         except (ValueError, RuntimeError) as err:
             verdict = first_line(err).removeprefix(f"{key}: ")
         rows.append((key, low, top, cycle, verdict))
-        print(f"{key:<8} {low:<46} {top:<38} {'—' if cycle is None else f'{cycle:6.2f}s':>7}   {verdict}")
+        print(f"{key:<8} {low:<52} {top:<52} {'—' if cycle is None else f'{cycle:6.2f}s':>7}   {verdict}")
     print("\nOne bay, one aisle, one way of teaching it. What changed is the machine:")
     print("how its torso makes height, how far its arms go, where it stands to work.")
     return rows

@@ -19,7 +19,7 @@ python examples/vehicles/semi_humanoid_demo.py
 ```
 
 ```text
-Unitree G1-D (catalog `unitree/g1/g1-d`); aisle 1.40 m
+Unitree G1-D (catalog `unitree/g1/g1-d/r2`); aisle 1.40 m
 cycle time: 55.39s
   to bay         0.00 –   4.75s
   look low       4.75 –   5.55s
@@ -51,8 +51,9 @@ waist that bows and turns, two 7-axis arms with three-finger hands, a
 differential base; the first run fetches it into the botrail cache.
 `--robot rby1` is a Rainbow Robotics RB-Y1 A, whose torso is a six-joint leg;
 `--robot rby1m` (the same on mecanum wheels), `--robot ffw` (a ROBOTIS AI
-Worker FFW-SG2, a lift column on swerve modules) and `--robot galbot` (a Galbot
-G1, a five-joint torso on omni wheels) are machines that do not turn;
+Worker FFW-SG2, a lift column on swerve modules), `--robot galbot` (a Galbot
+G1, a five-joint torso on omni wheels) and `--robot r1pro` (a Galaxea R1 Pro, a
+four-joint torso on swerve modules) are machines that do not turn;
 `--robot semi` runs the same cell on the primitive machine in
 `examples/assets/semi_humanoid_test.urdf`, with no download (see
 [the offline machine](#the-offline-machine)). `--compare` puts all of them in
@@ -63,7 +64,7 @@ front of one bay ([Which machine for this bay](#which-machine-for-this-bay)).
 ## The robot is its own vehicle
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:533:540"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:592:599"
 ```
 
 The vehicle has `body=[]`: there is no chassis box, because the robot's own
@@ -84,7 +85,7 @@ arrives at the bay nose first as well — one quarter turn in the whole trip.
 Everything about the wheels and the groups comes out of the package:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:463:469"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:522:528"
 ```
 
 ## The torso first, then the arm
@@ -101,7 +102,7 @@ gentlest first, and teaching keeps the first one the hand reaches all of the
 task's targets from, collision-free:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:708:732"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:767:791"
 ```
 
 For the G1-D that prints `low {'Yaw_Joint': 2.0}`: `Yaw_Joint` is the waist's
@@ -130,7 +131,7 @@ Two details of the arm's motions are worth stealing:
   costs seconds.
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:678:706"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:737:765"
 ```
 
 ## Ramps are yours to check
@@ -141,7 +142,7 @@ while its vehicle moves. So the demo samples each torso sweep at the station
 it happens at, before the bake:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:821:834"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:884:897"
 ```
 
 It earns its keep at once. Ramping the G1-D from its bow straight to the top
@@ -157,7 +158,7 @@ Hence the cycle's `straighten` step: upright first, then up.
 ## The head camera is an input
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:566:570"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:625:629"
 ```
 
 A [vision sensor](../guides/sensors-and-devices.md#vision-sensors) behind the
@@ -165,16 +166,18 @@ head camera is a signal: ON while the watched carton is in the view frustum
 with a clear line of sight. Each pick waits for it:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:911:911"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:974:974"
 ```
 
 The glance itself is taught like the torso: the machine description lists
 glances gentlest first, and teaching keeps the first that frames the carton —
 the geometric half of what the sensor judges, asked of the carton's corners —
 and gets there without sweeping the cell. A fixed head makes that matter: the
-G1-D looks down by bowing — 0.9 rad for the carton 0.30 m over the floor — and
-a glance that frames nothing, or sweeps the carried hand onto a board, is
-refused at teach time with every candidate's reason, not found out in the bake.
+G1-D looks down by bowing — 0.3 rad is enough, because its head camera already
+looks 47.6 degrees down (the package's `head_camera` frame: the vendor's frame
+of the legged G1's head camera, on the head the two machines share) — and a
+glance that frames nothing, or sweeps the carried hand onto a board, is refused
+at teach time with every candidate's reason, not found out in the bake.
 
 So a bay that was not replenished stalls the cycle at the glance, by name
 (``timed out after 60s waiting in step 8 (`look top`)``), instead of closing a
@@ -187,7 +190,7 @@ posture); the primitive machine has a pan-tilt head and a group for it.
 ## The fold rides the drive
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:924:925"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:987:988"
 ```
 
 A planned motion cannot start while the vehicle drives — a plan is baked in
@@ -262,13 +265,14 @@ python examples/vehicles/semi_humanoid_demo.py --compare --robot semi
 
 ```text
 bay: boards at 0.75 m and 1.50 m; aisle 1.40 m
-machine  torso, low board                               torso, top board                         cycle   verdict
-g1d      —                                              —                                            —   no glance shows the low carton
-rby1     torso_1 1.2, torso_2 -2.4, torso_3 1.2         as it travels                           71.08s   ok
-rby1m    torso_1 0.9, torso_2 -1.8, torso_3 0.9         as it travels                           66.55s   ok
-ffw      lift_joint -0.2                                as it travels                           73.11s   ok
-galbot   leg_joint1 0.8, leg_joint2 2, leg_joint3 1.2   leg_joint2 2.3, leg_joint3 1.4          63.25s   ok
-semi     lift_joint 0                                   lift_joint 0.4                          52.85s   ok
+machine  torso, low board                                     torso, top board                                       cycle   verdict
+g1d      Yaw_Joint 0.4                                        LZ_mt_Joint 0.21, LZ_it_Joint 0.21                         —   step 11 (`lift top`): planning failed: segment 1: cartesian line failed at 59%: IK did not converge (unreac...
+rby1     torso_1 1.2, torso_2 -2.4, torso_3 1.2               as it travels                                         71.08s   ok
+rby1m    torso_1 0.9, torso_2 -1.8, torso_3 0.9               as it travels                                         66.55s   ok
+ffw      lift_joint -0.2                                      as it travels                                         73.11s   ok
+galbot   leg_joint1 0.8, leg_joint2 2, leg_joint3 1.2         leg_joint2 2.3, leg_joint3 1.4                        63.25s   ok
+r1pro    torso_joint1 -0.7, torso_joint2 2, torso_joint3 1.3  torso_joint1 -0.6, torso_joint2 1.6, torso_joint3 1        —   step 9 (`pick top`): planning failed: segment 1: cartesian line failed at 60%: IK did not converge (unreach...
+semi     lift_joint 0                                         lift_joint 0.4                                        52.85s   ok
 ```
 
 and in front of the G1-D's bay, whose low board is 0.25 m over the floor
@@ -276,13 +280,14 @@ and in front of the G1-D's bay, whose low board is 0.25 m over the floor
 
 ```text
 bay: boards at 0.25 m and 1.45 m; aisle 1.40 m
-machine  torso, low board                               torso, top board                         cycle   verdict
-g1d      Yaw_Joint 2                                    LZ_mt_Joint 0.21, LZ_it_Joint 0.21      55.39s   ok
-rby1     —                                              —                                            —   no torso posture reaches `low` — the closest is 140 mm short
-rby1m    —                                              —                                            —   no torso posture reaches `low` — the closest is 87 mm short
-ffw      —                                              —                                            —   no torso posture reaches `low` — the closest is 120 mm short
-galbot   —                                              —                                            —   no glance shows the low carton
-semi     —                                              —                                            —   no torso posture reaches `low` — the closest is 263 mm short
+machine  torso, low board                                     torso, top board                                       cycle   verdict
+g1d      Yaw_Joint 2                                          LZ_mt_Joint 0.21, LZ_it_Joint 0.21                    55.39s   ok
+rby1     —                                                    —                                                          —   no torso posture reaches `low` — the closest is 140 mm short
+rby1m    —                                                    —                                                          —   no torso posture reaches `low` — the closest is 87 mm short
+ffw      —                                                    —                                                          —   no torso posture reaches `low` — the closest is 120 mm short
+galbot   —                                                    —                                                          —   no glance shows the low carton
+r1pro    —                                                    —                                                          —   no torso posture reaches `low` — the closest is 196 mm short
+semi     —                                                    —                                                          —   no torso posture reaches `low` — the closest is 263 mm short
 ```
 
 Four ways of making height, and they show. The column machines have no way
@@ -290,11 +295,19 @@ down to 0.25 m. The RB-Y1 squats 0.45 m and still ends 140 mm short of a
 *level* hand on that carton — the postures that put it there fold the machine
 into its own base. The Galbot G1 folds its leg and reaches both boards of that
 bay, and is stopped by its eyes instead: its head tilts 28 degrees down, and
-from where it travels that does not show a carton 0.30 m over the floor. The
-G1-D bows 115 degrees and takes it — and in front of the other bay no bow of
-its fixed head frames a carton that close and that far to the side. (Both
-machines' cameras are this cell's reading — the packages state none — so those
-two verdicts are about the reading as much as about the machines.) None of the
+from where it travels that does not show a carton 0.30 m over the floor. (The
+package has no camera link; the camera is this cell's reading of the head's
+mount frame, so that verdict is about the reading as much as about the
+machine.) The G1-D bows 115 degrees and takes it; in front of the other bay it
+is taught both boards (a bow of 0.4 rad, the column up) and then the bake
+stops it at the top one: 1.58 m up, its level hand has no room to back the
+carton 0.17 m straight out from under the board — the line runs out of arm at
+59 %. The Galaxea R1 Pro finishes in front of neither: this cell holds the torso
+still while an arm works and pulls a carton 0.15 m straight towards the body,
+and an elbow that folds 100 degrees keeps that wrist more than 0.35 m from its
+shoulder — what is left between too near and too far is millimetres wide. A
+cell that let the torso lean back with the pull would suit it; that is the
+cell's procedure speaking, and the table says which step. None of the
 verdicts is an opinion about the machine — each is this bay's requirement, met
 or not — and they come from three places: the **package** (not to be had), the
 **teaching** (no torso posture of the ones the machine description lists puts
@@ -302,8 +315,8 @@ the hand on the board, with how far off the best one is; no glance that shows
 the carton), the **bake** and the checks before it (a sweep through the bay, a
 body that brushes the aisle).
 
-Three of the six do not turn. A holonomic base — the RB-Y1 M's mecanum wheels,
-the AI Worker's swerve modules, the Galbot G1's omni wheels —
+Four of the seven do not turn. A holonomic base — the RB-Y1 M's mecanum wheels,
+the AI Worker's and the R1 Pro's swerve modules, the Galbot G1's omni wheels —
 [docks facing whatever it faced when parked](../guides/vehicles-and-amr.md#holonomic-drive-mecanum-wheels):
 in the cell above it would arrive side-on to the bay. The machine description
 says so (`holonomic=True`) and the cell is laid out by it — the stand on the
@@ -345,7 +358,7 @@ whose twin is a mimic. It has no package, so the script declares what a
 package would:
 
 ```python
---8<-- "examples/vehicles/semi_humanoid_demo.py:470:479"
+--8<-- "examples/vehicles/semi_humanoid_demo.py:529:538"
 ```
 
 Its bay is its own — boards at 0.75 m and 1.50 m, where a 0.40 m column makes

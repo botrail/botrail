@@ -99,7 +99,7 @@ scene.declare_io("door_ch1", role="input", kind="safe_di", safety=True, pair="do
   controller's points. `channels=` is a list of dicts; the `bt.io`
   templates build them (`di8/do8/di16/do16(base=…)`, `safe_di8`, `word`,
   `ao`, `ur_standard()`), a catalog product brings its own
-  (`bt.io.from_catalog("universal_robots/ur/ur5e/r1")` reads the package's
+  (`bt.io.from_catalog("universal_robots/ur/ur5e/r2")` reads the package's
   `electrical.io` — the controller's channel table, or the template it
   names; `bt.parts.remote_io(catalog=…)` builds a station's node the same
   way), and address dialects live there, in Python:

@@ -185,7 +185,7 @@ def from_catalog(ref, revision: Optional[str] = None) -> list:
     `bt.io.ur_standard()` and the UR5e package agree.
 
         scene.add_io_node("UR", kind="robot_controller", robots=["arm"],
-                          channels=bt.io.from_catalog("universal_robots/ur/ur5e/r1"))
+                          channels=bt.io.from_catalog("universal_robots/ur/ur5e/r2"))
     """
     manifest = _catalog_manifest(ref, revision)
     io = (manifest.get("electrical") or {}).get("io") or {}

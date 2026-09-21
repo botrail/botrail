@@ -33,8 +33,10 @@ LIFTKIT is the 620 variant with its 800 mm stroke (`0`–`0.4` m of drive, the
 second stage following, 0.905–1.705 m of mount height, 0.08 m/s over both
 stages). Mounting holes, adapters and communication are not in them, and
 `compatibility.model_fidelity` in each manifest says how far to trust the
-geometry and the masses. The `r1` packages stay `recipe_only`; pin the full
-id and a `revision` to reproduce a cell, and `save_project` bundles the
-geometry for replay without the catalog.
+geometry and the masses. The `r1` revisions they replace were built from
+meshes the catalog has no clearance to redistribute, so it never shipped
+their models — and it no longer lists them. Pin the full id and a `revision`
+to reproduce a cell, and `save_project` bundles the geometry for replay
+without the catalog.
 
 ::: botrail.catalog

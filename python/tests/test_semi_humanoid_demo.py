@@ -172,8 +172,8 @@ def test_one_bay_tells_the_machines_apart(baked, capsys) -> None:
     assert "bay: boards at 0.25 m and 1.45 m; aisle 1.40 m" in printed and "verdict" in printed
     # The machines the table is for come from the catalog; the ones whose base
     # does not turn say so, and get the cell laid out for them.
-    assert list(demo.MACHINES) == ["g1d", "rby1", "rby1m", "ffw", "galbot", "semi"]
-    assert [key for key, m in demo.MACHINES.items() if m.holonomic] == ["rby1m", "ffw", "galbot"]
+    assert list(demo.MACHINES) == ["g1d", "rby1", "rby1m", "ffw", "galbot", "r1pro", "semi"]
+    assert [key for key, m in demo.MACHINES.items() if m.holonomic] == ["rby1m", "ffw", "galbot", "r1pro"]
     assert demo.MACHINES["rby1"].package.endswith("/r2") and demo.MACHINES["semi"].package == ""
 
 
