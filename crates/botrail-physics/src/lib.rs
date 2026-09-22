@@ -293,6 +293,24 @@ pub trait PhysicsBackend: Send + Sync {
     /// An observation channel (design-rl.md §3.3), never a bake input.
     fn body_velocity(&self, body: BodyId) -> Velocity;
 
+    /// Whether the engine simulates `body` as a free (dynamic) body right
+    /// now — what a hand can move. A mirror, a part taken in hand, a
+    /// static body: `false`.
+    fn is_dynamic_body(&self, body: BodyId) -> bool;
+
+    /// The mass the engine simulates `body` with (kg).
+    fn body_mass(&self, body: BodyId) -> f64;
+
+    /// Sets the external force (N) applied at world `point` on `body`
+    /// every step until [`clear_force`](Self::clear_force) — a hand on
+    /// the body: a mouse pick, a push (design-physics-pick.md). Replaces
+    /// the force set before on that body; a body that is not dynamic
+    /// takes none.
+    fn set_force_at(&mut self, body: BodyId, force: Vector3<f64>, point: Vector3<f64>);
+
+    /// Lifts the external force from `body`.
+    fn clear_force(&mut self, body: BodyId);
+
     /// Takes the contact events accumulated since the last drain (the
     /// substeps of one scan tick, in practice).
     fn drain_contacts(&mut self) -> TickContacts;

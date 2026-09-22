@@ -343,6 +343,23 @@ export function sendStopBake(): void {
   rawSend({ type: "stop_bake" });
 }
 
+/** A hand on a body of the streaming physics bake: hold `name` (an
+ * obstacle, or a robot link as `robot/link`) at `local` in its own frame
+ * and pull it toward `target` in the world. Sent as the mouse moves; the
+ * host answers the first one of a grab with `grab`. */
+export function sendDrag(
+  name: string,
+  local: [number, number, number],
+  target: [number, number, number],
+): void {
+  rawSend({ type: "drag", name, local, target });
+}
+
+/** The hand lets go. */
+export function sendRelease(): void {
+  rawSend({ type: "release" });
+}
+
 /** Bake the last simulated timeline as a usda layer; the reply
  * (`usd_document`) is saved as a browser download. */
 export function sendExportUsd(fps: number): void {

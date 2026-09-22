@@ -120,10 +120,13 @@ drawing themselves as the programs advance, so a slow or long bake is
 watched rather than waited for; the bake ends when the programs do, and
 switching off mid-way stops it where it stands and bakes the programs
 kinematically again. With no program baked yet, on streams the world under
-gravity in step with the clock: whatever is unsupported falls while an
-unpowered machine folds — until you switch it off, which stops the world
-where it stands (the clip stays on the dock, exportable like any bake), or
-the cap ends it. Switching on again starts a fresh stream from the cell as
+gravity in step with the clock, watched live: whatever is unsupported
+falls while an unpowered machine folds, and **a body can be taken in
+hand** — press on a crate, a part, a link of a folded arm and drag: a
+spring pulls it after the mouse (amber line and dot; red when the body is
+bolted down and cannot move) until you let go. It runs until you switch
+the toggle off, which stops the world where it stands (the clip stays on
+the dock, exportable like any bake), or the cap ends it. Switching on again starts a fresh stream from the cell as
 authored. What "on" means is the host's choice: `bt.studio(scene,
 physics=bt.Physics(world=True, powered=False))` makes it a power cut,
 `physics=False` serves the studio without physics (the toggle says so). The

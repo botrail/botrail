@@ -13,6 +13,7 @@ import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
 import { UsdVisual } from "./UsdVisual";
 import { UNIT_BOX, UNIT_CYLINDER, UNIT_SPHERE } from "../three/primitiveGeometry";
+import { beginPick, swallowsClick } from "../physicsPick";
 
 const NEUTRAL_COLOR = "#9aa3b2";
 const SELECT_EDGE_COLOR = "#cdd4df";
@@ -269,6 +270,8 @@ function ObstacleNode({
     // playback), not the React prop, is the truth here.
     if (group && !group.visible) return;
     e.stopPropagation();
+    // Letting go of a body taken in hand under physics is not a click.
+    if (swallowsClick()) return;
     const from = downAt.current;
     downAt.current = null;
     if (
@@ -295,7 +298,12 @@ function ObstacleNode({
     <>
       <group ref={setGroup} visible={!stowed}>
         {obstacle.visual_asset ? <group onClick={onSelect}
-          onPointerDown={(e) => { downAt.current = [e.clientX, e.clientY]; }}
+          onPointerDown={(e) => {
+            // Under a live physics stream, pointer-down takes the body in
+            // hand (design-physics-pick.md); otherwise it may become a click.
+            if (group && group.visible && beginPick(e, name, group)) return;
+            downAt.current = [e.clientX, e.clientY];
+          }}
           onPointerOver={(e) => { e.stopPropagation(); cursorEnter(); }}
           onPointerOut={cursorLeave}>
           <UsdVisual source={obstacle.visual_asset} color={color}
@@ -313,6 +321,7 @@ function ObstacleNode({
           selected={selected}
           onSelect={onSelect}
           onDown={(e) => {
+            if (group && group.visible && beginPick(e, name, group)) return;
             downAt.current = [e.clientX, e.clientY];
           }}
         />}

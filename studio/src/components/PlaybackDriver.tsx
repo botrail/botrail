@@ -54,7 +54,12 @@ export function PlaybackDriver() {
     // sit without rAF for seconds (or minutes), and an unclamped delta
     // would leap the playhead to the end the moment it wakes.
     let t = clock.current + Math.min(delta, 0.25) * s.playbackSpeed;
-    if (t >= tracks.duration) {
+    if (s.bakeStream?.live) {
+      // A live stream: the playhead is pinned to the head, so what is
+      // shown is what the world does now — a hand on a body sees its
+      // answer as the next windows land.
+      t = tracks.duration;
+    } else if (t >= tracks.duration) {
       if (s.bakeStream) {
         // A streamed bake still growing: wait at its end for the next
         // window rather than stopping.

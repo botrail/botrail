@@ -130,6 +130,7 @@ export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const physicsOn = useStudioStore((s) => s.physicsOn);
   const streaming = useStudioStore((s) => s.bakeStream !== null);
+  const live = useStudioStore((s) => s.bakeStream?.live === true);
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const connected = useStudioStore((s) => s.connection === "connected");
   const lanes = useMemo(
@@ -211,6 +212,7 @@ export function TimelineDock() {
           {streaming ? "● " : ""}
           {timeline ? (timeline.stepSpans.length > 0 ? "cycle" : "physics") : "preview"}{" "}
           {duration.toFixed(2)}s
+          {live ? " · drag a body to push it" : ""}
         </span>
         <span className="timeline-controls">
           {/* A 60-90 s takt is unwatchable at 1x; speed and loop are how a

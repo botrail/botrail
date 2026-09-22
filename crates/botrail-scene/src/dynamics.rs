@@ -992,6 +992,81 @@ mod tests {
         );
     }
 
+    /// A hand on a loose body (design-physics-pick.md): the drag spring
+    /// pulls it to the target and lets go; a mirror is not held; an
+    /// unpowered arm's link swings when pulled.
+    #[test]
+    fn a_dragged_box_follows_the_hand_and_a_mirror_is_not_held() {
+        let mut scene = arm(false);
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                Isometry3::translation(0.8, 0.0, 0.05),
+            )
+            .unwrap();
+        let mut live = scene
+            .open_physics_rollout(5.0, &world_unpowered(), rapier())
+            .unwrap();
+        // The floor slab is bolted (buried): no hand moves it.
+        assert!(!live
+            .drag("floor", Vector3::zeros(), Vector3::zeros())
+            .unwrap());
+        assert!(live
+            .drag("nothing", Vector3::zeros(), Vector3::zeros())
+            .is_err());
+        // The box, by its top: pulled 0.3 m sideways at its own height.
+        let grip = Vector3::new(0.0, 0.0, 0.05);
+        let target = Vector3::new(0.8, 0.3, 0.1);
+        assert!(live.drag("box", grip, target).unwrap());
+        assert_eq!(live.dragging(), Some("box"));
+        for _ in 0..120 {
+            live.tick().unwrap();
+        }
+        let anchor = live.obstacle_pose("box").unwrap() * nalgebra::Point3::from(grip);
+        let gap = (anchor.coords - target).norm();
+        assert!(gap < 0.03, "the box's top sits {gap} m from the hand");
+        // Let go: it stays put on the floor, at rest.
+        live.release();
+        assert_eq!(live.dragging(), None);
+        for _ in 0..120 {
+            live.tick().unwrap();
+        }
+        let pose = live.obstacle_pose("box").unwrap();
+        assert!(
+            (pose.translation.z - 0.05).abs() < 0.01,
+            "z = {}",
+            pose.translation.z
+        );
+        let speed = live.obstacle_velocity("box").unwrap().linear.norm();
+        assert!(speed < 0.05, "still moving at {speed} m/s");
+        // The unpowered arm has folded onto the floor by now; pulled up
+        // and sideways by its wrist, the link comes along.
+        let model = &scene.robots()[0].model;
+        let wrist = model.link_index("wrist_3_link").unwrap();
+        let name = format!("{}/{}", scene.robots()[0].name, model.links[wrist].name);
+        let before = live.link_poses(0).unwrap()[wrist].translation.vector;
+        assert!(live
+            .drag(
+                &name,
+                Vector3::zeros(),
+                before + Vector3::new(0.0, 0.3, 0.3)
+            )
+            .unwrap());
+        for _ in 0..120 {
+            live.tick().unwrap();
+        }
+        let after = live.link_poses(0).unwrap()[wrist].translation.vector;
+        assert!(
+            (after - before).norm() > 0.05,
+            "the wrist moved {} m",
+            (after - before).norm()
+        );
+        live.release();
+    }
+
     // ============ world scope robots (design-world-physics.md W1) ============
 
     fn world_unpowered() -> RolloutOptions {

@@ -1490,6 +1490,13 @@ pub enum ServerMessage {
         /// data — the analysis-grade sweep stays in the Python API).
         points: Vec<[f64; 3]>,
     },
+    /// The host's answer to the first `drag` of a grab: whether the body
+    /// is the engine's to move (a bolted mirror, or a part a program
+    /// holds, is not).
+    Grab {
+        name: String,
+        held: bool,
+    },
     /// One window of a streaming bake (`start_bake`): the tracks sampled
     /// after `from` up to the timeline's `duration`, on the same 30 Hz
     /// lattice as every other chunk, so the client appends them; the step
@@ -1758,6 +1765,18 @@ pub enum ClientMessage {
     /// End the streaming bake where it stands: the last chunk arrives
     /// with `done`, and the whole bake becomes the host's retained result.
     StopBake,
+    /// A hand on a body of the streaming physics bake (the mouse pick of
+    /// a physics viewer, design-physics-pick.md): hold body `name` (an
+    /// obstacle, or a robot link as `robot/link`) at `local` in its own
+    /// frame and pull it toward `target` in the world. Sent as the mouse
+    /// moves; the host answers the first one of a grab with `grab`.
+    Drag {
+        name: String,
+        local: [f64; 3],
+        target: [f64; 3],
+    },
+    /// The hand lets go.
+    Release,
     /// Bake the last simulated timeline as a usda layer; the result
     /// arrives as a `usd_document` (the browser saves it as a download).
     ExportUsd {

@@ -26,6 +26,7 @@ import { LegendHud } from "./LegendHud";
 import { SprayView } from "./SprayView";
 import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
+import { DragLineView, PickBridge } from "./DragLineView";
 import { IoOverlay } from "./IoOverlay";
 import { IoTopologyOverlay } from "./IoTopologyOverlay";
 import { LadderOverlay } from "./LadderChart";
@@ -193,6 +194,7 @@ export function Viewport() {
         </Aid>
 
         <OrbitControls makeDefault target={view.target} />
+        <PickBridge />
 
         <Suspense fallback={null}>
           <SceneView />
@@ -203,6 +205,9 @@ export function Viewport() {
               guide paths, toolpath overlays, contact markers, transform
               gizmos. Process light (flash/spray/trace) stays — a camera
               would see it. */}
+          <Aid>
+            <DragLineView />
+          </Aid>
           <Aid>
             <SensorView />
           </Aid>

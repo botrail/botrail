@@ -65,6 +65,10 @@ pub struct SceneHub {
     studio_physics: Mutex<Option<botrail_scene::rollout::PhysicsOptions>>,
     /// The streaming bake in flight, if any (`start_bake`).
     bake_stream: Mutex<Option<BakeStream>>,
+    /// The viewer's hand on a body of the streaming bake
+    /// (design-physics-pick.md): what the message loop last asked for,
+    /// taken by the stream thread before its next tick.
+    hand: Mutex<Hand>,
     /// This hub's own `Arc`, for the stream thread to hold.
     self_weak: Weak<SceneHub>,
 }
@@ -73,6 +77,23 @@ pub struct SceneHub {
 struct BakeStream {
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
+}
+
+/// The hand on a body: the latest request from the viewer and the body
+/// the stream has acknowledged holding (so `grab` goes out once per grab).
+#[derive(Default)]
+struct Hand {
+    pending: Option<HandCommand>,
+    acked: Option<String>,
+}
+
+enum HandCommand {
+    Drag {
+        name: String,
+        local: [f64; 3],
+        target: [f64; 3],
+    },
+    Release,
 }
 
 impl SessionHost for SceneHub {
@@ -214,6 +235,33 @@ impl SessionHost for SceneHub {
             .name("botrail-bake-stream".to_string())
             .spawn(move || {
                 let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let steer = |live: &mut botrail_scene::rollout::LiveRollout| {
+                    let mut hand = hub.hand.lock().expect("hand mutex poisoned");
+                    match hand.pending.take() {
+                        Some(HandCommand::Drag {
+                            name,
+                            local,
+                            target,
+                        }) => {
+                            let held = live
+                                .drag(&name, local.into(), target.into())
+                                .unwrap_or(false);
+                            // The first drag of a grab is answered: the
+                            // viewer learns whether the body is held.
+                            if hand.acked.as_deref() != Some(name.as_str()) {
+                                hand.acked = Some(name.clone());
+                                drop(hand);
+                                hub.emit(&ServerMessage::Grab { name, held });
+                            }
+                        }
+                        Some(HandCommand::Release) => {
+                            hand.acked = None;
+                            drop(hand);
+                            live.release();
+                        }
+                        None => {}
+                    }
+                };
                 let result = botrail_session::run_bake_stream(
                     &*hub,
                     &scene,
@@ -224,7 +272,9 @@ impl SessionHost for SceneHub {
                     &|| flag.load(Ordering::Relaxed),
                     &|seconds| std::thread::sleep(std::time::Duration::from_secs_f64(seconds)),
                     pace,
+                    &steer,
                 );
+                *hub.hand.lock().expect("hand mutex poisoned") = Hand::default();
                 if let Err(error) = result {
                     botrail_session::emit_physics_failed(&*hub, &label, scenario.as_deref(), error);
                 }
@@ -232,6 +282,18 @@ impl SessionHost for SceneHub {
             .expect("spawn the bake stream thread");
         *self.bake_stream.lock().expect("bake stream mutex poisoned") =
             Some(BakeStream { stop, thread });
+    }
+
+    fn drag(&self, name: &str, local: [f64; 3], target: [f64; 3]) {
+        self.hand.lock().expect("hand mutex poisoned").pending = Some(HandCommand::Drag {
+            name: name.to_string(),
+            local,
+            target,
+        });
+    }
+
+    fn release(&self) {
+        self.hand.lock().expect("hand mutex poisoned").pending = Some(HandCommand::Release);
     }
 
     fn stop_bake_stream(&self) {
@@ -286,6 +348,7 @@ impl SceneHub {
             baked: Mutex::new(None),
             studio_physics: Mutex::new(Some(botrail_scene::rollout::PhysicsOptions::world())),
             bake_stream: Mutex::new(None),
+            hand: Mutex::new(Hand::default()),
             self_weak: weak.clone(),
         })
     }

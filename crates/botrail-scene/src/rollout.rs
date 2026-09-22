@@ -1919,7 +1919,28 @@ struct PhysicsRuntime {
     /// Robots whose base is a free rigid body: read back every tick into
     /// the robot's base pose and its base track.
     floating: Vec<FloatingBase>,
+    /// A hand on a body (design-physics-pick.md): the spring between the
+    /// grabbed point and the target, applied every tick until released.
+    drag: Option<DragRt>,
 }
+
+/// The body a hand holds, where it holds it, and where it pulls it to.
+struct DragRt {
+    id: botrail_physics::BodyId,
+    /// The grabbed point in the body's frame.
+    local: Vector3<f64>,
+    /// Where the hand is, in the world.
+    target: Vector3<f64>,
+}
+
+/// The drag spring (design-physics-pick.md §1), mass-normalised so a
+/// pallet and a carton follow the hand alike: acceleration
+/// `k·(target − anchor) − c·v_anchor`, critically damped (`c = 2√k`),
+/// capped at [`DRAG_MAX_ACCEL`] so nothing gets launched.
+pub const DRAG_STIFFNESS: f64 = 400.0;
+pub const DRAG_DAMPING: f64 = 40.0;
+/// About five g: a hand pulls hard, but not like a cannon.
+pub const DRAG_MAX_ACCEL: f64 = 50.0;
 
 /// A floating robot's base body and its track-building state.
 struct FloatingBase {
@@ -2642,6 +2663,32 @@ impl LiveRollout {
     /// anything else.
     pub fn obstacle_velocity(&self, name: &str) -> Option<botrail_physics::Velocity> {
         self.view().obstacle_velocity(name)
+    }
+
+    /// A hand on body `name` (an obstacle, or a robot link as
+    /// `robot/link`), holding it at `local` in its frame and pulling
+    /// toward `target` in the world — the mouse pick of a physics viewer
+    /// (design-physics-pick.md). The spring acts every tick until
+    /// [`release`](Self::release); calling again moves the hand. `false`
+    /// when the body is not the engine's to move (a mirror, a part a
+    /// program holds); an error for a name no body carries.
+    pub fn drag(
+        &mut self,
+        name: &str,
+        local: Vector3<f64>,
+        target: Vector3<f64>,
+    ) -> Result<bool, SeqError> {
+        self.inner.set_drag(name, local, target)
+    }
+
+    /// Lets go of whatever [`drag`](Self::drag) held.
+    pub fn release(&mut self) {
+        self.inner.release_drag();
+    }
+
+    /// The body in hand, if any.
+    pub fn dragging(&self) -> Option<&str> {
+        self.inner.dragging()
     }
 
     /// Current level of a signal lane.
@@ -4075,6 +4122,7 @@ impl Rollout {
                 contacts: Vec::new(),
                 touching: Vec::new(),
                 floating: Vec::new(),
+                drag: None,
             }),
             friction_holds: Vec::new(),
             ticks: 0,
@@ -4113,10 +4161,15 @@ impl Rollout {
     }
 
     fn cur_step(&self) -> usize {
-        self.programs[self.current].step
+        // A bake with no program at all (the world under gravity) has no
+        // cursor: its errors are pinned on step 0 of "physics".
+        self.programs.get(self.current).map_or(0, |p| p.step)
     }
 
     fn cur_step_name(&self) -> String {
+        if self.programs.is_empty() {
+            return "physics".to_string();
+        }
         self.step_name_in(self.current, self.cur_step())
     }
 
@@ -5583,6 +5636,29 @@ impl Rollout {
             let cmd = phys.driven[k].cmd;
             phys.backend.set_joint_target(k, cmd);
         }
+        // The hand on a body, if any: this tick's spring force at the
+        // grabbed point. A body that stopped being dynamic (taken in hand
+        // by a program) slips out of the hand.
+        if let Some(drag) = &phys.drag {
+            if phys.backend.is_dynamic_body(drag.id) {
+                let pose = phys.backend.body_pose(drag.id);
+                let anchor = pose * nalgebra::Point3::from(drag.local);
+                let velocity = phys.backend.body_velocity(drag.id);
+                let arm = anchor.coords - pose.translation.vector;
+                let v_anchor = velocity.linear + velocity.angular.cross(&arm);
+                let mut accel =
+                    DRAG_STIFFNESS * (drag.target - anchor.coords) - DRAG_DAMPING * v_anchor;
+                let norm = accel.norm();
+                if norm > DRAG_MAX_ACCEL {
+                    accel *= DRAG_MAX_ACCEL / norm;
+                }
+                let force = accel * phys.backend.body_mass(drag.id);
+                phys.backend.set_force_at(drag.id, force, anchor.coords);
+            } else {
+                phys.backend.clear_force(drag.id);
+                phys.drag = None;
+            }
+        }
         let sub = dt / phys.substeps as f64;
         for k in 1..=phys.substeps {
             let f = k as f64 / phys.substeps as f64;
@@ -5856,6 +5932,57 @@ impl Rollout {
             botrail_physics::BodyKind::Dynamic,
             Some(botrail_physics::Velocity { linear, angular }),
         );
+    }
+
+    /// Puts a hand on body `name` (an obstacle, or a robot link as
+    /// `robot/link`) at `local` in its frame and pulls it toward `target`
+    /// (design-physics-pick.md): the spring force is applied every tick
+    /// until [`release_drag`](Self::release_drag). `Ok(false)` when the
+    /// body is not the engine's to move (a mirror, a part in hand); an
+    /// error for a name no body carries. Calling again moves the hand.
+    fn set_drag(
+        &mut self,
+        name: &str,
+        local: Vector3<f64>,
+        target: Vector3<f64>,
+    ) -> Result<bool, SeqError> {
+        let Some(phys) = self.physics.as_mut() else {
+            return Err(self.live_err(
+                "there is no physics in this rollout to drag a body through".to_string(),
+            ));
+        };
+        let Some(index) = phys.names.iter().position(|n| n == name) else {
+            let message = format!("no physics body is called `{name}`");
+            return Err(self.live_err(message));
+        };
+        let id = botrail_physics::BodyId(index as u32);
+        if let Some(drag) = phys.drag.take() {
+            if drag.id != id {
+                phys.backend.clear_force(drag.id);
+            }
+        }
+        if !phys.backend.is_dynamic_body(id) {
+            phys.backend.clear_force(id);
+            return Ok(false);
+        }
+        phys.drag = Some(DragRt { id, local, target });
+        Ok(true)
+    }
+
+    /// Lets go of whatever the hand held.
+    fn release_drag(&mut self) {
+        if let Some(phys) = self.physics.as_mut() {
+            if let Some(drag) = phys.drag.take() {
+                phys.backend.clear_force(drag.id);
+            }
+        }
+    }
+
+    /// The body the hand holds, by name.
+    fn dragging(&self) -> Option<&str> {
+        let phys = self.physics.as_ref()?;
+        let drag = phys.drag.as_ref()?;
+        phys.names.get(drag.id.0 as usize).map(String::as_str)
     }
 
     /// Advances every robot's joints and every device by one scan period,

@@ -108,6 +108,14 @@ pub trait SessionHost {
     /// Ends the streaming bake where it stands (no-op without one).
     fn stop_bake_stream(&self) {}
 
+    /// A hand on a body of the streaming bake (`drag`): the host hands it
+    /// to the rollout on its thread (see [`run_bake_stream`]'s `steer`).
+    /// The default has no stream to steer and drops it.
+    fn drag(&self, _name: &str, _local: [f64; 3], _target: [f64; 3]) {}
+
+    /// The hand lets go (`release`).
+    fn release(&self) {}
+
     /// Called before any bake this host is asked for, so a streaming bake
     /// in flight can be wound up first and its last chunk lands before the
     /// new result.
@@ -400,6 +408,18 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         }
         ClientMessage::StopBake => {
             host.stop_bake_stream();
+            Ok(())
+        }
+        ClientMessage::Drag {
+            name,
+            local,
+            target,
+        } => {
+            host.drag(&name, local, target);
+            Ok(())
+        }
+        ClientMessage::Release => {
+            host.release();
             Ok(())
         }
         ClientMessage::SimulatePhysics { duration, scenario } => {
@@ -1432,8 +1452,14 @@ pub fn emit_physics_failed(
     });
 }
 
-/// Simulated seconds per streamed chunk.
+/// Simulated seconds per streamed chunk of a bake that runs as fast as
+/// it can (a program bake).
 pub const STREAM_CHUNK_SECONDS: f64 = 0.25;
+
+/// Simulated seconds per streamed chunk of a paced bake — the world under
+/// gravity, watched live and poked (design-physics-pick.md): a display
+/// frame, so a hand on a body sees its answer within a frame or two.
+pub const STREAM_CHUNK_SECONDS_LIVE: f64 = 1.0 / 30.0;
 
 /// How far a paced stream may run ahead of the wall clock (s): far
 /// enough that playback never waits, close enough that a stop lands
@@ -1458,10 +1484,12 @@ pub fn bake_label(names: &[String]) -> String {
 /// its last chunk. `pace` holds the simulated clock at most
 /// [`STREAM_LEAD_SECONDS`] ahead of the wall clock with `sleep` — the
 /// open-ended bake, so a stop lands where the viewer is; a program bake
-/// runs as fast as it can. On the way out the whole bake is retained
-/// (`store_baked`) like any sequence result. `scene` is the snapshot to
-/// bake (the scenario already applied), `scenario` its name for the
-/// timeline's self-description.
+/// runs as fast as it can. `steer` runs before every tick with the live
+/// rollout: what the viewer does to the world as it runs (a hand on a
+/// body, design-physics-pick.md). On the way out the whole bake is
+/// retained (`store_baked`) like any sequence result. `scene` is the
+/// snapshot to bake (the scenario already applied), `scenario` its name
+/// for the timeline's self-description.
 #[allow(clippy::too_many_arguments)]
 pub fn run_bake_stream(
     host: &impl SessionHost,
@@ -1473,6 +1501,7 @@ pub fn run_bake_stream(
     stop: &dyn Fn() -> bool,
     sleep: &dyn Fn(f64),
     pace: bool,
+    steer: &dyn Fn(&mut botrail_scene::rollout::LiveRollout),
 ) -> Result<SequenceTimeline, String> {
     let debug = std::env::var("BT_PHYS_DEBUG").is_ok();
     let cap = options.max_duration;
@@ -1495,7 +1524,12 @@ pub fn run_bake_stream(
         );
     }
     let dt = live.dt();
-    let ticks_per_chunk = (STREAM_CHUNK_SECONDS / dt).round().max(1.0) as usize;
+    let chunk_seconds = if pace {
+        STREAM_CHUNK_SECONDS_LIVE
+    } else {
+        STREAM_CHUNK_SECONDS
+    };
+    let ticks_per_chunk = (chunk_seconds / dt).round().max(1.0) as usize;
     let t0 = host.now_ms();
     let mut sent = 0.0;
     let mut chunks = 0usize;
@@ -1509,6 +1543,7 @@ pub fn run_bake_stream(
                 if live.finished() || (names.is_empty() && live.t() + 1e-9 >= cap) {
                     break;
                 }
+                steer(&mut live);
                 if let Err(e) = live.tick() {
                     failure = Some(e.to_string());
                     break;
@@ -2409,6 +2444,7 @@ mod tests {
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
                     ServerMessage::BakeChunk { .. } => "bake_chunk",
+                    ServerMessage::Grab { .. } => "grab",
                     ServerMessage::SequenceResult { .. } => "sequence_result",
                     ServerMessage::ScanResult { .. } => "scan_result",
                     ServerMessage::Sensors { .. } => "sensors",
@@ -2602,6 +2638,7 @@ mod tests {
             &|| false,
             &|s| slept.set(slept.get() + s),
             true,
+            &|_| {},
         )
         .unwrap();
         assert!((timeline.duration - 2.0).abs() < 1e-9);
@@ -2710,6 +2747,7 @@ mod tests {
             &|| false,
             &|_| panic!("a program bake is not paced"),
             false,
+            &|_| {},
         )
         .unwrap();
         // The program's one-second wait ended the stream, not the cap.
@@ -2757,6 +2795,7 @@ mod tests {
             &|| false,
             &|_| {},
             false,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(kinematic.physics, None);
@@ -2790,6 +2829,7 @@ mod tests {
             &|| false,
             &|_| {},
             false,
+            &|_| {},
         )
         .unwrap_err();
         assert!(err.contains("timed out"), "{err}");

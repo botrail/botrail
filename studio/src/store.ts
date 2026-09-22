@@ -499,11 +499,33 @@ export interface StudioState {
    * thread: its programs (or the world under gravity), sent as the tracks
    * grow (`bake_chunk`) until the programs end or the toggle stops it.
    * `request` is what asked for it, the last bake once it is done. */
-  bakeStream: { from: number; request: BakeRequest } | null;
+  bakeStream: {
+    from: number;
+    request: BakeRequest;
+    /** A paced stream watched as it runs — the world under gravity: the
+     * playhead pins to the head, and a body can be taken in hand. */
+    live: boolean;
+  } | null;
+  /** The hand on a body of the live physics stream: what the viewport is
+   * dragging, for the line it draws (design-physics-pick.md). */
+  drag: {
+    name: string;
+    local: [number, number, number];
+    target: [number, number, number];
+  } | null;
+  /** The host's answer to the current grab: whether the body is held. */
+  grab: { name: string; held: boolean } | null;
   sequenceError: string | null;
   /** The scenario the failed run was asked for (`sequenceError` set),
    * so the diagnosis can say which world did not complete. */
   sequenceErrorScenario: string | null;
+  setDrag: (
+    drag: {
+      name: string;
+      local: [number, number, number];
+      target: [number, number, number];
+    } | null,
+  ) => void;
   /** Step bands, robot lanes + signal lanes of the last baked timeline. */
   timeline: {
     duration: number;
@@ -689,6 +711,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   lastBake: null,
   bakePending: null,
   bakeStream: null,
+  drag: null,
+  grab: null,
   sequenceError: null,
   sequenceErrorScenario: null,
   timeline: null,
@@ -981,10 +1005,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             sequenceErrorScenario: msg.scenario ?? null,
             bakePending: null,
             bakeStream: null,
+            drag: null,
+            grab: null,
             physicsOn: wasPhysics && refused ? false : s.physicsOn,
           };
         });
       }
+    } else if (msg.type === "grab") {
+      set({ grab: { name: msg.name, held: msg.held } });
     } else if (msg.type === "bake_chunk") {
       // A streaming bake: the first window starts playback from the top,
       // every later one grows the tracks under the playhead. The step
@@ -1019,7 +1047,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           segmentEnds: chunk.step_spans.map((span) => span.end),
           sequenceError: null,
           sequenceErrorScenario: null,
-          bakeStream: msg.done ? null : { from: chunk.duration, request },
+          bakeStream: msg.done
+            ? null
+            : { from: chunk.duration, request, live: stream?.live ?? request.kind === "physics" },
+          drag: msg.done ? null : s.drag,
+          grab: msg.done ? null : s.grab,
           lastBake: msg.done
             ? request.kind === "physics"
               ? { ...request, duration: chunk.duration }
@@ -1417,9 +1449,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       bakePending: req,
     }),
   setPhysicsOn: (on) => set({ physicsOn: on }),
+  setDrag: (drag) => set(drag ? { drag } : { drag: null, grab: null }),
   beginBakeStream: (req) =>
     set({
-      bakeStream: { from: 0, request: req },
+      // The world under gravity is paced to the clock and watched live;
+      // a program bake runs as fast as it can and is played back.
+      bakeStream: { from: 0, request: req, live: req.kind === "physics" },
+      drag: null,
+      grab: null,
       sequenceError: null,
       sequenceErrorScenario: null,
     }),
@@ -1429,6 +1466,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       lastBake: null,
       bakePending: null,
       bakeStream: null,
+      drag: null,
+      grab: null,
       sequenceError: null,
       sequenceErrorScenario: null,
       segmentEnds: [],

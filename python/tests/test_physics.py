@@ -352,6 +352,29 @@ def test_a_live_rollout_snapshots_its_timeline_as_it_goes() -> None:
     assert whole.step_spans[0][0] == "up" and len(whole.step_spans) == 2
 
 
+def test_a_hand_on_a_body_pulls_it_and_lets_go() -> None:
+    scene = _arm_cell()
+    scene.add_box("crate", size=(0.1, 0.1, 0.1), position=(0.8, 0.0, 0.05))
+    live = scene.open_rollout([], physics=bt.Physics(world=True))
+    # The floor slab is bolted, a name nobody carries is an error.
+    assert live.drag("floor", (0, 0, 0), (0, 0, 0)) is False
+    with pytest.raises(ValueError, match="no physics body"):
+        live.drag("nothing", (0, 0, 0), (0, 0, 0))
+    # Pulled sideways by its top, the crate slides (and tips a little)
+    # toward the hand: its centre ends within a few centimetres of it.
+    assert live.drag("crate", (0, 0, 0.05), (0.8, 0.3, 0.1)) is True
+    live.tick(120)
+    (x, y, z), _ = live.object_pose("crate")
+    assert abs(x - 0.8) < 0.05 and abs(y - 0.3) < 0.08 and y > 0.2, (x, y, z)
+    # Let go, it settles back onto its base and comes to rest nearby.
+    live.release()
+    live.tick(120)
+    (x2, y2, z2), _ = live.object_pose("crate")
+    assert abs(x2 - x) < 0.05 and abs(y2 - y) < 0.05 and abs(z2 - 0.05) < 0.01
+    (vx, vy, vz), _ = live.object_velocity("crate")
+    assert (vx * vx + vy * vy + vz * vz) ** 0.5 < 0.05
+
+
 def test_a_floating_declaration_round_trips_and_floats(tmp_path) -> None:
     scene = _arm_cell()
     scene.set_robot_base_pose((0.0, 0.0, 0.5))

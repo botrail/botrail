@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
 import { linkKey, playbackRig } from "../playbackRig";
@@ -9,6 +10,7 @@ import {
   type RobotUiState,
 } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
+import { beginPick, swallowsClick } from "../physicsPick";
 import { authoredColor, COLLISION_COLOR, UNPAINTED } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
 import { UsdVisual } from "./UsdVisual";
@@ -56,6 +58,8 @@ function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
     <group
       onClick={(e) => {
         e.stopPropagation();
+        // Letting go of a link taken in hand under physics is not a click.
+        if (swallowsClick()) return;
         const s = useStudioStore.getState();
         s.selectTcp(name);
         s.focusTab("robot");
@@ -110,8 +114,19 @@ function LinkGroup({
     [robot, index],
   );
 
+  // Under a live physics stream, pointer-down takes the link in hand
+  // (design-physics-pick.md): the body is named `robot/link`, as the
+  // rollout names it.
+  const onPointerDown = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      const node = playbackRig.links.get(linkKey(robot, index));
+      if (node) beginPick(e, `${robot}/${link.name}`, node);
+    },
+    [robot, index, link.name],
+  );
+
   return (
-    <group ref={register} position={position} quaternion={quaternion}>
+    <group ref={register} position={position} quaternion={quaternion} onPointerDown={onPointerDown}>
       {link.visuals.map((visual, j) => (
         // Three shades, most specific first: the collision highlight is
         // the message and always wins; then the color the robot file

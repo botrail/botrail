@@ -5832,14 +5832,32 @@ impl Scene {
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let live = snapshot
-            .open_rollout(&refs, &options, backend)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // No program at all: the world under physics, ticked from outside
+        // until `max_duration` — what the studio's live physics stream is,
+        // and what a hand on a body (`drag`) needs a world for.
+        let live = if refs.is_empty() {
+            if backend.is_none() {
+                return Err(PyValueError::new_err(
+                    "a rollout with no program needs physics (physics=True or a bt.Physics)",
+                ));
+            }
+            snapshot
+                .open_physics_rollout(max_duration, &options, backend)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        } else {
+            snapshot
+                .open_rollout(&refs, &options, backend)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        };
         Ok(LiveRollout {
             inner: Some(live),
             scene: snapshot,
             hub: self.hub.clone(),
-            label: refs.join(" + "),
+            label: if refs.is_empty() {
+                "physics".to_string()
+            } else {
+                refs.join(" + ")
+            },
             scenario,
             spec: None,
         })
@@ -7219,6 +7237,34 @@ impl LiveRollout {
         self.live_mut()?
             .command(r, &q)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// A hand on a body — the mouse pick of a physics viewer: holds
+    /// `name` (an obstacle, or a robot link as `"robot/link"`) at `point`
+    /// in its own frame and pulls it toward `target` in the world with a
+    /// critically damped spring, every tick until `release` (or until the
+    /// next `drag` moves the hand). Returns whether the body is the
+    /// engine's to move: a bolted mirror or a part a program holds is not.
+    #[pyo3(signature = (name, point, target))]
+    fn drag(
+        &mut self,
+        name: &str,
+        point: (f64, f64, f64),
+        target: (f64, f64, f64),
+    ) -> PyResult<bool> {
+        self.live_mut()?
+            .drag(
+                name,
+                nalgebra::Vector3::new(point.0, point.1, point.2),
+                nalgebra::Vector3::new(target.0, target.1, target.2),
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Lets go of whatever `drag` held.
+    fn release(&mut self) -> PyResult<()> {
+        self.live_mut()?.release();
+        Ok(())
     }
 
     /// Puts driven joints of a dynamic robot under raw torques: `(joint

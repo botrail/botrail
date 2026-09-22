@@ -123,12 +123,28 @@ The knobs are on the declaration, per robot:
 scene.set_robot_physics("panda", max_force=87.0, armature=0.05, mass_floor=0.2)
 ```
 
-## The studio
+## The studio, and a hand on the world
 
 The **⚛ physics** toggle bakes the last request again under the host's
 physics and streams it as it grows; see [the studio](studio.md).
 `bt.studio(scene, physics=bt.Physics(world=True, powered=False))` decides
-what "on" means for that session.
+what "on" means for that session. With no program the world streams
+live, and a body in the viewport can be taken in hand and pulled — the
+mouse pick of a physics viewer: a critically damped spring between the
+grabbed point and the mouse, capped at a few g so nothing gets launched.
+
+The same hand is a Python call on a live rollout — the world with no
+program is `open_rollout([], physics=...)`:
+
+```python
+live = scene.open_rollout([], physics=bt.Physics(world=True))
+live.drag("crate", point=(0, 0, 0.15), target=(0.5, 0.0, 0.4))   # hold the crate's top, pull it here
+live.tick(120)
+live.release()
+```
+
+`drag` returns whether the body is the engine's to move: bolted equipment
+and a part a program holds are not. A robot link is named `robot/link`.
 
 ## Another engine
 

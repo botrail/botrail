@@ -205,6 +205,10 @@ pub struct RapierBackend {
     ccd: CCDSolver,
     /// `BodyId(i)` → handle, in `WorldDesc` order.
     handles: Vec<RigidBodyHandle>,
+    /// External forces set by [`PhysicsBackend::set_force_at`]: per body,
+    /// the force (N) and the world point it acts at, rebuilt onto the
+    /// body's user forces every step alongside the joint torques.
+    external: HashMap<RigidBodyHandle, (Vector, Vector)>,
     /// The reverse map, for naming contact events.
     body_ids: HashMap<RigidBodyHandle, BodyId>,
     /// Driven joints in `WorldDesc::joints` order, with what the target
@@ -238,11 +242,11 @@ impl Default for RapierBackend {
 impl RapierBackend {
     /// Applies every torqued joint's torque as an equal-and-opposite
     /// pair on its two bodies (a revolute joint: torques about the world
-    /// axis; a prismatic one: forces along it at the joint anchor). The
-    /// involved bodies' user forces are rebuilt from scratch each step so
-    /// nothing accumulates.
+    /// axis; a prismatic one: forces along it at the joint anchor), and
+    /// every external force at its point. The involved bodies' user
+    /// forces are rebuilt from scratch each step so nothing accumulates.
     fn apply_joint_torques(&mut self) {
-        if self.joints.iter().all(|j| j.torque.is_none()) {
+        if self.joints.iter().all(|j| j.torque.is_none()) && self.external.is_empty() {
             return;
         }
         let mut involved: Vec<RigidBodyHandle> = Vec::new();
@@ -253,10 +257,21 @@ impl RapierBackend {
                 }
             }
         }
+        for h in self.external.keys() {
+            if !involved.contains(h) {
+                involved.push(*h);
+            }
+        }
         for h in &involved {
             let rb = &mut self.bodies[*h];
             rb.reset_forces(true);
             rb.reset_torques(true);
+        }
+        for (h, (force, point)) in &self.external {
+            let rb = &mut self.bodies[*h];
+            if rb.is_dynamic() {
+                rb.add_force_at_point(*force, *point, true);
+            }
         }
         for k in 0..self.joints.len() {
             let (Some(tau), parent, child, frame1, kind) = (
@@ -301,6 +316,7 @@ impl RapierBackend {
             multibody_joints: MultibodyJointSet::new(),
             ccd: CCDSolver::new(),
             handles: Vec::new(),
+            external: HashMap::new(),
             body_ids: HashMap::new(),
             joints: Vec::new(),
             hooks: ConveyorHooks::default(),
@@ -594,6 +610,39 @@ impl PhysicsBackend for RapierBackend {
         Velocity {
             linear: nalgebra::Vector3::new(v.x, v.y, v.z),
             angular: nalgebra::Vector3::new(w.x, w.y, w.z),
+        }
+    }
+
+    fn is_dynamic_body(&self, body: BodyId) -> bool {
+        self.body(body).is_dynamic()
+    }
+
+    fn body_mass(&self, body: BodyId) -> f64 {
+        self.body(body).mass()
+    }
+
+    fn set_force_at(
+        &mut self,
+        body: BodyId,
+        force: nalgebra::Vector3<f64>,
+        point: nalgebra::Vector3<f64>,
+    ) {
+        let handle = self.handles[body.0 as usize];
+        self.external.insert(
+            handle,
+            (
+                Vector::new(force.x, force.y, force.z),
+                Vector::new(point.x, point.y, point.z),
+            ),
+        );
+    }
+
+    fn clear_force(&mut self, body: BodyId) {
+        let handle = self.handles[body.0 as usize];
+        if self.external.remove(&handle).is_some() {
+            let rb = &mut self.bodies[handle];
+            rb.reset_forces(true);
+            rb.reset_torques(true);
         }
     }
 
