@@ -147,13 +147,21 @@ def test_the_dog_climbs_a_storey_on_the_treads() -> None:
 
 
 @needs_dog
-def test_the_stair_is_what_caps_the_pace() -> None:
-    """One vehicle, one speed, and the flight is what sets it — not the
-    corridor. The demo's own figure walks; a little faster and the leading
-    leg runs out of fold on a tread, by name."""
+def test_the_pace_is_one_speed_up_to_the_gait_s_own_stride() -> None:
+    """One vehicle, one speed: the demo's stair pace walks the building,
+    and so does the gait's own cap (`0.6 · max_stride / period`) — the
+    body tilting onto each flight over one body length is what keeps the
+    legs in range on the treads. Beyond the stride the gait refuses by
+    name, before anything walks."""
     demo.bake(floors=1, walk=demo.WALK_SPEED)
-    with pytest.raises(ValueError, match="cannot reach its footfall"):
-        demo.bake(floors=5, walk=0.45)
+    _scene, tl = demo.bake(floors=1, walk=0.6)
+    assert tl.footfalls("dog")
+    scene = demo.build(floors=1, walk=0.6)
+    gait = demo.patrol.dog_of("go2", posture="stairs")[1]
+    gait.max_stride = 0.20   # a machine that cannot take the stride 0.6 m/s asks
+    with pytest.raises(ValueError, match="max_stride"):
+        scene.mount_robot("dog", gait=gait)
+        scene.simulate_sequence("deliver", max_duration=900.0)
 
 
 @needs_dog
@@ -175,3 +183,37 @@ def test_a_cart_left_in_the_corridor_is_named() -> None:
     with pytest.raises(ValueError) as refusal:
         demo.bake(floors=2, cart=True)
     assert "2F/cart/body" in str(refusal.value)
+
+
+# ------------------------------------------------ the same dog on wheels
+
+
+def test_a_wheel_legged_dog_rolls_the_corridors_and_walks_the_flights() -> None:
+    """`--robot quadw` (the primitive quadruped on wheels, no download): the
+    route is decided leg by leg from the floor — the corridors are
+    continuous and rolled at the vehicle's speed, the switchback steps and
+    is walked at the gait's, from a wheel's leading edge before the first
+    tread to the hind feet's last landing past the top one; and the storey
+    costs less than the walking dog's."""
+    walked = _quad_building().simulate_sequence("deliver", max_duration=900.0)
+    scene = demo.build(robot="quadw", floors=1, racks=None)
+    tl = scene.simulate_sequence("deliver", max_duration=900.0)
+    spans = tl.locomotion("dog")
+    modes = [mode for _, _, mode, _ in spans]
+    assert modes == ["roll", "walk", "roll"], spans
+    # The walk covers the whole switchback — both flights, the half landing
+    # between them (too short a roll to be worth the change) and the run-out
+    # — at the gait's own pace, 0.36 m/s of the 1 m/s the vehicle rolls at.
+    _t0, _t1, _mode, walked_m = spans[1]
+    assert 12.0 < walked_m < 14.5, spans
+    assert spans[1][3] / (spans[1][1] - spans[1][0]) == pytest.approx(0.36, abs=0.02)
+    assert spans[2][3] / (spans[2][1] - spans[2][0]) > 0.8
+    # Every footfall belongs to the walk, and the wheels stood still through
+    # it: the last landing is on the 1F floor.
+    steps = tl.footfalls("dog")
+    assert steps and all(spans[1][0] - 1e-9 <= lift < spans[1][1] for _, lift, _, _ in steps)
+    assert max(pos[2] for *_, pos in steps) == pytest.approx(demo.storey_of(demo.RISE) + 0.05, abs=1e-6)
+    # The wheeled dog is faster to the same handover.
+    assert tl.duration < walked.duration - 15.0, (tl.duration, walked.duration)
+    handover = {name: t0 for name, t0, _ in tl.step_spans}["handover_1F"]
+    assert handover < {name: t0 for name, t0, _ in walked.step_spans}["handover_1F"]

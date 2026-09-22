@@ -752,6 +752,9 @@ fn gait_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::GaitSpec
         bob: number("bob", 0.0)?,
         lateral: number("lateral", 0.0)?,
         max_step: optional("max_step")?.map(|v| v.extract()).transpose()?,
+        speed: optional("speed")?.map(|v| v.extract()).transpose()?,
+        turn_speed: optional("turn_speed")?.map(|v| v.extract()).transpose()?,
+        foothold: optional("foothold")?.map(|v| v.extract()).transpose()?,
     })
 }
 
@@ -781,6 +784,14 @@ fn wheels_from_py(
         Some(v) => v.extract()?,
         None => Vec::new(),
     };
+    let mode = match optional("mode")? {
+        Some(v) => {
+            let name: String = v.extract()?;
+            botrail_scene::seq::LocomotionMode::parse(&name)
+                .map_err(|m| PyValueError::new_err(format!("wheels: {m}")))?
+        }
+        None => botrail_scene::seq::LocomotionMode::default(),
+    };
     Ok((
         WheelDrive {
             wheels: wheels
@@ -793,6 +804,11 @@ fn wheels_from_py(
                 })
                 .collect(),
             base_frame: optional("base_frame")?.map(|v| v.extract()).transpose()?,
+            mode,
+            max_step: match optional("max_step")? {
+                Some(v) => v.extract()?,
+                None => 0.0,
+            },
         },
         posture,
     ))
@@ -1643,7 +1659,14 @@ impl Scene {
     /// is one purchase, and a walkable surface under it is where it
     /// rolls, not a collision. The robot is put in the wheels' posture,
     /// and the offset defaults to the one that stands its base frame (or
-    /// its wheels) on the vehicle frame. Not together with `gait`.
+    /// its wheels) on the vehicle frame.
+    ///
+    /// With both, the robot is a wheel-legged machine — wheels for feet,
+    /// one hanging from each foot link of the gait, the wheel radius for
+    /// its `foot_radius`. The wheels' `mode` says which gear takes the
+    /// route: `"roll"` (the legs held in the stance with the wheels'
+    /// posture laid over it, every wheel turned by its hub's travel) or
+    /// `"walk"` (the wheels locked, the axles planted like feet).
     ///
     /// `carrier` records the loaded vehicle model's flange frame and catalog
     /// provenance for `bt.mounting.report(scene)`. With no offset, the first
@@ -1685,11 +1708,6 @@ impl Scene {
             .map_err(scene_err)?;
         let gait = gait.map(gait_from_py).transpose()?;
         let wheels = wheels.map(wheels_from_py).transpose()?;
-        if gait.is_some() && wheels.is_some() {
-            return Err(PyValueError::new_err(
-                "a mounted robot walks (gait=) or rolls (wheels=), not both",
-            ));
-        }
         let offset = match (
             offset_position,
             offset_quaternion,
@@ -1709,7 +1727,13 @@ impl Scene {
         };
         let spin = spin.map(|m| m.into_iter().collect()).unwrap_or_default();
         let gear = match (gait, wheels) {
-            (Some(gait), _) => hub::MountGear::Legs(gait),
+            // Both: a wheel-legged machine (design-wheel-legged.md).
+            (Some(gait), Some((drive, posture))) => hub::MountGear::WheelLegs {
+                gait,
+                drive,
+                posture,
+            },
+            (Some(gait), None) => hub::MountGear::Legs(gait),
             (None, Some((drive, posture))) => hub::MountGear::Wheels { drive, posture },
             (None, None) => hub::MountGear::Rigid,
         };
@@ -7889,6 +7913,28 @@ impl SequenceTimeline {
                     f.land,
                     (f.position.x, f.position.y, f.position.z),
                 )
+            })
+            .collect())
+    }
+
+    /// How a machine that is its vehicle's running gear took each drive,
+    /// as `(start, end, mode, metres)` in time order: `mode` is `"walk"`
+    /// or `"roll"`, and a wheel-legged machine's rows say where it changed
+    /// gear (a turn travels no metres). Empty for a robot that is not
+    /// mounted as legs or wheels.
+    #[pyo3(signature = (robot = None))]
+    fn locomotion(&self, robot: Option<&str>) -> PyResult<Vec<(f64, f64, String, f64)>> {
+        Ok(self
+            .track_for(robot)?
+            .1
+            .locomotion
+            .iter()
+            .map(|s| {
+                let mode = match s.mode {
+                    botrail_scene::gait::LegMode::Roll => "roll",
+                    botrail_scene::gait::LegMode::Walk => "walk",
+                };
+                (s.t0, s.t1, mode.to_string(), s.distance)
             })
             .collect())
     }

@@ -2153,6 +2153,7 @@ mod tests {
             sway: Vec::new(),
             pitch: Vec::new(),
             rise: Vec::new(),
+            locomotion: Vec::new(),
         };
         let timeline = |ramp_to: f64, arm: usize| crate::rollout::SequenceTimeline {
             duration: 1.0,

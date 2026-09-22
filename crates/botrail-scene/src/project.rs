@@ -738,6 +738,51 @@ pub struct WheelDriveMsg {
     pub wheels: Vec<MountWheelMsg>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_frame: Option<String>,
+    /// How a mount with legs as well takes its route (a wheel-legged
+    /// machine). Absent in older files, and left out when it is `auto`,
+    /// the default.
+    #[serde(default, skip_serializing_if = "LocomotionModeMsg::is_auto")]
+    pub mode: LocomotionModeMsg,
+    /// The tallest break in the floor the wheels roll over, metres.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_step: f64,
+}
+
+/// [`crate::seq::LocomotionMode`] as a project carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LocomotionModeMsg {
+    #[default]
+    Auto,
+    Roll,
+    Walk,
+}
+
+impl LocomotionModeMsg {
+    fn is_auto(mode: &LocomotionModeMsg) -> bool {
+        *mode == LocomotionModeMsg::Auto
+    }
+}
+
+impl From<crate::seq::LocomotionMode> for LocomotionModeMsg {
+    fn from(mode: crate::seq::LocomotionMode) -> Self {
+        match mode {
+            crate::seq::LocomotionMode::Auto => LocomotionModeMsg::Auto,
+            crate::seq::LocomotionMode::Roll => LocomotionModeMsg::Roll,
+            crate::seq::LocomotionMode::Walk => LocomotionModeMsg::Walk,
+        }
+    }
+}
+
+impl From<LocomotionModeMsg> for crate::seq::LocomotionMode {
+    fn from(mode: LocomotionModeMsg) -> Self {
+        match mode {
+            LocomotionModeMsg::Auto => crate::seq::LocomotionMode::Auto,
+            LocomotionModeMsg::Roll => crate::seq::LocomotionMode::Roll,
+            LocomotionModeMsg::Walk => crate::seq::LocomotionMode::Walk,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -769,6 +814,8 @@ pub fn wheel_drive_msg(drive: &crate::seq::WheelDrive) -> WheelDriveMsg {
             })
             .collect(),
         base_frame: drive.base_frame.clone(),
+        mode: drive.mode.into(),
+        max_step: drive.max_step,
     }
 }
 
@@ -785,6 +832,8 @@ pub fn wheel_drive_from_msg(msg: &WheelDriveMsg) -> crate::seq::WheelDrive {
             })
             .collect(),
         base_frame: msg.base_frame.clone(),
+        mode: msg.mode.into(),
+        max_step: msg.max_step,
     }
 }
 
@@ -813,6 +862,15 @@ pub struct GaitMsg {
     /// Tallest step the machine may take, metres (see `GaitSpec::max_step`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_step: Option<f64>,
+    /// The pace the machine walks the walked legs of a route at, m/s, and
+    /// the pivot rate (see `GaitSpec::speed`). Absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_speed: Option<f64>,
+    /// The tread margin a foothold needs (see `GaitSpec::foothold`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foothold: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -870,6 +928,9 @@ pub fn gait_msg(spec: &crate::seq::GaitSpec) -> GaitMsg {
         bob: spec.bob,
         lateral: spec.lateral,
         max_step: spec.max_step,
+        speed: spec.speed,
+        turn_speed: spec.turn_speed,
+        foothold: spec.foothold,
     }
 }
 
@@ -915,6 +976,9 @@ pub fn gait_from_msg(msg: &GaitMsg) -> Result<crate::seq::GaitSpec, String> {
         bob: msg.bob,
         lateral: msg.lateral,
         max_step: msg.max_step,
+        speed: msg.speed,
+        turn_speed: msg.turn_speed,
+        foothold: msg.foothold,
     })
 }
 
@@ -1570,18 +1634,16 @@ impl Scene {
                 .transpose()
                 .map_err(|m| ProjectError::Incompatible(format!("robot `{name}` gait: {m}")))?;
             let offset = Some((&mount.offset).into());
-            match &mount.drive {
-                Some(drive) if gait.is_none() => self.mount_robot_on_wheels(
-                    i,
-                    &mount.device,
-                    offset,
-                    wheel_drive_from_msg(drive),
-                ),
-                Some(_) => Err(crate::SceneError::BadMount(
-                    "a mount walks (gait) or rolls (drive), not both".into(),
-                )),
-                None => self.mount_robot_with(i, &mount.device, offset, gait),
-            }
+            // Legs, wheels, or both (a wheel-legged machine): the file's
+            // offset is taken as saved, so the mount is not re-derived
+            // from whatever posture the robot loads in.
+            self.mount_robot_with_gear(
+                i,
+                &mount.device,
+                offset,
+                gait,
+                mount.drive.as_ref().map(wheel_drive_from_msg),
+            )
             .map_err(|e| ProjectError::Incompatible(format!("robot `{name}` mount: {e}")))?;
             if let Some(reference) = &mount.reference {
                 self.set_mount_reference(i, reference.clone())
@@ -1737,6 +1799,15 @@ fn py_gait(gait: &GaitMsg) -> String {
     if let Some(step) = gait.max_step {
         call.push_str(&format!(", max_step={step}"));
     }
+    if let Some(speed) = gait.speed {
+        call.push_str(&format!(", speed={speed:?}"));
+    }
+    if let Some(turn) = gait.turn_speed {
+        call.push_str(&format!(", turn_speed={turn:?}"));
+    }
+    if let Some(margin) = gait.foothold {
+        call.push_str(&format!(", foothold={margin:?}"));
+    }
     call.push(')');
     call
 }
@@ -1764,6 +1835,14 @@ fn py_wheels(drive: &WheelDriveMsg) -> String {
     }
     if let Some(frame) = &drive.base_frame {
         call.push_str(&format!(", base_frame={frame:?}"));
+    }
+    match drive.mode {
+        LocomotionModeMsg::Auto => {}
+        LocomotionModeMsg::Roll => call.push_str(", mode=\"roll\""),
+        LocomotionModeMsg::Walk => call.push_str(", mode=\"walk\""),
+    }
+    if drive.max_step != 0.0 {
+        call.push_str(&format!(", max_step={:?}", drive.max_step));
     }
     call.push(')');
     call

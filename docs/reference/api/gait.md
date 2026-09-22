@@ -12,6 +12,12 @@ gait = bt.Gait(
 )
 scene.mount_robot("walker", robot="go2", gait=gait)
 timeline.footfalls("go2")        # every step: (leg, lift, land, (x, y, z))
+timeline.locomotion("go2")       # how it took each drive: (t0, t1, "walk" | "roll", metres)
+
+# Wheels for feet — a Go2-W: the gait as well as a bt.Wheels on the mount
+# (see the legged guide, "Wheels for feet").
+scene.mount_robot("dog", robot="go2w", gait=bt.Gait(..., foothold=0.02, speed=0.4),
+                  wheels=bt.Wheels({...}))
 ```
 
 ::: botrail.gait

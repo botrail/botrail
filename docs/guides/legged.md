@@ -166,6 +166,22 @@ gate sees (`footprint_mm`, `height_mm`) and cap the vehicle's speed
 (`max_speed_mps`); `examples/legged/legged_patrol_demo.py --compare` bakes one
 cell on every package named and tables which fit and how long they take.
 
+A wheel-legged package (`unitree/go2/go2-w`, `unitree/b2/b2-w`) keeps the
+same block and adds `wheels` to it: `bt.Wheels.rolls(package)` says so, and
+`bt.Wheels.from_catalog` gives the wheels to mount beside the gait —
+`mode="auto"`, the wheels' rated `max_step_mm`, and `specs.max_speed_mps`
+now the *rolling* speed a cell derates for its vehicle. The gait's
+`foothold_m` (a wheel's contact patch) and `gait.speed_mps` (the pace it
+walks the flights at) ride along in the `Gait`:
+
+```python
+dog = bt.Robot.from_catalog("unitree/go2/go2-w")
+gait = bt.Gait.from_catalog("unitree/go2/go2-w", posture="stairs")
+wheels = bt.Wheels.from_catalog("unitree/go2/go2-w")          # mode="auto"
+scene.add_vehicle("dog", ..., speed=1.5)                       # 60 % of the 2.5 m/s it rolls at
+scene.mount_robot("dog", robot="go2w", gait=gait, wheels=wheels)
+```
+
 ## Stairs and steps
 
 A staircase is authored as geometry, not as a special move: mark an
@@ -241,6 +257,72 @@ offender:
   radius is refused with the tread's name and the margin, before anything
   walks half-on, half-off a step.
 
+## Wheels for feet
+
+A wheel-legged quadruped — a Unitree Go2-W or B2-W, a wheel where each foot
+was — is mounted with a `bt.Gait` *and* a `bt.Wheels`. The gait's feet are
+the axle frames the wheels turn on (a frame fixed to each calf at the wheel
+joint's origin; a catalog package carries it, a plain URDF gets it from an
+extra fixed link), its `foot_radius` is the wheel's radius, and the wheel
+joints belong to the wheels, so neither gear knows the other is there. The
+wheels' `mode` says which one takes the route:
+
+```python
+gait = bt.Gait(legs={"FL": "FL_axle", "FR": "FR_axle", "RL": "RL_axle", "RR": "RR_axle"},
+               stance=..., pattern="trot", period=0.45, max_stride=0.45,
+               foot_radius=0.086, foothold=0.02, speed=0.4)
+wheels = bt.Wheels({"FL_foot_joint": 0.086, "FR_foot_joint": 0.086,
+                    "RL_foot_joint": 0.086, "RR_foot_joint": 0.086}, drive="skid")
+scene.add_vehicle("dog", body=["dog/footprint"], path=..., speed=1.5, max_grade=0.4, ...)
+scene.mount_robot("dog", robot="go2w", gait=gait, wheels=wheels)
+tl = seq.simulate()
+tl.locomotion("go2w")     # [(t0, t1, "roll" | "walk", metres), ...]
+```
+
+* **`mode="auto"`** (the default) decides leg by leg of every route from
+  the floor under it. Along each straight the supporting surface — a
+  walkable face, else the guide line — is read every wheel radius; a jump
+  taller than the wheels' `max_step` (a stair flight, a kerb) makes the leg
+  a walked one, the rest are rolled. The walk reaches from a wheel's
+  leading edge before the first step (rolling into a kerb is what the walk
+  is for) to a hind foot's last landing past the last one — the straights
+  either side are split there, or walked whole when what would be left to
+  roll is shorter than two machine lengths or than the time the legs take
+  to change gear. A turn is walked when either straight beside it is.
+  Rolled legs go at the vehicle's `speed` and `turn_speed`; walked ones at
+  the gait's `speed` and `turn_speed` (by default the stride-safe
+  `0.6 · max_stride / period`, never faster than the vehicle). The gait's
+  stride check is made against the walked pace.
+* **`mode="roll"`** — every route is rolled: the legs hold the posture the
+  machine was mounted in (the gait's stance, with the wheels' `posture`
+  laid over it), every wheel turns by exactly its hub's travel, and a step
+  on the route is refused by name (`RollStep`, with the rise and where).
+  A pivot is a skid turn — the wheels on the inside roll backward.
+* **`mode="walk"`** — the wheels are locked and the machine walks on them
+  as on feet everywhere, wheel radius for foot radius: the same footfalls,
+  checks and stairs as the legged machine it also is.
+
+Where a route changes gear nothing stops: a planted axle simply starts
+rolling with the body when its walk ends, a swing still in the air lands
+under its hip, and each leg then blends into the stance over a second as
+the wheels turn under it — by the hub's travel through the body as well as
+the vehicle's. Where a roll ends and a walk begins, the wheels lock where
+they stand and the first swings are taken from there. A rolled route
+dispatched while the legs were still settling from a walk rides them into
+the stance the same way.
+
+The mount is checked as one machine: one wheel hanging from every foot
+link, the foot frame on the axle (within a millimetre), the radius and
+`foot_radius` one number, the axles level and the hubs on one floor in the
+stance — each named when it is not so. The bill of materials has one line
+for it, and its wheel joints are the mount's: no motion or ramp may drive
+them in any mode.
+
+A wheel is not a ball: it touches a tread at a point. `Gait.foothold` is
+the tread margin a foothold needs — by default `foot_radius`, a ball
+foot's; a wheel-legged machine states its contact patch (20 mm), or the
+step check would ask 86 mm of tread on either side of every landing.
+
 ## Reading the bake
 
 `timeline.footfalls(robot)` lists every step as `(leg, lift, land,
@@ -263,7 +345,12 @@ like any other.
   <dir>` runs it on a package the catalog builder wrote, `--robot quad` on
   the primitive quadruped in `examples/assets/quad_test.urdf` with no download;
   `--narrow` shows the gate check failing; `--compare <dir> ...` tables
-  every candidate.
+  every candidate. `--robot go2w` is the Go2-W, wheels for feet: the
+  walkway is flat, so `--mode auto` rolls it at 1.5 m/s and the cycle is
+  23.1 s against the Go2's 41.3 s; `--mode walk` locks the wheels and
+  takes the Go2's 282 steps in the Go2's time. `--robot quadw` is
+  `examples/assets/quad_wheel_test.urdf`, the offline wheeled stand-in the
+  tests use.
 * `examples/legged/humanoid_carry_demo.py` — a Unitree G1 picks a tote off a
   bench, carries it to another, sets it down and walks back. `--robot
   biped` runs it on `examples/assets/biped_test.urdf`.
@@ -272,7 +359,9 @@ like any other.
   body on the slope. `--tall` raises the risers over the gait's
   `max_step` and shows the refusal, named.
 * `examples/legged/building_delivery_demo.py` — the same machine delivering
-  through a whole building: B1F 荷受け to 5F, switchback flights and 2.40 m
+  through a whole building (`--robot go2w`: the Go2-W rolls the corridors
+  and walks the flights, 54 s a storey against the Go2's 87 s, and the
+  bake says what it rolled and what it walked): B1F 荷受け to 5F, switchback flights and 2.40 m
   corridors, with a lift that is in the cell and never called. `--code`
   orders the flight a person's building is built to and the bake refuses
   it for the dog's rating; `--cart` leaves a cleaning cart across the

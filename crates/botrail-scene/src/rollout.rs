@@ -156,6 +156,27 @@ pub enum SeqError {
         /// How far the solve fell short.
         detail: String,
     },
+    /// A rolling machine's route crosses a break in the floor its wheels
+    /// cannot take — and it may not walk it (a mount set to roll, or one
+    /// with no legs at all).
+    #[error(
+        "vehicle `{vehicle}`: robot `{robot}` rolls, and the floor steps {rise:.3} m at \
+         ({x:.3}, {y:.3}, {z:.3}) on the route dispatched at t = {t:.3}s, over the \
+         wheels' max_step {max_step:.3} m; let the machine walk it (mode \"auto\"), \
+         route round the step, or state a max_step the wheels are rated for"
+    )]
+    RollStep {
+        t: f64,
+        vehicle: String,
+        robot: String,
+        /// Signed height of the offending break.
+        rise: f64,
+        max_step: f64,
+        /// Where the floor steps.
+        x: f64,
+        y: f64,
+        z: f64,
+    },
     /// A leg would step higher than the machine's declared ability.
     #[error(
         "robot `{robot}`: leg `{leg}` would step {rise:.3} m at ({x:.3}, {y:.3}, \
@@ -682,6 +703,10 @@ pub struct RobotTrack {
     /// How the body rode over the guide line — the steps under it, not the
     /// straight route. Empty on flat ground.
     pub rise: Vec<crate::gait::BodyRise>,
+    /// How the machine took each drive of its vehicle: walked, rolled, or —
+    /// a wheel-legged machine — where it changed gear. Empty unless it is
+    /// its vehicle's running gear (a gait or wheels on its mount).
+    pub locomotion: Vec<crate::gait::LocomotionSpan>,
 }
 
 /// One motion/ramp as the rollout planned it: which program step fired it
@@ -1623,6 +1648,9 @@ struct RobotRuntime {
     spin: Option<SpinRuntime>,
     /// The running gear, for a machine that rolls its vehicle.
     wheels: Option<WheelRuntime>,
+    /// How a mounted machine took each drive: walked, rolled, or — a
+    /// wheel-legged machine — where it changed.
+    locomotion: Vec<crate::gait::LocomotionSpan>,
 }
 
 impl RobotRuntime {
@@ -1743,6 +1771,16 @@ struct WheelRuntime {
     drive: crate::wheels::ResolvedWheelDrive,
     /// `true` from the vehicle's dispatch until the tick it parks.
     rolling: bool,
+    /// Which gear takes the route on a machine that also has legs
+    /// (design-wheel-legged.md): rolling, the gait sits out the drive;
+    /// walking, the wheels stay locked — a planted axle does not turn;
+    /// auto, the route decides leg by leg.
+    mode: crate::seq::LocomotionMode,
+    /// The stretches of the drive in progress that are walked: the wheels
+    /// stand still through them (a planted axle does not turn).
+    walk_windows: Vec<(f64, f64)>,
+    /// The tallest break in the floor the wheels roll over.
+    max_step: f64,
 }
 
 struct GaitRuntime {
@@ -1751,6 +1789,13 @@ struct GaitRuntime {
     /// `Some` from dispatch until the last foot has settled.
     plan: Option<crate::gait::GaitPlan>,
     history: Vec<crate::gait::Footfall>,
+    /// Per leg, the roll region it is riding and the foot pose it rides
+    /// at in the root frame as of the tick it began — the pose the walk
+    /// left it at, blended to the stance from here.
+    riding: Vec<Option<(usize, f64, Isometry3<f64>)>>,
+    /// Per leg, the wheel of the mount's drive that hangs from its foot
+    /// (a wheel-legged machine), as an index into that drive's wheels.
+    wheel_of: Vec<Option<usize>>,
     /// The sway currently composed onto the world base (identity when
     /// standing): the vehicle drives the base *under* it, so it is undone
     /// before the rigid ride is advanced and recorded.
@@ -3333,6 +3378,7 @@ enum DeviceRuntime {
 }
 
 /// One piece of a vehicle's route.
+#[derive(Debug, Clone)]
 enum Leg {
     /// Pivot in place to the absolute heading `to` at signed rate `omega`.
     Turn { to: f64, omega: f64 },
@@ -3994,12 +4040,15 @@ impl Rollout {
                 let q = sr.joint_positions().to_vec();
                 let gait = sr.mount.as_ref().and_then(|mount| {
                     let spec = mount.gait.as_ref()?;
+                    let legs = spec.legs.len();
                     Some(GaitRuntime {
                         gait: crate::gait::resolve_gait(&sr.model, spec, &q)
                             .expect("a mounted gait was validated against its model"),
                         offset: mount.offset,
                         plan: None,
                         history: Vec::new(),
+                        riding: vec![None; legs],
+                        wheel_of: vec![None; legs],
                         sway: Isometry3::identity(),
                         sways: Vec::new(),
                         pitch: Isometry3::identity(),
@@ -4038,12 +4087,39 @@ impl Rollout {
                 });
                 let wheels = sr.mount.as_ref().and_then(|mount| {
                     let spec = mount.drive.as_ref()?;
+                    // A wheel-legged machine's drive was validated at the
+                    // gait's stance, from its hubs; the legs may stand
+                    // anywhere now. The offset was settled at the mount.
+                    let drive = match &gait {
+                        Some(gr) => crate::wheels::resolve_wheel_drive(
+                            &sr.model,
+                            &crate::seq::WheelDrive {
+                                base_frame: None,
+                                ..spec.clone()
+                            },
+                            &gr.gait.stance,
+                        ),
+                        None => crate::wheels::resolve_wheel_drive(&sr.model, spec, &q),
+                    };
                     Some(WheelRuntime {
                         device: mount.device.clone(),
-                        drive: crate::wheels::resolve_wheel_drive(&sr.model, spec, &q)
+                        drive: drive
                             .expect("a mounted wheel drive was validated against its model"),
                         rolling: false,
+                        mode: spec.mode,
+                        walk_windows: Vec::new(),
+                        max_step: spec.max_step,
                     })
+                });
+                // A wheel-legged machine: which wheel hangs from which foot.
+                let gait = gait.map(|mut gr| {
+                    if let Some(w) = &wheels {
+                        for (i, leg) in gr.gait.legs.iter().enumerate() {
+                            gr.wheel_of[i] =
+                                crate::wheels::wheel_of_foot(&sr.model, &w.drive, leg.foot);
+                        }
+                    }
+                    gr
                 });
                 RobotRuntime {
                     times: vec![0.0],
@@ -4067,6 +4143,7 @@ impl Rollout {
                     gait,
                     spin,
                     wheels,
+                    locomotion: Vec::new(),
                 }
             })
             .collect();
@@ -7400,11 +7477,14 @@ impl Rollout {
                 // A rolling machine's wheels turn by the same pieces: each
                 // hub's travel over the piece, about its own axle. A lift
                 // ride is no drive — the wheels stand still in the car.
+                // Nor does a walked stretch of a wheel-legged machine's
+                // route turn them (a planted axle does not), nor a leg
+                // still in the air past one — its wheel rolls once it lands.
                 let drive = self.robots[r]
                     .wheels
                     .as_ref()
                     .filter(|w| w.rolling)
-                    .map(|w| w.drive.clone());
+                    .map(|w| (w.drive.clone(), w.walk_windows.clone()));
                 let mut rolled = drive.as_ref().map(|_| self.robots[r].q_nom.clone());
                 for (tau0, tau1, piece) in pieces {
                     let from = base;
@@ -7412,13 +7492,49 @@ impl Rollout {
                     if let Some(spans) = self.robots[r].base.as_mut() {
                         push_vehicle_span(spans, from, *tau0, *tau1, piece);
                     }
-                    if let (Some(drive), Some(q)) = (&drive, rolled.as_mut()) {
+                    if let (Some((drive, windows)), Some(q)) = (&drive, rolled.as_mut()) {
+                        let mid = 0.5 * (tau0 + tau1);
+                        if windows.iter().any(|(a, b)| mid >= *a && mid < *b) {
+                            continue;
+                        }
+                        let flying: Vec<usize> = self.robots[r]
+                            .gait
+                            .as_ref()
+                            .and_then(|g| {
+                                let plan = g.plan.as_ref()?;
+                                Some(
+                                    (0..g.gait.legs.len())
+                                        .filter(|&i| {
+                                            matches!(
+                                                plan.state(&g.gait, i, *tau0),
+                                                crate::gait::LegState::Swinging { .. }
+                                            )
+                                        })
+                                        .filter_map(|i| g.wheel_of[i])
+                                        .collect(),
+                                )
+                            })
+                            .unwrap_or_default();
                         let model = &self.world.robots()[r].model;
-                        crate::wheels::roll(model, drive, q, &from, piece, tau1 - tau0);
+                        if flying.is_empty() {
+                            crate::wheels::roll(model, drive, q, &from, piece, tau1 - tau0);
+                        } else {
+                            let grounded = crate::wheels::ResolvedWheelDrive {
+                                wheels: drive
+                                    .wheels
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(w, _)| !flying.contains(w))
+                                    .map(|(_, w)| w.clone())
+                                    .collect(),
+                                offset: drive.offset,
+                            };
+                            crate::wheels::roll(model, &grounded, q, &from, piece, tau1 - tau0);
+                        }
                     }
                 }
                 self.world.set_robot_base_pose_for(r, lift * base * body);
-                if let (Some(drive), Some(rolled)) = (drive, rolled) {
+                if let (Some((drive, _)), Some(rolled)) = (drive, rolled) {
                     // The angle is the joints' nominal — what every later
                     // tick and move starts from — and, the joints being
                     // kinematic even on a dynamic machine, their position.
@@ -8782,7 +8898,7 @@ impl Rollout {
                 let mut lane_update = None;
                 // A vehicle dispatched this scan: its drive, closed form,
                 // for the legs of whatever rides it.
-                let mut dispatched: Option<crate::gait::BodyProfile> = None;
+                let mut dispatched: Option<(nalgebra::Point3<f64>, f64)> = None;
                 // A lift dispatched this scan: its cargo is fixed after
                 // the borrow below ends.
                 let mut lift_capture = false;
@@ -8994,7 +9110,7 @@ impl Rollout {
                         } else {
                             *at = None;
                             lane_update = Some((*lane, true));
-                            dispatched = Some(body_profile(legs, *position, *heading, t));
+                            dispatched = Some((*position, *heading));
                         }
                     }
                     (
@@ -9032,8 +9148,12 @@ impl Rollout {
                 if let Some((lane, value)) = lane_update {
                     self.set_lane(lane, t, value);
                 }
-                if let Some(profile) = dispatched {
-                    self.start_wheels(device);
+                if let Some((position, heading)) = dispatched {
+                    // The riders' gear decides how the route is taken —
+                    // and, for a wheel-legged machine, how fast each leg
+                    // of it goes — before anything plans against it.
+                    let profile = self.dispatch_locomotion(device, position, heading, t)?;
+                    self.start_wheels(device, &profile);
                     self.start_gaits(device, profile)?;
                 }
                 if lift_capture {
@@ -9171,6 +9291,7 @@ impl Rollout {
                         .as_ref()
                         .map(|g| g.rises.clone())
                         .unwrap_or_default(),
+                    locomotion: rt.locomotion.clone(),
                     // The cycle usually ends parked: close a travelling span
                     // at its own end and rest there, rather than extending it
                     // to the horn and driving off the timeline.
@@ -9286,15 +9407,20 @@ impl Rollout {
 /// in time from `t0`, each with the frame it starts from. Built from the
 /// same legs the tick walk consumes, at the same rates, so the body the
 /// footfalls are planned against is the body that will be driven.
+/// The closed-form body motion of a dispatch: one piece per leg that takes
+/// any time. `modes`, indexed like `legs`, is the gear a wheel-legged
+/// machine takes each leg on; empty for a machine that walks throughout.
 fn body_profile(
     legs: &std::collections::VecDeque<Leg>,
+    modes: &[crate::gait::LegMode],
     mut position: nalgebra::Point3<f64>,
     mut heading: f64,
     t0: f64,
 ) -> crate::gait::BodyProfile {
     let mut pieces = Vec::with_capacity(legs.len());
+    let mut piece_modes = Vec::with_capacity(legs.len());
     let mut t = t0;
-    for leg in legs {
+    for (i, leg) in legs.iter().enumerate() {
         let frame = vehicle_frame(&position, heading);
         match leg {
             Leg::Turn { to, omega } => {
@@ -9309,6 +9435,7 @@ fn body_profile(
                             omega: *omega,
                         },
                     ));
+                    piece_modes.extend(modes.get(i).copied());
                     t += need;
                 }
                 heading = *to;
@@ -9324,6 +9451,7 @@ fn body_profile(
                             velocity: *velocity,
                         },
                     ));
+                    piece_modes.extend(modes.get(i).copied());
                     t += need;
                 }
                 position = *to;
@@ -9335,6 +9463,7 @@ fn body_profile(
         t_end: t,
         pieces,
         end_frame: vehicle_frame(&position, heading),
+        modes: piece_modes,
     }
 }
 
@@ -9367,7 +9496,451 @@ impl ActiveMove {
     }
 }
 
+/// Every walkable top face of the scene, and the rule for which one a foot
+/// (or a wheel) stands on at a point: the highest face the whole foot disc
+/// fits on within `reach` of the surface it stands on now — so at a nosing
+/// overlap the toe legitimately lands on the lower tread's front, under
+/// the step above, the way real stairs are climbed. Only when no face fits
+/// the disc does the highest point-covering face answer (and the edge
+/// check names it).
+struct Treads {
+    faces: Vec<(Isometry3<f64>, Vector3<f64>, String)>,
+    /// The foot disc's radius.
+    need: f64,
+    /// How far above or below the present surface the next is looked for.
+    reach: f64,
+}
+
+impl Treads {
+    fn new(world: &Scene, need: f64, reach: f64) -> Self {
+        Treads {
+            faces: world
+                .obstacles()
+                .iter()
+                .filter(|o| o.walkable)
+                .filter_map(|o| match &o.geometry {
+                    botrail_model::Geometry::Box { size } => {
+                        Some((o.pose, size / 2.0, o.name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            need,
+            reach,
+        }
+    }
+
+    /// `(top z, face index, margin to the face's edge)`.
+    fn support(&self, x: f64, y: f64, hint: f64) -> Option<(f64, usize, f64)> {
+        let mut fits: Option<(f64, usize, f64)> = None;
+        let mut covers: Option<(f64, usize, f64)> = None;
+        for (i, (pose, half, _)) in self.faces.iter().enumerate() {
+            let local =
+                pose.inverse_transform_point(&nalgebra::Point3::new(x, y, pose.translation.z));
+            let (mx, my) = (half.x - local.x.abs(), half.y - local.y.abs());
+            if mx < 0.0 || my < 0.0 {
+                continue;
+            }
+            let top = pose.translation.z + half.z;
+            if (top - hint).abs() > self.reach {
+                continue;
+            }
+            let margin = mx.min(my);
+            if covers.map(|(t, _, _)| top > t).unwrap_or(true) {
+                covers = Some((top, i, margin));
+            }
+            if margin + 1e-9 >= self.need && fits.map(|(t, _, _)| top > t).unwrap_or(true) {
+                fits = Some((top, i, margin));
+            }
+        }
+        fits.or(covers)
+    }
+
+    /// The first break in the floor along a straight from `from` to `to`
+    /// taller than `max_step`, read every `pitch` metres: `(rise, where)`.
+    /// The surface under each reading is the walkable face under it, else
+    /// the guide line itself, each found from the one before. A break is
+    /// a jump between two readings of which at least one is a face: the
+    /// guide line is continuous by construction (a ramp is no step), and
+    /// two readings on faces, or a face and the line, jump only where
+    /// the floor really does. Under a few millimetres is authoring, not a
+    /// step.
+    fn steps_along(
+        &self,
+        from: nalgebra::Point3<f64>,
+        to: nalgebra::Point3<f64>,
+        pitch: f64,
+        max_step: f64,
+    ) -> Vec<FloorStep> {
+        const STEP_TOL: f64 = 5e-3;
+        let mut out = Vec::new();
+        let d = to - from;
+        let len = d.norm();
+        if len < 1e-9 {
+            return out;
+        }
+        let n = (len / pitch.max(1e-3)).ceil().max(1.0) as usize;
+        let mut prev: Option<(f64, bool)> = None;
+        for k in 0..=n {
+            let along = len * k as f64 / n as f64;
+            let p = from + d * (k as f64 / n as f64);
+            let hint = prev.map(|(z, _)| z).unwrap_or(p.z);
+            let (surface, on_face) = match self.support(p.x, p.y, hint) {
+                Some((top, _, _)) => (top, true),
+                None => (p.z, false),
+            };
+            if let Some((before, was_face)) = prev {
+                let rise = surface - before;
+                if (on_face || was_face) && rise.abs() > max_step.max(STEP_TOL) + 1e-9 {
+                    out.push(FloorStep {
+                        rise,
+                        at: nalgebra::Point3::new(p.x, p.y, surface),
+                        along,
+                    });
+                }
+            }
+            prev = Some((surface, on_face));
+        }
+        out
+    }
+}
+
+/// A break in the floor along one straight of a route.
+#[derive(Debug, Clone, Copy)]
+struct FloorStep {
+    rise: f64,
+    at: nalgebra::Point3<f64>,
+    /// Metres from the straight's start.
+    along: f64,
+}
+
 impl Rollout {
+    /// The body profile of a dispatch, with the gear each leg of it is
+    /// taken on. A machine that only walks or only rolls takes every leg
+    /// the one way it can; a wheel-legged one deciding leg by leg
+    /// (design-wheel-legged.md §3.3) rolls where the floor is continuous
+    /// and walks where it steps — a turn walked when either straight
+    /// beside it is, a roll too short to be worth the change walked with
+    /// its neighbours — and the walked legs are re-timed to the gait's
+    /// pace. One set to roll is refused a step by name.
+    fn dispatch_locomotion(
+        &mut self,
+        device: &str,
+        position: nalgebra::Point3<f64>,
+        heading: f64,
+        t: f64,
+    ) -> Result<crate::gait::BodyProfile, SeqError> {
+        use crate::gait::LegMode;
+        let di = self
+            .devices
+            .iter()
+            .position(|d| matches!(d, DeviceRuntime::Vehicle { name, .. } if name == device))
+            .expect("a dispatched vehicle");
+        let riders: Vec<usize> = (0..self.robots.len())
+            .filter(|&r| {
+                self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .is_some_and(|m| m.device == device)
+            })
+            .collect();
+        let wheeled = riders
+            .iter()
+            .copied()
+            .find(|&r| self.robots[r].wheels.is_some());
+        let (speed, turn_speed) = match &self.devices[di] {
+            DeviceRuntime::Vehicle {
+                speed, turn_speed, ..
+            } => (*speed, *turn_speed),
+            _ => unreachable!(),
+        };
+        let mut modes: Vec<LegMode> = Vec::new();
+        if let Some(r) = wheeled {
+            let wheels = self.robots[r].wheels.as_ref().expect("wheeled");
+            let (max_step, mode) = (wheels.max_step, wheels.mode);
+            let gait = self.robots[r].gait.as_ref().map(|g| &g.gait);
+            let name = self.world.robots()[r].name.clone();
+            // The route as legs, each with its length, and the floor under
+            // every straight read a wheel radius at a time.
+            let DeviceRuntime::Vehicle { legs, .. } = &self.devices[di] else {
+                unreachable!()
+            };
+            let mut route: Vec<(Leg, LegMode, f64)> = Vec::with_capacity(legs.len());
+            let radius = gait
+                .map(|g| g.foot_radius)
+                .or_else(|| wheels.drive.wheels.first().map(|w| w.radius))
+                .unwrap_or(0.05);
+            let reach = gait
+                .and_then(|g| g.max_step)
+                .unwrap_or(0.0)
+                .max(crate::gait::DEFAULT_STEP_REACH);
+            let treads = Treads::new(
+                &self.world,
+                gait.map(|g| g.foothold).unwrap_or(radius),
+                reach,
+            );
+            let mut steps: Vec<Vec<FloorStep>> = Vec::with_capacity(legs.len());
+            let mut pos = position;
+            for leg in legs.iter() {
+                let (len, found) = match leg {
+                    Leg::Straight { to, .. } => {
+                        let found = treads.steps_along(pos, *to, radius, max_step);
+                        let len = (to - pos).norm();
+                        pos = *to;
+                        (len, found)
+                    }
+                    Leg::Turn { .. } => (0.0, Vec::new()),
+                };
+                let mode = if found.is_empty() {
+                    LegMode::Roll
+                } else {
+                    LegMode::Walk
+                };
+                route.push((leg.clone(), mode, len));
+                steps.push(found);
+            }
+            let first_step = steps.iter().flatten().next().copied();
+            let walker = match (gait, mode) {
+                (Some(g), crate::seq::LocomotionMode::Auto) => Some(g),
+                (Some(_), crate::seq::LocomotionMode::Walk) => {
+                    for (_, m, _) in &mut route {
+                        *m = LegMode::Walk;
+                    }
+                    None
+                }
+                // Set to roll, or with no legs at all: every leg rolled,
+                // and a break in the floor is a refusal.
+                _ => {
+                    if let Some(step) = first_step {
+                        return Err(SeqError::RollStep {
+                            t,
+                            vehicle: device.to_string(),
+                            robot: name,
+                            rise: step.rise,
+                            max_step,
+                            x: step.at.x,
+                            y: step.at.y,
+                            z: step.at.z,
+                        });
+                    }
+                    for (_, m, _) in &mut route {
+                        *m = LegMode::Roll;
+                    }
+                    None
+                }
+            };
+            if let Some(g) = walker {
+                let (front, back) = g.legs.iter().fold((f64::MIN, f64::MAX), |(hi, lo), l| {
+                    let x = l.nominal.translation.x;
+                    (hi.max(x), lo.min(x))
+                });
+                let (v_walk, _) = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .and_then(|m| m.gait.as_ref())
+                    .map(|spec| spec.walk_rates(speed, turn_speed))
+                    .expect("a walking rider has a gait");
+                // A step is walked from a wheel's leading edge before it
+                // (rolling into a kerb is what the walk is for) to a hind
+                // foot's last landing past it — that foot lands up to a
+                // stride behind its hip, and rides from where it stands.
+                let margin = 0.05;
+                let lead = front + g.foot_radius + margin;
+                let tail = -back + v_walk * g.period + g.foot_radius + margin;
+                let switch_m = 2.0 * ((front - back).abs() + 2.0 * g.foot_radius);
+                // Where the walked stretch has to reach into the rolled
+                // straights beside it: a straight is split there and its
+                // near part walked — or walked whole, when what would be
+                // left to roll is not worth the change.
+                let mut splits: Vec<(usize, f64, bool)> = Vec::new(); // (leg, metres from its start, walk the head?)
+                for k in 0..route.len() {
+                    if steps[k].is_empty() {
+                        continue;
+                    }
+                    let first = steps[k][0].along;
+                    let last = steps[k][steps[k].len() - 1].along;
+                    if first < lead {
+                        if let Some(j) = (0..k)
+                            .rev()
+                            .find(|&j| matches!(route[j].0, Leg::Straight { .. }))
+                        {
+                            if route[j].1 == LegMode::Roll {
+                                let need = lead - first;
+                                let keep = route[j].2 - need;
+                                if keep < switch_m {
+                                    route[j].1 = LegMode::Walk;
+                                } else {
+                                    splits.push((j, keep, false));
+                                }
+                            }
+                        }
+                    }
+                    if route[k].2 - last < tail {
+                        if let Some(m) = (k + 1..route.len())
+                            .find(|&m| matches!(route[m].0, Leg::Straight { .. }))
+                        {
+                            if route[m].1 == LegMode::Roll {
+                                let need = tail - (route[k].2 - last);
+                                if route[m].2 - need < switch_m {
+                                    route[m].1 = LegMode::Walk;
+                                } else {
+                                    splits.push((m, need, true));
+                                }
+                            }
+                        }
+                    }
+                }
+                splits.sort_by(|a, b| b.0.cmp(&a.0));
+                splits.dedup_by_key(|s| s.0);
+                let mut pos = position;
+                let starts: Vec<nalgebra::Point3<f64>> = route
+                    .iter()
+                    .map(|(leg, _, _)| {
+                        let start = pos;
+                        if let Leg::Straight { to, .. } = leg {
+                            pos = *to;
+                        }
+                        start
+                    })
+                    .collect();
+                for (k, at, head_walks) in splits {
+                    let (Leg::Straight { to, velocity }, _, len) = route[k].clone() else {
+                        continue;
+                    };
+                    let start = starts[k];
+                    let cut = start + (to - start) * (at / len);
+                    let (head, tail_len) = (at, len - at);
+                    route[k] = (
+                        Leg::Straight { to: cut, velocity },
+                        if head_walks {
+                            LegMode::Walk
+                        } else {
+                            LegMode::Roll
+                        },
+                        head,
+                    );
+                    route.insert(
+                        k + 1,
+                        (
+                            Leg::Straight { to, velocity },
+                            if head_walks {
+                                LegMode::Roll
+                            } else {
+                                LegMode::Walk
+                            },
+                            tail_len,
+                        ),
+                    );
+                }
+                // A turn is walked when either straight beside it is.
+                for i in 0..route.len() {
+                    if !matches!(route[i].0, Leg::Turn { .. }) {
+                        continue;
+                    }
+                    let before = (0..i)
+                        .rev()
+                        .find(|&j| matches!(route[j].0, Leg::Straight { .. }))
+                        .map(|j| route[j].1);
+                    let after = (i + 1..route.len())
+                        .find(|&j| matches!(route[j].0, Leg::Straight { .. }))
+                        .map(|j| route[j].1);
+                    if before == Some(LegMode::Walk) || after == Some(LegMode::Walk) {
+                        route[i].1 = LegMode::Walk;
+                    }
+                }
+                // A roll too short to be worth the change — shorter than
+                // two machine lengths, or than a swing and two full blends
+                // (the machine would never actually ride in its stance) —
+                // is walked with its neighbours. Only where there is
+                // walking to join: a route rolled throughout stays rolled.
+                if route.iter().any(|(_, m, _)| *m == LegMode::Walk) {
+                    let switch_s = g.swing() + 2.0 * crate::gait::BLEND_MAX;
+                    let seconds = |leg: &Leg, len: f64, head: f64| -> f64 {
+                        match leg {
+                            Leg::Straight { velocity, .. } => len / velocity.norm(),
+                            Leg::Turn { to, omega } => wrap_angle(to - head).abs() / omega.abs(),
+                        }
+                    };
+                    let mut head = heading;
+                    let mut costs: Vec<(f64, f64)> = Vec::with_capacity(route.len());
+                    for (leg, _, len) in &route {
+                        costs.push((*len, seconds(leg, *len, head)));
+                        if let Leg::Turn { to, .. } = leg {
+                            head = *to;
+                        }
+                    }
+                    let mut i = 0;
+                    while i < route.len() {
+                        if route[i].1 != LegMode::Roll {
+                            i += 1;
+                            continue;
+                        }
+                        let mut j = i;
+                        let (mut metres, mut secs) = (0.0, 0.0);
+                        while j < route.len() && route[j].1 == LegMode::Roll {
+                            metres += costs[j].0;
+                            secs += costs[j].1;
+                            j += 1;
+                        }
+                        if metres < switch_m || secs < switch_s {
+                            for (_, m, _) in &mut route[i..j] {
+                                *m = LegMode::Walk;
+                            }
+                        }
+                        i = j;
+                    }
+                }
+                // The walked legs go at the gait's pace, not the vehicle's.
+                let spec = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .and_then(|m| m.gait.as_ref())
+                    .expect("a walking rider has a gait");
+                let (v_walk, w_walk) = spec.walk_rates(speed, turn_speed);
+                if route.iter().any(|(_, m, _)| *m == LegMode::Walk) {
+                    let gr = self.robots[r].gait.as_ref().expect("walker");
+                    crate::gait::check_stride(&gr.gait, &gr.offset, v_walk, w_walk).map_err(
+                        |m| SeqError::Action {
+                            step: self.cur_step(),
+                            name: self.cur_step_name(),
+                            message: format!("robot `{name}` walks part of this route: {m}"),
+                        },
+                    )?;
+                }
+                for (leg, mode, _) in &mut route {
+                    if *mode != LegMode::Walk {
+                        continue;
+                    }
+                    match leg {
+                        Leg::Straight { velocity, .. } => {
+                            *velocity = *velocity / velocity.norm() * v_walk;
+                        }
+                        Leg::Turn { omega, .. } => *omega = omega.signum() * w_walk,
+                    }
+                }
+            }
+            modes = route.iter().map(|(_, m, _)| *m).collect();
+            let DeviceRuntime::Vehicle { legs, .. } = &mut self.devices[di] else {
+                unreachable!()
+            };
+            *legs = route.into_iter().map(|(leg, _, _)| leg).collect();
+        }
+        let DeviceRuntime::Vehicle { legs, .. } = &self.devices[di] else {
+            unreachable!()
+        };
+        let profile = body_profile(legs, &modes, position, heading, t);
+        // What the track records: a walker walked it, a roller rolled it, a
+        // wheel-legged machine did what the profile says.
+        let spans = profile.locomotion();
+        for r in riders {
+            let rt = &mut self.robots[r];
+            if rt.gait.is_some() || rt.wheels.is_some() {
+                rt.locomotion.extend(spans.iter().cloned());
+            }
+        }
+        Ok(profile)
+    }
+
     /// A vehicle was dispatched: every robot that walks it plans its
     /// footfalls for the whole drive, right now, from the closed-form
     /// profile — the rest of the walk is sampling that plan.
@@ -9382,6 +9955,19 @@ impl Rollout {
                 .as_ref()
                 .is_some_and(|m| m.device == device);
             if !rides || self.robots[r].gait.is_none() {
+                continue;
+            }
+            // A wheel-legged machine rolling the whole route takes it on
+            // its wheels: the legs hold the posture it stands in — unless
+            // a walk is still settling from the drive before, in which
+            // case they ride from where that left them and blend into
+            // the stance as the wheels roll.
+            if profile.windows(crate::gait::LegMode::Walk).is_empty()
+                && self.robots[r]
+                    .gait
+                    .as_ref()
+                    .is_some_and(|g| g.plan.is_none())
+            {
                 continue;
             }
             let mut gr = self.robots[r].gait.take().expect("checked above");
@@ -9459,24 +10045,25 @@ impl Rollout {
         // while the previous drive's legs were still settling, which swing
         // is in the air and finishes as planned.
         let n = gr.gait.legs.len();
-        let (feet, carry): (Vec<_>, Vec<_>) = match &gr.plan {
-            Some(plan) => (0..n)
-                .map(|i| {
-                    let (position, yaw, flying) = plan.anchor(i, t);
-                    ((position, yaw), flying.cloned())
-                })
-                .unzip(),
-            None => {
-                let robot = &self.world.robots()[r];
-                let feet = crate::gait::feet_at(
-                    &robot.model,
-                    &gr.gait,
-                    robot.joint_positions(),
-                    &(robot.base_pose() * gr.sway.inverse()),
-                );
-                (feet, vec![None; n])
-            }
+        let standing = {
+            let robot = &self.world.robots()[r];
+            crate::gait::feet_at(
+                &robot.model,
+                &gr.gait,
+                robot.joint_positions(),
+                &(robot.base_pose() * gr.sway.inverse()),
+            )
         };
+        let (feet, carry): (Vec<_>, Vec<_>) = (0..n)
+            .map(|i| {
+                match gr.plan.as_ref().and_then(|plan| plan.anchor(i, t)) {
+                    Some((position, yaw, flying)) => ((position, yaw), flying.cloned()),
+                    // No walk in progress for this leg (or a ride): the
+                    // foot is where the machine has it.
+                    None => (standing[i], None),
+                }
+            })
+            .unzip();
         // The terrain under the walk — every walkable top face — is
         // snapshotted at dispatch like the rest of the plan.
         // How far from a foot's present foothold to look for the next one.
@@ -9488,96 +10075,88 @@ impl Rollout {
             .max_step
             .unwrap_or(0.0)
             .max(crate::gait::DEFAULT_STEP_REACH);
-        let treads: Vec<(Isometry3<f64>, Vector3<f64>, String)> = self
-            .world
-            .obstacles()
-            .iter()
-            .filter(|o| o.walkable)
-            .filter_map(|o| match &o.geometry {
-                botrail_model::Geometry::Box { size } => Some((o.pose, size / 2.0, o.name.clone())),
-                _ => None,
-            })
-            .collect();
-        // The surface a foot stands on: the highest walkable face the whole
-        // foot disc fits on — so at a nosing overlap the toe legitimately
-        // lands on the lower tread's front, under the step above, the way
-        // real stairs are climbed. Only when no face fits the disc does the
-        // highest point-covering face answer (and the edge check names it).
-        let need = gr.gait.foot_radius;
-        let support = |x: f64, y: f64, hint: f64| -> Option<(f64, usize, f64)> {
-            let mut fits: Option<(f64, usize, f64)> = None;
-            let mut covers: Option<(f64, usize, f64)> = None;
-            for (i, (pose, half, _)) in treads.iter().enumerate() {
-                let local =
-                    pose.inverse_transform_point(&nalgebra::Point3::new(x, y, pose.translation.z));
-                let (mx, my) = (half.x - local.x.abs(), half.y - local.y.abs());
-                if mx < 0.0 || my < 0.0 {
-                    continue;
-                }
-                let top = pose.translation.z + half.z;
-                if (top - hint).abs() > reach {
-                    continue;
-                }
-                let margin = mx.min(my);
-                if covers.map(|(t, _, _)| top > t).unwrap_or(true) {
-                    covers = Some((top, i, margin));
-                }
-                if margin + 1e-9 >= need && fits.map(|(t, _, _)| top > t).unwrap_or(true) {
-                    fits = Some((top, i, margin));
-                }
-            }
-            fits.or(covers)
-        };
+        let treads = Treads::new(&self.world, gr.gait.foothold, reach);
         let floor = |x: f64, y: f64, hint: f64| -> Option<f64> {
-            support(x, y, hint).map(|(top, _, _)| top)
+            treads.support(x, y, hint).map(|(top, _, _)| top)
         };
         let plan =
             crate::gait::plan_gait(&gr.gait, &gr.offset, profile, &feet, &carry, swing, &floor);
         // The declared step ability, and every foot staying on its tread —
-        // both priced at dispatch, where the whole walk is known.
+        // both priced at dispatch, where the whole walk is known. A step is
+        // between two footholds of one walk: a stretch rolled in between
+        // starts the count afresh where the next walk begins.
         let robot_name = self.world.robots()[r].name.clone();
         for (i, (leg, plan_leg)) in gr.gait.legs.iter().zip(&plan.legs).enumerate() {
-            let mut prev = feet[i].0;
-            for f in &plan_leg.footfalls {
-                let rise = f.position.z - prev.z;
-                if let Some(max_step) = gr.gait.max_step {
-                    if rise.abs() > max_step + 1e-9 {
-                        return Err(SeqError::StepHeight {
-                            t,
-                            robot: robot_name.clone(),
-                            leg: leg.name.clone(),
-                            rise,
-                            max_step,
-                            x: f.position.x,
-                            y: f.position.y,
-                            z: f.position.z,
-                        });
+            for (w, walk) in plan_leg.walks.iter().enumerate() {
+                let mut prev = if w == 0 { feet[i].0 } else { walk.start };
+                for f in &walk.footfalls {
+                    let rise = f.position.z - prev.z;
+                    if let Some(max_step) = gr.gait.max_step {
+                        if rise.abs() > max_step + 1e-9 {
+                            return Err(SeqError::StepHeight {
+                                t,
+                                robot: robot_name.clone(),
+                                leg: leg.name.clone(),
+                                rise,
+                                max_step,
+                                x: f.position.x,
+                                y: f.position.y,
+                                z: f.position.z,
+                            });
+                        }
                     }
-                }
-                let surface = f.position.z - gr.gait.foot_radius;
-                if let Some((_, idx, margin)) = support(f.position.x, f.position.y, surface) {
-                    if margin + 1e-9 < gr.gait.foot_radius {
-                        return Err(SeqError::FootOverhang {
-                            t,
-                            robot: robot_name.clone(),
-                            leg: leg.name.clone(),
-                            obstacle: treads[idx].2.clone(),
-                            margin,
-                            need: gr.gait.foot_radius,
-                        });
+                    let surface = f.position.z - gr.gait.foot_radius;
+                    if let Some((_, idx, margin)) =
+                        treads.support(f.position.x, f.position.y, surface)
+                    {
+                        if margin + 1e-9 < gr.gait.foothold {
+                            return Err(SeqError::FootOverhang {
+                                t,
+                                robot: robot_name.clone(),
+                                leg: leg.name.clone(),
+                                obstacle: treads.faces[idx].2.clone(),
+                                margin,
+                                need: gr.gait.foothold,
+                            });
+                        }
                     }
+                    prev = f.position;
                 }
-                prev = f.position;
             }
         }
+        // A drive dispatched mid-settle supersedes the steps the settle had
+        // still to take: they are never walked, and the new plan has its
+        // own (a swing in the air carries over, and stays on the record).
+        gr.history.retain(|f| f.lift < t - 1e-9);
         for (i, leg) in plan.legs.iter().enumerate() {
-            let carried = carry[i].as_ref();
+            // The carried swing is on the record already — re-aimed into a
+            // roll, it is updated there.
+            if let Some(carried) = carry[i].as_ref() {
+                if let Some(replanned) = leg
+                    .walks
+                    .first()
+                    .and_then(|w| w.footfalls.iter().find(|f| f.lift == carried.lift))
+                {
+                    if let Some(on_record) = gr
+                        .history
+                        .iter_mut()
+                        .find(|f| f.leg == carried.leg && f.lift == carried.lift)
+                    {
+                        *on_record = replanned.clone();
+                    }
+                }
+            }
             gr.history.extend(
-                leg.footfalls
+                leg.walks
                     .iter()
-                    .filter(|f| carried != Some(*f))
+                    .flat_map(|w| w.footfalls.iter())
+                    .filter(|f| carry[i].as_ref().is_none_or(|c| c.lift != f.lift))
                     .cloned(),
             );
+        }
+        // A fresh ride: every leg re-reads where the walk leaves it.
+        for slot in &mut gr.riding {
+            *slot = None;
         }
         if !plan.pitch.is_empty() {
             // A walk dispatched mid-settle takes the tilt over from here.
@@ -9683,12 +10262,19 @@ impl Rollout {
     /// tick from here — a wheel's angle is known only once the vehicle has
     /// moved, so a move's pre-baked future would hold the wheels still (it
     /// is re-baked when the vehicle parks).
-    fn start_wheels(&mut self, device: &str) {
+    fn start_wheels(&mut self, device: &str, profile: &crate::gait::BodyProfile) {
         let t = self.t;
         for rt in &mut self.robots {
             let Some(wheels) = rt.wheels.as_mut().filter(|w| w.device == device) else {
                 continue;
             };
+            // A wheel-legged machine walking the whole route keeps its
+            // wheels locked: the axles are its feet, and a planted foot
+            // does not turn. Walked stretches of a mixed route likewise.
+            if profile.windows(crate::gait::LegMode::Roll).is_empty() {
+                continue;
+            }
+            wheels.walk_windows = profile.windows(crate::gait::LegMode::Walk);
             wheels.rolling = true;
             rt.truncate_after(t);
             let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
@@ -9804,9 +10390,47 @@ impl Rollout {
                 }
             }
         } else {
+            let base_now = *self.world.robots()[r].base_pose();
             for (i, leg) in gait.legs.iter().enumerate() {
                 let (target, stride) = match plan.state(gait, i, t) {
                     LegState::Planted(pose) => (pose, None),
+                    // Riding the body through a roll: from the pose the
+                    // walk left the foot at, blended to the stance over
+                    // the region's blend time. Both are read in the level
+                    // ride frame — the vehicle's, offset up to the root,
+                    // before the pitch and the ride over the steps — so
+                    // the foot keeps to the floor while those ease out
+                    // under it; read the tick the ride begins, so the foot
+                    // stays where it was that one tick more and never
+                    // jumps.
+                    LegState::Riding { region, from } => {
+                        let blend = plan.rolls[region].blend;
+                        let (since, rel) = match gr.riding[i] {
+                            Some((k, since, rel)) if k == region => (since, rel),
+                            _ => {
+                                let rel = rigid.inverse() * from;
+                                gr.riding[i] = Some((region, t, rel));
+                                (t, rel)
+                            }
+                        };
+                        let u = if blend > 1e-12 {
+                            ((t - since) / blend).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        let s = u * u * (3.0 - 2.0 * u);
+                        let p = rel.translation.vector
+                            + (leg.nominal.translation.vector - rel.translation.vector) * s;
+                        let rotation = rel
+                            .rotation
+                            .try_slerp(&leg.nominal.rotation, s, 1e-9)
+                            .unwrap_or(leg.nominal.rotation);
+                        (
+                            rigid
+                                * Isometry3::from_parts(nalgebra::Translation3::from(p), rotation),
+                            None,
+                        )
+                    }
                     LegState::Swinging { from, to, u } => (
                         // A step up (or down) clears the *higher* of the
                         // two treads by the authored lift. The chord
@@ -9903,6 +10527,39 @@ impl Rollout {
                     continue;
                 }
                 q[s.joint] = s.center + s.amplitude * phase.sin() * fade;
+            }
+            // A wheel under a riding leg rolls by what the leg moved its
+            // hub through the body this tick, on top of what the vehicle
+            // drove (the base-motion term, applied before the legs).
+            if let Some(drive) = self.robots[r].wheels.as_ref().map(|w| w.drive.clone()) {
+                let model = &self.world.robots()[r].model;
+                let riding: Vec<(usize, usize)> = (0..gait.legs.len())
+                    .filter(|&i| matches!(plan.state(gait, i, t), LegState::Riding { .. }))
+                    .filter_map(|i| gr.wheel_of[i].map(|w| (i, w)))
+                    .collect();
+                if !riding.is_empty() {
+                    if let (Ok(before), Ok(after)) = (
+                        botrail_kin::forward_kinematics(model, &seed),
+                        botrail_kin::forward_kinematics(model, &q),
+                    ) {
+                        for (_, w) in riding {
+                            let wheel = &drive.wheels[w];
+                            let hub = model.joints[wheel.joint].child_link;
+                            let delta = base_now.rotation
+                                * (after[hub].translation.vector - before[hub].translation.vector);
+                            let axle = base_now.rotation
+                                * (after[hub].rotation
+                                    * model.joints[wheel.joint].axis.into_inner());
+                            q[wheel.q] += crate::wheels::rolling_rate(
+                                &delta,
+                                &axle,
+                                wheel.lateral_ratio,
+                                wheel.radius,
+                            );
+                            self.robots[r].q_nom[wheel.q] = q[wheel.q];
+                        }
+                    }
+                }
             }
         }
         let dt = self.options.dt;
@@ -15365,6 +16022,8 @@ mod wheel_mount_tests {
                 wheel("right_wheel_joint", 0.10),
             ],
             base_frame: Some("base_footprint".into()),
+            mode: crate::seq::LocomotionMode::Auto,
+            max_step: 0.0,
         }
     }
 
@@ -15613,6 +16272,8 @@ mod wheel_mount_tests {
         let drive = |wheels: Vec<MountWheel>, base_frame: Option<&str>| WheelDrive {
             wheels,
             base_frame: base_frame.map(str::to_string),
+            mode: crate::seq::LocomotionMode::Auto,
+            max_step: 0.0,
         };
         let pair = || vec![wheel("wheel_l_joint", 0.08), wheel("wheel_r_joint", 0.08)];
         let mut scene = trolley();
@@ -15724,6 +16385,8 @@ mod wheel_mount_tests {
                 WheelDrive {
                     wheels: vec![module("roll_f", "steer_f"), module("roll_r", "steer_r")],
                     base_frame: Some("base".into()),
+                    mode: crate::seq::LocomotionMode::Auto,
+                    max_step: 0.0,
                 },
             )
             .unwrap();
@@ -15794,6 +16457,8 @@ mod wheel_mount_tests {
                         mecanum("wheel_r_joint", 1.0),
                     ],
                     base_frame: None,
+                    mode: crate::seq::LocomotionMode::Auto,
+                    max_step: 0.0,
                 },
             )
             .unwrap();
@@ -16371,6 +17036,9 @@ mod gait_tests {
         }
         GaitSpec {
             max_step: None,
+            speed: None,
+            turn_speed: None,
+            foothold: None,
             body_link: None,
             legs: LEGS.iter().map(|n| leg(n)).collect(),
             pattern: GaitPattern::Trot,
@@ -17527,6 +18195,9 @@ mod biped_tests {
         }
         GaitSpec {
             max_step: None,
+            speed: None,
+            turn_speed: None,
+            foothold: None,
             body_link: None,
             legs: ["L", "R"]
                 .iter()
@@ -18067,6 +18738,9 @@ mod biped_tests {
         }
         let spec = GaitSpec {
             max_step: None,
+            speed: None,
+            turn_speed: None,
+            foothold: None,
             body_link: None,
             legs: ["FL", "FR", "RL", "RR"]
                 .iter()
@@ -20356,5 +21030,908 @@ mod policy_tests {
             .simulate_sequences(&["cycle"], &RolloutOptions::default())
             .unwrap_err();
         assert!(err.to_string().contains("unknown group `left`"), "{err}");
+    }
+}
+
+/// A wheel-legged machine (design-wheel-legged.md WL0): the primitive
+/// quadruped with a continuous wheel on every calf, mounted with a gait and
+/// a wheel drive at once. Rolling, the legs hold still and every wheel
+/// turns by its hub's travel; walking, the wheels stay locked and the axles
+/// are planted like feet.
+#[cfg(test)]
+mod wheel_leg_tests {
+    use super::*;
+    use crate::seq::{
+        Device, DeviceKind, FootContact, GaitPattern, GaitSpec, LegSpec, LocomotionMode,
+        MountWheel, Step, VehiclePath, WheelDrive,
+    };
+    use botrail_model::Geometry;
+    use nalgebra::Point3;
+    use std::f64::consts::FRAC_PI_2;
+    use std::sync::Arc;
+
+    const QUAD_W: &str = include_str!("../../../examples/assets/quad_wheel_test.urdf");
+    const LEGS: [&str; 4] = ["FL", "FR", "RL", "RR"];
+    const RADIUS: f64 = 0.05;
+    /// Hub y in the body: hip 0.09 + thigh offset 0.06 — the arm a pivot
+    /// about the vehicle origin rolls each wheel by.
+    const HUB_Y: f64 = 0.15;
+
+    fn gait(foot: &str, foot_radius: f64) -> GaitSpec {
+        let mut stance = Vec::new();
+        for n in LEGS {
+            stance.push((format!("{n}_hip_joint"), 0.0));
+            stance.push((format!("{n}_thigh_joint"), 0.7));
+            stance.push((format!("{n}_calf_joint"), -1.4));
+        }
+        GaitSpec {
+            body_link: None,
+            legs: LEGS
+                .iter()
+                .map(|n| LegSpec {
+                    name: (*n).into(),
+                    foot: format!("{n}_{foot}"),
+                    contact: FootContact::Point,
+                })
+                .collect(),
+            pattern: GaitPattern::Trot,
+            period: 0.5,
+            lift: 0.05,
+            stance,
+            max_stride: 0.5,
+            foot_radius,
+            arm_swing: Vec::new(),
+            bob: 0.0,
+            lateral: 0.0,
+            max_step: None,
+            speed: None,
+            turn_speed: None,
+            foothold: None,
+        }
+    }
+
+    fn drive(mode: LocomotionMode, radius: f64) -> WheelDrive {
+        WheelDrive {
+            wheels: LEGS
+                .iter()
+                .map(|n| MountWheel {
+                    joint: format!("{n}_wheel_joint"),
+                    radius,
+                    lateral_ratio: 0.0,
+                    steer: None,
+                })
+                .collect(),
+            base_frame: None,
+            mode,
+            max_step: 0.0,
+        }
+    }
+
+    /// The L of the gait tests: 2 m along +x, a 90° pivot, 1 m along +y,
+    /// at 0.5 m/s and 90°/s — 4 + 1 + 2 s.
+    fn dog() -> Device {
+        Device {
+            name: "dog".into(),
+            kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
+                path: VehiclePath {
+                    waypoints: vec![
+                        Point3::new(0.0, 0.0, 0.0),
+                        Point3::new(2.0, 0.0, 0.0),
+                        Point3::new(2.0, 1.0, 0.0),
+                    ],
+                    stations: vec![("a".into(), 0), ("c".into(), 2)],
+                    ring: false,
+                },
+                body: Vec::new(),
+                speed: 0.5,
+                turn_speed: FRAC_PI_2,
+                start: "a".into(),
+                drive: crate::seq::Drive::Differential {
+                    allow_reverse: false,
+                    max_grade: None,
+                },
+                tray: None,
+            },
+        }
+    }
+
+    /// Mounts as the Python binding does: a roller is posed in the gait's
+    /// stance first (its travel posture, with nothing laid over it), a
+    /// walker is stood in it by the mount.
+    fn mounted(gait: GaitSpec, drive: WheelDrive) -> Result<Scene, crate::SceneError> {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(QUAD_W).unwrap(),
+        ));
+        scene.upsert_device(dog());
+        if drive.mode == LocomotionMode::Roll {
+            let model = &scene.robots()[0].model;
+            let mut q = scene.robots()[0].joint_positions().to_vec();
+            for (joint, value) in &gait.stance {
+                if let Some(qi) = model
+                    .joint_index(joint)
+                    .and_then(|j| model.joints[j].q_index)
+                {
+                    q[qi] = *value;
+                }
+            }
+            scene.set_joint_positions_for(0, q)?;
+        }
+        scene.mount_robot_with_gear(0, "dog", None, Some(gait), Some(drive))?;
+        Ok(scene)
+    }
+
+    fn scene(mode: LocomotionMode) -> Scene {
+        mounted(gait("axle", RADIUS), drive(mode, RADIUS)).unwrap()
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    /// Drive to `c`, then stand for `dwell` seconds.
+    fn patrol(scene: &mut Scene, dwell: f64) -> Result<SequenceTimeline, SeqError> {
+        scene.upsert_sequence(Sequence {
+            name: "patrol".into(),
+            steps: vec![
+                step(
+                    "drive",
+                    vec![Action::Device {
+                        device: "dog".into(),
+                        command: DeviceCommand::Goto {
+                            station: "c".into(),
+                        },
+                    }],
+                    Condition::DeviceDone {
+                        device: "dog".into(),
+                    },
+                ),
+                step("stand", vec![], Condition::Elapsed { seconds: dwell }),
+            ],
+        });
+        scene.simulate_sequence("patrol", &RolloutOptions::default())
+    }
+
+    fn q_index(scene: &Scene, joint: &str) -> usize {
+        let model = &scene.robots()[0].model;
+        model.joints[model.joint_index(joint).unwrap()]
+            .q_index
+            .unwrap()
+    }
+
+    fn axles_world(scene: &Scene, tl: &SequenceTimeline, t: f64) -> Vec<Point3<f64>> {
+        let track = &tl.robots[0];
+        let q = track.trajectory.sample(t);
+        let base = SequenceTimeline::base_pose(track, t).unwrap();
+        let model = &scene.robots()[0].model;
+        let poses = botrail_kin::forward_kinematics_with_base(model, &q, &base).unwrap();
+        LEGS.iter()
+            .map(|n| {
+                let link = model.link_index(&format!("{n}_axle")).unwrap();
+                Point3::from(poses[link].translation.vector)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rolling_turns_every_wheel_by_its_hub_travel_and_holds_the_legs() {
+        let mut scene = scene(LocomotionMode::Roll);
+        // Mounted on its wheels: the axles a radius over the floor, the
+        // body a leg's depth above that.
+        let base = scene.robots()[0].base_pose().translation.z;
+        assert!(
+            (base - (0.4 * 0.7f64.cos() + RADIUS)).abs() < 1e-9,
+            "{base}"
+        );
+        let tl = patrol(&mut scene, 1.0).unwrap();
+        assert!((tl.duration - 8.0).abs() < 1e-9, "{}", tl.duration);
+        let track = &tl.robots[0];
+        assert!(track.footfalls.is_empty(), "a roller took steps");
+        let wheel = |t: f64, leg: &str| {
+            track.trajectory.sample(t)[q_index(&scene, &format!("{leg}_wheel_joint"))]
+        };
+        // Every axle points +y, so the straight along +x counts all four
+        // up by distance / radius.
+        for leg in LEGS {
+            assert!(
+                (wheel(4.0, leg) - 40.0).abs() < 1e-9,
+                "{leg}: {}",
+                wheel(4.0, leg)
+            );
+        }
+        // The left pivot rolls the left wheels back and the right ones
+        // forward by their hub's arc about the vehicle origin.
+        let arc = HUB_Y * FRAC_PI_2 / RADIUS;
+        for (leg, sign) in [("FL", -1.0), ("FR", 1.0), ("RL", -1.0), ("RR", 1.0)] {
+            let at5 = wheel(5.0, leg);
+            assert!((at5 - (40.0 + sign * arc)).abs() < 1e-9, "{leg}: {at5}");
+            let at7 = wheel(7.0, leg);
+            assert!((at7 - (60.0 + sign * arc)).abs() < 1e-9, "{leg}: {at7}");
+            // Parked, they rest.
+            assert_eq!(wheel(7.5, leg), at7);
+        }
+        // The legs held their posture throughout, and the axles rode
+        // rigidly with the body — one radius over the floor.
+        for &t in track.trajectory.times.iter().step_by(25) {
+            let q = track.trajectory.sample(t);
+            for leg in LEGS {
+                assert_eq!(q[q_index(&scene, &format!("{leg}_thigh_joint"))], 0.7);
+                assert_eq!(q[q_index(&scene, &format!("{leg}_calf_joint"))], -1.4);
+            }
+            for axle in axles_world(&scene, &tl, t) {
+                assert!(
+                    (axle.z - RADIUS).abs() < 1e-9,
+                    "axle z {} at t = {t}",
+                    axle.z
+                );
+            }
+        }
+        // Determinism: the same cell bakes the same bits.
+        let again = patrol(&mut scene, 1.0).unwrap();
+        assert_eq!(
+            track.trajectory.positions,
+            again.robots[0].trajectory.positions
+        );
+        // One machine on the bill: the vehicle is not a second purchase.
+        let categories: Vec<String> = scene
+            .bom()
+            .rows
+            .iter()
+            .map(|r| r.category.clone())
+            .collect();
+        assert!(
+            !categories.iter().any(|c| c.starts_with("vehicle")),
+            "{categories:?}"
+        );
+    }
+
+    #[test]
+    fn walking_locks_the_wheels_and_plants_the_axles() {
+        let mut scene = scene(LocomotionMode::Walk);
+        // Mounted in its stance, like the legged machine it also is.
+        let base = scene.robots()[0].base_pose().translation.z;
+        assert!(
+            (base - (0.4 * 0.7f64.cos() + RADIUS)).abs() < 1e-9,
+            "{base}"
+        );
+        let tl = patrol(&mut scene, 2.0).unwrap();
+        let track = &tl.robots[0];
+        assert!(
+            track.footfalls.len() >= 4 * 13,
+            "{} footfalls",
+            track.footfalls.len()
+        );
+        // Not one wheel turned.
+        for leg in LEGS {
+            let qi = q_index(&scene, &format!("{leg}_wheel_joint"));
+            assert!(
+                track.trajectory.positions.iter().all(|q| q[qi] == 0.0),
+                "{leg}'s wheel turned while walking"
+            );
+        }
+        // A planted axle stays where it landed, a wheel radius up.
+        let start = axles_world(&scene, &tl, 0.0);
+        for (i, leg) in LEGS.iter().enumerate() {
+            let steps: Vec<&crate::gait::Footfall> =
+                track.footfalls.iter().filter(|f| f.leg == *leg).collect();
+            let mut anchors = vec![(0.0, steps[0].lift, start[i])];
+            for pair in steps.windows(2) {
+                anchors.push((pair[0].land, pair[1].lift, pair[0].position));
+            }
+            let mut checked = 0;
+            for (from, to, anchor) in anchors {
+                assert!(
+                    (anchor.z - RADIUS).abs() < 1e-9,
+                    "{leg} lands at z {}",
+                    anchor.z
+                );
+                for &t in track
+                    .trajectory
+                    .times
+                    .iter()
+                    .filter(|&&t| t >= from + 1e-9 && t <= to - 1e-9)
+                {
+                    let slip = (axles_world(&scene, &tl, t)[i] - anchor).norm();
+                    assert!(slip < 1e-6, "{leg} slipped {slip:.2e} m at t = {t}");
+                    checked += 1;
+                }
+            }
+            assert!(checked > 100, "{leg}: {checked} planted samples");
+        }
+        // The same walk the wheel-less quadruped takes: as many steps, in
+        // the same time, landing in the same places (a radius higher).
+        let mut plain = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(include_str!(
+                "../../../examples/assets/quad_test.urdf"
+            ))
+            .unwrap(),
+        ));
+        plain.upsert_device(dog());
+        plain
+            .mount_robot_with(0, "dog", None, Some(gait("foot", 0.02)))
+            .unwrap();
+        let bare = patrol(&mut plain, 2.0).unwrap();
+        assert!((bare.duration - tl.duration).abs() < 1e-9);
+        assert_eq!(bare.robots[0].footfalls.len(), track.footfalls.len());
+        for (a, b) in bare.robots[0].footfalls.iter().zip(&track.footfalls) {
+            assert_eq!(
+                (a.leg.as_str(), a.lift, a.land),
+                (b.leg.as_str(), b.lift, b.land)
+            );
+            assert!((a.position.xy() - b.position.xy()).norm() < 1e-9);
+            assert!((b.position.z - a.position.z - (RADIUS - 0.02)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_ramp_on_a_wheel_is_refused_in_either_mode() {
+        for mode in [LocomotionMode::Roll, LocomotionMode::Walk] {
+            let mut scene = scene(mode);
+            scene.upsert_sequence(Sequence {
+                name: "spin".into(),
+                steps: vec![step(
+                    "turn",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("FL_wheel_joint".into(), 1.0)],
+                        duration: 1.0,
+                    }],
+                    Condition::Done,
+                )],
+            });
+            let err = scene
+                .simulate_sequence("spin", &RolloutOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("is a wheel of its mount"), "{mode:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_pairing_is_checked_by_name() {
+        let refused = |gait: GaitSpec, drive: WheelDrive| -> String {
+            mounted(gait, drive).err().expect("refused").to_string()
+        };
+        // The foot must be the axle, not the wheel: a wheel-link foot puts
+        // the wheel joint in the leg's chain.
+        let mut on_wheel = gait("wheel", RADIUS);
+        for n in LEGS {
+            on_wheel.stance.push((format!("{n}_wheel_joint"), 0.0));
+        }
+        let err = refused(on_wheel, drive(LocomotionMode::Roll, RADIUS));
+        assert!(
+            err.contains("hangs under wheel joint `FL_wheel_joint`"),
+            "{err}"
+        );
+        // The wheel's radius and the gait's foot height are one number.
+        let err = refused(gait("axle", 0.02), drive(LocomotionMode::Roll, RADIUS));
+        assert!(
+            err.contains("radius 0.05 m") && err.contains("0.02 m above the floor"),
+            "{err}"
+        );
+        // One wheel per leg.
+        let mut three = drive(LocomotionMode::Roll, RADIUS);
+        three.wheels.pop();
+        let err = refused(gait("axle", RADIUS), three);
+        assert!(err.contains("3 wheels for 4 legs"), "{err}");
+        // No swerve steering, no mecanum rollers on a leg's wheel.
+        let mut steered = drive(LocomotionMode::Roll, RADIUS);
+        steered.wheels[0].steer = Some("FL_calf_joint".into());
+        let err = refused(gait("axle", RADIUS), steered);
+        assert!(err.contains("steers with its legs"), "{err}");
+        let mut rollers = drive(LocomotionMode::Roll, RADIUS);
+        rollers.wheels[1].lateral_ratio = 1.0;
+        let err = refused(gait("axle", RADIUS), rollers);
+        assert!(err.contains("has no rollers"), "{err}");
+        // A wheel on a link no foot is rigid with.
+        let mut astray = drive(LocomotionMode::Roll, RADIUS);
+        astray.wheels[2].joint = "neck".into();
+        let err = refused(gait("axle", RADIUS), astray);
+        assert!(err.contains("neck"), "{err}");
+        // Walking needs legs.
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(QUAD_W).unwrap(),
+        ));
+        scene.upsert_device(dog());
+        let err = scene
+            .mount_robot_on_wheels(0, "dog", None, drive(LocomotionMode::Walk, RADIUS))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs legs"), "{err}");
+    }
+
+    #[test]
+    fn the_mount_round_trips_through_project_and_python() {
+        let scene = scene(LocomotionMode::Walk);
+        let project = scene.to_project();
+        let json = serde_json::to_string(&project).unwrap();
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let mount = back.robots[0].mount.as_ref().unwrap();
+        assert!(mount.gait.is_some());
+        assert_eq!(
+            mount.drive.as_ref().unwrap().mode,
+            crate::project::LocomotionModeMsg::Walk
+        );
+        let again = Scene::from_project(&back).unwrap();
+        let mount = again.robot_mount(0).unwrap();
+        assert_eq!(mount.drive, Some(drive(LocomotionMode::Walk, RADIUS)));
+        assert!(mount.gait.is_some());
+        assert_eq!(again.robots()[0].base_pose(), scene.robots()[0].base_pose());
+        let code = crate::project::generate_python(&project);
+        assert!(
+            code.contains("gait=bt.Gait(") && code.contains("wheels=bt.Wheels("),
+            "{code}"
+        );
+        assert!(code.contains("mode=\"walk\""), "{code}");
+        // A roller saves its mode and reads back rolling; one deciding leg
+        // by leg leaves `mode` out of the file, being the default.
+        let roller = self::scene(LocomotionMode::Roll);
+        let json = serde_json::to_string(&roller.to_project()).unwrap();
+        assert!(json.contains("\"mode\":\"roll\""), "{json}");
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let again = Scene::from_project(&back).unwrap();
+        assert_eq!(
+            again.robot_mount(0).unwrap().drive.as_ref().unwrap().mode,
+            LocomotionMode::Roll
+        );
+        let auto = self::scene(LocomotionMode::Auto);
+        let json = serde_json::to_string(&auto.to_project()).unwrap();
+        assert!(!json.contains("\"mode\""), "{json}");
+        let back: crate::project::ProjectFile = serde_json::from_str(&json).unwrap();
+        let again = Scene::from_project(&back).unwrap();
+        assert_eq!(
+            again.robot_mount(0).unwrap().drive.as_ref().unwrap().mode,
+            LocomotionMode::Auto
+        );
+    }
+
+    // ---- deciding leg by leg (design-wheel-legged.md §3.3, WL1) ----------
+
+    /// A 4 cm kerb three treads deep, then a raised floor: the route rolls
+    /// a flat metre or three, walks the steps, rolls the raised floor, turns
+    /// and rolls on.
+    fn stepped_scene(mode: LocomotionMode, speed: f64) -> Scene {
+        let mut scene = mounted(gait("axle", RADIUS), drive(mode, RADIUS)).unwrap();
+        // The floor is a walkable slab like a building's, so the first
+        // nosing has a face under it the way a real flight's does.
+        scene
+            .add_obstacle(
+                "floor",
+                Geometry::Box {
+                    size: Vector3::new(12.0, 4.0, 0.1),
+                },
+                Isometry3::translation(3.0, 0.0, -0.05),
+            )
+            .unwrap();
+        scene.set_obstacle_walkable("floor", true).unwrap();
+        scene.set_obstacle_enabled("floor", false).unwrap();
+        // Treads 0.3 m deep, each overlapping the one below by 0.12 m at
+        // the nosing (twice the wheel radius), as a real flight is built.
+        let treads = [(3.15, 0.04), (3.45, 0.08), (3.75, 0.12)];
+        for (i, (x, top)) in treads.iter().enumerate() {
+            scene
+                .add_obstacle(
+                    &format!("tread{i}"),
+                    Geometry::Box {
+                        size: Vector3::new(0.42, 2.0, *top),
+                    },
+                    Isometry3::translation(*x, 0.0, top / 2.0),
+                )
+                .unwrap();
+            scene
+                .set_obstacle_walkable(&format!("tread{i}"), true)
+                .unwrap();
+            scene
+                .set_obstacle_enabled(&format!("tread{i}"), false)
+                .unwrap();
+        }
+        // The raised floor runs 0.18 m under the top tread, as a landing
+        // does under a flight's last tread: an overlap shorter than two
+        // wheel radii leaves a band where no face fits the foot.
+        scene
+            .add_obstacle(
+                "upper",
+                Geometry::Box {
+                    size: Vector3::new(4.32, 4.0, 0.12),
+                },
+                Isometry3::translation(5.94, 0.0, 0.06),
+            )
+            .unwrap();
+        scene.set_obstacle_walkable("upper", true).unwrap();
+        scene.set_obstacle_enabled("upper", false).unwrap();
+        let mut device = dog();
+        if let DeviceKind::Vehicle {
+            path,
+            speed: v,
+            drive,
+            ..
+        } = &mut device.kind
+        {
+            path.waypoints = vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(2.85, 0.0, 0.0),
+                Point3::new(4.05, 0.0, 0.12),
+                Point3::new(7.0, 0.0, 0.12),
+                Point3::new(7.0, 1.0, 0.12),
+            ];
+            path.stations = vec![("a".into(), 0), ("c".into(), 4)];
+            *v = speed;
+            *drive = crate::seq::Drive::Differential {
+                allow_reverse: false,
+                max_grade: Some(0.2),
+            };
+        }
+        scene.upsert_device(device);
+        scene
+    }
+
+    #[test]
+    fn the_route_is_rolled_where_the_floor_is_flat_and_walked_where_it_steps() {
+        let mut scene = stepped_scene(LocomotionMode::Auto, 1.0);
+        let tl = patrol(&mut scene, 1.0).unwrap();
+        let track = &tl.robots[0];
+        // Roll, walk, roll: the flat metres at the vehicle's 1 m/s, the
+        // steps at the gait's pace (0.6 · 0.5 / 0.5 = 0.6 m/s) — walked
+        // from a wheel's leading edge before the first nosing to a hind
+        // foot's last landing past the top one, so the flat straights on
+        // either side are split there — the raised floor and the turn
+        // rolled again.
+        let spans = &track.locomotion;
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(spans[0].mode, crate::gait::LegMode::Roll);
+        assert_eq!(spans[1].mode, crate::gait::LegMode::Walk);
+        assert_eq!(spans[2].mode, crate::gait::LegMode::Roll);
+        let climb = (1.2f64.powi(2) + 0.12f64.powi(2)).sqrt();
+        let route = 2.85 + climb + 2.95 + 1.0;
+        let total: f64 = spans.iter().map(|s| s.distance).sum();
+        assert!((total - route).abs() < 1e-9, "{spans:?}");
+        assert!(
+            spans[0].distance > 2.5 && spans[0].distance < 2.85,
+            "{spans:?}"
+        );
+        assert!(
+            spans[1].distance > climb + 0.1 && spans[1].distance < climb + 0.7,
+            "{spans:?}"
+        );
+        assert!((spans[0].distance / (spans[0].t1 - spans[0].t0) - 1.0).abs() < 1e-9);
+        assert!((spans[1].distance / (spans[1].t1 - spans[1].t0) - 0.6).abs() < 1e-9);
+        assert!((spans[2].distance / (spans[2].t1 - spans[2].t0 - 1.0) - 1.0).abs() < 1e-9);
+        let (a, b) = (spans[1].t0, spans[1].t1);
+        // (The dwell after arrival ends on a scan tick.)
+        assert!(
+            (tl.duration - (spans[2].t1 + 1.0)).abs() < 0.01 + 1e-9,
+            "{}",
+            tl.duration
+        );
+        // Every footfall belongs to the walk: lifted inside the window,
+        // landing no later than a swing past it, on a tread or a floor.
+        assert!(track.footfalls.len() >= 8, "{}", track.footfalls.len());
+        for f in &track.footfalls {
+            assert!(f.lift >= a - 1e-9 && f.lift < b, "{f:?}");
+            assert!(f.land <= b + 0.25 + 1e-9, "{f:?}");
+            let on = [0.0, 0.04, 0.08, 0.12]
+                .iter()
+                .any(|top| (f.position.z - (top + RADIUS)).abs() < 1e-6);
+            assert!(on, "{f:?}");
+        }
+        // The last landings are all on the raised floor: the walk runs on
+        // until the hind feet are off the steps.
+        for leg in LEGS {
+            let last = track.footfalls.iter().rev().find(|f| f.leg == leg).unwrap();
+            assert!((last.position.z - (0.12 + RADIUS)).abs() < 1e-6, "{last:?}");
+        }
+        // The wheels turned by the rolled metres — none of the walked ones.
+        let wheel = |t: f64, leg: &str| {
+            track.trajectory.sample(t)[q_index(&scene, &format!("{leg}_wheel_joint"))]
+        };
+        for leg in LEGS {
+            // (Sampled between two scan ticks: within one tick's roll.)
+            let at_a = wheel(a, leg);
+            assert!(
+                (at_a - spans[0].distance / RADIUS).abs() < 0.25,
+                "{leg}: {at_a}"
+            );
+            // Over the walk the wheels stand still — not the twenty-odd
+            // radians the window's metres would be (within a tick's roll
+            // at either end).
+            let turned = wheel(b, leg) - at_a;
+            assert!(turned.abs() < 0.5, "{leg} turned {turned} rad walking");
+        }
+        // Then the raised floor rolls them on, and the pivot turns left and
+        // right wheels apart.
+        let arc = HUB_Y * FRAC_PI_2 / RADIUS;
+        let end = spans[2].t1;
+        for (leg, sign) in [("FL", -1.0), ("FR", 1.0), ("RL", -1.0), ("RR", 1.0)] {
+            let expected = wheel(b + 1.5, leg) + (spans[2].distance - 1.5) / RADIUS + sign * arc;
+            assert!(
+                (wheel(end, leg) - expected).abs() < 0.5,
+                "{leg}: {} vs {expected}",
+                wheel(end, leg)
+            );
+            assert_eq!(
+                wheel(end + 0.5, leg),
+                wheel(end + 0.02, leg),
+                "{leg} rolled on parked"
+            );
+        }
+        // Rolling out, the legs blended back into the stance and stayed.
+        let stance = crate::gait::resolve_gait(
+            &scene.robots()[0].model,
+            &gait("axle", RADIUS),
+            scene.robots()[0].joint_positions(),
+        )
+        .unwrap()
+        .stance;
+        for t in [b + 2.0, end, tl.duration] {
+            let q = track.trajectory.sample(t);
+            for leg in LEGS {
+                for j in ["hip", "thigh", "calf"] {
+                    let qi = q_index(&scene, &format!("{leg}_{j}_joint"));
+                    assert!(
+                        (q[qi] - stance[qi]).abs() < 1e-6,
+                        "{leg} {j} at t={t}: {}",
+                        q[qi]
+                    );
+                }
+            }
+            for axle in axles_world(&scene, &tl, t) {
+                assert!(
+                    (axle.z - (0.12 + RADIUS)).abs() < 1e-6,
+                    "axle z {} at t = {t}",
+                    axle.z
+                );
+            }
+        }
+        // Determinism: the same cell bakes the same bits.
+        let again = patrol(&mut scene, 1.0).unwrap();
+        assert_eq!(
+            track.trajectory.positions,
+            again.robots[0].trajectory.positions
+        );
+        assert_eq!(track.footfalls, again.robots[0].footfalls);
+    }
+
+    #[test]
+    fn a_planted_axle_stays_put_through_the_walk_and_rides_after_it() {
+        let mut scene = stepped_scene(LocomotionMode::Auto, 1.0);
+        let tl = patrol(&mut scene, 1.0).unwrap();
+        let track = &tl.robots[0];
+        let (a, b) = (track.locomotion[1].t0, track.locomotion[1].t1);
+        let times = &track.trajectory.times;
+        for (i, leg) in LEGS.iter().enumerate() {
+            let steps: Vec<&crate::gait::Footfall> =
+                track.footfalls.iter().filter(|f| f.leg == *leg).collect();
+            // Planted from the window's opening (read on the first scan
+            // tick of the walk) to the first lift, then from each landing
+            // to the next lift, then from the last landing until the ride
+            // begins (the window's end, or the landing if later).
+            let first_tick = *times.iter().find(|&&t| t >= a + 1e-9).unwrap();
+            let opening = axles_world(&scene, &tl, first_tick)[i];
+            let mut anchors = vec![(a, steps[0].lift, opening)];
+            for pair in steps.windows(2) {
+                anchors.push((pair[0].land, pair[1].lift, pair[0].position));
+            }
+            let last = steps.last().unwrap();
+            anchors.push((last.land, last.land.max(b), last.position));
+            let mut checked = 0;
+            for (from, to, anchor) in anchors {
+                for &t in times
+                    .iter()
+                    .filter(|&&t| t >= from + 1e-9 && t <= to - 1e-9)
+                {
+                    let slip = (axles_world(&scene, &tl, t)[i] - anchor).norm();
+                    assert!(slip < 1e-6, "{leg} slipped {slip:.2e} m at t = {t}");
+                    checked += 1;
+                }
+            }
+            assert!(checked > 20, "{leg}: {checked} planted samples");
+            // Riding, the axle keeps to the floor and moves with the body:
+            // the blend into the stance is read in the level ride frame,
+            // so the pitch and the ride over the steps easing out under
+            // it never lift it.
+            let mut worst: f64 = 0.0;
+            for &t in times
+                .iter()
+                .filter(|&&t| t > last.land.max(b) + 1e-9 && t < b + 3.0)
+            {
+                let z = axles_world(&scene, &tl, t)[i].z;
+                worst = worst.max((z - (0.12 + RADIUS)).abs());
+            }
+            assert!(worst < 1e-4, "{leg} axle floats {worst:.4} m riding");
+        }
+    }
+
+    #[test]
+    fn a_mount_set_to_roll_is_refused_the_step_by_name() {
+        let mut scene = stepped_scene(LocomotionMode::Roll, 1.0);
+        let err = patrol(&mut scene, 1.0).unwrap_err();
+        match &err {
+            // The first nosing: the floor slab to the first tread.
+            SeqError::RollStep { rise, x, z, .. } => {
+                assert!((rise - 0.04).abs() < 1e-9, "{err}");
+                assert!((x - 2.95).abs() < 0.06, "{err}");
+                assert!((z - 0.04).abs() < 1e-9, "{err}");
+            }
+            other => panic!("{other}"),
+        }
+        assert!(err.to_string().contains("mode \"auto\""), "{err}");
+        // Rated for the kerb, it rolls it.
+        let mut scene = stepped_scene(LocomotionMode::Roll, 1.0);
+        if let Some(m) = scene.robots[0].mount.as_mut() {
+            m.drive.as_mut().unwrap().max_step = 0.05;
+        }
+        let tl = patrol(&mut scene, 1.0).unwrap();
+        assert!(tl.robots[0].footfalls.is_empty());
+        assert!(tl.robots[0]
+            .locomotion
+            .iter()
+            .all(|s| s.mode == crate::gait::LegMode::Roll));
+    }
+
+    #[test]
+    fn a_roll_too_short_to_be_worth_the_change_is_walked() {
+        // Two kerbs 0.5 m apart after four flat metres: the flat half
+        // metre between them would be rolled on its own; beside two walks
+        // it is one walk.
+        let mut scene = mounted(gait("axle", RADIUS), drive(LocomotionMode::Auto, RADIUS)).unwrap();
+        for (name, x, top) in [
+            ("floor", 5.0, 0.0),
+            ("kerb0", 4.1, 0.03),
+            ("flat", 4.5, 0.03),
+            ("kerb1", 4.9, 0.06),
+            ("upper", 7.0, 0.06),
+        ] {
+            let len = match name {
+                "upper" => 4.2,
+                "floor" => 16.0,
+                _ => 0.52,
+            };
+            let (top, z) = if name == "floor" {
+                (0.1, -0.05)
+            } else {
+                (top, top / 2.0)
+            };
+            scene
+                .add_obstacle(
+                    name,
+                    Geometry::Box {
+                        size: Vector3::new(len, 4.0, top),
+                    },
+                    Isometry3::translation(x, 0.0, z),
+                )
+                .unwrap();
+            scene.set_obstacle_walkable(name, true).unwrap();
+            scene.set_obstacle_enabled(name, false).unwrap();
+        }
+        let mut device = dog();
+        if let DeviceKind::Vehicle {
+            path, speed, drive, ..
+        } = &mut device.kind
+        {
+            path.waypoints = vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(3.85, 0.0, 0.0),
+                Point3::new(4.15, 0.0, 0.03),
+                Point3::new(4.65, 0.0, 0.03),
+                Point3::new(4.95, 0.0, 0.06),
+                Point3::new(8.0, 0.0, 0.06),
+            ];
+            path.stations = vec![("a".into(), 0), ("c".into(), 5)];
+            *speed = 1.0;
+            *drive = crate::seq::Drive::Differential {
+                allow_reverse: false,
+                max_grade: Some(0.2),
+            };
+        }
+        scene.upsert_device(device);
+        let tl = patrol(&mut scene, 1.0).unwrap();
+        let modes: Vec<crate::gait::LegMode> =
+            tl.robots[0].locomotion.iter().map(|s| s.mode).collect();
+        assert_eq!(
+            modes,
+            vec![
+                crate::gait::LegMode::Roll,
+                crate::gait::LegMode::Walk,
+                crate::gait::LegMode::Roll
+            ],
+            "{:?}",
+            tl.robots[0].locomotion
+        );
+        // One walk from before the first kerb to past the second: the
+        // two kerbs, the flat half metre between them, and the lead-in
+        // and run-out on the straights either side.
+        let walk = &tl.robots[0].locomotion[1];
+        let kerbs = 0.3f64.hypot(0.03) * 2.0 + 0.5;
+        assert!(
+            walk.distance > kerbs && walk.distance < kerbs + 1.0,
+            "{walk:?}"
+        );
+        assert!(
+            (walk.distance / (walk.t1 - walk.t0) - 0.6).abs() < 1e-9,
+            "{walk:?}"
+        );
+    }
+
+    #[test]
+    fn a_roll_dispatched_mid_settle_rides_the_legs_into_the_stance() {
+        // Walk up to the raised floor and stop there; the next goto rolls
+        // on at once, while the settle still had steps to take.
+        let mut scene = stepped_scene(LocomotionMode::Auto, 1.0);
+        if let Some(DeviceKind::Vehicle { path, .. }) = scene
+            .devices
+            .iter_mut()
+            .find(|d| d.name == "dog")
+            .map(|d| &mut d.kind)
+        {
+            path.stations.push(("top".into(), 2));
+        }
+        let go = |station: &str| Action::Device {
+            device: "dog".into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        };
+        let done = || Condition::DeviceDone {
+            device: "dog".into(),
+        };
+        scene.upsert_sequence(Sequence {
+            name: "on".into(),
+            steps: vec![
+                step("climb", vec![go("top")], done()),
+                step("on", vec![go("c")], done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("on", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.robots[0];
+        let spans = &track.locomotion;
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(spans[2].mode, crate::gait::LegMode::Roll);
+        let rolled_from = spans[2].t0;
+        // No step is taken (or recorded) once the roll is dispatched: the
+        // settle's remaining steps were superseded.
+        assert!(
+            track.footfalls.iter().all(|f| f.lift < rolled_from + 1e-9),
+            "{:?}",
+            track.footfalls
+        );
+        // A swing in the air at the dispatch lands (under its hip, a swing
+        // later at most); then the legs blend into the stance as the
+        // wheels roll, and the axles never leave the raised floor.
+        let stance = crate::gait::resolve_gait(
+            &scene.robots()[0].model,
+            &gait("axle", RADIUS),
+            scene.robots()[0].joint_positions(),
+        )
+        .unwrap()
+        .stance;
+        for &t in track
+            .trajectory
+            .times
+            .iter()
+            .filter(|&&t| t > rolled_from + 0.26)
+        {
+            for axle in axles_world(&scene, &tl, t) {
+                assert!(
+                    (axle.z - (0.12 + RADIUS)).abs() < 1e-4,
+                    "axle z {} at t = {t}",
+                    axle.z
+                );
+            }
+        }
+        let q = track.trajectory.sample(rolled_from + 1.5);
+        for leg in LEGS {
+            for j in ["hip", "thigh", "calf"] {
+                let qi = q_index(&scene, &format!("{leg}_{j}_joint"));
+                assert!((q[qi] - stance[qi]).abs() < 1e-6, "{leg} {j}: {}", q[qi]);
+            }
+        }
     }
 }

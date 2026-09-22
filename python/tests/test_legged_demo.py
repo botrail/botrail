@@ -206,3 +206,123 @@ def test_a_catalog_package_directory_is_a_walker(tmp_path):
     assert tl.footfalls("dog")
     carried = tl.object_pose("part", tl.duration)[0]
     assert math.dist(carried[:2], demo.YARD) < 0.5  # the part rode out on the dog's back
+
+
+# ---- the same dog on wheels (design-wheel-legged.md WL0) ------------------
+# `--robot quadw` is the primitive quadruped with a continuous wheel on every
+# calf, mounted with a gait *and* wheels. The offline stand-in for the Go2-W.
+
+
+def _wheel_slots(scene):
+    names = scene.robot_of("dog").joint_names
+    return [names.index(f"{leg}_wheel_joint") for leg in LEGS]
+
+
+def test_a_wheel_legged_dog_rolls_the_walkway_and_takes_no_step(baked):
+    _, walked = baked
+    scene, tl = demo.bake("quadw")
+    # No footfalls: the legs held their posture and the wheels did the work,
+    # which is what the cycle time says too.
+    assert tl.footfalls("dog") == []
+    assert tl.duration < walked.duration - 10.0, (tl.duration, walked.duration)
+    # The first leg is the walkway, yard to dock, straight along +x: 5.6 m
+    # at 1.0 m/s, and every wheel (all axles +y) turned by exactly that
+    # over its 50 mm radius.
+    to_dock = next(end for name, start, end in tl.step_spans if name == "patrol/to dock")
+    q0, q1 = tl.sample(0.0, robot="dog"), tl.sample(to_dock, robot="dog")
+    for slot in _wheel_slots(scene):
+        assert abs((q1[slot] - q0[slot]) - 5.6 / 0.05) < 1e-6, q1[slot] - q0[slot]
+    # The part still rides out on its back.
+    end = tl.object_pose("part", tl.duration)[0]
+    assert abs(end[0] - demo.YARD[0]) < 0.2 and end[2] > 0.3, end
+
+
+def test_walking_on_its_wheels_is_the_walk_of_the_legged_dog(baked):
+    _, walked = baked
+    scene, tl = demo.bake("quadw", mode="walk")
+    # The wheels are locked: not one turned, from the first tick to the last.
+    slots = _wheel_slots(scene)
+    for t in (0.0, 3.0, 10.0, 25.0, tl.duration):
+        q = tl.sample(t, robot="dog")
+        assert all(q[slot] == 0.0 for slot in slots), (t, [q[s] for s in slots])
+    # The very walk the wheel-less dog takes — as many steps, in the same
+    # time, on the same spots, a wheel radius (50 mm) instead of a ball
+    # radius (20 mm) over the floor.
+    assert abs(tl.duration - walked.duration) < 1e-9
+    steps, plain = tl.footfalls("dog"), walked.footfalls("dog")
+    assert len(steps) == len(plain) > 40
+    for (leg, lift, land, pos), (leg2, lift2, land2, pos2) in zip(steps, plain):
+        assert (leg, lift, land) == (leg2, lift2, land2)
+        assert math.dist(pos[:2], pos2[:2]) < 1e-9
+        assert abs(pos[2] - pos2[2] - 0.03) < 1e-9
+    # ...and it round-trips through a project with both gears on the mount.
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _Path(tmp) / "wheel_legs.botrail"
+        scene.save_project(path)
+        again = demo.bt.Scene.load_project(path)
+        assert again.robot_base_pose_of("dog") == scene.robot_base_pose_of("dog")
+        back = again.simulate_sequences(["patrol", "load"], max_duration=90.0)
+        assert back.footfalls("dog") == steps
+    code = scene.generate_python()
+    assert "gait=bt.Gait(" in code and 'wheels=bt.Wheels(' in code and 'mode="walk"' in code, code
+
+
+def test_a_catalog_package_with_wheels_rolls_and_walks_from_its_manifest(tmp_path):
+    """A `vehicle.legged` package whose `locomotion` block carries `wheels`
+    (a Go2-W) runs the cell with nothing copied out of it: the gait — its
+    foothold and walking pace included — and the wheels both come off the
+    manifest, the vehicle cruises at a derated top speed, and on a flat
+    walkway it rolls the whole way."""
+    import shutil
+
+    import yaml
+
+    package = tmp_path / "test" / "quadw" / "quadw" / "r1"
+    (package / "urdf").mkdir(parents=True)
+    shutil.copy(demo.ASSETS / "quad_wheel_test.urdf", package / "urdf" / "model.urdf")
+    gait = demo.QUADW_GAIT
+    manifest = {
+        "id": "test/quadw/quadw/r1",
+        "category": "vehicle.legged",
+        "name": "QuadW",
+        "specs": {"dof": 16, "locomotion": "quadruped", "drive": "skid",
+                  "footprint_mm": [640, 420], "height_mm": 390, "max_speed_mps": 2.0},
+        "locomotion": {
+            "kind": "quadruped",
+            "legs": [{"name": n, "foot": f, "contact": "point"} for n, f in gait["legs"].items()],
+            "stance": gait["stance"],
+            "foot_radius_m": gait["foot_radius"],
+            "foothold_m": gait["foothold"],
+            "gait": {"pattern": gait["pattern"], "period_s": gait["period"],
+                     "lift_m": gait["lift"], "max_stride_m": gait["max_stride"],
+                     "speed_mps": 0.45},
+            "wheels": {"drive": "skid", "max_step_mm": 30.0,
+                       "joints": [{"joint": j, "radius_m": r, "axle": f"{j[:2]}_axle"}
+                                  for j, r in demo.QUADW_WHEELS.items()]},
+        },
+    }
+    (package / "manifest.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    assert demo.bt.Wheels.rolls(package)
+    wheels = demo.bt.Wheels.from_catalog(package)
+    assert wheels.wheels == dict(demo.QUADW_WHEELS)
+    assert wheels.drive == "skid" and wheels.mode == "auto" and wheels.max_step == 0.03
+    walk = demo.bt.Gait.from_catalog(package)
+    assert walk.foothold == gait["foothold"] and walk.speed == 0.45
+    _, walk, footprint, speed, _ = demo.dog_of(str(package))
+    assert footprint == (0.64, 0.42, 0.39)
+    assert speed == round(demo.ROLL_DERATE * 2.0, 3)
+    assert walk.speed == 0.45
+    assert demo.wheels_of(str(package)).mode == "auto"
+
+    _, tl = demo.bake(str(package))
+    assert tl.footfalls("dog") == []
+    assert {mode for *_, mode, _ in tl.locomotion("dog")} == {"roll"}
+    carried = tl.object_pose("part", tl.duration)[0]
+    assert math.dist(carried[:2], demo.YARD) < 0.5
+    # ...and walked whole on request, at the walking pace
+    _, tl = demo.bake(str(package), mode="walk")
+    assert tl.footfalls("dog") and {mode for *_, mode, _ in tl.locomotion("dog")} == {"walk"}

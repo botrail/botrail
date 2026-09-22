@@ -23,10 +23,15 @@ instead of a cell:
   tick. Leave a cleaning cart across the corridor (`--cart`) and the bake
   names the piece it hits, the part of the machine that hit it, and when.
 * **何分か** — 5 deliveries, 10 flights, 30 m of climb, and the per-storey
-  arrival times come out of the bake. The pace is set by the *flight*, not
-  the corridor: swept, this machine takes the building at 0.40 m/s and no
-  faster — at 0.45 the leading leg runs out of fold on the first tread and
-  the bake says so instead of letting it through.
+  arrival times come out of the bake. One vehicle, one speed, and it is a
+  *stair* speed — 0.40 m/s, what a dog is walked up a flight at — that the
+  corridors are walked at too, because a legged machine has no other gear.
+  `--robot go2w` is the same dog on wheels, and the difference in a
+  building is the whole point of the wheels: it rolls the corridors at
+  1.5 m/s, walks only the flights (decided leg by leg from the floor, the
+  wheels locked and the axles planted like feet), and the per-storey time
+  drops from 87 s to 54 s. The bake also says what it rolled and what it
+  walked, in metres and seconds.
 
 Nothing about the walk is authored. The treads are walkable, so the
 footfalls land on them rather than on the ramp the guide path interpolates;
@@ -551,6 +556,14 @@ def build(*, robot: str = "go2", floors: int = 5, rise: float = RISE,
     _m, gait, *_rest = patrol.dog_of(robot, posture="stairs")
     gait = flight_demo.rate_step(robot, flight_demo.stair_gait(gait, model))
     back = flight_demo.stance_depth(model, gait) + gait.foot_radius + over_root
+    # A wheel-legged dog (`go2w`, `quadw`) rolls the corridors at its
+    # vehicle's speed and walks the flights at the gait's: the `walk` pace
+    # is the gait's own, and the wheels decide leg by leg from the floor.
+    wheels = patrol.wheels_of(robot)
+    if wheels is not None:
+        gait.speed, gait.turn_speed = min(speed, walk), turn
+    else:
+        speed = min(speed, walk)
 
     scene = bt.Scene(model, name="dog")
     for i, level in enumerate(LEVELS):
@@ -620,11 +633,11 @@ def build(*, robot: str = "go2", floors: int = 5, rise: float = RISE,
                    description="post, one round", mass_kg=5.0)
     scene.add_vehicle(
         "dog", body=["dog/footprint"], path=path, stations=stations,
-        speed=min(speed, walk), turn_speed=turn, start="pickup", max_grade=MAX_GRADE,
+        speed=speed, turn_speed=turn, start="pickup", max_grade=MAX_GRADE,
         tray_position=(0.0, 0.0, back + case[2] / 2.0 + 0.02),
         tray_size=(case[0] + 0.14, case[1] + 0.14, case[2] + 0.10),
     )
-    scene.mount_robot("dog", gait=gait)
+    scene.mount_robot("dog", gait=gait, wheels=wheels)
     scene.set_part("dog", kind="device", category="vehicle.legged", qty=1)
 
     # ---- the cycle: to the flight, up it, out to the handover, dwell -----
@@ -654,7 +667,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", nargs="?", default=str(HERE / "building_cell.usdc"))
     parser.add_argument("--robot", default="go2",
-                        help="go2 (the catalog dog), quad, or a package directory")
+                        help="go2 (the catalog dog), go2w (on wheels: rolls the corridors, "
+                             "walks the flights), quad, quadw, or a package directory")
     parser.add_argument("--flight", default=FLIGHT,
                         help="the stair pack: a catalog id or a package directory")
     parser.add_argument("--floors", type=int, default=len(LEVELS) - 1,
@@ -702,6 +716,16 @@ def main() -> None:
     print(f"\ncycle {tl.duration:.1f}s over {args.floors} deliveries at "
           f"{min(patrol.dog_of(args.robot)[3], args.speed):.2f} m/s, "
           f"{len(steps)} footfalls, top foothold z = {max(f[3][2] for f in steps):.2f} m")
+    spans = tl.locomotion("dog")
+    if any(mode == "roll" for _, _, mode, _ in spans):
+        # A wheel-legged dog: what it rolled and what it walked, and the
+        # time each took — the corridors at the rolling speed, the flights
+        # at the gait's pace.
+        for mode in ("roll", "walk"):
+            metres = sum(m for _, _, k, m in spans if k == mode)
+            seconds = sum(t1 - t0 for t0, t1, k, _ in spans if k == mode)
+            print(f"  {mode:<6} {metres:6.1f} m in {seconds:6.1f}s "
+                  f"({len([1 for *_, k, _ in spans if k == mode])} stretches)")
     spans = {name: (t0, t1) for name, t0, t1 in tl.step_spans}
     previous = 0.0
     for i in range(1, args.floors + 1):

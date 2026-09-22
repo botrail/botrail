@@ -1170,6 +1170,9 @@ class SequenceTimeline:
     def footfalls(
         self, robot: Optional[str] = None
     ) -> list[tuple[str, float, float, tuple[float, float, float]]]: ...
+    def locomotion(
+        self, robot: Optional[str] = None
+    ) -> list[tuple[float, float, str, float]]: ...
     def moves(
         self, robot: Optional[str] = None, group: Optional[str] = None
     ) -> list[tuple[str, float, float]]: ...

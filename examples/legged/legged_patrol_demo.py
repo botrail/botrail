@@ -25,6 +25,20 @@ download at all — that is what the tests use. `--compare` bakes the same
 cell on every candidate (the built-ins and any package directories named
 after it) and tables what fits and how long the cycle takes.
 
+`--robot go2w` is the Unitree Go2-W, the same dog with a wheel for a foot
+(`go2w_description`, 12 + 4 DOF). To the cell it is *both* the legged
+machine above and a skid-steered cart: mounted with a `bt.Gait` whose feet
+are the axle frames and a `bt.Wheels` naming the wheel joints, and the
+wheels' `mode` says which gear takes the route. `--mode auto` (the default)
+decides leg by leg from the floor — this cell's walkway is flat, so it rolls
+the whole way at 1.5 m/s, with no footfall taken; a stair would be walked
+(`building_delivery_demo.py --robot go2w` is where that shows). `--mode
+roll` rolls and refuses a step by name; `--mode walk` locks the wheels and
+walks on them exactly as the Go2 walks, same footfalls, same cycle. Rolling,
+this cell is shorter by the difference between 1.5 m/s and 0.6 m/s on the
+walkway. `--robot quadw` is the primitive quadruped on wheels
+(`quad_wheel_test.urdf`), the offline stand-in the tests use.
+
 The cycle is the one a dog is bought for in a cell — carrying:
 
   * **到着** — the dog walks in from the yard, through the gate, and docks
@@ -50,8 +64,8 @@ Two things the bake checks that a picture would not:
     is refused by name before the bake, and one they just barely cannot
     take fails mid-walk with the leg and the time.
 
-Run with:  python examples/legged/legged_patrol_demo.py [out.usdc] [--robot go2|quad|<package dir>]
-                                                 [--narrow] [--studio]
+Run with:  python examples/legged/legged_patrol_demo.py [out.usdc] [--robot go2|go2w|quad|quadw|<package dir>]
+                                                 [--mode auto|roll|walk] [--narrow] [--studio]
                                                  [--compare [<package dir> ...]]
 """
 
@@ -91,7 +105,35 @@ GO2_GAIT = {
 GO2_FOOTPRINT = (0.66, 0.31, 0.40)   # the body the gate has to pass, metres
 GO2_SPEED, GO2_TURN = 0.6, 1.0       # m/s on a straight, rad/s in a pivot
 GO2_PACKAGE = "unitree/go2/go2"      # the catalog package, tried first
+GO2W_PACKAGE = "unitree/go2/go2-w"   # the Go2-W's, likewise
+ROLL_DERATE = 0.6                    # a cell's cruise: this much of a datasheet's top speed
 _FALLBACK_TOLD: set = set()          # so a --compare says it once
+
+# Go2-W: the Go2's legs with a continuous wheel joint (`*_foot_joint`, about
+# +y) where the foot ball was, the calf 13 mm longer to the axle. The gait's
+# foot is an axle frame fixed to the calf at that joint's origin — the
+# wheel turns on it, the leg does not know the wheel is there — and the
+# foot radius is the wheel's: 86 mm off Unitree's mesh (a 7-inch tyre).
+# The stance is the Go2's, so the axle stands where the Go2's foot did.
+GO2W_REPO = "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/master/robots/go2w_description"
+GO2W_MESHES = ["base", "hip", "thigh", "thigh_mirror", "left_wheel", "right_wheel"]   # COLLADA
+GO2W_STLS = ["calf", "calf_mirror"]                                                    # STL as shipped
+GO2W_AXLE_Z = -0.2264
+GO2W_RADIUS = 0.086
+GO2W_GAIT = {
+    **GO2_GAIT,
+    "legs": {n: f"{n}_axle" for n in ("FL", "FR", "RL", "RR")},
+    "foot_radius": GO2W_RADIUS,
+    # A wheel touches a tread at a point: the foothold it needs is a
+    # contact patch, not 86 mm of tread on either side.
+    "foothold": 0.02,
+}
+# The step it can take is not published the way the Go2's is: left to the
+# legs to refuse (`GaitReach`) rather than quoted from a guess.
+del GO2W_GAIT["max_step"]
+GO2W_WHEELS = {f"{n}_foot_joint": GO2W_RADIUS for n in ("FL", "FR", "RL", "RR")}
+GO2W_FOOTPRINT = (0.70, 0.44, 0.48)  # wheels outboard of the hips, body 75 mm higher
+GO2W_ROLL = 1.5                      # m/s rolling — Unitree's 2.5 derated for a cell
 
 # The primitive quadruped: 0.2 m thigh and calf, 20 mm foot balls.
 QUAD_GAIT = {
@@ -102,6 +144,14 @@ QUAD_GAIT = {
 }
 QUAD_FOOTPRINT = (0.64, 0.42, 0.36)
 QUAD_SPEED, QUAD_TURN = 0.5, 1.0
+
+# The same quadruped on 50 mm wheels (`quad_wheel_test.urdf`): the offline
+# wheel-legged stand-in. Its axle frames sit where the foot balls were.
+QUADW_GAIT = {**QUAD_GAIT, "legs": {n: f"{n}_axle" for n in ("FL", "FR", "RL", "RR")},
+              "foot_radius": 0.05, "foothold": 0.02}
+QUADW_WHEELS = {f"{n}_wheel_joint": 0.05 for n in ("FL", "FR", "RL", "RR")}
+QUADW_FOOTPRINT = (0.64, 0.42, 0.39)
+QUADW_ROLL = 1.0
 
 # ---------------------------------------------------------------- the cell
 YARD, DOCK, CORNER, BAY = (-3.6, 0.0), (2.0, 0.0), (3.4, 0.0), (3.4, 1.4)
@@ -287,14 +337,15 @@ def collada_to_obj(src: Path, dst: Path) -> int:
     return sum(len(f) for f in groups.values())
 
 
-def fetch_go2() -> Path:
-    """Unitree's Go2 description, fetched once into the botrail cache and
-    rewritten for botrail: the COLLADA meshes converted to OBJ (colours
-    kept), the URDF's `package://` paths pointed at them, and the per-link
-    `<material>` placeholders dropped so the meshes' own colours show."""
+def fetch_unitree(name: str, repo: str, meshes: list, stls: list = ()) -> Path:
+    """A Unitree description (`<name>_description`), fetched once into the
+    botrail cache and rewritten for botrail: the COLLADA meshes converted to
+    OBJ (colours kept), STL ones taken as they are, the URDF's `package://`
+    paths pointed at them, and the per-link `<material>` placeholders
+    dropped so the meshes' own colours show. Returns the rewritten URDF."""
     cache = Path(os.environ.get("BOTRAIL_CACHE_DIR") or Path.home() / ".cache" / "botrail")
-    dest = cache / "assets" / "go2"
-    urdf = dest / "go2.urdf"
+    dest = cache / "assets" / name
+    urdf = dest / f"{name}.urdf"
     if urdf.exists():
         return urdf
     dest.mkdir(parents=True, exist_ok=True)
@@ -304,37 +355,95 @@ def fetch_go2() -> Path:
         if not target.exists():
             print(f"downloading {rel} ...")
             part = target.with_suffix(target.suffix + ".part")
-            urllib.request.urlretrieve(f"{GO2_REPO}/{rel}", part)
+            urllib.request.urlretrieve(f"{repo}/{rel}", part)
             part.rename(target)
         return target
 
-    source = fetch("urdf/go2_description.urdf")
-    for name in GO2_MESHES:
-        dae = fetch(f"dae/{name}.dae")
-        obj = dest / f"{name}.obj"
+    source = fetch(f"urdf/{name}_description.urdf")
+    for mesh in meshes:
+        dae = fetch(f"dae/{mesh}.dae")
+        obj = dest / f"{mesh}.obj"
         if not obj.exists():
-            print(f"converting {name}.dae ...")
+            print(f"converting {mesh}.dae ...")
             collada_to_obj(dae, obj)
+    for mesh in stls:
+        fetch(f"dae/{mesh}.stl")
     xml = source.read_text()
-    xml = re.sub(r'package://go2_description/dae/(\w+)\.dae', r"\1.obj", xml)
+    xml = re.sub(rf'package://{name}_description/dae/(\w+)\.dae', r"\1.obj", xml)
+    xml = re.sub(rf'package://{name}_description/dae/(\w+)\.stl', r"\1.stl", xml)
     xml = re.sub(r"<material\b[^>]*>.*?</material>", "", xml, flags=re.DOTALL)
     xml = re.sub(r"<material\b[^>]*/>", "", xml)
     urdf.write_text(xml)
     return urdf
 
 
+def fetch_go2() -> Path:
+    """Unitree's Go2 description, cached and rewritten (see `fetch_unitree`)."""
+    return fetch_unitree("go2", GO2_REPO, GO2_MESHES)
+
+
+def fetch_go2w() -> Path:
+    """Unitree's Go2-W description, cached and rewritten — plus what a
+    wheel-legged mount needs of it: an axle frame (`*_axle`) fixed to each
+    calf at the wheel joint's origin, which is the gait's foot, and the
+    wheel's collision as the cylinder it is (the shipped mesh is the tyre's
+    tread, which the checks have no use for and the convex decomposition
+    would only approximate)."""
+    urdf = fetch_unitree("go2w", GO2W_REPO, GO2W_MESHES, GO2W_STLS)
+    tree = ET.parse(urdf)
+    root = tree.getroot()
+    if root.find("link[@name='FL_axle']") is not None:
+        return urdf
+    for leg in ("FL", "FR", "RL", "RR"):
+        axle = ET.SubElement(root, "link", name=f"{leg}_axle")
+        axle.tail = "\n  "
+        joint = ET.SubElement(root, "joint", name=f"{leg}_axle_joint", type="fixed")
+        ET.SubElement(joint, "parent", link=f"{leg}_calf")
+        ET.SubElement(joint, "child", link=f"{leg}_axle")
+        ET.SubElement(joint, "origin", xyz=f"0 0 {GO2W_AXLE_Z}")
+        joint.tail = "\n  "
+        wheel = root.find(f"link[@name='{leg}_foot']")
+        for collision in wheel.findall("collision"):
+            wheel.remove(collision)
+        collision = ET.SubElement(wheel, "collision")
+        ET.SubElement(collision, "origin", rpy="1.5707963 0 0")
+        ET.SubElement(ET.SubElement(collision, "geometry"), "cylinder",
+                      radius=str(GO2W_RADIUS), length="0.05")
+    tree.write(urdf, encoding="unicode")
+    return urdf
+
+
 # ------------------------------------------------------------------ the cell
-def dog_of(robot: str, *, posture: str | None = None):
+def dog_of(robot: str, *, posture: str | None = None, mode: str = "auto"):
     """The walker named by `--robot`: its model, gait, footprint, rates.
 
     `go2` comes from the catalog when the package and the catalog extra are
     there, and from Unitree's URDF otherwise; a directory is a package the
-    catalog builder wrote; `quad` is the primitive test quadruped.
+    catalog builder wrote; `quad` is the primitive test quadruped. `go2w`
+    and `quadw` are the same two on wheels — their wheels come from
+    `wheels_of`, and `mode` decides the vehicle's rate: the rolling speed
+    (`auto` rolls wherever the floor lets it, and walks the rest at the
+    gait's own pace), or the walking one (the Go2's own, so walking they
+    are the Go2).
 
     `posture="stairs"` asks the package for its stair posture. Only a
     catalog package carries one — the hand-written fallbacks come back in
     their standing stance, and the caller sees that in `gait.stance`.
     """
+    if robot == "go2w":
+        try:
+            return catalog_walker(GO2W_PACKAGE, posture=posture, mode=mode)
+        except Exception as err:  # noqa: BLE001 — no extra / offline / not published: fall back
+            if GO2W_PACKAGE not in _FALLBACK_TOLD:
+                _FALLBACK_TOLD.add(GO2W_PACKAGE)
+                print(f"catalog {GO2W_PACKAGE} unavailable ({first_line(err)}); reading the URDF")
+        speed = GO2_SPEED if mode == "walk" else GO2W_ROLL
+        return (bt.Robot.from_urdf(fetch_go2w()), bt.Gait(**GO2W_GAIT, speed=GO2_SPEED),
+                GO2W_FOOTPRINT, speed, GO2_TURN)
+    if robot == "quadw":
+        speed = QUAD_SPEED if mode == "walk" else QUADW_ROLL
+        return (bt.Robot.from_urdf(ASSETS / "quad_wheel_test.urdf"),
+                bt.Gait(**QUADW_GAIT, speed=QUAD_SPEED), QUADW_FOOTPRINT, speed, QUAD_TURN)
     if robot == "go2":
         try:
             return catalog_walker(GO2_PACKAGE, posture=posture)
@@ -347,11 +456,31 @@ def dog_of(robot: str, *, posture: str | None = None):
         return (bt.Robot.from_urdf(ASSETS / "quad_test.urdf"), bt.Gait(**QUAD_GAIT),
                 QUAD_FOOTPRINT, QUAD_SPEED, QUAD_TURN)
     if Path(robot).is_dir():
-        return catalog_walker(Path(robot), posture=posture)
-    raise ValueError(f"unknown robot `{robot}` (go2 | quad | a package directory)")
+        return catalog_walker(Path(robot), posture=posture, mode=mode)
+    raise ValueError(f"unknown robot `{robot}` (go2 | go2w | quad | quadw | a package directory)")
 
 
-def catalog_walker(package, *, posture: str | None = None):
+def wheels_of(robot: str, mode: str = "auto") -> bt.Wheels | None:
+    """The wheels of a wheel-legged `--robot`, in `mode` (`auto` | `roll` |
+    `walk`); `None` for a machine that only walks. A catalog package says
+    itself whether it rolls (`bt.Wheels.rolls`), and its wheels come out of
+    its manifest beside the gait."""
+    if robot == "go2w":
+        try:
+            catalogued = bt.Wheels.rolls(GO2W_PACKAGE)
+        except Exception:  # noqa: BLE001 — the fallback `dog_of` took: the hand-written wheels
+            catalogued = False
+        if catalogued:
+            return bt.Wheels.from_catalog(GO2W_PACKAGE, mode=mode)
+        return bt.Wheels(GO2W_WHEELS, drive="skid", mode=mode)
+    if robot == "quadw":
+        return bt.Wheels(QUADW_WHEELS, drive="skid", mode=mode)
+    if Path(robot).is_dir() and bt.Wheels.rolls(Path(robot)):
+        return bt.Wheels.from_catalog(Path(robot), mode=mode)
+    return None
+
+
+def catalog_walker(package, *, posture: str | None = None, mode: str = "auto"):
     """A `vehicle.legged` package as the cell's walker.
 
     The manifest decides everything the hand-written constants decide for
@@ -359,7 +488,9 @@ def catalog_walker(package, *, posture: str | None = None):
     the body the gate has to pass (`specs.footprint_mm` x `height_mm`), and
     the rates — a straight at 60 % of the stride the gait allows, capped
     by the machine's own top speed, which is what the builder's `gait_walk`
-    check walked the package at.
+    check walked the package at. A package that rolls too (`locomotion.wheels`)
+    is driven at 60 % of its top speed instead, and walks what it must at
+    the gait's pace — unless `mode="walk"`, when it is the walker above.
     """
     if isinstance(package, Path):
         model = bt.Robot.from_urdf(package / "urdf" / "model.urdf")
@@ -386,12 +517,17 @@ def catalog_walker(package, *, posture: str | None = None):
     speed = 0.6 * gait.max_stride / gait.period
     if specs.get("max_speed_mps"):
         speed = min(speed, float(specs["max_speed_mps"]))
+    if mode != "walk" and bt.Wheels.rolls(package):
+        # The walked legs keep the gait's pace; the vehicle cruises.
+        gait.speed = gait.speed or speed
+        speed = ROLL_DERATE * float(specs.get("max_speed_mps") or speed / ROLL_DERATE)
     return model, gait, (length, width, height), round(speed, 3), GO2_TURN
 
 
-def build_scene(robot: str = "go2", narrow: bool = False) -> bt.Scene:
+def build_scene(robot: str = "go2", narrow: bool = False, mode: str = "auto") -> bt.Scene:
     """The cell: a fenced station with an arm and a bench, a bay beyond it,
-    and a dog parked in the yard outside the gate."""
+    and a dog parked in the yard outside the gate. `mode` is read by a
+    wheel-legged dog only: how it takes the walkway."""
     arm = bt.Robot.from_urdf(ASSETS / "simple_arm.urdf")
     # 10 mm above the plate: a base resting *on* it reads as a collision.
     scene = bt.Scene(arm, name="arm", base_position=(*ARM_BASE, PEDESTAL_H + 0.01))
@@ -418,7 +554,7 @@ def build_scene(robot: str = "go2", narrow: bool = False) -> bt.Scene:
     # body — that is what the gate check sees; the legs themselves are
     # drawn, solved and checked against the arm, but not against the fence.
     # The tray is the top of its back, in its own frame.
-    model, gait, footprint, speed, turn = dog_of(robot)
+    model, gait, footprint, speed, turn = dog_of(robot, mode=mode)
     scene.add_robot(model, name="dog")
     scene.add_box("dog/footprint", footprint, (YARD[0] + 0.03, YARD[1], footprint[2] / 2))
     scene.set_obstacle_visible("dog/footprint", False)
@@ -426,7 +562,9 @@ def build_scene(robot: str = "go2", narrow: bool = False) -> bt.Scene:
                       stations={"yard": 0, "dock": 1, "bay": 3},
                       speed=speed, turn_speed=turn, start="yard", allow_reverse=True,
                       tray_position=(0.02, 0.0, footprint[2] + 0.06), tray_size=(0.40, 0.30, 0.20))
-    scene.mount_robot("walker", robot="dog", gait=gait)
+    # A wheel-legged dog is mounted with its wheels as well: the gait's feet
+    # are its axles, and `mode` says which gear the goto drives.
+    scene.mount_robot("walker", robot="dog", gait=gait, wheels=wheels_of(robot, mode))
 
     # The handover, read off the world: the dog at the dock, the arm over it,
     # and — mounted, so it still answers out on the walkway — the part on
@@ -444,6 +582,10 @@ def build_cycle(scene: bt.Scene) -> list:
     """Teaches the arm and writes both programs; returns their names."""
     home = list(scene.joint_positions)
     arm, base = scene.robot_of("arm"), scene.robot_base_pose_of("arm")[0]
+    # The handover is taught over the dog's back: a taller dog (a Go2-W
+    # stands 75 mm higher on its wheels) raises it by the difference.
+    back = scene.obstacle_bounds("dog/footprint")[1][2]
+    handover = (HANDOVER[0], HANDOVER[1], max(HANDOVER[2], back + 0.13))
 
     def teach(target, seed):
         local = tuple(target[i] - base[i] for i in range(3))   # the base has no yaw
@@ -453,7 +595,7 @@ def build_cycle(scene: bt.Scene) -> list:
         return result.q
 
     scene.add_segment("pick", goal=teach(PICK, PICK_SEED), robot="arm")
-    scene.add_segment("to_dog", goal=teach(HANDOVER, HANDOVER_SEED), robot="arm")
+    scene.add_segment("to_dog", goal=teach(handover, HANDOVER_SEED), robot="arm")
     scene.add_segment("home", goal=home, robot="arm")
 
     # The arm: pick the part, wait for the dog, set it on its back, let go.
@@ -483,9 +625,9 @@ def build_cycle(scene: bt.Scene) -> list:
     return ["patrol", "load"]
 
 
-def bake(robot: str = "go2", narrow: bool = False):
+def bake(robot: str = "go2", narrow: bool = False, mode: str = "auto"):
     """Scene and baked timeline for `robot`."""
-    scene = build_scene(robot, narrow)
+    scene = build_scene(robot, narrow, mode)
     names = build_cycle(scene)
     return scene, scene.simulate_sequences(names, max_duration=90.0)
 
@@ -500,10 +642,11 @@ def compare(packages: list, narrow: bool = False) -> None:
     cannot take). None is an opinion about the machine — they are this
     cell's requirements, met or not.
     """
-    candidates = ["quad", "go2"] + [str(p) for p in packages]
+    candidates = ["quad", "go2", "go2w", "go2w --mode walk"] + [str(p) for p in packages]
     print(f"{'walker':<28} {'body':>16} {'v':>5} {'stride':>6} {'cycle':>7} {'steps':>5}   verdict")
-    for name in candidates:
-        label = name
+    for candidate in candidates:
+        name, mode = (candidate.split()[0], "walk") if candidate.endswith("walk") else (candidate, "auto")
+        label = candidate
         if Path(name).is_dir():
             try:
                 manifest = bt.gait._read_manifest(Path(name))
@@ -511,14 +654,14 @@ def compare(packages: list, narrow: bool = False) -> None:
             except (OSError, ValueError):
                 label = Path(name).name
         try:
-            _, gait, footprint, speed, _ = dog_of(name)
+            _, gait, footprint, speed, _ = dog_of(name, mode=mode)
         except Exception as err:  # noqa: BLE001 — the package's verdict, whatever raised it
             print(f"{label:<28} {'—':>16} {'—':>5} {'—':>6} {'—':>7} {'—':>5}   {first_line(err)}")
             continue
         row = (f"{label:<28} {footprint[0]:4.2f}x{footprint[1]:4.2f}x{footprint[2]:4.2f} "
                f"{speed:5.2f} {gait.max_stride:6.2f}")
         try:
-            _, tl = bake(name, narrow)
+            _, tl = bake(name, narrow, mode)
         except (ValueError, RuntimeError) as err:
             print(f"{row} {'—':>7} {'—':>5}   {first_line(err)}")
             continue
@@ -534,7 +677,9 @@ def first_line(err: Exception) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="A quadruped on patrol through a working cell.")
     parser.add_argument("out", nargs="?", default="cell_legged.usdc")
-    parser.add_argument("--robot", default="go2", help="go2 | quad | a catalog package directory")
+    parser.add_argument("--robot", default="go2", help="go2 | go2w | quad | quadw | a catalog package directory")
+    parser.add_argument("--mode", default="auto", choices=("auto", "roll", "walk"),
+                        help="a wheel-legged dog: let the floor decide (default), roll, or walk")
     parser.add_argument("--narrow", action="store_true", help="a gate the body does not fit")
     parser.add_argument("--studio", action="store_true")
     parser.add_argument("--compare", nargs="*", metavar="PACKAGE_DIR",
@@ -545,7 +690,7 @@ def main() -> None:
         return
     robot, narrow, out = args.robot, args.narrow, args.out
 
-    scene = build_scene(robot, narrow)
+    scene = build_scene(robot, narrow, args.mode)
     names = build_cycle(scene)
     try:
         tl = scene.simulate_sequences(names, max_duration=90.0)
@@ -566,10 +711,17 @@ def main() -> None:
     carried = tl.object_pose("part", tl.duration)[0]
     print(f"part ends at {tuple(round(v, 3) for v in carried)} — on the dog's back, back in the yard")
     steps = tl.footfalls("dog")
-    strides = [math.dist(a[3][:2], b[3][:2]) for a, b in zip(steps, steps[4:]) if a[0] == b[0]]
-    walking = tl.signal("walker").high_total()
-    print(f"{len(steps)} footfalls; stride {min(strides):.3f}–{max(strides):.3f} m; "
-          f"walking {walking:.2f}s of {tl.duration:.2f}s")
+    moving = tl.signal("walker").high_total()
+    if steps:
+        strides = [math.dist(a[3][:2], b[3][:2]) for a, b in zip(steps, steps[4:]) if a[0] == b[0]]
+        print(f"{len(steps)} footfalls; stride {min(strides):.3f}–{max(strides):.3f} m; "
+              f"walking {moving:.2f}s of {tl.duration:.2f}s")
+    else:
+        print(f"no footfalls — rolled the whole way, {moving:.2f}s of {tl.duration:.2f}s on the wheels")
+    rolled = sum(m for _, _, mode, m in tl.locomotion("dog") if mode == "roll")
+    walked = sum(m for _, _, mode, m in tl.locomotion("dog") if mode == "walk")
+    if rolled and walked:
+        print(f"rolled {rolled:.2f} m, walked {walked:.2f} m")
 
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")

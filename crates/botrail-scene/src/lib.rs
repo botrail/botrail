@@ -748,7 +748,7 @@ impl Scene {
         offset: Option<Isometry3<f64>>,
         gait: Option<crate::seq::GaitSpec>,
     ) -> Result<(), SceneError> {
-        self.mount_robot_as(robot, device, offset, gait, None)
+        self.mount_robot_with_gear(robot, device, offset, gait, None)
     }
 
     /// [`Scene::mount_robot`] for a machine that rolls: the robot *is* the
@@ -764,10 +764,18 @@ impl Scene {
         offset: Option<Isometry3<f64>>,
         drive: crate::seq::WheelDrive,
     ) -> Result<(), SceneError> {
-        self.mount_robot_as(robot, device, offset, None, Some(drive))
+        self.mount_robot_with_gear(robot, device, offset, None, Some(drive))
     }
 
-    fn mount_robot_as(
+    /// [`Scene::mount_robot`] with the running gear stated outright: a
+    /// gait (the robot walks its vehicle), a wheel drive (it rolls it), or
+    /// both — a wheel-legged machine, wheels hanging from its feet, whose
+    /// [`crate::seq::WheelDrive::mode`] says which of the two takes the
+    /// route (design-wheel-legged.md). Walking, it is mounted in its
+    /// stance with the feet — the axles — a wheel radius over the vehicle
+    /// plane; rolling, it is mounted as it stands, which is the posture it
+    /// travels in, and its hubs are put that radius over the plane.
+    pub fn mount_robot_with_gear(
         &mut self,
         robot: usize,
         device: &str,
@@ -819,7 +827,23 @@ impl Scene {
             }
         }
         let (offset, stance) = match (&gait, &drive) {
-            (Some(spec), _) => {
+            (Some(spec), Some(wheels)) => {
+                let resolved = crate::wheels::resolve_wheel_legs(
+                    &self.robots[robot].model,
+                    spec,
+                    wheels,
+                    self.robots[robot].joint_positions(),
+                )
+                .map_err(SceneError::BadMount)?;
+                let stance = match wheels.mode {
+                    crate::seq::LocomotionMode::Auto | crate::seq::LocomotionMode::Walk => {
+                        Some(resolved.gait.stance)
+                    }
+                    crate::seq::LocomotionMode::Roll => None,
+                };
+                (offset.unwrap_or(resolved.offset), stance)
+            }
+            (Some(spec), None) => {
                 let resolved = crate::gait::resolve_gait(
                     &self.robots[robot].model,
                     spec,
@@ -829,6 +853,13 @@ impl Scene {
                 (offset.unwrap_or(resolved.offset), Some(resolved.stance))
             }
             (None, Some(spec)) => {
+                if spec.mode == crate::seq::LocomotionMode::Walk {
+                    return Err(SceneError::BadMount(
+                        "wheels: mode \"walk\" needs legs — mount the robot with a gait as \
+                         well, or let it roll"
+                            .into(),
+                    ));
+                }
                 let resolved = crate::wheels::resolve_wheel_drive(
                     &self.robots[robot].model,
                     spec,
@@ -2685,6 +2716,7 @@ impl Scene {
                 sway: Vec::new(),
                 pitch: Vec::new(),
                 rise: Vec::new(),
+                locomotion: Vec::new(),
             })
             .collect();
         rollout::SequenceTimeline {

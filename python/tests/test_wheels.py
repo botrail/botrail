@@ -94,8 +94,11 @@ def test_the_declaration_is_checked_by_name() -> None:
         scene.mount_robot("base", robot="semi", wheels=wheels(steer={"nope": "waist_yaw_joint"}))
     with pytest.raises(ValueError, match="drive must be one of"):
         scene.mount_robot("base", robot="semi", wheels=wheels(drive="tracked"))
-    gait = bt.Gait(legs={"L": "left_wheel", "R": "right_wheel"}, stance={})
-    with pytest.raises(ValueError, match="walks .* or rolls"):
+    # A gait as well makes it a wheel-legged mount, checked as one machine:
+    # the feet must be the axles the wheels hang from, not the wheels.
+    gait = bt.Gait(legs={"L": "left_wheel", "R": "right_wheel"}, pattern="biped",
+                   stance={"left_wheel_joint": 0.0, "right_wheel_joint": 0.0})
+    with pytest.raises(ValueError, match="must be the axle frame the wheel turns on"):
         scene.mount_robot("base", robot="semi", gait=gait, wheels=wheels())
 
 

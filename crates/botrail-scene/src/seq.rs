@@ -634,6 +634,11 @@ pub struct RobotMount {
     /// machine is one purchase, and a walkable surface under it is the
     /// arrangement, not a collision — so a model whose wheels are welded
     /// into the chassis mesh declares it with no wheels to turn.
+    ///
+    /// Set *with* `gait` for a wheel-legged machine — wheels for feet, one
+    /// hanging from each foot link (design-wheel-legged.md): the legs are
+    /// the gait's, the wheel joints the drive's, and
+    /// [`WheelDrive::mode`] says which of the two takes the route.
     pub drive: Option<WheelDrive>,
 }
 
@@ -649,6 +654,61 @@ pub struct WheelDrive {
     /// the turn centre, the URDF's `base_footprint`. It is what rides the
     /// vehicle frame when the mount states no offset.
     pub base_frame: Option<String>,
+    /// How a mount that has legs *and* wheels — a wheel-legged quadruped
+    /// (design-wheel-legged.md) — takes its vehicle's route. Read only
+    /// when the mount also carries a gait: a machine that only rolls
+    /// rolls.
+    pub mode: LocomotionMode,
+    /// The tallest break in the floor the wheels roll over, metres — a
+    /// kerb, a threshold. Along a leg of the route, the supporting surface
+    /// is read every wheel radius; a jump beyond this between two readings
+    /// is a step, and a step is walked (or, on a mount that only rolls,
+    /// refused by name). Zero — the default, and the honest figure when
+    /// none is published — walks every step.
+    pub max_step: f64,
+}
+
+/// Which running gear a wheel-legged machine takes a route on. The wheels
+/// hang from the feet, so the two cannot both be true of one instant: a
+/// planted axle is a locked wheel, a rolling hub is a leg held still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocomotionMode {
+    /// Decided leg by leg of the route from the floor under it: rolled
+    /// where the floor is continuous, walked where it steps (a stair
+    /// flight), a turn walked when either straight beside it is, a roll
+    /// too short to be worth the change walked with its neighbours.
+    #[default]
+    Auto,
+    /// The legs hold the posture the machine was mounted in and every
+    /// wheel turns by what its hub travelled — a skid-steered cart with
+    /// legs for suspension. A step on the route is refused by name.
+    Roll,
+    /// The wheels are locked and the machine walks on them as on feet:
+    /// the legged machine it also is, wheel radius for foot radius.
+    Walk,
+}
+
+impl LocomotionMode {
+    /// The name the Python API and the project file spell it by.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LocomotionMode::Auto => "auto",
+            LocomotionMode::Roll => "roll",
+            LocomotionMode::Walk => "walk",
+        }
+    }
+
+    /// The inverse of [`LocomotionMode::as_str`].
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "auto" => Ok(LocomotionMode::Auto),
+            "roll" => Ok(LocomotionMode::Roll),
+            "walk" => Ok(LocomotionMode::Walk),
+            other => Err(format!(
+                "mode must be \"auto\", \"roll\" or \"walk\", got {other:?}"
+            )),
+        }
+    }
 }
 
 /// One wheel of a [`WheelDrive`]. The axle and the hub are the joint's own
@@ -708,6 +768,35 @@ pub struct GaitSpec {
     /// fills it from `max_step_height_mm`. Also sets how far above/below
     /// the vehicle plane a walkable surface is searched for a foothold.
     pub max_step: Option<f64>,
+    /// The pace the machine walks at, m/s, on the legs of a route it
+    /// walks while its vehicle would roll faster — a wheel-legged machine's
+    /// stair flights (design-wheel-legged.md §3.5). `None` takes the
+    /// stride-safe `0.6 · max_stride / period`. A machine that only walks
+    /// walks at its vehicle's speed and does not read this.
+    pub speed: Option<f64>,
+    /// Likewise the pivot rate it walks turns at, rad/s; `None` keeps the
+    /// vehicle's.
+    pub turn_speed: Option<f64>,
+    /// How much of a tread a foot needs around its contact point, metres —
+    /// the margin a foothold keeps from a tread's edge, and the disc a
+    /// foothold is fitted on. `None` takes `foot_radius`, a ball foot's
+    /// own; a wheel touches at a point and needs only a contact patch
+    /// (20 mm), not its radius of tread.
+    pub foothold: Option<f64>,
+}
+
+impl GaitSpec {
+    /// The rates a wheel-legged machine walks the walked legs of a route
+    /// at, given its vehicle's rolling rates: the declared pace, else the
+    /// stride-safe `0.6 · max_stride / period`, and never faster than the
+    /// vehicle; the declared pivot rate, else the vehicle's.
+    pub fn walk_rates(&self, speed: f64, turn_speed: f64) -> (f64, f64) {
+        let pace = self.speed.unwrap_or(0.6 * self.max_stride / self.period);
+        (
+            speed.min(pace),
+            turn_speed.min(self.turn_speed.unwrap_or(turn_speed)),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2018,8 +2107,18 @@ impl Scene {
                     ),
                 ));
             }
-            crate::gait::check_stride(&resolved, &mount.offset, speed, turn_speed)
-                .map_err(|m| (None, format!("robot `{}`: {m}", robot.name)))?;
+            // A wheel-legged machine set to roll never strides: the
+            // vehicle's rates are its rolling rates, and the legs sit out.
+            // Deciding leg by leg, it walks at the gait's own pace.
+            let rates = match mount.drive.as_ref().map(|d| d.mode) {
+                Some(LocomotionMode::Roll) => None,
+                Some(LocomotionMode::Auto) => Some(spec.walk_rates(speed, turn_speed)),
+                Some(LocomotionMode::Walk) | None => Some((speed, turn_speed)),
+            };
+            if let Some((speed, turn_speed)) = rates {
+                crate::gait::check_stride(&resolved, &mount.offset, speed, turn_speed)
+                    .map_err(|m| (None, format!("robot `{}`: {m}", robot.name)))?;
+            }
         }
         for sensor in &self.sensors {
             let Some(mount) = &sensor.mount else { continue };

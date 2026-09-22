@@ -25,9 +25,9 @@ swing — because the catalog carries only how a machine stands on the floor.
     python examples/legged/stairs_delivery_demo.py --studio   # watch it climb
 
 `--robot quad` runs the primitive quadruped (no download) — a shorter-legged
-machine than the Go2, which the bake will tell you: it refuses this flight
-and takes `--rise 120`. `--robot <dir>` runs a package the catalog builder
-wrote, and `--flight <dir>` the same for the stairs.
+machine than the Go2, which the bake will tell you: it takes this flight but
+refuses `--rise 180`, by name. `--robot <dir>` runs a package the catalog
+builder wrote, and `--flight <dir>` the same for the stairs.
 """
 
 from __future__ import annotations

@@ -13,6 +13,16 @@ scene.add_vehicle("base", body=[], path=..., stations=..., drive=wheels.vehicle_
 scene.mount_robot("base", robot="g1d", wheels=wheels)
 
 wheels = bt.Wheels.from_catalog("unitree/g1/g1-d")     # a vehicle.mobile_manipulator package
+
+# A wheel-legged quadruped: a gait as well; `mode="auto"` (the default) rolls
+# or walks each leg of a route as the floor decides, "roll" / "walk" force it.
+scene.mount_robot("dog", robot="go2w", gait=gait, wheels=bt.Wheels({...}))
+tl.locomotion("go2w")                                # what it rolled and walked
+
+bt.Wheels.rolls("unitree/go2/go2-w")                 # True: a legged package with `wheels`
+wheels = bt.Wheels.from_catalog("unitree/go2/go2-w") # to mount beside bt.Gait.from_catalog
 ```
+
+See also [Wheels for feet](../../guides/legged.md#wheels-for-feet).
 
 ::: botrail.wheels

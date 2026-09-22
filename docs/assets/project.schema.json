@@ -2095,6 +2095,14 @@
           "format": "double",
           "default": 0.0
         },
+        "foothold": {
+          "description": "The tread margin a foothold needs (see `GaitSpec::foothold`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "lateral": {
           "type": "number",
           "format": "double",
@@ -2129,6 +2137,14 @@
           "type": "number",
           "format": "double"
         },
+        "speed": {
+          "description": "The pace the machine walks the walked legs of a route at, m/s, and\nthe pivot rate (see `GaitSpec::speed`). Absent in older files.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "stance": {
           "description": "The standing configuration, `(joint, value)`.",
           "type": "array",
@@ -2146,6 +2162,13 @@
               }
             ]
           }
+        },
+        "turn_speed": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       },
       "required": [
@@ -3196,6 +3219,15 @@
         "recess",
         "pin",
         "hole"
+      ]
+    },
+    "LocomotionModeMsg": {
+      "description": "[`crate::seq::LocomotionMode`] as a project carries it.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "roll",
+        "walk"
       ]
     },
     "Logic": {
@@ -5921,6 +5953,15 @@
             "string",
             "null"
           ]
+        },
+        "max_step": {
+          "description": "The tallest break in the floor the wheels roll over, metres.",
+          "type": "number",
+          "format": "double"
+        },
+        "mode": {
+          "description": "How a mount with legs as well takes its route (a wheel-legged\nmachine). Absent in older files, and left out when it is `auto`,\nthe default.",
+          "$ref": "#/$defs/LocomotionModeMsg"
         },
         "wheels": {
           "description": "May be empty: a machine whose wheels are part of its chassis mesh.",

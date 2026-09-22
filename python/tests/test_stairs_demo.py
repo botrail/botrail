@@ -197,7 +197,8 @@ def test_the_standard_flight_is_refused() -> None:
 def test_the_stair_posture_is_measured_not_assumed() -> None:
     """The posture is `depth` off the treads, and which fold that is depends
     on the legs. The primitive quad's are shorter than the Go2's, so it gets
-    a different fold — and cannot take the flight the Go2 takes."""
+    a different fold — and a flight the Go2 is rated for is the most it
+    takes: 180 mm risers are refused by name."""
     model, gait, *_rest = demo.patrol.dog_of("quad")
     fold = demo.stair_fold(model, gait)
     assert fold is not None
@@ -211,9 +212,9 @@ def test_the_stair_posture_is_measured_not_assumed() -> None:
     assert -z == pytest.approx(demo.STAIR_DEPTH, abs=1e-3)
 
     with pytest.raises(ValueError) as refusal:
-        demo.bake(robot="quad", rise=0.15, pack=None)
+        demo.bake(robot="quad", rise=0.18, pack=None)
     assert "cannot reach" in str(refusal.value)
-    _scene, tl = demo.bake(robot="quad", rise=0.12, pack=None)
+    _scene, tl = demo.bake(robot="quad", rise=0.15, pack=None)
     assert tl.footfalls("dog"), "the quad never walked"
 
 

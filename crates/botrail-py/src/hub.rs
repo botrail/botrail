@@ -334,6 +334,14 @@ pub enum MountGear {
         drive: botrail_scene::seq::WheelDrive,
         posture: Vec<(String, f64)>,
     },
+    /// Both: a wheel-legged machine, wheels hanging from its feet. Rolling,
+    /// it is mounted in the gait's stance with `posture` laid over it — the
+    /// way it travels; walking, in the stance.
+    WheelLegs {
+        gait: botrail_scene::seq::GaitSpec,
+        drive: botrail_scene::seq::WheelDrive,
+        posture: Vec<(String, f64)>,
+    },
 }
 
 impl SceneHub {
@@ -620,25 +628,42 @@ impl SceneHub {
                     ));
                 }
             }
+            // The posture first: a rolling machine is mounted the way it
+            // travels, as a gait mounts it in its stance. `over` is what
+            // the posture is laid on — for a wheel-legged machine the
+            // stance, so the joints it does not name stand as they walk.
+            let pose = |scene: &mut Scene, over: &[(String, f64)], posture: &[(String, f64)]| {
+                if over.is_empty() && posture.is_empty() {
+                    return Ok(());
+                }
+                let names = scene.robots()[robot].model.actuated_joint_names();
+                let mut q = scene.robots()[robot].joint_positions().to_vec();
+                for (joint, value) in over.iter().chain(posture) {
+                    let Some(qi) = names.iter().position(|n| n == joint) else {
+                        return Err(SceneError::BadMount(format!(
+                            "wheels: posture joint `{joint}` is not an actuated joint of this \
+                             robot"
+                        )));
+                    };
+                    q[qi] = *value;
+                }
+                scene.set_joint_positions_for(robot, q)
+            };
             match gear {
                 MountGear::Wheels { drive, posture } => {
-                    // The posture first: the machine is mounted the way it
-                    // travels, as a gait mounts it in its stance.
-                    if !posture.is_empty() {
-                        let names = scene.robots()[robot].model.actuated_joint_names();
-                        let mut q = scene.robots()[robot].joint_positions().to_vec();
-                        for (joint, value) in &posture {
-                            let Some(qi) = names.iter().position(|n| n == joint) else {
-                                return Err(SceneError::BadMount(format!(
-                                    "wheels: posture joint `{joint}` is not an actuated joint \
-                                     of this robot"
-                                )));
-                            };
-                            q[qi] = *value;
-                        }
-                        scene.set_joint_positions_for(robot, q)?;
-                    }
+                    pose(scene, &[], &posture)?;
                     scene.mount_robot_on_wheels(robot, device, offset, drive)?;
+                }
+                MountGear::WheelLegs {
+                    gait,
+                    drive,
+                    posture,
+                } => {
+                    // Rolling, this is the posture it travels in. Walking,
+                    // the mount stands the legs in the stance over it, and
+                    // the rest of the machine (a head, an arm) keeps it.
+                    pose(scene, &gait.stance, &posture)?;
+                    scene.mount_robot_with_gear(robot, device, offset, Some(gait), Some(drive))?;
                 }
                 MountGear::Legs(gait) => {
                     scene.mount_robot_with(robot, device, offset, Some(gait))?

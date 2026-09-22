@@ -136,27 +136,78 @@ pub fn rise_at(rises: &[BodyRise], t: f64) -> f64 {
 }
 
 /// Where one leg's foot is at `t`: its anchor, gliding along the swing
-/// chord while it flies (so the mean over the legs moves, never steps).
-fn foot_height(plan: &LegPlan, t: f64) -> f64 {
-    let mut prev = plan.start.z;
-    for f in &plan.footfalls {
-        if t < f.lift {
+/// chord while it flies (so the mean over the legs moves, never steps);
+/// riding, it blends from where the walk left it to the stance height over
+/// the guide line.
+fn foot_height(
+    plan: &LegPlan,
+    rolls: &[RollRegion],
+    profile: &BodyProfile,
+    foot_radius: f64,
+    t: f64,
+) -> f64 {
+    let guide = |t: f64| profile.frame_at(t).translation.z + foot_radius;
+    let riding = |from: f64, since: f64, region: Option<&RollRegion>| -> f64 {
+        let blend = region.map(|r| r.blend).unwrap_or(0.0);
+        if blend <= 1e-12 {
+            return guide(t);
+        }
+        from + (guide(t) - from) * smooth((t - since) / blend)
+    };
+    let mut prev_z: Option<f64> = None;
+    for (w, walk) in plan.walks.iter().enumerate() {
+        let region_before = rolls.iter().find(|r| r.next_window == Some(w));
+        if let Some(region) = region_before {
+            if t < region.t1 {
+                // Riding into this window from the previous walk's last
+                // anchor (or the dispatch anchor).
+                let from = prev_z.unwrap_or(plan.dispatch.0.z);
+                return riding(from, region.t0, Some(region));
+            }
+        }
+        if t < walk.ride {
+            let mut prev = walk.start.z;
+            for f in &walk.footfalls {
+                if t < f.lift {
+                    return prev;
+                }
+                if t < f.land {
+                    let u = (t - f.lift) / (f.land - f.lift).max(1e-12);
+                    return prev + (f.position.z - prev) * smooth(u);
+                }
+                prev = f.position.z;
+            }
             return prev;
         }
-        if t < f.land {
-            let u = (t - f.lift) / (f.land - f.lift).max(1e-12);
-            return prev + (f.position.z - prev) * smooth(u);
+        prev_z = Some(
+            walk.footfalls
+                .last()
+                .map(|f| f.position.z)
+                .unwrap_or(walk.start.z),
+        );
+        if let Some(region) = rolls.iter().find(|r| r.next_window == Some(w + 1)) {
+            if t < region.t1 {
+                return riding(prev_z.expect("set"), walk.ride, Some(region));
+            }
         }
-        prev = f.position.z;
     }
-    prev
+    // Riding out the route after the last window (or, with no window at
+    // all, from the dispatch).
+    let last = plan.walks.last();
+    let from = prev_z
+        .or(last.map(|w| w.start.z))
+        .unwrap_or(plan.dispatch.0.z);
+    let since = last.map(|w| w.ride).unwrap_or(profile.t0);
+    riding(from, since, rolls.iter().find(|r| r.next_window.is_none()))
 }
 
 /// How the body rides a drive: the mean of where its feet are, over the
 /// guide plane, sampled at every lift and landing (between them the legs
-/// glide, so this is the curve itself, not a fit to it).
+/// glide, so this is the curve itself, not a fit to it) — and at the ends
+/// of every blend into a roll, where the legs return to the stance.
 pub(crate) fn plan_rise(
     legs: &[LegPlan],
+    rolls: &[RollRegion],
     profile: &BodyProfile,
     foot_radius: f64,
 ) -> Vec<BodyRise> {
@@ -165,15 +216,35 @@ pub(crate) fn plan_rise(
     }
     let mut times: Vec<f64> = vec![profile.t0];
     for leg in legs {
-        for f in &leg.footfalls {
-            times.push(f.lift);
-            times.push(f.land);
+        for walk in &leg.walks {
+            for f in &walk.footfalls {
+                times.push(f.lift);
+                times.push(f.land);
+            }
+            if walk.ride.is_finite() {
+                times.push(walk.ride);
+                if let Some(r) = rolls
+                    .iter()
+                    .find(|r| r.t0 <= walk.ride && walk.ride <= r.t1)
+                {
+                    times.push((walk.ride + r.blend).min(r.t1));
+                }
+            }
         }
+    }
+    for r in rolls {
+        times.push(r.t0);
+        times.push((r.t0 + r.blend).min(r.t1));
+        times.push(r.t1);
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let value = |t: f64| -> f64 {
-        let mean: f64 = legs.iter().map(|l| foot_height(l, t)).sum::<f64>() / legs.len() as f64;
+        let mean: f64 = legs
+            .iter()
+            .map(|l| foot_height(l, rolls, profile, foot_radius, t))
+            .sum::<f64>()
+            / legs.len() as f64;
         mean - foot_radius - profile.frame_at(t).translation.z
     };
     let mut spans: Vec<BodyRise> = Vec::new();
@@ -183,7 +254,13 @@ pub(crate) fn plan_rise(
         if t1 - t0 < 1e-12 {
             continue;
         }
-        if (to - from).abs() < 1e-12 && spans.last().is_some_and(|s| (s.to - from).abs() < 1e-12) {
+        // A level stretch extends a level span before it — never a blend,
+        // which would stretch the blend out over the whole stretch.
+        if (to - from).abs() < 1e-12
+            && spans
+                .last()
+                .is_some_and(|s| (s.to - from).abs() < 1e-12 && (s.to - s.from).abs() < 1e-12)
+        {
             spans.last_mut().expect("checked").t1 = t1;
             continue;
         }
@@ -262,7 +339,13 @@ pub(crate) fn plan_pitch(profile: &BodyProfile, body_len: f64) -> Vec<BodyPitch>
         if t1 - t0 < 1e-12 {
             continue;
         }
-        if (to - from).abs() < 1e-12 && spans.last().is_some_and(|s| (s.to - from).abs() < 1e-12) {
+        // A held angle extends a held span before it — never a blend,
+        // which would stretch the blend out over the rest of the drive.
+        if (to - from).abs() < 1e-12
+            && spans
+                .last()
+                .is_some_and(|s| (s.to - from).abs() < 1e-12 && (s.to - s.from).abs() < 1e-12)
+        {
             spans.last_mut().expect("checked").t1 = t1;
             continue;
         }
@@ -360,9 +443,11 @@ pub(crate) struct ResolvedGait {
     /// Mount offset that stands the stance feet on the vehicle plane: the
     /// root lifted by the feet's depth below it (plus the foot radius).
     pub offset: Isometry3<f64>,
-    /// Foot radius (see `GaitSpec::foot_radius`) — also the margin a
-    /// foothold needs from a tread's edge.
+    /// Foot radius (see `GaitSpec::foot_radius`).
     pub foot_radius: f64,
+    /// The margin a foothold needs from a tread's edge (see
+    /// `GaitSpec::foothold`).
+    pub foothold: f64,
     /// Declared step ability (see `GaitSpec::max_step`).
     pub max_step: Option<f64>,
     /// The link the legs hang from — the machine's body. What a walking
@@ -493,6 +578,7 @@ pub(crate) fn resolve_gait(
     }
     for (name, value) in [
         ("foot_radius", spec.foot_radius),
+        ("foothold", spec.foothold.unwrap_or(spec.foot_radius)),
         ("bob", spec.bob),
         ("lateral", spec.lateral),
     ] {
@@ -691,6 +777,7 @@ pub(crate) fn resolve_gait(
         lean,
         offset,
         foot_radius: spec.foot_radius,
+        foothold: spec.foothold.unwrap_or(spec.foot_radius),
         max_step: spec.max_step,
         body,
     })
@@ -820,6 +907,29 @@ pub(crate) struct BodyProfile {
     /// `(start, end, vehicle frame at start, motion)`, tiling `[t0, t_end]`.
     pub pieces: Vec<(f64, f64, Isometry3<f64>, VehiclePiece)>,
     pub end_frame: Isometry3<f64>,
+    /// Which gear takes each piece, indexed like `pieces` — a wheel-legged
+    /// machine's route (design-wheel-legged.md §3.3). Empty for a machine
+    /// that walks every piece.
+    pub modes: Vec<LegMode>,
+}
+
+/// Which running gear one piece of a route is taken on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegMode {
+    Roll,
+    Walk,
+}
+
+/// How a mounted machine took one stretch of its route: the gear, the
+/// interval, and how far it went. A walking machine's spans all walk, a
+/// rolling one's all roll; a wheel-legged one's say where it changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocomotionSpan {
+    pub t0: f64,
+    pub t1: f64,
+    pub mode: LegMode,
+    /// Metres travelled over the span (a pivot travels none).
+    pub distance: f64,
 }
 
 impl BodyProfile {
@@ -835,6 +945,52 @@ impl BodyProfile {
         }
         self.end_frame
     }
+
+    /// The mode of piece `i`: walked, when the profile states none.
+    pub fn mode(&self, i: usize) -> LegMode {
+        self.modes.get(i).copied().unwrap_or(LegMode::Walk)
+    }
+
+    /// The stretches taken on `mode`, consecutive pieces merged: `[a, b]`
+    /// in time order.
+    pub fn windows(&self, mode: LegMode) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = Vec::new();
+        for (i, (a, b, _, _)) in self.pieces.iter().enumerate() {
+            if self.mode(i) != mode {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if (last.1 - a).abs() < 1e-9 => last.1 = *b,
+                _ => out.push((*a, *b)),
+            }
+        }
+        out
+    }
+
+    /// The spans a track records for this drive.
+    pub fn locomotion(&self) -> Vec<LocomotionSpan> {
+        let mut out: Vec<LocomotionSpan> = Vec::new();
+        for (i, (a, b, _, piece)) in self.pieces.iter().enumerate() {
+            let mode = self.mode(i);
+            let distance = match piece {
+                VehiclePiece::Lin { velocity } => velocity.norm() * (b - a),
+                VehiclePiece::Piv { .. } => 0.0,
+            };
+            match out.last_mut() {
+                Some(last) if last.mode == mode && (last.t1 - a).abs() < 1e-9 => {
+                    last.t1 = *b;
+                    last.distance += distance;
+                }
+                _ => out.push(LocomotionSpan {
+                    t0: *a,
+                    t1: *b,
+                    mode,
+                    distance,
+                }),
+            }
+        }
+        out
+    }
 }
 
 /// Heading of a frame about +Z.
@@ -843,13 +999,41 @@ pub(crate) fn yaw_of(frame: &Isometry3<f64>) -> f64 {
     r[(1, 0)].atan2(r[(0, 0)])
 }
 
-/// One leg's planned footfalls over a dispatch.
+/// One leg's footfalls over one walk window of a dispatch.
 #[derive(Debug, Clone)]
-pub(crate) struct LegPlan {
-    /// Where the foot stood at dispatch, and the body heading it stood at.
+pub(crate) struct LegWalk {
+    /// Where the foot stood as the window opened, and the body heading it
+    /// stood at.
     pub start: Point3<f64>,
     pub start_yaw: f64,
     pub footfalls: Vec<Footfall>,
+    /// When the leg stops walking after the window and rides the body
+    /// instead: the window's end, or the landing of a swing still in the
+    /// air then. Infinite when the window ends the route — the legs settle
+    /// into the stance and stand.
+    pub ride: f64,
+}
+
+/// One leg's planned footfalls over a dispatch: one walk per walk window.
+#[derive(Debug, Clone)]
+pub(crate) struct LegPlan {
+    /// Where the foot stood at dispatch, and the heading it stood at —
+    /// what it rides from when the route starts rolling.
+    pub dispatch: (Point3<f64>, f64),
+    pub walks: Vec<LegWalk>,
+}
+
+/// A stretch of the route the machine rolls — before the first walk
+/// window, or after any window that does not end the route. The legs ride
+/// the body through it, blending from where the walk left them to the
+/// stance over `blend` seconds.
+#[derive(Debug, Clone)]
+pub(crate) struct RollRegion {
+    pub t0: f64,
+    pub t1: f64,
+    pub blend: f64,
+    /// The walk window this region runs into, if any.
+    pub next_window: Option<usize>,
 }
 
 /// An arm joint swung over one walk, about where it stood at dispatch.
@@ -864,9 +1048,16 @@ pub(crate) struct ArmSwing {
 #[derive(Debug, Clone)]
 pub(crate) struct GaitPlan {
     pub profile: BodyProfile,
+    /// The walk windows `[a, b]` of the route, in time order: the whole
+    /// drive for a machine that only walks.
+    pub windows: Vec<(f64, f64)>,
+    /// The roll regions between and around them (empty for a machine that
+    /// only walks).
+    pub rolls: Vec<RollRegion>,
     pub legs: Vec<LegPlan>,
     /// When the last foot lands — the walk (and the settle after arrival)
-    /// is over, and the legs stand.
+    /// is over, and the legs stand. On a route that ends rolling, when the
+    /// last leg has blended into the stance.
     pub done: f64,
     /// The arms this walk swings: decided at dispatch, and left alone
     /// (not even returned to a centre) when the hands are full or a ramp
@@ -888,7 +1079,18 @@ pub(crate) enum LegState {
         to: Isometry3<f64>,
         u: f64,
     },
+    /// Riding the body through a roll region: from the anchor pose it
+    /// left the walk at, blending to the stance.
+    Riding {
+        region: usize,
+        from: Isometry3<f64>,
+    },
 }
+
+/// The longest a leg takes to blend into the stance once it rides — and
+/// what a roll has to have room for twice over, on top of a swing, to be
+/// worth changing gear for.
+pub(crate) const BLEND_MAX: f64 = 1.0;
 
 impl GaitPlan {
     /// The DOF the walk owns at `t`: the legs until the last foot settles,
@@ -913,34 +1115,100 @@ impl GaitPlan {
         rest
     }
 
+    /// The roll region a leg rides before window `w` (`None`: the last
+    /// region, after every window).
+    fn region_before(&self, w: Option<usize>) -> usize {
+        self.rolls
+            .iter()
+            .position(|r| r.next_window == w)
+            .expect("every roll region is planned")
+    }
+
     /// The anchor a leg stands on (or left) at `t`, with any swing in
-    /// flight: `(position, yaw, in-flight footfall)`.
-    pub fn anchor(&self, leg: usize, t: f64) -> (Point3<f64>, f64, Option<&Footfall>) {
+    /// flight: `(position, yaw, in-flight footfall)` — `None` while the
+    /// leg rides the body through a roll region.
+    pub fn anchor(&self, leg: usize, t: f64) -> Option<(Point3<f64>, f64, Option<&Footfall>)> {
         let plan = &self.legs[leg];
-        let mut prev = (plan.start, plan.start_yaw);
-        for f in &plan.footfalls {
-            if t < f.lift {
-                return (prev.0, prev.1, None);
+        for (w, (a, _)) in self.windows.iter().enumerate() {
+            if t < *a {
+                return None;
             }
-            if t < f.land {
-                return (prev.0, prev.1, Some(f));
+            let walk = &plan.walks[w];
+            if t >= walk.ride {
+                continue;
             }
-            prev = (f.position, f.yaw);
+            let mut prev = (walk.start, walk.start_yaw);
+            for f in &walk.footfalls {
+                if t < f.lift {
+                    return Some((prev.0, prev.1, None));
+                }
+                if t < f.land {
+                    return Some((prev.0, prev.1, Some(f)));
+                }
+                prev = (f.position, f.yaw);
+            }
+            return Some((prev.0, prev.1, None));
         }
-        (prev.0, prev.1, None)
+        None
     }
 
     pub fn state(&self, gait: &ResolvedGait, leg: usize, t: f64) -> LegState {
-        let (position, yaw, flying) = self.anchor(leg, t);
-        let from = gait.foot_pose(leg, &position, yaw);
-        match flying {
-            None => LegState::Planted(from),
-            Some(f) => LegState::Swinging {
-                from,
-                to: gait.foot_pose(leg, &f.position, f.yaw),
-                u: (t - f.lift) / (f.land - f.lift),
-            },
+        let plan = &self.legs[leg];
+        for (w, (a, _)) in self.windows.iter().enumerate() {
+            let walk = &plan.walks[w];
+            if t < *a {
+                // Riding into this window: from where the previous walk
+                // (or the dispatch) left the foot.
+                let from = match w.checked_sub(1) {
+                    Some(p) => plan.walks[p].last_anchor(),
+                    None => plan.dispatch,
+                };
+                return LegState::Riding {
+                    region: self.region_before(Some(w)),
+                    from: gait.foot_pose(leg, &from.0, from.1),
+                };
+            }
+            if t >= walk.ride {
+                continue;
+            }
+            let mut prev = (walk.start, walk.start_yaw);
+            for f in &walk.footfalls {
+                if t < f.lift {
+                    return LegState::Planted(gait.foot_pose(leg, &prev.0, prev.1));
+                }
+                if t < f.land {
+                    return LegState::Swinging {
+                        from: gait.foot_pose(leg, &prev.0, prev.1),
+                        to: gait.foot_pose(leg, &f.position, f.yaw),
+                        u: (t - f.lift) / (f.land - f.lift),
+                    };
+                }
+                prev = (f.position, f.yaw);
+            }
+            return LegState::Planted(gait.foot_pose(leg, &prev.0, prev.1));
         }
+        // Past every window: riding out the route — from where the last
+        // walk left the foot, or (a route rolled throughout, dispatched
+        // while the legs were still settling) from where it stood.
+        let from = plan
+            .walks
+            .last()
+            .map(|w| w.last_anchor())
+            .unwrap_or(plan.dispatch);
+        LegState::Riding {
+            region: self.region_before(None),
+            from: gait.foot_pose(leg, &from.0, from.1),
+        }
+    }
+}
+
+impl LegWalk {
+    /// Where the foot stands when this walk is over.
+    fn last_anchor(&self) -> (Point3<f64>, f64) {
+        self.footfalls
+            .last()
+            .map(|f| (f.position, f.yaw))
+            .unwrap_or((self.start, self.start_yaw))
     }
 }
 
@@ -979,6 +1247,40 @@ pub(crate) fn plan_gait(
     let pitch = plan_pitch(&profile, (front - back).abs().max(1e-6));
     let swing_time = gait.swing();
     let stance_half = 0.5 * gait.duty * gait.period;
+    // The walk windows of the route, and the roll regions around them. A
+    // route rolled throughout (dispatched while a walk was still settling,
+    // or the legs would not be planned at all) gets an empty window at the
+    // dispatch: a swing in the air lands as planned, and the legs ride
+    // from there.
+    let mut windows = profile.windows(LegMode::Walk);
+    if windows.is_empty() {
+        windows.push((t0, t0));
+    }
+    let mut rolls: Vec<RollRegion> = Vec::new();
+    let region = |from: f64, to: f64, after_walk: bool, next: Option<usize>| RollRegion {
+        t0: from,
+        t1: to,
+        // A swing still in the air at the window's end lands first.
+        blend: (0.5 * (to - from - if after_walk { swing_time } else { 0.0 }).max(0.0))
+            .min(BLEND_MAX),
+        next_window: next,
+    };
+    match windows.first() {
+        Some((a, _)) if *a > t0 + 1e-9 => rolls.push(region(t0, *a, false, Some(0))),
+        None => rolls.push(region(t0, t_end, false, None)),
+        _ => {}
+    }
+    for (w, (_, b)) in windows.iter().enumerate() {
+        if *b < t_end - 1e-9 {
+            let next = windows.get(w + 1).map(|n| n.0).unwrap_or(t_end);
+            rolls.push(region(
+                *b,
+                next,
+                true,
+                (w + 1 < windows.len()).then_some(w + 1),
+            ));
+        }
+    }
     let mut legs = Vec::with_capacity(gait.legs.len());
     let mut done = t0;
     for (i, leg) in gait.legs.iter().enumerate() {
@@ -1003,51 +1305,123 @@ pub(crate) fn plan_gait(
             }
             p
         };
-        let mut footfalls: Vec<Footfall> = Vec::new();
-        let mut last = feet[i].0;
-        let mut earliest = t0;
-        if let Some(f) = &carry[i] {
-            last = f.position;
-            earliest = f.land;
-            footfalls.push(f.clone());
-        }
-        let mut k = 0usize;
-        loop {
-            let lift = t0 + (k as f64 + gait.phases[i]) * gait.period;
-            k += 1;
-            if lift < earliest - 1e-9 {
-                continue;
+        let mut walks = Vec::with_capacity(windows.len());
+        for (w, (a, b)) in windows.iter().enumerate() {
+            let final_window = *b >= t_end - 1e-9;
+            // Where the foot stands as the window opens: at dispatch,
+            // wherever it is; after a roll, at the stance under the body.
+            let (start, start_yaw) = if w == 0 && *a <= t0 + 1e-9 {
+                feet[i]
+            } else {
+                let frame = profile.frame_at(*a);
+                let lean = pitch_offset(
+                    &[BodyPitch {
+                        t0: 0.0,
+                        t1: 0.0,
+                        from: pitch_angle(&pitch, *a),
+                        to: pitch_angle(&pitch, *a),
+                    }],
+                    0.0,
+                );
+                (
+                    Point3::from((frame * offset * lean * leg.nominal).translation.vector),
+                    yaw_of(&frame),
+                )
+            };
+            let mut footfalls: Vec<Footfall> = Vec::new();
+            let mut last = start;
+            let mut earliest = *a;
+            if w == 0 {
+                if let Some(f) = &carry[i] {
+                    let mut f = f.clone();
+                    // Into a roll, the swing in the air was planned for a
+                    // body that stayed put; it lands under its hip instead,
+                    // where the ride takes it from.
+                    if *b <= *a + 1e-9 {
+                        let frame = profile.frame_at(f.land);
+                        f.position = foot_at(&frame, &start, pitch_angle(&pitch, f.land));
+                        f.yaw = yaw_of(&frame);
+                    }
+                    last = f.position;
+                    earliest = f.land;
+                    footfalls.push(f);
+                }
             }
-            // Where the walk leaves this foot: re-read as the foot climbs,
-            // since the ground it parks on is found from where it stands.
-            let parked = foot_at(&profile.end_frame, &last, pitch_angle(&pitch, t_end));
-            if lift >= t_end - 1e-9 && (last - parked).norm() < 1e-9 {
-                break;
+            let mut k = 0usize;
+            loop {
+                let lift = a + (k as f64 + gait.phases[i]) * gait.period;
+                k += 1;
+                if lift < earliest - 1e-9 {
+                    continue;
+                }
+                if final_window {
+                    // Where the walk leaves this foot: re-read as the foot
+                    // climbs, since the ground it parks on is found from
+                    // where it stands.
+                    let parked = foot_at(&profile.end_frame, &last, pitch_angle(&pitch, t_end));
+                    if lift >= t_end - 1e-9 && (last - parked).norm() < 1e-9 {
+                        break;
+                    }
+                } else if lift >= *b - 1e-9 {
+                    break;
+                }
+                let land = lift + swing_time;
+                let mid = land + stance_half;
+                // A foot still in the air when the window closes lands
+                // under its hip, where the ride takes it from; one landing
+                // inside the window is placed for the body no later than
+                // the window's end, where the walk's pace ends.
+                let place = if final_window {
+                    mid
+                } else if land > *b {
+                    land
+                } else {
+                    mid.min(*b)
+                };
+                let frame = profile.frame_at(place);
+                let position = foot_at(&frame, &last, pitch_angle(&pitch, place));
+                footfalls.push(Footfall {
+                    leg: leg.name.clone(),
+                    lift,
+                    land,
+                    position,
+                    yaw: yaw_of(&frame),
+                });
+                last = position;
+                if k > 1_000_000 {
+                    break;
+                }
             }
-            let land = lift + swing_time;
-            let mid = land + stance_half;
-            let frame = profile.frame_at(mid);
-            let position = foot_at(&frame, &last, pitch_angle(&pitch, mid));
-            footfalls.push(Footfall {
-                leg: leg.name.clone(),
-                lift,
-                land,
-                position,
-                yaw: yaw_of(&frame),
+            let ride = if final_window {
+                f64::INFINITY
+            } else {
+                footfalls.last().map(|f| f.land.max(*b)).unwrap_or(*b)
+            };
+            if let Some(f) = footfalls.last() {
+                done = done.max(f.land);
+            }
+            if ride.is_finite() {
+                let blend = rolls
+                    .iter()
+                    .find(|r| (r.t0 - b).abs() < 1e-9)
+                    .map(|r| r.blend)
+                    .unwrap_or(0.0);
+                done = done.max(ride + blend);
+            }
+            walks.push(LegWalk {
+                start,
+                start_yaw,
+                footfalls,
+                ride,
             });
-            last = position;
-            if k > 1_000_000 {
-                break;
-            }
-        }
-        if let Some(f) = footfalls.last() {
-            done = done.max(f.land);
         }
         legs.push(LegPlan {
-            start: feet[i].0,
-            start_yaw: feet[i].1,
-            footfalls,
+            dispatch: feet[i],
+            walks,
         });
+    }
+    if let Some(first) = rolls.first().filter(|r| r.t0 <= t0 + 1e-9) {
+        done = done.max(first.t0 + first.blend);
     }
     let sway = (gait.bob > 0.0 || gait.lateral > 0.0).then_some(BodySway {
         t0,
@@ -1058,9 +1432,11 @@ pub(crate) fn plan_gait(
         lateral: gait.lateral,
         lean: gait.lean,
     });
-    let rise = plan_rise(&legs, &profile, gait.foot_radius);
+    let rise = plan_rise(&legs, &rolls, &profile, gait.foot_radius);
     GaitPlan {
         profile,
+        windows,
+        rolls,
         legs,
         done,
         swing,

@@ -105,6 +105,20 @@ class Gait:
         arm_swing: Joint -> amplitude (rad) swung in time with the first
             leg — a biped's arms. Left alone while the robot holds something
             or a ramp is driving them (a carried part rides still).
+        speed: The pace, m/s, a wheel-legged machine walks the walked legs
+            of a route at while its vehicle rolls the rest faster (a
+            ``bt.Wheels`` on the same mount, ``mode="auto"``). ``None`` takes
+            the stride-safe ``0.6 * max_stride / period``; never faster than
+            the vehicle. A machine that only walks walks at its vehicle's
+            speed and does not read this.
+        turn_speed: Likewise the pivot rate, rad/s, it walks turns at;
+            ``None`` keeps the vehicle's.
+        foothold: How much of a tread a foot needs around its contact
+            point, metres — the margin a foothold keeps from a tread's edge
+            (``FootOverhang``) and the disc a foothold is fitted on.
+            ``None`` takes ``foot_radius``, a ball foot's own; a wheel
+            touches the tread at a point and needs only a contact patch
+            (0.02), not its radius of tread.
     """
 
     legs: Mapping[str, Any] | Sequence[tuple[str, Any]]
@@ -122,6 +136,9 @@ class Gait:
     bob: float = 0.0
     lateral: float = 0.0
     max_step: float | None = None
+    speed: float | None = None
+    turn_speed: float | None = None
+    foothold: float | None = None
 
     @classmethod
     def from_catalog(
@@ -185,6 +202,10 @@ class Gait:
         step_mm = (manifest.get("specs") or {}).get("max_step_height_mm")
         if step_mm:
             kwargs["max_step"] = float(step_mm) / 1000.0
+        if loc.get("foothold_m") is not None:
+            kwargs["foothold"] = float(loc["foothold_m"])
+        if defaults.get("speed_mps") is not None:
+            kwargs["speed"] = float(defaults["speed_mps"])
         if posture is not None:
             if posture not in _POSTURES:
                 raise ValueError(f"posture must be one of {_POSTURES} or None, got {posture!r}")
@@ -244,6 +265,9 @@ class Gait:
             "bob": float(self.bob),
             "lateral": float(self.lateral),
             "max_step": None if self.max_step is None else float(self.max_step),
+            "speed": None if self.speed is None else float(self.speed),
+            "turn_speed": None if self.turn_speed is None else float(self.turn_speed),
+            "foothold": None if self.foothold is None else float(self.foothold),
         }
         if self.pattern == "custom":
             spec["duty"] = float(self.duty)  # type: ignore[arg-type]

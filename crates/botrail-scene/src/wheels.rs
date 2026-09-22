@@ -161,7 +161,7 @@ fn angular_rate(span: &TrackSpan, wheel: &VehicleWheel) -> f64 {
 /// two wheels mirrored across the machine (axles +Y and -Y) both roll
 /// forward, one counting up and one down. `lateral_ratio` does not change
 /// sign with the axle — it is the rollers' handedness, not the joint's.
-fn rolling_rate(
+pub(crate) fn rolling_rate(
     velocity: &Vector3<f64>,
     axle: &Vector3<f64>,
     lateral_ratio: f64,
@@ -358,6 +358,177 @@ pub(crate) fn resolve_wheel_drive(
         }
     };
     Ok(ResolvedWheelDrive { wheels, offset })
+}
+
+/// A gait and a wheel drive checked as one machine — a wheel-legged
+/// quadruped (design-wheel-legged.md §3.2): every wheel hangs from a foot,
+/// the foot frame sits on the axle, and the wheel's radius is the height
+/// the gait stands that foot at. The legs stay the gait's and the wheel
+/// joints the drive's; neither knows the other exists.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedWheelLegs {
+    pub gait: crate::gait::ResolvedGait,
+    /// The mount offset for the declared mode: the vehicle plane under
+    /// the root, the hubs one radius above it — read off the stance for a
+    /// walker, off the posture the machine stands in now for a roller.
+    pub offset: Isometry3<f64>,
+}
+
+/// Millimetre: how far a wheel's hub may sit from its foot frame, and how
+/// far the radius may differ from the gait's foot height.
+const HUB_ON_FOOT: f64 = 1e-3;
+
+/// Checks a gait and a wheel drive declared for one model as the two
+/// halves of a wheel-legged machine, at `current` — the configuration it is
+/// mounted in, its travel posture when it rolls.
+pub(crate) fn resolve_wheel_legs(
+    model: &RobotModel,
+    gait: &crate::seq::GaitSpec,
+    drive: &WheelDrive,
+    current: &[f64],
+) -> Result<ResolvedWheelLegs, String> {
+    let gait = crate::gait::resolve_gait(model, gait, current).map_err(|m| format!("gait: {m}"))?;
+    if drive.wheels.len() != gait.legs.len() {
+        return Err(format!(
+            "wheels: {} wheels for {} legs — a wheel-legged machine has one wheel on every foot",
+            drive.wheels.len(),
+            gait.legs.len()
+        ));
+    }
+    for wheel in &drive.wheels {
+        if wheel.steer.is_some() {
+            return Err(format!(
+                "wheels: wheel `{}` names a steer joint — a wheel-legged machine steers with \
+                 its legs; `steer` is a swerve module's",
+                wheel.joint
+            ));
+        }
+        if wheel.lateral_ratio != 0.0 {
+            return Err(format!(
+                "wheels: wheel `{}` has lateral_ratio {} — a leg's wheel has no rollers",
+                wheel.joint, wheel.lateral_ratio
+            ));
+        }
+    }
+    // The drive against the model at the stance — and, for a roller, at
+    // the posture it stands in now, which is how it will travel: continuous
+    // joints, level axles, all hubs on one floor. The floor is checked from
+    // the hubs, whatever `base_frame` says — the frame is validated on its
+    // own, and the postures decide the offset here.
+    let by_hubs = WheelDrive {
+        base_frame: None,
+        ..drive.clone()
+    };
+    let checked = resolve_wheel_drive(model, &by_hubs, &gait.stance)
+        .map_err(|m| format!("wheels (at the stance): {m}"))?;
+    if drive.mode == crate::seq::LocomotionMode::Roll {
+        resolve_wheel_drive(model, &by_hubs, current)
+            .map_err(|m| format!("wheels (as mounted, to roll): {m}"))?;
+    }
+    if drive.base_frame.is_some() {
+        resolve_wheel_drive(model, drive, &gait.stance).map_err(|m| format!("wheels: {m}"))?;
+    }
+    let rigid_root = |link: usize| rigid_root(model, link);
+    let poses = botrail_kin::forward_kinematics(model, &gait.stance).map_err(|e| e.to_string())?;
+    let mut carried: Vec<Option<usize>> = vec![None; gait.legs.len()];
+    for (w, wheel) in checked.wheels.iter().enumerate() {
+        let spec = &model.joints[wheel.joint];
+        let name = &spec.name;
+        // A foot that *is* the wheel puts the wheel joint in the leg's
+        // chain: the gait would own it and the stance would have to name
+        // it. The foot is the axle the wheel turns on.
+        if let Some(leg) = gait.legs.iter().find(|l| l.joints.contains(&wheel.q)) {
+            return Err(format!(
+                "wheels: leg `{}`'s foot `{}` hangs under wheel joint `{name}` — the foot must \
+                 be the axle frame the wheel turns on (a frame fixed to `{}`), not the wheel",
+                leg.name, model.links[leg.foot].name, model.links[spec.parent_link].name
+            ));
+        }
+        let hub_root = rigid_root(spec.parent_link);
+        let Some(i) = gait
+            .legs
+            .iter()
+            .position(|l| rigid_root(l.foot) == hub_root)
+        else {
+            return Err(format!(
+                "wheels: wheel `{name}` turns on `{}`, which is rigid with no foot — every \
+                 wheel of a wheel-legged machine hangs from a leg's foot link",
+                model.links[spec.parent_link].name
+            ));
+        };
+        if let Some(other) = carried[i] {
+            return Err(format!(
+                "wheels: leg `{}` carries two wheels, `{}` and `{name}`",
+                gait.legs[i].name, model.joints[checked.wheels[other].joint].name
+            ));
+        }
+        carried[i] = Some(w);
+        let hub = poses[spec.child_link].translation.vector;
+        let foot = gait.legs[i].nominal.translation.vector;
+        let apart = (hub - foot).norm();
+        if apart > HUB_ON_FOOT {
+            return Err(format!(
+                "wheels: wheel `{name}` turns {:.1} mm from foot `{}`'s origin — the foot \
+                 frame must sit on the axle",
+                apart * 1e3,
+                model.links[gait.legs[i].foot].name
+            ));
+        }
+        if (wheel.radius - gait.foot_radius).abs() > HUB_ON_FOOT {
+            return Err(format!(
+                "wheels: wheel `{name}` has radius {} m and the gait stands its feet {} m \
+                 above the floor (`foot_radius`) — on a wheel-legged machine these are one \
+                 number, the wheel's",
+                wheel.radius, gait.foot_radius
+            ));
+        }
+    }
+    // Set to roll, the machine is mounted as it stands (its travel
+    // posture): the vehicle plane is a wheel radius under the hubs there.
+    // Walking, or deciding leg by leg, it is mounted in its stance — the
+    // posture it rolls in too, between walks — where the gait already read
+    // the plane.
+    let offset = match drive.mode {
+        crate::seq::LocomotionMode::Auto | crate::seq::LocomotionMode::Walk => gait.offset,
+        crate::seq::LocomotionMode::Roll => {
+            let now = botrail_kin::forward_kinematics(model, current).map_err(|e| e.to_string())?;
+            let mean = gait
+                .legs
+                .iter()
+                .map(|l| now[l.foot].translation.z)
+                .sum::<f64>()
+                / gait.legs.len() as f64;
+            Translation3::new(0.0, 0.0, gait.foot_radius - mean).into()
+        }
+    };
+    Ok(ResolvedWheelLegs { gait, offset })
+}
+
+/// The rigid group a link belongs to: up through fixed joints to the first
+/// link under a moving joint (or the root).
+fn rigid_root(model: &RobotModel, mut link: usize) -> usize {
+    while let Some(ji) = model.links[link].parent_joint {
+        if !matches!(model.joints[ji].joint_type, JointType::Fixed) {
+            break;
+        }
+        link = model.joints[ji].parent_link;
+    }
+    link
+}
+
+/// The wheel of `drive` that hangs from the foot link `foot` — the one
+/// whose joint turns on a link rigid with it — as an index into
+/// `drive.wheels`.
+pub(crate) fn wheel_of_foot(
+    model: &RobotModel,
+    drive: &ResolvedWheelDrive,
+    foot: usize,
+) -> Option<usize> {
+    let root = rigid_root(model, foot);
+    drive
+        .wheels
+        .iter()
+        .position(|w| rigid_root(model, model.joints[w.joint].parent_link) == root)
 }
 
 /// How far each wheel (and where each steering joint) turns while its
