@@ -388,6 +388,7 @@ class Scene:
         trajectory: Optional[Trajectory] = None,
         fps: float = 60.0,
         robot: Optional[str] = None,
+        physics: Union[None, bool, str, "Physics"] = None,
     ) -> list[str]: ...
     def play_usd_animation(
         self,

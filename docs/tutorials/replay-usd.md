@@ -26,7 +26,9 @@ cycle did — every robot, every obstacle, grasped objects riding, releasing,
 resting exactly as simulated. Called without a trajectory,
 `scene.export_usd("cell.usda")` writes the *static* cell instead — robots at
 their current pose, every visible obstacle — the layer a layout is handed
-around as.
+around as. With `physics=` that static cell becomes a simulation stage for
+Isaac Sim or Isaac Lab
+([USD for a physics engine](../guides/export.md#usd-for-a-physics-engine-isaac-sim-isaac-lab)).
 
 ## A carry motion, exported
 

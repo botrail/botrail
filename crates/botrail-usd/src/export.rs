@@ -49,7 +49,10 @@ use thiserror::Error;
 use crate::articulation::AnyJoint;
 use crate::{decompose_matrix, y_up_to_z_up, AnyPrim, SearchPathResolver};
 
+mod physics;
 mod visual;
+
+pub use physics::{ArticulationSpec, BeltSpec, BodyRole, CarrierSpec, Ride, ServoSpec, UnitSpec};
 
 #[derive(Debug, Error)]
 pub enum UsdExportError {
@@ -197,6 +200,39 @@ pub struct AnimationInput<'a> {
     pub cameras: &'a [CameraSpec],
 }
 
+/// How one exported object stands in a simulation stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObjectBody {
+    /// Index into [`SimulationSpec::units`] of the rigid body the object
+    /// is part of; `None` leaves it to [`ObjectSpec::physics`] (a static
+    /// collider, or scenery).
+    pub unit: Option<usize>,
+    /// A collider nobody draws (an invisible collision proxy): authored
+    /// with `purpose = "guide"`.
+    pub guide: bool,
+}
+
+/// What turns the static export into a *simulation* stage
+/// (design-world-physics.md W4-U): the world as a physics engine owns it
+/// rather than as a recording of it. Single-frame values are authored as
+/// plain defaults — a consumer that writes poses back must not find them
+/// shadowed by timeSamples.
+pub struct SimulationSpec<'a> {
+    /// The bodies the engine moves, in authoring order.
+    pub units: &'a [UnitSpec],
+    /// One entry per [`AnimationInput::objects`].
+    pub bodies: &'a [ObjectBody],
+    /// One entry per [`AnimationInput::robots`]; `None` keeps a robot as
+    /// exported today (a USD-sourced robot references its own physics).
+    pub articulations: &'a [Option<ArticulationSpec>],
+    /// One entry per [`AnimationInput::robots`]: what the robot rides, if
+    /// anything — for authored articulations and referenced stages alike.
+    /// A [`Ride::Joins`] names an earlier robot riding as [`Ride::Base`].
+    pub rides: &'a [Option<Ride>],
+    /// Height of the ground half-space, when the world has one.
+    pub ground: Option<f64>,
+}
+
 pub struct ExportedAnimation {
     /// The composed animation layer, ready to serialize as usda text or a
     /// binary usdc crate file.
@@ -257,8 +293,14 @@ pub fn write_exported(
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
     match ext.as_deref() {
-        Some("usdc") | Some("usd") => CrateWriter::write_to_file(&exported.data, path)
-            .map_err(|e| UsdExportError::Author(format!("usdc write: {e}")))?,
+        Some("usdc") | Some("usd") => {
+            let mut crate_file = std::io::Cursor::new(Vec::new());
+            CrateWriter::write(&exported.data, &mut crate_file)
+                .map_err(|e| UsdExportError::Author(format!("usdc write: {e}")))?;
+            let mut bytes = crate_file.into_inner();
+            stamp_crate_version(&mut bytes);
+            std::fs::write(path, bytes).map_err(io)?;
+        }
         Some("usdz") => {
             return Err(UsdExportError::Input(
                 "usdz output is not supported (it is an asset package, not a layer); \
@@ -292,6 +334,69 @@ pub fn write_exported(
 pub fn export_animation(
     input: &AnimationInput,
     options: &ExportOptions,
+    asset_stem: &str,
+) -> Result<ExportedAnimation, UsdExportError> {
+    export_stage(input, options, None, asset_stem)
+}
+
+/// Authors `input` — one frame — as a simulation stage: see
+/// [`SimulationSpec`].
+pub fn export_simulation(
+    input: &AnimationInput,
+    simulation: &SimulationSpec,
+    asset_stem: &str,
+) -> Result<ExportedAnimation, UsdExportError> {
+    if input.times.len() != 1 {
+        return Err(UsdExportError::Input(format!(
+            "a simulation stage is one frame, got {}",
+            input.times.len()
+        )));
+    }
+    if simulation.bodies.len() != input.objects.len()
+        || simulation.articulations.len() != input.robots.len()
+        || simulation.rides.len() != input.robots.len()
+    {
+        return Err(UsdExportError::Input(
+            "simulation spec does not line up with the objects and robots".into(),
+        ));
+    }
+    let carriers = simulation.rides.iter().filter_map(|ride| match ride {
+        Some(Ride::Base(carrier)) => carrier.unit,
+        _ => None,
+    });
+    if let Some(bad) = simulation
+        .bodies
+        .iter()
+        .filter_map(|b| b.unit)
+        .chain(carriers)
+        .find(|&u| u >= simulation.units.len())
+    {
+        return Err(UsdExportError::Input(format!(
+            "object names unit {bad} of {}",
+            simulation.units.len()
+        )));
+    }
+    for (r, ride) in simulation.rides.iter().enumerate() {
+        if let Some(Ride::Joins { host }) = ride {
+            if *host >= r || !matches!(simulation.rides[*host], Some(Ride::Base(_))) {
+                return Err(UsdExportError::Input(format!(
+                    "robot {r} joins robot {host}, which is not an earlier robot riding a vehicle"
+                )));
+            }
+        }
+    }
+    export_stage(
+        input,
+        &ExportOptions::default(),
+        Some(simulation),
+        asset_stem,
+    )
+}
+
+fn export_stage(
+    input: &AnimationInput,
+    options: &ExportOptions,
+    simulation: Option<&SimulationSpec>,
     asset_stem: &str,
 ) -> Result<ExportedAnimation, UsdExportError> {
     let n = input.times.len();
@@ -369,6 +474,7 @@ pub fn export_animation(
     let codes: Vec<f64> = input.times.iter().map(|t| t * fps).collect();
     let mut warnings = Vec::new();
     let mut layer = LayerBuilder::new();
+    layer.collapse_single = simulation.is_some();
 
     let root_fields = [
         (FieldKey::DefaultPrim.as_ref(), Value::Token("World".into())),
@@ -389,8 +495,15 @@ pub fn export_animation(
     for (key, value) in root_fields {
         layer.root_field(key, value);
     }
+    if simulation.is_some() {
+        layer.root_field("kilogramsPerUnit", Value::Double(1.0));
+    }
     layer.ensure_prim("/World", Specifier::Def, Some("Xform"));
 
+    // Where everything under `/World/Env` goes, decided before anything is
+    // authored: a robot bolted to the body that carries it names that
+    // body's prim.
+    let layout = plan_env_layout(input.objects, simulation);
     let mut assets = Vec::new();
     let mut appearances = visual::VisualAssets::new(asset_stem);
     // Robot prims under /World, uniquified from sanitized instance names;
@@ -399,9 +512,69 @@ pub fn export_animation(
     let mut used_prims: HashMap<String, usize> = HashMap::new();
     let mut used_dirs: HashMap<String, usize> = HashMap::new();
     let mut source_dirs: HashMap<PathBuf, String> = HashMap::new();
-    for robot in input.robots {
+    // Rides, resolved as the robots are authored in order: a host's root
+    // body (what a joining robot on a body-less vehicle is bolted to) is
+    // known once the host is; a host that could not take the chain
+    // strands its riders and hands its vehicle back to the outside
+    // (`demoted`: the body is authored kinematic after all).
+    let rides = simulation.map_or(&[][..], |s| s.rides);
+    let hosts: std::collections::HashSet<usize> = rides
+        .iter()
+        .filter_map(|ride| match ride {
+            Some(Ride::Joins { host }) => Some(*host),
+            _ => None,
+        })
+        .collect();
+    let mut root_bodies: Vec<Option<(String, Isometry3<f64>)>> = vec![None; input.robots.len()];
+    let mut stranded: std::collections::HashSet<usize> = Default::default();
+    let mut demoted: std::collections::HashSet<usize> = Default::default();
+    for (r, robot) in input.robots.iter().enumerate() {
         let prim_name = unique_child(&mut used_prims, &sanitize_name(robot.name));
         let robot_prim = format!("/World/{prim_name}");
+        // A joining robot on a body-less vehicle is bolted to its host's
+        // root body, known once the host is authored (hosts come first).
+        let host_root: Option<(String, Isometry3<f64>)> = match rides.get(r) {
+            Some(Some(Ride::Joins { host })) => root_bodies[*host].clone(),
+            _ => None,
+        };
+        let mount = match (rides.get(r).and_then(Option::as_ref), simulation) {
+            (Some(Ride::Base(carrier)), Some(s)) => Some(physics::Mount::Base {
+                frame: &carrier.frame,
+                body: carrier
+                    .unit
+                    .map(|u| (layout.units[u].as_str(), &s.units[u].pose)),
+            }),
+            (Some(Ride::Joins { host }), Some(s)) if !stranded.contains(host) => {
+                let body = match &rides[*host] {
+                    Some(Ride::Base(CarrierSpec { unit: Some(u), .. })) => {
+                        Some((layout.units[*u].as_str(), &s.units[*u].pose))
+                    }
+                    _ => host_root.as_ref().map(|(prim, pose)| (prim.as_str(), pose)),
+                };
+                match body {
+                    Some(body) => Some(physics::Mount::Joins { body }),
+                    None => {
+                        warnings.push(format!(
+                            "robot `{}` cannot join robot `{}`'s articulation: nothing to bolt to; \
+                             anchored to the world where it stands",
+                            robot.name, input.robots[*host].name
+                        ));
+                        None
+                    }
+                }
+            }
+            (Some(Ride::Joins { host }), _) => {
+                warnings.push(format!(
+                    "robot `{}` rides with robot `{}`, which is anchored to the world; so is this one",
+                    robot.name, input.robots[*host].name
+                ));
+                None
+            }
+            _ => None,
+        };
+        // Robots sharing an articulation are named apart.
+        let shared = hosts.contains(&r) || matches!(rides.get(r), Some(Some(Ride::Joins { .. })));
+        let prefix = shared.then_some(prim_name.as_str());
         match robot.model.source.usd_stage() {
             Some((path, articulation_root)) => {
                 let (info, _stage) =
@@ -416,27 +589,44 @@ pub fn export_animation(
                         dir
                     }
                 };
-                author_referenced_robot(
+                let taken = author_referenced_robot(
                     &mut layer,
                     robot,
                     &codes,
                     &info,
                     &robot_prim,
                     &format!("./{asset_stem}_assets/{dir}"),
+                    mount,
                     &mut warnings,
                 )?;
+                root_bodies[r] = Some(taken.root_body);
+                if mount.is_some() && !taken.mounted {
+                    stranded.insert(r);
+                    if let Some(Ride::Base(CarrierSpec { unit: Some(u), .. })) = &rides[r] {
+                        demoted.insert(*u);
+                    }
+                }
             }
             // URDF robots and composites have no single stage to reference;
             // their geometry bakes into per-link transforms.
             None => {
-                author_urdf_robot(
+                let articulation = simulation.and_then(|s| {
+                    Some(physics::Rooted {
+                        spec: s.articulations[r].as_ref()?,
+                        mount,
+                        prefix,
+                    })
+                });
+                let root_body = author_urdf_robot(
                     &mut layer,
                     robot,
                     &codes,
                     &robot_prim,
+                    articulation,
                     &mut warnings,
                     &mut appearances,
                 )?;
+                root_bodies[r] = Some(root_body);
             }
         }
     }
@@ -444,10 +634,16 @@ pub fn export_animation(
     author_objects(
         &mut layer,
         input.objects,
+        simulation,
+        &layout,
+        &demoted,
         &codes,
         &mut warnings,
         &mut appearances,
     )?;
+    if let Some(height) = simulation.and_then(|s| s.ground) {
+        physics::author_ground(&mut layer, height);
+    }
     assets.extend(appearances.copies);
     author_curves(&mut layer, input.curves, &mut warnings);
     author_cameras(&mut layer, input.cameras, &codes);
@@ -629,6 +825,22 @@ fn orient_value(x: &Isometry3<f64>) -> Value {
     Value::Quatd(gf::quatd(q.w, q.i, q.j, q.k))
 }
 
+/// The crate version a written `.usdc` claims: the lowest one its content
+/// needs, which is what stock USD writes too. openusd's writer stamps the
+/// newest version it knows (0.12, USD 25's splines) on every file, and a
+/// reader refuses a file newer than itself whatever is inside — Isaac Sim
+/// 5.1 (USD 24, crate 0.11) would not open a botrail `.usdc` at all.
+/// Nothing this exporter authors is newer than 0.8: no `TimeCode` values
+/// (0.9), path expressions (0.10), relocates (0.11) or splines (0.12).
+const CRATE_VERSION: [u8; 3] = [0, 8, 0];
+
+/// Restamps the bootstrap header (`"PXR-USDC"`, then major/minor/patch).
+fn stamp_crate_version(bytes: &mut [u8]) {
+    if bytes.len() >= 11 && bytes.starts_with(b"PXR-USDC") {
+        bytes[8..11].copy_from_slice(&CRATE_VERSION);
+    }
+}
+
 /// openusd's text writer prints single-item list-ops without brackets.
 /// That shorthand is fine for `references`, but pxr's parser insists on a
 /// bracketed list for `apiSchemas` — wrap those lines so exported layers
@@ -694,6 +906,11 @@ struct LayerBuilder {
     prim_children: HashMap<String, Vec<String>>,
     prop_children: HashMap<String, Vec<String>>,
     prims: HashMap<String, Specifier>,
+    /// Type names of the prims defined here (not of the `over`s).
+    types: HashMap<String, String>,
+    /// Authors a lone time sample as the attribute's default instead — a
+    /// simulation stage states values, not a one-frame animation.
+    collapse_single: bool,
 }
 
 impl LayerBuilder {
@@ -705,6 +922,8 @@ impl LayerBuilder {
             prim_children: HashMap::new(),
             prop_children: HashMap::new(),
             prims: HashMap::new(),
+            types: HashMap::new(),
+            collapse_single: false,
         }
     }
 
@@ -747,6 +966,7 @@ impl LayerBuilder {
                 spec.add(FieldKey::Specifier, Value::Specifier(specifier));
                 if let Some(t) = type_name {
                     spec.add(FieldKey::TypeName, Value::Token(t.into()));
+                    self.types.insert(path.to_string(), t.to_string());
                 }
                 self.prims.insert(path.to_string(), specifier);
             }
@@ -758,6 +978,7 @@ impl LayerBuilder {
                 spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
                 if let Some(t) = type_name {
                     spec.add(FieldKey::TypeName, Value::Token(t.into()));
+                    self.types.insert(path.to_string(), t.to_string());
                 }
                 self.prims.insert(path.to_string(), Specifier::Def);
             }
@@ -767,6 +988,25 @@ impl LayerBuilder {
 
     fn has_prim(&self, path: &str) -> bool {
         self.prims.contains_key(path)
+    }
+
+    /// The prepended `apiSchemas` authored on `path` so far.
+    fn applied_schemas(&self, path: &str) -> Vec<String> {
+        let Some(spec) = sdf::path(path).ok().and_then(|p| self.data.spec(&p)) else {
+            return Vec::new();
+        };
+        match spec.get(FieldKey::ApiSchemas.as_ref()) {
+            Some(Value::TokenListOp(op)) => op
+                .prepended_items
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn is_mesh(&self, path: &str) -> bool {
+        self.types.get(path).is_some_and(|t| t == "Mesh")
     }
 
     fn prim_field(&mut self, path: &str, key: FieldKey, value: Value) {
@@ -849,6 +1089,9 @@ impl LayerBuilder {
                     Value::Variability(Variability::Uniform),
                 );
                 spec.add(FieldKey::Default, v);
+            }
+            AttrValue::Samples(mut map) if self.collapse_single && map.len() == 1 => {
+                spec.add(FieldKey::Default, map.remove(0).1);
             }
             AttrValue::Samples(map) => spec.add(FieldKey::TimeSamples, Value::TimeSamples(map)),
         }
@@ -980,6 +1223,13 @@ pub(crate) struct RobotStageInfo {
     pub(crate) frame: StageFrame,
     root_path: String,
     pub(crate) links: Vec<LinkStageInfo>,
+    /// Joints the stage ties to the world — one body relationship empty,
+    /// the other a body of this robot — relative to the root prim: what
+    /// anchors the robot where its asset put it.
+    world_joints: Vec<String>,
+    /// The root prim's child names, so what is authored beneath it takes a
+    /// free name.
+    root_children: Vec<String>,
 }
 
 /// Prim facts gathered from the source robot stage.
@@ -1185,6 +1435,8 @@ pub(crate) fn baked_robot_stage_info_on(
         frame: opened.frame,
         root_path: stage_root.to_string(),
         links,
+        world_joints: Vec::new(),
+        root_children: Vec::new(),
     })
 }
 
@@ -1383,10 +1635,58 @@ pub(crate) fn robot_stage_info_on(
         });
     }
 
+    // The stage's own anchoring to the world: every joint with one empty
+    // body relationship whose other end is a body of this robot.
+    let is_link = |path: &str| links.iter().any(|l| l.stage_path == path);
+    let mut world_joints: Vec<String> = Vec::new();
+    for (prim_path, info) in prims {
+        if !in_subtree(prim_path)
+            || !info.type_name.starts_with("Physics")
+            || !info.type_name.ends_with("Joint")
+        {
+            continue;
+        }
+        let joint = AnyJoint(info.prim.clone());
+        let target = |rel: openusd::usd::Relationship| -> Option<String> {
+            rel.targets()
+                .ok()
+                .and_then(|t| t.first().map(|p| p.to_string()))
+        };
+        let (body0, body1) = (target(joint.body0_rel()), target(joint.body1_rel()));
+        let anchored = match (body0, body1) {
+            (None, Some(b)) | (Some(b), None) => is_link(&b),
+            _ => false,
+        };
+        if anchored {
+            world_joints.push(
+                prim_path
+                    .strip_prefix(&format!("{articulation_root}/"))
+                    .unwrap_or(prim_path)
+                    .to_string(),
+            );
+        }
+    }
+    world_joints.sort();
+    let root_children: Vec<String> = prims
+        .get(articulation_root)
+        .map(|root| {
+            root.prim
+                .children()
+                .map(|children| {
+                    children
+                        .iter()
+                        .filter_map(|c| c.path().as_str().rsplit('/').next().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     Ok(RobotStageInfo {
         frame,
         root_path: articulation_root.to_string(),
         links,
+        world_joints,
+        root_children,
     })
 }
 
@@ -1424,6 +1724,15 @@ fn collect_stage_prims(
     Ok(())
 }
 
+/// What [`author_referenced_robot`] found and did for a rider.
+struct ReferencedRobot {
+    /// The root link's body prim and its world pose in the export frame.
+    root_body: (String, Isometry3<f64>),
+    /// Whether the mount asked for was authored.
+    mounted: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn author_referenced_robot(
     layer: &mut LayerBuilder,
     robot: &RobotAnimation,
@@ -1431,8 +1740,9 @@ fn author_referenced_robot(
     info: &RobotStageInfo,
     robot_prim: &str,
     asset_ref_dir: &str,
+    mount: Option<physics::Mount>,
     warnings: &mut Vec<String>,
-) -> Result<(), UsdExportError> {
+) -> Result<ReferencedRobot, UsdExportError> {
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     layer.prim_field(
         robot_prim,
@@ -1519,7 +1829,63 @@ fn author_referenced_robot(
             warnings,
         );
     }
-    Ok(())
+
+    // The root body prim, and its pose in the export world: the stage
+    // pose through the corrective placement.
+    let root = robot.model.root_link;
+    let root_prim = match info.links[root].rel_path.as_str() {
+        "" => robot_prim.to_string(),
+        rel => format!("{robot_prim}/{rel}"),
+    };
+    let stage_pose = body_stage[0][root];
+    let root_pose = Isometry3::from_parts(
+        Translation3::from(info.frame.up_fix * (stage_pose.translation.vector * mpu)),
+        info.frame.up_fix * stage_pose.rotation,
+    );
+    let mut mounted = false;
+    if let Some(mount) = mount {
+        if root_is_body.is_some() {
+            // The articulation is rooted on the base body itself: a chain
+            // cannot hang under a body, and PhysX would keep that body as
+            // the root of the tree. Unsupported for now.
+            warnings.push(format!(
+                "robot `{}`: its stage roots the articulation on the base body itself; the \
+                 robot stays anchored to the world as its stage says and does not ride",
+                robot.name
+            ));
+        } else {
+            // The chain's poses are world-frame: under the robot prim only
+            // when that composes at identity, a sibling otherwise.
+            let identity = (mpu - 1.0).abs() < 1e-12 && info.frame.up_fix.angle() < 1e-12;
+            let sibling;
+            let chain_parent = if identity {
+                robot_prim
+            } else {
+                sibling = format!("{robot_prim}_carrier");
+                sibling.as_str()
+            };
+            let mut used: HashMap<String, usize> = HashMap::new();
+            if identity {
+                for name in &info.root_children {
+                    used.insert(name.clone(), 1);
+                }
+            }
+            physics::author_referenced_mount(
+                layer,
+                robot_prim,
+                chain_parent,
+                &mut used,
+                &info.world_joints,
+                (root_prim.as_str(), &root_pose),
+                mount,
+            );
+            mounted = true;
+        }
+    }
+    Ok(ReferencedRobot {
+        root_body: (root_prim, root_pose),
+        mounted,
+    })
 }
 
 /// Authors `PhysicsJointStateAPI` position timeSamples on the joint prims —
@@ -1644,14 +2010,21 @@ fn author_urdf_robot(
     robot: &RobotAnimation,
     codes: &[f64],
     robot_prim: &str,
+    articulation: Option<physics::Rooted>,
     warnings: &mut Vec<String>,
     appearances: &mut visual::VisualAssets,
-) -> Result<(), UsdExportError> {
+) -> Result<(String, Isometry3<f64>), UsdExportError> {
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     let mut used = HashMap::new();
+    let mut link_prims = Vec::with_capacity(robot.model.links.len());
+    let prefix = articulation.and_then(|a| a.prefix);
     for (i, link) in robot.model.links.iter().enumerate() {
-        let name = unique_child(&mut used, &sanitize_name(&link.name));
+        let name = unique_child(
+            &mut used,
+            &physics::prefixed(prefix, &sanitize_name(&link.name)),
+        );
         let prim = format!("{robot_prim}/{name}");
+        link_prims.push(prim.clone());
         layer.ensure_prim(&prim, Specifier::Def, Some("Xform"));
         let poses: Vec<Isometry3<f64>> = robot.link_poses.iter().map(|p| p[i]).collect();
         layer.xform(&prim, &XformValue::Sampled(codes, poses), None);
@@ -1671,7 +2044,19 @@ fn author_urdf_robot(
             }
         }
     }
-    Ok(())
+    if let Some(rooted) = articulation {
+        physics::author_articulation(
+            layer,
+            robot,
+            rooted,
+            robot_prim,
+            &link_prims,
+            &mut used,
+            warnings,
+        )?;
+    }
+    let root = robot.model.root_link;
+    Ok((link_prims[root].clone(), robot.link_poses[0][root]))
 }
 
 /// Authors one visual shape as a gprim with a static link-local transform.
@@ -1891,49 +2276,290 @@ fn unique_child(used: &mut HashMap<String, usize>, name: &str) -> String {
 
 // ------------------------------------------------------------- environment
 
+/// Where every exported object (and rigid unit) lives under `/World/Env`.
+///
+/// An obstacle named `a/b/c` is the prim `/World/Env/a/b/c`, its world
+/// transform the obstacle's pose — the convention recordings are read
+/// back by. Two things bend the plain "leaf gprim under identity groups"
+/// picture:
+///
+/// - a **container**: an obstacle whose name is a prefix of another's
+///   (`washer/basket` next to `washer/basket/mesh`), or the frame member
+///   of a rigid unit. Its prim is a posed `Xform` with the gprim beneath
+///   (`geom`), and everything under it is authored relative to it — a
+///   gprim cannot parent prims, and a scaled `Cube` would scale them.
+/// - a **hoisted** prim: whatever is named under a rigid body without
+///   being part of it (a crate on a pallet, each a body of its own) moves
+///   out to be the body's sibling, `<body>_<rest>`. UsdPhysics takes
+///   every prim below a rigid body as part of that body.
+///
+/// A third case makes a container too: an object that **collides as a
+/// primitive but is drawn as a mesh** (the parts library's tray is a box
+/// to the planner and the engine, a pocketed tray to the eye). The box is
+/// authored beside the picture as an undrawn collider (`collider`), so a
+/// consumer's physics sees the shape botrail's does — measured in Isaac
+/// Sim: colliding as the picture, a part seated on the tray fell into its
+/// pocket.
+struct EnvLayout {
+    /// The body `Xform` of each unit.
+    units: Vec<String>,
+    /// Each object's own prim — the gprim, or the container `Xform`.
+    objects: Vec<String>,
+    /// Where a container's gprim goes; `None` for a plain leaf.
+    geoms: Vec<Option<String>>,
+    /// Where the collision primitive of a mesh-drawn object goes.
+    colliders: Vec<Option<String>>,
+}
+
+/// Whether `obj`'s collision shape has to be authored apart from its
+/// picture: a collider whose geometry is a primitive while a source mesh
+/// draws it. A mesh geometry *is* the drawn gprim's triangles (that is how
+/// imported scenery gets its geometry), so that one collides as drawn.
+fn collides_apart(obj: &ObjectSpec) -> bool {
+    obj.physics.is_some()
+        && obj.visual_asset.is_some()
+        && !matches!(obj.geometry, Geometry::Mesh { .. })
+}
+
+const ENV_ROOT: &str = "/World/Env";
+
+fn env_segments(name: &str) -> Vec<String> {
+    let segments: Vec<String> = name
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(sanitize_name)
+        .collect();
+    if segments.is_empty() {
+        vec!["object".to_string()]
+    } else {
+        segments
+    }
+}
+
+/// Proper ancestors of `path` below [`ENV_ROOT`], shortest first.
+fn env_ancestors(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/')
+        .map(move |(i, _)| &path[..i])
+        .filter(|a| a.len() > ENV_ROOT.len())
+}
+
+fn plan_env_layout(objects: &[ObjectSpec], simulation: Option<&SimulationSpec>) -> EnvLayout {
+    use std::collections::HashSet;
+    let units = simulation.map_or(&[][..], |s| s.units);
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut bodies: HashSet<String> = HashSet::new();
+    let claim = |taken: &mut HashSet<String>, path: String| -> String {
+        let mut unique = path.clone();
+        let mut n = 1;
+        while !taken.insert(unique.clone()) {
+            n += 1;
+            unique = format!("{path}_{n}");
+        }
+        unique
+    };
+    // Out from under the topmost body above `path`, as that body's sibling.
+    let hoist = |bodies: &HashSet<String>, path: String| -> String {
+        let Some(body) = env_ancestors(&path).find(|a| bodies.contains(*a)) else {
+            return path;
+        };
+        let rest = path[body.len() + 1..].replace('/', "_");
+        format!("{body}_{rest}")
+    };
+
+    // Units shallowest first, so a body is placed before what nests in it.
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    let depth = |name: &str| name.split('/').filter(|s| !s.is_empty()).count();
+    order.sort_by_key(|&u| depth(&units[u].name));
+    let mut unit_paths = vec![String::new(); units.len()];
+    for u in order {
+        let natural = format!("{ENV_ROOT}/{}", env_segments(&units[u].name).join("/"));
+        let path = claim(&mut taken, hoist(&bodies, natural));
+        bodies.insert(path.clone());
+        unit_paths[u] = path;
+    }
+
+    let mut object_paths = Vec::with_capacity(objects.len());
+    for (i, obj) in objects.iter().enumerate() {
+        let segments = env_segments(&obj.name);
+        let unit = simulation.and_then(|s| s.bodies[i].unit);
+        let path = match unit {
+            Some(u) => {
+                // Below its body, by what its name adds to the unit's; the
+                // frame member (same name) *is* the body prim.
+                let own = env_segments(&units[u].name);
+                let under = segments.len() >= own.len() && segments[..own.len()] == own[..];
+                let rest = if under {
+                    &segments[own.len()..]
+                } else {
+                    &segments[..]
+                };
+                if rest.is_empty() {
+                    unit_paths[u].clone()
+                } else {
+                    claim(&mut taken, format!("{}/{}", unit_paths[u], rest.join("/")))
+                }
+            }
+            None => {
+                let natural = format!("{ENV_ROOT}/{}", segments.join("/"));
+                claim(&mut taken, hoist(&bodies, natural))
+            }
+        };
+        object_paths.push(path);
+    }
+
+    let mut parents: HashSet<&str> = HashSet::new();
+    for path in object_paths.iter().chain(&unit_paths) {
+        parents.extend(env_ancestors(path));
+    }
+    let container: Vec<bool> = object_paths
+        .iter()
+        .zip(objects)
+        .map(|(path, obj)| {
+            bodies.contains(path) || parents.contains(path.as_str()) || collides_apart(obj)
+        })
+        .collect();
+    let geoms = container
+        .iter()
+        .zip(&object_paths)
+        .map(|(c, path)| c.then(|| claim(&mut taken, format!("{path}/geom"))))
+        .collect();
+    let colliders = objects
+        .iter()
+        .zip(&object_paths)
+        .map(|(obj, path)| {
+            collides_apart(obj).then(|| claim(&mut taken, format!("{path}/collider")))
+        })
+        .collect();
+    EnvLayout {
+        units: unit_paths,
+        objects: object_paths,
+        geoms,
+        colliders,
+    }
+}
+
+/// `child` relative to `parent`, frame by frame.
+fn relative_track(parent: Option<&PoseTrack>, child: &PoseTrack) -> PoseTrack {
+    match (parent, child) {
+        (None, PoseTrack::Static(c)) => PoseTrack::Static(*c),
+        (None, PoseTrack::Sampled(c)) => PoseTrack::Sampled(c.clone()),
+        (Some(PoseTrack::Static(p)), PoseTrack::Static(c)) => PoseTrack::Static(p.inverse() * c),
+        (Some(PoseTrack::Static(p)), PoseTrack::Sampled(c)) => {
+            PoseTrack::Sampled(c.iter().map(|c| p.inverse() * c).collect())
+        }
+        (Some(PoseTrack::Sampled(p)), PoseTrack::Static(c)) => {
+            PoseTrack::Sampled(p.iter().map(|p| p.inverse() * c).collect())
+        }
+        (Some(PoseTrack::Sampled(p)), PoseTrack::Sampled(c)) => {
+            PoseTrack::Sampled(p.iter().zip(c).map(|(p, c)| p.inverse() * c).collect())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn author_objects(
     layer: &mut LayerBuilder,
     objects: &[ObjectSpec],
+    simulation: Option<&SimulationSpec>,
+    layout: &EnvLayout,
+    demoted: &std::collections::HashSet<usize>,
     codes: &[f64],
     warnings: &mut Vec<String>,
     appearances: &mut visual::VisualAssets,
 ) -> Result<(), UsdExportError> {
-    if objects.is_empty() {
+    let units = simulation.map_or(&[][..], |s| s.units);
+    if objects.is_empty() && units.is_empty() {
         return Ok(());
     }
-    layer.ensure_prim("/World/Env", Specifier::Def, Some("Xform"));
+    layer.ensure_prim(ENV_ROOT, Specifier::Def, Some("Xform"));
+
+    // World track of every posed prim, so what sits below one is authored
+    // relative to it.
+    let unit_tracks: Vec<PoseTrack> = units.iter().map(|u| PoseTrack::Static(u.pose)).collect();
+    let mut posed: HashMap<&str, &PoseTrack> = HashMap::new();
+    for (path, track) in layout.units.iter().zip(&unit_tracks) {
+        posed.insert(path.as_str(), track);
+    }
+    for (i, obj) in objects.iter().enumerate() {
+        if layout.geoms[i].is_some() {
+            // A unit's frame member shares the body prim; the body's pose
+            // stands.
+            posed
+                .entry(layout.objects[i].as_str())
+                .or_insert(&obj.track);
+        }
+    }
+    let frame_of = |path: &str| -> Option<&PoseTrack> {
+        env_ancestors(path)
+            .filter_map(|a| posed.get(a).copied())
+            .last()
+    };
+    let xform_of = |track: PoseTrack| match track {
+        PoseTrack::Static(x) => XformValue::Static(x),
+        PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples),
+    };
+    // Grouping `Xform`s down to (not including) `path`.
+    let ensure_groups = |layer: &mut LayerBuilder, path: &str| {
+        for ancestor in env_ancestors(path) {
+            layer.ensure_prim(ancestor, Specifier::Def, Some("Xform"));
+        }
+    };
+
+    for (u, unit) in units.iter().enumerate() {
+        let prim = &layout.units[u];
+        ensure_groups(layer, prim);
+        layer.ensure_prim(prim, Specifier::Def, Some("Xform"));
+        let local = relative_track(frame_of(prim), &unit_tracks[u]);
+        layer.xform(prim, &xform_of(local), None);
+        // A vehicle whose rider could not take it in stays a body posed
+        // from outside.
+        let demoted_unit;
+        let unit = if demoted.contains(&u) {
+            demoted_unit = UnitSpec {
+                role: BodyRole::Kinematic,
+                ..unit.clone()
+            };
+            &demoted_unit
+        } else {
+            unit
+        };
+        physics::author_unit_body(layer, prim, unit);
+    }
+
+    // A unit's frame member shares the body prim, which is posed already.
+    let posed_units: std::collections::HashSet<&str> =
+        layout.units.iter().map(String::as_str).collect();
     // Physics materials dedupe on (friction, restitution): one prim per
     // distinct pair, shared by every obstacle that binds it.
     let mut materials: HashMap<(u64, u64), String> = HashMap::new();
-    for obj in objects {
-        let mut parent = "/World/Env".to_string();
-        let segments: Vec<&str> = obj.name.split('/').filter(|s| !s.is_empty()).collect();
-        let (leaf, mids) = segments.split_last().unwrap_or((&"object", &[]));
-        // Intermediate segments are shared grouping Xforms (idempotent);
-        // only the leaf gprim must not collide with an existing prim.
-        for mid in mids {
-            let path = format!("{parent}/{}", sanitize_name(mid));
-            layer.ensure_prim(&path, Specifier::Def, Some("Xform"));
-            parent = path;
-        }
-        let base = sanitize_name(leaf);
-        let mut name = base.clone();
-        let mut n = 1;
-        while layer.has_prim(&format!("{parent}/{name}")) {
-            n += 1;
-            name = format!("{base}_{n}");
-        }
-        let prim = format!("{parent}/{name}");
-        let pose = match &obj.track {
-            PoseTrack::Static(x) => XformValue::Static(*x),
-            PoseTrack::Sampled(samples) => XformValue::Sampled(codes, samples.clone()),
+    for (i, obj) in objects.iter().enumerate() {
+        let own = &layout.objects[i];
+        ensure_groups(layer, own);
+        let prim = match &layout.geoms[i] {
+            Some(geom) => {
+                layer.ensure_prim(own, Specifier::Def, Some("Xform"));
+                if !posed_units.contains(own.as_str()) {
+                    let local = relative_track(frame_of(own), &obj.track);
+                    layer.xform(own, &xform_of(local), None);
+                }
+                geom
+            }
+            None => own,
         };
-        if let Some(source) = &obj.visual_asset {
-            appearances.author(layer, &prim, source, &pose, obj.color, obj.material)?;
+        // Under its own container the gprim sits at the origin — said
+        // once, not frame by frame.
+        let frame = frame_of(prim);
+        let pose = xform_of(if frame.is_some_and(|f| std::ptr::eq(f, &obj.track)) {
+            PoseTrack::Static(Isometry3::identity())
         } else {
-            author_geometry(layer, &prim, &obj.geometry, &pose, obj.color, warnings)?;
+            relative_track(frame, &obj.track)
+        });
+        if let Some(source) = &obj.visual_asset {
+            appearances.author(layer, prim, source, &pose, obj.color, obj.material)?;
+        } else {
+            author_geometry(layer, prim, &obj.geometry, &pose, obj.color, warnings)?;
             if let Some(finish) = obj.material {
-                author_surface(layer, &prim, finish);
+                author_surface(layer, prim, finish);
             }
         }
         if !obj.visible.is_empty() {
@@ -1955,10 +2581,33 @@ fn author_objects(
                     })
                 })
                 .collect();
-            layer.attr(&prim, "visibility", "token", AttrValue::Samples(samples));
+            layer.attr(prim, "visibility", "token", AttrValue::Samples(samples));
         }
-        if let Some(phys) = &obj.physics {
-            author_object_physics(layer, &prim, phys, &mut materials);
+        let body = simulation.map(|s| s.bodies[i]).unwrap_or_default();
+        if body.guide {
+            physics::guide_purpose(layer, prim);
+        }
+        let Some(phys) = &obj.physics else { continue };
+        // A body the solver moves takes no triangle mesh: the engine's own
+        // units, and a vehicle's body that is a link of its rider.
+        let in_dynamic_body = body
+            .unit
+            .is_some_and(|u| units[u].role != BodyRole::Kinematic && !demoted.contains(&u));
+        match &layout.colliders[i] {
+            // The collision primitive beside the picture, undrawn; a body
+            // of its own (the declared-dynamic export) is then the
+            // container, which carries both.
+            Some(collider) => {
+                let pose = xform_of(if frame.is_some_and(|f| std::ptr::eq(f, &obj.track)) {
+                    PoseTrack::Static(Isometry3::identity())
+                } else {
+                    relative_track(frame, &obj.track)
+                });
+                author_geometry(layer, collider, &obj.geometry, &pose, None, warnings)?;
+                physics::guide_purpose(layer, collider);
+                author_object_physics(layer, own, collider, phys, in_dynamic_body, &mut materials);
+            }
+            None => author_object_physics(layer, prim, prim, phys, in_dynamic_body, &mut materials),
         }
     }
     Ok(())
@@ -2054,30 +2703,69 @@ fn author_surface(
 /// re-simulatable in a UsdPhysics consumer.
 fn author_object_physics(
     layer: &mut LayerBuilder,
+    body: &str,
     prim: &str,
     phys: &PhysicsSpec,
+    in_dynamic_body: bool,
     materials: &mut HashMap<(u64, u64), String>,
 ) {
+    // `body` is where a declared-dynamic object's rigid body goes: the
+    // collider itself, or — when the collider stands beside the picture —
+    // the container that carries both.
+    //
+    // A triangle mesh only collides as scenery: PhysX refuses one on a
+    // body it moves. A convex decomposition keeps a tray's pocket and a
+    // bin's hollow, which a single hull would fill.
+    let convex = (phys.dynamic || in_dynamic_body) && layer.is_mesh(prim);
+    let massed = phys.dynamic && phys.mass.is_some();
+    let mut body_schemas: Vec<openusd::tf::Token> = Vec::new();
     let mut schemas: Vec<openusd::tf::Token> = Vec::new();
+    let split = body != prim;
     if phys.dynamic {
-        schemas.push("PhysicsRigidBodyAPI".into());
+        body_schemas.push("PhysicsRigidBodyAPI".into());
+    }
+    if !split {
+        schemas.append(&mut body_schemas);
     }
     schemas.push("PhysicsCollisionAPI".into());
-    if phys.dynamic && phys.mass.is_some() {
-        schemas.push("PhysicsMassAPI".into());
+    if convex {
+        schemas.push("PhysicsMeshCollisionAPI".into());
+    }
+    if massed {
+        if split {
+            &mut body_schemas
+        } else {
+            &mut schemas
+        }
+        .push("PhysicsMassAPI".into());
     }
     // The physics-material binding below is a `material:binding:*` rel,
     // which pxr validation requires MaterialBindingAPI for.
     schemas.push("MaterialBindingAPI".into());
+    if !body_schemas.is_empty() {
+        layer.prim_field(
+            body,
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(ListOp::prepended(body_schemas)),
+        );
+    }
     layer.prim_field(
         prim,
         FieldKey::ApiSchemas,
         Value::TokenListOp(ListOp::prepended(schemas)),
     );
+    if convex {
+        layer.attr(
+            prim,
+            "physics:approximation",
+            "token",
+            AttrValue::Uniform(Value::Token("convexDecomposition".into())),
+        );
+    }
     if phys.dynamic {
         if let Some(mass) = phys.mass {
             layer.attr(
-                prim,
+                body,
                 "physics:mass",
                 "float",
                 AttrValue::Default(Value::Float(mass as f32)),
@@ -2666,6 +3354,1109 @@ mod tests {
         );
     }
 
+    fn scenery(name: &str, size: [f64; 3], at: [f64; 3], collides: bool) -> ObjectSpec {
+        ObjectSpec {
+            material: None,
+            visual_asset: None,
+            name: name.into(),
+            geometry: Geometry::Box {
+                size: Vector3::new(size[0], size[1], size[2]),
+            },
+            track: PoseTrack::Static(Isometry3::translation(at[0], at[1], at[2])),
+            color: None,
+            visible: Vec::new(),
+            physics: collides.then_some(PhysicsSpec {
+                dynamic: false,
+                mass: None,
+                friction: 0.6,
+                restitution: 0.0,
+            }),
+        }
+    }
+
+    /// An obstacle whose name is a prefix of another's used to parent it
+    /// as a gprim — the child inherited the parent's pose *and* its box
+    /// scale. Both now stand where the scene put them, in either order.
+    #[test]
+    fn nested_obstacle_names_keep_their_world_poses() {
+        for flip in [false, true] {
+            let mut objects = vec![
+                scenery("a", [1.0, 1.0, 0.2], [1.0, 2.0, 0.1], false),
+                scenery("a/b", [0.2, 0.2, 0.2], [1.0, 2.0, 0.3], false),
+            ];
+            if flip {
+                objects.reverse();
+            }
+            let input = AnimationInput {
+                robots: &[],
+                times: &[0.0],
+                objects: &objects,
+                curves: &[],
+                cameras: &[],
+            };
+            let exported = export_animation(&input, &ExportOptions::default(), "nest").unwrap();
+            let dir = temp_dir(if flip { "nest_flip" } else { "nest" });
+            let path = dir.join("nest.usda");
+            std::fs::write(&path, exported.to_usda().unwrap()).unwrap();
+            let stage = Stage::open(&path.display().to_string()).unwrap();
+            let worlds = composed_worlds(&stage, 0.0);
+            // The obstacle's own prim carries its pose; the gprim under a
+            // container carries the box scale and nothing else.
+            assert_close(
+                mul_point(&worlds["/World/Env/a"], [0.0, 0.0, 0.0]),
+                [1.0, 2.0, 0.1],
+                1e-9,
+                "a",
+            );
+            assert_close(
+                mul_point(&worlds["/World/Env/a/geom"], [0.5, 0.5, 0.5]),
+                [1.5, 2.5, 0.2],
+                1e-9,
+                "a's box corner",
+            );
+            assert_close(
+                mul_point(&worlds["/World/Env/a/b"], [0.5, 0.5, 0.5]),
+                [1.1, 2.1, 0.4],
+                1e-9,
+                "a/b's box corner",
+            );
+        }
+    }
+
+    /// The bodies of a simulation stage: a compound dynamic unit with its
+    /// frame member, a body named under another body hoisted out to be its
+    /// sibling, a belt, a static collider, an undrawn collision proxy.
+    #[test]
+    fn simulation_stage_authors_rigid_units() {
+        let objects = vec![
+            scenery("pallet", [1.2, 0.8, 0.15], [2.0, 0.0, 0.075], true),
+            scenery("pallet/board", [1.2, 0.1, 0.02], [2.0, 0.3, 0.16], false),
+            scenery("pallet/crate", [0.3, 0.3, 0.3], [2.0, 0.0, 0.30], true),
+            scenery("line/belt", [2.0, 0.5, 0.1], [0.0, 1.0, 0.75], true),
+            scenery("bench", [1.0, 1.0, 0.7], [0.0, -1.0, 0.35], true),
+            scenery("bench/proxy", [1.1, 1.1, 0.7], [0.0, -1.0, 0.35], true),
+        ];
+        let turned = Isometry3::from_parts(
+            Translation3::new(0.0, 1.0, 0.75),
+            UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2),
+        );
+        let units = [
+            UnitSpec {
+                name: "pallet".into(),
+                role: BodyRole::Dynamic,
+                pose: Isometry3::translation(2.0, 0.0, 0.075),
+                mass: Some(22.0),
+                belt: None,
+            },
+            UnitSpec {
+                name: "pallet/crate".into(),
+                role: BodyRole::Dynamic,
+                pose: Isometry3::translation(2.0, 0.0, 0.30),
+                mass: None,
+                belt: None,
+            },
+            UnitSpec {
+                name: "line/belt".into(),
+                role: BodyRole::Kinematic,
+                pose: turned,
+                mass: Some(5.0),
+                belt: Some(BeltSpec {
+                    velocity: [0.0, 0.3, 0.0],
+                    running: true,
+                }),
+            },
+        ];
+        let body = |unit: Option<usize>, guide: bool| ObjectBody { unit, guide };
+        let bodies = [
+            body(Some(0), false),
+            body(Some(0), false),
+            body(Some(1), false),
+            body(Some(2), false),
+            body(None, false),
+            body(None, true),
+        ];
+        let mut objects = objects;
+        objects[3].track = PoseTrack::Static(turned);
+        let input = AnimationInput {
+            robots: &[],
+            times: &[0.0],
+            objects: &objects,
+            curves: &[],
+            cameras: &[],
+        };
+        let spec = SimulationSpec {
+            units: &units,
+            bodies: &bodies,
+            articulations: &[],
+            rides: &[],
+            ground: Some(0.0),
+        };
+        let usda = export_simulation(&input, &spec, "sim")
+            .unwrap()
+            .to_usda()
+            .unwrap();
+        assert!(
+            !usda.contains("timeSamples"),
+            "a simulation stage states values"
+        );
+        assert!(usda.contains("kilogramsPerUnit = 1"));
+        assert!(usda.contains("def Plane \"Ground\""));
+
+        let dir = temp_dir("sim_units");
+        let path = dir.join("sim.usda");
+        std::fs::write(&path, &usda).unwrap();
+        let stage = Stage::open(&path.display().to_string()).unwrap();
+        let schemas = |prim: &str| -> Vec<String> {
+            stage
+                .prim(sdf::path(prim).unwrap())
+                .api_schemas()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect()
+        };
+        assert_eq!(
+            schemas("/World/Env/pallet"),
+            ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        );
+        // The frame member's box and the undrawn board both sit under the
+        // body; only the one that collides is a collider.
+        assert!(schemas("/World/Env/pallet/geom").contains(&"PhysicsCollisionAPI".to_string()));
+        assert!(schemas("/World/Env/pallet/board").is_empty());
+        // A body named under a body is its sibling, not its child.
+        assert_eq!(schemas("/World/Env/pallet_crate"), ["PhysicsRigidBodyAPI"]);
+        assert!(!usda.contains("def Xform \"crate\""));
+        // The belt: kinematic, carrying along its own +X after the quarter
+        // turn that points it down world +Y; a kinematic body states no mass.
+        assert_eq!(
+            schemas("/World/Env/line/belt"),
+            ["PhysicsRigidBodyAPI", "PhysxSurfaceVelocityAPI"]
+        );
+        let belt = stage.prim(sdf::path("/World/Env/line/belt").unwrap());
+        assert_eq!(
+            belt.attribute("physics:kinematicEnabled")
+                .get::<bool>()
+                .unwrap(),
+            Some(true)
+        );
+        let v = belt
+            .attribute("physxSurfaceVelocity:surfaceVelocity")
+            .get::<[f32; 3]>()
+            .unwrap()
+            .unwrap();
+        assert_close(
+            [v[0] as f64, v[1] as f64, v[2] as f64],
+            [0.3, 0.0, 0.0],
+            1e-6,
+            "belt velocity, body frame",
+        );
+        // Scenery collides without a body; the proxy collides unseen.
+        assert_eq!(
+            schemas("/World/Env/bench/geom"),
+            ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        );
+        let proxy = stage.prim(sdf::path("/World/Env/bench/proxy").unwrap());
+        assert_eq!(
+            proxy
+                .attribute("purpose")
+                .get::<tf::Token>()
+                .unwrap()
+                .map(|t| t.as_str().to_string()),
+            Some("guide".to_string())
+        );
+        // Members stand where the scene put them, through the body frame.
+        let worlds = composed_worlds(&stage, 0.0);
+        assert_close(
+            mul_point(&worlds["/World/Env/pallet/board"], [0.0, 0.0, 0.0]),
+            [2.0, 0.3, 0.16],
+            1e-9,
+            "board under its body",
+        );
+        assert_close(
+            mul_point(&worlds["/World/Env/pallet_crate/geom"], [0.0, 0.0, 0.0]),
+            [2.0, 0.0, 0.30],
+            1e-9,
+            "hoisted crate",
+        );
+    }
+
+    /// A URDF robot written as an articulation reads back as the same
+    /// machine: geometry in the same places at every configuration, the
+    /// same limits, the same coupling, the same mass properties — through
+    /// an oblique axis, a reversed one, a slide, a mimic and a weld.
+    #[test]
+    fn urdf_articulation_round_trips_through_the_importer() {
+        let urdf = r#"
+        <robot name="r">
+          <link name="base">
+            <inertial><mass value="4"/><origin xyz="0 0 0.05"/>
+              <inertia ixx="0.02" iyy="0.03" izz="0.04" ixy="0" ixz="0" iyz="0"/></inertial>
+            <visual><geometry><box size="0.3 0.3 0.1"/></geometry></visual>
+            <collision><geometry><box size="0.3 0.3 0.1"/></geometry></collision>
+          </link>
+          <link name="arm">
+            <inertial><mass value="2"/><origin xyz="0.1 0 0.2" rpy="0.3 0.2 0.1"/>
+              <inertia ixx="0.011" iyy="0.02" izz="0.015" ixy="0.002" ixz="-0.001" iyz="0.003"/></inertial>
+            <visual><origin xyz="0 0 0.2"/><geometry><cylinder radius="0.04" length="0.4"/></geometry></visual>
+            <collision><origin xyz="0 0 0.2"/><geometry><cylinder radius="0.05" length="0.4"/></geometry></collision>
+          </link>
+          <link name="slide"><visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual></link>
+          <link name="finger"><visual><geometry><box size="0.02 0.02 0.08"/></geometry></visual></link>
+          <link name="twin"><visual><geometry><box size="0.02 0.02 0.08"/></geometry></visual></link>
+          <link name="tcp"/>
+          <joint name="shoulder" type="revolute">
+            <parent link="base"/><child link="arm"/>
+            <origin xyz="0 0 0.1" rpy="0.2 0 0.4"/><axis xyz="0 1 1"/>
+            <limit lower="-1.5" upper="2.5" effort="40" velocity="3"/>
+          </joint>
+          <joint name="reach" type="prismatic">
+            <parent link="arm"/><child link="slide"/>
+            <origin xyz="0 0 0.4"/><axis xyz="-1 0 0"/>
+            <limit lower="0" upper="0.25" effort="200" velocity="0.5"/>
+          </joint>
+          <joint name="grip" type="revolute">
+            <parent link="slide"/><child link="finger"/>
+            <origin xyz="0 0.05 0.05"/><axis xyz="1 0 0"/>
+            <limit lower="0" upper="0.8" effort="5" velocity="2"/>
+          </joint>
+          <joint name="grip_twin" type="revolute">
+            <parent link="slide"/><child link="twin"/>
+            <origin xyz="0 -0.05 0.05"/><axis xyz="1 0 0"/>
+            <limit lower="-0.8" upper="0" effort="5" velocity="2"/>
+            <mimic joint="grip" multiplier="-1" offset="0.1"/>
+          </joint>
+          <joint name="tool" type="fixed">
+            <parent link="slide"/><child link="tcp"/><origin xyz="0 0 0.1" rpy="0 1.2 0"/>
+          </joint>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        let base = Isometry3::from_parts(
+            Translation3::new(1.0, -2.0, 0.5),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.7),
+        );
+        let q = vec![0.4, 0.1, 0.3];
+        let link_poses =
+            vec![botrail_kin::forward_kinematics_with_base(&model, &q, &base).unwrap()];
+        let joint_samples = vec![q.clone()];
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &[0.0],
+            objects: &[],
+            curves: &[],
+            cameras: &[],
+        };
+        let articulation = ArticulationSpec {
+            powered: true,
+            ..Default::default()
+        };
+        let spec = SimulationSpec {
+            units: &[],
+            bodies: &[],
+            articulations: &[Some(articulation)],
+            rides: &[None],
+            ground: None,
+        };
+        let usda = export_simulation(&input, &spec, "arm")
+            .unwrap()
+            .to_usda()
+            .unwrap();
+        for expected in [
+            "prepend apiSchemas = [\"PhysicsArticulationRootAPI\", \"PhysxArticulationAPI\"]",
+            "bool physxArticulation:enabledSelfCollisions = false",
+            "def PhysicsFixedJoint \"root_joint\"",
+            "[\"PhysicsJointStateAPI:angular\", \"PhysxJointAPI\", \"PhysicsDriveAPI:angular\"]",
+            "[\"PhysicsJointStateAPI:linear\", \"PhysxJointAPI\", \"PhysicsDriveAPI:linear\"]",
+            "[\"PhysicsJointStateAPI:angular\", \"PhysxJointAPI\", \"PhysxMimicJointAPI:rotX\"]",
+            // The pose is stated on the joints (degrees; the follower at
+            // its derived -0.3 + 0.1 rad): PhysX starts from these, not
+            // from where the links stand.
+            "float state:angular:physics:position = 22.918",
+            "float state:angular:physics:position = -11.459",
+            "float state:linear:physics:position = 0.1",
+            "uniform token physxMimicJoint:rotX:referenceJointAxis = \"rotX\"",
+            "float drive:angular:physics:maxForce = 40",
+        ] {
+            assert!(usda.contains(expected), "missing `{expected}`");
+        }
+
+        let dir = temp_dir("articulation");
+        let path = dir.join("arm.usda");
+        std::fs::write(&path, &usda).unwrap();
+        let imported = crate::import_robot(&path, &crate::RobotImportOptions::default()).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        let back = imported.model;
+        assert_eq!(back.dof(), model.dof());
+        let link_of = |name: &str| {
+            back.links
+                .iter()
+                .position(|l| l.name.ends_with(&format!("/{name}")))
+                .unwrap_or_else(|| panic!("link {name} came back"))
+        };
+        let joint_of = |name: &str| {
+            back.joints
+                .iter()
+                .find(|j| j.name.ends_with(&format!("/{name}")))
+                .unwrap_or_else(|| panic!("joint {name} came back"))
+        };
+
+        // Limits, in botrail's units again.
+        let shoulder = joint_of("shoulder").limits.unwrap();
+        assert!((shoulder.lower + 1.5).abs() < 1e-5 && (shoulder.upper - 2.5).abs() < 1e-5);
+        assert!((shoulder.velocity - 3.0).abs() < 1e-5 && (shoulder.effort - 40.0).abs() < 1e-5);
+        let reach = joint_of("reach").limits.unwrap();
+        assert!((reach.upper - 0.25).abs() < 1e-6 && (reach.velocity - 0.5).abs() < 1e-6);
+        let mimic = joint_of("grip_twin").mimic.expect("the coupling came back");
+        assert!((mimic.multiplier + 1.0).abs() < 1e-6 && (mimic.offset - 0.1).abs() < 1e-5);
+
+        // Geometry stands where it stood, relative to the base, wherever
+        // the joints are — the importer's link frames may differ from the
+        // URDF's (an oblique axis turns the joint frame), the machine not.
+        for q in [
+            vec![0.0, 0.0, 0.0],
+            vec![0.4, 0.1, 0.3],
+            vec![-1.2, 0.25, 0.8],
+        ] {
+            let before = botrail_kin::forward_kinematics(&model, &q).unwrap();
+            let after = botrail_kin::forward_kinematics(&back, &q).unwrap();
+            for (l, link) in model.links.iter().enumerate() {
+                let Some(shape) = link.visuals.first() else {
+                    continue;
+                };
+                let b = link_of(&link.name);
+                let expect = before[model.root_link].inverse() * before[l] * shape.origin;
+                let got =
+                    after[back.root_link].inverse() * after[b] * back.links[b].visuals[0].origin;
+                assert!(
+                    (expect.translation.vector - got.translation.vector).norm() < 1e-5
+                        && expect.rotation.angle_to(&got.rotation) < 1e-5,
+                    "{} at {q:?}: {expect} vs {got}",
+                    link.name
+                );
+            }
+        }
+        assert!((imported.root_pose.translation.vector - base.translation.vector).norm() < 1e-6);
+
+        // Mass properties: the same tensor about the same point, however
+        // the principal frame came out.
+        let (a, b) = (
+            model.links[1].inertial.as_ref().unwrap(),
+            back.links[link_of("arm")].inertial.as_ref().unwrap(),
+        );
+        assert!((a.mass - b.mass).abs() < 1e-6);
+        let in_link = |i: &botrail_model::Inertial| {
+            let r = i.origin.rotation.to_rotation_matrix();
+            r.matrix() * i.inertia * r.matrix().transpose()
+        };
+        // `arm`'s joint axis is oblique, so its frame comes back turned by
+        // the joint frame; compare in the base-relative frame at q = 0.
+        let zero = vec![0.0; 3];
+        let (fa, fb) = (
+            botrail_kin::forward_kinematics(&model, &zero).unwrap(),
+            botrail_kin::forward_kinematics(&back, &zero).unwrap(),
+        );
+        let world = |x: &Isometry3<f64>, i: &botrail_model::Inertial| {
+            let r = x.rotation.to_rotation_matrix();
+            (
+                x * nalgebra::Point3::from(i.origin.translation.vector),
+                r.matrix() * in_link(i) * r.matrix().transpose(),
+            )
+        };
+        let (ca, ta) = world(&(fa[model.root_link].inverse() * fa[1]), a);
+        let lb = link_of("arm");
+        let (cb, tb) = world(&(fb[back.root_link].inverse() * fb[lb]), b);
+        assert!((ca - cb).norm() < 1e-5, "center of mass {ca} vs {cb}");
+        assert!((ta - tb).norm() < 1e-6, "inertia {ta} vs {tb}");
+    }
+
+    /// The two-link arm of the riding tests.
+    fn rider_arm() -> RobotModel {
+        RobotModel::from_urdf_str(
+            r#"
+        <robot name="r">
+          <link name="base"><visual><geometry><box size="0.2 0.2 0.1"/></geometry></visual></link>
+          <link name="arm"><visual><geometry><box size="0.05 0.05 0.4"/></geometry></visual></link>
+          <joint name="base_x" type="revolute">
+            <parent link="base"/><child link="arm"/><origin xyz="0 0 0.1"/><axis xyz="0 1 0"/>
+            <limit lower="-1" upper="1" effort="10" velocity="1"/>
+          </joint>
+        </robot>"#,
+        )
+        .unwrap()
+    }
+
+    /// The vehicle of the riding tests: parked at (2, 1) on the floor,
+    /// turned a quarter and nose-up a little (a ramp); its body's frame is
+    /// the chassis box's centre, 0.15 above the vehicle's own.
+    fn rider_vehicle() -> (Isometry3<f64>, Isometry3<f64>) {
+        let frame = Isometry3::from_parts(
+            Translation3::new(2.0, 1.0, 0.0),
+            UnitQuaternion::from_euler_angles(0.0, -0.1, std::f64::consts::FRAC_PI_2),
+        );
+        (frame, frame * Isometry3::translation(0.0, 0.0, 0.15))
+    }
+
+    fn rel_targets(stage: &Stage, prim: &str, rel: &str) -> Vec<String> {
+        stage
+            .prim(sdf::path(prim).unwrap())
+            .relationship(rel)
+            .targets()
+            .unwrap()
+            .iter()
+            .map(|p| p.to_string())
+            .collect()
+    }
+
+    fn has_api(stage: &Stage, prim: &str, api: &str) -> bool {
+        stage
+            .prim(sdf::path(prim).unwrap())
+            .api_schemas()
+            .unwrap()
+            .iter()
+            .any(|t| t.as_str() == api)
+    }
+
+    fn float_attr(stage: &Stage, prim: &str, attr: &str) -> f64 {
+        stage
+            .prim(sdf::path(prim).unwrap())
+            .attribute(attr)
+            .get::<f32>()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{prim}.{attr}")) as f64
+    }
+
+    fn point_attr(stage: &Stage, prim: &str, attr: &str) -> [f64; 3] {
+        let v = stage
+            .prim(sdf::path(prim).unwrap())
+            .attribute(attr)
+            .get::<[f32; 3]>()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{prim}.{attr}"));
+        [v[0] as f64, v[1] as f64, v[2] as f64]
+    }
+
+    /// A robot riding a vehicle takes the vehicle in as its base: the body
+    /// is a link of the robot's articulation, reached from the world through
+    /// six virtual joints whose positions are the vehicle's pose — drive
+    /// them and both move, on any pipeline.
+    #[test]
+    fn a_riding_articulation_takes_its_vehicle_as_its_base() {
+        let model = rider_arm();
+        let (frame, body) = rider_vehicle();
+        let base = frame * Isometry3::translation(0.1, 0.0, 0.3);
+        let q = vec![0.2];
+        let link_poses =
+            vec![botrail_kin::forward_kinematics_with_base(&model, &q, &base).unwrap()];
+        let joint_samples = vec![q];
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: Some(&joint_samples),
+        }];
+        let mut chassis = scenery("amr/chassis", [0.8, 0.5, 0.3], [0.0; 3], true);
+        chassis.track = PoseTrack::Static(body);
+        let objects = [chassis];
+        let units = [UnitSpec {
+            name: "amr".into(),
+            role: BodyRole::Link,
+            pose: body,
+            mass: None,
+            belt: None,
+        }];
+        let bodies = [ObjectBody {
+            unit: Some(0),
+            guide: false,
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &[0.0],
+            objects: &objects,
+            curves: &[],
+            cameras: &[],
+        };
+        let export = |articulation: ArticulationSpec, ride: Option<Ride>| {
+            let spec = SimulationSpec {
+                units: &units,
+                bodies: &bodies,
+                articulations: &[Some(articulation)],
+                rides: &[ride],
+                ground: None,
+            };
+            let usda = export_simulation(&input, &spec, "ride")
+                .unwrap()
+                .to_usda()
+                .unwrap();
+            let dir = temp_dir("ride");
+            let path = dir.join("ride.usda");
+            std::fs::write(&path, &usda).unwrap();
+            (usda, Stage::open(&path.display().to_string()).unwrap())
+        };
+        let powered = || ArticulationSpec {
+            powered: true,
+            ..Default::default()
+        };
+
+        let (usda, stage) = export(
+            powered(),
+            Some(Ride::Base(CarrierSpec {
+                unit: Some(0),
+                frame,
+            })),
+        );
+        // A fixed base: an anchor link bolted to the world at the origin
+        // (PhysX takes whatever joint reaches the world as the fixed base,
+        // its type ignored — slid straight off the world, the first
+        // virtual joint would be no joint at all), and the robot prim
+        // roots the articulation like any bolted-down robot's.
+        assert!(has_api(
+            &stage,
+            "/World/Robot",
+            "PhysicsArticulationRootAPI"
+        ));
+        assert!(!has_api(
+            &stage,
+            "/World/Robot/base",
+            "PhysicsArticulationRootAPI"
+        ));
+        let joints = "/World/Robot/joints";
+        assert!(rel_targets(&stage, &format!("{joints}/root_joint"), "physics:body0").is_empty());
+        assert_eq!(
+            rel_targets(&stage, &format!("{joints}/root_joint"), "physics:body1"),
+            ["/World/Robot/carrier_anchor"]
+        );
+        // The virtual joints state the vehicle's pose in the world: three
+        // slides, then yaw, pitch, roll (degrees). The robot's own joint
+        // kept its name; the virtual one made way.
+        let expect = [
+            ("base_x_2", "linear", 2.0),
+            ("base_y", "linear", 1.0),
+            ("base_z", "linear", 0.0),
+            ("base_yaw", "angular", 90.0),
+            ("base_pitch", "angular", -0.1f64.to_degrees()),
+            ("base_roll", "angular", 0.0),
+        ];
+        for (name, kind, value) in expect {
+            let prim = format!("{joints}/{name}");
+            for attr in [
+                format!("state:{kind}:physics:position"),
+                format!("drive:{kind}:physics:targetPosition"),
+            ] {
+                let got = float_attr(&stage, &prim, &attr);
+                assert!(
+                    (got - value).abs() < 1e-4,
+                    "{name}.{attr}: {got} vs {value}"
+                );
+            }
+            assert!(float_attr(&stage, &prim, &format!("drive:{kind}:physics:stiffness")) > 0.0);
+        }
+        assert!(usda.contains("def PhysicsRevoluteJoint \"base_x\""));
+        // The chain ends on the vehicle's body — at the vehicle's frame as
+        // the body sees it, 0.15 below its own — and the robot is bolted to
+        // that body where it sits on the deck. Both joints are part of the
+        // articulation: nothing stands outside it, nothing is filtered.
+        let last = format!("{joints}/base_roll");
+        assert_eq!(
+            rel_targets(&stage, &last, "physics:body0"),
+            ["/World/Robot/carrier_pitch"]
+        );
+        assert_eq!(
+            rel_targets(&stage, &last, "physics:body1"),
+            ["/World/Env/amr"]
+        );
+        assert_close(
+            point_attr(&stage, &last, "physics:localPos1"),
+            [0.0, 0.0, -0.15],
+            1e-6,
+            "frame seen from the body",
+        );
+        let mount = format!("{joints}/mount_joint");
+        assert_eq!(
+            rel_targets(&stage, &mount, "physics:body0"),
+            ["/World/Env/amr"]
+        );
+        assert_eq!(
+            rel_targets(&stage, &mount, "physics:body1"),
+            ["/World/Robot/base"]
+        );
+        assert_close(
+            point_attr(&stage, &mount, "physics:localPos0"),
+            [0.1, 0.0, 0.15],
+            1e-6,
+            "mount on the body",
+        );
+        assert!(!usda.contains("excludeFromArticulation") && !usda.contains("filteredPairs"));
+        // The body is a link the solver moves — not kinematic — and the
+        // virtual links stand along the chain, the last of them at the
+        // vehicle's frame less its roll.
+        let amr: Vec<String> = stage
+            .prim(sdf::path("/World/Env/amr").unwrap())
+            .api_schemas()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        assert_eq!(amr, ["PhysicsRigidBodyAPI"]);
+        assert!(!usda.contains("kinematicEnabled"));
+        let worlds = composed_worlds(&stage, 0.0);
+        assert_close(
+            mul_point(&worlds["/World/Robot/carrier_pitch"], [0.0, 0.0, 0.0]),
+            [2.0, 1.0, 0.0],
+            1e-9,
+            "the chain reaches the vehicle's frame",
+        );
+        assert_close(
+            mul_point(&worlds["/World/Robot/carrier_y"], [0.0, 0.0, 0.0]),
+            [2.0, 1.0, 0.0],
+            1e-9,
+            "x then y",
+        );
+
+        // The robot being the machine — a vehicle with no body of its own —
+        // the chain lands on the robot's root link, and nothing is mounted.
+        let (usda, stage) = export(
+            powered(),
+            Some(Ride::Base(CarrierSpec { unit: None, frame })),
+        );
+        assert_eq!(
+            rel_targets(&stage, &last, "physics:body1"),
+            ["/World/Robot/base"]
+        );
+        assert_close(
+            point_attr(&stage, &last, "physics:localPos1"),
+            [-0.1, 0.0, -0.3],
+            1e-6,
+            "frame seen from the base",
+        );
+        assert!(!usda.contains("mount_joint"));
+
+        // Bolted to the world, the root joint holds the robot's own base.
+        let (usda, stage) = export(powered(), None);
+        assert_eq!(
+            rel_targets(&stage, &format!("{joints}/root_joint"), "physics:body1"),
+            ["/World/Robot/base"]
+        );
+        assert!(!usda.contains("carrier_anchor") && !usda.contains("base_yaw"));
+        assert!(has_api(
+            &stage,
+            "/World/Robot",
+            "PhysicsArticulationRootAPI"
+        ));
+        // A floating base has no root joint whatever it rides, and names
+        // its root link itself — PhysX would otherwise root the tree at
+        // its most central link.
+        let (usda, stage) = export(
+            ArticulationSpec {
+                floating: true,
+                ..Default::default()
+            },
+            Some(Ride::Base(CarrierSpec {
+                unit: Some(0),
+                frame,
+            })),
+        );
+        assert!(!usda.contains("root_joint") && !usda.contains("carrier_anchor"));
+        assert!(has_api(
+            &stage,
+            "/World/Robot/base",
+            "PhysicsArticulationRootAPI"
+        ));
+        assert!(!has_api(
+            &stage,
+            "/World/Robot",
+            "PhysicsArticulationRootAPI"
+        ));
+    }
+
+    /// A second robot on the same vehicle joins the first one's
+    /// articulation: bolted to the vehicle's body by a mount joint alone —
+    /// no root of its own, no root joint, no chain (membership is by
+    /// connection) — and both are named apart, since two arms of one
+    /// model would otherwise clash.
+    #[test]
+    fn a_second_rider_joins_the_first_ones_articulation() {
+        let model = rider_arm();
+        let (frame, body) = rider_vehicle();
+        let seats = [
+            frame * Isometry3::translation(0.1, 0.2, 0.3),
+            frame * Isometry3::translation(0.1, -0.2, 0.3),
+        ];
+        let q = vec![0.2];
+        let poses: Vec<Vec<Vec<Isometry3<f64>>>> = seats
+            .iter()
+            .map(|seat| vec![botrail_kin::forward_kinematics_with_base(&model, &q, seat).unwrap()])
+            .collect();
+        let samples = vec![q];
+        let robots: Vec<RobotAnimation> = ["left", "right"]
+            .iter()
+            .zip(&poses)
+            .map(|(name, link_poses)| RobotAnimation {
+                name,
+                model: &model,
+                link_poses,
+                joint_samples: Some(&samples),
+            })
+            .collect();
+        let mut chassis = scenery("amr/chassis", [0.8, 0.5, 0.3], [0.0; 3], true);
+        chassis.track = PoseTrack::Static(body);
+        let objects = [chassis];
+        let bodies = [ObjectBody {
+            unit: Some(0),
+            guide: false,
+        }];
+        // The chassis as plain scenery, for the vehicle with no body.
+        let scenery_only = [ObjectBody {
+            unit: None,
+            guide: false,
+        }];
+        let input = AnimationInput {
+            robots: &robots,
+            times: &[0.0],
+            objects: &objects,
+            curves: &[],
+            cameras: &[],
+        };
+        let powered = ArticulationSpec {
+            powered: true,
+            ..Default::default()
+        };
+        let export = |units: &[UnitSpec], rides: &[Option<Ride>], tag: &str| {
+            let spec = SimulationSpec {
+                units,
+                bodies: if units.is_empty() {
+                    &scenery_only
+                } else {
+                    &bodies
+                },
+                articulations: &[Some(powered.clone()), Some(powered.clone())],
+                rides,
+                ground: None,
+            };
+            let usda = export_simulation(&input, &spec, tag)
+                .unwrap()
+                .to_usda()
+                .unwrap();
+            let dir = temp_dir(tag);
+            let path = dir.join(format!("{tag}.usda"));
+            std::fs::write(&path, &usda).unwrap();
+            (usda, Stage::open(&path.display().to_string()).unwrap())
+        };
+
+        let units = [UnitSpec {
+            name: "amr".into(),
+            role: BodyRole::Link,
+            pose: body,
+            mass: None,
+            belt: None,
+        }];
+        let rides = [
+            Some(Ride::Base(CarrierSpec {
+                unit: Some(0),
+                frame,
+            })),
+            Some(Ride::Joins { host: 0 }),
+        ];
+        let (usda, stage) = export(&units, &rides, "crew");
+        // One articulation, rooted at the host; the chain is the host's.
+        assert!(has_api(&stage, "/World/left", "PhysicsArticulationRootAPI"));
+        assert!(!has_api(
+            &stage,
+            "/World/right",
+            "PhysicsArticulationRootAPI"
+        ));
+        assert!(!has_api(
+            &stage,
+            "/World/right/right_base",
+            "PhysicsArticulationRootAPI"
+        ));
+        assert_eq!(
+            usda.matches("def Xform \"carrier_anchor\"").count(),
+            1,
+            "one chain"
+        );
+        assert_eq!(
+            usda.matches("def PhysicsFixedJoint \"root_joint\"").count(),
+            1
+        );
+        // Self-collision is stated once, on the host: the two arms are one
+        // articulation and do not collide with each other.
+        assert_eq!(
+            usda.matches("physxArticulation:enabledSelfCollisions")
+                .count(),
+            1
+        );
+        // Named apart: links and joints of both carry their robot's name.
+        for prim in [
+            "/World/left/left_base",
+            "/World/left/left_arm",
+            "/World/left/joints/left_base_x",
+            "/World/right/right_base",
+            "/World/right/right_arm",
+            "/World/right/joints/right_base_x",
+        ] {
+            assert!(
+                stage.prim(sdf::path(prim).unwrap()).is_valid().unwrap(),
+                "{prim}"
+            );
+        }
+        // The virtual joints keep their plain names on the host...
+        assert_eq!(
+            rel_targets(&stage, "/World/left/joints/base_roll", "physics:body1"),
+            ["/World/Env/amr"]
+        );
+        assert_eq!(
+            rel_targets(
+                &stage,
+                "/World/left/joints/left_mount_joint",
+                "physics:body1"
+            ),
+            ["/World/left/left_base"]
+        );
+        // ...and the second robot is bolted to the vehicle's body where it
+        // sits, by its mount joint alone.
+        let mount = "/World/right/joints/right_mount_joint";
+        assert_eq!(
+            rel_targets(&stage, mount, "physics:body0"),
+            ["/World/Env/amr"]
+        );
+        assert_eq!(
+            rel_targets(&stage, mount, "physics:body1"),
+            ["/World/right/right_base"]
+        );
+        assert_close(
+            point_attr(&stage, mount, "physics:localPos0"),
+            [0.1, -0.2, 0.15],
+            1e-6,
+            "the second seat on the body",
+        );
+        assert!(!usda.contains("/World/right/joints/root_joint"));
+        assert!(!stage
+            .prim(sdf::path("/World/right/joints/base_x").unwrap())
+            .is_valid()
+            .unwrap());
+
+        // On a vehicle with no body of its own, the second robot is bolted
+        // to the host's root link.
+        let rides = [
+            Some(Ride::Base(CarrierSpec { unit: None, frame })),
+            Some(Ride::Joins { host: 0 }),
+        ];
+        let (_, stage) = export(&[], &rides, "crew_bare");
+        let mount = "/World/right/joints/right_mount_joint";
+        assert_eq!(
+            rel_targets(&stage, mount, "physics:body0"),
+            ["/World/left/left_base"]
+        );
+        assert_close(
+            point_attr(&stage, mount, "physics:localPos0"),
+            [0.0, -0.4, 0.0],
+            1e-6,
+            "the second seat, seen from the first",
+        );
+
+        // A join has to name an earlier robot that rides as a base.
+        let bad = SimulationSpec {
+            units: &[],
+            bodies: &[],
+            articulations: &[Some(powered.clone()), Some(powered.clone())],
+            rides: &[Some(Ride::Joins { host: 1 }), None],
+            ground: None,
+        };
+        assert!(matches!(
+            export_simulation(&input, &bad, "bad"),
+            Err(UsdExportError::Input(_))
+        ));
+    }
+
+    /// A USD-sourced robot rides like any other: its stage's anchoring to
+    /// the world is switched off by an `over`, the chain hangs under the
+    /// referenced prim (or beside it, when the stage composes through a
+    /// unit correction), and a mount joint bolts its root body to the
+    /// vehicle. A second one joining loses its stage's articulation root.
+    #[test]
+    fn a_referenced_robot_rides_its_vehicle() {
+        for (tag, usda_src, under_robot) in [
+            ("ref_ride_zup", ARM.to_string(), true),
+            ("ref_ride_yup", arm_yup_cm(), false),
+        ] {
+            let dir = temp_dir(tag);
+            std::fs::write(dir.join("robot.usda"), &usda_src).unwrap();
+            let imported = import_robot(
+                &dir.join("robot.usda"),
+                &RobotImportOptions {
+                    mesh_cache_dir: Some(dir.join("meshes")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let model = imported.model;
+            let (frame, body) = rider_vehicle();
+            let seats = [
+                frame * Isometry3::translation(0.1, 0.2, 0.3),
+                frame * Isometry3::translation(0.1, -0.2, 0.3),
+            ];
+            let q = vec![0.3, -0.2];
+            let poses: Vec<Vec<Vec<Isometry3<f64>>>> = seats
+                .iter()
+                .map(|seat| {
+                    vec![botrail_kin::forward_kinematics_with_base(&model, &q, seat).unwrap()]
+                })
+                .collect();
+            let samples = vec![q.clone()];
+            let robots: Vec<RobotAnimation> = ["left", "right"]
+                .iter()
+                .zip(&poses)
+                .map(|(name, link_poses)| RobotAnimation {
+                    name,
+                    model: &model,
+                    link_poses,
+                    joint_samples: Some(&samples),
+                })
+                .collect();
+            let mut chassis = scenery("amr/chassis", [0.8, 0.5, 0.3], [0.0; 3], true);
+            chassis.track = PoseTrack::Static(body);
+            let objects = [chassis];
+            let units = [UnitSpec {
+                name: "amr".into(),
+                role: BodyRole::Link,
+                pose: body,
+                mass: None,
+                belt: None,
+            }];
+            let bodies = [ObjectBody {
+                unit: Some(0),
+                guide: false,
+            }];
+            let input = AnimationInput {
+                robots: &robots,
+                times: &[0.0],
+                objects: &objects,
+                curves: &[],
+                cameras: &[],
+            };
+            let spec = SimulationSpec {
+                units: &units,
+                bodies: &bodies,
+                articulations: &[None, None],
+                rides: &[
+                    Some(Ride::Base(CarrierSpec {
+                        unit: Some(0),
+                        frame,
+                    })),
+                    Some(Ride::Joins { host: 0 }),
+                ],
+                ground: None,
+            };
+            let exported = export_simulation(&input, &spec, "ride").unwrap();
+            assert!(
+                exported.warnings.is_empty(),
+                "{tag}: {:?}",
+                exported.warnings
+            );
+            let out = dir.join("ride.usda");
+            let usda = exported.to_usda().unwrap();
+            write_exported(&out, exported).unwrap();
+            let stage = Stage::open(&out.display().to_string()).unwrap();
+
+            // The stage's own anchor to the world is gone — an `over`
+            // deactivating the referenced joint — on both robots.
+            for robot in ["left", "right"] {
+                let anchor = format!("/World/{robot}/joints/anchor");
+                assert!(
+                    usda.contains(&format!(
+                        "over \"anchor\" (\n{}active = false",
+                        " ".repeat(16)
+                    )),
+                    "{tag}: {anchor} deactivated"
+                );
+                assert!(
+                    !stage
+                        .prim(sdf::path(&anchor).unwrap())
+                        .is_active()
+                        .unwrap_or(true),
+                    "{tag}: {anchor} still active"
+                );
+            }
+            // The chain: under the referenced prim when the stage composes
+            // at identity, beside it otherwise — and its joints sit in a
+            // scope of their own, the asset's `joints` being taken.
+            let chain = if under_robot {
+                "/World/left"
+            } else {
+                "/World/left_carrier"
+            };
+            let scope = if under_robot { "joints_2" } else { "joints" };
+            let root_joint = format!("{chain}/{scope}/root_joint");
+            assert_eq!(
+                rel_targets(&stage, &root_joint, "physics:body1"),
+                [format!("{chain}/carrier_anchor")],
+                "{tag}"
+            );
+            let last = format!("{chain}/{scope}/base_roll");
+            assert_eq!(
+                rel_targets(&stage, &last, "physics:body1"),
+                ["/World/Env/amr"],
+                "{tag}"
+            );
+            assert!(
+                (float_attr(
+                    &stage,
+                    &format!("{chain}/{scope}/base_yaw"),
+                    "state:angular:physics:position"
+                ) - 90.0)
+                    .abs()
+                    < 1e-4
+            );
+            // The mount joint bolts the root *body* prim to the vehicle,
+            // where the base sits on the deck — in metres, whatever the
+            // stage's units.
+            let mount = format!("{chain}/{scope}/mount_joint");
+            assert_eq!(
+                rel_targets(&stage, &mount, "physics:body0"),
+                ["/World/Env/amr"]
+            );
+            assert_eq!(
+                rel_targets(&stage, &mount, "physics:body1"),
+                ["/World/left/base"]
+            );
+            assert_close(
+                point_attr(&stage, &mount, "physics:localPos0"),
+                [0.1, 0.2, 0.15],
+                1e-5,
+                &format!("{tag}: the seat on the body"),
+            );
+            // The second robot joins: a mount joint of its own, and the
+            // articulation root its stage applies deleted.
+            let mount = "/World/right/joints_2/mount_joint";
+            let mount = if under_robot {
+                mount.to_string()
+            } else {
+                "/World/right_carrier/joints/mount_joint".to_string()
+            };
+            assert_eq!(
+                rel_targets(&stage, &mount, "physics:body1"),
+                ["/World/right/base"]
+            );
+            assert!(
+                !usda.contains("/World/right_carrier/joints/root_joint")
+                    && !usda.contains("/World/right/joints_2/root_joint")
+            );
+            assert!(
+                usda.contains("delete apiSchemas = [\"PhysicsArticulationRootAPI\"]"),
+                "{tag}: the joining robot's root is deleted"
+            );
+            assert!(
+                has_api(&stage, "/World/left", "PhysicsArticulationRootAPI"),
+                "{tag}"
+            );
+        }
+    }
+
     #[test]
     fn urdf_export_is_self_contained() {
         let dir = temp_dir("urdf");
@@ -2995,6 +4786,14 @@ mod tests {
         for name in ["anim.usdc", "anim.usd"] {
             let head = std::fs::read(dir.join(name)).unwrap();
             assert_eq!(&head[..8], b"PXR-USDC", "{name} lacks the crate magic");
+            // Stamped with what the content needs, not with the newest
+            // version the writer knows: a USD 24 reader (Isaac Sim 5)
+            // refuses a 0.12 file outright.
+            assert_eq!(
+                &head[8..11],
+                [0, 8, 0],
+                "{name} claims a newer crate version"
+            );
         }
         assert!(matches!(
             write_animation(&dir.join("anim.usdz"), &input, &ExportOptions::default()),

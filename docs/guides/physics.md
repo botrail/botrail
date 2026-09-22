@@ -130,6 +130,19 @@ physics and streams it as it grows; see [the studio](studio.md).
 `bt.studio(scene, physics=bt.Physics(world=True, powered=False))` decides
 what "on" means for that session.
 
+## Another engine
+
+The world `physics_plan()` tabulates can leave botrail as a UsdPhysics
+stage — robots as articulations, dynamic units as rigid bodies, what a
+device moves as kinematic bodies, belts with a surface velocity — for Isaac
+Sim or Isaac Lab to own:
+
+```python
+scene.export_usd("cell.usdc", physics=bt.Physics(world=True))
+```
+
+See [USD for a physics engine](export.md#usd-for-a-physics-engine-isaac-sim-isaac-lab).
+
 ## Not simulated
 
 A part in a dynamic robot's hand rides as a mirror: it does not load the

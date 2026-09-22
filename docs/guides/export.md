@@ -72,6 +72,115 @@ Isaac Sim captures — is
 [`play_usd_animation`][botrail.Scene.play_usd_animation]; the
 [Export and replay USD](../tutorials/replay-usd.md) tutorial covers both ways.
 
+## USD for a physics engine (Isaac Sim, Isaac Lab)
+
+An animation layer is a recording: robots are pictures of their links, and
+nothing collides. `physics=` writes the static cell as a **simulation
+stage** instead — the world an engine can own, in UsdPhysics:
+
+```python
+physics = bt.Physics(world=True)               # the whole cell; True = what was declared
+print(scene.physics_plan(physics).to_markdown())   # what becomes what
+scene.export_usd("cell.usdc", physics=physics)
+```
+
+| In the cell | In the stage |
+|---|---|
+| a URDF, catalog or tool-composed robot | `PhysicsArticulationRootAPI`: every link a rigid body with its mass and colliders, every joint with limits, a drive (`maxForce` from the effort limit), its velocity cap, mimic couplings (`PhysxMimicJointAPI`), and the pose it stands in |
+| a USD-sourced robot (an Isaac asset) | referenced, as ever — its own physics comes with it |
+| a dynamic unit of [`physics_plan()`](physics.md#the-world-scope) | one rigid body (`/World/Env/<unit>`), its members beneath it as colliders |
+| what a device moves (a door on an axis, a lift's car, a vehicle nobody rides) | one kinematic body per device (`/World/Env/amr1` for `amr1/base_link`, `amr1/visual/...`): the engine never pushes it, your controller poses it |
+| a robot riding a vehicle | one fixed-base articulation with its vehicle: six virtual joints (`base_x`, `base_y`, `base_z`, `base_yaw`, `base_pitch`, `base_roll`) state the vehicle's pose, the vehicle's body is a link, the robot is bolted to it. Drive the joints and both move. A USD-sourced robot rides the same way, its own stage's anchoring to the world deactivated |
+| a second robot on the same vehicle | joins the first one's articulation, bolted to the vehicle's body: two arms on one cart are one machine, addressed through the first rider's prim, its links and joints named apart (`left_shoulder_pan`, `right_shoulder_pan`) |
+| a walker or an aircraft (a floating base) | no joint to anything, rooted at its base link; the envelope its vehicle draws around it stays a picture |
+| a conveyor | the bodies its zone reaches become kinematic, with `PhysxSurfaceVelocityAPI` |
+| everything else that collides | a static collider |
+| the ground of the world scope | a `Plane` collider |
+
+Collision follows `enabled` and the picture follows `visible`, the way they
+do in botrail: an invisible collision proxy is authored as a `guide`, a
+display shell that never collides stays a picture. A part drawn as a mesh
+but colliding as a box (the parts library's tray) gets the box beside the
+picture, so the engine sees the shape botrail's own bake sees.
+
+The stage has no timeSamples — an animation and a simulation would fight
+over the same prims — so `physics=` does not combine with a trajectory. A
+body named under another body (a crate on a pallet, `pallet/crate`) moves
+out to be its sibling (`/World/Env/pallet_crate`): UsdPhysics takes every
+prim below a rigid body as part of that body. Prefer `.usdc` for robots
+with meshes; the file is stamped crate 0.8, which Isaac Sim 5 (USD 24)
+reads.
+
+In Isaac Lab the cell is one reference per environment, and its residents
+are addressed where the stage put them:
+
+```python
+cell = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Cell", spawn=sim_utils.UsdFileCfg(usd_path="cell.usdc"))
+robot = ArticulationCfg(prim_path="{ENV_REGEX_NS}/Cell/Robot", spawn=None, actuators={...})
+carton = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/Cell/Env/cartons/c3", spawn=None)
+```
+
+`examples/export/isaaclab_cell.py` runs this end to end (checked on Isaac
+Lab 2.3 / Isaac Sim 5.1): the arm starts in its exported pose and follows
+joint targets, loose parts fall and rest on the bench and on each other,
+the belt carries its carton, and cloned environments agree. Three things
+are the engine's, not the stage's:
+
+* **A belt needs CPU dynamics.** A surface velocity is a contact
+  modification; under GPU dynamics PhysX lets a part fall through a running
+  belt, and the physics replicator does not clone it. Run with
+  `device="cpu"` and `replicate_physics=False`, or switch
+  `physxSurfaceVelocity:surfaceVelocityEnabled` off (the export warns when
+  the cell has a belt).
+* **Isaac Lab checks `init_state.joint_pos` against the limits.** It
+  defaults to zero; a robot with a joint whose range excludes zero (the
+  Franka's fourth) needs its defaults stated — `scene.joint_positions` is
+  the pose the stage was written in.
+* **Drive gains are a starting point.** The authored position drives hold
+  the exported pose when the stage is simply played (`powered=False`
+  leaves only the passive drag); Isaac Lab's actuator configs overwrite
+  them.
+* **A vehicle that carries a robot is driven through its base joints.**
+  botrail's vehicles go where their program says, and the stage says the
+  same in the form an engine takes on every pipeline — the way Isaac Lab's
+  own mobile manipulators are built, with all six degrees of freedom, so a
+  lift and a ramp are joint targets like a floor is. The joint positions
+  are the vehicle's pose in the cell's frame (metres, and radians once
+  Isaac Lab reads them): `base_x = 10.0, base_y = 3.44, base_yaw = 1.57` is
+  a vehicle parked at that station, heading +y.
+
+  ```python
+  amr = scene["amr1_lift"]                       # the robot *and* its vehicle
+  x = amr.joint_names.index("base_x")
+  target = amr.data.joint_pos.clone()
+  target[:, x] += 0.5                            # half a metre along the cell's x
+  amr.set_joint_position_target(target)
+  ```
+
+  Checked on Isaac Lab's defaults (GPU dynamics, replicated environments):
+  commanded 1 m along, 0.5 m up and 0.2 rad nose-up, the base joints
+  tracked within 0.005 and a six-axis arm on the deck kept its pose within
+  0.0004 rad — a URDF arm, the Isaac Franka, and an arm from a
+  centimetre / Y-up stage alike. The articulation is a fixed base like any
+  bolted-down arm's, so Jacobians and mass matrices keep their usual
+  shape. The pose is *commanded*: a machine whose pose the ground decides
+  — tracks over rough terrain — is not something a botrail vehicle is, in
+  the stage or in botrail's own physics.
+
+  Two robots on one vehicle are one articulation: `ArticulationCfg` names
+  the first rider's prim, and the joint regexes tell the arms apart by
+  their prefixes (`left_.*`, `right_.*`). A USD-sourced robot keeps its
+  asset's own names, so two of the same asset on one cart come out with
+  PhysX's suffixes (`panda_joint1`, `panda_joint1_0`). Arms sharing an
+  articulation do not collide with each other (its self-collision is off
+  as a whole), where botrail's own physics would have them collide.
+
+Not written yet: an object held at export time is a free body (it is not
+welded to the hand), a USD-sourced robot whose stage roots the
+articulation on its base body itself stays anchored to the world (the
+export warns), a device nobody rides is a kinematic body rather than a
+driven joint, and sensors, signals and programs stay in botrail.
+
 ## Camera video
 
 ```python

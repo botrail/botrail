@@ -185,9 +185,12 @@ impl PhysicsPlan {
     }
 }
 
-/// One rigid unit of the lowering.
+/// One rigid unit of the lowering: what the engine gets as a single
+/// body (or, fixed, as its members mirrored one by one). Public for the
+/// consumers that lower the same world somewhere else — the UsdPhysics
+/// stage export (design-world-physics.md W4-U).
 #[derive(Debug, Clone)]
-pub(crate) struct Unit {
+pub struct Unit {
     pub name: String,
     /// The obstacle the unit's frame is taken from (its root, or the first
     /// member of a pin-only group).
@@ -513,6 +516,68 @@ fn dynamic_props(mass: Option<f64>) -> BodyProps {
 }
 
 impl Scene {
+    /// The rigid units a physics bake under `options` lowers, in obstacle
+    /// order of their frame member — the derivation [`Scene::physics_plan`]
+    /// tabulates, with the member indices and body properties the table
+    /// leaves out.
+    pub fn physics_units(&self, options: &PhysicsOptions) -> Vec<Unit> {
+        derive_units(self, options)
+    }
+
+    /// The enabled obstacles each conveyor's zone reaches, as `(obstacle
+    /// index, device index)` — the bodies whose contacts a physics bake's
+    /// surface-velocity zone drives, for a consumer that has to hang the
+    /// belt's velocity on a body instead of a region (a UsdPhysics stage).
+    /// The belt's top face *is* the zone's bottom face, so the box is
+    /// taken `margin` larger; the first conveyor to reach an obstacle
+    /// keeps it.
+    pub fn belt_obstacles(&self, margin: f64) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (i, o) in self.obstacles().iter().enumerate() {
+            if !o.enabled {
+                continue;
+            }
+            let reached = self.devices().iter().position(|device| {
+                let DeviceKind::Conveyor {
+                    zone_pose,
+                    zone_size,
+                    ..
+                } = &device.kind
+                else {
+                    return false;
+                };
+                let Some((min, max)) =
+                    self.obstacle_colliders()[i].aabb(&(zone_pose.inverse() * o.pose))
+                else {
+                    return false;
+                };
+                (0..3).all(|k| {
+                    let half = zone_size[k] / 2.0 + margin;
+                    min[k] <= half && max[k] >= -half
+                })
+            });
+            if let Some(d) = reached {
+                out.push((i, d));
+            }
+        }
+        out
+    }
+
+    /// How robot `robot` stands in a physics world under `options`: its
+    /// resolved servo declaration (its own, or the world scope's default;
+    /// `None` for an undeclared robot under the declared scope) and
+    /// whether its base is a free body.
+    pub fn robot_physics(
+        &self,
+        robot: usize,
+        options: &PhysicsOptions,
+    ) -> (Option<RobotDynamics>, bool) {
+        (
+            robot_dynamics_for(self, robot, options).map(|(d, _)| d),
+            robot_floating(self, robot, options),
+        )
+    }
+
     /// The audit of what a physics bake under `options` would hand the
     /// engine (design-world-physics.md §3.2): the ground, every rigid
     /// unit with its kind and the rule that decided it, and the count of

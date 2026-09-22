@@ -5,12 +5,14 @@
 //! tracks with stowed-visibility, weld flashes — and hand the result to
 //! `botrail_usd::export`.
 
-use botrail_scene::rollout::SequenceTimeline;
+use botrail_scene::physics_world::PlanKind;
+use botrail_scene::rollout::{PhysicsOptions, PhysicsScope, SequenceTimeline};
 use botrail_scene::seq::{CameraMount, DeviceKind};
 use botrail_scene::Scene;
 use botrail_usd::export::{
-    export_animation, AnimationInput, CameraSpec, CurveSpec, ExportOptions, ExportedAnimation,
-    ObjectSpec, PoseTrack, RobotAnimation,
+    export_animation, export_simulation, AnimationInput, ArticulationSpec, BeltSpec, BodyRole,
+    CameraSpec, CarrierSpec, CurveSpec, ExportOptions, ExportedAnimation, ObjectBody, ObjectSpec,
+    PhysicsSpec, PoseTrack, Ride, RobotAnimation, ServoSpec, SimulationSpec, UnitSpec,
 };
 use nalgebra::Isometry3;
 
@@ -386,6 +388,307 @@ pub fn bake_timeline(
 /// (a vehicle-mounted camera at the parked frame). The cell a layout is
 /// handed around as, rather than a cycle of it.
 pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, String> {
+    bake_scene_stage(scene, None, asset_stem)
+}
+
+/// Bakes the scene as it stands into a *simulation* stage
+/// (design-world-physics.md W4-U): the world `physics_plan(options)`
+/// tabulates, written as UsdPhysics for an engine to own — Isaac Sim /
+/// Isaac Lab first. Robots are articulations, dynamic units rigid bodies,
+/// what a device moves kinematic bodies, the rest static colliders; a
+/// conveyor's belt carries a surface velocity. No timeSamples: an
+/// animation and a simulation would fight over the same prims.
+pub fn bake_simulation(
+    scene: &Scene,
+    options: &PhysicsOptions,
+    asset_stem: &str,
+) -> Result<ExportedAnimation, String> {
+    bake_scene_stage(scene, Some(options), asset_stem)
+}
+
+/// How far below its authored box a conveyor zone still claims the body
+/// under it (m) — the belt's top face *is* the zone's bottom face, so the
+/// two only touch. The physics bake's own `ZONE_MARGIN`.
+const BELT_MARGIN: f64 = 0.005;
+
+/// The simulation-stage view of the obstacles: which to export, which
+/// rigid body each is part of, and those bodies.
+struct SimulationBodies {
+    /// Obstacle indices exported, in obstacle order.
+    exported: Vec<usize>,
+    bodies: Vec<ObjectBody>,
+    colliders: Vec<Option<PhysicsSpec>>,
+    units: Vec<UnitSpec>,
+    /// The one body of each rigid device that has one, by device name —
+    /// what a robot riding the device is bolted to.
+    device_units: std::collections::HashMap<String, usize>,
+}
+
+/// Mass (kg) of a vehicle body that is a link of its rider's articulation
+/// but has nothing to weigh — every piece of it a picture. A link needs a
+/// mass; the virtual joints that carry it do not care which.
+const BARE_CARRIER_MASS: f64 = 1.0;
+
+/// `ridden` names the vehicles that carry a robot the stage authors as an
+/// articulation: their body is a link of that articulation, not a
+/// kinematic body of its own.
+fn simulation_bodies(
+    scene: &Scene,
+    options: &PhysicsOptions,
+    ridden: &std::collections::HashSet<&str>,
+) -> SimulationBodies {
+    let obstacles = scene.obstacles();
+    let world = options.scope == PhysicsScope::World;
+    let default_material = botrail_physics::BodyProps::default().material;
+
+    // What a device moves by name is kinematic: the consumer puts it where
+    // its own controller says. A vehicle's body, an axis's objects and a
+    // lift's car each move as one piece, so each is *one* body (posing an
+    // AMR is one call, not one per cover and wheel); a source's pool is
+    // so many separate parts.
+    let index_of: std::collections::HashMap<&str, usize> = obstacles
+        .iter()
+        .enumerate()
+        .map(|(i, o)| (o.name.as_str(), i))
+        .collect();
+    // A floating machine's vehicle is a planning device: its body (the
+    // massing footprint drawn around a walker, to the head) is not matter
+    // the machine can stand in, so the bake keeps it out of the world —
+    // and so does the stage. Drawn, if it is drawn; never a collider.
+    let phantom: std::collections::HashSet<&str> = scene
+        .robots()
+        .iter()
+        .enumerate()
+        .filter(|(r, _)| scene.robot_physics(*r, options).1)
+        .filter_map(|(_, robot)| robot.mount.as_ref().map(|m| m.device.as_str()))
+        .collect();
+    let mut ghosts: std::collections::HashSet<usize> = Default::default();
+    // (what to call the body, its listed obstacles, the device's name when
+    // the body is that device's one body)
+    let mut driven: Vec<(String, Vec<usize>, Option<String>)> = Vec::new();
+    for device in scene.devices() {
+        let (names, rigid) = match &device.kind {
+            DeviceKind::LinearAxis { objects, .. } => (objects, true),
+            DeviceKind::Vehicle { body, .. } => (body, true),
+            DeviceKind::Lift { car, .. } => (car, true),
+            DeviceKind::Source { pool, .. } => (pool, false),
+            DeviceKind::Conveyor { .. } | DeviceKind::Sink { .. } => continue,
+        };
+        let listed: Vec<usize> = names
+            .iter()
+            .filter_map(|n| index_of.get(n.as_str()).copied())
+            .collect();
+        if phantom.contains(device.name.as_str()) {
+            ghosts.extend(listed);
+            continue;
+        }
+        if rigid {
+            driven.push((device.name.clone(), listed, Some(device.name.clone())));
+        } else {
+            driven.extend(
+                listed
+                    .into_iter()
+                    .map(|i| (obstacles[i].name.clone(), vec![i], None)),
+            );
+        }
+    }
+    // The belt under a conveyor zone: a fixed body whose collision
+    // reaches into the zone — the same "contacts inside the box" the
+    // bake's surface-velocity zone drives.
+    let belts: std::collections::HashMap<usize, BeltSpec> = scene
+        .belt_obstacles(BELT_MARGIN)
+        .into_iter()
+        .filter_map(|(i, d)| match &scene.devices()[d].kind {
+            DeviceKind::Conveyor {
+                velocity, running, ..
+            } => Some((
+                i,
+                BeltSpec {
+                    velocity: [velocity.x, velocity.y, velocity.z],
+                    running: *running,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+
+    let mut units: Vec<UnitSpec> = Vec::new();
+    let mut device_units: std::collections::HashMap<String, usize> = Default::default();
+    let mut unit_of: Vec<Option<usize>> = vec![None; obstacles.len()];
+    let mut material_of = vec![default_material; obstacles.len()];
+    // What rides a fixed unit's root (the world scope folds a door's
+    // handle into the door): it goes wherever the root goes.
+    let mut riders: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    for unit in scene.physics_units(options) {
+        if unit.kind != PlanKind::Dynamic {
+            riders.insert(unit.frame, unit.members);
+            continue;
+        }
+        for &i in &unit.members {
+            material_of[i] = unit.props.material;
+            unit_of[i] = Some(units.len());
+        }
+        units.push(UnitSpec {
+            name: unit.name.clone(),
+            role: BodyRole::Dynamic,
+            pose: obstacles[unit.frame].pose,
+            mass: unit.props.mass,
+            belt: None,
+        });
+    }
+    for (device, listed, rigid_device) in driven {
+        let mut members: Vec<usize> = Vec::new();
+        for i in listed {
+            for &m in riders.get(&i).unwrap_or(&vec![i]) {
+                if unit_of[m].is_none() && !members.contains(&m) {
+                    members.push(m);
+                }
+            }
+        }
+        let Some(&first) = members.first() else {
+            continue;
+        };
+        let name = driven_body_name(&device, &members, obstacles);
+        let frame = index_of.get(name.as_str()).copied().unwrap_or(first);
+        for &m in &members {
+            unit_of[m] = Some(units.len());
+        }
+        // A vehicle that carries a robot is that robot's base: a link the
+        // solver moves through the robot's virtual base joints, not a body
+        // posed from outside.
+        let link = rigid_device.as_deref().is_some_and(|d| ridden.contains(d));
+        let weighs = members
+            .iter()
+            .any(|&m| obstacles[m].enabled || (world && obstacles[m].walkable));
+        if let Some(rigid_device) = rigid_device {
+            device_units.insert(rigid_device, units.len());
+        }
+        units.push(UnitSpec {
+            name,
+            role: if link {
+                BodyRole::Link
+            } else {
+                BodyRole::Kinematic
+            },
+            pose: obstacles[frame].pose,
+            mass: (link && !weighs).then_some(BARE_CARRIER_MASS),
+            // A roller deck on a vehicle: the body carries its belt.
+            belt: members.iter().find_map(|m| belts.get(m).copied()),
+        });
+    }
+    for (i, o) in obstacles.iter().enumerate() {
+        if unit_of[i].is_some() {
+            continue;
+        }
+        if let Some(props) = &o.physics {
+            material_of[i] = props.material;
+        }
+        // Fixed scenery is lowered obstacle by obstacle; a belt still
+        // needs a body to hang its velocity on.
+        if let Some(belt) = belts.get(&i).copied() {
+            unit_of[i] = Some(units.len());
+            units.push(UnitSpec {
+                name: o.name.clone(),
+                role: BodyRole::Kinematic,
+                pose: o.pose,
+                mass: None,
+                belt: Some(belt),
+            });
+        }
+    }
+
+    let mut out = SimulationBodies {
+        exported: Vec::new(),
+        bodies: Vec::new(),
+        colliders: Vec::new(),
+        units,
+        device_units,
+    };
+    for (i, o) in obstacles.iter().enumerate() {
+        // The engine's truth is `enabled` (a floor slab a walker stands on
+        // is a floor to the world scope too); the picture's is `visible`.
+        let collides = (o.enabled || (world && o.walkable)) && !ghosts.contains(&i);
+        if !collides && !o.visible {
+            continue;
+        }
+        out.exported.push(i);
+        out.bodies.push(ObjectBody {
+            unit: unit_of[i],
+            guide: !o.visible,
+        });
+        out.colliders.push(collides.then_some(PhysicsSpec {
+            dynamic: false,
+            mass: None,
+            friction: material_of[i].friction,
+            restitution: material_of[i].restitution,
+        }));
+    }
+    out
+}
+
+/// What to call the one body of a device's obstacles: the `/`-prefix
+/// their names share (`amr1` for `amr1/base_link` and `amr1/visual/...`, a
+/// lone obstacle's own name), so the body sits where its pieces already
+/// are — unless something that is *not* part of the device lives under
+/// that prefix too (two doors of one `cell/`), which would then be moved
+/// out from under the body; the device's own name serves there.
+fn driven_body_name(
+    device: &str,
+    members: &[usize],
+    obstacles: &[botrail_scene::Obstacle],
+) -> String {
+    let mut shared: Vec<&str> = obstacles[members[0]].name.split('/').collect();
+    for &m in &members[1..] {
+        let segments: Vec<&str> = obstacles[m].name.split('/').collect();
+        let agree = shared
+            .iter()
+            .zip(&segments)
+            .take_while(|(a, b)| a == b)
+            .count();
+        shared.truncate(agree);
+    }
+    let shared = shared.join("/");
+    let free = |name: &str| {
+        !name.is_empty()
+            && obstacles.iter().enumerate().all(|(i, o)| {
+                members.contains(&i) || !(o.name == name || o.name.starts_with(&format!("{name}/")))
+            })
+    };
+    if free(&shared) {
+        shared
+    } else if free(device) {
+        device.to_string()
+    } else {
+        format!("{device}_body")
+    }
+}
+
+fn articulation_spec(scene: &Scene, robot: usize, options: &PhysicsOptions) -> ArticulationSpec {
+    let (dynamics, floating) = scene.robot_physics(robot, options);
+    ArticulationSpec {
+        floating,
+        powered: options.powered != Some(false),
+        passive_damping: options.passive_damping,
+        servos: dynamics
+            .map(|d| {
+                d.servos
+                    .iter()
+                    .map(|servo| ServoSpec {
+                        max_force: Some(servo.max_force),
+                        max_velocity: Some(servo.max_velocity),
+                        armature: Some(servo.armature),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn bake_scene_stage(
+    scene: &Scene,
+    physics: Option<&PhysicsOptions>,
+    asset_stem: &str,
+) -> Result<ExportedAnimation, String> {
     let times = [0.0];
 
     let mut robot_frames: Vec<Vec<Vec<Isometry3<f64>>>> = Vec::with_capacity(scene.robots().len());
@@ -397,25 +700,77 @@ pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, 
         joint_samples.push(vec![q]);
     }
 
-    let objects: Vec<ObjectSpec> = scene
-        .obstacles()
-        .iter()
+    // Which vehicle each robot rides, when its base is not free. The first
+    // robot on a vehicle takes it as its base; the next ones join that
+    // articulation. A USD-sourced robot rides like any other — unless its
+    // stage roots the articulation on the base body itself, which the
+    // exporter cannot re-root (the model names such a root link by the
+    // root prim's own path).
+    let mut riders: Vec<Option<&str>> = vec![None; scene.robots().len()];
+    let mut hosts: std::collections::HashMap<&str, usize> = Default::default();
+    let mut rides: Vec<Option<Ride>> = vec![None; scene.robots().len()];
+    let mut stranded: Vec<String> = Vec::new();
+    if let Some(options) = physics {
+        for (r, robot) in scene.robots().iter().enumerate() {
+            let Some(mount) = robot.mount.as_ref() else {
+                continue;
+            };
+            if scene.robot_physics(r, options).1 {
+                continue; // a floating base rides nothing
+            }
+            let model = &robot.model;
+            if model
+                .source
+                .usd_stage()
+                .is_some_and(|(_, root)| model.links[model.root_link].name == root)
+            {
+                stranded.push(format!(
+                    "{} (on {}): its stage roots the articulation on the base body itself; the \
+                     robot stays anchored to the world as its stage says and does not ride",
+                    robot.name, mount.device
+                ));
+                continue;
+            }
+            riders[r] = Some(mount.device.as_str());
+            if let Some(&host) = hosts.get(mount.device.as_str()) {
+                rides[r] = Some(Ride::Joins { host });
+            } else {
+                hosts.insert(mount.device.as_str(), r);
+            }
+        }
+    }
+    let ridden: std::collections::HashSet<&str> = hosts.keys().copied().collect();
+    let simulation = physics.map(|options| simulation_bodies(scene, options, &ridden));
+    let exported: Vec<usize> = match &simulation {
+        Some(sim) => sim.exported.clone(),
         // A collision proxy is not part of the picture: the export is
         // what someone opens in usdview, and hidden means hidden.
-        .filter(|o| o.visible)
-        .map(|o| ObjectSpec {
-            material: o.material.map(|m| botrail_usd::export::SurfaceMaterial {
-                metalness: m.metalness,
-                roughness: m.roughness,
-                opacity: m.opacity,
-            }),
-            visual_asset: o.visual_asset.clone(),
-            name: o.name.clone(),
-            geometry: o.geometry.clone(),
-            track: PoseTrack::Static(o.pose),
-            color: o.color,
-            visible: Vec::new(),
-            physics: physics_spec(scene, &o.name),
+        None => (0..scene.obstacles().len())
+            .filter(|&i| scene.obstacles()[i].visible)
+            .collect(),
+    };
+    let objects: Vec<ObjectSpec> = exported
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| {
+            let o = &scene.obstacles()[i];
+            ObjectSpec {
+                material: o.material.map(|m| botrail_usd::export::SurfaceMaterial {
+                    metalness: m.metalness,
+                    roughness: m.roughness,
+                    opacity: m.opacity,
+                }),
+                visual_asset: o.visual_asset.clone(),
+                name: o.name.clone(),
+                geometry: o.geometry.clone(),
+                track: PoseTrack::Static(o.pose),
+                color: o.color,
+                visible: Vec::new(),
+                physics: match &simulation {
+                    Some(sim) => sim.colliders[k],
+                    None => physics_spec(scene, &o.name),
+                },
+            }
         })
         .collect();
 
@@ -493,8 +848,67 @@ pub fn bake_scene(scene: &Scene, asset_stem: &str) -> Result<ExportedAnimation, 
         curves: &curves,
         cameras: &cameras,
     };
-    let options = ExportOptions { fps: 60.0 };
-    export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
+    let (Some(sim), Some(physics)) = (&simulation, physics) else {
+        let options = ExportOptions { fps: 60.0 };
+        return export_animation(&input, &options, asset_stem).map_err(|e| e.to_string());
+    };
+    // A USD-sourced robot references its own stage, physics included; the
+    // rest are authored as articulations here.
+    // A robot riding a vehicle takes the vehicle in as its base: six virtual
+    // joints state the vehicle's pose, and driving them moves both. The
+    // vehicle's frame is where the mount says it is — the robot's base,
+    // less the mount's offset — so it is right wherever the scene stands.
+    for (r, robot) in scene.robots().iter().enumerate() {
+        if rides[r].is_some() {
+            continue; // joins a host
+        }
+        if let Some((device, mount)) = riders[r].zip(robot.mount.as_ref()) {
+            rides[r] = Some(Ride::Base(CarrierSpec {
+                unit: sim.device_units.get(device).copied(),
+                frame: robot.base_pose() * mount.offset.inverse(),
+            }));
+        }
+    }
+    let articulations: Vec<Option<ArticulationSpec>> = scene
+        .robots()
+        .iter()
+        .enumerate()
+        .map(|(r, robot)| {
+            robot
+                .model
+                .source
+                .usd_stage()
+                .is_none()
+                .then(|| articulation_spec(scene, r, physics))
+        })
+        .collect();
+    let spec = SimulationSpec {
+        units: &sim.units,
+        bodies: &sim.bodies,
+        articulations: &articulations,
+        rides: &rides,
+        ground: physics.ground,
+    };
+    let mut exported = export_simulation(&input, &spec, asset_stem).map_err(|e| e.to_string())?;
+    exported.warnings.extend(stranded);
+    let belts: Vec<&str> = sim
+        .units
+        .iter()
+        .filter(|u| u.belt.is_some())
+        .map(|u| u.name.as_str())
+        .collect();
+    if !belts.is_empty() {
+        // Not a defect of the stage, but the one thing about it that fails
+        // silently on the consumer's side (measured on Isaac Sim 5.1).
+        exported.warnings.push(format!(
+            "conveyor belt bodies ({}) carry PhysxSurfaceVelocityAPI, which PhysX honours under \
+             CPU dynamics only: under GPU dynamics parts fall through a running belt, and the \
+             physics replicator does not clone it (Isaac Lab: device=\"cpu\" and \
+             replicate_physics=False, or switch physxSurfaceVelocity:surfaceVelocityEnabled off)",
+            belts.join(", ")
+        ));
+    }
+    Ok(exported)
 }
 
 /// A sampled track whose poses never change is a static xform — the

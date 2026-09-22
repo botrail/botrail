@@ -2646,14 +2646,49 @@ impl Scene {
     /// robots reference their original stage (assets copied to a sibling
     /// `<stem>_assets/` directory); URDF robots are authored from the
     /// model's visuals. Returns exporter warnings.
-    #[pyo3(signature = (path, trajectory = None, fps = 60.0, robot = None))]
+    ///
+    /// `physics=` writes the static cell as a *simulation stage* instead —
+    /// the world a physics engine can own (Isaac Sim / Isaac Lab), in
+    /// UsdPhysics: robots as articulations (links with mass and
+    /// colliders, joints with limits and drives), the dynamic units of
+    /// `physics_plan()` as rigid bodies, what a device moves as kinematic
+    /// bodies, everything else that collides as static colliders, a
+    /// conveyor's belt with a surface velocity, the ground as a plane.
+    /// The vocabulary is a bake's: `True` is the declared scope,
+    /// `bt.Physics(world=True)` the whole cell. Collision follows
+    /// `enabled`, the picture follows `visible` (an invisible collision
+    /// proxy is authored as a guide). It does not combine with a
+    /// `trajectory`: an animation and a simulation would fight over the
+    /// same prims.
+    #[pyo3(signature = (path, trajectory = None, fps = 60.0, robot = None, physics = None))]
     fn export_usd(
         &self,
         path: PathBuf,
         trajectory: Option<&Trajectory>,
         fps: f64,
         robot: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<String>> {
+        let mut bake = botrail_scene::rollout::RolloutOptions::default();
+        let simulate = physics_bake(&mut bake, physics)?.is_some();
+        if simulate {
+            if trajectory.is_some() {
+                return Err(PyValueError::new_err(
+                    "`physics=` writes a simulation stage, which has no animation: \
+                     export the trajectory on its own, without `physics=`",
+                ));
+            }
+            if robot.is_some() {
+                return Err(PyValueError::new_err(
+                    "`robot` names the instance a trajectory belongs to; \
+                     a simulation stage takes the whole scene",
+                ));
+            }
+            return self
+                .hub
+                .export_simulation_usd(&path, &bake.physics.unwrap_or_default())
+                .map_err(PyValueError::new_err);
+        }
         match trajectory {
             Some(trajectory) => {
                 let index = self.resolve_robot(robot)?;
