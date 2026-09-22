@@ -6,7 +6,7 @@
 ![The demo cell in the studio](../assets/botrail_demo.png)
 
 ```bash
-python examples/basics/demo.py
+python examples/basics/demo.py --studio
 ```
 
 The first run downloads NVIDIA's official Isaac Sim Franka asset (~10 MB) into
@@ -77,7 +77,7 @@ and each opening breaks the run; the curtain then watches the gate opening
 the fence cannot close):
 
 ```python
---8<-- "examples/basics/demo.py:94:152"
+--8<-- "examples/basics/demo.py:95:153"
 ```
 
 Each one is checked against what the package actually sells: ask the fence for
@@ -105,7 +105,7 @@ axis along the approach. IK, though, solves for a link. So a taught pose is
 backed off along the tool axis to the hand frame first:
 
 ```python
---8<-- "examples/basics/demo.py:177:204"
+--8<-- "examples/basics/demo.py:178:205"
 ```
 
 `teach_grasp` is the scripted form of dragging the studio's TCP gizmo: solve

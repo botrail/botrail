@@ -14,6 +14,19 @@ server.url
 server.stop()
 ```
 
+A studio that opens after a headless bake replays it: the demos bake the
+cycle, write the USD, and only then open the studio with `--studio`, and
+the dock has the cycle to play. It is the **last** bake that is replayed,
+so a script that bakes more afterwards — a scenario matrix for the
+report, a sweep — names the one to show:
+
+```python
+tl = scene.simulate_sequence("cycle")
+runs = scene.simulate_scenarios(["cycle"])   # the FAT rows; the last is now "latest"
+scene.show_timeline(tl)                      # the nominal cycle again
+bt.studio(scene)
+```
+
 ![The studio](../assets/studio/overview.png)
 
 The header names the robot (a dropdown when several share the scene, driving

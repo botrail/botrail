@@ -26,7 +26,7 @@ Requirements: Rust (stable), Python 3.9+, [maturin](https://maturin.rs),
 ./scripts/build_studio.sh          # build the studio UI into the package
 uv venv .venv && source .venv/bin/activate
 maturin develop --uv
-python examples/basics/demo.py
+python examples/basics/demo.py --studio
 ```
 
 !!! warning "Rebuild the studio bundle after touching `studio/`"

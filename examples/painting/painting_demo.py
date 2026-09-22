@@ -44,7 +44,7 @@ in the same step the raster starts) and the program's own — the feed
 strokes. The approach the rollout plans in from the taught stance, and the
 rapids, never spray the part however the enable was authored.
 
-Run with:  python examples/painting/painting_demo.py [--studio]
+Run with:  python examples/painting/painting_demo.py [out.usdc] [--studio]
 """
 
 import math
@@ -300,16 +300,23 @@ def main() -> None:
     film.save_obj(film_obj)
     print(f"  film map: {film_obj.name} (+ .mtl)")
 
+    # Presentation only: the panel takes the paint's colour as the film
+    # builds up, stroke by stroke, and the jet's cone and footprint ring
+    # show where the pattern lands. Collision and planning still see the
+    # original panel; the numbers above came from `spray_coat`. The USD
+    # carries the same build-up as visibility-switched stages.
+    pitch = PATTERN * (1.0 - overlap)
+    timeline = scene.animate_paint(
+        timeline, "panel", applicator_for(pitch), gate="gun_on", spec=SPEC,
+        trigger_signal="spraying", paint_color=PAINT_COLOR,
+    )
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    recording = Path(args[0]) if args else Path("painting_panel.usdc")
+    warnings = timeline.export_usd(recording)
+    print(f"  USD: {recording} ({recording.stat().st_size / 1e6:.1f} MB, "
+          f"{'no warnings' if not warnings else warnings})")
+
     if "--studio" in sys.argv:
-        # Presentation only: the panel takes the paint's colour as the film
-        # builds up, stroke by stroke, and the jet's cone and footprint
-        # ring show where the pattern lands. Collision and planning still
-        # see the original panel; the numbers above came from `spray_coat`.
-        pitch = PATTERN * (1.0 - overlap)
-        timeline = scene.animate_paint(
-            timeline, "panel", applicator_for(pitch), gate="gun_on", spec=SPEC,
-            trigger_signal="spraying", paint_color=PAINT_COLOR,
-        )
         print(
             "\nstudio:\n"
             "  - press play: the panel takes the paint's colour as the film builds\n"

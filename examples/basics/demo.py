@@ -13,7 +13,7 @@ here is a length and a number of levels, the generator refuses a size
 nobody sells, and every one of them lands on the bill of materials with
 the part number you would order it by.
 
-Run with:  python examples/basics/demo.py
+Run with:  python examples/basics/demo.py [out.usda] [--studio]
 
 Needs `pip install botrail[catalog]` for the equipment (the packages are
 fetched from the Hugging Face dataset botrail/botrail-catalog and cached).
@@ -21,6 +21,7 @@ fetched from the Hugging Face dataset botrail/botrail-catalog and cached).
 
 import math
 import os
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -225,6 +226,14 @@ def identify_layout(scene: bt.Scene) -> None:
 
 
 if __name__ == "__main__":
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    out = args[0] if args else "demo_cell.usda"
     scene = build_scene()
     print(scene.robot)
-    bt.studio(scene)
+    # Nothing is baked here — the cycle is the next demo's — so what the
+    # file holds is the cell as it stands: the robot on its pedestal and
+    # every product ordered above, in one layer.
+    warnings = scene.export_usd(out)
+    print(f"wrote {out}" + (f" ({len(warnings)} warnings)" if warnings else ""))
+    if "--studio" in sys.argv:
+        bt.studio(scene)

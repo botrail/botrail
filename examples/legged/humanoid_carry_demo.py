@@ -283,9 +283,6 @@ def main() -> None:
 
     scene, poses = build_scene(robot)
     name = build_cycle(scene, poses)
-    if "--studio" in args:
-        bt.studio(scene)
-        return
     try:
         tl = scene.simulate_sequence(name, max_duration=120.0)
     except ValueError as err:
@@ -310,6 +307,8 @@ def main() -> None:
 
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")
+    if "--studio" in args:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

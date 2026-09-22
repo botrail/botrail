@@ -633,6 +633,9 @@ def main() -> None:
         print(f"  scenario {name:<20} {'ok' if verdict is None else 'refused — ' + verdict}")
     print(f"wrote the document set to {out_dir}/ ({len(report.deliverables)} files hashed in the report)")
     if args.studio:
+        # The scenario matrix was the last thing baked; the studio should
+        # open on the nominal cycle.
+        scene.show_timeline(tl)
         bt.studio(scene)
 
 

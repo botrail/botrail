@@ -29,7 +29,7 @@ Run with `--clash` to push the dock 0.6 m deeper into the cell: the AGV
 then noses into the pallet and the cycle fails as a hard `VehicleCollision`
 with the time, the body part and the pallet board named.
 
-Run with:  python examples/vehicles/agv_cell_demo.py [out.usda] [--clash]
+Run with:  python examples/vehicles/agv_cell_demo.py [out.usda] [--clash] [--studio]
 """
 
 import math
@@ -390,6 +390,9 @@ def main() -> None:
     tl.export_usd(out, fps=60)
     print(f"wrote {out}")
     print(f"  replay it with:  python examples/export/play_record.py {out}")
+
+    if "--studio" in sys.argv:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,17 @@
 # Examples
 
-Every demo is a runnable script: `python examples/<group>/<name>.py` from the
-repository root. Most open the studio in the browser; the ones that take an
-output path bake a USD recording instead. Demos that order equipment from the
+Every demo is a runnable script, and the cell demos all run the same way:
+
+```bash
+python examples/<group>/<name>.py [out.usd] [--studio] [options]
+```
+
+builds the cell, bakes the cycle, prints the verdict, writes the recording
+as USD (each demo has its own default name) and exits; `--studio` does the
+same and then opens the studio on that bake (Ctrl-C to stop). Demos that
+never build a cell to simulate — the sweeps, the document sets, the
+mounting reports, the exporters under `export/` — keep their own
+command lines, described below. Demos that order equipment from the
 catalog fetch it from the Hugging Face dataset on first run (cached after).
 The `.usdc` files sitting beside some demos are pre-baked recordings of them.
 

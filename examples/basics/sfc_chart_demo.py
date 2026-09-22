@@ -20,24 +20,26 @@ ladder logic, and the reason the chart has two ◇ diamonds per part: one
 that measures, one that routes. A second program (`lamp`) watches the
 gripper through edge conditions, so two columns scan side by side.
 
-    .venv/bin/python examples/basics/sfc_chart_demo.py
+    .venv/bin/python examples/basics/sfc_chart_demo.py [out.usdc] [--studio]
 
 The built r2/ES-062 kit is downloaded on first use. TCP and close are
-re-taught from its geometry.
+re-taught from its geometry. Both programs are baked, the verdicts and
+the step table printed, and the cycle written as USD; `--studio` then
+opens the cell on that bake.
 
 Then, in the browser:
 
-1. Sequence tab -> **SFC chart** — the authored program, neutral.
-2. **Simulate (2 programs)** — the path each part took stays solid and
-   the arms it did not take dash out. The first block marks *ok* and
-   seats its part on the tray; the second marks *ng* and puts its part
-   back on the belt to be sent downstream.
-3. Press play in the dock: a token rides each column, and the live
+1. Sequence tab -> **SFC chart** — the authored program: the path each
+   part took stays solid and the arms it did not take dash out. The
+   first block marks *ok* and seats its part on the tray; the second
+   marks *ng* and puts its part back on the belt to be sent downstream.
+   (**Simulate (2 programs)** re-bakes it in place.)
+2. Press play in the dock: a token rides each column, and the live
    condition beside it colors green as it becomes true (`0.50s` counts
    up, edge atoms underline while the signal is high, and the condition
    that released a step glows for a beat after the token hops).
-4. Click any solid step box — the playhead jumps to when it began.
-5. Watch the `too_tall` lane in the dock: a long high while the tall part
+3. Click any solid step box — the playhead jumps to when it began.
+4. Watch the `too_tall` lane in the dock: a long high while the tall part
    stands on the station (that is the reading the `reject` relay latches)
    and a blip each time a part is lifted up through the beam afterwards —
    which is exactly why the verdict is captured rather than re-read.
@@ -321,14 +323,31 @@ def author_lamp(scene: bt.Scene) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--studio", action="store_true", help="open Studio (the default)")
-    parser.parse_args()
+    parser.add_argument("out", nargs="?", default="sfc_chart.usdc")
+    parser.add_argument("--studio", action="store_true", help="open the studio on the bake")
+    args = parser.parse_args()
     scene = build_cell()
     teach(scene)
     author_pick(scene)
     author_lamp(scene)
-    print(__doc__)
-    bt.studio(scene)
+
+    tl = scene.simulate_sequences(["pick", "lamp"], max_duration=120.0)
+    print(f"cycle time: {tl.duration:.2f}s")
+    for step, start, end in tl.step_spans:
+        print(f"  {step:<16} {start:6.2f} – {end:6.2f}s")
+    # The verdicts are the branches the token took, in part order.
+    verdicts = [name.rsplit(" ", 1)[-1] for name, _, _ in tl.step_spans if name.startswith("pick/mark ")]
+    for (part, _, _, _), verdict in zip(PARTS, verdicts):
+        (x, y, z), _ = tl.object_pose(part, tl.duration)
+        on_tray = abs(x - TRAY_XY[0]) < 0.1 and abs(y - TRAY_XY[1]) < 0.1
+        print(f"  {part}: {verdict}, ends {'on the tray' if on_tray else 'on the belt'} "
+              f"at ({x:.2f}, {y:.2f}, {z:.3f})")
+
+    warnings = tl.export_usd(args.out, fps=60)
+    print(f"wrote {args.out}" + (f" ({len(warnings)} warnings)" if warnings else ""))
+    if args.studio:
+        print(__doc__[__doc__.index("Then, in the browser"):])
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

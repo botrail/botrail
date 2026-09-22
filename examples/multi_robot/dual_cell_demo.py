@@ -17,7 +17,7 @@ the other frozen as an obstacle, and the rollout re-checks arm-against-arm
 every tick — so a missing interlock is not a silent near-miss, it is a hard
 `RobotCollision` with a timestamp. Run with `--clash` to see exactly that.
 
-Run with:  python examples/multi_robot/dual_cell_demo.py [out.usda] [--clash]
+Run with:  python examples/multi_robot/dual_cell_demo.py [out.usda] [--clash] [--studio]
 """
 
 import sys
@@ -474,6 +474,9 @@ def main() -> None:
     for w in warnings:
         print(f"warning: {w}")
     print(f"exported to {out} — view with: usdview {out}")
+
+    if "--studio" in sys.argv:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

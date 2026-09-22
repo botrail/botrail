@@ -11,7 +11,7 @@ material removal are not simulated. The cycle starts only on its
 permissives (air, clamp — simulated inputs, not sensors from the kit);
 the `air_missing` scenario takes the inhibited branch instead.
 
-Run with:  python examples/machining/ati_deburring_demo.py [--studio]
+Run with:  python examples/machining/ati_deburring_demo.py [out.usdc] [--studio]
                  [--output DIR]
 """
 
@@ -171,6 +171,7 @@ def build() -> bt.Scene:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("out", nargs="?", default="ati_deburring.usdc", help="write the baked cycle as USD here")
     parser.add_argument("--studio", action="store_true")
     parser.add_argument("--output", type=Path, help="directory for the project and the BOM")
     args = parser.parse_args()
@@ -181,6 +182,8 @@ def main() -> None:
     for name, t0, t1 in timeline.step_spans:
         print(f"  {name:<20} {t0:6.2f} - {t1:6.2f} s")
     print(bt.mounting.report(scene).to_markdown())
+    warnings = timeline.export_usd(args.out, fps=60)
+    print(f"wrote {args.out}" + (f" ({warnings})" if warnings else ""))
     if args.output:
         args.output.mkdir(parents=True, exist_ok=True)
         scene.save_project(args.output / "cell.botrail")

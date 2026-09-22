@@ -103,23 +103,20 @@ downloads NVIDIA's official Franka asset, ~10 MB, and the catalog packages;
 `pip install botrail[catalog]` for those):
 
 ```bash
-python examples/basics/demo.py           # interactive studio: pose, plan, play
-python examples/basics/sequence_demo.py  # 13-step cell: conveyor feed → tracked pick
+python examples/basics/demo.py --studio  # interactive studio: pose, plan, play
+python examples/basics/sequence_demo.py --studio  # 13-step cell: conveyor feed → tracked pick
                                   # → pallet; prints the cycle time, exports USD
-python examples/multi_robot/dual_cell_demo.py # two arms sharing one infeed, arbitrated by a
+python examples/multi_robot/dual_cell_demo.py --studio  # two arms sharing one infeed, arbitrated by a
                                   # zone interlock; --clash shows what happens
                                   # without it
-python examples/basics/sweep_demo.py     # parameter sweep: belt speed × lane position
+python examples/basics/sweep_demo.py --studio  # parameter sweep: belt speed × lane position
                                   # vs cycle time and clearance (no downloads)
-python examples/engineering/cell_deliverables_demo.py  # the whole document set from one
+python examples/engineering/cell_deliverables_demo.py --studio  # the whole document set from one
                                   # script: layout SVG/DXF, BOM, I/O list, robot
                                   # program, USD, cell report (no downloads)
-python examples/engineering/equipment_cell_demo.py     # fence, conveyor and rack ordered from
+python examples/engineering/equipment_cell_demo.py --studio  # fence, conveyor and rack ordered from
                                   # the catalog: a bill with real part numbers,
                                   # and each drawn from the package's own file
-python examples/export/play_record.py \
-       cell_dual.usda             # replay a baked USD in the studio (any of
-                                  # the recordings above; omit for cell_seq)
 ```
 
 Or try the browser-only build ([deployed from `main`][demo], or build it
@@ -248,7 +245,7 @@ Requirements: Rust (stable), Python >= 3.9, [maturin](https://maturin.rs),
 ./scripts/build_studio.sh                 # build the studio UI into the package
 uv venv .venv && source .venv/bin/activate
 maturin develop --uv
-python examples/basics/demo.py
+python examples/basics/demo.py --studio
 ```
 
 Tests:

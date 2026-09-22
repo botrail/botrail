@@ -6017,6 +6017,19 @@ impl Scene {
         })
     }
 
+    /// Makes `timeline` the session's latest bake again — what a studio
+    /// opened afterwards replays and downloads — after later bakes (a
+    /// scenario matrix, a sweep) have taken its place. The timeline
+    /// carries its own scene snapshot, so nothing is re-baked; connected
+    /// studios receive it as a `sequence_result`.
+    fn show_timeline(&self, timeline: PyRef<'_, SequenceTimeline>) {
+        self.hub.publish_timeline(
+            &timeline.scene,
+            &timeline.inner,
+            &botrail_session::bake_label(&timeline.inner.sequences),
+        );
+    }
+
     /// Colliding pairs at the current configuration, as
     /// `((kind, name), (kind, name))` tuples with kind `"link"`/`"obstacle"`.
     fn check_collisions(&self) -> Vec<((String, String), (String, String))> {

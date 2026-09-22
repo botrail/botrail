@@ -36,7 +36,7 @@ reads it off the offset. A split that leaves a station spots on both
 sides of its datum costs that station a wrist re-orientation mid-row —
 which `examples/welding/line_balance_sweep.py` measures rather than assumes.
 
-Run with:  python examples/welding/weld_line_demo.py [out.usda] [--clash]
+Run with:  python examples/welding/weld_line_demo.py [out.usda] [--clash] [--studio]
 """
 
 import sys
@@ -651,12 +651,17 @@ def sweep_for_contact(scene: bt.Scene, riders: dict, timeline,
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    clash = "--clash" in sys.argv
-    for k, flag in enumerate(sys.argv[1:], start=1):
+    argv = sys.argv[1:]
+    clash = "--clash" in argv
+    for k, flag in enumerate(argv):
         if flag.startswith("--stations"):
-            value = flag.split("=", 1)[1] if "=" in flag else sys.argv[k + 1]
+            # `--stations=N` or `--stations N`; either way the value is not
+            # the output path.
+            value = flag.split("=", 1)[1] if "=" in flag else argv[k + 1]
             set_stations(int(value))
+            argv = argv[:k] + argv[k + (1 if "=" in flag else 2):]
+            break
+    args = [a for a in argv if not a.startswith("--")]
     out = Path(args[0]) if args else Path("cell_line.usda")
 
     scene, line, riders = build_line()
@@ -718,6 +723,9 @@ def main() -> None:
     for w in warnings:
         print(f"warning: {w}")
     print(f"exported to {out} — view with: usdview {out}")
+
+    if "--studio" in sys.argv:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

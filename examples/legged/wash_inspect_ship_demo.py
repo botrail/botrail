@@ -702,9 +702,6 @@ def main() -> None:
     scene, poses = build(args.wash_s)
     print(f"fingertips reach {poses['finger_reach'] * 1000:.0f} mm past the hand's frame (measured); "
           f"START reads {poses['press_depth_mm']:+.0f} mm from the nominal press (calibrated)")
-    if args.studio:
-        bt.studio(scene)
-        return
     try:
         tl = scene.simulate_sequences(PROGRAMS, max_duration=400.0)
     except ValueError as err:
@@ -729,15 +726,19 @@ def main() -> None:
 
     warnings = tl.export_usd(args.out, fps=60)
     print(f"wrote {args.out}" + (f" ({warnings})" if warnings else ""))
-    if args.no_deliver:
-        return
-    out_dir = Path(args.out).with_name("wash_inspect_ship_deliverables")
-    _report, runs = deliver(scene, tl, out_dir)
-    print(f"wrote the document set to {out_dir}/")
-    for name in list(runs.names) + [n for n in runs.errors if n not in runs.names]:
-        err = runs.errors.get(name)
-        status = f"refused — {err}" if err else f"completed in {runs.durations[name]:.2f}s"
-        print(f"  scenario {name:<18} {status}")
+    if not args.no_deliver:
+        out_dir = Path(args.out).with_name("wash_inspect_ship_deliverables")
+        _report, runs = deliver(scene, tl, out_dir)
+        print(f"wrote the document set to {out_dir}/")
+        for name in list(runs.names) + [n for n in runs.errors if n not in runs.names]:
+            err = runs.errors.get(name)
+            status = f"refused — {err}" if err else f"completed in {runs.durations[name]:.2f}s"
+            print(f"  scenario {name:<18} {status}")
+    if args.studio:
+        # The scenario matrix was the last thing baked; the studio should
+        # open on the nominal cycle.
+        scene.show_timeline(tl)
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

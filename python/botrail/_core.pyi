@@ -622,6 +622,7 @@ class Scene:
         max_duration: float = 120.0,
         plan_resolution: Optional[float] = None,
     ) -> "ScenarioRuns": ...
+    def show_timeline(self, timeline: "SequenceTimeline") -> None: ...
     def add_zone_sensor(
         self,
         name: str,

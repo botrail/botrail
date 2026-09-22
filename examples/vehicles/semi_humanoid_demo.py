@@ -1180,9 +1180,6 @@ def main() -> None:
         name = build_cycle(scene, machine, poses)
     except RuntimeError as err:
         sys.exit(f"teaching failed: {err}")
-    if "--studio" in args:
-        bt.studio(scene, view=((5.9, 4.7, 4.0), (1.25, 0.0, 0.65)))
-        return
     try:
         tl = scene.simulate_sequence(name, max_duration=180.0)
     except ValueError as err:
@@ -1211,6 +1208,8 @@ def main() -> None:
     if deliverables:
         manifest = bt.export_cell(scene, deliverables, name="semi_humanoid", max_duration=180.0)
         print(f"wrote the hand-over set: {manifest}")
+    if "--studio" in args:
+        bt.studio(scene, view=((5.9, 4.7, 4.0), (1.25, 0.0, 0.65)))
 
 
 if __name__ == "__main__":

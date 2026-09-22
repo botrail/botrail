@@ -14,7 +14,7 @@ and the guarding came from the catalog and are already identified, the
 photo-eye and the pedestal are *identified* here (`scene.set_part`), and
 the parts list is derived, never typed.
 
-Run with:  python examples/basics/sequence_demo.py [out.usda]
+Run with:  python examples/basics/sequence_demo.py [out.usda] [--studio]
 """
 
 import sys
@@ -155,7 +155,8 @@ def identify_parts(scene: bt.Scene) -> None:
 
 
 def main() -> None:
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("cell_seq.usda")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    out = Path(args[0]) if args else Path("cell_seq.usda")
     scene = build_scene()
     name = build_cycle(scene)
     identify_parts(scene)
@@ -184,6 +185,9 @@ def main() -> None:
     bom.save(bom_path)
     print(f"\n{bom.to_markdown()}")
     print(f"BOM: {len(bom)} lines, {len(bom.unidentified())} still unidentified — written to {bom_path}")
+
+    if "--studio" in sys.argv:
+        bt.studio(scene)
 
 
 if __name__ == "__main__":

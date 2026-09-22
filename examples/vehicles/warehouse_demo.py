@@ -42,8 +42,8 @@ What the bake answers, in the order the customer asked:
     out from between the packing bench and the belt: the clearance scan
     reports the tightest pass of the cycle.
 
-Run with:  python examples/vehicles/warehouse_demo.py [--studio] [--out DIR]
-                        [--aisle M] [--no-interlock] [--catalog-root DIR]
+Run with:  python examples/vehicles/warehouse_demo.py [recording.usdc] [--studio]
+                        [--out DIR] [--aisle M] [--no-interlock] [--catalog-root DIR]
 
 `--out DIR` writes the document set (layout SVG/DXF, BOM, I/O list,
 interlock table, PLCopen, report, USD recording). `--catalog-root` points at
@@ -1153,7 +1153,7 @@ def deliver(scene: bt.Scene, tl, out: Path) -> None:
 def main() -> None:
     global CATALOG_ROOT
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("recording", nargs="?", default=None, help="write the baked shift as USD here")
+    parser.add_argument("recording", nargs="?", default="warehouse_cell.usdc", help="write the baked shift as USD here")
     parser.add_argument("--aisle", type=float, default=AISLE, help="main aisle width in metres (the sketch says 3.0 minimum)")
     parser.add_argument("--no-interlock", dest="no_interlock", action="store_true",
                         help="drop the traffic control: both machines drive on their own clock, refused")
@@ -1200,9 +1200,8 @@ def main() -> None:
         driving = sum(t1 - t0 for t0, t1 in _high_spans(lanes[name], tl.duration))
         print(f"  {name} driving {driving:.0f} s of {tl.duration:.0f} ({driving / tl.duration:.0%})")
     print(f"  picker busy {tl.utilizations()['picker']:.0%}")
-    if args.recording:
-        tl.export_usd(args.recording, fps=15)
-        print(f"wrote {args.recording}")
+    tl.export_usd(args.recording, fps=15)
+    print(f"wrote {args.recording}")
     if args.out:
         deliver(scene, tl, args.out)
     if args.studio:

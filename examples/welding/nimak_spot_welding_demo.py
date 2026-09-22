@@ -10,7 +10,7 @@ its permissives (cooling, drive, clamp — simulated inputs, not verified
 hardware feedback); the `cooling_missing` scenario takes the inhibited
 branch instead.
 
-Run with:  python examples/welding/nimak_spot_welding_demo.py [--studio]
+Run with:  python examples/welding/nimak_spot_welding_demo.py [out.usdc] [--studio]
                  [--output DIR]
 """
 
@@ -158,6 +158,7 @@ def build() -> bt.Scene:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("out", nargs="?", default="nimak_spot_welding.usdc", help="write the baked cycle as USD here")
     parser.add_argument("--studio", action="store_true")
     parser.add_argument("--output", type=Path, help="directory for the project and the BOM")
     args = parser.parse_args()
@@ -167,6 +168,8 @@ def main() -> None:
     print(f"Two-position dry cycle: {timeline.duration:.2f} s; no welding current applied")
     for name, t0, t1 in timeline.step_spans:
         print(f"  {name:<24} {t0:6.2f} - {t1:6.2f} s")
+    warnings = timeline.export_usd(args.out, fps=60)
+    print(f"wrote {args.out}" + (f" ({warnings})" if warnings else ""))
     if args.output:
         args.output.mkdir(parents=True, exist_ok=True)
         scene.save_project(args.output / "cell.botrail")
