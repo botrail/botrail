@@ -47,13 +47,40 @@ Move the pedestal prim in the USD and the robot moves with it; move
 `PickFrame` and the pick re-teaches itself. The
 [tutorial cells](../tutorials/pose-and-plan.md) run entirely on this pattern.
 
+## Cameras come along too
+
+A `Camera` prim in the stage becomes a [camera](sensors-and-devices.md#cameras)
+of the scene — a world fixture named like the prim, standing where the prim
+stands, with the authored optics: the film back (`focalLength` /
+`horizontalAperture`) is the horizontal field of view, the aperture aspect
+the image aspect, `clippingRange` the near and far clip in meters. USD
+cameras carry no pixel count; a stage botrail exported says it in
+`botrail:resolution` and imports back pixel-exact, anything else gets a
+1280-pixel width and the aperture aspect. Omniverse's far clips of ten
+million meters are capped at 100 m, with an import notice.
+
+```python
+scene.load_usd("cell.usda", prefix="env")
+scene.camera_names            # ['env/World/Overview', ...]
+scene.remove_camera("env/World/Overview")   # scene state like any other
+```
+
+A camera Omniverse hid with `visibility = "invisible"` still imports — that
+only hides its gizmo, the camera still films. Orthographic cameras are
+skipped with a notice; botrail's cameras are pinhole.
+
 ## Robots from USD
 
 Articulations load through [`Robot.from_usd`][botrail.Robot.from_usd] — see
 the [Robots guide](robots.md#three-ways-in) for the details (prim-path names,
 degree/unit conversion, `articulation_root`, `search_paths`). USD-sourced
 robots keep a pointer to their stage, which the exporter uses to reference the
-original asset at full visual fidelity.
+original asset at full visual fidelity. A `Camera` prim under one of its
+rigid bodies — an Isaac asset's head or wrist camera — is the robot's own:
+adding the robot mounts it on that link as `<robot>/<prim name>`, riding the
+joints, without the generic housing (the robot's geometry is the housing).
+Remove one you do not want; the project and the generated script keep it
+removed.
 
 A tool that came from USD keeps its authored prims after `attach_tool`,
 mapped onto the composite's links; `Robot.from_catalog(id, format="usd")`

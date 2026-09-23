@@ -1,11 +1,14 @@
 """USD articulation import (Phase 4): Robot.from_usd end to end."""
 
 import math
+import re
 from pathlib import Path
 
 import pytest
 
 import botrail as bt
+
+EXAMPLES_ARM = Path(__file__).resolve().parents[2] / "examples" / "assets" / "simple_arm.urdf"
 
 # 2-DOF arm articulation (meters, Z-up): fixed anchor, revolute Z with a
 # localPose1 offset, revolute Y. Mirrors the Rust golden fixture.
@@ -270,3 +273,62 @@ def test_joint_less_articulation_imports_as_dof0(tmp_path: Path) -> None:
     (_, _, cap_z), _ = scene.link_pose("/Coupling/cap")
     assert cap_z == pytest.approx(0.03)
     assert not scene.in_collision()
+
+
+def test_usd_robot_cameras_mount_on_their_links(tmp_path: Path) -> None:
+    """A `Camera` prim under a rigid body is the robot's own sensor camera:
+    it is mounted on that link when the robot is added, named
+    `<robot>/<prim>`, rides the joints, and can be removed like any camera —
+    a removal the project keeps and the generated script replays."""
+    path = tmp_path / "arm_cam.usda"
+    path.write_text(
+        ARM.replace(
+            '    def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])\n    {\n',
+            '    def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])\n    {\n'
+            '        def Camera "eye" {\n'
+            "            float focalLength = 18.147562\n"
+            "            float horizontalAperture = 20.955\n"
+            "            float verticalAperture = 11.787\n"
+            "            float2 clippingRange = (0.05, 4)\n"
+            "            double3 xformOp:translate = (0, 0, 0.1)\n"
+            '            uniform token[] xformOpOrder = ["xformOp:translate"]\n'
+            "        }\n",
+            1,
+        )
+    )
+    scene = bt.Scene(bt.Robot.from_usd(path))
+    assert scene.camera_names == ["Robot/eye"]
+    code = scene.generate_python()
+    assert re.search(
+        r'scene\.add_camera\("Robot/eye", position=\(0\.0, 0\.0, 0\.1\).*fov=60(\.0)?, '
+        r'resolution=\(1280, 720\), near=0\.05, far=4(\.0)?, body_visible=False, robot="Robot", link="/Robot/link2"',
+        code,
+    ), code
+    # The mounted camera follows the arm: exported at whatever the joints
+    # say, it stands at link2's pose plus the offset — and comes back in
+    # as a fixture there when the stage is loaded elsewhere.
+    scene.set_joint_positions([0.7, -0.4])
+    out = tmp_path / "posed.usda"
+    scene.export_usd(out)
+    other = bt.Scene(bt.Robot.from_urdf(EXAMPLES_ARM))
+    other.load_usd(out)
+    m = re.search(
+        r'scene\.add_camera\("/World/Cameras/Robot_eye", position=\(([-\d., ]+)\)',
+        other.generate_python(),
+    )
+    assert m, other.generate_python()
+    pos = tuple(float(v) for v in m.group(1).split(","))
+    (lx, ly, lz), lq = scene.link_pose("/Robot/link2")
+    x, y, z, w = lq
+    # Rotate (0, 0, 0.1) by the link quaternion, plain math.
+    ox = 0.1 * (2 * (x * z + w * y))
+    oy = 0.1 * (2 * (y * z - w * x))
+    oz = 0.1 * (1 - 2 * (x * x + y * y))
+    assert pos == pytest.approx((lx + ox, ly + oy, lz + oz), abs=1e-6)
+
+    scene.remove_camera("Robot/eye")
+    project = tmp_path / "arm_cam.botrail"
+    scene.save_project(project)
+    reloaded = bt.Scene.load_project(project)
+    assert reloaded.camera_names == []
+    assert 'scene.remove_camera("Robot/eye")' in reloaded.generate_python()

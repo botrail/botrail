@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use botrail_mesh::MeshData;
 use botrail_model::{
-    Geometry, Joint, JointLimits, JointType, Link, RobotModel, RobotSource, Shape,
+    Geometry, Joint, JointLimits, JointType, Link, LinkCamera, RobotModel, RobotSource, Shape,
 };
 use nalgebra::{Isometry3, Translation3, Unit, UnitQuaternion, Vector3};
 use openusd::schemas::geom::{self, Imageable, PointBased, Purpose, Visibility, Xformable};
@@ -48,7 +48,7 @@ use openusd::usd::{Prim, SchemaBase, Stage, TimeCode};
 use openusd::{gf, sdf};
 
 use crate::{
-    decompose_matrix, default_mesh_cache_dir, display_color, int_vec, triangulate,
+    camera, decompose_matrix, default_mesh_cache_dir, display_color, int_vec, triangulate,
     write_stl_cached, y_up_to_z_up, AnyPrim, SearchPathResolver, UsdImportError,
 };
 
@@ -309,6 +309,7 @@ fn import_robot_stage(
         meshes_in_memory: options.meshes_in_memory,
         meshes: Vec::new(),
         warnings: Vec::new(),
+        cameras: Vec::new(),
     };
     builder.build(prims, options.articulation_root.as_deref())
 }
@@ -367,6 +368,9 @@ struct RobotBuilder<'a> {
     meshes_in_memory: bool,
     meshes: Vec<(PathBuf, MeshData)>,
     warnings: Vec<String>,
+    /// `Camera` prims found under the bodies, collected as the links are
+    /// built (the link index is the body's position).
+    cameras: Vec<LinkCamera>,
 }
 
 impl RobotBuilder<'_> {
@@ -540,7 +544,7 @@ impl RobotBuilder<'_> {
                     "joint references body `{body_path}` which is not in the stage"
                 )));
             };
-            links.push(self.build_link(body, &prims, &body_paths, &corrections[bi]));
+            links.push(self.build_link(body, bi, &prims, &body_paths, &corrections[bi]));
         }
 
         // ---- model joints -------------------------------------------
@@ -579,7 +583,7 @@ impl RobotBuilder<'_> {
             .next()
             .unwrap_or("robot")
             .to_string();
-        let model = RobotModel::from_parts(
+        let mut model = RobotModel::from_parts(
             name,
             links,
             model_joints,
@@ -589,6 +593,19 @@ impl RobotBuilder<'_> {
             },
         )
         .map_err(|e| art(e.to_string()))?;
+        // Declared cameras, named by their prim's own name — unique within
+        // the model (two links each carrying an `eye` become `eye`, `eye_2`).
+        let mut cameras: Vec<LinkCamera> = Vec::with_capacity(self.cameras.len());
+        for mut camera in std::mem::take(&mut self.cameras) {
+            let base = camera.name.clone();
+            let mut n = 2;
+            while cameras.iter().any(|c| c.name == camera.name) {
+                camera.name = format!("{base}_{n}");
+                n += 1;
+            }
+            cameras.push(camera);
+        }
+        model.cameras = cameras;
 
         // Base placement hint: the root body's stage-world pose with frame
         // semantics (conjugated up-axis fix).
@@ -1157,6 +1174,7 @@ impl RobotBuilder<'_> {
     fn build_link(
         &mut self,
         body: &PrimInfo,
+        link: usize,
         prims: &[PrimInfo],
         body_paths: &[String],
         correction: &Isometry3<f64>,
@@ -1183,6 +1201,40 @@ impl RobotBuilder<'_> {
                 if nearest.map(|b| b != &body.path).unwrap_or(false) {
                     continue;
                 }
+            }
+            if info.type_name == "Camera" {
+                // A sensor camera riding this link, whatever its
+                // visibility (Omniverse hides the gizmo that way). Its
+                // optical axis is a physical direction: the offset takes
+                // the geometry normalization, not the frame relabeling
+                // the link frames get.
+                let mut notes = Vec::new();
+                match camera::read_camera_optics(self.stage, &info.prim, self.mpu, &mut notes) {
+                    Ok(Some(optics)) => {
+                        let (cam_raw, _) = decompose_matrix(&info.world);
+                        let relative = body_raw.inverse() * cam_raw;
+                        self.cameras.push(LinkCamera {
+                            name: info
+                                .path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("camera")
+                                .to_string(),
+                            link,
+                            pose: self.physical(&(correction.inverse() * relative)),
+                            fov_deg: optics.fov_deg,
+                            resolution: optics.resolution,
+                            near: optics.near,
+                            far: optics.far,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.warnings.push(format!("{}: camera: {e}", info.path)),
+                }
+                for note in notes {
+                    self.warnings.push(format!("{}: camera: {note}", info.path));
+                }
+                continue;
             }
             let geometry = match self.read_geometry(info) {
                 Ok(Some(g)) => g,
@@ -1437,6 +1489,19 @@ impl RobotBuilder<'_> {
         Isometry3::from_parts(
             Translation3::from(self.up_fix * (x.translation.vector * self.mpu)),
             self.up_fix * x.rotation * self.up_fix.inverse(),
+        )
+    }
+
+    /// A pose whose axes are physical directions (a camera's optical axis),
+    /// expressed in a link frame that [`Self::conjugate`] relabeled: the
+    /// translation goes over like the frame's, the rotation is rotated
+    /// into the Z-up world outright — `R_link⁻¹ · R_cam` in the stage is
+    /// `up_fix · (R_link⁻¹ · R_cam)` in the model, since the link's frame
+    /// was conjugated and the camera's is not.
+    fn physical(&self, x: &Isometry3<f64>) -> Isometry3<f64> {
+        Isometry3::from_parts(
+            Translation3::from(self.up_fix * (x.translation.vector * self.mpu)),
+            self.up_fix * x.rotation,
         )
     }
 }
@@ -2543,5 +2608,85 @@ def Xform "Body"
             "Props/a.usd"
         );
         assert_eq!(crate::normalize_bundle_path("/a.usd"), "a.usd");
+    }
+
+    /// A `Camera` prim under a rigid body is a link camera: named by its
+    /// own prim name (suffixed when two links carry the same name), posed
+    /// in the link frame with the optical axis as a physical direction —
+    /// on a Y-up centimeter stage a level camera 10 cm above its link's
+    /// origin ends up 0.1 m up along Z, still looking level, while the link
+    /// frames themselves are relabeled to identity.
+    #[test]
+    fn camera_prims_under_bodies_become_link_cameras() {
+        let imported = import_arm(
+            r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 10 }
+        def Camera "Eye" {
+            token visibility = "invisible"
+        }
+    }
+
+    def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 50, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "geom" { double size = 10 }
+        def Camera "Eye" {
+            float focalLength = 18.147562
+            float horizontalAperture = 20.955
+            float verticalAperture = 11.787
+            float2 clippingRange = (5, 400)
+            double3 xformOp:translate = (0, 10, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </Robot/base>
+        }
+
+        def PhysicsRevoluteJoint "j1"
+        {
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link1>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, 50, 0)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+    }
+}
+"#,
+        );
+        let model = &imported.model;
+        assert_eq!(model.cameras.len(), 2, "{:?}", imported.warnings);
+        let link1 = model.link_index("/Robot/link1").unwrap();
+        let eye = model.cameras.iter().find(|c| c.link == link1).unwrap();
+        assert_eq!(eye.name, "Eye_2");
+        assert!(model.cameras.iter().any(|c| c.name == "Eye" && c.link == model.link_index("/Robot/base").unwrap()));
+        assert!((eye.fov_deg - 60.0).abs() < 1e-3, "{}", eye.fov_deg);
+        assert_eq!(eye.resolution, [camera::DEFAULT_WIDTH, 720]);
+        assert!((eye.near - 0.05).abs() < 1e-9 && (eye.far - 4.0).abs() < 1e-9);
+        let t = eye.pose.translation.vector;
+        assert!((t - Vector3::new(0.0, 0.0, 0.1)).norm() < 1e-9, "{t}");
+        let view = eye.pose.rotation * Vector3::new(0.0, 0.0, -1.0);
+        let up = eye.pose.rotation * Vector3::new(0.0, 1.0, 0.0);
+        assert!((view - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-9, "{view}");
+        assert!((up - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-9, "{up}");
+        // The camera prim is not geometry: the link keeps its one cube.
+        assert_eq!(model.links[link1].visuals.len(), 1);
     }
 }

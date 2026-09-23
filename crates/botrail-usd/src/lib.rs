@@ -18,13 +18,17 @@
 //! Filtering: only visible, default-purpose prims are imported (guide /
 //! proxy / render are skipped). Leaf `Xform`/`Scope` prims with no children
 //! become named [`ImportedFrame`]s — mount-point markers for robot
-//! placement.
+//! placement. `Camera` prims become [`ImportedCamera`]s whatever their
+//! visibility: Omniverse hides a camera's gizmo with `visibility =
+//! "invisible"` and the camera still films.
 
 mod articulation;
+mod camera;
 pub mod export;
 pub mod recording;
 
 pub use articulation::{import_robot, import_robot_bundle, ImportedRobot, RobotImportOptions};
+pub use camera::{CameraOptics, DEFAULT_WIDTH, MAX_FAR, MIN_NEAR, RESOLUTION_ATTR};
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -96,10 +100,25 @@ pub struct ImportedFrame {
     pub pose: Isometry3<f64>,
 }
 
+/// A `Camera` prim, ready to become a world-fixture scene camera.
+#[derive(Debug, Clone)]
+pub struct ImportedCamera {
+    /// Prim path (the naming contract shared with nodes and frames).
+    pub name: String,
+    /// World pose, meters / Z-up, in botrail's camera convention (-Z is
+    /// the view direction, +Y image-up — USD's too, so the authored
+    /// orientation goes over as a physical direction, like geometry).
+    pub pose: Isometry3<f64>,
+    pub optics: CameraOptics,
+}
+
 #[derive(Debug)]
 pub struct ImportedScene {
     pub nodes: Vec<ImportedNode>,
     pub frames: Vec<ImportedFrame>,
+    /// `Camera` prims outside any articulation (a robot's own cameras
+    /// come with the robot, see [`ImportedRobot`]).
+    pub cameras: Vec<ImportedCamera>,
     /// Prims that could not be imported (unsupported types, degenerate
     /// data). Import continues past them.
     pub warnings: Vec<String>,
@@ -118,6 +137,7 @@ impl Default for ImportedScene {
         ImportedScene {
             nodes: Vec::new(),
             frames: Vec::new(),
+            cameras: Vec::new(),
             warnings: Vec::new(),
             up_axis: "Y",
             robot_roots: Vec::new(),
@@ -432,6 +452,26 @@ impl Importer<'_> {
                 name: path,
                 pose: self.frame_pose(&world),
             });
+        } else if type_name == "Camera" {
+            // Whatever its visibility: Omniverse hides the gizmo that way
+            // and the camera still films. The optical axis is a physical
+            // direction, so the pose takes the geometry normalization (a
+            // level camera in a Y-up stage stays level in Z-up), not the
+            // frame relabeling.
+            let mut notes = Vec::new();
+            match camera::read_camera_optics(self.stage, view.prim(), self.meters_per_unit, &mut notes)
+            {
+                Ok(Some(optics)) => self.out.cameras.push(ImportedCamera {
+                    name: path.clone(),
+                    pose: self.normalized_pose(&world).0,
+                    optics,
+                }),
+                Ok(None) => {}
+                Err(e) => self.warn(view.prim().path(), format!("camera: {e}")),
+            }
+            for note in notes {
+                self.warn(view.prim().path(), format!("camera: {note}"));
+            }
         }
 
         for child in children {
@@ -1316,5 +1356,76 @@ def Xform "W" {
         let cube = scene.nodes.iter().find(|n| n.name == "/W/C").unwrap();
         assert!(matches!(cube.geometry, Geometry::Box { size } if (size.x - 0.5).abs() < 1e-9));
         assert!(cube.mesh_data.is_none());
+    }
+
+    /// `Camera` prims become world-fixture cameras: the film back gives the
+    /// horizontal fov, the aperture aspect the image aspect (botrail's own
+    /// `botrail:resolution` wins when authored), `clippingRange` the
+    /// near/far in meters — capped, since Omniverse authors fars of 1e7 —
+    /// and the pose is the physical one: a level camera in a Y-up stage
+    /// stays level in Z-up. Invisible cameras still count (Omniverse hides
+    /// the gizmo that way); orthographic ones are skipped with a warning.
+    #[test]
+    fn camera_prims_import_as_fixture_cameras() {
+        let dir = std::env::temp_dir().join(format!("botrail-usd-cams-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Centimeters, Y-up: a camera 150 cm up, looking along -Z (level).
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "W"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+def Xform "W" {
+    def Camera "Overview" {
+        float focalLength = 18.147562
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.787
+        float2 clippingRange = (5, 3000)
+        custom int2 botrail:resolution = (1920, 1080)
+        token visibility = "invisible"
+        double3 xformOp:translate = (0, 150, 40)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Far" {
+        float2 clippingRange = (0.01, 10000000)
+    }
+    def Camera "Ortho" {
+        token projection = "orthographic"
+    }
+}
+"#;
+        let path = dir.join("cams.usda");
+        std::fs::write(&path, usda).unwrap();
+        let scene = import_usd(&path, &ImportOptions::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(scene.cameras.len(), 2, "{:?}", scene.warnings);
+        let overview = scene.cameras.iter().find(|c| c.name == "/W/Overview").unwrap();
+        assert!((overview.optics.fov_deg - 60.0).abs() < 1e-3, "{}", overview.optics.fov_deg);
+        assert_eq!(overview.optics.resolution, [1920, 1080]);
+        assert!((overview.optics.near - 0.05).abs() < 1e-9);
+        assert!((overview.optics.far - 30.0).abs() < 1e-9);
+        // USD (0, 150, 40) cm, Y-up -> (0, -0.4, 1.5) m, Z-up.
+        let t = overview.pose.translation.vector;
+        assert!((t - Vector3::new(0.0, -0.4, 1.5)).norm() < 1e-9, "{t}");
+        // The optical axis (-Z, horizontal in the stage) is horizontal here
+        // too, and image-up is world-up: the pose was rotated like
+        // geometry, not relabeled like a frame.
+        let view = overview.pose.rotation * Vector3::new(0.0, 0.0, -1.0);
+        let up = overview.pose.rotation * Vector3::new(0.0, 1.0, 0.0);
+        assert!((view - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-9, "{view}");
+        assert!((up - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-9, "{up}");
+
+        // Schema defaults: 50 mm on a 20.955 x 15.2908 film back, the pixel
+        // count from the default width and the aperture aspect; the
+        // Omniverse clip range clamped to what a cell can use.
+        let far = scene.cameras.iter().find(|c| c.name == "/W/Far").unwrap();
+        assert!((far.optics.fov_deg - 23.670).abs() < 1e-2, "{}", far.optics.fov_deg);
+        assert_eq!(far.optics.resolution, [DEFAULT_WIDTH, 934]);
+        assert!((far.optics.near - MIN_NEAR).abs() < 1e-12);
+        assert!((far.optics.far - MAX_FAR).abs() < 1e-12);
+        assert!(scene.warnings.iter().any(|w| w.contains("/W/Far") && w.contains("capped")));
+        assert!(scene.warnings.iter().any(|w| w.contains("/W/Ortho") && w.contains("orthographic")));
     }
 }

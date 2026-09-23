@@ -19,7 +19,15 @@ export function WasmStageView() {
       return;
     }
     let cancelled = false;
-    new ThreeUsdRobotLoader({ loadSceneGeometry: true, worldUp: "Z" })
+    // Geometry only: the stage's lights would stack on the viewport's own
+    // rig at their authored (often photometric) strength, and its cameras
+    // reach the studio as botrail cameras through the wasm import.
+    new ThreeUsdRobotLoader({
+      loadSceneGeometry: true,
+      worldUp: "Z",
+      loadLights: false,
+      loadCameras: false,
+    })
       .parse(droppedStage.data)
       .then((loaded) => {
         if (!cancelled) setStage(loaded);

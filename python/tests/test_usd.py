@@ -1,5 +1,6 @@
 """USD scene import (Phase 3): obstacles, frames, normalization, planning."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -169,3 +170,54 @@ def Xform "World" {
     assert scene.obstacle_color("/World/Rig/Frame") == pytest.approx((0.2, 0.4, 0.6))
     assert scene.obstacle_color("/World/Rig/Guard") == pytest.approx((0.9, 0.7, 0.1))
     assert scene.obstacle_color("/World/Plain") is None
+
+
+def test_load_usd_imports_camera_prims(tmp_path: Path) -> None:
+    """A stage's `Camera` prims become world-fixture cameras with the
+    authored optics: the film back is the horizontal fov, the aperture
+    aspect the image aspect, `clippingRange` the near/far — and a camera
+    Omniverse hid with `visibility = "invisible"` still counts."""
+    stage = tmp_path / "cams.usda"
+    stage.write_text(
+        """#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "World" {
+    def Cube "Bench" { double size = 0.5 }
+    def Camera "Overview" {
+        float focalLength = 18.147562
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.787
+        float2 clippingRange = (0.05, 30)
+        token visibility = "invisible"
+        double3 xformOp:translate = (1.5, -1.5, 1.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"""
+    )
+    scene = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    names = scene.load_usd(stage, prefix="env")
+    assert names == ["env/World/Bench"]
+    assert scene.camera_names == ["env/World/Overview"]
+
+    code = scene.generate_python()
+    m = re.search(
+        r'scene\.add_camera\("env/World/Overview", position=\(1\.5, -1\.5, 1\.2\).*'
+        r"fov=([\d.]+), resolution=\((\d+), (\d+)\), near=([\d.]+), far=([\d.]+)",
+        code,
+    )
+    assert m, code
+    # 18.15 mm on a 20.955 mm film back is a 60° view; the aperture aspect
+    # (16:9) sizes the default 1280-wide image; USD's float attributes
+    # come back through f32.
+    assert float(m.group(1)) == pytest.approx(60.0, abs=1e-5)
+    assert (int(m.group(2)), int(m.group(3))) == (1280, 720)
+    assert float(m.group(4)) == pytest.approx(0.05, abs=1e-7)
+    assert float(m.group(5)) == pytest.approx(30.0, abs=1e-5)
+    # A camera is scene state like any other: it goes, and stays gone.
+    scene.remove_camera("env/World/Overview")
+    assert scene.camera_names == []

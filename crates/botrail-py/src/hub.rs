@@ -1275,6 +1275,13 @@ impl SceneHub {
         botrail_session::upsert_camera(self, camera)
     }
 
+    pub fn upsert_cameras(
+        &self,
+        cameras: Vec<botrail_scene::seq::Camera>,
+    ) -> Result<(), SceneError> {
+        botrail_session::upsert_cameras(self, cameras)
+    }
+
     pub fn remove_camera(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_camera(self, name)
     }

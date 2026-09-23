@@ -33,6 +33,10 @@ fn to_json(msg: &ServerMessage) -> String {
 struct PreparedScene {
     nodes: Vec<PreparedNode>,
     frames: Vec<wire::FrameMsg>,
+    /// The stage's `Camera` prims as world-fixture cameras (absent in
+    /// older prepared scenes).
+    #[serde(default)]
+    cameras: Vec<wire::CameraMsg>,
     warnings: Vec<String>,
     /// Authored up axis of the source stage ("Y"/"Z"), so the client can
     /// orient its own rendering of the original stage.
@@ -89,6 +93,16 @@ pub fn decompose_usd_scene(
             .map(|f| wire::FrameMsg {
                 name: format!("{prefix}{}", f.name),
                 pose: wire::PoseMsg::from(&f.pose),
+            })
+            .collect(),
+        cameras: imported
+            .cameras
+            .iter()
+            .map(|c| {
+                wire::camera_msg(&botrail_session::stage_camera(
+                    format!("{prefix}{}", c.name),
+                    c,
+                ))
             })
             .collect(),
         warnings: imported.warnings,
@@ -298,6 +312,11 @@ impl WasmSession {
                 for frame in prepared.frames {
                     scene.add_frame(&frame.name, (&frame.pose).into());
                 }
+                for camera in &prepared.cameras {
+                    scene
+                        .upsert_camera(wire::camera_from_msg(camera))
+                        .map_err(|e| e.to_string())?;
+                }
                 Ok(())
             })
             .map_err(|e| JsError::new(&e))?;
@@ -352,6 +371,14 @@ impl WasmSession {
                 }
                 for frame in imported.frames {
                     scene.add_frame(&format!("{prefix}{}", frame.name), frame.pose);
+                }
+                for camera in &imported.cameras {
+                    scene
+                        .upsert_camera(botrail_session::stage_camera(
+                            format!("{prefix}{}", camera.name),
+                            camera,
+                        ))
+                        .map_err(|e| e.to_string())?;
                 }
                 Ok(())
             })
@@ -433,6 +460,7 @@ impl WasmSession {
             vec![
                 wire::obstacles_message(scene, |_| (String::new(), String::new())),
                 wire::frames_message(scene),
+                wire::cameras_message(scene),
                 wire::state_message(scene),
             ]
         });
@@ -562,5 +590,50 @@ mod tests {
             .insert_robot_instance(None, None, nalgebra::Isometry3::identity())
             .unwrap_err();
         assert!(err.contains("pass the one to copy"), "{err}");
+    }
+
+    /// A dropped stage's `Camera` prims cross the worker boundary inside
+    /// the prepared scene and land as world-fixture cameras, named like
+    /// the stage's other prims.
+    #[test]
+    fn prepared_scenes_carry_the_stage_cameras() {
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "W"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "W" {
+    def Cube "Bench" { double size = 0.5 }
+    def Camera "Eye" {
+        float focalLength = 18.147562
+        float horizontalAperture = 20.955
+        float verticalAperture = 11.787
+        float2 clippingRange = (0.05, 30)
+        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+"#;
+        let json =
+            decompose_usd_scene(usda.as_bytes().to_vec(), "cams.usda", Some("env".into())).unwrap();
+        let prepared: PreparedScene = serde_json::from_str(&json).unwrap();
+        assert_eq!(prepared.cameras.len(), 1);
+        assert_eq!(prepared.cameras[0].name, "env/W/Eye");
+
+        let mut session = WasmSession::demo().unwrap();
+        session.load_prepared_scene(&json).unwrap();
+        session.host.with_scene(|scene| {
+            assert!(scene.obstacles().iter().any(|o| o.name == "env/W/Bench"));
+            let camera = scene
+                .cameras()
+                .iter()
+                .find(|c| c.name == "env/W/Eye")
+                .expect("the stage camera is mounted");
+            assert!((camera.fov_deg - 60.0).abs() < 1e-3, "{}", camera.fov_deg);
+            assert_eq!(camera.resolution, [botrail_usd::DEFAULT_WIDTH, 720]);
+            let t = camera.pose.translation.vector;
+            assert!((t - nalgebra::Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-9, "{t}");
+        });
     }
 }

@@ -185,6 +185,10 @@ pub struct CameraSpec {
     pub vertical_aperture: f64,
     /// Near/far clip distances, stage units (m).
     pub clipping: [f64; 2],
+    /// Image size in pixels — not a `UsdGeomCamera` notion (the film back
+    /// only fixes the aspect), authored as `custom int2 botrail:resolution`
+    /// so a stage botrail wrote imports back pixel-exact.
+    pub resolution: [u32; 2],
 }
 
 pub struct AnimationInput<'a> {
@@ -695,6 +699,18 @@ fn author_cameras(layer: &mut LayerBuilder, cameras: &[CameraSpec], codes: &[f64
                 spec.clipping[0] as f32,
                 spec.clipping[1] as f32,
             ))),
+        );
+        // Pixels, for botrail's own round trip; a `custom` attribute, so
+        // no schema claims it.
+        layer.attr_meta(
+            &prim,
+            crate::camera::RESOLUTION_ATTR,
+            "int2",
+            AttrValue::Default(Value::Vec2i(gf::Vec2i {
+                x: spec.resolution[0] as i32,
+                y: spec.resolution[1] as i32,
+            })),
+            &[(FieldKey::Custom.as_ref(), Value::Bool(true))],
         );
     }
 }
@@ -4912,6 +4928,7 @@ mod tests {
                 horizontal_aperture: 20.955,
                 vertical_aperture: 11.787,
                 clipping: [0.05, 30.0],
+                resolution: [1920, 1080],
             },
             CameraSpec {
                 name: "wrist cam".into(),
@@ -4923,6 +4940,7 @@ mod tests {
                 horizontal_aperture: 20.955,
                 vertical_aperture: 11.787,
                 clipping: [0.05, 4.0],
+                resolution: [640, 360],
             },
         ];
         let input = AnimationInput {
@@ -4951,6 +4969,7 @@ mod tests {
             horizontal_aperture: 20.955,
             vertical_aperture: 11.787,
             clipping: [0.05, 30.0],
+            resolution: [1920, 1080],
         }];
         let result = export_animation(
             &AnimationInput {

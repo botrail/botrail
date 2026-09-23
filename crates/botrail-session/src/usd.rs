@@ -343,6 +343,7 @@ pub fn bake_timeline(
             horizontal_aperture: H_APERTURE,
             vertical_aperture: H_APERTURE * aspect,
             clipping: [camera.near, camera.far],
+            resolution: camera.resolution,
         });
     }
 
@@ -813,6 +814,7 @@ fn bake_scene_stage(
             horizontal_aperture: H_APERTURE,
             vertical_aperture: H_APERTURE * aspect,
             clipping: [camera.near, camera.far],
+            resolution: camera.resolution,
         });
     }
 

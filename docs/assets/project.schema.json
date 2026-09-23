@@ -4555,6 +4555,13 @@
           "description": "World pose of the robot's root link.",
           "$ref": "#/$defs/PoseMsg"
         },
+        "declared_cameras": {
+          "description": "Scene names of the cameras the model declares on its links\n(`<robot>/<camera>`, mounted by `add_robot`). One missing from\n`cameras` was removed on purpose, and the generated script says so.\nAbsent in older files and for models without cameras.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "dynamics": {
           "description": "Dynamic-robot declaration (`set_robot_dynamics`): under a physics\nbake the whole robot is an articulated body driven by motors.\nAbsent in older files and for kinematic robots.",
           "anyOf": [

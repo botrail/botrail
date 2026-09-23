@@ -8,8 +8,9 @@ import {
 
 const warn = (message: string) => console.warn(`botrail studio: USD appearance: ${message}`);
 
-/** Composition in three-usd-robot 0.13 keeps asset attributes relative to the
- * authoring layer. Anchor them before composition loses that provenance. */
+/** Composition in three-usd-robot (0.13 through 0.14) keeps asset attributes
+ * relative to the authoring layer. Anchor them before composition loses that
+ * provenance. */
 export function anchoredLayer(bytes: Uint8Array, url: string, resolver: AssetResolver) {
   const file = CrateReader.isCrate(bytes)
     ? crateToUsdaFile(new CrateReader(bytes))

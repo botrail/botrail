@@ -1935,8 +1935,10 @@ impl Scene {
     /// Imports the static geometry of a USD stage (usda/usdc/usdz —
     /// references, variants, and instancing are composed) as obstacles,
     /// normalized to meters / Z-up. Leaf Xform/Scope prims become named
-    /// frames (see `frame()`), usable as robot mount points. Obstacle and
-    /// frame names are the prim paths, optionally prefixed. Returns the
+    /// frames (see `frame()`), usable as robot mount points; `Camera`
+    /// prims become world-fixture cameras (see `add_camera`) with the
+    /// authored optics, whatever their visibility. Obstacle, frame and
+    /// camera names are the prim paths, optionally prefixed. Returns the
     /// added obstacle names.
     #[pyo3(signature = (path, prefix = None, search_paths = None))]
     fn load_usd(
@@ -1983,6 +1985,14 @@ impl Scene {
                 .map(|f| (format!("{prefix}{}", f.name), f.pose))
                 .collect(),
         );
+        let cameras: Vec<_> = imported
+            .cameras
+            .iter()
+            .map(|c| botrail_session::stage_camera(format!("{prefix}{}", c.name), c))
+            .collect();
+        if !cameras.is_empty() {
+            self.hub.upsert_cameras(cameras).map_err(scene_err)?;
+        }
         Ok(names)
     }
 

@@ -166,3 +166,42 @@ def test_camera_validation(scene) -> None:
     with pytest.raises(ValueError):
         scene.remove_camera("never_added")
     assert scene.camera_names == []
+
+
+def test_exported_cameras_import_back(scene, tmp_path) -> None:
+    """The USD round trip: a camera botrail wrote (`/World/Cameras/<name>`,
+    film back plus `botrail:resolution`) comes back through `load_usd`
+    with the same fov, pixel size and clip range, standing where it stood."""
+    scene.add_camera(
+        "overview",
+        position=(1.5, -1.5, 1.2),
+        look_at=(0.0, 0.0, 0.3),
+        fov=70,
+        resolution=(1920, 1080),
+        near=0.1,
+        far=12.0,
+    )
+    out = tmp_path / "cams.usda"
+    scene.export_usd(out)
+
+    other = bt.Scene(bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf"))
+    other.load_usd(out)
+    assert "/World/Cameras/overview" in other.camera_names
+    code = other.generate_python()
+    m = re.search(
+        r'scene\.add_camera\("/World/Cameras/overview", position=\(([-\d., ]+)\), '
+        r"quaternion=\(([-\d., ]+)\), fov=([\d.]+), resolution=\((\d+), (\d+)\), near=([\d.]+), far=([\d.]+)",
+        code,
+    )
+    assert m, code
+    position = tuple(float(v) for v in m.group(1).split(","))
+    assert position == pytest.approx((1.5, -1.5, 1.2), abs=1e-6)
+    q = tuple(float(v) for v in m.group(2).split(","))
+    view = rotate(q, (0.0, 0.0, -1.0))
+    expected = (-1.5, 1.5, -0.9)
+    n = math.sqrt(sum(c * c for c in expected))
+    assert view == pytest.approx(tuple(c / n for c in expected), abs=1e-6)
+    assert float(m.group(3)) == pytest.approx(70.0, abs=0.05)
+    assert (int(m.group(4)), int(m.group(5))) == (1920, 1080)
+    assert float(m.group(6)) == pytest.approx(0.1, abs=1e-6)
+    assert float(m.group(7)) == pytest.approx(12.0, abs=1e-4)

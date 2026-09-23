@@ -65,7 +65,10 @@ packaging the referenced robot assets is a different operation.
 frame by frame through their mount (a wrist camera rides the arm, a
 vehicle camera its machine) and their optics carried as
 focal-length/aperture — so *View → Camera* in usdview or Omniverse frames
-exactly what the studio's picture-in-picture shows.
+exactly what the studio's picture-in-picture shows. The pixel size, which
+no `UsdGeomCamera` attribute holds, rides along as a custom
+`botrail:resolution`, so the same stage [loads back](usd-import.md#cameras-come-along-too)
+with the cameras it left with.
 
 The reverse direction — playing recordings back into the studio, including
 Isaac Sim captures — is

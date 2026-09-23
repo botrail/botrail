@@ -658,6 +658,12 @@ pub struct ProjectRobotMsg {
     /// package carries its own). Absent in older files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_collisions: Vec<(String, String)>,
+    /// Scene names of the cameras the model declares on its links
+    /// (`<robot>/<camera>`, mounted by `add_robot`). One missing from
+    /// `cameras` was removed on purpose, and the generated script says so.
+    /// Absent in older files and for models without cameras.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_cameras: Vec<String>,
 }
 
 /// A gripper drive as a project carries it: the declaration, re-resolved
@@ -1162,6 +1168,7 @@ impl ProjectFile {
                         dynamics: None,
                         groups: Vec::new(),
                         allowed_collisions: Vec::new(),
+                        declared_cameras: Vec::new(),
                     }],
                     obstacles: v1.obstacles,
                     motions: v1.motions,
@@ -1300,6 +1307,12 @@ impl Scene {
                             .collect()
                     },
                     allowed_collisions: declared_allowed_collisions(&r.model),
+                    declared_cameras: r
+                        .model
+                        .cameras
+                        .iter()
+                        .map(|c| format!("{}/{}", r.name, c.name))
+                        .collect(),
                 })
                 .collect(),
             obstacles: self
@@ -2120,6 +2133,14 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             out.push_str(&format!("scene = bt.Scene({var}{kwargs})\n"));
         } else {
             out.push_str(&format!("scene.add_robot({var}{kwargs})\n"));
+        }
+        // A camera the model declares is mounted by the line above; one the
+        // scene no longer has was removed on purpose, and the script has
+        // to say so or it comes back.
+        for camera in &robot_msg.declared_cameras {
+            if !project.cameras.iter().any(|c| &c.name == camera) {
+                out.push_str(&format!("scene.remove_camera({camera:?})\n"));
+            }
         }
     }
     if project.robots.is_empty() {
@@ -4047,5 +4068,69 @@ mod tests {
         let code = generate_python(&project);
         assert!(code.contains("scene.add_segment(\"main\""));
         assert!(!code.contains("scene.plan_motion("));
+    }
+
+    /// A model's declared cameras (a USD asset's head camera) are mounted
+    /// on its links when the robot is added, follow a rename, and a removed
+    /// one stays removed: the project restores the camera list as saved,
+    /// and the generated script says `remove_camera` after `add_robot`.
+    #[test]
+    fn declared_cameras_are_mounted_renamed_and_removable() {
+        let mut model = RobotModel::from_urdf_str(ARM).unwrap();
+        let tip = model.links.len() - 1;
+        model.cameras.push(botrail_model::LinkCamera {
+            name: "eye".into(),
+            link: tip,
+            pose: Isometry3::translation(0.0, 0.0, 0.05),
+            fov_deg: 60.0,
+            resolution: [640, 480],
+            near: 0.05,
+            far: 10.0,
+        });
+        let mut scene = Scene::new(Arc::new(model));
+        let robot = scene.robots()[0].name.clone();
+        let camera = scene.cameras().iter().find(|c| c.name == format!("{robot}/eye")).unwrap();
+        assert!(!camera.body_visible, "the robot's own geometry is the housing");
+        assert_eq!(
+            camera.mount,
+            crate::seq::CameraMount::Link {
+                robot: robot.clone(),
+                link: scene.robot().links[tip].name.clone(),
+            }
+        );
+
+        // A vision sensor and a part follow the camera through a rename.
+        scene.set_sensors(vec![crate::seq::Sensor {
+            name: "sees".into(),
+            kind: crate::seq::SensorKind::Vision {
+                camera: format!("{robot}/eye"),
+                detect_range: None,
+                occlusion: false,
+            },
+            watch: crate::seq::SensorWatch::All,
+            mount: None,
+        }]);
+        scene.rename_robot(0, "left");
+        let camera = scene.cameras().iter().find(|c| c.name == "left/eye").expect("renamed");
+        assert!(matches!(&camera.mount, crate::seq::CameraMount::Link { robot, .. } if robot == "left"));
+        assert!(matches!(
+            &scene.sensors()[0].kind,
+            crate::seq::SensorKind::Vision { camera, .. } if camera == "left/eye"
+        ));
+
+        // Removed on purpose: the file says so and the script replays it.
+        scene.set_sensors(Vec::new());
+        scene.remove_camera("left/eye").unwrap();
+        let project = scene.to_project();
+        assert_eq!(project.robots[0].declared_cameras, ["left/eye"]);
+        let reloaded = Scene::from_project(&project).unwrap();
+        assert!(reloaded.cameras().is_empty());
+        let code = generate_python(&project);
+        assert!(code.contains("scene.remove_camera(\"left/eye\")\n"), "{code}");
+        // Present, it is authored like any camera — and not removed.
+        let mut kept = Scene::new(Arc::new(RobotModel::from_urdf_str(ARM).unwrap()));
+        kept.rename_robot(0, "left");
+        let code = generate_python(&kept.to_project());
+        assert!(!code.contains("remove_camera"), "{code}");
     }
 }

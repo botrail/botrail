@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import * as THREE from "three";
 import { ThreeUsdRobotLoader, type ThreeUsdRobot } from "three-usd-robot";
 import { highlightLink, restoreLinkMaterials } from "three-usd-robot/helpers";
 
@@ -52,18 +51,14 @@ function UsdRobotInstance({ name }: { name: string }) {
     }
     let cancelled = false;
     // botrail's world is Z-up; the library defaults to three.js Y-up.
-    new ThreeUsdRobotLoader({ worldUp: "Z" })
+    // The loader flags every mesh for shadows itself (the arm's shadow is
+    // what tells you how far above the part it is). What it would also
+    // bind, the studio owns: the lighting is the viewport's rig, and the
+    // stage's cameras arrive as botrail cameras over the wire.
+    new ThreeUsdRobotLoader({ worldUp: "Z", loadLights: false, loadCameras: false })
       .loadAsync(url)
       .then((r) => {
         if (cancelled) return;
-        // The loader leaves shadows off; the arm is the one thing in the
-        // scene whose shadow tells you how far above the part it is.
-        r.traverse((o) => {
-          if ((o as THREE.Mesh).isMesh) {
-            o.castShadow = true;
-            o.receiveShadow = true;
-          }
-        });
         setRobot(r);
       })
       .catch((e) =>

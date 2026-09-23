@@ -11,8 +11,8 @@ official Isaac asset, fetched straight from their CDN; the page itself is just
 static files.
 
 You can also drop a USD file straight into the viewport — stages become the
-scene, articulations become robots, the same import pipeline as everywhere
-else.
+scene, articulations become robots, `Camera` prims become cameras you can
+look through, the same import pipeline as everywhere else.
 
 ## How it works
 

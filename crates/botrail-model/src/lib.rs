@@ -411,6 +411,30 @@ impl RobotSource {
     }
 }
 
+/// A sensor camera the model declares on one of its links — a
+/// `UsdGeomCamera` prim authored under a rigid body (an Isaac asset's head
+/// or wrist camera). The pose is in the link frame with botrail's camera
+/// convention (-Z is the view direction, +Y image-up); the optics are what
+/// a scene camera carries. `Scene::add_robot` turns each into a
+/// link-mounted camera named `<robot>/<name>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkCamera {
+    /// The prim's own name (`Head_Camera`), unique within the model.
+    pub name: String,
+    /// Index into [`RobotModel::links`] of the link it is bolted to.
+    pub link: usize,
+    /// Offset in the link frame.
+    pub pose: Isometry3<f64>,
+    /// Horizontal field of view, degrees.
+    pub fov_deg: f64,
+    /// Image size in pixels (aspect ratio and export pixel size).
+    pub resolution: [u32; 2],
+    /// Near clip distance, meters.
+    pub near: f64,
+    /// Far clip distance, meters.
+    pub far: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RobotModel {
     pub name: String,
@@ -452,6 +476,10 @@ pub struct RobotModel {
     /// overlap in *most* poses, not all, and only its maker can say that
     /// is the design rather than a collision.
     pub allowed_collisions: Vec<(usize, usize)>,
+    /// Sensor cameras the source declares on its links (`UsdGeomCamera`
+    /// prims under rigid bodies). Advisory like the frames above: a scene
+    /// mounts them when the robot is added, and they can be removed there.
+    pub cameras: Vec<LinkCamera>,
 }
 
 impl RobotModel {
@@ -1315,6 +1343,7 @@ impl RobotModel {
             grasp_links: Vec::new(),
             declared_groups: Vec::new(),
             allowed_collisions: Vec::new(),
+            cameras: Vec::new(),
         })
     }
 
@@ -1450,6 +1479,7 @@ impl RobotModel {
             .chain(tool.grasp_links.iter().map(|i| i + link_offset))
             .collect();
         model.allowed_collisions = welded_allowances(self, tool, link_offset);
+        model.cameras = welded_cameras(self, tool, link_offset);
         // The addressed arm's declaration follows the tool: its TCP is the
         // tool's now, its flange the tool's onward face. Other arms are
         // untouched. With no arm addressed (a single-arm robot) the groups
@@ -1531,6 +1561,7 @@ impl RobotModel {
             .chain(part.grasp_links.iter().map(|i| i + link_offset))
             .collect();
         model.allowed_collisions = welded_allowances(self, part, link_offset);
+        model.cameras = welded_cameras(self, part, link_offset);
         let rename = |name: &str| match prefix {
             Some(p) => format!("{p}{name}"),
             None => name.to_string(),
@@ -1750,6 +1781,28 @@ fn welded_allowances(
                 .map(|(i, j)| (i + link_offset, j + link_offset)),
         )
         .collect()
+}
+
+/// Both halves' declared cameras on a welded composite: the base's ride
+/// along as they are, the part's follow their links at `link_offset` — a
+/// camera-bearing gripper bolted on still knows where it looks from. A
+/// part camera whose name the base already uses is suffixed (`eye_2`).
+fn welded_cameras(base: &RobotModel, part: &RobotModel, link_offset: usize) -> Vec<LinkCamera> {
+    let mut cameras = base.cameras.clone();
+    for camera in &part.cameras {
+        let mut name = camera.name.clone();
+        let mut n = 2;
+        while cameras.iter().any(|c| c.name == name) {
+            name = format!("{}_{n}", camera.name);
+            n += 1;
+        }
+        cameras.push(LinkCamera {
+            name,
+            link: camera.link + link_offset,
+            ..camera.clone()
+        });
+    }
+    cameras
 }
 
 pub fn pose_to_isometry(pose: &xurdf::Pose) -> Isometry3<f64> {
@@ -2721,5 +2774,45 @@ mod group_tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].tip, combined.default_tcp_link());
         assert_eq!(groups[0].joints.len(), combined.dof());
+    }
+
+    /// Declared cameras ride along when a tool is bolted on: the arm's
+    /// keep their links, the tool's follow theirs into the composite, and
+    /// a name both halves use is suffixed rather than lost.
+    #[test]
+    fn declared_cameras_follow_their_links_through_attach_tool() {
+        let eye = |link: usize| LinkCamera {
+            name: "eye".into(),
+            link,
+            pose: Isometry3::translation(0.0, 0.0, 0.05),
+            fov_deg: 60.0,
+            resolution: [640, 480],
+            near: 0.05,
+            far: 10.0,
+        };
+        let mut arm = RobotModel::from_urdf_str(ARM).unwrap();
+        let arm_link = arm.links.len() - 1;
+        arm.cameras.push(eye(arm_link));
+        let mut tool = RobotModel::from_urdf_str(super::tests::GRIPPER).unwrap();
+        tool.cameras.push(eye(0));
+
+        let flange = arm.links[arm_link].name.clone();
+        let combined = arm
+            .attach_tool(&tool, Some(&flange), None, Isometry3::identity(), None, Some("g_"), None)
+            .unwrap();
+        assert_eq!(combined.cameras.len(), 2);
+        assert_eq!(combined.cameras[0].name, "eye");
+        assert_eq!(
+            combined.links[combined.cameras[0].link].name,
+            arm.links[arm_link].name
+        );
+        assert_eq!(combined.cameras[1].name, "eye_2");
+        assert!(
+            combined.links[combined.cameras[1].link]
+                .name
+                .ends_with(&tool.links[0].name),
+            "{}",
+            combined.links[combined.cameras[1].link].name
+        );
     }
 }

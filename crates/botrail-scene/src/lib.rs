@@ -517,37 +517,9 @@ impl Scene {
 
     /// A scene with the robot root placed at `base` (world frame).
     pub fn with_base(robot: Arc<RobotModel>, base: Isometry3<f64>) -> Self {
-        let name = robot.name.clone();
-        let (scene_robot, collision_warnings) = SceneRobot::new(name, robot, base);
-        Self {
-            robots: vec![scene_robot],
-            collision_slack: 0.0,
-            inter_acm: InterRobotAcm::default(),
-            obstacles: Vec::new(),
-            obstacle_colliders: Vec::new(),
-            attachments: Vec::new(),
-            motions: Vec::new(),
-            sequences: Vec::new(),
-            signals: Vec::new(),
-            sensors: Vec::new(),
-            devices: Vec::new(),
-            cameras: Vec::new(),
-            lidars: Vec::new(),
-            weld_flashes: Vec::new(),
-            scenarios: Vec::new(),
-            frames: Vec::new(),
-            toolpaths: Vec::new(),
-            toolpath_marks: Vec::new(),
-            allowed_contacts: Vec::new(),
-            allowed_object_contacts: Vec::new(),
-            applicators: Vec::new(),
-            brushes: Vec::new(),
-            io: iomap::IoMap::default(),
-            parts: Vec::new(),
-            connection_plan: connections::ConnectionPlan::default(),
-            forced_inputs: Vec::new(),
-            collision_warnings,
-        }
+        let mut scene = Self::empty();
+        scene.add_robot(robot, None, base);
+        scene
     }
 
     // ---------------------------------------------------------------- robots
@@ -590,10 +562,45 @@ impl Scene {
         base: Isometry3<f64>,
     ) -> String {
         let name = self.unique_robot_name(name.unwrap_or(&model.name));
-        let (scene_robot, mut warnings) = SceneRobot::new(name.clone(), model, base);
+        let (scene_robot, mut warnings) = SceneRobot::new(name.clone(), model.clone(), base);
         self.robots.push(scene_robot);
         self.collision_warnings.append(&mut warnings);
+        self.mount_declared_cameras(&name, &model);
         name
+    }
+
+    /// The cameras a model declares on its links (a USD asset's head or
+    /// wrist camera) become link-mounted scene cameras named
+    /// `<robot>/<camera>` — without the generic housing, since the robot's
+    /// own geometry is the housing. A name already taken is left alone: a
+    /// camera someone authored is not overwritten by a re-added robot.
+    fn mount_declared_cameras(&mut self, robot: &str, model: &RobotModel) {
+        for declared in &model.cameras {
+            let name = format!("{robot}/{}", declared.name);
+            if self.cameras.iter().any(|c| c.name == name) {
+                continue;
+            }
+            let Some(link) = model.links.get(declared.link) else {
+                continue;
+            };
+            let camera = seq::Camera {
+                name,
+                body_visible: false,
+                mount: seq::CameraMount::Link {
+                    robot: robot.to_string(),
+                    link: link.name.clone(),
+                },
+                pose: declared.pose,
+                fov_deg: declared.fov_deg,
+                resolution: declared.resolution,
+                near: declared.near,
+                far: declared.far,
+            };
+            if let Err(e) = self.upsert_camera(camera) {
+                self.collision_warnings
+                    .push(format!("{robot}: declared camera `{}` skipped: {e}", declared.name));
+            }
+        }
     }
 
     /// Renames a robot instance; the name is uniquified against the other
@@ -665,6 +672,34 @@ impl Scene {
                 )
             }) {
                 swap(&mut binding.point.name);
+            }
+        }
+        // Optics bolted to its links, and the cameras it brought along
+        // under its old name (`old/eye` → `new/eye`) — with the vision
+        // sensors and parts that name them.
+        let mut renamed_cameras = Vec::new();
+        for camera in &mut self.cameras {
+            if let seq::CameraMount::Link { robot, .. } = &mut camera.mount {
+                swap(robot);
+            }
+            if let Some(rest) = camera.name.strip_prefix(&format!("{old}/")) {
+                let renamed = format!("{candidate}/{rest}");
+                renamed_cameras.push((std::mem::replace(&mut camera.name, renamed.clone()), renamed));
+            }
+        }
+        for (from, to) in &renamed_cameras {
+            for sensor in &mut self.sensors {
+                if let seq::SensorKind::Vision { camera, .. } = &mut sensor.kind {
+                    if camera == from {
+                        *camera = to.clone();
+                    }
+                }
+            }
+            self.rename_part_target(part::PartTargetKind::Camera, from, to);
+        }
+        for lidar in &mut self.lidars {
+            if let seq::LidarMount::Link { robot, .. } = &mut lidar.mount {
+                swap(robot);
             }
         }
         self.rename_part_target(part::PartTargetKind::Robot, &old, &candidate);

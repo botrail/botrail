@@ -1244,6 +1244,37 @@ pub fn upsert_camera(
     Ok(())
 }
 
+/// Adds or replaces several cameras at once (a stage's authored cameras on
+/// import), broadcasting the list once.
+pub fn upsert_cameras(
+    host: &impl SessionHost,
+    cameras: Vec<botrail_scene::seq::Camera>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| {
+        cameras
+            .into_iter()
+            .try_for_each(|camera| scene.upsert_camera(camera))
+    })?;
+    emit_cameras(host);
+    Ok(())
+}
+
+/// A `Camera` prim imported from a stage as a world fixture: named like
+/// the stage's other prims, drawn with the studio's generic housing (the
+/// prim has no geometry of its own to mark where it stands).
+pub fn stage_camera(name: String, imported: &botrail_usd::ImportedCamera) -> botrail_scene::seq::Camera {
+    botrail_scene::seq::Camera {
+        name,
+        body_visible: true,
+        mount: botrail_scene::seq::CameraMount::World,
+        pose: imported.pose,
+        fov_deg: imported.optics.fov_deg,
+        resolution: imported.optics.resolution,
+        near: imported.optics.near,
+        far: imported.optics.far,
+    }
+}
+
 pub fn remove_camera(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_camera(name))?;
     emit_cameras(host);
