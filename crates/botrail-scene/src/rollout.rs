@@ -9790,7 +9790,7 @@ impl Rollout {
                         }
                     }
                 }
-                splits.sort_by(|a, b| b.0.cmp(&a.0));
+                splits.sort_by_key(|s| std::cmp::Reverse(s.0));
                 splits.dedup_by_key(|s| s.0);
                 let mut pos = position;
                 let starts: Vec<nalgebra::Point3<f64>> = route
@@ -10155,9 +10155,7 @@ impl Rollout {
             );
         }
         // A fresh ride: every leg re-reads where the walk leaves it.
-        for slot in &mut gr.riding {
-            *slot = None;
-        }
+        gr.riding.fill(None);
         if !plan.pitch.is_empty() {
             // A walk dispatched mid-settle takes the tilt over from here.
             if let Some(open) = gr.pitches.last_mut() {
