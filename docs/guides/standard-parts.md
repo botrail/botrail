@@ -55,18 +55,33 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`tray`][botrail.parts.tray] | the tray `<name>` (collides), its foam insert `<name>/insert` (a picture), and in full detail a bent grip each side under `<name>/trim/` | `<name>/seat` (the insert's top centre — where a part sets down) | — | `<name>` (`tray`) |
 | [`stage`][botrail.parts.stage] | the block `<name>` (collides; hidden in full detail behind the plate and legs under `<name>/trim/`), `<name>/insert` | `<name>/seat` | — | `<name>` (`fixture`) |
 | [`carton`][botrail.parts.carton] | one box `<name>`, drawn as the library's carton | — | — | `<name>` (`workpiece`, the RSC size as its model, `mass_kg` when given) |
+| [`bin`][botrail.parts.bin] | a small-load container: the floor `<name>/floor` between four walls `<name>/wall0..3` (all collide), and in full detail the library's ribbed sleeve round them under `<name>/trim/` | `<name>/floor` (the floor's top centre — where a part sets down) | — | `<name>` (`bin`, one part on the group so a physics bake carries the five boxes as one unit; with a catalog the VDA type number, mass and inside dimensions — `botrail/bin/klt-vda4500`) |
 | [`unit_load`][botrail.parts.unit_load] | the envelopes `<name>/pallet` and `<name>/load` (collide, hidden in full detail), the timber, cartons, film and labels under `<name>/visual/` | — | — | nothing: stock is not a purchase |
 | [`marking`][botrail.parts.marking] | paint out of collision — `<name>/0`…`<name>/3` round a rect, `<name>` for a line, `<name>/0`… for its dashes | — | — | nothing (the layout sheet draws them on its ground layer) |
 | [`person`][botrail.parts.person] | one box `<name>` (collides) | — | — | nothing |
 | [`gantry`][botrail.parts.gantry] | `<name>/post_l`, `<name>/post_r`, `<name>/beam` (collide) | `<name>/beam` (the beam's centre underside — a camera's mount) | — | `<name>` (`structure.gantry`) |
+| [`prop`][botrail.parts.prop] | one mesh `<name>`: a catalog object's model (a scanned YCB object) drawn with its textures, colliding as its convex decomposition, dynamic at the pack's mass | — | — | `<name>` (the pack's category, name and maker, the catalog id, `mass_kg`) |
 
-The last seven are *props*: the generic things a cell is full of and nobody
+The last eight are *props*: the generic things a cell is full of and nobody
 orders by part number — the tray a part waits in, the stage under a camera,
-the carton, the stock on a pallet, the paint on the floor, the person a
-scenario stands in the gate, the portal a camera hangs from. They are
-generated from their dimensions like everything else, drawn from the
+the carton, the bin, the stock on a pallet, the paint on the floor, the
+person a scenario stands in the gate, the portal a camera hangs from. They
+are generated from their dimensions like everything else, drawn from the
 [shape library](#shapes-a-box-cannot-draw-the-shape-library) where a box
-cannot draw the thing, and `detail="plain"` keeps just the massing.
+cannot draw the thing, and `detail="plain"` keeps just the massing. The bin
+is the one of them you can also order: with `catalog="botrail/bin/klt-vda4500"`
+it is a VDA 4500 R-KLT — the size is matched against the seven the standard
+names (300 × 200 × 147 up to 600 × 400 × 280), the walls and floor are as
+thick as the inside dimensions leave, and the row carries the type number
+and the mass.
+`prop` is the other way round: the thing *is* a catalog product — one of
+the YCB objects under `ycb/objects/*`, a scan with its texture and its
+measured mass — and the generator only sets it down, the middle of its
+footprint on the point and its underside on the face, turned by `yaw`.
+The obstacle is coloured with the pack's mean albedo for the consumers
+that draw no texture (the rollout's colour pictures, a USD without
+materials); in the studio an authored colour never paints over a
+texture.
 
 Every generator takes `model=`, `manufacturer=` and free attributes
 (`mass_kg=…`) for the part it pins — or `catalog=`, the id of a spec pack, and
@@ -85,7 +100,13 @@ rubber feet. Conveyor belts and rails also have separate finishes. These are
 authored visual defaults, not measured manufacturer data or friction values.
 Colours and geometry stay independent of the finish. Override a surface with
 `scene.set_obstacle_material(name, metalness=..., roughness=...)`; overrides
-survive project save/load and generated Python. These defaults do not override
+survive project save/load and generated Python. A named pattern goes on the
+same call — `finish="wood"`, `"checker_plate"` or `"plastic"` — and the
+studio draws it over the colour at its real pitch (timber grain along a
+board's length, the raised bars of tread plate, the pebble of a moulded
+bin); stair treads and a bin's walls carry theirs already. Pictures a
+rollout renders and a USD export keep the colour and the two knobs and
+ignore the pattern. These defaults do not override
 imported catalog trim; its appearance follows the existing
 [import path](scene-and-obstacles.md). In `machine_tool(detail="full")`, the
 doors have framed transparent panes; the hidden full leaves remain the
@@ -178,7 +199,7 @@ Some of what every cell has is neither a product nor a box: a carton with
 its folded lids and tape, a pressed tray, a perforated basket, the rubber
 foot under a bench leg, a bent handle, a drain hose, a machined part with
 its bores. botrail ships a small library of these forms — `bt.parts.SHAPES`,
-nine unit-box USD layers under `botrail/_shapes/`, authored in
+ten unit-box USD layers under `botrail/_shapes/`, authored in
 [botrail-assets](https://github.com/botrail/botrail-assets) (`workshop-shapes/`)
 and vendored by `scripts/sync_shapes.py` — and two ways to use them:
 
@@ -217,6 +238,7 @@ scale with the box.
 | `panel` | a laminate board with rounded corners — tint it | laminate |
 | `handle` | a bent-tube grip, its opening along −Z | brushed steel |
 | `hose` | a hanging drain hose | rubber |
+| `tote` | the ribbed sleeve of a small-load container (a KLT): outer skin, vertical ribs, stacking rim and base band, a grip on each end, a card pocket — open inside and below, drawn a little past the plain boxes that are its walls and floor | polypropylene (tint it) |
 
 ## Series-specific equipment trims
 

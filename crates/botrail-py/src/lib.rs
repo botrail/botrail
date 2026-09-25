@@ -950,6 +950,12 @@ fn physics_backend(
 /// machine folds under gravity; `None` (default) is powered when a program
 /// runs and unpowered in `simulate_physics`. Walkers and aircraft float
 /// (their base is a free body); an arm keeps its stand.
+///
+/// `settle` is the world's tail in seconds: once every program has ended,
+/// the engine keeps running until everything it owns is at rest — a
+/// dropped part landed — or the tail runs out; `0` (default) ends the bake
+/// where the programs end. The bake's `max_duration` is the programs'
+/// time to finish and does not count the tail.
 #[pyclass(frozen, module = "botrail._core", get_all)]
 #[derive(Clone, Debug)]
 struct Physics {
@@ -961,12 +967,13 @@ struct Physics {
     gravity: (f64, f64, f64),
     powered: Option<bool>,
     passive_damping: f64,
+    settle: f64,
 }
 
 #[pymethods]
 impl Physics {
     #[new]
-    #[pyo3(signature = (engine = "rapier", world = false, ground = None, anchored = true, substeps = 4, gravity = (0.0, 0.0, -9.81), powered = None, passive_damping = 1.0))]
+    #[pyo3(signature = (engine = "rapier", world = false, ground = None, anchored = true, substeps = 4, gravity = (0.0, 0.0, -9.81), powered = None, passive_damping = 1.0, settle = 0.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine: &str,
@@ -977,10 +984,16 @@ impl Physics {
         gravity: (f64, f64, f64),
         powered: Option<bool>,
         passive_damping: f64,
+        settle: f64,
     ) -> PyResult<Self> {
         if !(passive_damping.is_finite() && passive_damping >= 0.0) {
             return Err(PyValueError::new_err(format!(
                 "passive_damping must be non-negative, got {passive_damping}"
+            )));
+        }
+        if !(settle.is_finite() && settle >= 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "settle must be a non-negative number of seconds, got {settle}"
             )));
         }
         if engine != "rapier" {
@@ -1013,13 +1026,14 @@ impl Physics {
             gravity,
             powered,
             passive_damping,
+            settle,
         })
     }
 
     fn __repr__(&self) -> String {
         let py_bool = |b: bool| if b { "True" } else { "False" };
         format!(
-            "Physics(engine='{}', world={}, ground={}, anchored={}, substeps={}, gravity={:?}, powered={}, passive_damping={})",
+            "Physics(engine='{}', world={}, ground={}, anchored={}, substeps={}, gravity={:?}, powered={}, passive_damping={}, settle={})",
             self.engine,
             py_bool(self.world),
             match self.ground {
@@ -1033,7 +1047,8 @@ impl Physics {
                 Some(p) => py_bool(p).to_string(),
                 None => "None".to_string(),
             },
-            self.passive_damping
+            self.passive_damping,
+            self.settle
         )
     }
 }
@@ -1055,12 +1070,31 @@ impl Physics {
             anchored: self.anchored,
             powered: self.powered,
             passive_damping: self.passive_damping,
+            settle: self.settle,
         }
     }
 
     fn backend(&self) -> Box<dyn botrail_physics::PhysicsBackend> {
         Box::new(botrail_physics_rapier::RapierBackend::new())
     }
+}
+
+/// The vectorised twin of [`physics_bake`]: the engine name every world
+/// builds its own backend from (`None` for the kinematic bake), with a
+/// `Physics` object's options landing on `options.physics` the same way
+/// — so a `VecEnv` runs the world scope, a powered cell, a ground plane
+/// exactly as the single environment does (design-rl-tabletop.md G11).
+fn physics_engine_bake(
+    options: &mut botrail_scene::rollout::RolloutOptions,
+    arg: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
+    if let Some(v) = arg {
+        if let Ok(physics) = v.extract::<PyRef<'_, Physics>>() {
+            options.physics = Some(physics.options());
+            return Ok(Some(physics.engine.clone()));
+        }
+    }
+    physics_engine(arg)
 }
 
 /// Resolves a bake's `physics` argument into the backend to inject and
@@ -2190,29 +2224,52 @@ impl Scene {
     }
 
     /// Sets how an obstacle's surface takes light. Passing no appearance values
-    /// clears the material, handing the choice back to the viewer.
-    #[pyo3(signature = (name, metalness = None, roughness = None, *, opacity = None))]
+    /// clears the material, handing the choice back to the viewer. `finish`
+    /// — `"wood"`, `"checker_plate"` or `"plastic"` — is a surface pattern
+    /// the studio draws over the colour (timber grain, the raised bars of
+    /// tread plate, moulded plastic); on its own it also picks the two knobs
+    /// that finish reads as. Pictures a rollout renders and a USD export
+    /// keep the colour and the knobs and ignore the pattern.
+    #[pyo3(signature = (name, metalness = None, roughness = None, *, opacity = None, finish = None))]
     fn set_obstacle_material(
         &self,
         name: &str,
         metalness: Option<f32>,
         roughness: Option<f32>,
         opacity: Option<f32>,
+        finish: Option<&str>,
     ) -> PyResult<()> {
         if opacity.is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v)) {
             return Err(PyValueError::new_err("opacity must be finite and in 0..1"));
         }
-        let material = match (metalness, roughness, opacity) {
-            (None, None, None) => None,
+        let finish = match finish {
+            None => None,
+            Some(name) => Some(botrail_scene::Finish::parse(name).ok_or_else(|| {
+                let known: Vec<&str> = botrail_scene::Finish::ALL
+                    .iter()
+                    .map(|f| f.as_str())
+                    .collect();
+                PyValueError::new_err(format!(
+                    "finish must be one of {}, not {name:?}",
+                    known.join(", ")
+                ))
+            })?),
+        };
+        let material = match (metalness, roughness, opacity, finish) {
+            (None, None, None, None) => None,
             // One knob given is still an authored material; the other takes
-            // the studio's own default rather than silently going to zero.
-            (m, r, opacity) => Some(
-                botrail_scene::Material::new(
-                    m.unwrap_or(DEFAULT_METALNESS),
-                    r.unwrap_or(DEFAULT_ROUGHNESS),
+            // the finish's own figure, else the studio's default, rather
+            // than silently going to zero.
+            (m, r, opacity, finish) => {
+                let (fm, fr) = finish
+                    .map(|f| f.defaults())
+                    .unwrap_or((DEFAULT_METALNESS, DEFAULT_ROUGHNESS));
+                Some(
+                    botrail_scene::Material::new(m.unwrap_or(fm), r.unwrap_or(fr))
+                        .with_opacity(opacity)
+                        .with_finish(finish),
                 )
-                .with_opacity(opacity),
-            ),
+            }
         };
         self.hub
             .set_obstacle_material(name, material)
@@ -2398,6 +2455,12 @@ impl Scene {
         self.hub.obstacle_material(name).map_err(scene_err)
     }
 
+    /// The surface pattern (`"wood"`, `"checker_plate"`, `"plastic"`) the
+    /// obstacle's material carries, or `None`.
+    fn obstacle_finish(&self, name: &str) -> PyResult<Option<String>> {
+        self.hub.obstacle_finish(name).map_err(scene_err)
+    }
+
     /// Explicit alpha override, or None when the source/viewer supplies it.
     fn obstacle_opacity(&self, name: &str) -> PyResult<Option<f32>> {
         self.hub
@@ -2473,6 +2536,29 @@ impl Scene {
         self.hub
             .allow_inter_robot_collision(robot_a, link_a, robot_b, link_b)
             .map_err(PyValueError::new_err)
+    }
+
+    /// Whether an obstacle takes part in collision checking and physics
+    /// (`set_obstacle_enabled`) — what a pool draw parks things out of.
+    fn obstacle_enabled(&self, name: &str) -> PyResult<bool> {
+        self.hub
+            .snapshot()
+            .obstacles()
+            .iter()
+            .find(|o| o.name == name)
+            .map(|o| o.enabled)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
+    }
+
+    /// Whether an obstacle is drawn (`set_obstacle_visible`).
+    fn obstacle_visible(&self, name: &str) -> PyResult<bool> {
+        self.hub
+            .snapshot()
+            .obstacles()
+            .iter()
+            .find(|o| o.name == name)
+            .map(|o| o.visible)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown obstacle `{name}`")))
     }
 
     /// An obstacle's display colour as linear RGB, or `None` when it has
@@ -3152,6 +3238,18 @@ impl Scene {
     #[getter]
     fn camera_names(&self) -> Vec<String> {
         self.hub.camera_names()
+    }
+
+    /// The horizontal field of view (degrees) of the named camera — what
+    /// a picture channel's default decimation cell is sized from.
+    fn camera_fov(&self, name: &str) -> PyResult<f64> {
+        self.hub
+            .snapshot()
+            .cameras()
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.fov_deg)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown camera `{name}`")))
     }
 
     /// Adds a LiDAR scanner: a named scan origin with a planar sweep,
@@ -7496,9 +7594,9 @@ impl LiveRollout {
     /// converged (`True` for the joint controls); a failed step holds.
     #[pyo3(signature = (action, robot = None))]
     fn act(&mut self, action: Vec<f64>, robot: Option<&str>) -> PyResult<bool> {
-        self.robot(robot)?;
+        let r = self.robot(robot)?;
         self.live_mut()?
-            .act(&action)
+            .act_for(r, &action)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -8461,9 +8559,18 @@ impl SequenceTimeline {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "animation".to_string());
-        let exported =
-            botrail_session::usd::bake_timeline(&self.scene, &self.inner, fps, start, end, &stem)
-                .map_err(PyValueError::new_err)?;
+        let exported = botrail_session::usd::bake_timeline(
+            &self.scene,
+            &self.inner,
+            &botrail_usd::export::ExportOptions {
+                fps,
+                ..Default::default()
+            },
+            start,
+            end,
+            &stem,
+        )
+        .map_err(PyValueError::new_err)?;
         botrail_usd::export::write_exported(&path, exported)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }

@@ -49,6 +49,7 @@ use thiserror::Error;
 use crate::articulation::AnyJoint;
 use crate::{decompose_matrix, y_up_to_z_up, AnyPrim, SearchPathResolver};
 
+mod meshes;
 mod physics;
 mod visual;
 
@@ -74,11 +75,20 @@ pub enum UsdExportError {
 pub struct ExportOptions {
     /// Time codes per second of the layer; samples land on `t * fps`.
     pub fps: f64,
+    /// Write each triangle mesh once, as a binary layer under
+    /// `<stem>_assets/meshes/`, and reference it from every prim that
+    /// draws it (the default: six arms cost one arm's meshes). `false`
+    /// authors the triangles inline — a single self-contained file, the
+    /// studio's download.
+    pub mesh_layers: bool,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        ExportOptions { fps: 60.0 }
+        ExportOptions {
+            fps: 60.0,
+            mesh_layers: true,
+        }
     }
 }
 
@@ -244,6 +254,10 @@ pub struct ExportedAnimation {
     /// Files to place next to the written layer (absolute source, relative
     /// destination) so the robot reference resolves — empty for URDF robots.
     pub assets: Vec<(PathBuf, PathBuf)>,
+    /// Layers this export composed itself — one binary layer per triangle
+    /// mesh under `<stem>_assets/meshes/` (relative destination, bytes) —
+    /// that the main layer references. Empty when meshes are inline.
+    pub generated: Vec<(PathBuf, Vec<u8>)>,
     pub warnings: Vec<String>,
 }
 
@@ -329,6 +343,13 @@ pub fn write_exported(
             std::fs::create_dir_all(dir).map_err(io)?;
         }
         std::fs::copy(src, &dest).map_err(io)?;
+    }
+    for (rel, bytes) in &exported.generated {
+        let dest = base.join(rel);
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        std::fs::write(&dest, bytes).map_err(io)?;
     }
     Ok(exported.warnings)
 }
@@ -510,6 +531,7 @@ fn export_stage(
     let layout = plan_env_layout(input.objects, simulation);
     let mut assets = Vec::new();
     let mut appearances = visual::VisualAssets::new(asset_stem);
+    let mut meshes = meshes::MeshLayers::new(asset_stem, !options.mesh_layers);
     // Robot prims under /World, uniquified from sanitized instance names;
     // asset directories dedup by source stage (two instances of the same
     // asset share one copy, both references point at it).
@@ -629,6 +651,7 @@ fn export_stage(
                     articulation,
                     &mut warnings,
                     &mut appearances,
+                    &mut meshes,
                 )?;
                 root_bodies[r] = Some(root_body);
             }
@@ -644,6 +667,7 @@ fn export_stage(
         &codes,
         &mut warnings,
         &mut appearances,
+        &mut meshes,
     )?;
     if let Some(height) = simulation.and_then(|s| s.ground) {
         physics::author_ground(&mut layer, height);
@@ -655,6 +679,7 @@ fn export_stage(
     Ok(ExportedAnimation {
         data: layer.finish(),
         assets,
+        generated: meshes.generated,
         warnings,
     })
 }
@@ -2021,6 +2046,7 @@ fn robot_asset_copies(
 
 // -------------------------------------------------- URDF robot (authored)
 
+#[allow(clippy::too_many_arguments)]
 fn author_urdf_robot(
     layer: &mut LayerBuilder,
     robot: &RobotAnimation,
@@ -2029,6 +2055,7 @@ fn author_urdf_robot(
     articulation: Option<physics::Rooted>,
     warnings: &mut Vec<String>,
     appearances: &mut visual::VisualAssets,
+    meshes: &mut meshes::MeshLayers,
 ) -> Result<(String, Isometry3<f64>), UsdExportError> {
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     let mut used = HashMap::new();
@@ -2056,7 +2083,14 @@ fn author_urdf_robot(
                     None,
                 )?;
             } else {
-                author_shape(layer, &shape_prim, shape, warnings)?;
+                // The mesh layer is named after the link (and the visual's
+                // index past the first), so the assets directory reads.
+                let hint = if vi == 0 {
+                    name.clone()
+                } else {
+                    format!("{name}_v{vi}")
+                };
+                author_shape(layer, &shape_prim, shape, &hint, meshes, warnings)?;
             }
         }
     }
@@ -2068,6 +2102,7 @@ fn author_urdf_robot(
             robot_prim,
             &link_prims,
             &mut used,
+            meshes,
             warnings,
         )?;
     }
@@ -2080,6 +2115,8 @@ fn author_shape(
     layer: &mut LayerBuilder,
     prim: &str,
     shape: &Shape,
+    hint: &str,
+    meshes: &mut meshes::MeshLayers,
     warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
     author_geometry(
@@ -2088,6 +2125,8 @@ fn author_shape(
         &shape.geometry,
         &XformValue::Static(shape.origin),
         shape.color,
+        hint,
+        meshes,
         warnings,
     )
 }
@@ -2096,12 +2135,17 @@ fn author_shape(
 const ENV_COLOR: [f32; 3] = [0.604, 0.639, 0.698];
 
 /// Authors a geometry prim (with display color) whose transform is `pose`.
+/// A mesh goes through `meshes` — written once and referenced, or inline
+/// — under the name `hint`.
+#[allow(clippy::too_many_arguments)]
 fn author_geometry(
     layer: &mut LayerBuilder,
     prim: &str,
     geometry: &Geometry,
     pose: &XformValue,
     color: Option<[f32; 3]>,
+    hint: &str,
+    meshes: &mut meshes::MeshLayers,
     _warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
     let extent = |half: [f64; 3]| {
@@ -2167,91 +2211,7 @@ fn author_geometry(
             layer.xform(prim, pose, None);
         }
         Geometry::Mesh { path, scale } => {
-            let data = botrail_mesh::load_path(path).map_err(|e| UsdExportError::Mesh {
-                path: path.display().to_string(),
-                message: e.to_string(),
-            })?;
-            let points: Vec<gf::Vec3f> = data
-                .vertices
-                .iter()
-                .map(|v| {
-                    gf::vec3f(
-                        (v[0] * scale.x) as f32,
-                        (v[1] * scale.y) as f32,
-                        (v[2] * scale.z) as f32,
-                    )
-                })
-                .collect();
-            let (mut min, mut max) = ([f32::MAX; 3], [f32::MIN; 3]);
-            for p in &points {
-                for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
-                    min[k] = min[k].min(v);
-                    max[k] = max[k].max(v);
-                }
-            }
-            let indices: Vec<i32> = data
-                .indices
-                .iter()
-                .flat_map(|t| t.iter().map(|&i| i as i32))
-                .collect();
-            let counts = vec![3i32; data.indices.len()];
-            layer.ensure_prim(prim, Specifier::Def, Some("Mesh"));
-            layer.attr(
-                prim,
-                "points",
-                "point3f[]",
-                AttrValue::Default(Value::Vec3fVec(points)),
-            );
-            layer.attr(
-                prim,
-                "faceVertexCounts",
-                "int[]",
-                AttrValue::Default(Value::IntVec(counts)),
-            );
-            layer.attr(
-                prim,
-                "faceVertexIndices",
-                "int[]",
-                AttrValue::Default(Value::IntVec(indices)),
-            );
-            layer.attr(
-                prim,
-                "extent",
-                "float3[]",
-                AttrValue::Default(Value::Vec3fVec(vec![
-                    gf::vec3f(min[0], min[1], min[2]),
-                    gf::vec3f(max[0], max[1], max[2]),
-                ])),
-            );
-            layer.attr(
-                prim,
-                "subdivisionScheme",
-                "token",
-                AttrValue::Uniform(Value::Token(tf::Token::from("none"))),
-            );
-            layer.xform(prim, pose, None);
-        }
-    }
-    // A mesh that carried its own materials paints per face — that is the
-    // manufacturer's own coloring, and one flat color over the top would
-    // throw it away. An explicit `color` still wins: it is a choice the
-    // scene made (authored scenery, a highlight), which the mesh cannot
-    // know about.
-    if color.is_none() {
-        if let Geometry::Mesh { path, .. } = geometry {
-            if let Some(colors) = mesh_face_colors(path) {
-                // One color per face: `uniform` is metadata on the primvar,
-                // not a sibling property — without it a reader takes the
-                // array as `constant` and the whole mesh goes one color.
-                layer.attr_meta(
-                    prim,
-                    "primvars:displayColor",
-                    "color3f[]",
-                    AttrValue::Default(Value::Vec3fVec(colors)),
-                    &[("interpolation", Value::Token(tf::Token::from("uniform")))],
-                );
-                return Ok(());
-            }
+            return meshes.author(layer, prim, hint, path, scale, pose, color);
         }
     }
     let [r, g, b] = color.unwrap_or(ENV_COLOR);
@@ -2262,22 +2222,6 @@ fn author_geometry(
         AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(r, g, b)])),
     );
     Ok(())
-}
-
-/// Per-face diffuse of a mesh file, when it carried materials. Re-reads the
-/// file rather than threading colors through every caller; loads are
-/// cached upstream and this runs once per authored prim.
-fn mesh_face_colors(path: &std::path::Path) -> Option<Vec<gf::Vec3f>> {
-    let data = botrail_mesh::load_path(path).ok()?;
-    if data.face_colors.is_empty() {
-        return None;
-    }
-    Some(
-        data.face_colors
-            .iter()
-            .map(|c| gf::vec3f(c[0], c[1], c[2]))
-            .collect(),
-    )
 }
 
 fn unique_child(used: &mut HashMap<String, usize>, name: &str) -> String {
@@ -2482,6 +2426,7 @@ fn author_objects(
     codes: &[f64],
     warnings: &mut Vec<String>,
     appearances: &mut visual::VisualAssets,
+    meshes: &mut meshes::MeshLayers,
 ) -> Result<(), UsdExportError> {
     let units = simulation.map_or(&[][..], |s| s.units);
     if objects.is_empty() && units.is_empty() {
@@ -2570,10 +2515,20 @@ fn author_objects(
         } else {
             relative_track(frame, &obj.track)
         });
+        let hint = obj.name.rsplit('/').next().unwrap_or(&obj.name);
         if let Some(source) = &obj.visual_asset {
             appearances.author(layer, prim, source, &pose, obj.color, obj.material)?;
         } else {
-            author_geometry(layer, prim, &obj.geometry, &pose, obj.color, warnings)?;
+            author_geometry(
+                layer,
+                prim,
+                &obj.geometry,
+                &pose,
+                obj.color,
+                hint,
+                meshes,
+                warnings,
+            )?;
             if let Some(finish) = obj.material {
                 author_surface(layer, prim, finish);
             }
@@ -2619,7 +2574,16 @@ fn author_objects(
                 } else {
                     relative_track(frame, &obj.track)
                 });
-                author_geometry(layer, collider, &obj.geometry, &pose, None, warnings)?;
+                author_geometry(
+                    layer,
+                    collider,
+                    &obj.geometry,
+                    &pose,
+                    None,
+                    &format!("{hint}_collider"),
+                    meshes,
+                    warnings,
+                )?;
                 physics::guide_purpose(layer, collider);
                 author_object_physics(layer, own, collider, phys, in_dynamic_body, &mut materials);
             }
@@ -2668,11 +2632,13 @@ fn author_surface(
     );
     layer.attr(&shader, "outputs:surface", "token", AttrValue::Declaration);
     layer.attr(&reader, "outputs:result", "float3", AttrValue::Declaration);
+    // `string`, as UsdPrimvarReader declares it: a `token` here fails
+    // pxr's shader-property validation.
     layer.attr(
         &reader,
         "inputs:varname",
-        "token",
-        AttrValue::Default(Value::Token("displayColor".into())),
+        "string",
+        AttrValue::Default(Value::String("displayColor".into())),
     );
     layer.attr(
         &reader,
@@ -3343,20 +3309,20 @@ mod tests {
             link_poses: &[vec![Isometry3::identity()]],
             joint_samples: None,
         }];
-        let out = dir.join("anim.usda");
-        write_animation(
-            &out,
-            &AnimationInput {
-                robots: &robots,
-                times: &[0.0],
-                objects: &[],
-                curves: &[],
-                cameras: &[],
-            },
-            &ExportOptions::default(),
-        )
-        .unwrap();
-
+        let input = AnimationInput {
+            robots: &robots,
+            times: &[0.0],
+            objects: &[],
+            curves: &[],
+            cameras: &[],
+        };
+        // Inline, the per-face colours are on the prim, uniform.
+        let out = dir.join("inline/anim.usda");
+        let inline = ExportOptions {
+            fps: 60.0,
+            mesh_layers: false,
+        };
+        write_animation(&out, &input, &inline).unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         let color = text
             .lines()
@@ -3368,6 +3334,27 @@ mod tests {
             text.contains(r#"interpolation = "uniform""#),
             "per-face colors need uniform interpolation"
         );
+        // Referenced, they ride in the mesh layer and compose onto the prim
+        // — nothing flat is painted over them.
+        let out = dir.join("anim.usda");
+        write_animation(&out, &input, &ExportOptions::default()).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(!text.contains("primvars:displayColor"), "{text}");
+        let stage = Stage::builder()
+            .resolver(SearchPathResolver::new(vec![dir.clone()]))
+            .open(&out.display().to_string())
+            .unwrap();
+        let colors: Vec<gf::Vec3f> = stage
+            .prim("/World/Robot/base_link/Visual_0")
+            .attribute("primvars:displayColor")
+            .get()
+            .unwrap()
+            .expect("composed per-face colours");
+        assert!(colors.len() > 1, "{colors:?}");
+        assert!(colors
+            .iter()
+            .any(|c| (c.x - 1.0).abs() < 1e-6 && (c.z).abs() < 1e-6));
+        assert!(colors.iter().any(|c| (c.x - 0.5).abs() < 1e-6));
     }
 
     fn scenery(name: &str, size: [f64; 3], at: [f64; 3], collides: bool) -> ObjectSpec {
@@ -4473,6 +4460,110 @@ mod tests {
         }
     }
 
+    /// One mesh file drawn by two objects is one binary layer beside the
+    /// animation, named after the first prim that drew it and referenced
+    /// from both — each in its own colour; a different scale is another
+    /// layer. Asked for inline, the triangles land in the layer itself
+    /// and nothing is written beside it.
+    #[test]
+    fn meshes_are_written_once_and_referenced_or_inlined_on_request() {
+        let dir = temp_dir("meshlayers");
+        let stl = dir.join("part.stl");
+        std::fs::write(
+            &stl,
+            botrail_mesh::to_stl_binary(&botrail_mesh::box_mesh([0.1, 0.2, 0.3])),
+        )
+        .unwrap();
+        let object = |name: &str, x: f64, scale: f64, color: Option<[f32; 3]>| ObjectSpec {
+            material: None,
+            visual_asset: None,
+            name: name.into(),
+            geometry: Geometry::Mesh {
+                path: stl.clone(),
+                scale: Vector3::new(scale, scale, scale),
+            },
+            track: PoseTrack::Static(Isometry3::translation(x, 0.0, 0.15)),
+            color,
+            visible: Vec::new(),
+            physics: None,
+        };
+        let objects = vec![
+            object("crate_a", 0.0, 1.0, Some([0.8, 0.2, 0.1])),
+            object("crate_b", 1.0, 1.0, None),
+            object("crate_c", 2.0, 2.0, None),
+        ];
+        let times = [0.0];
+        let input = AnimationInput {
+            robots: &[],
+            times: &times,
+            objects: &objects,
+            curves: &[],
+            cameras: &[],
+        };
+        let warnings =
+            write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut layers: Vec<String> = std::fs::read_dir(dir.join("cell_assets/meshes"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        layers.sort();
+        assert_eq!(layers, vec!["crate_a.usdc", "crate_c.usdc"]);
+        let head = std::fs::read(dir.join("cell_assets/meshes/crate_a.usdc")).unwrap();
+        assert!(head.starts_with(b"PXR-USDC") && head[8..11] == CRATE_VERSION);
+        let text = std::fs::read_to_string(dir.join("cell.usda")).unwrap();
+        assert_eq!(text.matches("./cell_assets/meshes/crate_a.usdc").count(), 2);
+        assert_eq!(text.matches("./cell_assets/meshes/crate_c.usdc").count(), 1);
+        assert!(
+            !text.contains("faceVertexIndices"),
+            "meshes are referenced, not inline"
+        );
+
+        // Composed, every prim draws the triangles, in its own colour.
+        let stage = Stage::builder()
+            .resolver(SearchPathResolver::new(vec![dir.clone()]))
+            .open(&dir.join("cell.usda").display().to_string())
+            .unwrap();
+        for (prim, expect, extent) in [
+            ("/World/Env/crate_a", [0.8, 0.2, 0.1], 0.05),
+            ("/World/Env/crate_b", ENV_COLOR, 0.05),
+            ("/World/Env/crate_c", ENV_COLOR, 0.1),
+        ] {
+            let points: Vec<gf::Vec3f> = stage
+                .prim(prim)
+                .attribute("points")
+                .get()
+                .unwrap()
+                .expect("referenced points");
+            assert!(!points.is_empty(), "{prim}");
+            let far = points.iter().map(|p| p.x.abs()).fold(0.0f32, f32::max);
+            assert!((far - extent).abs() < 1e-6, "{prim}: {far}");
+            let color: Vec<gf::Vec3f> = stage
+                .prim(prim)
+                .attribute("primvars:displayColor")
+                .get()
+                .unwrap()
+                .expect("displayColor");
+            assert!(
+                (color[0].x - expect[0]).abs() < 1e-6,
+                "{prim}: {:?}",
+                color[0]
+            );
+        }
+
+        // Inline on request: the triangles in the layer, nothing beside it.
+        let inline = dir.join("inline/cell.usda");
+        let options = ExportOptions {
+            fps: 60.0,
+            mesh_layers: false,
+        };
+        write_animation(&inline, &input, &options).unwrap();
+        let text = std::fs::read_to_string(&inline).unwrap();
+        assert_eq!(text.matches("faceVertexIndices").count(), 3);
+        assert!(!dir.join("inline/cell_assets").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn urdf_export_is_self_contained() {
         let dir = temp_dir("urdf");
@@ -4570,8 +4661,10 @@ mod tests {
         let bare = block("def Cylinder \"Visual_1\"");
         assert!(bare.contains("primvars:displayColor"), "{bare}");
         assert!(!bare.contains("(0.25, 0.5, 0.75)"), "{bare}");
-        // Self-contained: no referenced assets.
-        assert!(!dir.join("anim_assets").exists());
+        // Nothing copied from a robot stage: the only siblings are the mesh
+        // layers the export writes itself.
+        assert!(!dir.join("anim_assets/robot").exists());
+        assert!(dir.join("anim_assets/meshes/tip.usdc").exists());
 
         let stage = Stage::builder()
             .resolver(SearchPathResolver::new(vec![dir.clone()]))
@@ -4642,9 +4735,15 @@ mod tests {
             fallback[0]
         );
 
-        // The mesh visual made it through with its triangles.
+        // The mesh visual made it through with its triangles — in its own
+        // layer beside the animation, referenced from the link.
         let usda = std::fs::read_to_string(dir.join("anim.usda")).unwrap();
-        assert!(usda.contains("faceVertexIndices"));
+        assert!(
+            !usda.contains("faceVertexIndices"),
+            "meshes are referenced, not inline"
+        );
+        assert!(usda.contains("./anim_assets/meshes/tip.usdc"));
+        assert!(dir.join("anim_assets/meshes/tip.usdc").exists());
         assert!(usda.contains("timeSamples"));
         assert!(usda.contains("upAxis = \"Z\""));
         let _ = std::fs::remove_dir_all(&dir);

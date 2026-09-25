@@ -450,6 +450,78 @@ mod tests {
         assert_eq!((d.max_force, d.mass_floor), (Some(5.0), DEFAULT_MASS_FLOOR));
     }
 
+    /// The world's tail: a part still falling when the program ends lands
+    /// and comes to rest before the bake does, the cap — the programs'
+    /// time — not cutting it; without a tail the bake ends mid-flight;
+    /// and a program still waiting at the cap times out, tail or not.
+    #[test]
+    fn a_settle_tail_runs_the_world_to_rest_after_the_programs_end() {
+        let drop = |wait: f64| {
+            let mut scene = Scene::empty();
+            scene
+                .add_obstacle(
+                    "part",
+                    Geometry::Box {
+                        size: Vector3::new(0.1, 0.1, 0.1),
+                    },
+                    Isometry3::translation(0.0, 0.0, 0.55),
+                )
+                .unwrap();
+            scene
+                .set_obstacle_physics(
+                    "part",
+                    Some(botrail_physics::BodyProps {
+                        mass: Some(0.5),
+                        ..botrail_physics::BodyProps::dynamic()
+                    }),
+                )
+                .unwrap();
+            scene.upsert_sequence(Sequence {
+                name: "drop".into(),
+                steps: vec![step("wait", vec![], Condition::Elapsed { seconds: wait })],
+            });
+            scene
+        };
+        let options = |settle: f64| RolloutOptions {
+            max_duration: 0.2,
+            physics: Some(crate::rollout::PhysicsOptions {
+                settle,
+                ..crate::rollout::PhysicsOptions::world()
+            }),
+            ..Default::default()
+        };
+        let cut = drop(0.1)
+            .simulate_sequences_with(&["drop"], &options(0.0), rapier())
+            .unwrap();
+        assert!((cut.duration - 0.1).abs() < 1e-6, "{}", cut.duration);
+        let at = |tl: &crate::rollout::SequenceTimeline, t: f64| {
+            let track = tl.objects.iter().find(|o| o.name == "part").unwrap();
+            crate::rollout::SequenceTimeline::object_pose(track, &[], t)
+                .unwrap()
+                .translation
+                .z
+        };
+        let mid = at(&cut, cut.duration);
+        assert!(mid > 0.45, "still falling at the program's end: {mid}");
+
+        let tailed = drop(0.1)
+            .simulate_sequences_with(&["drop"], &options(3.0), rapier())
+            .unwrap();
+        assert!(
+            tailed.duration > 0.4 && tailed.duration < 3.1,
+            "landed and rested within the tail: {}",
+            tailed.duration
+        );
+        let end = at(&tailed, tailed.duration);
+        assert!((end - 0.05).abs() < 0.01, "at rest on the ground: {end}");
+
+        let stalled = drop(60.0).simulate_sequences_with(&["drop"], &options(3.0), rapier());
+        assert!(
+            matches!(stalled, Err(crate::rollout::SeqError::Timeout { .. })),
+            "{stalled:?}"
+        );
+    }
+
     #[test]
     fn a_dynamic_arm_holds_ready_under_gravity_and_bakes_per_tick() {
         let scene = arm(true);
@@ -597,6 +669,69 @@ mod tests {
             .to_string();
         assert!(err.contains("not dynamic"), "{err}");
         assert!(plain.gravity_torques(0).is_none());
+    }
+
+    /// The world scope powers a robot a program drives; an external drive
+    /// is a driver too (design-rl-tabletop.md G12). The arm a `hold`
+    /// program leaves alone is unpowered and folds — unless a driver
+    /// takes it: its servos switch on where it stands, and it holds; taken
+    /// after it fell, it holds where it fell (no snap back to the
+    /// authored pose).
+    #[test]
+    fn an_external_drive_powers_an_unpowered_arm_under_the_world_scope() {
+        use crate::rollout::PhysicsOptions;
+        let scene = arm(true);
+        let options = RolloutOptions {
+            physics: Some(PhysicsOptions::world()),
+            ..Default::default()
+        };
+        let mut idle = scene.open_rollout(&["hold"], &options, rapier()).unwrap();
+        for _ in 0..150 {
+            idle.tick().unwrap();
+        }
+        let fallen = idle.joint_positions(0).unwrap().to_vec();
+        let drop = (fallen[1] - READY[1]).abs();
+        assert!(
+            drop > 0.1,
+            "an unpowered shoulder should fold, moved {drop:.3}"
+        );
+
+        let mut live = scene.open_rollout(&["hold"], &options, rapier()).unwrap();
+        live.drive(0, None, None).unwrap();
+        live.command(0, &READY).unwrap();
+        for _ in 0..150 {
+            live.tick().unwrap();
+        }
+        let q = live.joint_positions(0).unwrap().to_vec();
+        let err = q
+            .iter()
+            .zip(READY.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            err < 0.02,
+            "the driven arm drifted {err:.4} rad from READY: {q:?}"
+        );
+
+        let mut late = scene.open_rollout(&["hold"], &options, rapier()).unwrap();
+        for _ in 0..150 {
+            late.tick().unwrap();
+        }
+        let before = late.joint_positions(0).unwrap().to_vec();
+        late.drive(0, None, None).unwrap();
+        for _ in 0..30 {
+            late.tick().unwrap();
+        }
+        let after = late.joint_positions(0).unwrap().to_vec();
+        let moved = after
+            .iter()
+            .zip(before.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            moved < 0.05,
+            "a late drive should hold where the arm fell, moved {moved:.3}"
+        );
     }
 
     /// The gravity-torque read-out is exact against the engine: applied

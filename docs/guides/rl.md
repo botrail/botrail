@@ -57,6 +57,13 @@ An episode truncates at `horizon_s` or when every sequence has run to its
 end; the last one closes into a timeline (`env.timeline()`) that plays in
 the studio and exports as USD like any bake.
 
+`Task.settle_s` runs the world for that long after each reset, with the
+drive holding the robot where it stands and no action taken, before the
+first observation: what the randomisation set down comes to rest (a
+part dropped onto a table, a pool of things tipped into a bin) instead
+of being observed mid-fall. The episode's `horizon_s` counts from that
+first observation; `info["t"]` is the rollout's clock, settling included.
+
 `rl.make(..., num_envs=N)` returns a vectorised environment: `N` worlds
 stepped together in Rust with the GIL released, one thread each. A single
 environment and a world of the vector are **bit-identical** under the same
@@ -152,8 +159,126 @@ task = rl.Task(..., render=render)
 `shadows` fits an orthographic shadow map to what the picture shows and
 costs about a second picture; `decimate` clusters a dense CAD mesh's
 vertices into cells of that size — a policy reading 64 pixels a side does
-not miss the detail. `scene.set_camera_pose(name, position, quaternion)`
-in `reset` jitters a world camera; a wrist camera rides its link.
+not miss the detail. Left unsaid, a task with a picture channel decimates
+to half a pixel's footprint at one metre of its finest picture
+(`tan(fov/2) / width`, about 1 cm for 64 pixels over 70°): a catalogue
+arm's CAD-dense visual meshes otherwise cost a 64-pixel depth picture ten
+times the state observation. `render={"decimate": None}` keeps every
+triangle. `scene.set_camera_pose(name, position, quaternion)` in `reset`
+jitters a world camera; a wrist camera rides its link.
+
+`rl.randomize` holds the draws a tabletop cell makes every episode, over
+the same setters, on one prefix of a tiled scene or none:
+
+```python
+TOP = 0.75                                     # the table's top face
+
+def randomize(scene, rng, prefix="", origin=(0.0, 0.0)):
+    ox, oy = origin
+    drawn = rl.randomize.pool(scene, rng, OTHERS, 4, prefix=prefix)       # 4 of the pool join the can, the rest parked
+    region = ((ox + 0.24, ox + 0.52), (oy - 0.28, oy + 0.28))
+    rl.randomize.scatter(scene, rng, ["can", *drawn], region, TOP, prefix=prefix)   # footprints 2 cm apart
+    rl.randomize.friction(scene, rng, THINGS, 0.4, 0.9, prefix=prefix)
+```
+
+`pool` draws `k` of a pool of things and parks the rest — disabled,
+hidden, out of the physics and the pictures until a later draw brings
+them back (Isaac Lab's `MultiAssetSpawnerCfg(random_choice=True)`, on a
+cell whose residents are all built once); given spots and the face they
+are on, it also sets the drawn things down on them. `scatter` sets things
+down in a region with their footprints kept `gap` apart, biggest first,
+starting over when a layout boxes the next thing in — so the physics
+plan's overlap audit stays empty. Both read each thing's footprint and
+underside off its bounds, not its origin: a primitive and a scanned
+object whose frame sits anywhere are set down alike. `friction` draws a
+coefficient per thing.
+
+## A cell, tiled
+
+The picture of an environment being learned — a grid of copies of one
+cell, a policy running in every one — is the same cell written once as
+a function of a scene, a name prefix and an origin:
+
+```python
+def cell(scene: bt.Scene, prefix: str, origin: tuple[float, float]) -> str:
+    ox, oy = origin
+    bt.parts.table(scene, prefix + "table", size=(0.9, 0.7, 0.75), position=(ox + 0.55, oy))
+    bt.parts.table(scene, prefix + "stand", size=(0.6, 0.5, 0.75), position=(ox - 0.2, oy))
+    name = scene.add_robot(ROBOT, name=prefix.replace("/", "_") + "fr3", base_position=(ox - 0.2, oy, 0.752))
+    scene.set_robot_physics(name)
+    scene.add_box(prefix + "can", size=(0.06, 0.06, 0.1), position=(ox + 0.5, oy, 0.802))
+    scene.set_physics(prefix + "can", dynamic=True, mass=0.35)
+    return name
+
+env = rl.make(rl.single(cell), task, num_envs=16)       # learning: 16 independent worlds
+tiled = rl.tile(cell, rows=2, cols=3, spacing=(1.9, 1.6))   # watching: six copies in one scene
+tiled.randomize(randomize, seed=0)                       # the same draws, per copy
+timeline = rl.play(tiled, task, model, duration_s=6.0)  # the policy in every copy at once
+timeline.export_usd("tabletop.usda")
+```
+
+`single(cell)` is a `build` for `make`: the cell at the origin with no
+prefix, on a floor slab, under a wait program. `tile` lays copies out on
+a grid, each named `c{i}/` with the robot the cell returned, and `play`
+opens the grid's rollout, binds the task's control to every robot,
+relocates the task's channels into every copy (`ObjectPose("can")` reads
+`c3/can` in copy 3, `Contacts("fr3/finger", "can")` that copy's finger)
+and asks the model for each copy's action every control period until
+`duration_s`, the task's `done` in every copy, or the programs' end. The
+grid is one physical world on one thread — for learning, `make(...,
+num_envs=N)` steps `N` worlds in parallel; for the picture and the USD,
+the grid — and the grid's USD is a few megabytes, not six times one
+cell's: every mesh is written once beside the layer and referenced
+([export](export.md)). The robot's base goes a couple of millimetres above the face
+it stands on: seated exactly on it, the base link and the top touch at
+zero distance and every scan flags a collision. `examples/rl/tabletop_env.py`
+is the whole of it — a Franka on a stand with a tread-plate top, a timber
+work table, a KLT (`bt.parts.bin`, the catalog's `botrail/bin/klt-vda4500`
+in the real-object cell: five boxes pinned as one part, so the world scope
+keeps them one rigid unit), a tray, a pool of things drawn every
+episode — with `--tile 2x3`.
+
+### Real objects on the table
+
+The pool is the YCB Object and Model Set (CC BY 4.0) from the catalog:
+the scanned, textured models under `ycb/objects/*` — a tomato soup can, a
+mustard bottle, a cracker box, a mug, fruit, clamps, 30 of them — at the
+masses the set measured. `bt.parts.prop` places one as a single dynamic
+obstacle:
+
+```python
+bt.parts.prop(scene, prefix + "can", (ox + 0.3, oy, 0.752), catalog="ycb/objects/005-tomato-soup-can")
+```
+
+It is drawn with its texture and collides as the convex decomposition of
+the scan; the catalog package has moved the scan's origin to the middle
+of its footprint on its underside, so the can's observed pose
+(`ObjectPose("can")`) is the middle of the can on the table. The colour
+pictures draw it flat in the pack's mean albedo (`specs.albedo_rgb`) —
+the texture is the studio's. A package is 8–18 MB (the 4096² scan
+texture is kept as the source; what botrail draws carries a 1024² copy),
+downloaded once; `--shapes` builds the cell from primitives of the same
+sizes and masses instead.
+
+### The cell in Isaac Lab
+
+The same cell goes to Isaac Lab as a simulation stage
+([export](export.md#usd-for-a-physics-engine-isaac-sim-isaac-lab)):
+`examples/export/isaaclab_tabletop.py export` writes it with
+`scene.export_usd(path, physics=bt.Physics(world=True))` — the arm an
+articulation with the servo botrail authored (limits, drive gains and force
+caps, the hand's mimic finger, the exported joint positions), every thing
+on the table and the KLT rigid bodies at their masses and friction, the
+bench and the stand static colliders, every mesh once beside the layer —
+and `... run --headless --num_envs 16` opens it in Isaac Lab, clones it
+with `env_spacing` and steps it on the GPU (checked on Isaac Lab 2.3 /
+Isaac Sim 5.1: the arm starts in its exported pose and follows joint
+targets, the hand closes with its follower, the things settle where they
+were set down, sixteen environments agree). What crosses over is the
+cell; the task — observation, reward, termination, the episode's
+randomisation — is stated again on the other side in Isaac Lab's own
+environment configuration, and the pictures are the engines' own (the
+finishes are the studio's, the scans' textures ride with the catalog).
 
 ## The policy back in the cell
 
@@ -206,6 +331,16 @@ along a prismatic one, added to its mass), which also keeps a light wrist
 from drooping under the engine's impulse-solved motor. The base assembly
 stays on its stand or vehicle. Without a physics backend the declaration
 is inert, and a robot never declared is unchanged to the bit.
+
+`Task.physics` takes the bake's argument: `True` is the declared scope
+(the parts and robots declared physical, the rest kinematic scenery),
+`bt.Physics(world=True)` the whole cell under physics with a ground
+plane (see [physics](physics.md)) — in a `VecEnv` as in a single one.
+Under the world scope a robot no program drives is unpowered and folds;
+the environment's drive is a driver, so the task robot's servos switch
+on when the episode opens (where the arm stands, fallen or not). Other
+machines in the cell stay unpowered unless `bt.Physics(world=True,
+powered=True)` powers them all.
 
 The position controls (`JointDelta`, `JointTarget`, `TcpDelta`) work on a
 dynamic robot as they do on a kinematic one — the drive rate-limits the
@@ -272,6 +407,15 @@ Measured on one machine, 32 worlds, a six-axis arm with a dynamic part,
 | + 64 × 64 RGB with shadows | 5 k |
 | dynamic robot, `TcpDelta` | 8 k |
 | dynamic robot, `Torque` | 7 k |
+
+The tabletop cell of `examples/rl/tabletop_env.py` — a catalogue FR3
+with its hand, eight dynamic things, 16 worlds on the same machine —
+runs at about 2.2 k env-steps a second under position control and
+3.3 k under torque control, 2.6 k with the arm kinematic: the mirrored
+links and the things' contacts are the cost, the servos a sixth of it.
+With the YCB scans instead of primitives (convex decompositions touching
+each other and the table) the joint-step control runs at about 2.9 k
+against 5.2 k for the primitives.
 
 The rasteriser is CPU code — no GPU, nothing to install, deterministic —
 and it is the right tool up to a few hundred pixels a side. Photoreal

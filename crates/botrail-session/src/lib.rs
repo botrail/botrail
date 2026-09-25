@@ -1262,7 +1262,10 @@ pub fn upsert_cameras(
 /// A `Camera` prim imported from a stage as a world fixture: named like
 /// the stage's other prims, drawn with the studio's generic housing (the
 /// prim has no geometry of its own to mark where it stands).
-pub fn stage_camera(name: String, imported: &botrail_usd::ImportedCamera) -> botrail_scene::seq::Camera {
+pub fn stage_camera(
+    name: String,
+    imported: &botrail_usd::ImportedCamera,
+) -> botrail_scene::seq::Camera {
     botrail_scene::seq::Camera {
         name,
         body_visible: true,
@@ -1535,6 +1538,9 @@ pub fn run_bake_stream(
     steer: &dyn Fn(&mut botrail_scene::rollout::LiveRollout),
 ) -> Result<SequenceTimeline, String> {
     let debug = std::env::var("BT_PHYS_DEBUG").is_ok();
+    // For a stream with no program — the world under gravity — this is
+    // the world's time, not a program's cap: the seconds the client asked
+    // for, or forever (`+inf`, the studio's toggle) until it stops it.
     let cap = options.max_duration;
     let opened_at = host.now_ms();
     let mut live = if names.is_empty() {
@@ -1805,7 +1811,12 @@ fn export_usd_document(host: &impl SessionHost, fps: f64) -> ServerMessage {
         stem.push('_');
         stem.push_str(scenario);
     }
-    let exported = match usd::bake_timeline(&scene, &timeline, fps, None, None, &stem) {
+    // One file, no siblings: the meshes go inline for the download.
+    let options = botrail_usd::export::ExportOptions {
+        fps,
+        mesh_layers: false,
+    };
+    let exported = match usd::bake_timeline(&scene, &timeline, &options, None, None, &stem) {
         Ok(exported) => exported,
         Err(e) => return refused(e),
     };
@@ -2751,6 +2762,40 @@ mod tests {
         assert!(!ok);
         assert_eq!(label, "wait");
         handle_client_message(&plain, r#"{"type":"stop_bake"}"#);
+    }
+
+    /// A stream with no program — the world under gravity — asked for
+    /// with no time at all runs until the client stops it: there is no
+    /// program to time out.
+    #[test]
+    fn a_physics_stream_with_no_program_and_no_time_runs_until_stopped() {
+        let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+        let scene = host.0.scene.borrow().clone();
+        let (backend, physics) = host.physics().unwrap();
+        let options = botrail_scene::rollout::RolloutOptions {
+            max_duration: f64::INFINITY,
+            physics: Some(physics),
+            ..Default::default()
+        };
+        let polls = std::cell::Cell::new(0usize);
+        let timeline = run_bake_stream(
+            &host,
+            &scene,
+            &[],
+            None,
+            &options,
+            Some(backend),
+            &|| {
+                polls.set(polls.get() + 1);
+                polls.get() > 4
+            },
+            &|_| {},
+            false,
+            &|_| {},
+        )
+        .unwrap();
+        // Four chunks of a quarter second: stopped, not timed out.
+        assert!(timeline.duration > 0.6, "{}", timeline.duration);
     }
 
     /// A program streams too: its step band grows with the clock, the

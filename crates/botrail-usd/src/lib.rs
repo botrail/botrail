@@ -459,8 +459,12 @@ impl Importer<'_> {
             // level camera in a Y-up stage stays level in Z-up), not the
             // frame relabeling.
             let mut notes = Vec::new();
-            match camera::read_camera_optics(self.stage, view.prim(), self.meters_per_unit, &mut notes)
-            {
+            match camera::read_camera_optics(
+                self.stage,
+                view.prim(),
+                self.meters_per_unit,
+                &mut notes,
+            ) {
                 Ok(Some(optics)) => self.out.cameras.push(ImportedCamera {
                     name: path.clone(),
                     pose: self.normalized_pose(&world).0,
@@ -1401,8 +1405,16 @@ def Xform "W" {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(scene.cameras.len(), 2, "{:?}", scene.warnings);
-        let overview = scene.cameras.iter().find(|c| c.name == "/W/Overview").unwrap();
-        assert!((overview.optics.fov_deg - 60.0).abs() < 1e-3, "{}", overview.optics.fov_deg);
+        let overview = scene
+            .cameras
+            .iter()
+            .find(|c| c.name == "/W/Overview")
+            .unwrap();
+        assert!(
+            (overview.optics.fov_deg - 60.0).abs() < 1e-3,
+            "{}",
+            overview.optics.fov_deg
+        );
         assert_eq!(overview.optics.resolution, [1920, 1080]);
         assert!((overview.optics.near - 0.05).abs() < 1e-9);
         assert!((overview.optics.far - 30.0).abs() < 1e-9);
@@ -1421,11 +1433,21 @@ def Xform "W" {
         // count from the default width and the aperture aspect; the
         // Omniverse clip range clamped to what a cell can use.
         let far = scene.cameras.iter().find(|c| c.name == "/W/Far").unwrap();
-        assert!((far.optics.fov_deg - 23.670).abs() < 1e-2, "{}", far.optics.fov_deg);
+        assert!(
+            (far.optics.fov_deg - 23.670).abs() < 1e-2,
+            "{}",
+            far.optics.fov_deg
+        );
         assert_eq!(far.optics.resolution, [DEFAULT_WIDTH, 934]);
         assert!((far.optics.near - MIN_NEAR).abs() < 1e-12);
         assert!((far.optics.far - MAX_FAR).abs() < 1e-12);
-        assert!(scene.warnings.iter().any(|w| w.contains("/W/Far") && w.contains("capped")));
-        assert!(scene.warnings.iter().any(|w| w.contains("/W/Ortho") && w.contains("orthographic")));
+        assert!(scene
+            .warnings
+            .iter()
+            .any(|w| w.contains("/W/Far") && w.contains("capped")));
+        assert!(scene
+            .warnings
+            .iter()
+            .any(|w| w.contains("/W/Ortho") && w.contains("orthographic")));
     }
 }

@@ -71,7 +71,17 @@ scene.set_obstacle_material("cabinet", metalness=0.0, roughness=0.55)  # paint
 scene.set_obstacle_material("window", metalness=0.0, roughness=0.16, opacity=0.24)
 scene.set_obstacle_material("panel")                  # back to the viewer's choice
 scene.obstacle_material("panel")                      # (metalness, roughness) | None
+scene.set_obstacle_material("top", finish="wood")     # a pattern over the colour
+scene.obstacle_finish("top")                          # "wood" | "checker_plate" | "plastic" | None
 ```
+
+`finish` names a pattern the studio draws over the colour — timber grain
+along a board's length, the raised bars of tread plate, the pebble of a
+moulded bin — tiled at its real pitch on any box, cylinder or sphere. On its
+own it also sets the two knobs the pattern reads as (tread plate is bright
+metal); a knob you give wins. It is presentation only: the pictures a
+rollout renders and a USD export carry the colour and the knobs and never
+the pattern.
 
 `opacity` (0 transparent … 1 opaque) makes a window or a guard pane
 see-through; it is appearance only — collision and sensors see the solid —

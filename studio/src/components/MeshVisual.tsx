@@ -11,6 +11,7 @@ export function MeshVisual({
   geometry,
   color,
   forceColor = false,
+  keepTextures = false,
   material,
   roughness = 0.85,
   opacity = 1,
@@ -23,6 +24,9 @@ export function MeshVisual({
    * carries meaning the mesh cannot — a collision highlight, or a color
    * the scene author chose. */
   forceColor?: boolean;
+  /** Under `forceColor`, leave a textured material's texture its own colour
+   * (see `MeshAppearance.keepTextures`). */
+  keepTextures?: boolean;
   material?: MaterialMsg | null;
   roughness?: number;
   opacity?: number;
@@ -52,11 +56,11 @@ export function MeshVisual({
   const objectClone = useMemo(() => {
     if (!loaded || loaded.kind !== "object") return null;
     return meshInstance(loaded.object, loaded.shaded, {
-      color: new THREE.Color(r, g, b), forceColor, roughness, opacity,
+      color: new THREE.Color(r, g, b), forceColor, keepTextures, roughness, opacity,
       material: metalness !== undefined && authoredRoughness !== undefined
       ? { metalness, roughness: authoredRoughness, opacity: authoredOpacity } : null,
     }, casts, receiveShadow);
-  }, [loaded, r, g, b, forceColor, metalness, authoredRoughness, authoredOpacity, roughness, opacity, casts, receiveShadow]);
+  }, [loaded, r, g, b, forceColor, keepTextures, metalness, authoredRoughness, authoredOpacity, roughness, opacity, casts, receiveShadow]);
 
   useEffect(() => () => objectClone?.dispose(), [objectClone]);
 

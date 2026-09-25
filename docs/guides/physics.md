@@ -52,6 +52,18 @@ own; what a program takes *together* in one step (every board and case
 of a pallet, attached to a lift at once) stays one rigid unit and is
 carried whole.
 
+The programs' time and the world's are two things. A bake ends when
+every program has ended, or at `max_duration` — the programs' cap, which
+turns a step that waits for a signal that never comes into a *timed out*
+diagnosis instead of a hang. A part still in the air when the last
+program ends is frozen there unless the world is given a tail:
+`bt.Physics(settle=3.0)` keeps the engine running after the programs
+until everything it owns has been at rest for a quarter second, or the
+three seconds run out. The cap does not count the tail. A bake with no
+program at all (`simulate_physics`, the studio's physics toggle with
+nothing baked) has no cap: it runs for the seconds asked, or in the
+studio until it is switched off.
+
 Every robot is an articulated body: each link a rigid body weighing what
 its model states, each joint a force-capped servo. Whether the servos are
 on is the bake's business (`powered=`): with no program at all the

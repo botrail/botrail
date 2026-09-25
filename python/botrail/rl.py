@@ -80,12 +80,17 @@ __all__ = [
     "Task",
     "TcpDelta",
     "TcpPose",
+    "Tiled",
     "Torque",
     "VecEnv",
     "load",
     "make",
+    "play",
+    "randomize",
     "rewards",
     "segmentation_ids",
+    "single",
+    "tile",
 ]
 
 # ------------------------------------------------------------ quaternions
@@ -745,11 +750,19 @@ class Task:
     built scene with the seeded generator before each episode (set poses
     and properties — do not add residents, the scene persists across
     episodes); `reward(obs, info)` and `done(obs, info)` read the channel
-    dict and the step's info. An episode is truncated at `horizon_s` or
-    when every sequence has run to its end. `render` lights the colour
-    pictures (see the field). The `control` is `JointDelta`, `JointTarget`
-    or `TcpDelta` (position commands the drive rate-limits) or `Torque`
-    (raw joint torques on a robot declared dynamic)."""
+    dict and the step's info. An episode is truncated `horizon_s` after
+    its first observation or when every sequence has run to its end.
+    `settle_s` is ticked off before that first observation, with no
+    action: what the randomisation dropped comes to rest (a part set
+    down on a table, a pool tipped into a bin). `render` lights the
+    colour pictures (see the field). The `control` is `JointDelta`,
+    `JointTarget` or `TcpDelta` (position commands the drive rate-limits)
+    or `Torque` (raw joint torques on a robot declared dynamic).
+    `physics` is the bake's argument: `True` (the declared scope), an
+    engine name, or a `bt.Physics(...)` — the world scope, a ground
+    plane, the cell powered (`powered=True`: a machine no program drives
+    is otherwise unpowered under the world scope until the task's drive
+    takes it)."""
 
     robot: Optional[str] = None
     control: Any = field(default_factory=JointDelta)
@@ -758,9 +771,10 @@ class Task:
     reward: Optional[Callable[[ObsDict, Info], float]] = None
     done: Optional[Callable[[ObsDict, Info], bool]] = None
     horizon_s: float = 10.0
+    settle_s: float = 0.0
     group: Optional[str] = None
     sequences: Optional[Sequence[str]] = None
-    physics: Union[bool, str] = True
+    physics: Union[bool, str, Any] = True
     #: How the pictures are drawn, per episode: a dict with any of
     #: `"light": (x, y, z)` (a direction toward the light), `"ambient": a`,
     #: `"shadows": bool` (hard shadows from that light, about the cost of
@@ -786,15 +800,46 @@ def _render_options(task: Task, rng: np.random.Generator) -> Optional[dict]:
     light = tuple(float(v) for v in spec.get("light", (0.3, -0.5, 0.8)))
     if len(light) != 3:
         raise ValueError("render['light'] must be a direction (x, y, z)")
-    decimate = spec.get("decimate")
-    if decimate is not None and not (float(decimate) > 0.0):
-        raise ValueError("render['decimate'] is a cell size in metres (positive) or None")
+    decimate = spec.get("decimate", "auto")
+    if decimate is not None and decimate != "auto" and not (float(decimate) > 0.0):
+        raise ValueError("render['decimate'] is a cell size in metres (positive), None for full detail, or absent for the default")
     return {
         "light": light,
         "ambient": float(spec.get("ambient", 0.35)),
         "shadows": bool(spec.get("shadows", False)),
-        "decimate": None if decimate is None else float(decimate),
+        # Absent: the default cell (`_auto_decimate`); `None`: full detail.
+        "decimate": decimate if decimate in (None, "auto") else float(decimate),
     }
+
+
+def _auto_decimate(channels: Sequence[Channel], fov_of: Callable[[str], float]) -> Optional[float]:
+    """The default decimation cell of a task's pictures: half a pixel's
+    footprint at one metre of the finest picture asked for (`tan(fov/2)
+    / width`) — a catalogue robot's CAD-dense visual meshes cost a
+    64-pixel picture ten times its state observation otherwise
+    (design-rl-tabletop.md G7), and nothing a pixel could show past half
+    a metre is lost. `None` when the task takes no picture."""
+    cells = [
+        math.tan(math.radians(fov_of(c.camera)) / 2.0) / c.width
+        for c in channels
+        if isinstance(c, _Picture)
+    ]
+    return min(cells) if cells else None
+
+
+def _decimate_cell(render: Optional[dict], auto: Optional[float]) -> Optional[float]:
+    """The cell an episode's pictures are decimated to: what `render`
+    says, or the task's default when it says nothing."""
+    if render is None or render["decimate"] == "auto":
+        return auto
+    return render["decimate"]
+
+
+def _settle_ticks(settle_s: float, dt: float) -> int:
+    """Scan ticks of a task's settling time."""
+    if not (settle_s >= 0.0) or not math.isfinite(settle_s):
+        raise ValueError(f"settle_s must be a finite, non-negative time, got {settle_s}")
+    return round(settle_s / dt)
 
 
 def _offsets(channels: Sequence[Channel]) -> list[tuple[str, int, int, Optional[tuple[int, ...]]]]:
@@ -912,6 +957,7 @@ class Env(_Base):
         self._done = True
         self._timeline = None
         self._steps = 0
+        self._t0 = 0.0
 
     # -------------------------------------------------- setup
 
@@ -922,6 +968,7 @@ class Env(_Base):
         self._offsets = _offsets(self.channels)
         self._spec = json.dumps([c.lower(self.task.robot) for c in self.channels])
         self._control = json.dumps(control.lower())
+        self._auto_cell = _auto_decimate(self.channels, self._scene.camera_fov)
         self.action_space = _box(-1.0, 1.0, (control.dim,))
         if self._flatten:
             self.observation_space = _box(-np.inf, np.inf, (self.obs_dim,))
@@ -961,7 +1008,7 @@ class Env(_Base):
         self.live = self._scene.open_rollout(
             names,
             dt=self._dt,
-            max_duration=self._max_duration or self.task.horizon_s + 1.0,
+            max_duration=self._max_duration or self.task.horizon_s + self.task.settle_s + 1.0,
             physics=self.task.physics,
         )
         self.live.drive(
@@ -975,8 +1022,14 @@ class Env(_Base):
         render = _render_options(self.task, self._rng)
         if render is not None:
             self.live.set_lighting(render["light"], render["ambient"], render["shadows"])
-            self.live.set_render_decimate(render["decimate"])
+        self.live.set_render_decimate(_decimate_cell(render, self._auto_cell))
         self.live.set_control(self._control, robot=self.task.robot, group=self.task.group)
+        # The settling ticks: the world runs with the drive holding the
+        # robot where it stands, and what the reset dropped comes to rest.
+        settle = _settle_ticks(self.task.settle_s, self._dt)
+        if settle:
+            self.live.tick(settle)
+        self._t0 = self.live.t
         self._steps = 0
         self._done = False
         self._timeline = None
@@ -1007,7 +1060,7 @@ class Env(_Base):
         terminated = bool(self.task.done(channels, info)) if self.task.done is not None else False
         terminated = terminated or error is not None
         truncated = (not terminated) and (
-            self.live.t >= self.task.horizon_s - 1e-9 or self.live.finished
+            self.live.t - self._t0 >= self.task.horizon_s - 1e-9 or self.live.finished
         )
         self._done = terminated or truncated
         return self._pack(channels), reward, terminated, truncated, info
@@ -1107,6 +1160,7 @@ class VecEnv(_VecBase):
         self._offsets = _offsets(self.channels)
         self._spec = json.dumps([c.lower(task.robot) for c in self.channels])
         self._control = json.dumps(task.control.lower())
+        self._auto_cell = _auto_decimate(self.channels, self._scenes[0].camera_fov)
         self.single_action_space = _box(-1.0, 1.0, (task.control.dim,))
         if flatten:
             self.single_observation_space = _box(-np.inf, np.inf, (self.obs_dim,))
@@ -1186,7 +1240,7 @@ class VecEnv(_VecBase):
                 group=self.task.group,
                 max_velocity=getattr(self.task.control, "max_velocity", None),
                 dt=self._dt,
-                max_duration=self._max_duration or self.task.horizon_s + 1.0,
+                max_duration=self._max_duration or self.task.horizon_s + self.task.settle_s + 1.0,
                 physics=self.task.physics,
                 control=self._control,
                 seed=self._seed,
@@ -1197,9 +1251,16 @@ class VecEnv(_VecBase):
             render = _render_options(self.task, self._rngs[i])
             if render is not None:
                 self._vec.set_lighting(i, render["light"], render["ambient"], render["shadows"])
-                self._vec.set_render_decimate(i, render["decimate"])
+            self._vec.set_render_decimate(i, _decimate_cell(render, self._auto_cell))
             self._steps[i] = 0
             self._needs_reset[i] = False
+        settle = _settle_ticks(self.task.settle_s, self._dt)
+        if settle:
+            only = [i in set(indices) for i in range(self.num_envs)]
+            errors = self._vec.tick_all(settle, only)
+            failed = [(i, e) for i, e in enumerate(errors) if e is not None and only[i]]
+            if failed:
+                raise RuntimeError(f"the settling ticks failed: {failed}")
 
     def reset(self, *, seed: Optional[Union[int, Sequence[int]]] = None, options: Optional[dict] = None):
         if seed is not None:
@@ -1241,7 +1302,9 @@ class VecEnv(_VecBase):
                 rewards[i] = float(self.task.reward(channels, env_info))
             done = bool(self.task.done(channels, env_info)) if self.task.done is not None else False
             terminated[i] = done or error is not None
-            truncated[i] = (not terminated[i]) and (t >= self.task.horizon_s - 1e-9 or finished)
+            truncated[i] = (not terminated[i]) and (
+                t - self.task.settle_s >= self.task.horizon_s - 1e-9 or finished
+            )
         self._needs_reset = terminated | truncated
         return self._pack(obs), rewards, terminated, truncated, info
 
@@ -1249,7 +1312,8 @@ class VecEnv(_VecBase):
         envs: list[Info] = []
         for i in range(self.num_envs):
             if results is None:
-                t, finished, error, collisions, contacts = 0.0, False, None, [], []
+                # Fresh worlds: the clock reads the settling ticks.
+                t, finished, error, collisions, contacts = float(self.task.settle_s), False, None, [], []
             else:
                 t, finished, error, collisions, contacts, _ik_failed = results[i]
             env_info: Info = {
@@ -1394,6 +1458,348 @@ def load(path, scene, task: Task, **options) -> Policy:
             raise ValueError(f"could not load {name} with any stable-baselines3 algorithm")
         return Policy(scene, task, lambda obs: algo.predict(obs, deterministic=True)[0], **options)
     raise ValueError(f"unknown policy file {name!r}: pass an .onnx, a stable-baselines3 .zip, or a callable")
+
+
+# ------------------------------------------------------------ cells, tiled
+# A cell written once as `cell(scene, prefix, origin) -> robot name`
+# (every resident named `prefix + ...`, everything placed relative to
+# `origin`) is one environment for learning (`single`) and a grid of
+# copies in one scene for watching or exporting (`tile`, `play`).
+
+Cell = Callable[[Any, str, tuple[float, float]], str]
+
+
+def _floor(scene, size: tuple[float, float], center: tuple[float, float], thickness: float = 0.1) -> None:
+    """A slab whose top face is z = 0 — what the cells stand on."""
+    scene.add_box(
+        "floor",
+        size=(size[0], size[1], thickness),
+        position=(center[0], center[1], -thickness / 2.0),
+        color=(0.82, 0.82, 0.82),
+    )
+
+
+def single(cell: Cell, *, sequence: str = "run", wait_s: float = 30.0, floor: Optional[tuple[float, float]] = (6.0, 6.0)):
+    """`build()` for `make`: one copy of `cell` at the origin with no
+    prefix, on a floor slab (`floor` is its size; `None` for none), and
+    one program — a `wait_s` wait named `sequence` — for the rollout to
+    run. The cell's own program, if it adds one, runs alongside."""
+
+    def build():
+        import botrail as bt
+
+        scene = bt.Scene()
+        if floor is not None:
+            _floor(scene, floor, (0.0, 0.0))
+        cell(scene, "", (0.0, 0.0))
+        if sequence not in scene.sequence_names:
+            scene.sequence(sequence).step("wait", transition=bt.seq.elapsed(wait_s))
+        return scene
+
+    return build
+
+
+@dataclass
+class Tiled:
+    """A grid of copies of one cell in one scene (`tile`): `cells` are the
+    `(prefix, robot)` of each copy, row-major, `origins` where they
+    stand; `sequence` the wait program the whole grid runs under."""
+
+    scene: Any
+    cell: Cell
+    cells: list[tuple[str, str]]
+    origins: list[tuple[float, float]]
+    sequence: str
+
+    @property
+    def robots(self) -> list[str]:
+        return [robot for _, robot in self.cells]
+
+    def randomize(
+        self,
+        reset: Callable[[Any, np.random.Generator, str, tuple[float, float]], None],
+        *,
+        seed: int = 0,
+    ) -> None:
+        """Runs a cell-relative randomiser `reset(scene, rng, prefix,
+        origin)` on every copy, world `i` drawing from `seed + i` — the
+        same draw a `VecEnv` of the single cell makes for its world `i`
+        (whose `Task.reset` is the same function at prefix `""` and the
+        origin)."""
+        for i, ((prefix, _), origin) in enumerate(zip(self.cells, self.origins)):
+            reset(self.scene, np.random.default_rng(seed + i), prefix, origin)
+
+
+def tile(
+    cell: Cell,
+    rows: int,
+    cols: int,
+    spacing: tuple[float, float] = (2.0, 2.0),
+    *,
+    sequence: str = "run",
+    wait_s: float = 30.0,
+    margin: float = 1.0,
+) -> Tiled:
+    """`rows × cols` copies of `cell` in one scene, `spacing` apart, on
+    one floor slab reaching `margin` past the grid — the picture of an
+    environment being learned, and the scene `play` runs a policy on in
+    every copy at once. Copy `i` (row-major) is named `c{i}/` and its
+    robot whatever `cell` returned for it. One physical world, one
+    thread: for learning, `make(single(cell), ..., num_envs=N)` steps N
+    independent worlds in parallel instead."""
+    import botrail as bt
+
+    if rows < 1 or cols < 1:
+        raise ValueError("tile needs at least one row and one column")
+    sx, sy = float(spacing[0]), float(spacing[1])
+    scene = bt.Scene()
+    _floor(
+        scene,
+        ((cols - 1) * sx + 2 * margin, (rows - 1) * sy + 2 * margin),
+        ((cols - 1) * sx / 2.0, (rows - 1) * sy / 2.0),
+    )
+    cells: list[tuple[str, str]] = []
+    origins: list[tuple[float, float]] = []
+    for r in range(rows):
+        for c in range(cols):
+            i = r * cols + c
+            prefix = f"c{i}/"
+            origin = (c * sx, r * sy)
+            robot = cell(scene, prefix, origin)
+            if not isinstance(robot, str) or robot not in scene.robots:
+                raise ValueError(f"cell {prefix!r} must return the name of the robot it added, got {robot!r}")
+            cells.append((prefix, robot))
+            origins.append(origin)
+    if sequence not in scene.sequence_names:
+        scene.sequence(sequence).step("wait", transition=bt.seq.elapsed(wait_s))
+    return Tiled(scene=scene, cell=cell, cells=cells, origins=origins, sequence=sequence)
+
+
+def _relocate(spec: dict, prefix: str, robot_from: str, robot_to: str) -> dict:
+    """A channel's lowered spec moved into copy `prefix` of the cell:
+    obstacle, camera, LiDAR and signal names take the prefix, references
+    to the task robot (`robot`, `<robot>/tcp`, `<robot>/<link>`) go to
+    the copy's robot."""
+
+    def ref(value: str) -> str:
+        if value == robot_from or value.startswith(robot_from + "/"):
+            return robot_to + value[len(robot_from):]
+        return prefix + value
+
+    out = dict(spec)
+    if out.get("robot") == robot_from:
+        out["robot"] = robot_to
+    for key in ("obstacle", "camera", "lidar", "signal"):
+        if key in out:
+            out[key] = prefix + out[key]
+    for key in ("a", "b"):
+        if key in out:
+            out[key] = ref(out[key])
+    return out
+
+
+def play(
+    tiled: Tiled,
+    task: Task,
+    model: Any,
+    *,
+    duration_s: float = 6.0,
+    dt: float = 0.01,
+    publish: bool = False,
+):
+    """Runs one policy in every copy of a tiled cell at once and closes
+    the run into a timeline — the learned behaviour as a picture (the
+    studio, USD, a recording). `model(obs) -> action` is the decision over
+    the flat float32 observation `task` packs (a trained network, an
+    `rl.Policy`'s model, a scripted rule); the task's control turns each
+    copy's action into its robot's command, the task's `done` retires a
+    copy (it holds where it is), and `settle_s` is ticked off first.
+    Stops at `duration_s` after the first observation, when every copy is
+    done, or when the grid's programs end."""
+    import botrail as bt
+
+    if isinstance(model, Policy):
+        model = model.model
+    single_scene = single(tiled.cell)()
+    k, channels = _bind(single_scene, task, dt)
+    offsets = _offsets(channels)
+    width = sum(c.dim for c in channels)
+    control = json.dumps(task.control.lower())
+    robot_from = task.robot
+    specs = [
+        _relocate(c.lower(robot_from), prefix, robot_from, robot)
+        for prefix, robot in tiled.cells
+        for c in channels
+    ]
+    settle = _settle_ticks(task.settle_s, dt)
+    live = tiled.scene.open_rollout(
+        [tiled.sequence],
+        dt=dt,
+        max_duration=duration_s + task.settle_s + 1.0,
+        physics=task.physics,
+    )
+    for _, robot in tiled.cells:
+        live.drive(robot=robot, group=task.group, max_velocity=getattr(task.control, "max_velocity", None))
+        live.set_control(control, robot=robot, group=task.group)
+    dims = live.set_observation(json.dumps(specs))
+    assert len(dims) == len(channels) * len(tiled.cells), (dims, channels)
+    rng = np.random.default_rng(0)
+    render = _render_options(task, rng)
+    if render is not None:
+        live.set_lighting(render["light"], render["ambient"], render["shadows"])
+    live.set_render_decimate(_decimate_cell(render, _auto_decimate(channels, single_scene.camera_fov)))
+    if settle:
+        live.tick(settle)
+    t0 = live.t
+    retired = [False] * len(tiled.cells)
+    steps = 0
+    while live.t - t0 < duration_s - 1e-9 and not live.finished and not all(retired):
+        row = live.observe()
+        for i, (_, robot) in enumerate(tiled.cells):
+            if retired[i]:
+                continue
+            block = row[i * width:(i + 1) * width]
+            obs = {key: _shaped(block[a:b], shape) for key, a, b, shape in offsets}
+            info: Info = {"t": live.t - t0, "steps": steps, "channels": obs, "collision": bool(live.collisions())}
+            if task.done is not None and task.done(obs, info):
+                retired[i] = True
+                continue
+            flat = np.concatenate([obs[c.key].reshape(-1) for c in channels]).astype(np.float32)
+            action = np.clip(np.asarray(model(flat), dtype=np.float64).reshape(-1), -1.0, 1.0)
+            if action.shape[0] != task.control.dim:
+                raise ValueError(f"the model returned {action.shape[0]} values, the control takes {task.control.dim}")
+            live.act(action.tolist(), robot=robot)
+        live.tick(k)
+        steps += 1
+    del bt
+    return live.finish(publish=publish)
+
+
+# ------------------------------------------------------------ randomisation
+# Domain randomisation helpers for `Task.reset` — the setters a cell's
+# things are moved and re-drawn with, on one prefix of a tiled scene or
+# none. All draws come from the generator handed in.
+
+
+def _set_down(scene, name: str, x: float, y: float, face: float, gap: float) -> None:
+    """Moves obstacle `name`, as it is turned, so the middle of its footprint
+    lands on (x, y) and its underside `gap` above the face at z = `face` —
+    read off its bounds, so a primitive and a scan whose model frame sits
+    wherever the scanner put it are set down alike."""
+    (px, py, pz), _ = scene.obstacle_pose(name)
+    lo, hi = scene.obstacle_bounds(name)
+    scene.set_obstacle_pose(
+        name,
+        (x + px - (lo[0] + hi[0]) / 2, y + py - (lo[1] + hi[1]) / 2, face + gap + pz - lo[2]),
+    )
+
+
+def _footprint(scene, name: str) -> tuple[float, float]:
+    lo, hi = scene.obstacle_bounds(name)
+    return hi[0] - lo[0], hi[1] - lo[1]
+
+
+def _pool(
+    scene,
+    rng: np.random.Generator,
+    names: Sequence[str],
+    k: int,
+    spots: Optional[Sequence[tuple[float, float]]] = None,
+    face: Optional[float] = None,
+    *,
+    prefix: str = "",
+    jitter: float = 0.02,
+    gap: float = 0.002,
+    park: tuple[float, float, float] = (3.0, 3.0, 0.5),
+) -> list[str]:
+    """Draws `k` of the pool `names`: they are enabled and shown, the rest
+    parked at `park` (spread along x), disabled and hidden — out of the
+    physics, the pictures and the collision checks until a later draw
+    brings them back. Given `spots` (x, y) and the `face` they are on, the
+    drawn things are set down on `k` of the spots, shuffled: the middle of
+    each footprint on its spot (jittered by up to `jitter` in x and y), the
+    underside `gap` above the face, as it is turned. Without spots they
+    stay where they are — place them yourself (`scatter` keeps things of
+    any size apart). Returns the names drawn."""
+    names = list(names)
+    if not 0 <= k <= len(names):
+        raise ValueError(f"pool: draw {k} of {len(names)} things")
+    if spots is not None and len(spots) < k:
+        raise ValueError(f"pool: {k} things for {len(spots)} spots")
+    if spots is not None and face is None:
+        raise ValueError("pool: spots are on a face — give its height (face=)")
+    chosen = [names[i] for i in rng.choice(len(names), size=k, replace=False)]
+    order = rng.permutation(len(spots))[:k] if spots is not None else [None] * k
+    for name, s in zip(chosen, order):
+        if s is not None:
+            x, y = spots[s]
+            dx, dy = rng.uniform(-jitter, jitter), rng.uniform(-jitter, jitter)
+            _set_down(scene, prefix + name, x + dx, y + dy, face, gap)
+        scene.set_obstacle_enabled(prefix + name, True)
+        scene.set_obstacle_visible(prefix + name, True)
+    for i, name in enumerate(n for n in names if n not in chosen):
+        scene.set_obstacle_pose(prefix + name, (park[0] + 0.3 * i, park[1], park[2]))
+        scene.set_obstacle_enabled(prefix + name, False)
+        scene.set_obstacle_visible(prefix + name, False)
+    return chosen
+
+
+def _scatter(
+    scene,
+    rng: np.random.Generator,
+    names: Sequence[str],
+    region: tuple[tuple[float, float], tuple[float, float]],
+    face: float,
+    *,
+    prefix: str = "",
+    gap: float = 0.02,
+    lift: float = 0.002,
+    tries: int = 100,
+    restarts: int = 20,
+) -> dict[str, tuple[float, float]]:
+    """Scatters `names` over `region` (`(x0, x1), (y0, y1)`) on the face at
+    z = `face` (each underside `lift` above it) without overlap: footprints
+    — read off each thing's bounds as it is turned — keep `gap` apart, so
+    the physics plan's overlap audit stays empty. The biggest footprint goes
+    down first, each thing gets up to `tries` draws, and a layout that
+    boxes the next thing out starts over (up to `restarts` times) before
+    the region is declared too small. Returns the footprint centres set."""
+    (x0, x1), (y0, y1) = region
+    sizes = {name: _footprint(scene, prefix + name) for name in names}
+    for name, (lx, ly) in sizes.items():
+        if x1 - x0 < lx or y1 - y0 < ly:
+            raise ValueError(f"scatter: {name} ({lx:.3f} × {ly:.3f}) does not fit the region")
+    order = sorted(names, key=lambda n: -sizes[n][0] * sizes[n][1])
+    for _ in range(restarts + 1):
+        placed: dict[str, tuple[float, float]] = {}
+        for name in order:
+            lx, ly = sizes[name]
+            for _ in range(tries):
+                x = rng.uniform(x0 + lx / 2, x1 - lx / 2)
+                y = rng.uniform(y0 + ly / 2, y1 - ly / 2)
+                clear = all(
+                    abs(x - px) >= (lx + sizes[other][0]) / 2 + gap or abs(y - py) >= (ly + sizes[other][1]) / 2 + gap
+                    for other, (px, py) in placed.items()
+                )
+                if clear:
+                    placed[name] = (x, y)
+                    break
+            else:
+                break
+        if len(placed) == len(order):
+            for name, (x, y) in placed.items():
+                _set_down(scene, prefix + name, x, y, face, lift)
+            return placed
+    raise ValueError(f"scatter: {len(names)} things do not fit the region with {gap} m between them")
+
+
+def _friction(scene, rng: np.random.Generator, names: Sequence[str], low: float = 0.4, high: float = 0.9, *, prefix: str = "") -> None:
+    """Draws every thing's friction coefficient from `[low, high]`."""
+    for name in names:
+        scene.set_physics(prefix + name, friction=float(rng.uniform(low, high)))
+
+
+randomize = SimpleNamespace(pool=_pool, scatter=_scatter, friction=_friction)
 
 
 # ------------------------------------------------------------ rewards

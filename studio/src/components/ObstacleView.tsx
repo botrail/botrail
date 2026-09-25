@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Edges, TransformControls } from "@react-three/drei";
-import type { ThreeEvent } from "@react-three/fiber";
+import { useThree, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
 import { playbackRig } from "../playbackRig";
@@ -13,6 +13,7 @@ import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
 import { UsdVisual } from "./UsdVisual";
 import { UNIT_BOX, UNIT_CYLINDER, UNIT_SPHERE } from "../three/primitiveGeometry";
+import { finishMaps, isFinish, metricGeometry } from "../three/finishes";
 import { beginPick, swallowsClick } from "../physicsPick";
 
 const NEUTRAL_COLOR = "#9aa3b2";
@@ -314,8 +315,11 @@ function ObstacleNode({
           color={color}
           // An authored color and a collision highlight both mean
           // something the mesh's own materials cannot say, so they paint
-          // over it; the bare neutral does not.
+          // over it; the bare neutral does not. A texture is the exception
+          // for the authored colour: a scanned object keeps its photograph
+          // (the colour is what the rollout's flat pictures draw).
           forceColor={colliding || tint !== null}
+          keepTextures={!colliding}
           material={obstacle.material}
           solid={styled}
           selected={selected}
@@ -350,6 +354,7 @@ function ObstacleGeometry({
   geometry,
   color,
   forceColor,
+  keepTextures,
   material,
   solid,
   selected,
@@ -359,6 +364,7 @@ function ObstacleGeometry({
   geometry: GeometryMsg;
   color: THREE.Color;
   forceColor: boolean;
+  keepTextures: boolean;
   material?: MaterialMsg | null;
   solid: boolean;
   selected: boolean;
@@ -366,6 +372,11 @@ function ObstacleGeometry({
   onDown: (e: ThreeEvent<PointerEvent>) => void;
 }) {
   const highlight = selected && <Edges color={SELECT_EDGE_COLOR} lineWidth={2} />;
+  // A finish draws its tile at a real pitch, so the primitive needs UVs in
+  // metres: its own geometry at its size rather than the shared unit one.
+  const finish = isFinish(material?.finish) ? material!.finish : null;
+  const sized = useMemo(() => (finish ? metricGeometry(geometry) : null), [finish, geometry]);
+  useEffect(() => () => sized?.dispose(), [sized]);
   const pick = {
     onPointerDown: onDown,
     onClick: onSelect,
@@ -380,6 +391,15 @@ function ObstacleGeometry({
     receiveShadow: true,
   };
 
+  if (sized) {
+    return (
+      <mesh {...pick}>
+        <primitive object={sized} attach="geometry" />
+        <ObstacleMaterial color={color} solid={solid} material={material} />
+        {highlight}
+      </mesh>
+    );
+  }
   switch (geometry.kind) {
     case "box":
       return (
@@ -417,6 +437,7 @@ function ObstacleGeometry({
             geometry={geometry}
             color={color}
             forceColor={forceColor}
+            keepTextures={keepTextures}
             material={material}
             roughness={solid ? 0.8 : 0.7}
             opacity={solid ? 1 : 0.85}
@@ -440,15 +461,23 @@ function ObstacleMaterial({
   material?: MaterialMsg | null;
 }) {
   // An authored material says how the surface takes light; without one the
-  // studio picks, and a bare collision proxy stays see-through.
-  return (
-    <meshStandardMaterial
-      color={color}
-      roughness={material ? material.roughness : solid ? 0.8 : 0.7}
-      metalness={material ? material.metalness : 0.05}
-      transparent={!solid || (material?.opacity ?? 1) < 1}
-      opacity={material?.opacity ?? (solid ? 1 : 0.85)}
-      depthWrite={(material?.opacity ?? 1) >= 1}
-    />
-  );
+  // studio picks, and a bare collision proxy stays see-through. A finish
+  // adds the studio's own tile over the colour (finishes.ts); R3F would
+  // assign the renderer's colour space to texture props, so the material
+  // is owned here and the maps keep theirs.
+  const gl = useThree((s) => s.gl);
+  const finish = isFinish(material?.finish) ? material!.finish : null;
+  const standard = useMemo(() => {
+    const m = new THREE.MeshStandardMaterial();
+    if (finish) Object.assign(m, finishMaps(finish, gl.capabilities.getMaxAnisotropy()));
+    return m;
+  }, [finish, gl]);
+  useEffect(() => () => standard.dispose(), [standard]);
+  standard.color.copy(color);
+  standard.roughness = material ? material.roughness : solid ? 0.8 : 0.7;
+  standard.metalness = material ? material.metalness : 0.05;
+  standard.transparent = !solid || (material?.opacity ?? 1) < 1;
+  standard.opacity = material?.opacity ?? (solid ? 1 : 0.85);
+  standard.depthWrite = (material?.opacity ?? 1) >= 1;
+  return <primitive object={standard} attach="material" />;
 }

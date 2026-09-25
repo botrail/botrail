@@ -375,7 +375,7 @@ pub struct ObstacleMsg {
 
 /// Metalness/roughness, the pair every viewer botrail hands a scene to
 /// already speaks (glTF, USD Preview Surface, three.js).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MaterialMsg {
@@ -383,6 +383,11 @@ pub struct MaterialMsg {
     pub roughness: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f32>,
+    /// A surface pattern the studio draws over the colour: `wood`,
+    /// `checker_plate` or `plastic`. A name this build does not know is
+    /// dropped on the way in, so a newer project still opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<String>,
 }
 
 /// Authored physics of an obstacle (design-physics.md). Inert on a
@@ -452,13 +457,16 @@ impl From<crate::Material> for MaterialMsg {
             metalness: m.metalness,
             roughness: m.roughness,
             opacity: m.opacity,
+            finish: m.finish.map(|f| f.as_str().to_string()),
         }
     }
 }
 
 impl From<MaterialMsg> for crate::Material {
     fn from(m: MaterialMsg) -> Self {
-        crate::Material::new(m.metalness, m.roughness).with_opacity(m.opacity)
+        crate::Material::new(m.metalness, m.roughness)
+            .with_opacity(m.opacity)
+            .with_finish(m.finish.as_deref().and_then(crate::Finish::parse))
     }
 }
 

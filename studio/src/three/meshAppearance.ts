@@ -5,6 +5,11 @@ import type { MaterialMsg } from "../protocol";
 export type MeshAppearance = {
   color: THREE.Color;
   forceColor: boolean;
+  /** A textured material keeps its texture's colours under `forceColor`:
+   * the photograph is the colour, and the authored one is what colour-only
+   * consumers (the rollout's pictures, a USD without materials) draw. A
+   * collision highlight still paints over it. */
+  keepTextures?: boolean;
   material?: MaterialMsg | null;
   /** Used only when the file brought no material. */
   roughness?: number;
@@ -16,7 +21,7 @@ export type MeshAppearance = {
  * explicit metallic/roughness pair converts a legacy material to PBR. */
 export function meshMaterial(
   source: THREE.Material | null,
-  { color, forceColor, material, roughness = 0.85, opacity = 1 }: MeshAppearance,
+  { color, forceColor, keepTextures = false, material, roughness = 0.85, opacity = 1 }: MeshAppearance,
 ): THREE.Material {
   let result: THREE.Material;
   if (!source) {
@@ -46,7 +51,7 @@ export function meshMaterial(
     result = source.clone();
   }
   const shaded = result as THREE.MeshStandardMaterial;
-  if (forceColor && shaded.color) shaded.color.copy(color);
+  if (forceColor && shaded.color && !(keepTextures && shaded.map)) shaded.color.copy(color);
   if (material) {
     shaded.metalness = material.metalness;
     shaded.roughness = material.roughness;

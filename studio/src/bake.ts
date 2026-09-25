@@ -58,8 +58,9 @@ export function startBake(req: BakeRequest): void {
  * physics (on, streamed) or kinematically (off, from the top) — off while
  * the physics stream runs stops it where it stands first. With no
  * program: on streams the world under gravity until off stops it where it
- * stands (the clip stays on the dock) or the cap ends it; off with the
- * stream already over puts the cell back as authored. */
+ * stands (the clip stays on the dock) — the cap is the programs' and does
+ * not end it; off with the stream already over puts the cell back as
+ * authored. */
 export function setPhysics(on: boolean): void {
   const s = useStudioStore.getState();
   const last = s.bakeStream?.request ?? s.lastBake;

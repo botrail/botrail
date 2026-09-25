@@ -42,11 +42,12 @@ fn physics_spec(scene: &Scene, name: &str) -> Option<botrail_usd::export::Physic
 pub fn bake_timeline(
     scene: &Scene,
     timeline: &SequenceTimeline,
-    fps: f64,
+    options: &ExportOptions,
     start: Option<f64>,
     end: Option<f64>,
     asset_stem: &str,
 ) -> Result<ExportedAnimation, String> {
+    let fps = options.fps;
     if !(fps.is_finite() && fps > 0.0) {
         return Err(format!("fps must be positive, got {fps}"));
     }
@@ -379,7 +380,7 @@ pub fn bake_timeline(
         curves: &curves,
         cameras: &cameras,
     };
-    let options = ExportOptions { fps };
+    let options = options.clone();
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
 }
 
@@ -851,7 +852,10 @@ fn bake_scene_stage(
         cameras: &cameras,
     };
     let (Some(sim), Some(physics)) = (&simulation, physics) else {
-        let options = ExportOptions { fps: 60.0 };
+        let options = ExportOptions {
+            fps: 60.0,
+            ..Default::default()
+        };
         return export_animation(&input, &options, asset_stem).map_err(|e| e.to_string());
     };
     // A USD-sourced robot references its own stage, physics included; the

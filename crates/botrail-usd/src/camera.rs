@@ -101,7 +101,9 @@ pub(crate) fn read_camera_optics(
     let mut near = clip[0];
     let mut far = clip[1];
     if near < MIN_NEAR {
-        notes.push(format!("clippingRange near {near} m raised to {MIN_NEAR} m"));
+        notes.push(format!(
+            "clippingRange near {near} m raised to {MIN_NEAR} m"
+        ));
         near = MIN_NEAR;
     }
     if far > MAX_FAR {

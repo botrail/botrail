@@ -126,3 +126,20 @@ test("unshaded OBJ leaves use authored PBR values and the proxy's shadow policy"
   assert.equal(root.children[0].receiveShadow, false);
   instance.dispose();
 });
+
+test("an authored colour leaves a textured material's texture alone; a highlight still paints it", () => {
+  // A scanned object (an OBJ/MTL photograph texture): the obstacle carries
+  // its mean albedo for the colour-only consumers, not to tint the scan.
+  const map = new THREE.Texture();
+  const scan = new THREE.MeshPhongMaterial({ map });
+  const plain = new THREE.MeshPhongMaterial({ color: 0xffffff });
+  const albedo = new THREE.Color(0.12, 0.01, 0.01);
+  const kept = meshMaterial(scan, { color: albedo, forceColor: true, keepTextures: true });
+  assert.ok(kept.color.equals(new THREE.Color(0xffffff)));
+  assert.equal(kept.map, map);
+  // No texture: the authored colour is the colour, as before.
+  assert.ok(meshMaterial(plain, { color: albedo, forceColor: true, keepTextures: true }).color.equals(albedo));
+  // A collision highlight (keepTextures off) paints over the scan too.
+  const red = new THREE.Color("red");
+  assert.ok(meshMaterial(scan, { color: red, forceColor: true, keepTextures: false }).color.equals(red));
+});

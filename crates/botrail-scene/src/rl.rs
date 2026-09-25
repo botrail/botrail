@@ -1312,6 +1312,40 @@ impl VecRollout {
         Ok(())
     }
 
+    /// Advances the worlds flagged in `only` (every world when empty) by
+    /// `k` scan ticks with no command — the settling ticks after a reset
+    /// (`Task.settle_s`): parts dropped by the randomisation come to rest
+    /// before the first observation. Returns each world's bake error, if
+    /// its ticks raised one (a dead world reports that it has none).
+    pub fn tick_all(&mut self, k: u32, only: &[bool]) -> Vec<Option<String>> {
+        assert!(
+            only.is_empty() || only.len() == self.worlds.len(),
+            "only flags are N"
+        );
+        let tick = |(i, world): (usize, &mut Option<LiveRollout>)| -> Option<String> {
+            if !only.is_empty() && !only[i] {
+                return None;
+            }
+            let Some(live) = world.as_mut() else {
+                return Some("no world (finished or never opened)".into());
+            };
+            for _ in 0..k {
+                if let Err(e) = live.tick() {
+                    return Some(e.to_string());
+                }
+            }
+            None
+        };
+        #[cfg(feature = "parallel")]
+        {
+            self.worlds.par_iter_mut().enumerate().map(tick).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.worlds.iter_mut().enumerate().map(tick).collect()
+        }
+    }
+
     /// Width of one action (`0` without a control).
     pub fn action_dim(&self) -> usize {
         self.control.as_ref().map(Control::dim).unwrap_or(0)

@@ -57,18 +57,8 @@ class Spec:
 
     @classmethod
     def load(cls, ref: CatalogRef) -> "Spec":
-        id_or_path, revision = ref if isinstance(ref, tuple) else (ref, None)
-        path = Path(id_or_path)
-        if path.is_dir():
-            directory = path
-        elif path.is_file():
-            directory = path.parent
-        else:
-            from . import catalog_package
-
-            directory = Path(catalog_package(str(id_or_path), revision=revision))
-            revision = revision or _snapshot_revision(directory)
-        return cls(_read_manifest(directory), directory, revision)
+        directory, manifest, revision = package(ref)
+        return cls(manifest, directory, revision)
 
     @property
     def catalog_ref(self) -> tuple[str, Optional[str]]:
@@ -359,6 +349,24 @@ class Spec:
             raise ValueError(
                 f"{self.id}: the mass of {role!r} needs {key}, which this pack does not size"
             ) from None
+
+
+def package(ref: CatalogRef) -> tuple[Path, dict, Optional[str]]:
+    """A catalog package on disk: `(directory, manifest, revision)` for a
+    catalog id (downloaded through `catalog_package`), an `(id, revision)`
+    pair, or a package directory (a local build — revision `None`)."""
+    id_or_path, revision = ref if isinstance(ref, tuple) else (ref, None)
+    path = Path(id_or_path)
+    if path.is_dir():
+        directory = path
+    elif path.is_file():
+        directory = path.parent
+    else:
+        from . import catalog_package
+
+        directory = Path(catalog_package(str(id_or_path), revision=revision))
+        revision = revision or _snapshot_revision(directory)
+    return directory, _read_manifest(directory), revision
 
 
 def _read_manifest(directory: Path) -> dict:

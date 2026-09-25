@@ -310,6 +310,26 @@ def _arm_cell() -> bt.Scene:
     return scene
 
 
+def test_a_settle_tail_lets_the_part_land_after_the_program_ends(scene: bt.Scene) -> None:
+    """The programs' cap and the world's time are two things: a program
+    that ends while a part is still falling ends the bake mid-flight —
+    unless `settle` gives the engine a tail to run until everything is
+    at rest. The cap does not count the tail; a stalled program still
+    times out at it."""
+    scene.sequence("blink").step("wait", transition=bt.seq.elapsed(0.1))
+    cut = scene.simulate_sequence("blink", physics=True)
+    assert cut.duration == pytest.approx(0.1)
+    assert cut.object_pose("part", cut.duration)[0][2] > 1.4  # still up there
+    tailed = scene.simulate_sequence("blink", physics=bt.Physics(settle=3.0), max_duration=0.2)
+    assert 0.4 < tailed.duration < 3.1
+    assert tailed.object_pose("part", tailed.duration)[0][2] == pytest.approx(REST_Z, abs=0.01)
+    assert repr(bt.Physics(settle=3.0)).endswith("settle=3)") and bt.Physics(settle=3.0).settle == 3.0
+    with pytest.raises(ValueError, match="settle"):
+        bt.Physics(settle=-1.0)
+    with pytest.raises(ValueError, match="timed out|limit|wait"):
+        scene.simulate_sequence("settle", physics=bt.Physics(settle=3.0), max_duration=0.3)
+
+
 def test_an_undeclared_arm_collapses_unpowered_and_holds_powered() -> None:
     scene = _arm_cell()
     plan = scene.physics_plan()

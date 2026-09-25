@@ -328,7 +328,21 @@ pub struct PhysicsOptions {
     /// without it a 29-joint humanoid's arms swing for good; at 1–2 they
     /// are quiet within a second.
     pub passive_damping: f64,
+    /// The world's tail, in seconds: once every program has ended the
+    /// engine keeps running until everything it owns is at rest — a
+    /// dropped part landed, a released one come to a stop — or these
+    /// seconds run out. `0.0` (the default) ends the bake where the
+    /// programs end, mid-flight or not. The program cap
+    /// (`RolloutOptions::max_duration`) is the programs' time to finish
+    /// and does not count the tail.
+    pub settle: f64,
 }
+
+/// A body counts as at rest below these (m/s, rad/s) …
+const REST_LINEAR: f64 = 0.01;
+const REST_ANGULAR: f64 = 0.05;
+/// … held for this long: a part at the top of a bounce is briefly still.
+const REST_WINDOW: f64 = 0.25;
 
 /// Prismatic joints see the passive drag scaled by this (N·s/m per
 /// N·m·s/rad): a metre per second on a slide is a large motion.
@@ -355,6 +369,7 @@ impl Default for PhysicsOptions {
             anchored: true,
             powered: None,
             passive_damping: 1.0,
+            settle: 0.0,
         }
     }
 }
@@ -1395,7 +1410,7 @@ impl Scene {
         inner.start()?;
         Ok(LiveRollout {
             inner,
-            control: None,
+            controls: Vec::new(),
         })
     }
 
@@ -1567,7 +1582,7 @@ impl Scene {
         inner.start()?;
         Ok(LiveRollout {
             inner,
-            control: None,
+            controls: Vec::new(),
         })
     }
 
@@ -1578,7 +1593,8 @@ impl Scene {
         options: &RolloutOptions,
         backend: Option<Box<dyn PhysicsBackend>>,
     ) -> Result<Rollout, SeqError> {
-        if !(duration.is_finite() && duration > 0.0) {
+        // `+inf` is allowed: a stream with no program runs until stopped.
+        if duration.is_nan() || duration <= 0.0 {
             return Err(SeqError::Validation {
                 step: None,
                 message: format!("duration must be positive, got {duration}"),
@@ -2106,6 +2122,9 @@ struct DrivenRt {
     /// An unpowered joint: no command, no servo — the motor is a viscous
     /// drag at zero velocity and the joint goes where gravity takes it.
     passive: bool,
+    /// The motor this joint runs when powered (the servo's velocity loop
+    /// and cap) — what a driver switching an unpowered robot on restores.
+    powered: botrail_physics::JointMotor,
 }
 
 /// One dynamic link's weight for the gravity-torque read-out: the mass
@@ -2258,9 +2277,10 @@ fn interp_pose(a: &Isometry3<f64>, b: &Isometry3<f64>, f: f64) -> Isometry3<f64>
 /// [`SequenceTimeline`].
 pub struct LiveRollout {
     inner: Rollout,
-    /// The control `act` goes through, with its state (a TcpDelta's
-    /// setpoint) — `set_control`.
-    control: Option<(crate::rl::Control, crate::rl::ControlState)>,
+    /// The controls `act` goes through — one per driven robot, each with
+    /// its state (a TcpDelta's setpoint) — `set_control`. A cell tiled
+    /// into one scene binds one control per copy of its robot.
+    controls: Vec<(crate::rl::Control, crate::rl::ControlState)>,
 }
 
 /// A read-only window on a rollout between ticks — what a controller, a
@@ -2625,24 +2645,42 @@ impl LiveRollout {
             .map_err(|message| self.inner.live_err(message))?;
         let dim = control.dim();
         let state = control.start();
-        self.control = Some((control, state));
+        self.controls.retain(|(c, _)| c.robot() != robot);
+        self.controls.push((control, state));
         Ok(dim)
     }
 
     /// One action through the bound control: the joint command it maps
     /// to (a `TcpDelta` integrates its setpoint and solves the IK here)
     /// is set as the drive's target. Returns whether the IK converged
-    /// (`true` for the joint controls); a failed step holds.
+    /// (`true` for the joint controls); a failed step holds. With
+    /// several robots bound, say which one acts ([`act_for`](Self::act_for)).
     pub fn act(&mut self, action: &[f64]) -> Result<bool, SeqError> {
-        let Some((control, state)) = self.control.as_mut() else {
-            return Err(self
+        match self.controls.len() {
+            0 => Err(self
                 .inner
-                .live_err("no control bound: call set_control first".into()));
+                .live_err("no control bound: call set_control first".into())),
+            1 => {
+                let robot = self.controls[0].0.robot();
+                self.act_for(robot, action)
+            }
+            _ => Err(self
+                .inner
+                .live_err("several controls are bound: name the robot that acts".into())),
+        }
+    }
+
+    /// [`act`](Self::act) for the control bound on robot `robot`.
+    pub fn act_for(&mut self, robot: usize, action: &[f64]) -> Result<bool, SeqError> {
+        let Some(index) = self.controls.iter().position(|(c, _)| c.robot() == robot) else {
+            return Err(self.inner.live_err(format!(
+                "no control bound on robot {robot}: call set_control for it first"
+            )));
         };
+        let (control, state) = &mut self.controls[index];
         let (command, converged) = control
             .apply(state, WorldView(&self.inner), action)
             .map_err(|message| self.inner.live_err(message))?;
-        let robot = control.robot();
         self.apply_command(robot, command)?;
         Ok(converged)
     }
@@ -2813,6 +2851,9 @@ impl Rollout {
             }
             vmax[qi] = cap;
         }
+        // A driver is what a program driving the robot is: an unpowered
+        // machine (the world scope's idle rule) switches on for it.
+        self.power_robot(robot);
         let t = self.t;
         let rt = &mut self.robots[robot];
         // Like a move alongside another: no future to pre-bake, so the
@@ -2826,6 +2867,53 @@ impl Rollout {
             kind: MoveKind::External { target, vmax },
         });
         Ok(owned)
+    }
+
+    /// Switches an unpowered dynamic robot's motors back on — a driver
+    /// taking the robot counts as a program driving it (the world scope's
+    /// power rule, design-world-physics.md §3.4; design-rl-tabletop.md
+    /// G12). Every passive joint gets its servo motor with its command
+    /// reset to where the joint stands, and the robot's nominal joints
+    /// are re-read from the physical ones, so the drive starts from the
+    /// pose the machine is in — fallen or not — rather than the one it
+    /// was authored in. Returns whether anything was switched on.
+    fn power_robot(&mut self, robot: usize) -> bool {
+        if !self.robots.get(robot).is_some_and(|rt| rt.dynamic) {
+            return false;
+        }
+        // An explicit blackout (`powered = false`) is the bake's word:
+        // no driver switches a machine on through it.
+        if self
+            .options
+            .physics
+            .as_ref()
+            .is_some_and(|p| p.powered == Some(false))
+        {
+            return false;
+        }
+        let Some(phys) = self.physics.as_mut() else {
+            return false;
+        };
+        let mut switched = false;
+        for (k, d) in phys.driven.iter_mut().enumerate() {
+            if d.robot != robot || !d.passive {
+                continue;
+            }
+            d.passive = false;
+            d.cmd = d.last;
+            d.prev_cmd = d.last;
+            d.trim = 0.0;
+            phys.backend.set_joint_motor(k, d.powered);
+            switched = true;
+        }
+        if switched {
+            let rt = &mut self.robots[robot];
+            let q = rt.q.clone();
+            rt.q_nom = q.clone();
+            rt.q_nom_prev = q.clone();
+            rt.q_cmd = q;
+        }
+        switched
     }
 
     /// Releases every external drive on `robot`.
@@ -3083,6 +3171,12 @@ struct Rollout {
     /// ending at once (`Scene::simulate_physics_with`): the world under
     /// gravity, nothing choreographed.
     hold_until: Option<f64>,
+    /// When every program had ended — the start of the world's tail
+    /// (`PhysicsOptions::settle`); `None` while one still runs.
+    settle_from: Option<f64>,
+    /// Since when everything the engine owns has been at rest, during
+    /// the tail.
+    rest_since: Option<f64>,
     /// Friction holds (attach on a driven gripper under physics),
     /// open and closed; the horn closes the stragglers.
     friction_holds: Vec<GraspHold>,
@@ -4212,6 +4306,8 @@ impl Rollout {
             render_decimate: None,
             dynamic_names: Vec::new(),
             hold_until: None,
+            settle_from: None,
+            rest_since: None,
             objects,
             vehicles: Vec::new(),
             signals,
@@ -4253,6 +4349,46 @@ impl Rollout {
     fn finished(&self) -> bool {
         self.programs.iter().all(Program::finished)
             && self.hold_until.is_none_or(|until| self.t + 1e-9 >= until)
+            && self.settled()
+    }
+
+    /// Whether the world's tail is over: no tail asked for (or nothing
+    /// to tail — no program, no engine), or the programs ended and
+    /// everything has been at rest for a while, or the tail ran out.
+    fn settled(&self) -> bool {
+        let settle = match (&self.physics, &self.options.physics) {
+            (Some(_), Some(options)) => options.settle,
+            _ => return true,
+        };
+        if settle <= 0.0 || self.programs.is_empty() {
+            return true;
+        }
+        match self.settle_from {
+            None => false,
+            Some(from) => {
+                self.t + 1e-9 >= from + settle
+                    || self
+                        .rest_since
+                        .is_some_and(|since| self.t + 1e-9 >= since + REST_WINDOW)
+            }
+        }
+    }
+
+    /// Whether everything the engine owns — the loose bodies it moves,
+    /// the free bases — is still.
+    fn world_at_rest(&self) -> bool {
+        let Some(rt) = &self.physics else {
+            return true;
+        };
+        let still = |id: botrail_physics::BodyId| {
+            let v = rt.backend.body_velocity(id);
+            v.linear.norm() < REST_LINEAR && v.angular.norm() < REST_ANGULAR
+        };
+        rt.dynamics
+            .iter()
+            .filter(|body| body.owned)
+            .all(|body| still(body.id))
+            && rt.floating.iter().all(|base| still(base.id))
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
@@ -4299,11 +4435,20 @@ impl Rollout {
     fn tick(&mut self) -> Result<(), SeqError> {
         self.ticks += 1;
         self.t = self.ticks as f64 * self.options.dt;
-        if self.t > self.options.max_duration {
+        // The cap is the programs' time to finish; the world's tail after
+        // them is bounded by its own length.
+        if self.t > self.options.max_duration && self.settle_from.is_none() {
             return Err(self.timeout());
         }
         self.scan_policies()?;
         self.advance_world()?;
+        if self.settle_from.is_some() {
+            self.rest_since = if self.world_at_rest() {
+                Some(self.rest_since.unwrap_or(self.t))
+            } else {
+                None
+            };
+        }
         self.check_driven_collisions();
         if let (Some(run), Some((a, b))) = (self.policy_runs.first(), self.collisions.first()) {
             // Under a policy the safety read is a verdict, not a
@@ -4325,6 +4470,12 @@ impl Rollout {
             self.current = p;
             self.advance_through_ready_steps()?;
             self.close_scan(p);
+        }
+        if self.settle_from.is_none()
+            && !self.programs.is_empty()
+            && self.programs.iter().all(Program::finished)
+        {
+            self.settle_from = Some(self.t);
         }
         Ok(())
     }
@@ -4914,6 +5065,10 @@ impl Rollout {
                     }
                 }
             }
+            // What each joint runs when powered — kept aside so a driver
+            // taking an unpowered robot mid-bake can switch it back on.
+            let powered_motor_of: std::collections::HashMap<usize, botrail_physics::JointMotor> =
+                driven_joints.iter().copied().collect();
             // Unpowered: every motor is switched off. What is left on
             // each joint is its travel limits and a viscous drag (the
             // bearings and gears no drive is fighting), so the machine
@@ -5223,6 +5378,7 @@ impl Rollout {
                     cap: motor.max_force,
                     torqued: false,
                     passive: !powered && dynamics.is_some(),
+                    powered: powered_motor_of.get(&ji).copied().unwrap_or(motor),
                 });
             }
 

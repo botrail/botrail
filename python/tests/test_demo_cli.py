@@ -50,6 +50,7 @@ CELL_DEMOS = [
     "rl/reach_control_demo.py",
     "rl/reach_env.py",
     "rl/torque_env.py",
+    "rl/tabletop_env.py",
     "vehicles/agv_cell_demo.py",
     "vehicles/amr_demo.py",
     "vehicles/lift_demo.py",

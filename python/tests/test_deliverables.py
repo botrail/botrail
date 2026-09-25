@@ -292,6 +292,7 @@ def test_deliverables_demo_writes_the_document_set(tmp_path: Path) -> None:
         "cell_bom.csv",
         "cell_bom.md",
         "cell_cycle.usda",
+        "cell_cycle_assets",  # the cycle's meshes, one layer each, beside it
         "cell_interlocks.md",
         "cell_io.csv",
         "cell_layout.dxf",
@@ -301,7 +302,8 @@ def test_deliverables_demo_writes_the_document_set(tmp_path: Path) -> None:
         "cell_topology.mmd",
         "pick_cell.script",
     ]
-    assert len(report.deliverables) == 12
+    meshes = list((tmp_path / "cell_cycle_assets" / "meshes").glob("*.usdc"))
+    assert meshes and len(report.deliverables) == 12 + len(meshes)
     assert report.bom["unidentified"] == 0
     # 2.4 + 1.6 + 2.4 + 1.6 m of fence at 1 m pitch: 2+2+2+2 panels, one of
     # them the door.

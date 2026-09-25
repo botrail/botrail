@@ -42,7 +42,13 @@ robots **reference their original stage** at full visual fidelity (assets are
 copied to a sibling `<stem>_assets/` directory); URDF robots are authored from
 the model's visuals, and a visual whose OBJ names an `mtllib` keeps its
 authored colors — one `displayColor` per face, so a catalog arm looks like
-the machine rather than like a palette. A sole robot exports under the
+the machine rather than like a palette. Every triangle mesh — a link's
+visual, a scanned object, a collision shape — is written **once**, as a
+binary layer under `<stem>_assets/meshes/<name>.usdc` named after the first
+link or obstacle that drew it, and every prim that draws it references that
+layer with its own pose and colour: six arms in a grid cost the file one
+arm's meshes, and a cell that was 29 MB of text is a few MB. The studio's
+own download is the one exception — a single file, its meshes inline. A sole robot exports under the
 historical `Robot` prim;
 with several, each lands at `/World/<sanitized instance name>` — the
 convention playback relies on. Exporters return their warnings as a list.

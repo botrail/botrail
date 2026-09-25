@@ -337,4 +337,12 @@ pub trait PhysicsBackend: Send + Sync {
     /// back to its motor at whatever target it holds. Design-rl-dynamics.md
     /// RD0 — the `Torque` action of a dynamic robot.
     fn set_joint_torque(&mut self, joint: usize, torque: Option<f64>);
+
+    /// Replaces driven joint `joint`'s motor — its velocity-loop gain
+    /// (`damping`) and force cap — keeping whatever target or velocity it
+    /// holds. How an unpowered joint (a viscous drag at zero velocity) is
+    /// switched back on when a driver takes the robot mid-bake
+    /// (design-world-physics.md W3, an external drive on a world-scope
+    /// robot). A torqued joint keeps its motor off until the torque lifts.
+    fn set_joint_motor(&mut self, joint: usize, motor: JointMotor);
 }

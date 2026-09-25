@@ -739,6 +739,34 @@ impl PhysicsBackend for RapierBackend {
         }
     }
 
+    fn set_joint_motor(&mut self, joint: usize, motor: JointMotor) {
+        let dj = &mut self.joints[joint];
+        let axis = match dj.kind {
+            JointKind::Prismatic => JointAxis::LinX,
+            JointKind::Revolute => JointAxis::AngX,
+            JointKind::Fixed => return,
+        };
+        dj.motor = motor;
+        let cap = if dj.torque.is_some() {
+            0.0
+        } else {
+            motor.max_force
+        };
+        if let Some(j) = self.impulse_joints.get_mut(dj.handle, true) {
+            // Hold still under the new gains until the next command: the
+            // velocity loop at zero, or the position spring at the
+            // joint's current value when the motor has one.
+            if motor.stiffness > 0.0 {
+                let here = j.data.motor(axis).map(|m| m.target_pos).unwrap_or(0.0);
+                j.data
+                    .set_motor_position(axis, here, motor.stiffness, motor.damping);
+            } else {
+                j.data.set_motor_velocity(axis, 0.0, motor.damping);
+            }
+            j.data.set_motor_max_force(axis, cap);
+        }
+    }
+
     fn joint_position(&self, joint: usize) -> f64 {
         let dj = &self.joints[joint];
         // Relative joint transform: frame1⁻¹ ∘ pose1⁻¹ ∘ pose2 ∘ frame2.

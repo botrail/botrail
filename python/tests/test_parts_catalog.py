@@ -1873,11 +1873,77 @@ configuration:
     max_opening_mm_by_diameter: {"165": 52, "210": 75, "254": 91}
 """
 
+KLT_MANIFEST = """
+schema_version: '0.1'
+id: vda/bin/klt/r1
+kind: spec
+category: bin
+name: R-KLT (VDA 4500)
+manufacturer:
+  name: VDA
+distribution: public
+specs:
+  color: RAL 5003
+  fill_kg: 20
+  albedo_rgb: [0.05, 0.12, 0.35]
+configuration:
+  generator: bin
+  params:
+    length_mm: {values: [300, 400], default: 400}
+    width_mm: {values: [200, 300], default: 300}
+    height_mm: {values: [147, 280], default: 147}
+  components:
+    - role: bin
+      category: bin
+      variants:
+        - {length_mm: 300, width_mm: 200, height_mm: 147, part_number: R-KLT 3215, kg: 0.57}
+        - {length_mm: 400, width_mm: 300, height_mm: 147, part_number: R-KLT 4315, kg: 1.29}
+        - {length_mm: 400, width_mm: 300, height_mm: 280, part_number: R-KLT 4329, kg: 1.85}
+  rules:
+    inner_mm:
+      R-KLT 3215: [243, 162, 129.5]
+      R-KLT 4315: [346, 265, 109]
+      R-KLT 4329: [346, 265, 242]
+"""
+
+
 def _pack(tmp_path: Path, name: str, manifest: str) -> Path:
     directory = tmp_path / name
     directory.mkdir()
     (directory / "manifest.yaml").write_text(manifest)
     return directory
+
+
+def test_a_bin_is_ordered_by_its_type_number_and_sized_inside_from_the_pack(tmp_path: Path) -> None:
+    """A KLT is bought by its VDA type number: the outside is the size
+    sold, the walls and floor are what the inside dimensions leave, and
+    a size nobody moulds is refused."""
+    scene = scene_()
+    pack = _pack(tmp_path, "klt", KLT_MANIFEST)
+    built = bt.parts.bin(scene, "klt", catalog=pack, position=(1.0, 0.0, 0.75))  # the pack's default: 4315
+    lo, hi = scene.obstacle_bounds("klt/floor")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) == pytest.approx((0.346, 0.265, 0.038))
+    lo, hi = scene.obstacle_bounds("klt/wall2")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) == pytest.approx((0.346, 0.0175, 0.147))
+    assert scene.frame("klt/floor")[0][2] == pytest.approx(0.788)
+    assert scene.obstacle_color("klt/wall0") == pytest.approx((0.05, 0.12, 0.35))
+    assert len(built.obstacles) == 6
+    row = rows(scene)["klt"]
+    assert (row["model"], row["manufacturer"], row["category"]) == ("R-KLT 4315", "VDA", "bin")
+    assert row["catalog"] == "vda/bin/klt/r1"
+    assert row["attributes"]["mass_kg"] == 1.29 and row["attributes"]["color"] == "RAL 5003"
+    small = bt.parts.bin(scene, "small", catalog=pack, size=(0.3, 0.2, 0.147), position=(2, 0))
+    assert rows(scene)["small"]["model"] == "R-KLT 3215" and rows(scene)["small"]["attributes"]["mass_kg"] == 0.57
+    lo, hi = scene.obstacle_bounds("small/floor")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) == pytest.approx((0.243, 0.162, 0.0175))
+    tall = bt.parts.bin(scene, "tall", catalog=pack, height_mm=280, position=(3, 0), color=(0.5, 0.5, 0.5))
+    assert rows(scene)["tall"]["model"] == "R-KLT 4329" and len(small.obstacles) == len(tall.obstacles)
+    assert scene.obstacle_color("tall/wall0") == pytest.approx((0.5, 0.5, 0.5))
+    with pytest.raises(ValueError, match="is sold"):
+        bt.parts.bin(scene, "nope", catalog=pack, size=(0.3, 0.2, 0.28), position=(4, 0))
+    with pytest.raises(ValueError, match="not available"):
+        bt.parts.bin(scene, "nope", catalog=pack, length_mm=500, position=(4, 0))
+    assert "nope/floor" not in scene.obstacle_names
 
 
 def test_a_machine_tool_is_ordered_from_its_envelope_pack(tmp_path: Path) -> None:

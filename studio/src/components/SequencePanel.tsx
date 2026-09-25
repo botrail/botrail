@@ -68,9 +68,10 @@ export function SequencePanel() {
     }
   }, [scenarios, scenario]);
   const runScenario = scenario === "baseline" ? undefined : scenario;
-  // The bake's time cap: the engine's 120 s by default. A cell whose cycle
-  // is longer is simulated by raising it; a run under a fault that stalls
-  // still surfaces at it.
+  // The programs' time cap: the engine's 120 s by default. A cell whose
+  // cycle is longer is simulated by raising it; a run under a fault that
+  // stalls still surfaces at it. The world's time is not it: a physics
+  // stream with no program runs until switched off.
   const [cap, setCap] = useState(120);
   useEffect(() => {
     if (!motions.some((m) => m.name === motionChoice)) {
@@ -342,7 +343,7 @@ export function SequencePanel() {
           )}
           <label
             className="seq-cap"
-            title="the bake's time cap in seconds: a run still waiting past it is reported as timed out (the engine's default is 120 s — raise it for a longer cycle)"
+            title="the programs' time cap in seconds: a run still waiting past it is reported as timed out (the engine's default is 120 s — raise it for a longer cycle). The world's own time is separate: a physics stream with no program runs until switched off, and a tail after the programs is bt.Physics(settle=)"
           >
             cap
             <input

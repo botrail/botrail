@@ -4,4 +4,10 @@
  * Metalness/roughness, the pair every viewer botrail hands a scene to
  * already speaks (glTF, USD Preview Surface, three.js).
  */
-export type MaterialMsg = { metalness: number, roughness: number, opacity?: number | null, };
+export type MaterialMsg = { metalness: number, roughness: number, opacity?: number | null, 
+/**
+ * A surface pattern the studio draws over the colour: `wood`,
+ * `checker_plate` or `plastic`. A name this build does not know is
+ * dropped on the way in, so a newer project still opens.
+ */
+finish?: string | null, };

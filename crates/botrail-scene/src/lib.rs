@@ -192,6 +192,45 @@ pub struct Obstacle {
     pub physics: Option<botrail_physics::BodyProps>,
 }
 
+/// A surface pattern the studio draws over the colour — timber grain, the
+/// raised bars of tread plate, the pebble of moulded plastic — so a box
+/// stops reading as a flat paint chip. Presentation only: the rollout's
+/// pictures and a USD export carry the colour and the two knobs, never
+/// the pattern (design-rl-tabletop.md G5, decision D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    Wood,
+    CheckerPlate,
+    Plastic,
+}
+
+impl Finish {
+    pub const ALL: [Finish; 3] = [Finish::Wood, Finish::CheckerPlate, Finish::Plastic];
+
+    /// The name the Python API, the project file and the wire use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Finish::Wood => "wood",
+            Finish::CheckerPlate => "checker_plate",
+            Finish::Plastic => "plastic",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Finish> {
+        Finish::ALL.into_iter().find(|f| f.as_str() == name)
+    }
+
+    /// `(metalness, roughness)` the finish reads as when the author gave
+    /// neither: tread plate is bright metal, timber and plastic are not.
+    pub fn defaults(self) -> (f32, f32) {
+        match self {
+            Finish::Wood => (0.0, 0.65),
+            Finish::CheckerPlate => (0.9, 0.45),
+            Finish::Plastic => (0.0, 0.5),
+        }
+    }
+}
+
 /// The two PBR knobs that decide whether a surface reads as bare steel, a
 /// painted panel or a concrete floor. Both are 0..1 and use the
 /// glTF / USD Preview Surface convention, with an optional
@@ -204,6 +243,8 @@ pub struct Material {
     pub roughness: f32,
     /// Optional alpha override for thin transparent covers; not refraction.
     pub opacity: Option<f32>,
+    /// The pattern drawn over the colour, if any (studio only).
+    pub finish: Option<Finish>,
 }
 
 impl Material {
@@ -213,11 +254,17 @@ impl Material {
             metalness: metalness.clamp(0.0, 1.0),
             roughness: roughness.clamp(0.0, 1.0),
             opacity: None,
+            finish: None,
         }
     }
 
     pub fn with_opacity(mut self, opacity: Option<f32>) -> Self {
         self.opacity = opacity.map(|v| v.clamp(0.0, 1.0));
+        self
+    }
+
+    pub fn with_finish(mut self, finish: Option<Finish>) -> Self {
+        self.finish = finish;
         self
     }
 }
@@ -597,8 +644,10 @@ impl Scene {
                 far: declared.far,
             };
             if let Err(e) = self.upsert_camera(camera) {
-                self.collision_warnings
-                    .push(format!("{robot}: declared camera `{}` skipped: {e}", declared.name));
+                self.collision_warnings.push(format!(
+                    "{robot}: declared camera `{}` skipped: {e}",
+                    declared.name
+                ));
             }
         }
     }
@@ -684,7 +733,10 @@ impl Scene {
             }
             if let Some(rest) = camera.name.strip_prefix(&format!("{old}/")) {
                 let renamed = format!("{candidate}/{rest}");
-                renamed_cameras.push((std::mem::replace(&mut camera.name, renamed.clone()), renamed));
+                renamed_cameras.push((
+                    std::mem::replace(&mut camera.name, renamed.clone()),
+                    renamed,
+                ));
             }
         }
         for (from, to) in &renamed_cameras {

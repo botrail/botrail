@@ -410,6 +410,7 @@ fn author_link_mass(layer: &mut LayerBuilder, prim: &str, link: &Link) {
 /// under `robot_prim`: every link a rigid body with its colliders, every
 /// joint a UsdPhysics joint under `<robot_prim>/joints`. `used` is the
 /// robot prim's child names so far.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn author_articulation(
     layer: &mut LayerBuilder,
     robot: &RobotAnimation,
@@ -417,6 +418,7 @@ pub(super) fn author_articulation(
     robot_prim: &str,
     link_prims: &[String],
     used: &mut HashMap<String, usize>,
+    meshes: &mut super::meshes::MeshLayers,
     warnings: &mut Vec<String>,
 ) -> Result<(), UsdExportError> {
     let model = robot.model;
@@ -435,12 +437,15 @@ pub(super) fn author_articulation(
         }
         for (k, shape) in link.collisions.iter().enumerate() {
             let collider = format!("{prim}/Collision_{k}");
+            let leaf = prim.rsplit('/').next().unwrap_or(prim);
             author_geometry(
                 layer,
                 &collider,
                 &shape.geometry,
                 &XformValue::Static(shape.origin),
                 None,
+                &format!("{leaf}_c{k}"),
+                meshes,
                 warnings,
             )?;
             guide_purpose(layer, &collider);

@@ -76,6 +76,51 @@ def test_carton_is_one_identified_resident_with_its_mass():
     assert "visual_asset" not in objects(scene)["other"] and rows(scene)["other"]["model"] == "K-30"
 
 
+def test_bin_is_five_boxes_pinned_as_one_unit_with_a_floor_to_set_down_on():
+    """A KLT: four walls and a floor that all collide (a thing set down
+    inside lands on the floor and stops at a wall), one part on the group
+    so a physics bake carries the five as one rigid unit (design-rl-tabletop.md
+    G13), the sleeve a picture round them."""
+    scene = bt.Scene()
+    built = bt.parts.bin(scene, "bin", (0.3, 0.2, 0.147), (1.0, 2.0, 0.75), yaw=math.pi / 2, mass_kg=0.6,
+                         model="R-KLT 3215")
+    by = objects(scene)
+    assert sorted(built.obstacles) == ["bin/floor", "bin/trim/sleeve", "bin/wall0", "bin/wall1", "bin/wall2", "bin/wall3"]
+    assert all(by[n]["enabled"] for n in built.obstacles if not n.startswith("bin/trim/"))
+    sleeve = by["bin/trim/sleeve"]
+    assert not sleeve["enabled"] and sleeve["visual_asset"]["prim_path"] == "/Shapes/tote"
+    assert sleeve["visual_asset"]["color_override"] is True
+    assert scene.obstacle_finish("bin/wall0") == "plastic" and scene.obstacle_finish("bin/floor") == "plastic"
+    # Turned a quarter, the length lies along y. The floor, 12 mm thick,
+    # sits between 12 mm walls that stand the full height.
+    lo, hi = scene.obstacle_bounds("bin/floor")
+    assert (hi[0] - lo[0], hi[1] - lo[1]) == pytest.approx((0.2 - 0.024, 0.3 - 0.024))
+    assert (lo[2], hi[2]) == pytest.approx((0.75, 0.762))
+    lo, hi = scene.obstacle_bounds("bin/wall0")
+    assert (hi[0] - lo[0], hi[1] - lo[1], lo[2], hi[2]) == pytest.approx((0.2, 0.012, 0.75, 0.897))
+    assert scene.frame("bin/floor")[0] == pytest.approx((1.0, 2.0, 0.762))
+    row = rows(scene)["bin"]
+    assert (row["category"], row["model"], row["attributes"]["mass_kg"]) == ("bin", "R-KLT 3215", 0.6)
+    # One rigid unit under the world scope, weighing what the row says.
+    plan = scene.physics_plan(physics=bt.Physics(world=True))
+    unit = next(r for r in plan.rows if r["name"] == "bin")
+    assert unit["kind"] == "dynamic" and unit["mass_kg"] == pytest.approx(0.6)
+    assert sorted(unit["members"]) == sorted(built.obstacles)
+    assert plan.dynamic() == ["bin"]
+    built.remove(scene)
+    assert scene.obstacle_names == [] and not scene.frames and scene.parts() == []
+    # Plain detail is the five boxes; walls may differ across and along.
+    plain = bt.parts.bin(scene, "plain", (0.4, 0.3, 0.147), (0, 0), detail="plain", wall=(0.027, 0.0175), floor=0.038)
+    assert plain.obstacles == ["plain/floor", "plain/wall0", "plain/wall1", "plain/wall2", "plain/wall3"]
+    lo, hi = scene.obstacle_bounds("plain/floor")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2]) == pytest.approx((0.346, 0.265, 0.038))
+    assert rows(scene)["plain"]["model"] == "BIN-400x300x147"
+    with pytest.raises(ValueError):
+        bt.parts.bin(scene, "bad", (0.3, 0.2, 0.147), (0, 0), wall=0.2)
+    with pytest.raises(ValueError):
+        bt.parts.bin(scene, "bad", None, (0, 0))
+
+
 def test_unit_load_collides_as_two_hidden_envelopes_and_stacks_its_cartons_flush():
     scene = bt.Scene()
     built = bt.parts.unit_load(scene, "stock", (2, 3, 1.3), yaw=0.0, pallet=(0.8, 1.2, 0.144), height=0.9)

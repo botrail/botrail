@@ -12,7 +12,7 @@ use botrail_session::SessionHost;
 use botrail_scene::rl::{Control, ObsSpec, PolicyDriver, PolicyInput, StepResult, VecOptions};
 use pyo3::types::PyDict;
 
-use super::{backend_named, hub::SceneHub, physics_engine, spin_mode, LiveRollout, Scene};
+use super::{backend_named, hub::SceneHub, physics_engine_bake, spin_mode, LiveRollout, Scene};
 
 /// One step's report per world: `(t, finished, error, collisions,
 /// contacts, ik_failed)`.
@@ -109,7 +109,7 @@ impl VecRollout {
         if let Some(mode) = toolpath_spin {
             options.toolpath.spin = spin_mode(mode)?;
         }
-        let engine = physics_engine(physics)?;
+        let engine = physics_engine_bake(&mut options, physics)?;
         let hubs: Vec<Arc<SceneHub>> = scenes.iter().map(|s| s.hub.clone()).collect();
         let snapshots: Vec<botrail_scene::Scene> = hubs.iter().map(|h| h.snapshot()).collect();
         let first = &snapshots[0];
@@ -296,6 +296,28 @@ impl VecRollout {
             rows(py, obs, n, dim)?,
             results.into_iter().map(step_tuple).collect(),
         ))
+    }
+
+    /// Advances the worlds flagged in `only` (all of them by default) by
+    /// `k` scan ticks with no command — the settling ticks after a reset.
+    /// Returns each world's bake error, or `None`.
+    #[pyo3(signature = (k, only = None))]
+    fn tick_all(
+        &mut self,
+        py: Python<'_>,
+        k: u32,
+        only: Option<Vec<bool>>,
+    ) -> PyResult<Vec<Option<String>>> {
+        let n = self.inner.len();
+        let only = only.unwrap_or_default();
+        if !only.is_empty() && only.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "only: expected {n} flags, got {}",
+                only.len()
+            )));
+        }
+        let inner = &mut self.inner;
+        Ok(py.allow_threads(|| inner.tick_all(k, &only)))
     }
 
     /// The `(N, dim)` observations as the worlds stand.

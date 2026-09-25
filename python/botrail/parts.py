@@ -3206,6 +3206,7 @@ def stairs(
             quaternion=q,
             color=tread_color,
         )
+        scene.set_obstacle_material(made, finish="checker_plate")
         scene.set_obstacle_walkable(made, True)
         built.obstacles.append(made)
 
@@ -5075,7 +5076,7 @@ def compound(
 # The forms a box cannot draw, as unit-box USD layers — one mesh at
 # `/Shapes/<name>` with its finishes as material subsets — vendored from
 # botrail-assets/workshop-shapes by scripts/sync_shapes.py.
-SHAPES: tuple[str, ...] = ("adjuster", "basket", "carton", "handle", "hose", "panel", "rim", "tray", "workpiece")
+SHAPES: tuple[str, ...] = ("adjuster", "basket", "carton", "handle", "hose", "panel", "rim", "tote", "tray", "workpiece")
 _SHAPES_DIR = Path(__file__).resolve().parent / "_shapes"
 
 
@@ -5153,6 +5154,8 @@ LINE_GREEN: Color = (0.10, 0.45, 0.20)
 HI_VIS: Color = (0.85, 0.75, 0.30)
 TRAY_STEEL: Color = (0.55, 0.57, 0.60)
 FOAM: Color = (0.82, 0.80, 0.74)
+# The blue a VDA small-load container (KLT) is moulded in, RAL 5003-ish.
+KLT_BLUE: Color = (0.10, 0.25, 0.60)
 # One lot of cartons is one board colour; the timber of a pallet varies plank by plank.
 _CARDBOARD_LOTS: tuple[Color, ...] = ((0.48, 0.31, 0.16), (0.60, 0.43, 0.25), (0.68, 0.51, 0.32), (0.42, 0.28, 0.16))
 _TIMBER: tuple[Color, ...] = ((0.39, 0.27, 0.14), (0.52, 0.38, 0.21), (0.60, 0.45, 0.27))
@@ -5338,6 +5341,249 @@ def carton(
     if mass_kg is not None:
         identity["mass_kg"] = mass_kg
     scene.set_part(made, kind="obstacle", category=identity.pop("category", "workpiece"), **identity)
+    return made
+
+
+# The tote sleeve is drawn this much (of each side) past the boxes it
+# wraps: its skin then stands just outside their faces and its ribs stand
+# proud of that, whatever the bin's size (the sleeve's depths are fractions
+# of the side — see botrail-assets workshop-shapes `tote`).
+_TOTE_OVERHANG = 0.015
+
+
+def bin(
+    scene,
+    name: str,
+    size: Optional[Point3] = None,
+    position=(0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    wall: float | tuple[float, float] | None = None,
+    floor: Optional[float] = None,
+    yaw: float = 0.0,
+    detail: str | None = None,
+    color: Color | None = None,
+    mass_kg: float | None = None,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A small-load container — a KLT, a tote: `size = (length, width,
+    height)` outside, standing at `position` (the centre of its underside;
+    a bench top) turned by `yaw`. Four walls `wall` thick (one figure, or
+    `(across the length, across the width)`) stand under `<name>/wall0..3`
+    with the floor `floor` thick between them as `<name>/floor`, every one
+    a box the planner and the engine see — a thing set down inside lands
+    on the floor and stops at a wall — and the frame `<name>/floor` is the
+    floor's top centre, where a part sets down. Pinned as one part (`bin`)
+    on the group, so a physics bake keeps the five boxes one rigid unit
+    that rests, slides and is carried whole; `mass_kg` is what that unit
+    weighs. Full detail draws the library's ribbed sleeve — skin, ribs,
+    stacking rim, grips, card pocket — round the boxes under
+    `<name>/trim/`, out of collision, in the bin's colour.
+
+    With `catalog=` — a bin spec pack such as `botrail/bin/klt-vda4500` — a
+    container you can order: `size` (or `length_mm` / `width_mm` /
+    `height_mm`) is matched against the sizes sold and a combination nobody
+    sells is refused, the walls and floor are as thick as the pack's inside
+    dimensions say, and the BOM row carries the type number and the mass."""
+    spec = None
+    params: dict = {}
+    part_number = None
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("bin")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        size = _sized_box(spec, params, size, ("length_mm", "width_mm", "height_mm"))
+        part_number = spec.part_number("bin", **params)  # refuses a combination nobody sells
+        inner = (spec.rule("inner_mm") or {}).get(part_number)
+        if inner is not None:
+            il, iw, ih = (float(v) / 1000.0 for v in inner)
+            wall = wall if wall is not None else ((size[0] - il) / 2, (size[1] - iw) / 2)
+            floor = floor if floor is not None else size[2] - ih
+        manufacturer = manufacturer or spec.manufacturer
+        albedo = (spec.manifest.get("specs") or {}).get("albedo_rgb")
+        if color is None and isinstance(albedo, (list, tuple)) and len(albedo) == 3:
+            color = (float(albedo[0]), float(albedo[1]), float(albedo[2]))
+    mode = _prop_detail(detail)
+    if size is None:
+        raise ValueError("bin: size is required without a catalog")
+    lx, ly, h = (float(v) for v in size)
+    color = KLT_BLUE if color is None else color
+    wall = 0.012 if wall is None else wall
+    wx, wy = (float(wall[0]), float(wall[1])) if isinstance(wall, (tuple, list)) else (float(wall), float(wall))
+    floor = 0.012 if floor is None else float(floor)
+    if min(lx, ly, h) <= 0 or not (0 < wx < lx / 2 and 0 < wy < ly / 2 and 0 < floor < h):
+        raise ValueError(f"{name}: a bin needs positive sides, walls thinner than half a side and a floor "
+                         f"lower than its height, not {size} / walls {wx * 1e3:.0f}x{wy * 1e3:.0f} mm / floor {floor * 1e3:.0f} mm")
+
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    built = Built(name)
+    made = scene.add_box(f"{name}/floor", size=(lx - 2 * wx, ly - 2 * wy, floor),
+                         position=(x, y, z0 + floor / 2), quaternion=q, color=color)
+    scene.set_obstacle_material(made, finish="plastic")
+    built.obstacles.append(made)
+    # The end walls span the width; the side walls stand between them.
+    ends = [(-(lx - wx) / 2, 0.0, wx, ly), ((lx - wx) / 2, 0.0, wx, ly)]
+    sides = [(0.0, -(ly - wy) / 2, lx - 2 * wx, wy), (0.0, (ly - wy) / 2, lx - 2 * wx, wy)]
+    for k, (dx, dy, sx, sy) in enumerate(ends + sides):
+        px, py = _turned(x, y, yaw, dx, dy)
+        made = scene.add_box(f"{name}/wall{k}", size=(sx, sy, h), position=(px, py, z0 + h / 2), quaternion=q, color=color)
+        scene.set_obstacle_material(made, finish="plastic")
+        built.obstacles.append(made)
+    scene.add_frame(f"{name}/floor", position=(x, y, z0 + floor), quaternion=q)
+    built.frames.append(f"{name}/floor")
+    if mode == "full":
+        g = 1.0 + 2.0 * _TOTE_OVERHANG
+        built.obstacles.append(
+            shaped_box(scene, f"{name}/trim/sleeve", "tote", (lx * g, ly * g, h), (x, y, z0 + h / 2),
+                       quaternion=q, color=color)
+        )
+
+    if spec is None:
+        identity = _identity(model or f"BIN-{round(lx * 1000)}x{round(ly * 1000)}x{round(h * 1000)}", manufacturer, attributes)
+        if mass_kg is not None:
+            identity["mass_kg"] = mass_kg
+        scene.set_part(name, kind="group", category=identity.pop("category", "bin"), **identity)
+        return built
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    weighed = mass_kg if mass_kg is not None else spec.mass_kg("bin", **params)
+    scene.set_part(
+        name, kind="group", category=spec.category("bin", "bin"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or part_number, description=spec.name,
+        **{**recorded, **_kg(weighed), **attributes},
+    )
+    return built
+
+
+def _rpy_quat(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    """URDF `rpy` (fixed-axis X, then Y, then Z) as a quaternion (x, y, z, w)."""
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def _urdf_origin(element) -> tuple[Point3, tuple[float, float, float, float]]:
+    if element is None:
+        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+    xyz = tuple(float(v) for v in (element.get("xyz") or "0 0 0").split())
+    rpy = tuple(float(v) for v in (element.get("rpy") or "0 0 0").split())
+    return xyz, _rpy_quat(*rpy)
+
+
+def _prop_model(directory: Path, manifest: dict, pid: str):
+    """The one visual mesh a rigid catalog model draws with: its file (kept
+    lexical — a hub snapshot's files are symlinks to extension-less blobs),
+    its scale, and its pose in the model's root frame (the fixed joints down
+    to its link and the visual's own origin, composed)."""
+    import os
+    import xml.etree.ElementTree as ET
+
+    rel = (manifest.get("assets") or {}).get("urdf")
+    if not rel:
+        raise ValueError(f"{pid}: the package ships no model (assets.urdf) to place")
+    urdf = directory / rel
+    root = ET.parse(urdf).getroot()
+    for joint in root.findall("joint"):
+        if joint.get("type") != "fixed":
+            raise ValueError(f"{pid}: a prop is one rigid body — joint {joint.get('name')!r} moves ({joint.get('type')})")
+    meshes = [
+        (link.get("name"), visual, mesh)
+        for link in root.findall("link")
+        for visual in link.findall("visual")
+        if (mesh := visual.find("geometry/mesh")) is not None
+    ]
+    if len(meshes) != 1:
+        raise ValueError(f"{pid}: a prop draws with one mesh — the model has {len(meshes)} visual meshes")
+    link, visual, mesh = meshes[0]
+    parent_of = {j.find("child").get("link"): j for j in root.findall("joint")}
+    position, quaternion = _urdf_origin(visual.find("origin"))
+    while link in parent_of:
+        joint = parent_of[link]
+        offset, turn = _urdf_origin(joint.find("origin"))
+        moved = _rotate(turn, position)
+        position = (offset[0] + moved[0], offset[1] + moved[1], offset[2] + moved[2])
+        quaternion = _mul_quat(turn, quaternion)
+        link = joint.find("parent").get("link")
+    path = Path(os.path.normpath(urdf.parent / mesh.get("filename")))
+    scale = tuple(float(v) for v in mesh.get("scale").split()) if mesh.get("scale") else None
+    return path, scale, position, quaternion
+
+
+def prop(
+    scene,
+    name: str,
+    position,
+    *,
+    catalog: "CatalogRef",
+    yaw: float = 0.0,
+    dynamic: bool = True,
+    mass_kg: float | None = None,
+    friction: float | None = None,
+    color: Optional[Color] = None,
+    **attributes,
+) -> str:
+    """A catalog object — a scanned mug, a cracker box, a clamp — standing
+    at `position` (x, y[, the z of the face it stands on]) turned by `yaw`:
+    the package's model as one obstacle, drawn as it ships (its textures
+    included) and colliding as the convex decomposition of that mesh, a
+    dynamic body of the pack's mass (`mass_kg` overrides) under physics
+    (`dynamic=False` for scenery). The model's frame need not sit in its
+    footprint — a scan's origin is wherever the scanner put it: the mesh is
+    placed so the middle of its footprint lands on (x, y) and its underside
+    on the face. `catalog` is a catalog id, an `(id, revision)` pair or a
+    package directory (a local build).
+
+    Pins one part (the catalog id and revision, the pack's category, name
+    and maker, the mass) and colours the obstacle with the pack's
+    `albedo_rgb` unless `color` is given — the flat colour the consumers
+    that draw no texture use (the rollout's colour pictures, a USD
+    without materials); the studio keeps the texture. Returns the name."""
+    from ._spec import package
+
+    directory, manifest, revision = package(catalog)
+    pid = str(manifest.get("id", directory))
+    mesh, scale, offset, turn = _prop_model(directory, manifest, pid)
+    specs = manifest.get("specs") or {}
+    if color is None and specs.get("albedo_rgb") is not None:
+        color = tuple(float(v) for v in specs["albedo_rgb"][:3])
+    made = scene.add_mesh(name, str(mesh), position=offset, scale=scale, quaternion=turn, color=color)
+    # The footprint in the model's root frame (Z up): where the mesh stands
+    # with the root at the origin.
+    (lo, hi) = scene.obstacle_bounds(made)
+    centre = (-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2])
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    moved = _rotate(q, (centre[0] + offset[0], centre[1] + offset[1], centre[2] + offset[2]))
+    scene.set_obstacle_pose(made, (x + moved[0], y + moved[1], z0 + moved[2]), _mul_quat(q, turn))
+    mass = mass_kg if mass_kg is not None else specs.get("mass_kg")
+    physics: dict = {"dynamic": dynamic}
+    if mass is not None:
+        physics["mass"] = float(mass)
+    if friction is not None:
+        physics["friction"] = friction
+    scene.set_physics(made, **physics)
+    maker = manifest.get("manufacturer") or {}
+    identity = dict(attributes)
+    identity.setdefault("model", manifest.get("name") or pid)
+    if isinstance(maker, dict) and maker.get("name"):
+        identity.setdefault("manufacturer", maker["name"])
+    if mass is not None:
+        identity.setdefault("mass_kg", float(mass))
+    category = identity.pop("category", manifest.get("category") or "workpiece")
+    scene.set_part(made, kind="obstacle", category=category, catalog=(pid, revision), **identity)
     return made
 
 

@@ -1214,12 +1214,7 @@ impl RobotBuilder<'_> {
                         let (cam_raw, _) = decompose_matrix(&info.world);
                         let relative = body_raw.inverse() * cam_raw;
                         self.cameras.push(LinkCamera {
-                            name: info
-                                .path
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or("camera")
-                                .to_string(),
+                            name: info.path.rsplit('/').next().unwrap_or("camera").to_string(),
                             link,
                             pose: self.physical(&(correction.inverse() * relative)),
                             fov_deg: optics.fov_deg,
@@ -2676,7 +2671,10 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         let link1 = model.link_index("/Robot/link1").unwrap();
         let eye = model.cameras.iter().find(|c| c.link == link1).unwrap();
         assert_eq!(eye.name, "Eye_2");
-        assert!(model.cameras.iter().any(|c| c.name == "Eye" && c.link == model.link_index("/Robot/base").unwrap()));
+        assert!(model
+            .cameras
+            .iter()
+            .any(|c| c.name == "Eye" && c.link == model.link_index("/Robot/base").unwrap()));
         assert!((eye.fov_deg - 60.0).abs() < 1e-3, "{}", eye.fov_deg);
         assert_eq!(eye.resolution, [camera::DEFAULT_WIDTH, 720]);
         assert!((eye.near - 0.05).abs() < 1e-9 && (eye.far - 4.0).abs() < 1e-9);

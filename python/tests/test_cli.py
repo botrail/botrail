@@ -167,7 +167,11 @@ def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> 
 def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "docs"), "--all", "--scenarios", "--name", "pick")
     assert code == 0 and out["ok"]
-    names = sorted(Path(p).name for p in out["files"])
+    # A USD's meshes ride beside it (`<stem>_assets/meshes/*.usdc`) and are
+    # listed as its assets; the documents themselves are these.
+    assets = [p for p in out["files"] if "_assets/" in p]
+    assert assets and all(p.endswith(".usdc") and "_assets/meshes/" in p for p in assets)
+    names = sorted(Path(p).name for p in out["files"] if "_assets/" not in p)
     assert names == sorted(
         [
             "pick.botrail",
@@ -189,8 +193,8 @@ def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
         ]
     )
     report = json.loads((tmp_path / "docs" / "pick_report.json").read_text())
-    # The report hashes what was written before it.
-    assert len(report["deliverables"]) == 14
+    # The report hashes what was written before it — the assets included.
+    assert len(report["deliverables"]) == len(out["files"]) - 2
     assert all(d["sha256"] for d in report["deliverables"])
     # A subset, no bake needed.
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "some"), "--bom", "--layout")

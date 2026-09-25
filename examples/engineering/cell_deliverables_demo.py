@@ -107,6 +107,9 @@ def deliver(scene: bt.Scene, out: Path) -> bt.CellReport:
     write("cell_layout.svg", lambda p: scene.export_layout(p, scale=200, title="pick cell"))  # plan view for the review
     write("cell_layout.dxf", lambda p: scene.export_layout(p, title="pick cell"))  # plan view for the 2D CAD
     write("cell_cycle.usda", lambda p: baseline.export_usd(p, fps=30.0))  # the baked cycle
+    # The cycle's meshes ride beside it, one binary layer each, and are
+    # part of the set the report hashes.
+    files += sorted(p for p in (out / "cell_cycle_assets").rglob("*") if p.is_file())
     write("pick_cell.script", runs.export_script)                   # the controller program, both arms
 
     report = scene.cell_report(

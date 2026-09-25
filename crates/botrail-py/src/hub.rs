@@ -222,6 +222,10 @@ impl SessionHost for SceneHub {
         let mut options = botrail_scene::rollout::RolloutOptions::default();
         if let Some(cap) = max_duration.filter(|cap| cap.is_finite() && *cap > 0.0) {
             options.max_duration = cap;
+        } else if names.is_empty() {
+            // The world under gravity with no time asked for: the studio's
+            // physics toggle. Nothing to time out — it runs until stopped.
+            options.max_duration = f64::INFINITY;
         }
         let backend = backend.map(|(backend, physics)| {
             options.physics = Some(physics);
@@ -819,6 +823,21 @@ impl SceneHub {
                 .find(|o| o.name == name)
                 .ok_or_else(|| SceneError::UnknownObstacle(name.to_string()))?;
             Ok(obstacle.material.map(|m| (m.metalness, m.roughness)))
+        })
+    }
+
+    /// The surface pattern of an obstacle's material, by name, when it has one.
+    pub fn obstacle_finish(&self, name: &str) -> Result<Option<String>, SceneError> {
+        self.with_scene(|scene| {
+            let obstacle = scene
+                .obstacles()
+                .iter()
+                .find(|o| o.name == name)
+                .ok_or_else(|| SceneError::UnknownObstacle(name.to_string()))?;
+            Ok(obstacle
+                .material
+                .and_then(|m| m.finish)
+                .map(|f| f.as_str().to_string()))
         })
     }
 
@@ -1581,7 +1600,10 @@ impl SceneHub {
             curves: &[],
             cameras: &[],
         };
-        let options = botrail_usd::export::ExportOptions { fps };
+        let options = botrail_usd::export::ExportOptions {
+            fps,
+            ..Default::default()
+        };
         botrail_usd::export::write_animation(path, &input, &options).map_err(|e| e.to_string())
     }
 

@@ -1,3 +1,4 @@
+import json
 import math
 from pathlib import Path
 
@@ -172,6 +173,33 @@ def test_obstacle_material_is_optional_and_settable(scene: bt.Scene) -> None:
 
     with pytest.raises(ValueError):
         scene.set_obstacle_material("nope", metalness=0.5)
+
+
+def test_a_finish_is_a_named_pattern_over_the_colour(scene: bt.Scene, tmp_path: Path) -> None:
+    """Timber grain, tread plate, moulded plastic: a pattern the studio
+    draws over the colour, named on the material. On its own it picks the
+    knobs that finish reads as; a knob given wins; the project and the
+    generated recipe carry it."""
+    scene.add_box("top", (1.5, 0.7, 0.03), (0.5, 0.0, 0.735))
+    assert scene.obstacle_finish("top") is None
+    scene.set_obstacle_material("top", finish="wood")
+    assert scene.obstacle_finish("top") == "wood"
+    assert scene.obstacle_material("top") == pytest.approx((0.0, 0.65))
+    scene.set_obstacle_material("top", finish="checker_plate")
+    assert scene.obstacle_material("top") == pytest.approx((0.9, 0.45))
+    scene.set_obstacle_material("top", metalness=0.2, finish="checker_plate")
+    assert scene.obstacle_material("top") == pytest.approx((0.2, 0.45))
+    with pytest.raises(ValueError, match="wood, checker_plate, plastic"):
+        scene.set_obstacle_material("top", finish="marble")
+    assert scene.obstacle_finish("top") == "checker_plate"
+    scene.set_obstacle_material("top", metalness=0.5, roughness=0.5)
+    assert scene.obstacle_finish("top") is None
+    scene.set_obstacle_material("top", finish="plastic")
+    obstacle = next(o for o in json.loads(scene._project_json())["obstacles"] if o["name"] == "top")
+    assert obstacle["material"] == {"metalness": 0.0, "roughness": 0.5, "finish": "plastic"}
+    assert 'scene.set_obstacle_material("top", metalness=0, roughness=0.5, finish="plastic")' in scene.generate_python()
+    scene.save_project(tmp_path / "cell.botrail")
+    assert bt.Scene.load_project(tmp_path / "cell.botrail").obstacle_finish("top") == "plastic"
 
 
 def test_material_never_affects_collision(scene: bt.Scene) -> None:

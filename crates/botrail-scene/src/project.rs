@@ -1489,7 +1489,7 @@ impl Scene {
                     geometry,
                     pose: (&o.pose).into(),
                     color: o.color,
-                    material: o.material.map(Into::into),
+                    material: o.material.clone().map(Into::into),
                 },
                 o.enabled,
                 o.visible,
@@ -2200,13 +2200,18 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 o.name
             ));
         }
-        if let Some(m) = o.material {
+        if let Some(m) = &o.material {
             let alpha = m
                 .opacity
                 .map(|v| format!(", opacity={v}"))
                 .unwrap_or_default();
+            let finish = m
+                .finish
+                .as_deref()
+                .map(|f| format!(", finish={f:?}"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "scene.set_obstacle_material({:?}, metalness={}, roughness={}{alpha})\n",
+                "scene.set_obstacle_material({:?}, metalness={}, roughness={}{alpha}{finish})\n",
                 o.name, m.metalness, m.roughness
             ));
         }
@@ -4016,6 +4021,36 @@ mod tests {
     }
 
     #[test]
+    fn a_finish_survives_the_project_and_its_python_and_an_unknown_one_is_dropped() {
+        let mut scene = sample_scene();
+        scene
+            .set_obstacle_material(
+                "wall",
+                Some(crate::Material::new(0.0, 0.65).with_finish(Some(crate::Finish::Wood))),
+            )
+            .unwrap();
+        let project = scene.to_project();
+        let json = project.to_json();
+        assert!(json.contains("\"finish\"") && json.contains("\"wood\""));
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.obstacles()[0].material.and_then(|m| m.finish),
+            Some(crate::Finish::Wood)
+        );
+        assert!(generate_python(&project).contains(
+            "scene.set_obstacle_material(\"wall\", metalness=0, roughness=0.65, finish=\"wood\")"
+        ));
+        // A finish this build has no picture for is not an error: the
+        // material stays, the pattern goes.
+        let newer = json.replace("\"wood\"", "\"marble\"");
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&newer).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.obstacles()[0].material,
+            Some(crate::Material::new(0.0, 0.65))
+        );
+    }
+
+    #[test]
     fn generated_python_contains_the_full_recipe() {
         let mut scene = sample_scene();
         scene.set_robot_base_pose(Isometry3::translation(1.0, 0.0, 0.0));
@@ -4089,8 +4124,15 @@ mod tests {
         });
         let mut scene = Scene::new(Arc::new(model));
         let robot = scene.robots()[0].name.clone();
-        let camera = scene.cameras().iter().find(|c| c.name == format!("{robot}/eye")).unwrap();
-        assert!(!camera.body_visible, "the robot's own geometry is the housing");
+        let camera = scene
+            .cameras()
+            .iter()
+            .find(|c| c.name == format!("{robot}/eye"))
+            .unwrap();
+        assert!(
+            !camera.body_visible,
+            "the robot's own geometry is the housing"
+        );
         assert_eq!(
             camera.mount,
             crate::seq::CameraMount::Link {
@@ -4111,8 +4153,14 @@ mod tests {
             mount: None,
         }]);
         scene.rename_robot(0, "left");
-        let camera = scene.cameras().iter().find(|c| c.name == "left/eye").expect("renamed");
-        assert!(matches!(&camera.mount, crate::seq::CameraMount::Link { robot, .. } if robot == "left"));
+        let camera = scene
+            .cameras()
+            .iter()
+            .find(|c| c.name == "left/eye")
+            .expect("renamed");
+        assert!(
+            matches!(&camera.mount, crate::seq::CameraMount::Link { robot, .. } if robot == "left")
+        );
         assert!(matches!(
             &scene.sensors()[0].kind,
             crate::seq::SensorKind::Vision { camera, .. } if camera == "left/eye"
@@ -4126,7 +4174,10 @@ mod tests {
         let reloaded = Scene::from_project(&project).unwrap();
         assert!(reloaded.cameras().is_empty());
         let code = generate_python(&project);
-        assert!(code.contains("scene.remove_camera(\"left/eye\")\n"), "{code}");
+        assert!(
+            code.contains("scene.remove_camera(\"left/eye\")\n"),
+            "{code}"
+        );
         // Present, it is authored like any camera — and not removed.
         let mut kept = Scene::new(Arc::new(RobotModel::from_urdf_str(ARM).unwrap()));
         kept.rename_robot(0, "left");

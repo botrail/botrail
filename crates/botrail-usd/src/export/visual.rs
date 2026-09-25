@@ -99,6 +99,7 @@ impl VisualAssets {
         }
         let tint = source.color_override.then_some(color).flatten();
         bind_material(layer, dest, &prim, asset, tint, finish, &self.copies)?;
+        let mut material_subsets = false;
         for child in prim.children().map_err(author_err)? {
             if child
                 .type_name()
@@ -110,7 +111,24 @@ impl VisualAssets {
                 layer.ensure_prim(&sub, Specifier::Def, Some("GeomSubset"));
                 copy_attributes(layer, &sub, &child)?;
                 bind_material(layer, &sub, &child, asset, tint, finish, &self.copies)?;
+                material_subsets |= child
+                    .attribute("familyName")
+                    .get::<Value>()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| matches!(v, Value::Token(t) if t.as_str() == "materialBind"));
             }
+        }
+        if material_subsets {
+            // A material-binding family has to say its subsets do not
+            // overlap (the shape layers do not say so themselves): pxr's
+            // validators reject the default `unrestricted` for it.
+            layer.attr(
+                dest,
+                "subsetFamily:materialBind:familyType",
+                "token",
+                AttrValue::Uniform(Value::Token(tf::Token::from("nonOverlapping"))),
+            );
         }
         Ok(())
     }
