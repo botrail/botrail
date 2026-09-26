@@ -46,6 +46,7 @@ CELL_DEMOS = [
     "multi_robot/dual_cell_demo.py",
     "painting/painting_demo.py",
     "painting/painting_hood_demo.py",
+    "palletizing/palletizing_line_demo.py",
     "rl/policy_cell_demo.py",
     "rl/reach_control_demo.py",
     "rl/reach_env.py",

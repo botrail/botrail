@@ -1467,6 +1467,9 @@ def conveyor(
     rail: Optional[float] = None,
     legs: bool = True,
     leg: Optional[float] = None,
+    stand_span: Optional[float] = None,
+    rollers: Optional[tuple[float, float]] = None,
+    roller_color: Optional[Color] = None,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
     color: Color = DARK_STEEL,
@@ -1479,6 +1482,12 @@ def conveyor(
     (`zone_height` tall, `speed` along `direction`). The part is pinned on the
     device (`conveyor`): the body is its geometry, not a second product. Adds
     the frames `<name>/infeed` and `<name>/outfeed` at the belt ends.
+
+    `rollers=(pitch, diameter)` makes it a roller conveyor: the same slab
+    collides, but full detail draws the rollers across the frame — tops at
+    the conveying height, `roller_color` (zinc by default) — as one mesh out
+    of collision, and the part is a `conveyor.roller`. `stand_span` spaces
+    the stands at most that far apart (a pair at each end without it).
 
     With `catalog=` — the id of a conveyor spec pack, or a package directory —
     a conveyor you can order: the length, belt width and stand height are
@@ -1516,6 +1525,8 @@ def conveyor(
         if spec.has_component("stand"):
             leg = leg if leg is not None else _mm(spec.dimension_mm("stand", "leg", 50.0))
             stand_span_mm = spec.rule("stand_span_max_mm")
+        if rollers is None and spec.dimension_mm("unit", "roller_pitch") is not None:
+            rollers = (_mm(spec.dimension_mm("unit", "roller_pitch")), _mm(spec.dimension_mm("unit", "roller_diameter")))
         manufacturer = manufacturer or spec.manufacturer
 
     mode = _detail(detail, spec is not None)
@@ -1583,6 +1594,14 @@ def conveyor(
             f"{name}/mid_tension", size=(tl / 1000, width + 2 * rail, td / 1000),
             position=(x + dx * length / 4, y + dy * length / 4, z - belt_thickness - td / 2000),
             quaternion=q, color=color))
+    if rollers is not None:
+        pitch, diameter = float(rollers[0]), float(rollers[1])
+        if not (math.isfinite(pitch) and math.isfinite(diameter)) or pitch <= 0 or diameter <= 0 or diameter > pitch:
+            raise ValueError("conveyor: rollers are (pitch, diameter), positive, no wider than the pitch")
+    if stand_span_mm is None and stand_span is not None:
+        if not math.isfinite(stand_span) or stand_span <= 0:
+            raise ValueError("conveyor: stand_span must be positive")
+        stand_span_mm = stand_span * 1000.0
     stands = 0
     if legs and z - belt_thickness > leg:
         h = z - belt_thickness
@@ -1604,7 +1623,7 @@ def conveyor(
             pair = []
             for side, s in (("l", 1.0), ("r", -1.0)):
                 ox, oy = nx * s * (width / 2 - leg / 2), ny * s * (width / 2 - leg / 2)
-                end = ("in", "out")[i > 0] if spec is None else f"s{i}"
+                end = f"s{i}" if spec is not None else "in" if i == 0 else "out" if i == count - 1 else f"s{i}"
                 pname = f"{name}/leg_{end}{side}" if spec is None else f"{name}/stands/{end}_{side}"
                 pair.append(
                     scene.add_box(pname, size=(leg, leg, h),
@@ -1641,6 +1660,24 @@ def conveyor(
             scene.set_obstacle_visible(f"{name}/drive", False)
         if has_tension:
             scene.set_obstacle_visible(f"{name}/mid_tension", False)
+    elif mode == "full" and rollers is not None:
+        # The goods ride the roller tops: the slab stays the collision, the
+        # rollers are one mesh across the frame at their pitch.
+        scene.set_obstacle_visible(f"{name}/belt", False)
+        pitch, diameter = float(rollers[0]), float(rollers[1])
+        count = max(1, int(math.floor((length - diameter) / pitch + 1e-9)) + 1)
+        first = -(count - 1) * pitch / 2
+        deck = compound(
+            scene, f"{name}/trim/rollers",
+            [Cylinder(diameter / 2, width, (first + i * pitch, 0.0, -width / 2)) for i in range(count)],
+            (x, y, z - diameter / 2),
+            # the rollers' axis (+Z of the compound) across the frame, their
+            # row (+X) along the conveyor
+            quaternion=_mul_quat(q, _pitch_quat(math.pi / 2)),
+            color=roller_color if roller_color is not None else ZINC, finish=_MACHINED_METAL, segments=16,
+        )
+        scene.set_obstacle_enabled(deck, False)
+        built.obstacles.append(deck)
     elif mode == "full":
         # The rollers the belt runs on, and the drive under the outfeed end.
         # A nose roller is about as thick as the frame it sits in.
@@ -1680,7 +1717,8 @@ def conveyor(
         built.frames.append(fname)
 
     if spec is None:
-        scene.set_part(name, kind="device", category="conveyor", **_identity(model, manufacturer, attributes))
+        scene.set_part(name, kind="device", category="conveyor.roller" if rollers is not None else "conveyor",
+                       **_identity(model, manufacturer, attributes))
         return built
 
     # The device row is the unit itself, so it carries the part number you

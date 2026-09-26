@@ -149,6 +149,27 @@ def test_conveyor_makes_a_body_a_device_and_end_frames() -> None:
         bt.parts.conveyor(scene, "bad", length=1.0, width=0.3, position=(0, 0, 0.7), direction=(0, 0))
 
 
+def test_roller_conveyor_draws_its_rollers_and_keeps_the_slab() -> None:
+    scene = scene_()
+    c = bt.parts.conveyor(scene, "rc", length=2.0, width=0.62, position=(0.0, 0.0, 0.75), rollers=(0.09, 0.05),
+                          stand_span=0.8, detail="full", model="RM 8310", manufacturer="Interroll")
+    # The slab still collides at the conveying height; the picture is rollers.
+    assert scene.obstacle_enabled("rc/belt") and not scene.obstacle_visible("rc/belt")
+    assert scene.obstacle_bounds("rc/belt")[1][2] == pytest.approx(0.75)
+    assert "rc/trim/rollers" in c.obstacles and not scene.obstacle_enabled("rc/trim/rollers")
+    lo, hi = scene.obstacle_bounds("rc/trim/rollers")
+    assert hi[2] == pytest.approx(0.75, abs=1e-3)          # roller tops at the conveying height
+    assert hi[0] - lo[0] <= 2.0 and hi[1] - lo[1] == pytest.approx(0.62, abs=1e-3)
+    # Stands at most 0.8 apart along 2 m: four pairs, not two.
+    assert len([n for n in c.obstacles if n.startswith("rc/leg_")]) == 8
+    assert rows(scene)["rc"]["category"] == "conveyor.roller"
+    # A belt spaces its stands the same way.
+    belt = bt.parts.conveyor(scene, "bc", length=2.0, width=0.4, position=(0.0, 1.5, 0.75), stand_span=0.8)
+    assert len([n for n in belt.obstacles if n.startswith("bc/leg_")]) == 8
+    with pytest.raises(ValueError, match="rollers"):
+        bt.parts.conveyor(scene, "bad", length=1.0, width=0.3, position=(0, 2, 0.7), rollers=(0.05, 0.09))
+
+
 def test_light_curtain_is_a_beam_between_two_columns() -> None:
     scene = scene_()
     lc = bt.parts.light_curtain(scene, "lc", frm=(-1.0, -1.0), to=(1.0, -1.0), height=1.2, model="SL-V", manufacturer="KEYENCE")
