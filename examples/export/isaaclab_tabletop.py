@@ -26,6 +26,8 @@ the stage. What Isaac Lab addresses, per environment:
     {ENV}/Cell/Robot        the arm (ArticulationCfg, spawn=None)
     {ENV}/Cell/Env/can      a thing on the table (RigidObjectCfg, spawn=None)
     {ENV}/Cell/Env/bin      the KLT: five boxes, one body
+    {ENV}/Cell/Env/cam      the wrist camera's bracket: one body on a fixed
+                            joint to the hand (`.../cam/weld`)
 
 `scene.physics_plan(physics)` is the table of what became what. No belt
 here, so the run keeps Isaac Lab's defaults: GPU dynamics and the physics
@@ -149,6 +151,7 @@ def run(usd: Path, argv: list[str]) -> None:
         sugar = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/Cell/Env/sugar", spawn=None)
         bin = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/Cell/Env/bin", spawn=None)
         tray = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/Cell/Env/tray", spawn=None)
+        bracket = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/Cell/Env/cam", spawn=None)
 
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=1 / 120, device=args.device))
     scene = InteractiveScene(TabletopSceneCfg(num_envs=args.num_envs, env_spacing=2.5))
@@ -174,6 +177,15 @@ def run(usd: Path, argv: list[str]) -> None:
     index = {name: names.index(name) for name in ARM + FINGERS}
     things = OBJECTS + ["bin", "tray"]
     start = {name: scene[name].data.root_pos_w.clone() - scene.env_origins for name in things}
+    # Where the bracket stands in the hand's own frame: the swing turns the
+    # hand, so a world-frame offset would turn with it.
+    from isaaclab.utils.math import quat_apply_inverse
+
+    hand = robot.body_names.index("fr3_hand")
+    bracket_offset = lambda: quat_apply_inverse(  # noqa: E731
+        robot.data.body_quat_w[:, hand], scene["bracket"].data.root_pos_w - robot.data.body_pos_w[:, hand]
+    )
+    bracket_start = bracket_offset().clone()
     q0 = robot.data.joint_pos.clone()
     target = q0.clone()
     target[:, index["fr3_joint1"]] += 0.5  # swing the base half a radian
@@ -204,6 +216,8 @@ def run(usd: Path, argv: list[str]) -> None:
         print(f"  {name:<8} moved ({d[0]:+.4f}, {d[1]:+.4f}, {d[2]:+.4f}) m, now z = {end[name][0][2].item():.4f}")
     spread = max((end[name] - end[name][0]).abs().max().item() for name in end)
     print(f"  environments agree to {spread:.4f} m")
+    bracket_drift = (bracket_offset() - bracket_start).norm(dim=-1).max().item()
+    print(f"  the camera bracket moved {bracket_drift:.4f} m relative to the hand through the swing")
 
     resting = {name: -0.010 < moved[name][2] <= 0.001 and abs(moved[name][0]) < 0.01 and abs(moved[name][1]) < 0.01 for name in OBJECTS}
     checks = {
@@ -212,6 +226,7 @@ def run(usd: Path, argv: list[str]) -> None:
         "the hand closes and the mimic finger follows": finger.max().item() < 0.005 and (finger - follower).abs().max().item() < 0.003,
         "every thing settles onto the table where it was set down": all(resting.values()),
         "the KLT and the tray stay put": all(max(abs(v) for v in moved[name]) < 0.005 for name in ("bin", "tray")),
+        "the wrist camera's bracket rides the hand": bracket_drift < 0.002,
         "cloned environments behave alike": spread < 0.01,
     }
     for what, ok in checks.items():

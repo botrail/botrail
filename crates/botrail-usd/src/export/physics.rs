@@ -921,7 +921,7 @@ fn author_carrier_chain(
     }
 }
 
-fn author_joint_frames(
+pub(super) fn author_joint_frames(
     layer: &mut LayerBuilder,
     prim: &str,
     local0: &Isometry3<f64>,

@@ -4,6 +4,7 @@ pictures' default decimation; a `VecEnv` under `bt.Physics` (G11); an
 external drive powering a world-scope robot (G12); a dynamic arm that
 stops on what it presses; the randomisation helpers."""
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -81,7 +82,7 @@ def test_pictures_default_to_a_decimated_mesh() -> None:
     cell = demo.make_cell(dynamic=False, objects="shapes")
     observe = [rl.Joints(), rl.Depth("wrist", size=(64, 64))]
     auto = rl.make(rl.single(cell), rl.Task(observe=observe, horizon_s=1.0), seed=0)
-    assert auto._auto_cell == pytest.approx(np.tan(np.radians(70.0) / 2) / 64)
+    assert auto._auto_cell == pytest.approx(np.tan(np.radians(auto.scene.camera_fov("wrist")) / 2) / 64)
     full = rl.make(rl.single(cell), rl.Task(observe=observe, horizon_s=1.0, render={"decimate": None}), seed=0)
     coarse = rl.make(rl.single(cell), rl.Task(observe=observe, horizon_s=1.0, render={"decimate": 0.05}), seed=0)
     auto.reset()
@@ -352,6 +353,30 @@ def test_the_tiled_export_writes_each_mesh_once_and_stays_small(tmp_path) -> Non
     assert all(len(m.GetPointsAttr().Get()) > 0 for m in meshes)
 
 
+def test_the_wrist_camera_is_a_catalog_d405_on_a_clip_the_hand_carries() -> None:
+    """The picture channels look through a RealSense D405 from the catalog
+    — its optics, its body, its BOM line — seated on a printed clip that
+    hugs the hand (botrail-assets franka-hand-d405-clip, vendored): drawn
+    from the clip's layer on a resident that does not collide, colliding
+    as two hidden boxes and the camera's own mesh, all attached to the
+    hand, one part on the BOM, clear of the hand, the wrist, the fingers
+    and of each other by the planner's clearance."""
+    scene = rl.single(demo.make_cell(objects="shapes"))()
+    assert scene.attachments == [(f"cam/{p}", "fr3_hand") for p in ("clip", "claw", "plate", "body")]
+    by = {o["name"]: o for o in json.loads(scene._project_json())["obstacles"]}
+    assert by["cam/clip"]["visual_asset"]["prim_path"] == "/Clip/clip" and not by["cam/clip"]["enabled"]
+    assert by["cam/clip"]["visual_asset"]["url"].endswith("franka_hand_d405_clip.usda")
+    assert all(by[n]["enabled"] and not by[n]["visible"] for n in ("cam/claw", "cam/plate"))
+    rows = {r["names"][0]: r for r in scene.bom().rows}
+    assert rows["wrist"]["category"] == "sensor.camera" and rows["wrist"]["model"] == "RealSense D405"
+    assert rows["wrist"]["catalog"].startswith("realsense/d400/d405/r1")
+    assert rows["cam"]["category"] == "adapter" and rows["cam"]["attributes"]["mass_kg"] == demo.CLIP_MASS
+    assert scene.camera_fov("wrist") == pytest.approx(87.0)
+    assert scene.check_collisions() == []
+    plan = {r["name"]: r for r in scene.physics_plan(physics=bt.Physics(world=True)).rows}
+    assert plan["cam"]["kind"] == "dynamic" and plan["cam"]["reason"] == "carried by fr3/fr3_hand"
+
+
 def test_the_physics_stage_carries_the_cell_for_isaac_lab(tmp_path) -> None:
     """What `examples/export/isaaclab_tabletop.py` writes (design-rl-tabletop.md
     §10.5, T-I): one articulation rooted at the arm with its exported pose
@@ -380,7 +405,10 @@ def test_the_physics_stage_carries_the_cell_for_isaac_lab(tmp_path) -> None:
     assert posed["fr3_finger_joint1"] == pytest.approx(demo.READY[7], abs=1e-6)
     assert posed["fr3_finger_joint2"] == pytest.approx(demo.READY[7], abs=1e-6)  # the mimic follower, derived
     bodies = {str(p.GetPath()) for p in stage.Traverse() if p.HasAPI(UsdPhysics.RigidBodyAPI) and "/Env/" in str(p.GetPath())}
-    assert {f"/World/Env/{n}" for n in demo.NAMES} | {"/World/Env/bin", "/World/Env/tray"} <= bodies
+    assert {f"/World/Env/{n}" for n in demo.NAMES} | {"/World/Env/bin", "/World/Env/tray", "/World/Env/cam"} <= bodies
+    # The camera bracket rides the hand: welded to its link.
+    weld = UsdPhysics.FixedJoint(stage.GetPrimAtPath("/World/Env/cam/weld"))
+    assert weld and [str(p) for p in weld.GetBody0Rel().GetTargets()] == ["/World/Robot/fr3_hand"]
     assert not any(p.startswith("/World/Env/table") or p.startswith("/World/Env/stand") for p in bodies)
     assert stage.GetPrimAtPath("/World/Env/table/top").HasAPI(UsdPhysics.CollisionAPI)
     try:

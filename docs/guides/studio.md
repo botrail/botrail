@@ -117,17 +117,25 @@ body, a ground plane at z = 0 — and playback restarts from the top; off,
 it runs again kinematically and restarts. A physics bake *streams*: the
 host sends the tracks as they grow and playback follows, the step bands
 drawing themselves as the programs advance, so a slow or long bake is
-watched rather than waited for; the bake ends when the programs do, and
-switching off mid-way stops it where it stands and bakes the programs
-kinematically again. With no program baked yet, on streams the world under
-gravity in step with the clock, watched live: whatever is unsupported
-falls while an unpowered machine folds, and **a body can be taken in
-hand** — press on a crate, a part, a link of a folded arm and drag: a
-spring pulls it after the mouse (amber line and dot; red when the body is
-bolted down and cannot move) until you let go. It runs until you switch
-the toggle off, which stops the world where it stands (the clip stays on
-the dock, exportable like any bake), or the cap ends it. Switching on again starts a fresh stream from the cell as
-authored. What "on" means is the host's choice: `bt.studio(scene,
+watched rather than waited for. When the programs end, the world runs on
+live from where they left it, in step with the clock — the dock reads
+`cycle 3.00s · world 8.25s` — until you switch the toggle off, which stops
+it and bakes the programs kinematically again; the bake kept for export is
+the programs' alone. The live world is watched, not kept: neither the host
+nor the studio records it, so it can run for as long as you like — to see
+it again, run it again. With no program baked yet, on streams the world
+under gravity the same way, live from the start: whatever is unsupported
+falls while an unpowered machine folds. Once playback reaches the live part, **a
+body can be taken in hand** — press on a crate, a part, the wall of a
+tote, a link of a folded arm and drag: a spring pulls the whole body after
+the mouse (amber line and dot; red when the body is bolted down and cannot
+move) until you let go. A click on the dock's bar before the live part
+pauses there to review what happened, and the hand is off while you do; a
+click on the live part, or ▶, follows the live world again. The world with
+no program runs until you switch the toggle off, which stops it where it
+stands; nothing of it is kept to replay or export. Switching on again
+starts a fresh stream from the cell as authored. What "on" means is the
+host's choice: `bt.studio(scene,
 physics=bt.Physics(world=True, powered=False))` makes it a power cut,
 `physics=False` serves the studio without physics (the toggle says so). The
 label on the dock names the engine the playing bake ran under; the

@@ -443,6 +443,20 @@ pub(crate) fn derive_units(scene: &Scene, options: &PhysicsOptions) -> Vec<Unit>
             } else {
                 (PlanKind::Fixed, "declared static".to_string(), props)
             }
+        } else if let Some(attachment) = scene.attachment(&obstacles[frame].name) {
+            // What a robot holds — a grasped part, the camera bracket on
+            // its hand — goes where the robot goes, whatever the pin says:
+            // the bake welds it to the carrying link, the export ties it
+            // with a fixed joint.
+            let robot = &scene.robots()[attachment.robot];
+            (
+                PlanKind::Dynamic,
+                format!(
+                    "carried by {}/{}",
+                    robot.name, robot.model.links[attachment.link].name
+                ),
+                dynamic_props(pin_mass),
+            )
         } else if root.is_some_and(|i| listed.contains(obstacles[i].name.as_str())) {
             (
                 PlanKind::Fixed,

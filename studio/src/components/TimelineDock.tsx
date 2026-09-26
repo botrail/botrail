@@ -3,7 +3,7 @@ import { useMemo, useRef, useState } from "react";
 import { samplePlayback } from "../playback";
 import type { StepSpanMsg } from "../protocol";
 import { setPhysics } from "../bake";
-import { useStudioStore } from "../store";
+import { followsLive, useStudioStore } from "../store";
 import { sendExportUsd } from "../ws";
 import { chipsForLane } from "./IoOverlay";
 
@@ -130,7 +130,7 @@ export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const physicsOn = useStudioStore((s) => s.physicsOn);
   const streaming = useStudioStore((s) => s.bakeStream !== null);
-  const live = useStudioStore((s) => s.bakeStream?.live === true);
+  const live = useStudioStore(followsLive);
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const connected = useStudioStore((s) => s.connection === "connected");
   const lanes = useMemo(
@@ -197,6 +197,14 @@ export function TimelineDock() {
     const rect = bar.getBoundingClientRect();
     const frac = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
     const t = frac * duration;
+    const liveFrom = useStudioStore.getState().bakeStream?.liveFrom;
+    if (liveFrom != null && t >= liveFrom) {
+      // The live part of a stream is now: a click there follows the head
+      // (again) — it never freezes the picture over a world that runs on.
+      setPlayback(duration, samplePlayback(playback, duration));
+      setPlaying(true);
+      return;
+    }
     setPlaying(false);
     setPlayback(t, samplePlayback(playback, t));
   };
@@ -211,7 +219,8 @@ export function TimelineDock() {
           {timeline?.scenario ? `⧉ ${timeline.scenario} — ` : ""}
           {streaming ? "● " : ""}
           {timeline ? (timeline.stepSpans.length > 0 ? "cycle" : "physics") : "preview"}{" "}
-          {duration.toFixed(2)}s
+          {(timeline?.cycleEnd ?? duration).toFixed(2)}s
+          {timeline?.cycleEnd != null ? ` · world ${duration.toFixed(2)}s` : ""}
           {live ? " · drag a body to push it" : ""}
         </span>
         <span className="timeline-controls">
@@ -250,10 +259,10 @@ export function TimelineDock() {
               disabled={simulating || !connected}
               title={
                 streaming
-                  ? "physics streaming: stop here (a program is baked again kinematically, the world's clip stays)"
+                  ? "physics streaming: stop here (a program is baked again kinematically; the live world is not kept)"
                   : physicsOn
                     ? "physics on: bake again kinematically and restart from the top"
-                    : "bake again under physics — the whole cell, every obstacle and robot the engine's — and restart from the top"
+                    : "bake again under physics — the whole cell, every obstacle and robot the engine's — and restart from the top; when the programs end the world runs on, a body free to drag, until stopped"
               }
             >
               ⚛ {timeline?.physics ?? "physics"}
@@ -304,9 +313,10 @@ export function TimelineDock() {
             </button>
           )}
           {/* Sequence timelines only: the server bakes the retained
-              rollout, so a motion preview or a loaded recording has
-              nothing to re-export. */}
-          {timeline && !recording && (
+              rollout, so a motion preview, a loaded recording or the
+              world streamed live (kept by no one) has nothing to
+              export. */}
+          {timeline && !recording && timeline.kept !== false && (
             <button
               className="timeline-button"
               onClick={() => sendExportUsd(60)}
@@ -316,11 +326,13 @@ export function TimelineDock() {
             </button>
           )}
           {/* Any playback (bake, recording, motion preview) can be filmed
-              through a camera; the export runs in the browser itself. */}
+              through a camera; the export runs in the browser itself —
+              not while a stream runs, nor of a world streamed live: its
+              past is not kept to film. */}
           {playback && camTarget && (
             <button
               className="timeline-button"
-              disabled={!webcodecs || camExport !== null}
+              disabled={!webcodecs || camExport !== null || streaming || timeline?.kept === false}
               onClick={() =>
                 beginCamExport(
                   camTarget,

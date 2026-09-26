@@ -90,19 +90,27 @@ pub trait SessionHost {
 
     /// Starts a streaming bake (`start_bake`): the host runs
     /// [`run_bake_stream`] off the message loop and stops it on
-    /// [`stop_bake_stream`](Self::stop_bake_stream). The default refuses
-    /// in a failed `sequence_result` — a host without a thread (the
-    /// browser session) or without an engine.
+    /// [`stop_bake_stream`](Self::stop_bake_stream). `stream` is the
+    /// client's id for it, echoed on every chunk. The default refuses in
+    /// a failed `sequence_result` — a host without a thread (the browser
+    /// session) or without an engine.
     fn start_bake_stream(
         &self,
         names: &[String],
         scenario: Option<&str>,
         _max_duration: Option<f64>,
         _physics: bool,
+        stream: Option<u32>,
     ) where
         Self: Sized,
     {
-        emit_physics_refused(self, &bake_label(names), scenario);
+        emit_stream_failed(
+            self,
+            &bake_label(names),
+            scenario,
+            PHYSICS_UNAVAILABLE.to_string(),
+            stream,
+        );
     }
 
     /// Ends the streaming bake where it stands (no-op without one).
@@ -402,8 +410,9 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             scenario,
             max_duration,
             physics,
+            stream,
         } => {
-            host.start_bake_stream(&names, scenario.as_deref(), max_duration, physics);
+            host.start_bake_stream(&names, scenario.as_deref(), max_duration, physics, stream);
             Ok(())
         }
         ClientMessage::StopBake => {
@@ -775,6 +784,7 @@ pub fn emit_timeline(
             error: None,
             timeline: Some(timeline_msg(scene, timeline)),
             planning_time_ms: None,
+            stream: None,
         };
         host.emit(&msg);
     }
@@ -1474,6 +1484,19 @@ pub fn emit_physics_failed(
     scenario: Option<&str>,
     error: String,
 ) {
+    emit_stream_failed(host, label, scenario, error, None);
+}
+
+/// A streaming bake that could not start or ended in an error, reported
+/// to the clients under its id (`start_bake`'s `stream`): a client that
+/// has since started another stream knows the failure is not its own.
+pub fn emit_stream_failed(
+    host: &impl SessionHost,
+    label: &str,
+    scenario: Option<&str>,
+    error: String,
+    stream: Option<u32>,
+) {
     host.emit(&ServerMessage::SequenceResult {
         ok: false,
         sequence: label.to_string(),
@@ -1483,6 +1506,7 @@ pub fn emit_physics_failed(
         error: Some(error),
         timeline: None,
         planning_time_ms: None,
+        stream,
     });
 }
 
@@ -1500,6 +1524,10 @@ pub const STREAM_CHUNK_SECONDS_LIVE: f64 = 1.0 / 30.0;
 /// about where the viewer is watching.
 pub const STREAM_LEAD_SECONDS: f64 = 1.0;
 
+/// The longest a live stream sleeps without asking whether it was
+/// stopped (s).
+pub const STREAM_SLEEP_SLICE_SECONDS: f64 = 0.05;
+
 /// The label a bake's results carry: its programs, or `physics` for the
 /// cell with no program.
 pub fn bake_label(names: &[String]) -> String {
@@ -1510,20 +1538,55 @@ pub fn bake_label(names: &[String]) -> String {
     }
 }
 
+/// How a streaming bake runs (see [`run_bake_stream`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StreamMode {
+    /// The client's name for the stream (`start_bake`'s `stream`),
+    /// echoed on every chunk and on its failure: a client that has moved
+    /// on to a newer stream tells this one's last chunks apart.
+    pub id: Option<u32>,
+    /// Live from the start: the world with no program, watched and
+    /// poked as it runs.
+    pub pace: bool,
+    /// When the programs end, the world runs on live until the stream is
+    /// stopped — the result of a physics run, open to a hand
+    /// (design-physics-pick.md §7). The programs' bake is retained as it
+    /// stood at their end; the tail is not part of it.
+    pub tail: bool,
+    /// Keep nothing of the live stretch (design-physics-pick.md §8): the
+    /// rollout forgets each window once it is sent, and the world with no
+    /// program retains no bake at its end — to see it again is to run it
+    /// again. The programs of a run with a tail are retained all the
+    /// same, at their end.
+    pub forget: bool,
+}
+
 /// A streaming bake (design-world-physics.md §3.6): the programs `names`
 /// — or, with none, the world under gravity — advanced chunk by chunk and
 /// sent as `bake_chunk`s until the programs end, `stop` says so, or the
 /// program-less bake reaches `options.max_duration`. A program still
 /// waiting at the cap fails the way a batch bake does (timed out), after
-/// its last chunk. `pace` holds the simulated clock at most
-/// [`STREAM_LEAD_SECONDS`] ahead of the wall clock with `sleep` — the
-/// open-ended bake, so a stop lands where the viewer is; a program bake
-/// runs as fast as it can. `steer` runs before every tick with the live
+/// its last chunk. A program bake runs as fast as it can; a *live*
+/// stretch holds the simulated clock at most [`STREAM_LEAD_SECONDS`]
+/// ahead of the wall clock with `sleep`, so a hand's pull shows as it
+/// happens and a stop lands where the viewer is. The world with no
+/// program is live from the start (`mode.pace`); a program bake with
+/// `mode.tail` goes live when its programs end and the world runs on
+/// until stopped. Every chunk carries the stream's id and, once live,
+/// from when (`live_from`). `steer` runs before every tick with the live
 /// rollout: what the viewer does to the world as it runs (a hand on a
-/// body, design-physics-pick.md). On the way out the whole bake is
-/// retained (`store_baked`) like any sequence result. `scene` is the
-/// snapshot to bake (the scenario already applied), `scenario` its name
-/// for the timeline's self-description.
+/// body, design-physics-pick.md). The bake is retained (`store_baked`)
+/// like any sequence result — the whole stream on the way out, or with a
+/// tail the programs' bake at their end — and returned; with
+/// `mode.forget` the live stretch is not kept (the rollout forgets each
+/// window once sent), so the world with no program retains nothing and
+/// returns `None`. Each chunk is sampled from
+/// [`LiveRollout::timeline_since`], so a long stream costs the same per
+/// chunk as a short one. `scene` is the snapshot to bake (the scenario
+/// already applied), `scenario` its name for the timeline's
+/// self-description.
+///
+/// [`LiveRollout::timeline_since`]: botrail_scene::rollout::LiveRollout::timeline_since
 #[allow(clippy::too_many_arguments)]
 pub fn run_bake_stream(
     host: &impl SessionHost,
@@ -1534,9 +1597,9 @@ pub fn run_bake_stream(
     backend: Option<Box<dyn botrail_physics::PhysicsBackend>>,
     stop: &dyn Fn() -> bool,
     sleep: &dyn Fn(f64),
-    pace: bool,
+    mode: StreamMode,
     steer: &dyn Fn(&mut botrail_scene::rollout::LiveRollout),
-) -> Result<SequenceTimeline, String> {
+) -> Result<Option<SequenceTimeline>, String> {
     let debug = std::env::var("BT_PHYS_DEBUG").is_ok();
     // For a stream with no program — the world under gravity — this is
     // the world's time, not a program's cap: the seconds the client asked
@@ -1560,16 +1623,28 @@ pub fn run_bake_stream(
             names.len()
         );
     }
+    let scenario = scenario
+        .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+        .map(str::to_string);
     let dt = live.dt();
-    let chunk_seconds = if pace {
+    let ticks = |seconds: f64| (seconds / dt).round().max(1.0) as usize;
+    // From when the stream is live: the world with no program from the
+    // start, a program bake with a tail from its programs' end.
+    let mut live_from = mode.pace.then_some(0.0);
+    let mut ticks_per_chunk = ticks(if mode.pace {
         STREAM_CHUNK_SECONDS_LIVE
     } else {
         STREAM_CHUNK_SECONDS
-    };
-    let ticks_per_chunk = (chunk_seconds / dt).round().max(1.0) as usize;
-    let t0 = host.now_ms();
+    });
+    let t_start = host.now_ms();
+    // The wall-clock instant a live stretch paces the simulated zero to.
+    let mut t0 = t_start;
     let mut sent = 0.0;
     let mut chunks = 0usize;
+    // The programs' bake, kept at their end while the world runs on.
+    let mut retained: Option<SequenceTimeline> = None;
+    // Whether the programs are over and the world runs on after them.
+    let tailing = |live_from: Option<f64>| !names.is_empty() && live_from.is_some();
     // The last chunk goes out before an error is reported, so the clip up
     // to the failure stays on the dock under the diagnosis.
     let mut failure: Option<String> = None;
@@ -1577,7 +1652,9 @@ pub fn run_bake_stream(
         let stopped = stop();
         if !stopped {
             for _ in 0..ticks_per_chunk {
-                if live.finished() || (names.is_empty() && live.t() + 1e-9 >= cap) {
+                if (live.finished() && !tailing(live_from))
+                    || (names.is_empty() && live.t() + 1e-9 >= cap)
+                {
                     break;
                 }
                 steer(&mut live);
@@ -1587,29 +1664,48 @@ pub fn run_bake_stream(
                 }
             }
         }
+        // The programs just ended: their bake is kept as it stands, and
+        // the world runs on live from here, paced from now.
+        if mode.tail
+            && !stopped
+            && failure.is_none()
+            && !names.is_empty()
+            && live_from.is_none()
+            && live.finished()
+        {
+            let mut timeline = live.timeline();
+            timeline.scenario = scenario.clone();
+            host.store_baked(scene, &timeline);
+            retained = Some(timeline);
+            live_from = Some(live.t());
+            ticks_per_chunk = ticks(STREAM_CHUNK_SECONDS_LIVE);
+            t0 = host.now_ms() - live.t() * 1000.0;
+        }
         let done = stopped
             || failure.is_some()
-            || live.finished()
+            || (live.finished() && !tailing(live_from))
             || (names.is_empty() && live.t() + 1e-9 >= cap);
         let ticked_at = host.now_ms();
-        let snapshot = live.timeline();
-        let chunk = timeline_window_msg(scene, &snapshot, sent);
+        let window = live.timeline_since(sent);
+        let chunk = timeline_window_msg(scene, &window, sent);
         let from = sent;
-        sent = snapshot.duration;
+        sent = window.duration;
         let has_samples = chunk.robots.iter().any(|r| !r.trajectory.times.is_empty())
             || chunk.objects.iter().any(|o| !o.poses.is_empty())
             || chunk.vehicles.iter().any(|v| !v.poses.is_empty());
         if done || has_samples {
             host.emit(&ServerMessage::BakeChunk {
+                stream: mode.id,
                 from,
                 done,
+                live_from,
                 timeline: chunk,
             });
             chunks += 1;
             if debug && chunks == 1 {
                 eprintln!(
                     "STREAM first chunk: ticks {:.1} ms, window+emit {:.1} ms, t = {:.2} s",
-                    ticked_at - t0,
+                    ticked_at - t_start,
                     host.now_ms() - ticked_at,
                     sent
                 );
@@ -1618,10 +1714,18 @@ pub fn run_bake_stream(
         if done {
             break;
         }
-        if pace {
-            let ahead = sent - (host.now_ms() - t0) / 1000.0;
-            if ahead > STREAM_LEAD_SECONDS {
-                sleep(ahead - STREAM_LEAD_SECONDS);
+        if mode.forget && live_from.is_some() {
+            // Sent is shown: the live world keeps no past.
+            live.forget_before(sent);
+        }
+        if live_from.is_some() {
+            // Sleep off whatever runs past the lead, in slices, so a stop
+            // is heard within one.
+            let mut wait = sent - (host.now_ms() - t0) / 1000.0 - STREAM_LEAD_SECONDS;
+            while wait > 0.0 && !stop() {
+                let slice = wait.min(STREAM_SLEEP_SLICE_SECONDS);
+                sleep(slice);
+                wait -= slice;
             }
         }
     }
@@ -1630,18 +1734,23 @@ pub fn run_bake_stream(
             "STREAM end: {} chunks, {:.2} s simulated in {:.1} ms",
             chunks,
             sent,
-            host.now_ms() - t0
+            host.now_ms() - t_start
         );
     }
     if let Some(error) = failure {
         return Err(error);
     }
+    if let Some(timeline) = retained {
+        return Ok(Some(timeline));
+    }
+    if mode.forget && live_from.is_some() {
+        // The world with no program, watched and gone.
+        return Ok(None);
+    }
     let mut timeline = live.finish();
-    timeline.scenario = scenario
-        .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
-        .map(str::to_string);
+    timeline.scenario = scenario;
     host.store_baked(scene, &timeline);
-    Ok(timeline)
+    Ok(Some(timeline))
 }
 
 pub fn simulate_sequence_and_emit(
@@ -1667,6 +1776,7 @@ pub fn baked_result_message(host: &impl SessionHost) -> Option<ServerMessage> {
         error: None,
         timeline: Some(timeline_msg(&scene, &timeline)),
         planning_time_ms: None,
+        stream: None,
     })
 }
 
@@ -1770,6 +1880,7 @@ fn bake_and_emit(
                 error: None,
                 timeline: Some(timeline_msg(&snapshot, timeline)),
                 planning_time_ms: Some(*ms),
+                stream: None,
             }
         }
         Err(e) => ServerMessage::SequenceResult {
@@ -1779,6 +1890,7 @@ fn bake_and_emit(
             error: Some(e.clone()),
             timeline: None,
             planning_time_ms: None,
+            stream: None,
         },
     };
     host.emit(&msg);
@@ -1870,7 +1982,7 @@ pub fn timeline_msg(
         }
     };
     let rows: Vec<Vec<Vec<f64>>> = sampled.into_iter().map(|(_, rows)| rows).collect();
-    timeline_msg_on(scene, timeline, grid, rows, true)
+    timeline_msg_on(scene, timeline, grid, rows, None)
 }
 
 /// The window of a timeline after `from`: the tracks sampled on the
@@ -1879,7 +1991,9 @@ pub fn timeline_msg(
 /// into one continuous track set (the streaming bake's chunks). Constant
 /// tracks are not collapsed: a chunk's arrays all have the window's
 /// length. Step bands, branches and signal lanes are the whole bake so
-/// far; the touches only those that began in the window.
+/// far; the touches only those that began in the window, after `from`
+/// (the previous window's end), so none goes out twice. `timeline` may
+/// be the whole bake or only what the window reads (`timeline_since`).
 pub fn timeline_window_msg(
     scene: &Scene,
     timeline: &botrail_scene::rollout::SequenceTimeline,
@@ -1897,31 +2011,29 @@ pub fn timeline_window_msg(
         .iter()
         .map(|track| grid.iter().map(|&t| track.trajectory.sample(t)).collect())
         .collect();
-    timeline_msg_on(scene, timeline, grid, rows, false)
+    timeline_msg_on(scene, timeline, grid, rows, Some(from))
 }
 
 /// The wire form of a timeline sampled on `grid`, with `rows[r][k]` robot
-/// `r`'s joints at `grid[k]`. `collapse` folds tracks that never move
-/// into a single pose (the whole-timeline message); a window keeps every
-/// sample so it can be appended.
+/// `r`'s joints at `grid[k]`. The whole timeline (`window: None`) folds
+/// tracks that never move into a single pose; a window after `from`
+/// keeps every sample so it can be appended, and only the touches that
+/// began after `from`.
 fn timeline_msg_on(
     scene: &Scene,
     timeline: &botrail_scene::rollout::SequenceTimeline,
     grid: Vec<f64>,
     rows: Vec<Vec<Vec<f64>>>,
-    collapse: bool,
+    window: Option<f64>,
 ) -> wire::TimelineMsg {
+    let collapse = window.is_none();
     let sampled: Vec<(Vec<f64>, Vec<Vec<f64>>)> =
         rows.into_iter().map(|r| (grid.clone(), r)).collect();
     // A window's touches: those that began strictly after the previous
-    // window's end, which is the lattice point before this window's first.
-    // (Step bands, branches and signal lanes go whole either way: the
-    // client replaces them, and an open step's band grows with the clock.)
-    let window_from = if collapse {
-        f64::NEG_INFINITY
-    } else {
-        grid.first().map_or(timeline.duration, |t| t - 1.0 / 30.0)
-    };
+    // window's end. (Step bands, branches and signal lanes go whole
+    // either way: the client replaces them, and an open step's band grows
+    // with the clock.)
+    let window_from = window.unwrap_or(f64::NEG_INFINITY);
     let grid: &[f64] = &grid;
 
     // A mounted robot's base moves; everything that does FK off it has to
@@ -2679,10 +2791,16 @@ mod tests {
             Some(backend),
             &|| false,
             &|s| slept.set(slept.get() + s),
-            true,
+            StreamMode {
+                id: Some(7),
+                pace: true,
+                tail: false,
+                forget: false,
+            },
             &|_| {},
         )
-        .unwrap();
+        .unwrap()
+        .expect("a kept stream retains its bake");
         assert!((timeline.duration - 2.0).abs() < 1e-9);
         let out = host.0.out.borrow();
         let mut times: Vec<f64> = Vec::new();
@@ -2690,8 +2808,10 @@ mod tests {
         let mut done_seen = false;
         for msg in out.iter() {
             let ServerMessage::BakeChunk {
+                stream,
                 from,
                 done,
+                live_from,
                 timeline,
             } = msg
             else {
@@ -2700,6 +2820,10 @@ mod tests {
             chunks_seen.set(chunks_seen.get() + 1);
             assert!(!done_seen, "a chunk after done");
             done_seen = *done;
+            // Every chunk carries the client's id; the world with no
+            // program is live from its start.
+            assert_eq!(*stream, Some(7));
+            assert_eq!(*live_from, Some(0.0));
             let hover = timeline.objects.iter().find(|o| o.name == "hover").unwrap();
             // Every sample in this window lies after `from`, on the lattice.
             let n = hover.poses.len();
@@ -2723,10 +2847,19 @@ mod tests {
                 "sample {k} at {t}"
             );
         }
-        // … and the concatenation is what one window from the start gives.
+        // … and the concatenation is what one window from the start gives
+        // (each window was cut from the live rollout: the same samples,
+        // to the rounding of a shifted span start).
         let whole = timeline_window_msg(&host.0.scene.borrow(), &timeline, 0.0);
         let hover = whole.objects.iter().find(|o| o.name == "hover").unwrap();
-        assert_eq!(hover.poses, poses);
+        assert_eq!(hover.poses.len(), poses.len());
+        for (k, (a, b)) in hover.poses.iter().zip(&poses).enumerate() {
+            let gap = (0..3)
+                .map(|i| (a.position[i] - b.position[i]).abs())
+                .chain((0..4).map(|i| (a.quaternion[i] - b.quaternion[i]).abs()))
+                .fold(0.0, f64::max);
+            assert!(gap < 1e-9, "sample {k} off by {gap}");
+        }
         // The box fell: the last pose is below the first.
         assert!(poses.last().unwrap().position[2] < poses[0].position[2] - 0.3);
         // The whole bake is the retained result, replayed as `physics`.
@@ -2744,16 +2877,24 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // A host without a thread refuses to stream, by name.
+        // A host without a thread refuses to stream, by name and under the
+        // stream's id.
         let plain = TestHost::from_scene(hover_scene());
         handle_client_message(
             &plain,
-            r#"{"type":"start_bake","max_duration":1.0,"physics":true}"#,
+            r#"{"type":"start_bake","max_duration":1.0,"physics":true,"stream":41}"#,
         );
         let (ok, label, _, error) = last_result(&plain.out.borrow());
         assert!(!ok);
         assert_eq!(label, "physics");
         assert!(error.unwrap().contains("physics is not available"));
+        assert!(matches!(
+            plain.out.borrow().last(),
+            Some(ServerMessage::SequenceResult {
+                stream: Some(41),
+                ..
+            })
+        ));
         handle_client_message(
             &plain,
             r#"{"type":"start_bake","names":["wait"],"physics":true}"#,
@@ -2762,6 +2903,73 @@ mod tests {
         assert!(!ok);
         assert_eq!(label, "wait");
         handle_client_message(&plain, r#"{"type":"stop_bake"}"#);
+    }
+
+    /// The studio's world stream keeps nothing (design-physics-pick.md
+    /// §8): the rollout forgets each window once it is sent and nothing
+    /// is retained at the end — yet the windows are the ones a stream
+    /// that remembers everything sends.
+    #[test]
+    fn a_forgetting_world_stream_sends_the_same_windows_and_keeps_nothing() {
+        let run = |forget: bool| {
+            let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+            let scene = host.0.scene.borrow().clone();
+            let (backend, physics) = host.physics().unwrap();
+            let options = botrail_scene::rollout::RolloutOptions {
+                max_duration: 2.0,
+                physics: Some(physics),
+                ..Default::default()
+            };
+            let kept = run_bake_stream(
+                &host,
+                &scene,
+                &[],
+                None,
+                &options,
+                Some(backend),
+                &|| false,
+                &|_| {},
+                StreamMode {
+                    id: None,
+                    pace: true,
+                    tail: false,
+                    forget,
+                },
+                &|_| {},
+            )
+            .unwrap();
+            let poses: Vec<wire::PoseMsg> = host
+                .0
+                .out
+                .borrow()
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::BakeChunk { timeline, .. } => timeline
+                        .objects
+                        .iter()
+                        .find(|o| o.name == "hover")
+                        .map(|o| o.poses.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            (kept.is_some(), host.baked().is_some(), poses)
+        };
+        let (kept, retained, remembered) = run(false);
+        assert!(kept && retained);
+        let (kept, retained, forgotten) = run(true);
+        assert!(!kept && !retained, "the live world keeps nothing");
+        assert_eq!(forgotten.len(), remembered.len());
+        // The box fell through the windows either way, to the rounding of
+        // a physics-sampled span cut at a shifted start.
+        assert!(remembered.last().unwrap().position[2] < remembered[0].position[2] - 0.3);
+        for (k, (a, b)) in forgotten.iter().zip(&remembered).enumerate() {
+            let gap = (0..3)
+                .map(|i| (a.position[i] - b.position[i]).abs())
+                .chain((0..4).map(|i| (a.quaternion[i] - b.quaternion[i]).abs()))
+                .fold(0.0, f64::max);
+            assert!(gap < 1e-9, "sample {k} off by {gap}");
+        }
     }
 
     /// A stream with no program — the world under gravity — asked for
@@ -2790,10 +2998,11 @@ mod tests {
                 polls.get() > 4
             },
             &|_| {},
-            false,
+            StreamMode::default(),
             &|_| {},
         )
-        .unwrap();
+        .unwrap()
+        .expect("a kept stream retains its bake");
         // Four chunks of a quarter second: stopped, not timed out.
         assert!(timeline.duration > 0.6, "{}", timeline.duration);
     }
@@ -2822,10 +3031,11 @@ mod tests {
             Some(backend),
             &|| false,
             &|_| panic!("a program bake is not paced"),
-            false,
+            StreamMode::default(),
             &|_| {},
         )
-        .unwrap();
+        .unwrap()
+        .expect("a kept stream retains its bake");
         // The program's one-second wait ended the stream, not the cap.
         assert!(
             (timeline.duration - 1.0).abs() < 0.05,
@@ -2870,10 +3080,11 @@ mod tests {
             None,
             &|| false,
             &|_| {},
-            false,
+            StreamMode::default(),
             &|_| {},
         )
-        .unwrap();
+        .unwrap()
+        .expect("a kept stream retains its bake");
         assert_eq!(kinematic.physics, None);
         assert!(kinematic.objects.is_empty());
         // A program that never ends within the cap: the chunks up to the
@@ -2904,7 +3115,7 @@ mod tests {
             Some(backend),
             &|| false,
             &|_| {},
-            false,
+            StreamMode::default(),
             &|_| {},
         )
         .unwrap_err();
@@ -2918,6 +3129,95 @@ mod tests {
         assert!(done);
         assert!((duration - 0.6).abs() < 0.02, "{duration}");
         assert!(host.baked().is_none(), "a failed bake is not retained");
+    }
+
+    /// A physics run with a tail (the studio's): the program streams as
+    /// fast as it goes and its bake is retained at its end; from there the
+    /// world runs on live — `live_from` the program's end, paced, a hand
+    /// free to pull on it — until stopped, and the retained bake stays
+    /// the program's alone.
+    #[test]
+    fn a_physics_run_goes_live_when_its_programs_end_and_keeps_its_bake() {
+        use std::cell::Cell;
+        let host = PhysicsHost(TestHost::from_scene(hover_scene()));
+        let scene = host.0.scene.borrow().clone();
+        let (backend, physics) = host.physics().unwrap();
+        let options = botrail_scene::rollout::RolloutOptions {
+            max_duration: 5.0,
+            physics: Some(physics),
+            ..Default::default()
+        };
+        let ticks = Cell::new(0usize);
+        let slept = Cell::new(0.0);
+        let timeline = run_bake_stream(
+            &host,
+            &scene,
+            &["wait"],
+            None,
+            &options,
+            Some(backend),
+            // Past the cap: the tail is the world's time, not the program's.
+            &|| ticks.get() >= 600,
+            &|s| slept.set(slept.get() + s),
+            StreamMode {
+                id: Some(3),
+                pace: false,
+                tail: true,
+                forget: true,
+            },
+            &|_| ticks.set(ticks.get() + 1),
+        )
+        .unwrap()
+        .expect("a kept stream retains its bake");
+        // The returned and retained bake is the program's.
+        assert!(
+            (timeline.duration - 1.0).abs() < 0.05,
+            "{}",
+            timeline.duration
+        );
+        assert_eq!(bake_label(&timeline.sequences), "wait");
+        let (_, baked) = host.baked().unwrap();
+        assert!((baked.duration - timeline.duration).abs() < 1e-9);
+        let out = host.0.out.borrow();
+        let chunks: Vec<(Option<f64>, bool, f64)> = out
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::BakeChunk {
+                    stream,
+                    done,
+                    live_from,
+                    timeline,
+                    ..
+                } => {
+                    assert_eq!(*stream, Some(3));
+                    Some((*live_from, *done, timeline.duration))
+                }
+                _ => None,
+            })
+            .collect();
+        // Not live while the program runs; live from its end after.
+        let first_live = chunks
+            .iter()
+            .position(|c| c.0.is_some())
+            .expect("the world went live");
+        assert!(first_live > 0);
+        let end = chunks[first_live].0.unwrap();
+        assert!((end - timeline.duration).abs() < 1e-9, "live from {end}");
+        assert!(chunks[..first_live].iter().all(|c| c.0.is_none() && !c.1));
+        assert!(chunks[first_live..].iter().all(|c| c.0 == Some(end)));
+        // It ran on past the program and the cap until stopped.
+        let (_, done, last) = *chunks.last().unwrap();
+        assert!(done && last > options.max_duration, "stopped at {last}");
+        assert!(chunks[first_live..chunks.len() - 1].iter().all(|c| !c.1));
+        // Live chunks are a display frame long, and paced.
+        let (_, _, a) = chunks[first_live + 1];
+        let (_, _, b) = chunks[first_live + 2];
+        assert!(
+            (b - a - STREAM_CHUNK_SECONDS_LIVE).abs() < 0.011,
+            "{}",
+            b - a
+        );
+        assert!(slept.get() > 0.0);
     }
 
     #[test]

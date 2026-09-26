@@ -35,6 +35,7 @@ export function PlaybackDriver() {
   const clock = useRef(0);
   const wasPlaying = useRef(false);
   const lastPushed = useRef(-1);
+  const epoch = useRef(0);
 
   useFrame((_, delta) => {
     const s = useStudioStore.getState();
@@ -44,20 +45,28 @@ export function PlaybackDriver() {
       return;
     }
     const tracks = s.playback;
-    if (!wasPlaying.current) {
-      // (Re)starting: resume from wherever the UI left the playhead.
-      clock.current = s.playbackTime >= tracks.duration ? 0 : s.playbackTime;
+    const liveFrom = s.bakeStream?.liveFrom ?? null;
+    if (!wasPlaying.current || epoch.current !== s.playbackEpoch) {
+      // (Re)starting: resume from wherever the UI left the playhead — at
+      // the end of a finished bake, from the top; a live stream's end is
+      // its head, where it resumes. A new playback started while one was
+      // playing (a stream replacing another) starts from its own top,
+      // not from the old clock.
+      clock.current =
+        s.playbackTime >= tracks.duration && liveFrom === null ? 0 : s.playbackTime;
       wasPlaying.current = true;
+      epoch.current = s.playbackEpoch;
       lastPushed.current = -1;
     }
     // Clamp the frame delta: a backgrounded or software-rendered tab can
     // sit without rAF for seconds (or minutes), and an unclamped delta
     // would leap the playhead to the end the moment it wakes.
     let t = clock.current + Math.min(delta, 0.25) * s.playbackSpeed;
-    if (s.bakeStream?.live) {
-      // A live stream: the playhead is pinned to the head, so what is
-      // shown is what the world does now — a hand on a body sees its
-      // answer as the next windows land.
+    if (liveFrom !== null && t >= liveFrom - 1e-6) {
+      // The live part of a stream: the playhead is pinned to the head,
+      // so what is shown is what the world does now — a hand on a body
+      // sees its answer as the next windows land. (A physics run's
+      // programs play at speed until their end, then follow.)
       t = tracks.duration;
     } else if (t >= tracks.duration) {
       if (s.bakeStream) {

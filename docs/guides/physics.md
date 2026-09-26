@@ -50,7 +50,10 @@ because a rule froze it. A ground plane at z = 0 catches what falls
 program picks up *on its own* — a case off a stack — is a unit of its
 own; what a program takes *together* in one step (every board and case
 of a pallet, attached to a lift at once) stays one rigid unit and is
-carried whole.
+carried whole. What a robot *holds* — a part in its gripper, the camera
+bracket attached to its hand — goes where the robot goes whatever its
+part pin says: a dynamic unit the bake welds to the carrying link
+(`physics_plan` says `carried by <robot>/<link>`).
 
 The programs' time and the world's are two things. A bake ends when
 every program has ended, or at `max_duration` — the programs' cap, which
@@ -140,10 +143,16 @@ scene.set_robot_physics("panda", max_force=87.0, armature=0.05, mass_floor=0.2)
 The **⚛ physics** toggle bakes the last request again under the host's
 physics and streams it as it grows; see [the studio](studio.md).
 `bt.studio(scene, physics=bt.Physics(world=True, powered=False))` decides
-what "on" means for that session. With no program the world streams
-live, and a body in the viewport can be taken in hand and pulled — the
-mouse pick of a physics viewer: a critically damped spring between the
-grabbed point and the mouse, capped at a few g so nothing gets launched.
+what "on" means for that session. The world with no program streams
+live, and so does a physics run once its programs end: the world runs on
+from where they left it until the toggle is off. The live world is not
+recorded — the programs' bake is what is kept — so it runs for as long as
+you watch it. While the viewport
+follows that live world, a body in it can be taken in hand and pulled —
+the mouse pick of a physics viewer: a critically damped spring between
+the grabbed point and the mouse, capped at a few g so nothing gets
+launched. Any piece of a body built from several boxes — a tote's wall, a
+tray's insert — takes the whole body.
 
 The same hand is a Python call on a live rollout — the world with no
 program is `open_rollout([], physics=...)`:
@@ -156,7 +165,8 @@ live.release()
 ```
 
 `drag` returns whether the body is the engine's to move: bolted equipment
-and a part a program holds are not. A robot link is named `robot/link`.
+and a part a program holds are not. A robot link is named `robot/link`;
+any obstacle of a rigid unit names the unit, held at that point.
 
 ## Another engine
 

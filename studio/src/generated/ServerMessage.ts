@@ -50,11 +50,29 @@ topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, 
  * World-frame hit points, meters, rounded to 0.1 mm (display
  * data — the analysis-grade sweep stays in the Python API).
  */
-points: Array<[number, number, number]>, } | { "type": "grab", name: string, held: boolean, } | { "type": "bake_chunk", from: number, done: boolean, timeline: TimelineMsg, } | { "type": "sequence_result", ok: boolean, sequence: string, 
+points: Array<[number, number, number]>, } | { "type": "grab", name: string, held: boolean, } | { "type": "bake_chunk", 
+/**
+ * The id the client started the stream under (`start_bake`'s
+ * `stream`): a client that has moved on to a newer stream drops
+ * the chunks of the one it left, its closing chunk included.
+ */
+stream?: number | null, from: number, done: boolean, 
+/**
+ * From when the stream is live — paced to the wall clock, the
+ * world open to a hand (`drag`): `0` for the world with no
+ * program, the programs' end for a physics run that goes on
+ * after them; absent while programs run.
+ */
+live_from?: number | null, timeline: TimelineMsg, } | { "type": "sequence_result", ok: boolean, sequence: string, 
 /**
  * Scenario the rollout ran under; absent = `baseline`.
  */
-scenario?: string | null, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, } | { "type": "recording_result", ok: boolean, 
+scenario?: string | null, error: string | null, timeline: TimelineMsg | null, planning_time_ms: number | null, 
+/**
+ * The streaming bake this answers (`start_bake`'s `stream`): a
+ * stream refused or failed. Absent for every batch bake.
+ */
+stream?: number | null, } | { "type": "recording_result", ok: boolean, 
 /**
  * Source layer path (display form).
  */

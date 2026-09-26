@@ -3,7 +3,7 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
 import { currentPick, endPick, pickRig } from "../physicsPick";
-import { useStudioStore } from "../store";
+import { followsLive, useStudioStore } from "../store";
 
 const HELD_COLOR = "#ffd166";
 const REFUSED_COLOR = "#ff6b6b";
@@ -29,7 +29,9 @@ export function PickBridge() {
 export function DragLineView() {
   const drag = useStudioStore((s) => s.drag);
   const grab = useStudioStore((s) => s.grab);
-  const streaming = useStudioStore((s) => s.bakeStream?.live === true);
+  // Following the live head: paused, reviewing the past, or the stream
+  // over, the hand lets go.
+  const streaming = useStudioStore(followsLive);
   const line = useMemo(() => {
     const geometry = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(),
@@ -57,7 +59,7 @@ export function DragLineView() {
     },
     [line, dot],
   );
-  // The stream ending under a hand lets go.
+  // The stream ending (or no longer followed) under a hand lets go.
   useEffect(() => {
     if (!streaming) endPick();
   }, [streaming]);

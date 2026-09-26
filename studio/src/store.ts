@@ -35,7 +35,7 @@ import {
   type PlaybackSample,
   type PlaybackTracks,
 } from "./playback";
-import { appendTracks } from "./playback";
+import { appendTracks, forgetLive } from "./playback";
 import { applySample } from "./playbackRig";
 import { attributionIssues } from "./sfc";
 import * as THREE from "three";
@@ -344,13 +344,34 @@ function retargetSelection(sel: Selection, robot: string): Selection {
   return sel;
 }
 
+/** Whether the viewport shows the live head of a stream: the stream is
+ * live, playing, and the playhead has reached its live part — where it
+ * pins to the head. Only then may a hand take a body: what is drawn is
+ * what the world is doing now. Paused, or reviewing the programs before
+ * the live part, the picture is the past. */
+export function followsLive(
+  s: Pick<StudioState, "bakeStream" | "playing" | "playbackTime">,
+): boolean {
+  const from = s.bakeStream?.liveFrom;
+  return from != null && s.playing && s.playbackTime >= from - 1e-6;
+}
+
+/** Seconds of a live stream the studio holds: the viewport draws the
+ * head, so a moment's slack is all it needs (design-physics-pick.md §8). */
+const LIVE_KEEP_SECONDS = 2;
+
+/** Counts the playbacks started (see `playbackEpoch`). */
+let playbackEpochs = 0;
+
 /** Playback + first-sample overrides, spread into a store update. */
 function startPlayback(tracks: PlaybackTracks) {
   const sample = samplePlayback(tracks, 0);
+  playbackEpochs += 1;
   return {
     playback: tracks,
     playbackTime: 0,
     playing: true,
+    playbackEpoch: playbackEpochs,
     overridePoses: sample.poses,
     overrideJoints: sample.joints,
     overrideBases: sample.bases,
@@ -407,6 +428,10 @@ export interface StudioState {
   playback: PlaybackTracks | null;
   playbackTime: number;
   playing: boolean;
+  /** Bumped whenever a new playback starts from the top (a bake, a
+   * stream's first window, a recording): the driver's clock restarts
+   * even when it was already playing the one before. */
+  playbackEpoch: number;
   /** Playback rate multiplier (1, 2, 4, 8). */
   playbackSpeed: number;
   /** Restart from 0 when the end is reached. */
@@ -500,11 +525,19 @@ export interface StudioState {
    * grow (`bake_chunk`) until the programs end or the toggle stops it.
    * `request` is what asked for it, the last bake once it is done. */
   bakeStream: {
+    /** The id this studio started the stream under, echoed on its
+     * chunks: the chunks of a stream it has moved on from are dropped.
+     * `null` for a stream another studio started, taken up from its
+     * chunks. */
+    id: number | null;
     from: number;
     request: BakeRequest;
-    /** A paced stream watched as it runs — the world under gravity: the
-     * playhead pins to the head, and a body can be taken in hand. */
-    live: boolean;
+    /** From when the stream is live — paced to the clock and watched as
+     * it runs, the world open to a hand: `0` for the world under
+     * gravity, the programs' end for a physics run that goes on after
+     * them, `null` while programs run. Once the playhead reaches it, it
+     * pins to the head (see `followsLive`). */
+    liveFrom: number | null;
   } | null;
   /** The hand on a body of the live physics stream: what the viewport is
    * dragging, for the line it draws (design-physics-pick.md). */
@@ -543,6 +576,12 @@ export interface StudioState {
     /** The engine this bake stepped under (`"rapier"`); null when
      * kinematic. */
     physics: string | null;
+    /** Where the programs of a physics run ended when the world ran on
+     * live after them: the cycle, the rest is the world under the hand. */
+    cycleEnd?: number | null;
+    /** `false` when the host keeps nothing of this bake to export — the
+     * world streamed live with no program. Absent: kept. */
+    kept?: boolean;
   } | null;
   /** The USD recording behind the current playback, when there is one. */
   recording: { source: string; mode: string; warnings: string[] } | null;
@@ -644,9 +683,9 @@ export interface StudioState {
    * kept so the toggle can send it again. */
   beginBake: (req: BakeRequest) => void;
   setPhysicsOn: (on: boolean) => void;
-  /** A streaming bake has been asked for; its first window starts
-   * playback. */
-  beginBakeStream: (req: BakeRequest) => void;
+  /** A streaming bake has been asked for under stream id `id`; its
+   * first window starts playback. */
+  beginBakeStream: (req: BakeRequest, id: number) => void;
   /** Drops the bake and its playback: the cell as authored. */
   clearBake: () => void;
   beginMotionPlanning: () => void;
@@ -681,6 +720,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   playback: null,
   playbackTime: 0,
   playing: false,
+  playbackEpoch: 0,
   playbackSpeed: 1,
   playbackLoop: false,
   overridePoses: null,
@@ -986,6 +1026,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           recording: null,
         }));
       } else {
+        // The failure of a stream this studio has moved on from is not
+        // news: the stream it runs now is still running.
+        const current = get().bakeStream;
+        if (msg.stream != null && current?.id != null && current.id !== msg.stream) return;
         // The last good bake stays on the dock; the diagnosis (a stall
         // under a fault scenario names the step and the forced point)
         // is shown beside it, not as a broken screen. A refused physics
@@ -1023,9 +1067,22 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       const chunk = msg.timeline;
       set((s) => {
         const stream = s.bakeStream;
+        const id = msg.stream ?? null;
+        // A chunk of a stream this studio has moved on from — the one a
+        // new bake stopped, its closing chunk included — is not ours.
+        if (stream && stream.id !== null && id !== null && stream.id !== id) return s;
         const fresh = msg.from === 0 || !s.playback || !stream;
         const tracks = appendTracks(fresh ? null : s.playback, chunk, msg.from);
         const before = fresh ? null : s.timeline;
+        // The live part keeps no past (design-physics-pick.md §8): the
+        // last moments stay for the viewport, the final frame once the
+        // stream ends — to see it again is to run it again.
+        const liveFrom = msg.live_from ?? null;
+        const keepFrom = msg.done ? chunk.duration : chunk.duration - LIVE_KEEP_SECONDS;
+        if (liveFrom !== null) forgetLive(tracks, liveFrom, keepFrom);
+        const touches = chunk.contacts?.length
+          ? [...(before?.contacts ?? []), ...chunk.contacts]
+          : (before?.contacts ?? []);
         const request: BakeRequest = stream?.request ?? {
           kind: "physics",
           duration: chunk.duration,
@@ -1041,15 +1098,29 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             signals: chunk.signals,
             branches: chunk.branches,
             scenario,
-            contacts: [...(before?.contacts ?? []), ...(chunk.contacts ?? [])],
+            // Touches come by the window they began in: most windows bring
+            // none. Those of the live part go with its past.
+            contacts:
+              liveFrom === null
+                ? touches
+                : touches.filter((c) => c.start <= liveFrom || c.end >= keepFrom),
             physics: chunk.physics ?? null,
+            cycleEnd: liveFrom ? liveFrom : null,
+            // The world with no program is watched, not kept: the host
+            // retains nothing of it to export.
+            kept: request.kind !== "physics",
           },
           segmentEnds: chunk.step_spans.map((span) => span.end),
           sequenceError: null,
           sequenceErrorScenario: null,
           bakeStream: msg.done
             ? null
-            : { from: chunk.duration, request, live: stream?.live ?? request.kind === "physics" },
+            : {
+                id: stream?.id ?? id,
+                from: chunk.duration,
+                request,
+                liveFrom,
+              },
           drag: msg.done ? null : s.drag,
           grab: msg.done ? null : s.grab,
           lastBake: msg.done
@@ -1450,11 +1521,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }),
   setPhysicsOn: (on) => set({ physicsOn: on }),
   setDrag: (drag) => set(drag ? { drag } : { drag: null, grab: null }),
-  beginBakeStream: (req) =>
+  beginBakeStream: (req, id) =>
     set({
       // The world under gravity is paced to the clock and watched live;
-      // a program bake runs as fast as it can and is played back.
-      bakeStream: { from: 0, request: req, live: req.kind === "physics" },
+      // a program bake runs as fast as it can and is played back, and
+      // goes live when its programs end (the host says when).
+      bakeStream: { id, from: 0, request: req, liveFrom: req.kind === "physics" ? 0 : null },
       drag: null,
       grab: null,
       sequenceError: null,

@@ -38,6 +38,7 @@ stable-baselines3.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import sys
 from pathlib import Path
@@ -55,6 +56,117 @@ WOOD = (0.62, 0.45, 0.28)
 STEEL = (0.72, 0.73, 0.75)
 # The bin: the VDA 4500 small-load container spec pack (R-KLT 3215 here).
 KLT = "botrail/bin/klt-vda4500"
+# The wrist camera: a RealSense D405 (7–50 cm, the gripper camera of the
+# family) on a printed clip that hugs the hand. The clip is authored in
+# botrail-assets (franka-hand-d405-clip: Node + three, in the hand's frame,
+# fitted to the catalog hand's measured surfaces) and vendored here.
+D405 = "realsense/d400/d405"
+CLIP = Path(__file__).resolve().parents[1] / "assets" / "franka_hand_d405_clip.usda"
+CAM_TILT = math.radians(30.0)  # the optical axis leans this much toward the hand's axis
+CAM_SEAT = (0.0338, 0.0, 0.038)  # the camera's bottom-screw point on the clip's cradle, hand frame
+CLIP_MASS = 0.028  # kg: ~27 cm³ of PA12
+CLIP_COLOR = (0.105, 0.11, 0.115)  # the clip's PA12, for what draws flat colours
+
+
+def _quat_mul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _quat_rotate(q, v):
+    x, y, z = _quat_mul(_quat_mul(q, (v[0], v[1], v[2], 0.0)), (-q[0], -q[1], -q[2], q[3]))[:3]
+    return (x, y, z)
+
+
+def _quat_from_axes(x, y, z):
+    """(x, y, z, w) of the rotation whose columns are the unit vectors `x`, `y`, `z`."""
+    m = ((x[0], y[0], z[0]), (x[1], y[1], z[1]), (x[2], y[2], z[2]))
+    tr = m[0][0] + m[1][1] + m[2][2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        return ((m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s)
+    i = max(range(3), key=lambda k: m[k][k])
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = math.sqrt(1.0 + m[i][i] - m[j][j] - m[k][k]) * 2
+    q = [0.0, 0.0, 0.0]
+    q[i], q[j], q[k] = 0.25 * s, (m[j][i] + m[i][j]) / s, (m[k][i] + m[i][k]) / s
+    return (q[0], q[1], q[2], (m[k][j] - m[j][k]) / s)
+
+
+def wrist_camera(scene: bt.Scene, prefix: str, robot_name: str) -> None:
+    """A RealSense D405 on a printed clip on the Franka hand, lens down
+    past the fingers. The clip hooks under the hand's coupling ring, lies
+    on its broad face and hooks under its bottom edge; its cradle seats the
+    camera by the bottom screw, leaning `CAM_TILT` toward the hand's axis
+    so the fingertips sit at the edge of the picture.
+
+    What the planner and the engine see is two boxes — the claw round the
+    ring and the plate down the face — and the camera's own mesh; what is
+    drawn is the clip's layer, on a resident that does not collide. All of
+    it is attached to the hand: kept out of the bin's walls, welded to the
+    hand in a physics bake, one line on the BOM (and the camera another).
+    Its picture channels are 64 × 64, out to 2 m."""
+    (hx, hy, hz), hq = scene.link_pose("fr3_hand", robot=robot_name)
+    # The package's mount frame looks along +X (the optical axis) and its
+    # body stands on +Z from the screw face: both in the hand's frame here.
+    look = (-math.sin(CAM_TILT), 0.0, math.cos(CAM_TILT))
+    body = (math.cos(CAM_TILT), 0.0, math.sin(CAM_TILT))
+    side = (0.0, -1.0, 0.0)  # = body × look
+    mount_q = _quat_from_axes(look, side, body)
+
+    def place(local_pos, local_q=(0.0, 0.0, 0.0, 1.0)):
+        dx, dy, dz = _quat_rotate(hq, local_pos)
+        return (hx + dx, hy + dy, hz + dz), _quat_mul(hq, local_q)
+
+    def along(base, axis, distance):
+        return tuple(b + a * distance for b, a in zip(base, axis))
+
+    def box(tag, lo, hi, *, collides=True):
+        """A box between two corners of the hand's frame (mm), on the hand."""
+        centre = tuple((a + b) / 2000.0 for a, b in zip(lo, hi))
+        position, quaternion = place(centre)
+        made = scene.add_box(f"{clip}/{tag}", size=tuple((b - a) / 1000.0 for a, b in zip(lo, hi)),
+                             position=position, quaternion=quaternion, color=CLIP_COLOR)
+        scene.set_obstacle_enabled(made, collides)
+        scene.set_obstacle_visible(made, not collides)
+        return made, centre
+
+    clip = prefix + "cam"
+    # The picture first (the unit's frame): the plate's box, out of
+    # collision, drawn as the clip's layer. The layer is in the hand's own
+    # frame, so it is bound with the inverse of the box's offset.
+    made, (cx, cy, cz) = box("clip", (18.9, -24.0, 8.6), (22.9, 24.0, 64.0), collides=False)
+    scene.set_obstacle_visual_asset(made, CLIP, "/Clip/clip",
+                                    (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -cx, -cy, -cz, 1.0))
+    # The massing, hidden: the claw round the ring (clear of the wrist's
+    # flange) and the plate with its lip (clear of the fingers and of the
+    # camera). Kept a clearance apart: the planner reads two obstacles
+    # closer than that as a collision, one part or not.
+    residents = [made, box("claw", (18.9, -24.0, 2.2), (36.1, 24.0, 11.1))[0],
+                 box("plate", (13.5, -24.0, 13.3), (22.9, 24.0, 69.4))[0]]
+    # The camera's body is the package's own mesh on the cradle: what really
+    # hits a wall, and what is drawn — the camera itself draws no body
+    # (`body_visible=False`). It sits in the package's `camera_link` frame:
+    # from the screw point 10.85 mm along the optical axis, 9 mm across and
+    # 21 mm up, then the model's own visual origin.
+    package = Path(bt.catalog_package(D405))
+    mesh = package / "sources" / "realsense2_description" / "meshes" / "d405.stl"
+    camera_link = along(along(along(CAM_SEAT, look, 0.01085), side, 0.009), body, 0.021)
+    visual = along(along(camera_link, look, 0.0038), side, -0.009)
+    # URDF rpy (π/2, 0, π/2): Rz(π/2) · Rx(π/2), in the camera_link frame.
+    h = math.sqrt(0.5)
+    turned = _quat_mul(mount_q, _quat_mul((0.0, 0.0, h, h), (h, 0.0, 0.0, h)))
+    position, quaternion = place(visual, turned)
+    residents.append(scene.add_mesh(f"{clip}/body", mesh, position=position, quaternion=quaternion,
+                                    scale=(0.001, 0.001, 0.001), color=(0.05, 0.05, 0.06)))
+    for name in residents:
+        scene.attach(name, link="fr3_hand", robot=robot_name, touch_links=["fr3_hand"])
+    scene.set_part(clip, kind="group", category="adapter", model="D405 clip for the Franka Hand (printed, PA12)",
+                   manufacturer="in-house", mass_kg=CLIP_MASS)
+    scene.add_camera(prefix + "wrist", from_catalog=D405, robot=robot_name, link="fr3_hand",
+                     position=CAM_SEAT, quaternion=mount_q, resolution=(64, 64), far=2.0, body_visible=False)
 TRAY_LILAC = (0.70, 0.55, 0.75)
 
 # The pool: the YCB objects by the names the task and the randomiser use.
@@ -179,9 +291,7 @@ def make_cell(*, dynamic: bool = True, objects: str = "ycb", catalog_root=None):
             else:
                 scene.add_sphere(prefix + n, radius=size[0], position=(x, y, rest_z(n)), color=color)
             scene.set_physics(prefix + n, dynamic=True, mass=mass, friction=0.6)
-        # A wrist camera looking down the hand, for the picture channels.
-        scene.add_camera(prefix + "wrist", position=(0.05, 0.0, 0.0), quaternion=(1.0, 0.0, 0.0, 0.0), fov=70.0,
-                         resolution=(64, 64), near=0.05, far=2.0, robot=name, link="fr3_hand")
+        wrist_camera(scene, prefix, name)
         return name
 
     return cell

@@ -184,11 +184,16 @@ are the engine's, not the stage's:
   articulation do not collide with each other (its self-collision is off
   as a whole), where botrail's own physics would have them collide.
 
-Not written yet: an object held at export time is a free body (it is not
-welded to the hand), a USD-sourced robot whose stage roots the
-articulation on its base body itself stays anchored to the world (the
-export warns), a device nobody rides is a kinematic body rather than a
-driven joint, and sensors, signals and programs stay in botrail.
+An object held at export time — a part in the gripper, a camera bracket
+attached to the hand — is a dynamic body tied to its link with a
+`PhysicsFixedJoint` (`<body>/weld`, the body's pose in the link's frame as
+the joint's frame), so the consumer's engine carries it as botrail's bake
+does.
+
+Not written yet: a USD-sourced robot whose stage roots the articulation
+on its base body itself stays anchored to the world (the export warns), a
+device nobody rides is a kinematic body rather than a driven joint, and
+sensors, signals and programs stay in botrail.
 
 ## Camera video
 

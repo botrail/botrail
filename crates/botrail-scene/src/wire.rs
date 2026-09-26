@@ -1510,11 +1510,22 @@ pub enum ServerMessage {
     /// lattice as every other chunk, so the client appends them; the step
     /// bands, branches and signal lanes are the whole bake so far (the
     /// client replaces them), the touches those that began in the window.
-    /// `done` closes the stream; the whole bake is then the host's
-    /// retained result, replayed to late joiners like any bake.
+    /// `done` closes the stream; the bake is then the host's retained
+    /// result, replayed to late joiners like any bake.
     BakeChunk {
+        /// The id the client started the stream under (`start_bake`'s
+        /// `stream`): a client that has moved on to a newer stream drops
+        /// the chunks of the one it left, its closing chunk included.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<u32>,
         from: f64,
         done: bool,
+        /// From when the stream is live — paced to the wall clock, the
+        /// world open to a hand (`drag`): `0` for the world with no
+        /// program, the programs' end for a physics run that goes on
+        /// after them; absent while programs run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        live_from: Option<f64>,
         timeline: TimelineMsg,
     },
     /// Response to a `simulate_sequence` request (broadcast to every client).
@@ -1527,6 +1538,10 @@ pub enum ServerMessage {
         error: Option<String>,
         timeline: Option<TimelineMsg>,
         planning_time_ms: Option<f64>,
+        /// The streaming bake this answers (`start_bake`'s `stream`): a
+        /// stream refused or failed. Absent for every batch bake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<u32>,
     },
     /// Response to a USD-recording playback request (broadcast to every
     /// client): a baked animation (an Isaac Sim capture or a botrail
@@ -1758,8 +1773,10 @@ pub enum ClientMessage {
     /// `max_duration` (the engine's 120 s when absent; a program still
     /// waiting past it is a timed-out `sequence_result`, the chunks so
     /// far staying on the dock). `physics` bakes under the host's physics
-    /// (`SessionHost::physics`). A host that cannot stream (no engine, no
-    /// thread) answers with a failed `sequence_result`.
+    /// (`SessionHost::physics`); a physics run goes on after its programs
+    /// end — the world live, open to a hand — until `stop_bake`. A host
+    /// that cannot stream (no engine, no thread) answers with a failed
+    /// `sequence_result`.
     StartBake {
         #[serde(default)]
         names: Vec<String>,
@@ -1769,6 +1786,10 @@ pub enum ClientMessage {
         max_duration: Option<f64>,
         #[serde(default)]
         physics: bool,
+        /// The client's id for the stream, echoed on its every chunk (and
+        /// on a failure), so the client can tell it from one it left.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<u32>,
     },
     /// End the streaming bake where it stands: the last chunk arrives
     /// with `done`, and the whole bake becomes the host's retained result.

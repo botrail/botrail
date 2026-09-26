@@ -1,16 +1,17 @@
 // The mouse pick of a physics viewer (design-physics-pick.md): while the
-// world streams live under physics, pointer-down on a body takes it in
-// hand — the hit point in the body's frame, and a target that follows the
-// mouse on the plane through the hit point facing the camera — and the
-// host pulls the body toward the target with a spring until the button
-// is released. The viewport only sends; the host says whether the body is
+// world streams live under physics — the world alone, or a physics run
+// after its programs end — and the viewport follows it, pointer-down on
+// a body (any piece of it) takes it in hand — the hit point in the
+// piece's frame, and a target that follows the mouse on the plane
+// through the hit point facing the camera — and the host pulls the body
+// toward the target with a spring until the button is released. The viewport only sends; the host says whether the body is
 // the engine's to move (`grab`), and the line drawn between the grabbed
 // point and the target says so too.
 
 import type { ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
-import { useStudioStore } from "./store";
+import { followsLive, useStudioStore } from "./store";
 import { sendDrag, sendRelease } from "./ws";
 
 /** What the viewport hands the pick: the camera controls to hold still
@@ -41,9 +42,10 @@ let releasedAt = 0;
 const raycaster = new THREE.Raycaster();
 
 /** Whether a body under the pointer can be taken in hand right now: the
- * physics world is streaming live. */
+ * physics world streams live and the viewport follows it — what is drawn
+ * is what the world is doing now, not a paused or reviewed past. */
 export function pickable(): boolean {
-  return useStudioStore.getState().bakeStream?.live === true;
+  return followsLive(useStudioStore.getState());
 }
 
 /** The body in hand and where it is held, for the line the viewport

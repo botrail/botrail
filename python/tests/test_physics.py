@@ -310,6 +310,22 @@ def _arm_cell() -> bt.Scene:
     return scene
 
 
+def test_what_a_robot_holds_is_carried_whatever_its_pin_says() -> None:
+    """A bracket pinned as equipment would be bolted down under the world
+    scope — unless the robot holds it: attached to a link, it is a
+    dynamic unit the bake welds to the link."""
+    scene = bt.Scene(bt.Robot.from_urdf(Path(__file__).resolve().parents[2] / "examples" / "assets" / "simple_arm.urdf"))
+    tool = scene.robot.link_names[-1]
+    (tx, ty, tz), _ = scene.link_pose(tool)
+    scene.add_box("cam/plate", (0.02, 0.04, 0.05), (tx + 0.04, ty, tz))
+    scene.set_part("cam", category="adapter", model="bracket", mass_kg=0.05)
+    rows = {r["name"]: r for r in scene.physics_plan(physics=bt.Physics(world=True)).rows}
+    assert rows["cam"]["kind"] == "fixed"
+    scene.attach("cam/plate", link=tool, touch_links=[tool])
+    rows = {r["name"]: r for r in scene.physics_plan(physics=bt.Physics(world=True)).rows}
+    assert rows["cam"]["kind"] == "dynamic" and rows["cam"]["reason"] == f"carried by simple_arm/{tool}"
+
+
 def test_a_settle_tail_lets_the_part_land_after_the_program_ends(scene: bt.Scene) -> None:
     """The programs' cap and the world's time are two things: a program
     that ends while a part is still falling ends the bake mid-flight —

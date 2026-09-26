@@ -236,6 +236,51 @@ def test_a_urdf_robot_is_an_articulation_in_its_pose(tmp_path: Path) -> None:
         assert relative(got, back_base) == pytest.approx(relative(expect, base), abs=1e-5)
 
 
+def test_what_a_robot_holds_is_welded_to_its_link(tmp_path: Path) -> None:
+    """A bracket on the hand, a part in the gripper: attached to a link, it
+    is a body the world scope carries (whatever its part pin says), and
+    the stage ties it to the link with a fixed joint — the body's pose in
+    the link's frame as the joint's frame — so the consumer's engine moves
+    it with the arm as botrail's bake does."""
+    pytest.importorskip("pxr")
+    from pxr import Gf, UsdPhysics
+
+    scene = _cell()
+    tool = scene.robot.link_names[-1]
+    (tx, ty, tz), _ = scene.link_pose(tool)
+    scene.add_box("cam/plate", (0.02, 0.04, 0.05), (tx + 0.04, ty, tz))
+    scene.add_box("cam/body", (0.02, 0.04, 0.04), (tx + 0.07, ty, tz))
+    scene.set_part("cam", category="adapter", model="camera bracket (shape example)", mass_kg=0.05)
+    for name in ("cam/plate", "cam/body"):
+        scene.attach(name, link=tool, touch_links=[tool])
+    physics = bt.Physics(world=True)
+    rows = {r["name"]: r for r in scene.physics_plan(physics).rows}
+    assert rows["cam"]["kind"] == "dynamic" and rows["cam"]["reason"] == f"carried by simple_arm/{tool}"
+    assert rows["cam"]["mass_kg"] == pytest.approx(0.05)
+    out = tmp_path / "held.usda"
+    warnings = scene.export_usd(out, physics=physics)
+    assert all("conveyor belt" in w for w in warnings), warnings  # the cell's belt, as ever
+    stage = _stage(out)
+    # The pinned group is one body, posed at its frame member (the plate).
+    body = stage.GetPrimAtPath("/World/Env/cam")
+    assert body.HasAPI(UsdPhysics.RigidBodyAPI) and not body.GetAttribute("physics:kinematicEnabled").Get()
+    weld = UsdPhysics.FixedJoint(stage.GetPrimAtPath("/World/Env/cam/weld"))
+    assert weld
+    assert [str(p) for p in weld.GetBody0Rel().GetTargets()] == [f"/World/Robot/{tool}"]
+    assert [str(p) for p in weld.GetBody1Rel().GetTargets()] == ["/World/Env/cam"]
+    # The joint's frame on the link is where the plate stands relative to
+    # it: 4 cm away (in the link's own axes, which READY turns), and the
+    # body's own origin on the body.
+    assert Gf.Vec3f(weld.GetLocalPos0Attr().Get()).GetLength() == pytest.approx(0.04, abs=1e-5)
+    assert Gf.Vec3f(weld.GetLocalPos1Attr().Get()) == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
+    try:
+        from pxr import UsdValidation
+    except ImportError:
+        return
+    context = UsdValidation.ValidationContext(UsdValidation.ValidationRegistry().GetOrLoadAllValidators())
+    assert [e.GetMessage() for e in context.Validate(stage)] == []
+
+
 def test_the_declared_scope_exports_what_was_declared(tmp_path: Path) -> None:
     pytest.importorskip("pxr")
     from pxr import UsdPhysics

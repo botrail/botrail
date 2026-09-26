@@ -189,12 +189,19 @@ impl SessionHost for SceneHub {
         scenario: Option<&str>,
         max_duration: Option<f64>,
         physics: bool,
+        stream: Option<u32>,
     ) {
         self.join_bake_stream();
         let label = botrail_session::bake_label(names);
         let backend = if physics || names.is_empty() {
             let Some((backend, physics)) = self.physics() else {
-                botrail_session::emit_physics_refused(self, &label, scenario);
+                botrail_session::emit_stream_failed(
+                    self,
+                    &label,
+                    scenario,
+                    botrail_session::PHYSICS_UNAVAILABLE.to_string(),
+                    stream,
+                );
                 return;
             };
             Some((backend, physics))
@@ -210,11 +217,12 @@ impl SessionHost for SceneHub {
         let mut scene = self.snapshot();
         if let Some(name) = &scenario {
             if let Err(e) = scene.apply_scenario(name) {
-                botrail_session::emit_physics_failed(
+                botrail_session::emit_stream_failed(
                     self,
                     &label,
                     scenario.as_deref(),
                     e.to_string(),
+                    stream,
                 );
                 return;
             }
@@ -231,8 +239,17 @@ impl SessionHost for SceneHub {
             options.physics = Some(physics);
             backend
         });
+        // The world with no program is live from the start; a physics run
+        // goes live when its programs end and runs on until stopped.
+        // Nothing of the live stretch is kept: to see it again is to run
+        // it again (design-physics-pick.md §8).
+        let mode = botrail_session::StreamMode {
+            id: stream,
+            pace: names.is_empty(),
+            tail: backend.is_some() && !names.is_empty(),
+            forget: true,
+        };
         let names: Vec<String> = names.to_vec();
-        let pace = names.is_empty();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let thread = std::thread::Builder::new()
@@ -275,12 +292,18 @@ impl SessionHost for SceneHub {
                     backend,
                     &|| flag.load(Ordering::Relaxed),
                     &|seconds| std::thread::sleep(std::time::Duration::from_secs_f64(seconds)),
-                    pace,
+                    mode,
                     &steer,
                 );
                 *hub.hand.lock().expect("hand mutex poisoned") = Hand::default();
                 if let Err(error) = result {
-                    botrail_session::emit_physics_failed(&*hub, &label, scenario.as_deref(), error);
+                    botrail_session::emit_stream_failed(
+                        &*hub,
+                        &label,
+                        scenario.as_deref(),
+                        error,
+                        stream,
+                    );
                 }
             })
             .expect("spawn the bake stream thread");
@@ -1172,6 +1195,7 @@ impl SceneHub {
             error: None,
             timeline: Some(botrail_session::timeline_msg(snapshot, timeline)),
             planning_time_ms: None,
+            stream: None,
         });
     }
 

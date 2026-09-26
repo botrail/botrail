@@ -322,12 +322,15 @@ export function sendSimulatePhysics(duration: number, scenario?: string): void {
  * the cell with no program under gravity, paced to the clock) and sends
  * `bake_chunk`s as the tracks grow, until the programs end, `sendStopBake`
  * or the cap (the engine's 120 s when omitted). `physics` bakes under the
- * host's physics. */
+ * host's physics; a physics run then goes on live after its programs
+ * until stopped. `stream` names the stream: every chunk (and a failure)
+ * carries it back. */
 export function sendStartBake(
   names: string[],
-  scenario?: string,
-  maxDuration?: number,
-  physics = false,
+  scenario: string | undefined,
+  maxDuration: number | undefined,
+  physics: boolean,
+  stream: number,
 ): void {
   rawSend({
     type: "start_bake",
@@ -335,6 +338,7 @@ export function sendStartBake(
     scenario,
     max_duration: maxDuration,
     physics,
+    stream,
   });
 }
 

@@ -2798,7 +2798,15 @@ mod group_tests {
 
         let flange = arm.links[arm_link].name.clone();
         let combined = arm
-            .attach_tool(&tool, Some(&flange), None, Isometry3::identity(), None, Some("g_"), None)
+            .attach_tool(
+                &tool,
+                Some(&flange),
+                None,
+                Isometry3::identity(),
+                None,
+                Some("g_"),
+                None,
+            )
             .unwrap();
         assert_eq!(combined.cameras.len(), 2);
         assert_eq!(combined.cameras[0].name, "eye");

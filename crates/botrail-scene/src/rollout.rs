@@ -679,6 +679,55 @@ impl TrackSpan {
     }
 }
 
+/// The spans of a track from the one in force at `from` on: what a
+/// sample after `from` reads, copied without the history before it. A
+/// physics-sampled span in force at `from` is cut at its sample at or
+/// before `from`, so the copy costs the window, not the whole motion.
+fn spans_from(spans: &[TrackSpan], from: f64) -> Vec<TrackSpan> {
+    let start = spans
+        .iter()
+        .rposition(|s| s.range().0 <= from + 1e-9)
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(spans.len() - start);
+    for (k, span) in spans[start..].iter().enumerate() {
+        match span {
+            TrackSpan::Sampled { t0, dt, poses } if k == 0 && poses.len() > 1 => {
+                let cut = (((from - t0) / dt).floor().max(0.0) as usize).min(poses.len() - 2);
+                out.push(TrackSpan::Sampled {
+                    t0: t0 + cut as f64 * dt,
+                    dt: *dt,
+                    poses: poses[cut..].to_vec(),
+                });
+            }
+            _ => out.push(span.clone()),
+        }
+    }
+    out
+}
+
+/// Drops a track's spans before `t` in place: the span in force at `t`
+/// and every later one stay, a physics-sampled span in force at `t` cut
+/// at its sample at or before `t` — what [`spans_from`] would copy, kept
+/// instead of copied, so the track goes on growing from its last span.
+fn forget_spans(spans: &mut Vec<TrackSpan>, t: f64) {
+    let start = spans
+        .iter()
+        .rposition(|s| s.range().0 <= t + 1e-9)
+        .unwrap_or(0);
+    if start > 0 {
+        spans.drain(..start);
+    }
+    if let Some(TrackSpan::Sampled { t0, dt, poses }) = spans.first_mut() {
+        if poses.len() > 1 {
+            let cut = (((t - *t0) / *dt).floor().max(0.0) as usize).min(poses.len() - 2);
+            if cut > 0 {
+                poses.drain(..cut);
+                *t0 += cut as f64 * *dt;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjectTrack {
     /// Obstacle name.
@@ -2193,6 +2242,9 @@ struct KinematicBody {
     source: KinSource,
     id: botrail_physics::BodyId,
     last_pose: Isometry3<f64>,
+    /// The self-collision group the body keeps when nothing carries it
+    /// (while a dynamic robot does, it is in that robot's).
+    home_group: u32,
 }
 
 enum KinSource {
@@ -2590,6 +2642,31 @@ impl LiveRollout {
     /// streaming bake sends between ticks.
     pub fn timeline(&self) -> SequenceTimeline {
         self.inner.timeline_at()
+    }
+
+    /// The timeline after `from`, for sampling in `(from, t]`: sampled
+    /// there it gives what [`timeline`](Self::timeline) gives, but every
+    /// track is cut to what those samples read — the copy costs the
+    /// window, not the bake. The step bands, branches, signal lanes and
+    /// moves come whole; the touches are those that began after `from`;
+    /// the planned paths, footfalls and locomotion spans are left out.
+    /// What a streaming bake sends its next window from.
+    pub fn timeline_since(&self, from: f64) -> SequenceTimeline {
+        self.inner.timeline_from(Some(from))
+    }
+
+    /// Forgets the recording before `t`, keeping what a timeline read at
+    /// or after `t` needs: every robot's sample at or before `t` and all
+    /// after it (a move's pre-baked future included), every track's span
+    /// in force at `t` and all after it, the touches that ended after
+    /// `t`. What grows by the step rather than the tick — step bands,
+    /// signal lanes, moves — stays whole, and so do wheel tracks (a
+    /// wheel's spin is counted from the start of its ride). A live
+    /// stream calls it after each window it sent, so the world runs on
+    /// without remembering it (design-physics-pick.md §8); what
+    /// [`timeline`](Self::timeline) returns afterwards starts at `t`.
+    pub fn forget_before(&mut self, t: f64) {
+        self.inner.forget_before(t)
     }
 
     /// The world as it stands after the last tick.
@@ -4894,6 +4971,17 @@ impl Rollout {
                 // for the read-back.
                 let frame = o.pose;
                 let attached = self.world.attachment(&o.name).is_some();
+                // What a dynamic robot holds from the start — a part in its
+                // gripper, a camera clip on its hand — is welded to its link
+                // below and joins that robot's collision group, as a part
+                // taken in hand mid-bake does: clamped to the links it
+                // touches, it must not be shoved by them.
+                let carrier_group = self
+                    .world
+                    .attachment(&o.name)
+                    .map(|a| a.robot)
+                    .filter(|r| dynamic_robots.contains(r))
+                    .map_or(0, |r| r as u32 + 1);
                 let mut parts = Vec::new();
                 let mut members = Vec::new();
                 for &m in &unit.members {
@@ -4920,7 +5008,7 @@ impl Rollout {
                     pose: frame,
                     parts,
                     props: unit.props.clone(),
-                    group: 0,
+                    group: carrier_group,
                 });
                 dynamics.push(DynamicBody {
                     name: o.name.clone(),
@@ -4949,17 +5037,29 @@ impl Rollout {
             let props = self.world.resolved_body_props(&o.name).unwrap_or_default();
             let id = BodyId(desc.bodies.len() as u32);
             names.push(o.name.clone());
+            let home_group = rider_group.get(&o.name).copied().unwrap_or(0);
+            // A mirror a dynamic robot carries from the start — a camera
+            // clip on its hand — is in that robot's group while it does:
+            // an immovable body pressed into the links it is clamped to
+            // would shove the arm off its targets.
+            let carrier_group = self
+                .world
+                .attachment(&o.name)
+                .map(|a| a.robot)
+                .filter(|r| dynamic_robots.contains(r))
+                .map(|r| r as u32 + 1);
             desc.bodies.push(BodyDesc {
                 kind: BodyKind::Kinematic,
                 pose: o.pose,
                 parts: self.world.obstacle_colliders()[i].parts().to_vec(),
                 props,
-                group: rider_group.get(&o.name).copied().unwrap_or(0),
+                group: carrier_group.unwrap_or(home_group),
             });
             kinematics.push(KinematicBody {
                 source: KinSource::Obstacle(i),
                 id,
                 last_pose: o.pose,
+                home_group,
             });
         }
         let mut driven_rt: Vec<DrivenRt> = Vec::new();
@@ -5309,6 +5409,7 @@ impl Rollout {
                         source: KinSource::Link { robot: r, link },
                         id,
                         last_pose: *pose,
+                        home_group: r as u32 + 1,
                     });
                 }
             }
@@ -6113,9 +6214,21 @@ impl Rollout {
             .map(|a| a.robot)
             .filter(|&r| self.robots[r].dynamic)
             .map(|r| r as u32 + 1);
+        let index = self.world.obstacles().iter().position(|o| o.name == object);
         let Some(phys) = self.physics.as_mut() else {
             return;
         };
+        if let (Some(group), Some(i)) = (carrier_group, index) {
+            let mirrors: Vec<botrail_physics::BodyId> = phys
+                .kinematics
+                .iter()
+                .filter(|k| matches!(k.source, KinSource::Obstacle(j) if j == i))
+                .map(|k| k.id)
+                .collect();
+            for id in mirrors {
+                phys.backend.set_body_group(id, group);
+            }
+        }
         let Some(body) = phys.dynamics.iter_mut().find(|b| b.name == object) else {
             return;
         };
@@ -6135,9 +6248,22 @@ impl Rollout {
     /// go mid-motion flies on instead of stopping dead.
     fn physics_detach(&mut self, object: &str) {
         let dt = self.options.dt;
+        let index = self.world.obstacles().iter().position(|o| o.name == object);
         let Some(phys) = self.physics.as_mut() else {
             return;
         };
+        // A mirror let go of goes back to its own group.
+        if let Some(i) = index {
+            let mirrors: Vec<(botrail_physics::BodyId, u32)> = phys
+                .kinematics
+                .iter()
+                .filter(|k| matches!(k.source, KinSource::Obstacle(j) if j == i))
+                .map(|k| (k.id, k.home_group))
+                .collect();
+            for (id, group) in mirrors {
+                phys.backend.set_body_group(id, group);
+            }
+        }
         let Some(body) = phys.dynamics.iter_mut().find(|b| b.name == object) else {
             return;
         };
@@ -6170,9 +6296,12 @@ impl Rollout {
     /// Puts a hand on body `name` (an obstacle, or a robot link as
     /// `robot/link`) at `local` in its frame and pulls it toward `target`
     /// (design-physics-pick.md): the spring force is applied every tick
-    /// until [`release_drag`](Self::release_drag). `Ok(false)` when the
-    /// body is not the engine's to move (a mirror, a part in hand); an
-    /// error for a name no body carries. Calling again moves the hand.
+    /// until [`release_drag`](Self::release_drag). Any obstacle of a rigid
+    /// unit names the unit — the viewport picks the piece it draws, a
+    /// KLT's wall or a tray's insert, and the hand holds the unit at the
+    /// same point. `Ok(false)` when the body is not the engine's to move
+    /// (a mirror, a part in hand); an error for a name no body carries.
+    /// Calling again moves the hand.
     fn set_drag(
         &mut self,
         name: &str,
@@ -6184,11 +6313,28 @@ impl Rollout {
                 "there is no physics in this rollout to drag a body through".to_string(),
             ));
         };
-        let Some(index) = phys.names.iter().position(|n| n == name) else {
+        let body = match phys.names.iter().position(|n| n == name) {
+            Some(index) => Some((botrail_physics::BodyId(index as u32), local)),
+            None => self
+                .world
+                .obstacles()
+                .iter()
+                .position(|o| o.name == name)
+                .and_then(|m| {
+                    phys.dynamics.iter().find_map(|body| {
+                        let offset = if body.index == m {
+                            Isometry3::identity()
+                        } else {
+                            body.members.iter().find(|(k, _)| *k == m)?.1
+                        };
+                        Some((body.id, (offset * nalgebra::Point3::from(local)).coords))
+                    })
+                }),
+        };
+        let Some((id, local)) = body else {
             let message = format!("no physics body is called `{name}`");
             return Err(self.live_err(message));
         };
-        let id = botrail_physics::BodyId(index as u32);
         if let Some(drag) = phys.drag.take() {
             if drag.id != id {
                 phys.backend.clear_force(drag.id);
@@ -9393,16 +9539,74 @@ impl Rollout {
     /// are wound up; a streaming bake sends it as it goes, and each
     /// snapshot is a prefix of the next (the tracks only grow).
     fn timeline_at(&self) -> SequenceTimeline {
+        self.timeline_from(None)
+    }
+
+    /// See [`LiveRollout::forget_before`].
+    fn forget_before(&mut self, t: f64) {
+        for rt in &mut self.robots {
+            let keep = rt.times.partition_point(|&x| x <= t).saturating_sub(1);
+            if keep > 0 {
+                rt.times.drain(..keep);
+                rt.positions.drain(..keep);
+                rt.velocities.drain(..keep);
+            }
+            if let Some(base) = &mut rt.base {
+                forget_spans(base, t);
+            }
+        }
+        let wheels: Vec<String> = self
+            .world
+            .devices()
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DeviceKind::Vehicle { wheels, .. } => Some(wheels),
+                _ => None,
+            })
+            .flatten()
+            .map(|w| w.object.clone())
+            .collect();
+        for track in &mut self.objects {
+            if !wheels.contains(&track.name) {
+                forget_spans(&mut track.spans, t);
+            }
+        }
+        for track in &mut self.vehicles {
+            forget_spans(&mut track.spans, t);
+        }
+        if let Some(phys) = self.physics.as_mut() {
+            phys.contacts.retain(|c| c.end > t);
+        }
+    }
+
+    /// [`timeline_at`](Self::timeline_at), or with `from` only what a
+    /// sample in `(from, t]` reads: every track cut to the sample or span
+    /// in force at `from` (a wheel's spin still counted from the start),
+    /// the touches that began after `from`, and what no sample reads —
+    /// the planned paths, the footfalls, the locomotion spans — left
+    /// out. The step bands, branches, signal lanes, moves and the body's
+    /// sway, pitch and rise come whole — they grow by the step, not by
+    /// the tick. What a streaming bake samples its next window from: the
+    /// copy costs the window, not the bake.
+    fn timeline_from(&self, from: Option<f64>) -> SequenceTimeline {
         let duration = self.t;
         let names: Vec<String> = self.world.robots().iter().map(|r| r.name.clone()).collect();
+        let window = |spans: &[TrackSpan]| match from {
+            Some(from) => spans_from(spans, from),
+            None => spans.to_vec(),
+        };
         let robots = self
             .robots
             .iter()
             .zip(names)
             .map(|(rt, name)| {
-                let mut times = rt.times.clone();
-                let mut positions = rt.positions.clone();
-                let mut velocities = rt.velocities.clone();
+                // The sample at or before `from` brackets the window's first.
+                let start = from.map_or(0, |from| {
+                    rt.times.partition_point(|&t| t <= from).saturating_sub(1)
+                });
+                let mut times = rt.times[start..].to_vec();
+                let mut positions = rt.positions[start..].to_vec();
+                let mut velocities = rt.velocities[start..].to_vec();
                 // The horn: hold the last configuration to the end.
                 if times.last().is_some_and(|last| duration > last + 1e-9) {
                     times.push(duration);
@@ -9417,10 +9621,15 @@ impl Rollout {
                         velocities,
                     },
                     moves: rt.moves.clone(),
-                    planned: rt.planned.clone(),
+                    planned: if from.is_some() {
+                        Vec::new()
+                    } else {
+                        rt.planned.clone()
+                    },
                     footfalls: rt
                         .gait
                         .as_ref()
+                        .filter(|_| from.is_none())
                         .map(|g| {
                             let mut steps = g.history.clone();
                             steps.sort_by(|a, b| {
@@ -9447,11 +9656,16 @@ impl Rollout {
                         .as_ref()
                         .map(|g| g.rises.clone())
                         .unwrap_or_default(),
-                    locomotion: rt.locomotion.clone(),
+                    locomotion: if from.is_some() {
+                        Vec::new()
+                    } else {
+                        rt.locomotion.clone()
+                    },
                     // The cycle usually ends parked: close a travelling span
                     // at its own end and rest there, rather than extending it
                     // to the horn and driving off the timeline.
-                    base: rt.base.clone().map(|mut spans| {
+                    base: rt.base.as_deref().map(|spans| {
+                        let mut spans = window(spans);
                         match spans.last() {
                             Some(span @ (TrackSpan::Linear { .. } | TrackSpan::Pivot { .. })) => {
                                 let (_, end) = span.range();
@@ -9477,14 +9691,53 @@ impl Rollout {
                 }
             })
             .collect();
-        let mut objects = self.objects.clone();
-        let mut vehicles = self.vehicles.clone();
+        // A wheel's spin is counted from the start of its ride, so its
+        // track is cut only once the spin is laid on.
+        let wheels: Vec<&str> = self
+            .world
+            .devices()
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DeviceKind::Vehicle { wheels, .. } => Some(wheels),
+                _ => None,
+            })
+            .flatten()
+            .map(|w| w.object.as_str())
+            .collect();
+        let mut objects: Vec<ObjectTrack> = self
+            .objects
+            .iter()
+            .map(|track| ObjectTrack {
+                name: track.name.clone(),
+                spans: if wheels.contains(&track.name.as_str()) {
+                    track.spans.clone()
+                } else {
+                    window(&track.spans)
+                },
+            })
+            .collect();
+        let mut vehicles: Vec<ObjectTrack> = self
+            .vehicles
+            .iter()
+            .map(|track| ObjectTrack {
+                name: track.name.clone(),
+                spans: window(&track.spans),
+            })
+            .collect();
         for track in objects.iter_mut().chain(vehicles.iter_mut()) {
             if let Some(open) = track.spans.last_mut() {
                 open.set_end(duration);
             }
         }
         crate::wheels::animate(&self.world, &mut objects);
+        if from.is_some() {
+            for track in objects
+                .iter_mut()
+                .filter(|t| wheels.contains(&t.name.as_str()))
+            {
+                track.spans = window(&track.spans);
+            }
+        }
         // Friction holds still open at the horn were held to the end.
         let grasps = self
             .friction_holds
@@ -9537,16 +9790,38 @@ impl Rollout {
                 .as_ref()
                 .map(|phys| {
                     let names = &phys.names;
-                    let mut contacts = phys.contacts.clone();
+                    let mut contacts = match from {
+                        None => phys.contacts.clone(),
+                        // Closed episodes are recorded as they end, so all
+                        // that began after `from` ended after it too.
+                        Some(from) => {
+                            let first = phys
+                                .contacts
+                                .iter()
+                                .rposition(|c| c.end <= from)
+                                .map_or(0, |k| k + 1);
+                            phys.contacts[first..]
+                                .iter()
+                                .filter(|c| c.start > from)
+                                .cloned()
+                                .collect()
+                        }
+                    };
                     // Episodes still touching at the horn close here.
-                    contacts.extend(phys.open_contacts.iter().map(|((a, b), open)| ContactSpan {
-                        a: names[*a as usize].clone(),
-                        b: names[*b as usize].clone(),
-                        start: open.start,
-                        end: duration,
-                        position: open.position,
-                        peak_force: open.peak_force,
-                    }));
+                    let began = |start: f64| from.is_none_or(|from| start > from);
+                    contacts.extend(
+                        phys.open_contacts
+                            .iter()
+                            .filter(|(_, open)| began(open.start))
+                            .map(|((a, b), open)| ContactSpan {
+                                a: names[*a as usize].clone(),
+                                b: names[*b as usize].clone(),
+                                start: open.start,
+                                end: duration,
+                                position: open.position,
+                                peak_force: open.peak_force,
+                            }),
+                    );
                     contacts.sort_by(|x, y| {
                         x.start
                             .partial_cmp(&y.start)
@@ -15936,6 +16211,154 @@ mod mount_tests {
         });
         scene.mount_robot(0, "amr", iso(0.0, 0.0, 0.3)).unwrap();
         scene
+    }
+
+    /// A streaming bake samples each window from `timeline_since`: read
+    /// anywhere in the window it agrees with the whole snapshot — the
+    /// joints, the riding base, the vehicle frame, a wheel's spin counted
+    /// from the start, a body the engine drops — while holding only the
+    /// window's share of the tracks, and it carries each touch once, in
+    /// the window it began.
+    #[test]
+    fn a_window_since_samples_like_the_whole_timeline() {
+        let mut scene = amr_scene();
+        scene
+            .add_obstacle(
+                "wheel",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.02, 0.1),
+                },
+                iso(0.15, 0.16, 0.05),
+            )
+            .unwrap();
+        scene.set_obstacle_enabled("wheel", false).unwrap();
+        let mut amr = scene
+            .devices()
+            .iter()
+            .find(|d| d.name == "amr")
+            .unwrap()
+            .clone();
+        if let DeviceKind::Vehicle { body, .. } = &mut amr.kind {
+            body.push("wheel".into());
+        }
+        scene.upsert_device(amr);
+        scene
+            .set_vehicle_wheel(
+                "amr",
+                crate::wheels::VehicleWheel {
+                    object: "wheel".into(),
+                    radius: 0.05,
+                    axis: [0.0, 1.0, 0.0],
+                    pivot: [0.0; 3],
+                    lateral_ratio: 0.0,
+                },
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "pad",
+                Geometry::Box {
+                    size: Vector3::new(1.0, 1.0, 0.1),
+                },
+                iso(3.0, 3.0, -0.05),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.1),
+                },
+                iso(3.0, 3.0, 0.6),
+            )
+            .unwrap();
+        scene
+            .set_obstacle_physics("box", Some(botrail_physics::BodyProps::dynamic()))
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "go".into(),
+            steps: vec![
+                step("drive", vec![goto("c")], device_done()),
+                step("dwell", vec![], Condition::Elapsed { seconds: 2.0 }),
+            ],
+        });
+        let options = RolloutOptions {
+            physics: Some(PhysicsOptions::default()),
+            ..Default::default()
+        };
+        let mut live = scene
+            .open_rollout(
+                &["go"],
+                &options,
+                Some(Box::new(botrail_physics_rapier::RapierBackend::new())),
+            )
+            .unwrap();
+        let near = |a: &Isometry3<f64>, b: &Isometry3<f64>| {
+            (a.translation.vector - b.translation.vector).norm() < 1e-9
+                && a.rotation.angle_to(&b.rotation) < 1e-9
+        };
+        const TICKS: usize = 37;
+        let (mut from, mut touches) = (0.0, Vec::new());
+        while !live.finished() {
+            for _ in 0..TICKS {
+                if live.finished() {
+                    break;
+                }
+                live.tick().unwrap();
+            }
+            let now = live.t();
+            let window = live.timeline_since(from);
+            let whole = live.timeline();
+            assert_eq!(window.duration, whole.duration);
+            // The window's share, not the bake's.
+            assert!(window.robots[0].trajectory.times.len() <= TICKS + 2);
+            for k in 1..=8 {
+                let t = from + (now - from) * k as f64 / 8.0;
+                assert_eq!(
+                    window.robots[0].trajectory.sample(t),
+                    whole.robots[0].trajectory.sample(t),
+                    "joints at {t}"
+                );
+                let base = |tl: &SequenceTimeline| SequenceTimeline::base_pose(&tl.robots[0], t);
+                assert!(
+                    near(&base(&window).unwrap(), &base(&whole).unwrap()),
+                    "base at {t}"
+                );
+                for (cut, full) in [
+                    (&window.objects, &whole.objects),
+                    (&window.vehicles, &whole.vehicles),
+                ] {
+                    assert_eq!(cut.len(), full.len());
+                    for track in full.iter() {
+                        let part = cut.iter().find(|o| o.name == track.name).unwrap();
+                        let a = SequenceTimeline::object_pose(part, &[], t).unwrap();
+                        let b = SequenceTimeline::object_pose(track, &[], t).unwrap();
+                        assert!(near(&a, &b), "`{}` at {t}", track.name);
+                    }
+                }
+            }
+            touches.extend(
+                window
+                    .contacts
+                    .iter()
+                    .map(|c| (c.a.clone(), c.b.clone(), c.start)),
+            );
+            from = now;
+        }
+        let whole = live.timeline();
+        // The wheel turned and the box landed: both were exercised.
+        let wheel = whole.objects.iter().find(|o| o.name == "wheel").unwrap();
+        assert!(wheel
+            .spans
+            .iter()
+            .any(|s| matches!(s, TrackSpan::Wheel { rate, .. } if rate.abs() > 1.0)));
+        let every: Vec<_> = whole
+            .contacts
+            .iter()
+            .map(|c| (c.a.clone(), c.b.clone(), c.start))
+            .collect();
+        assert!(!every.is_empty(), "the box landed on its pad");
+        assert_eq!(touches, every, "each touch once, in the window it began");
     }
 
     #[test]

@@ -226,6 +226,20 @@ pub struct ObjectBody {
     pub guide: bool,
 }
 
+/// A body a robot carries — a grasped part, the bracket on its hand —
+/// tied to the carrying link with a fixed joint, so it goes where the
+/// link goes in the consumer's engine as it does in botrail's bake.
+#[derive(Debug, Clone)]
+pub struct WeldSpec {
+    /// Index into [`SimulationSpec::units`] of the carried body.
+    pub unit: usize,
+    /// The carrying robot (index into [`AnimationInput::robots`]) and link.
+    pub robot: usize,
+    pub link: usize,
+    /// The body's pose in the link's frame (`link ← body`).
+    pub grasp: Isometry3<f64>,
+}
+
 /// What turns the static export into a *simulation* stage
 /// (design-world-physics.md W4-U): the world as a physics engine owns it
 /// rather than as a recording of it. Single-frame values are authored as
@@ -245,6 +259,8 @@ pub struct SimulationSpec<'a> {
     pub rides: &'a [Option<Ride>],
     /// Height of the ground half-space, when the world has one.
     pub ground: Option<f64>,
+    /// Bodies carried by a robot's link, welded to it.
+    pub welds: &'a [WeldSpec],
 }
 
 pub struct ExportedAnimation {
@@ -410,6 +426,22 @@ pub fn export_simulation(
             }
         }
     }
+    for weld in simulation.welds {
+        let links = input
+            .robots
+            .get(weld.robot)
+            .map(|r| r.model.links.len())
+            .unwrap_or(0);
+        if weld.unit >= simulation.units.len() || weld.link >= links {
+            return Err(UsdExportError::Input(format!(
+                "weld names unit {} of {} on robot {} link {} of {links}",
+                weld.unit,
+                simulation.units.len(),
+                weld.robot,
+                weld.link
+            )));
+        }
+    }
     export_stage(
         input,
         &ExportOptions::default(),
@@ -552,6 +584,8 @@ fn export_stage(
         })
         .collect();
     let mut root_bodies: Vec<Option<(String, Isometry3<f64>)>> = vec![None; input.robots.len()];
+    // Every link's body prim, per robot: what a carried body is welded to.
+    let mut link_prims: Vec<Vec<String>> = vec![Vec::new(); input.robots.len()];
     let mut stranded: std::collections::HashSet<usize> = Default::default();
     let mut demoted: std::collections::HashSet<usize> = Default::default();
     for (r, robot) in input.robots.iter().enumerate() {
@@ -626,6 +660,7 @@ fn export_stage(
                     &mut warnings,
                 )?;
                 root_bodies[r] = Some(taken.root_body);
+                link_prims[r] = taken.link_prims;
                 if mount.is_some() && !taken.mounted {
                     stranded.insert(r);
                     if let Some(Ride::Base(CarrierSpec { unit: Some(u), .. })) = &rides[r] {
@@ -643,7 +678,7 @@ fn export_stage(
                         prefix,
                     })
                 });
-                let root_body = author_urdf_robot(
+                let authored = author_urdf_robot(
                     &mut layer,
                     robot,
                     &codes,
@@ -653,7 +688,8 @@ fn export_stage(
                     &mut appearances,
                     &mut meshes,
                 )?;
-                root_bodies[r] = Some(root_body);
+                root_bodies[r] = Some(authored.root_body);
+                link_prims[r] = authored.link_prims;
             }
         }
     }
@@ -671,6 +707,18 @@ fn export_stage(
     )?;
     if let Some(height) = simulation.and_then(|s| s.ground) {
         physics::author_ground(&mut layer, height);
+    }
+    // What a robot carries rides its link: a fixed joint from the link's
+    // body to the carried one, the body's pose in the link's frame as the
+    // joint's frame on the link, identity on the body.
+    for weld in simulation.map_or(&[][..], |s| s.welds) {
+        let body = &layout.units[weld.unit];
+        let link = &link_prims[weld.robot][weld.link];
+        let joint = format!("{body}/weld");
+        layer.ensure_prim(&joint, Specifier::Def, Some("PhysicsFixedJoint"));
+        layer.rel(&joint, "physics:body0", link);
+        layer.rel(&joint, "physics:body1", body);
+        physics::author_joint_frames(&mut layer, &joint, &weld.grasp, &Isometry3::identity());
     }
     assets.extend(appearances.copies);
     author_curves(&mut layer, input.curves, &mut warnings);
@@ -1771,6 +1819,8 @@ struct ReferencedRobot {
     root_body: (String, Isometry3<f64>),
     /// Whether the mount asked for was authored.
     mounted: bool,
+    /// Every link's body prim, in model order.
+    link_prims: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1923,9 +1973,18 @@ fn author_referenced_robot(
             mounted = true;
         }
     }
+    let link_prims = info
+        .links
+        .iter()
+        .map(|link| match link.rel_path.as_str() {
+            "" => robot_prim.to_string(),
+            rel => format!("{robot_prim}/{rel}"),
+        })
+        .collect();
     Ok(ReferencedRobot {
         root_body: (root_prim, root_pose),
         mounted,
+        link_prims,
     })
 }
 
@@ -2056,7 +2115,7 @@ fn author_urdf_robot(
     warnings: &mut Vec<String>,
     appearances: &mut visual::VisualAssets,
     meshes: &mut meshes::MeshLayers,
-) -> Result<(String, Isometry3<f64>), UsdExportError> {
+) -> Result<AuthoredRobot, UsdExportError> {
     layer.ensure_prim(robot_prim, Specifier::Def, Some("Xform"));
     let mut used = HashMap::new();
     let mut link_prims = Vec::with_capacity(robot.model.links.len());
@@ -2107,7 +2166,17 @@ fn author_urdf_robot(
         )?;
     }
     let root = robot.model.root_link;
-    Ok((link_prims[root].clone(), robot.link_poses[0][root]))
+    Ok(AuthoredRobot {
+        root_body: (link_prims[root].clone(), robot.link_poses[0][root]),
+        link_prims,
+    })
+}
+
+/// What authoring a URDF robot hands back: its root body prim (with its
+/// world pose) and every link's body prim, in model order.
+struct AuthoredRobot {
+    root_body: (String, Isometry3<f64>),
+    link_prims: Vec<String>,
 }
 
 /// Authors one visual shape as a gprim with a static link-local transform.
@@ -3488,6 +3557,7 @@ mod tests {
             cameras: &[],
         };
         let spec = SimulationSpec {
+            welds: &[],
             units: &units,
             bodies: &bodies,
             articulations: &[],
@@ -3659,6 +3729,7 @@ mod tests {
             ..Default::default()
         };
         let spec = SimulationSpec {
+            welds: &[],
             units: &[],
             bodies: &[],
             articulations: &[Some(articulation)],
@@ -3885,6 +3956,7 @@ mod tests {
         };
         let export = |articulation: ArticulationSpec, ride: Option<Ride>| {
             let spec = SimulationSpec {
+                welds: &[],
                 units: &units,
                 bodies: &bodies,
                 articulations: &[Some(articulation)],
@@ -4130,6 +4202,7 @@ mod tests {
         };
         let export = |units: &[UnitSpec], rides: &[Option<Ride>], tag: &str| {
             let spec = SimulationSpec {
+                welds: &[],
                 units,
                 bodies: if units.is_empty() {
                     &scenery_only
@@ -4264,6 +4337,7 @@ mod tests {
 
         // A join has to name an earlier robot that rides as a base.
         let bad = SimulationSpec {
+            welds: &[],
             units: &[],
             bodies: &[],
             articulations: &[Some(powered.clone()), Some(powered.clone())],
@@ -4343,6 +4417,7 @@ mod tests {
                 cameras: &[],
             };
             let spec = SimulationSpec {
+                welds: &[],
                 units: &units,
                 bodies: &bodies,
                 articulations: &[None, None],

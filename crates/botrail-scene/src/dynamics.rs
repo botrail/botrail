@@ -1202,6 +1202,200 @@ mod tests {
         live.release();
     }
 
+    /// The viewport picks the piece it draws; the engine knows the rigid
+    /// unit. A hand on any piece — a pinned group's disabled visual, a
+    /// root's child — holds the unit at that point, and the point goes
+    /// where the hand pulls it.
+    #[test]
+    fn a_hand_on_any_piece_of_a_rigid_unit_pulls_the_unit() {
+        use crate::part::{Part, PartTargetKind};
+        let boxed = |scene: &mut Scene, name: &str, x: f64, z: f64| {
+            scene
+                .add_obstacle(
+                    name,
+                    Geometry::Box {
+                        size: Vector3::new(0.1, 0.1, 0.1),
+                    },
+                    Isometry3::translation(x, 0.0, z),
+                )
+                .unwrap();
+        };
+        let mut scene = Scene::empty();
+        // A pallet pinned as a part: a slab and a disabled visual board.
+        boxed(&mut scene, "pallet/slab", 0.0, 0.07);
+        boxed(&mut scene, "pallet/visual/board", 0.0, 0.05);
+        scene
+            .set_obstacle_enabled("pallet/visual/board", false)
+            .unwrap();
+        scene
+            .set_part(
+                "pallet",
+                Some(PartTargetKind::Group),
+                Part {
+                    catalog: None,
+                    manufacturer: None,
+                    model: None,
+                    category: Some("pallet".into()),
+                    description: None,
+                    qty: 1,
+                    attributes: Default::default(),
+                },
+            )
+            .unwrap();
+        // A crate with a lid: one unit by its name hierarchy.
+        boxed(&mut scene, "crate", 1.0, 0.05);
+        boxed(&mut scene, "crate/lid", 1.0, 0.15);
+        let pose = |name: &str| {
+            scene
+                .obstacles()
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap()
+                .pose
+        };
+        let open = || {
+            let mut live = scene
+                .open_physics_rollout(5.0, &world_unpowered(), rapier())
+                .unwrap();
+            for _ in 0..20 {
+                live.tick().unwrap();
+            }
+            live
+        };
+        // (piece, the unit's body, the obstacle that frames it)
+        for (piece, unit, frame, grip, lift) in [
+            (
+                "crate/lid",
+                "crate",
+                "crate",
+                Vector3::new(0.05, 0.0, 0.05),
+                Vector3::new(0.0, 0.3, 0.2),
+            ),
+            (
+                "pallet/visual/board",
+                "pallet",
+                "pallet/slab",
+                Vector3::new(0.0, 0.05, 0.0),
+                Vector3::new(0.3, 0.0, 0.2),
+            ),
+        ] {
+            let mut by_piece = open();
+            let mut by_unit = open();
+            let start = by_piece.obstacle_pose(piece).unwrap() * nalgebra::Point3::from(grip);
+            let target = start.coords + lift;
+            // The same point, in the unit's frame.
+            let local = (pose(frame).inverse() * pose(piece) * nalgebra::Point3::from(grip)).coords;
+            assert!(
+                by_piece.drag(piece, grip, target).unwrap(),
+                "{piece} not held"
+            );
+            assert_eq!(by_piece.dragging(), Some(unit));
+            assert!(by_unit.drag(unit, local, target).unwrap());
+            for _ in 0..150 {
+                by_piece.tick().unwrap();
+                by_unit.tick().unwrap();
+            }
+            let a = by_piece.obstacle_pose(piece).unwrap();
+            let b = by_unit.obstacle_pose(piece).unwrap();
+            assert!(
+                (a.translation.vector - b.translation.vector).norm() < 1e-9,
+                "{piece}: a piece's hand is not the unit's"
+            );
+            // And the hand pulled the point up to it (swinging a little
+            // under an off-centre grip, sagging under the weight).
+            let anchor = a * nalgebra::Point3::from(grip);
+            let gap = (anchor.coords - target).norm();
+            assert!(gap < 0.08, "{piece}'s grip sits {gap} m from the hand");
+            assert!(
+                anchor.z > start.z + 0.12,
+                "{piece} rose {}",
+                anchor.z - start.z
+            );
+        }
+        let mut live = open();
+        // A piece that no body carries is still an error.
+        assert!(live
+            .drag("nothing", Vector3::zeros(), Vector3::zeros())
+            .is_err());
+    }
+
+    /// A live stream forgets what it sent (design-physics-pick.md §8): a
+    /// rollout that forgets reads the same windows as one that remembers
+    /// — the folding arm's joints, sampled every tick, and a ball that
+    /// rolls on and on — while holding only a window's worth of either.
+    #[test]
+    fn forgetting_keeps_the_next_window_and_nothing_older() {
+        let mut scene = arm(false);
+        scene
+            .add_obstacle(
+                "ball",
+                Geometry::Sphere { radius: 0.05 },
+                Isometry3::translation(0.8, 0.4, 0.3),
+            )
+            .unwrap();
+        // A tilted gravity: the ball never comes to rest.
+        let options = RolloutOptions {
+            physics: Some(PhysicsOptions {
+                gravity: [0.3, 0.0, -9.81],
+                ..PhysicsOptions::world()
+            }),
+            ..Default::default()
+        };
+        let mut keeping = scene
+            .open_physics_rollout(f64::INFINITY, &options, rapier())
+            .unwrap();
+        let mut forgetting = scene
+            .open_physics_rollout(f64::INFINITY, &options, rapier())
+            .unwrap();
+        const TICKS: usize = 3;
+        let mut from = 0.0;
+        for _ in 0..300 {
+            for _ in 0..TICKS {
+                keeping.tick().unwrap();
+                forgetting.tick().unwrap();
+            }
+            let now = keeping.t();
+            let (a, b) = (
+                keeping.timeline_since(from),
+                forgetting.timeline_since(from),
+            );
+            let ball = |tl: &SequenceTimeline, t: f64| {
+                let track = tl.objects.iter().find(|o| o.name == "ball").unwrap();
+                SequenceTimeline::object_pose(track, &[], t).unwrap()
+            };
+            for k in 1..=TICKS {
+                let t = from + (now - from) * k as f64 / TICKS as f64;
+                assert_eq!(
+                    a.robots[0].trajectory.sample(t),
+                    b.robots[0].trajectory.sample(t),
+                    "joints at {t}"
+                );
+                let gap = (ball(&a, t).translation.vector - ball(&b, t).translation.vector).norm();
+                assert!(gap < 1e-9, "ball off by {gap} at {t}");
+            }
+            forgetting.forget_before(now);
+            from = now;
+        }
+        // What the forgetting rollout holds is the last window's worth …
+        let held = forgetting.timeline();
+        assert!(held.robots[0].trajectory.times.len() <= TICKS + 2);
+        let samples = |tl: &SequenceTimeline| -> usize {
+            let ball = tl.objects.iter().find(|o| o.name == "ball").unwrap();
+            ball.spans
+                .iter()
+                .map(|s| match s {
+                    TrackSpan::Sampled { poses, .. } => poses.len(),
+                    _ => 1,
+                })
+                .sum()
+        };
+        assert!(samples(&held) <= TICKS + 2, "{}", samples(&held));
+        // … where the one that remembers holds all nine seconds.
+        let all = keeping.timeline();
+        assert!(all.robots[0].trajectory.times.len() > 800);
+        assert!(samples(&all) > 800);
+    }
+
     // ============ world scope robots (design-world-physics.md W1) ============
 
     fn world_unpowered() -> RolloutOptions {
@@ -1448,6 +1642,73 @@ mod tests {
             .simulate_physics_with(1.0, &options, rapier())
             .unwrap();
         assert!(held.robots[0].base.is_none());
+    }
+
+    /// What a powered arm holds from the start — a camera clip hugging
+    /// the tool, its collision reaching into the link it is clamped to —
+    /// is welded to that link and kept out of its own robot's collisions:
+    /// the arm holds its pose, and nothing on the arm pushes the part.
+    /// (A body left in collision group 0 was shoved out of the link by
+    /// hundreds of newtons and the servos lost their targets.)
+    #[test]
+    fn a_part_held_from_the_start_is_not_shoved_by_its_own_arm() {
+        // Under the world scope the part is a body welded to the link;
+        // under the declared scope, on a declared-dynamic arm, it is a
+        // mirror the arm carries. Neither may push the arm.
+        let declared = RolloutOptions {
+            physics: Some(crate::rollout::PhysicsOptions::default()),
+            ..Default::default()
+        };
+        held_part_rides_quietly(false, &world_powered(true));
+        held_part_rides_quietly(true, &declared);
+    }
+
+    fn held_part_rides_quietly(declared: bool, options: &RolloutOptions) {
+        let mut scene = arm(declared);
+        let tip = scene.robots()[0].model.links.len() - 1;
+        let tcp = scene.link_poses_for(0)[tip];
+        // Overlapping the carrying link by design, as a clip on a hand does.
+        scene
+            .add_obstacle(
+                "clip",
+                Geometry::Box {
+                    size: Vector3::new(0.12, 0.12, 0.04),
+                },
+                tcp,
+            )
+            .unwrap();
+        let tip_name = scene.robots()[0].model.links[tip].name.clone();
+        scene
+            .attach_obstacle("clip", Some(tip_name.as_str()), None)
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "hold".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 2.0 })],
+        });
+        let mut live = scene.open_rollout(&["hold"], options, rapier()).unwrap();
+        let mut pushed = 0.0f64;
+        for _ in 0..150 {
+            live.tick().unwrap();
+            for c in live.contacts() {
+                if c.a == "clip" || c.b == "clip" {
+                    pushed = pushed.max(c.force);
+                }
+            }
+        }
+        assert!(
+            pushed < 1e-6,
+            "declared={declared}: the arm pushed its own clip with {pushed} N"
+        );
+        let q = live.view().joint_positions(0).unwrap().to_vec();
+        let worst = q
+            .iter()
+            .zip(READY.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 0.02,
+            "declared={declared}: the arm held READY to within {worst} rad"
+        );
     }
 
     #[test]

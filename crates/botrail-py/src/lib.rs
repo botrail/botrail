@@ -7375,8 +7375,10 @@ impl LiveRollout {
     /// `name` (an obstacle, or a robot link as `"robot/link"`) at `point`
     /// in its own frame and pulls it toward `target` in the world with a
     /// critically damped spring, every tick until `release` (or until the
-    /// next `drag` moves the hand). Returns whether the body is the
-    /// engine's to move: a bolted mirror or a part a program holds is not.
+    /// next `drag` moves the hand). Any obstacle of a rigid unit — a
+    /// tote's wall, a tray's insert — holds the whole unit at that point.
+    /// Returns whether the body is the engine's to move: a bolted mirror
+    /// or a part a program holds is not.
     #[pyo3(signature = (name, point, target))]
     fn drag(
         &mut self,

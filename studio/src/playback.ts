@@ -122,12 +122,23 @@ function expandFlags(flags: boolean[] | null | undefined, n: number): boolean[] 
   return flags;
 }
 
+/** Tracks built by `appendTracks`: theirs to grow in place. */
+const streamTracks = new WeakSet<PlaybackTracks>();
+
+/** Appends `items` to `target` in place and returns it. */
+function pushAll<T>(target: T[], items: readonly T[]): T[] {
+  for (const item of items) target.push(item);
+  return target;
+}
+
 /** The tracks so far plus a streamed window (`bake_chunk`): every
  * array grows by the window's samples, on the shared lattice. A track the
  * window brings for the first time stood still until now, so it is padded
- * back to the start with its first pose; a track the window drops (none
- * should) keeps its last pose. `prev` null starts the tracks from the
- * window. */
+ * back to the start with its first pose. `prev` null starts the tracks
+ * from the window. Tracks this function built grow in place — a long
+ * stream appends each window at the window's cost, not the recording's —
+ * under a new wrapper, so the store sees the change; any other `prev` is
+ * copied first. */
 export function appendTracks(
   prev: PlaybackTracks | null,
   chunk: TimelineMsg,
@@ -141,10 +152,15 @@ export function appendTracks(
   const times = chunk.robots[0]?.trajectory.times.length
     ? chunk.robots[0].trajectory.times
     : windowTimes(from, n);
+  const own = prev !== null && streamTracks.has(prev);
+  const grow = <T>(before: T[] | null | undefined, now: readonly T[]): T[] =>
+    own && before ? pushAll(before, now) : [...(before ?? []), ...now];
   const prevTimes =
     prev?.robots[0]?.trajectory.times ?? prev?.objects?.times ?? prev?.vehicles?.times ?? [];
-  const allTimes = [...prevTimes, ...times];
   const m = prevTimes.length;
+  // One lattice for every track: the robots', the objects' and the
+  // vehicles' `times` are this same array.
+  const allTimes = grow(prevTimes, times);
 
   const robots = chunk.robots.map((r) => {
     const before = prev?.robots.find((p) => p.name === r.name);
@@ -152,20 +168,17 @@ export function appendTracks(
     const old = before?.trajectory;
     const linkPoses =
       old?.link_poses && traj.link_poses
-        ? [...old.link_poses, ...traj.link_poses]
+        ? grow(old.link_poses, traj.link_poses)
         : traj.link_poses && !old
           ? traj.link_poses
           : old?.link_poses ?? traj.link_poses;
-    const base =
-      r.base && r.base.length > 0
-        ? [...(before?.base ?? []), ...r.base]
-        : before?.base;
+    const base = r.base && r.base.length > 0 ? grow(before?.base, r.base) : before?.base;
     return {
       name: r.name,
       trajectory: {
         duration: chunk.duration,
         times: allTimes,
-        joint_positions: [...(old?.joint_positions ?? []), ...traj.joint_positions],
+        joint_positions: grow(old?.joint_positions, traj.joint_positions),
         link_poses: linkPoses,
         object_tracks: null,
       },
@@ -173,37 +186,99 @@ export function appendTracks(
     };
   });
 
-  const grow = <T extends { name: string; poses: PoseMsg[]; visible?: boolean[] | null }>(
+  const extend = <T extends { name: string; poses: PoseMsg[]; visible?: boolean[] | null }>(
     prevTracks: T[] | undefined,
     tracks: T[],
     withVisible: boolean,
-  ): T[] =>
-    tracks.map((track) => {
-      const before = prevTracks?.find((p) => p.name === track.name);
+  ): T[] => {
+    const earlier = new Map((prevTracks ?? []).map((t) => [t.name, t]));
+    return tracks.map((track) => {
+      const before = earlier.get(track.name);
       const now = expandPoses(track.poses, n);
-      const earlier = before
-        ? expandPoses(before.poses, m)
-        : Array.from({ length: m }, () => now[0]);
-      const grown = { ...track, poses: [...earlier, ...now] };
+      const poses =
+        before && before.poses.length === m
+          ? grow(before.poses, now)
+          : [
+              ...(before ? expandPoses(before.poses, m) : Array.from({ length: m }, () => now[0])),
+              ...now,
+            ];
+      const grown = { ...track, poses };
       if (withVisible) {
         const flagsBefore = before?.visible ?? [];
         const flagsNow = track.visible ?? [];
         grown.visible =
           flagsBefore.length === 0 && flagsNow.length === 0
             ? []
-            : [...expandFlags(flagsBefore, m), ...expandFlags(flagsNow, n)];
+            : flagsBefore.length === m
+              ? grow(flagsBefore, expandFlags(flagsNow, n))
+              : [...expandFlags(flagsBefore, m), ...expandFlags(flagsNow, n)];
       }
       return grown;
     });
+  };
 
-  const objects = grow(prev?.objects?.tracks, chunk.objects, true);
-  const vehicles = grow(prev?.vehicles?.tracks, chunk.vehicles ?? [], false);
-  return {
+  const objects = extend(prev?.objects?.tracks, chunk.objects, true);
+  const vehicles = extend(prev?.vehicles?.tracks, chunk.vehicles ?? [], false);
+  const tracks: PlaybackTracks = {
     duration: chunk.duration,
     robots,
     objects: objects.length > 0 ? { times: allTimes, tracks: objects } : null,
     vehicles: vehicles.length > 0 ? { times: allTimes, tracks: vehicles } : null,
   };
+  streamTracks.add(tracks);
+  return tracks;
+}
+
+/** The first index of `times` (sorted) at or after `t`. */
+function firstFrom(times: number[], t: number): number {
+  let lo = 0;
+  let hi = times.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** A live stream keeps no past (design-physics-pick.md §8): drops, in
+ * place, every sample after `liveFrom` and before `keepFrom` from every
+ * array of `tracks` — the programs' part before the live part stays, and
+ * so does what the viewport draws now: the last sample is never dropped,
+ * however late `keepFrom` (a stream's end falls between lattice points).
+ * For the tracks a stream built (`appendTracks`), which share one
+ * lattice. Returns whether anything was dropped. */
+export function forgetLive(tracks: PlaybackTracks, liveFrom: number, keepFrom: number): boolean {
+  const times =
+    tracks.robots[0]?.trajectory.times ?? tracks.objects?.times ?? tracks.vehicles?.times;
+  if (!times) return false;
+  const first = firstFrom(times, liveFrom + 1e-9);
+  const count = Math.min(firstFrom(times, keepFrom - 1e-9), times.length - 1) - first;
+  if (count <= 0) return false;
+  // Every per-sample array once (the lattice is shared by all tracks).
+  const arrays = new Set<unknown[]>();
+  const add = (a: unknown[] | null | undefined) => {
+    if (a && a.length === times.length) arrays.add(a);
+  };
+  for (const r of tracks.robots) {
+    add(r.trajectory.times);
+    add(r.trajectory.joint_positions);
+    add(r.trajectory.link_poses);
+    add(r.base);
+  }
+  if (tracks.objects) {
+    add(tracks.objects.times);
+    for (const o of tracks.objects.tracks) {
+      add(o.poses);
+      add(o.visible);
+    }
+  }
+  if (tracks.vehicles) {
+    add(tracks.vehicles.times);
+    for (const v of tracks.vehicles.tracks) add(v.poses);
+  }
+  for (const a of arrays) a.splice(first, count);
+  return true;
 }
 
 /** Every robot's override + object poses at time `t` (clamped). */

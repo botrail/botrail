@@ -289,7 +289,9 @@ export function SequencePanel() {
             {simulating && <span className="badge muted">simulating…</span>}
             {!simulating && timeline && (
               <span className="badge ok">
-                cycle {timeline.duration.toFixed(2)}s
+                {/* A physics run's world goes on after the cycle: the
+                    cycle is where its programs ended. */}
+                cycle {(timeline.cycleEnd ?? timeline.duration).toFixed(2)}s
               </span>
             )}
           </>
@@ -370,10 +372,10 @@ export function SequencePanel() {
             disabled={simulating || !connected}
             title={
               streaming
-                ? "physics streaming: stop here (a program is baked again kinematically, the world's clip stays on the dock)"
+                ? "physics streaming: stop here (a program is baked again kinematically; the live world is not kept — switch on again to run it again)"
                 : physicsOn
                   ? "physics on: bake again kinematically and restart"
-                  : "physics off: bake the whole cell under physics (every obstacle and robot the engine's, ground at z = 0) and restart; with no program, stream the world under gravity until stopped"
+                  : "physics off: bake the whole cell under physics (every obstacle and robot the engine's, ground at z = 0) and restart — when the programs end the world runs on, a body free to drag, until stopped; with no program, stream the world under gravity until stopped"
             }
           >
             ⚛ physics

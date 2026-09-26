@@ -12,7 +12,7 @@ use botrail_scene::Scene;
 use botrail_usd::export::{
     export_animation, export_simulation, AnimationInput, ArticulationSpec, BeltSpec, BodyRole,
     CameraSpec, CarrierSpec, CurveSpec, ExportOptions, ExportedAnimation, ObjectBody, ObjectSpec,
-    PhysicsSpec, PoseTrack, Ride, RobotAnimation, ServoSpec, SimulationSpec, UnitSpec,
+    PhysicsSpec, PoseTrack, Ride, RobotAnimation, ServoSpec, SimulationSpec, UnitSpec, WeldSpec,
 };
 use nalgebra::Isometry3;
 
@@ -424,6 +424,8 @@ struct SimulationBodies {
     /// The one body of each rigid device that has one, by device name —
     /// what a robot riding the device is bolted to.
     device_units: std::collections::HashMap<String, usize>,
+    /// Units a robot carries (their frame member is attached to a link).
+    welds: Vec<WeldSpec>,
 }
 
 /// Mass (kg) of a vehicle body that is a link of its rider's articulation
@@ -515,6 +517,7 @@ fn simulation_bodies(
         .collect();
 
     let mut units: Vec<UnitSpec> = Vec::new();
+    let mut welds: Vec<WeldSpec> = Vec::new();
     let mut device_units: std::collections::HashMap<String, usize> = Default::default();
     let mut unit_of: Vec<Option<usize>> = vec![None; obstacles.len()];
     let mut material_of = vec![default_material; obstacles.len()];
@@ -529,6 +532,14 @@ fn simulation_bodies(
         for &i in &unit.members {
             material_of[i] = unit.props.material;
             unit_of[i] = Some(units.len());
+        }
+        if let Some(attachment) = scene.attachment(&obstacles[unit.frame].name) {
+            welds.push(WeldSpec {
+                unit: units.len(),
+                robot: attachment.robot,
+                link: attachment.link,
+                grasp: attachment.grasp,
+            });
         }
         units.push(UnitSpec {
             name: unit.name.clone(),
@@ -605,6 +616,7 @@ fn simulation_bodies(
         colliders: Vec::new(),
         units,
         device_units,
+        welds,
     };
     for (i, o) in obstacles.iter().enumerate() {
         // The engine's truth is `enabled` (a floor slab a walker stands on
@@ -894,6 +906,7 @@ fn bake_scene_stage(
         articulations: &articulations,
         rides: &rides,
         ground: physics.ground,
+        welds: &sim.welds,
     };
     let mut exported = export_simulation(&input, &spec, asset_stem).map_err(|e| e.to_string())?;
     exported.warnings.extend(stranded);

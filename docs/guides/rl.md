@@ -236,7 +236,19 @@ is the whole of it — a Franka on a stand with a tread-plate top, a timber
 work table, a KLT (`bt.parts.bin`, the catalog's `botrail/bin/klt-vda4500`
 in the real-object cell: five boxes pinned as one part, so the world scope
 keeps them one rigid unit), a tray, a pool of things drawn every
-episode — with `--tile 2x3`.
+episode — with `--tile 2x3`. The wrist camera is the catalog's RealSense
+D405 (`add_camera(from_catalog=...)`: the gripper camera of the family,
+its optics and its BOM line), seated 30° toward the fingertips on a
+printed clip that hugs the hand — hooked under the coupling ring, flat
+on the broad face, hooked under the bottom edge. The clip is a shape
+boxes cannot draw, so it is authored in Node + three against the hand's
+measured surfaces (botrail-assets `franka-hand-d405-clip`), vendored as
+`examples/assets/franka_hand_d405_clip.usda` and drawn on a resident that
+does not collide (`set_obstacle_visual_asset`); what collides is two
+hidden boxes and the camera's own mesh. All of it is attached to the hand
+with `scene.attach` and pinned as one `adapter` part, so the planner and
+the engine keep the camera out of the bin's walls, a physics bake welds
+it to the hand, and Isaac Lab gets it as a body on a fixed joint.
 
 ### Real objects on the table
 

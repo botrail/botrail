@@ -633,7 +633,10 @@ def Xform "W" {
             assert!((camera.fov_deg - 60.0).abs() < 1e-3, "{}", camera.fov_deg);
             assert_eq!(camera.resolution, [botrail_usd::DEFAULT_WIDTH, 720]);
             let t = camera.pose.translation.vector;
-            assert!((t - nalgebra::Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-9, "{t}");
+            assert!(
+                (t - nalgebra::Vector3::new(1.0, 2.0, 3.0)).norm() < 1e-9,
+                "{t}"
+            );
         });
     }
 }

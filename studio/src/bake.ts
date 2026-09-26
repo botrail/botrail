@@ -22,6 +22,15 @@ import {
  * unsupported to land, and for a machine with no power to fold and rest. */
 export const PHYSICS_SETTLE_SECONDS = 10;
 
+/** Stream ids: from a random start, so two studios on one host do not
+ * pick the same, then counted up (a u32 on the wire). */
+let streamSeq = Math.floor(Math.random() * 0xffff_ffff);
+
+function nextStreamId(): number {
+  streamSeq = (streamSeq + 1) % 0x1_0000_0000;
+  return streamSeq;
+}
+
 /** Whether a request bakes under the host's physics. */
 export function underPhysics(req: BakeRequest): boolean {
   return req.kind === "physics" || req.physics;
@@ -36,11 +45,14 @@ export function underPhysics(req: BakeRequest): boolean {
 export function startBake(req: BakeRequest): void {
   const s = useStudioStore.getState();
   if (underPhysics(req) && !isWasmMode()) {
-    s.beginBakeStream(req);
+    // The stream's id tells its chunks from those of the stream it
+    // replaces, which keep arriving until the host has stopped it.
+    const id = nextStreamId();
+    s.beginBakeStream(req, id);
     if (req.kind === "physics") {
-      sendStartBake([], req.scenario, undefined, true);
+      sendStartBake([], req.scenario, undefined, true, id);
     } else {
-      sendStartBake(req.names, req.scenario, req.cap, true);
+      sendStartBake(req.names, req.scenario, req.cap, true, id);
     }
     return;
   }
@@ -55,12 +67,14 @@ export function startBake(req: BakeRequest): void {
 }
 
 /** The physics toggle. With a program baked: the same bake again under
- * physics (on, streamed) or kinematically (off, from the top) — off while
- * the physics stream runs stops it where it stands first. With no
+ * physics (on, streamed — when the programs end the world runs on live,
+ * open to a hand, until off) or kinematically (off, from the top) — off
+ * while the physics stream runs stops it where it stands first. With no
  * program: on streams the world under gravity until off stops it where it
- * stands (the clip stays on the dock) — the cap is the programs' and does
- * not end it; off with the stream already over puts the cell back as
- * authored. */
+ * stands — the cap is the programs' and does not end it; off with the
+ * stream already over puts the cell back as authored. The live world is
+ * watched, not kept (design-physics-pick.md §8): to see it again is to
+ * run it again. */
 export function setPhysics(on: boolean): void {
   const s = useStudioStore.getState();
   const last = s.bakeStream?.request ?? s.lastBake;
