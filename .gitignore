@@ -11,10 +11,13 @@ studio/public-wasm/
 # Generated usd
 /*.usd
 /*.usd[ac]
+/**/*.usd
+/**/*.usd[ac]
 examples/**/*.usd
 examples/**/*.usd[ac]
 !examples/assets/*.usd
 !examples/assets/*.usd[ac]
+!python/tests/**/*.usd[ac]
 
 # Python
 __pycache__/
