@@ -21,9 +21,27 @@ import tabletop_env as demo
 from test_rl import READY as ARM_READY
 from test_rl import build as arm_build
 
+
+@pytest.fixture(scope="module")
+def catalog_arm() -> bt.Robot:
+    """The cell's FR3 and its hand come from the catalog: fetch them once,
+    or skip where the catalog cannot be reached — CI keeps the suite
+    offline (no huggingface_hub) and skips the catalog demos, the way
+    test_amr_demo does."""
+    pytest.importorskip("huggingface_hub", reason="the tabletop cell's FR3 needs the optional catalog extra")
+    try:
+        return demo.robot()
+    except ValueError as err:
+        # Catalog parsing and mounting regressions must fail the test.
+        if "cannot reach the catalog dataset" not in str(err):
+            raise
+        pytest.skip(f"catalog unavailable: {err}")
+
+
 # ------------------------------------------------------------ the cell
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_single_and_vector_worlds_match_with_a_dynamic_arm() -> None:
     """The cell as `rl.single` builds it, the arm dynamic: a vector world
     and the single environment agree to the bit under the same seed —
@@ -52,6 +70,7 @@ def test_single_and_vector_worlds_match_with_a_dynamic_arm() -> None:
     assert len(enabled) == 4
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_the_dynamic_arm_stops_on_the_mug_it_presses() -> None:
     """The acceptance of T0 (design-rl-tabletop.md §10.3): commanded 30 cm
     through a mug on the table, a kinematic mirror pushes the mug through
@@ -75,6 +94,7 @@ def test_the_dynamic_arm_stops_on_the_mug_it_presses() -> None:
     assert tz > demo.TOP - 0.005, f"the hand went through the table top (tcp z={tz:.3f})"
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_pictures_default_to_a_decimated_mesh() -> None:
     """A picture channel decimates a catalogue arm's visual meshes to
     half a pixel's footprint at a metre unless `render` says otherwise —
@@ -94,6 +114,7 @@ def test_pictures_default_to_a_decimated_mesh() -> None:
         rl.make(rl.single(cell), rl.Task(observe=observe, render={"decimate": -1.0}), seed=0).reset()
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_a_vector_env_takes_physics_options() -> None:
     """G11: `Task.physics` may be a `bt.Physics` — the world scope, powered
     — in a `VecEnv` as in the single one, and the two still agree."""
@@ -116,6 +137,7 @@ def test_a_vector_env_takes_physics_options() -> None:
     assert abs(q[3] - demo.READY[3]) < 0.5, q
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_tile_builds_the_grid_and_play_runs_the_policy_in_every_copy() -> None:
     """`rl.tile` names each copy's residents by its prefix and its robot
     by the cell's rule; `rl.play` binds one control per robot, relocates
@@ -320,6 +342,7 @@ def tree_size(layer: Path) -> int:
     return layer.stat().st_size + sum(p.stat().st_size for p in assets.rglob("*") if p.is_file())
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_the_tiled_export_writes_each_mesh_once_and_stays_small(tmp_path) -> None:
     """Six copies of the arm and its things cost the file one set of
     meshes (design-rl-tabletop.md G6 / T3): the grid's USD is a few
@@ -353,6 +376,7 @@ def test_the_tiled_export_writes_each_mesh_once_and_stays_small(tmp_path) -> Non
     assert all(len(m.GetPointsAttr().Get()) > 0 for m in meshes)
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_the_wrist_camera_is_a_catalog_d405_on_a_clip_the_hand_carries() -> None:
     """The picture channels look through a RealSense D405 from the catalog
     — its optics, its body, its BOM line — seated on a printed clip that
@@ -377,6 +401,7 @@ def test_the_wrist_camera_is_a_catalog_d405_on_a_clip_the_hand_carries() -> None
     assert plan["cam"]["kind"] == "dynamic" and plan["cam"]["reason"] == "carried by fr3/fr3_hand"
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_the_physics_stage_carries_the_cell_for_isaac_lab(tmp_path) -> None:
     """What `examples/export/isaaclab_tabletop.py` writes (design-rl-tabletop.md
     §10.5, T-I): one articulation rooted at the arm with its exported pose
@@ -419,6 +444,7 @@ def test_the_physics_stage_carries_the_cell_for_isaac_lab(tmp_path) -> None:
     assert [e.GetMessage() for e in context.Validate(stage)] == []
 
 
+@pytest.mark.usefixtures("catalog_arm")
 def test_the_cell_stands_the_ycb_objects_on_the_table() -> None:
     """The catalog's scans placed with `bt.parts.prop`: re-centred on their
     footprints, so the can's observed pose is the middle of the can on the
