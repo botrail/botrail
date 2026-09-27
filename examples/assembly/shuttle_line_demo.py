@@ -19,8 +19,8 @@ Commercial equipment uses these products; fixtures and adapters are SI designs:
     loop, upside down along the bottom;
   * two FANUC LR Mate 200iD hanging from the portal, each with an SMC
     MHZ2-20D and SI-built fingers — S1 loads housings out of a jig pallet, S5 takes the finished
-    modules off into a tray (catalog r2: the same model in FANUC's own
-    yellow, read as the display colour the ROS description gives);
+    modules off into a tray (catalog r3: FANUC's official ROS 2 model,
+    with detailed meshes, surface normals and part materials);
   * three FANUC SR-3iA (the catalog's reference model) on pedestals, each
     with station-specific tooling — S2 sets a PCB with PFYN 6 cups, S3 a
     cover with ZP3 cups, S4 a connector with an MPG-plus 25, each
@@ -37,11 +37,13 @@ round to the same places: twelve jobs at each station, each module on its
 shuttle from S1 to S5, and every handshake a signal.
 
 Run with:  python examples/assembly/shuttle_line_demo.py [out.usdc] [--studio]
-                        [--catalog-root DIR]
+                        [--catalog-root DIR] [--handler CATALOG_ID]
 
 `--catalog-root` points at a catalog builder's `build/` directory instead
 of the published catalog; what the local build lacks still comes from the
 published one.
+FANUC's official ROS 2 model (r3) is the default. Use
+`--handler fanuc/lrmate200id/lrmate200id/r2` to select the previous model.
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ import _shuttle_line_tooling as tooling
 import botrail as bt
 
 # ---- what is ordered -------------------------------------------------
-HANDLER = "fanuc/lrmate200id/lrmate200id/r2"   # FANUC LR Mate 200iD, ceiling mounted (r2: true FANUC yellow)
+HANDLER = "fanuc/lrmate200id/lrmate200id/r3"   # FANUC LR Mate 200iD, official ROS 2 model, ceiling mounted
 GRIPPER = tooling.HOUSING_GRIPPER
 SCARA = "fanuc/sr3ia/sr-3ia/r1"             # FANUC SR-3iA
 
@@ -424,12 +426,13 @@ def swept(scene: bt.Scene, robot: str, frm: list, to: list, samples: int = 16) -
     scene.set_joint_positions(frm, robot=robot)
 
 
-def straight(robot: str, frm: list, to: list, share: float = 0.5) -> dict:
+def straight(scene: bt.Scene, robot: str, frm: list, to: list, share: float = 0.5) -> dict:
     """A joint ramp at `share` of the axis speeds: the short vertical
     approach or retreat between a hover pose and the grip below it, and
     (checked by `swept`) the swing between two hover poses."""
     t = max(abs(b - a) / (share * v) for a, b, v in zip(frm[:6], to[:6], LR_SPEEDS)) + 0.15
-    return bt.seq.ramp(dict(zip([f"joint_{i}" for i in range(1, 7)], to[:6])), round(t, 3), robot=robot)
+    names = scene.robot_of(robot).joint_names[:6]
+    return bt.seq.ramp(dict(zip(names, to[:6])), round(t, 3), robot=robot)
 
 
 def fingers(robot: str, value: float, t: float = 0.3) -> dict:
@@ -459,19 +462,19 @@ def loader(scene: bt.Scene, info: dict, sch: dict) -> str:
     for j, product in enumerate(sch["jobs"]["s1"]):
         h = pname("housing", product)
         if j > 0:
-            sq.step(f"j{j}_to_jig", actions=[straight("r1", q["s1_hi"], q[f"jig{product}_hi"], SWING)])
-            sq.step(f"j{j}_down", actions=[straight("r1", q[f"jig{product}_hi"], q[f"jig{product}_lo"])])
+            sq.step(f"j{j}_to_jig", actions=[straight(scene, "r1", q["s1_hi"], q[f"jig{product}_hi"], SWING)])
+            sq.step(f"j{j}_down", actions=[straight(scene, "r1", q[f"jig{product}_hi"], q[f"jig{product}_lo"])])
             sq.step(f"j{j}_close", actions=[fingers("r1", CLOSED)])
             sq.step(f"j{j}_grip", actions=[bt.seq.attach(h, robot="r1", touch_links=tooling.FINGER_CONTACTS)])
-            sq.step(f"j{j}_lift", actions=[straight("r1", q[f"jig{product}_lo"], q[f"jig{product}_hi"])])
+            sq.step(f"j{j}_lift", actions=[straight(scene, "r1", q[f"jig{product}_lo"], q[f"jig{product}_hi"])])
             sq.step(f"j{j}_await", transition=bt.seq.signal("at_s1"))
-            sq.step(f"j{j}_over", actions=[straight("r1", q[f"jig{product}_hi"], q["s1_hi"], SWING)])
-            sq.step(f"j{j}_down_nest", actions=[straight("r1", q["s1_hi"], q["s1_lo"])])
+            sq.step(f"j{j}_over", actions=[straight(scene, "r1", q[f"jig{product}_hi"], q["s1_hi"], SWING)])
+            sq.step(f"j{j}_down_nest", actions=[straight(scene, "r1", q["s1_hi"], q["s1_lo"])])
         sq.step(f"j{j}_release", actions=([bt.seq.detach(h)] if j > 0 else []) + [fingers("r1", OPEN)])
-        sq.step(f"j{j}_clear", actions=[straight("r1", q["s1_lo"], q["s1_hi"])])
+        sq.step(f"j{j}_clear", actions=[straight(scene, "r1", q["s1_lo"], q["s1_hi"])])
         sq.step(f"j{j}_done", actions=[bt.seq.set_signal("done_s1")], transition=bt.seq.signal("at_s1", False))
         sq.step(f"j{j}_reset", actions=[bt.seq.set_signal("done_s1", False)])
-    sq.step("park", actions=[straight("r1", q["s1_hi"], q["rest"], SWING)])
+    sq.step("park", actions=[straight(scene, "r1", q["s1_hi"], q["rest"], SWING)])
     return "r1"
 
 
@@ -498,21 +501,21 @@ def unloader(scene: bt.Scene, info: dict, sch: dict, *, kinds=("housing", "pcb",
         parts = [o for o in (pname(k, product) for k in kinds) if o in set(scene.obstacle_names)]
         sq.step(f"j{j}_await", transition=bt.seq.signal("at_s5"))
         if j > 0:
-            sq.step(f"j{j}_over", actions=[straight("r2", q[f"out{j - 1}_hi"], q["s5_hi"], SWING)])
-        sq.step(f"j{j}_down", actions=[straight("r2", q["s5_hi"], q["s5_lo"])])
+            sq.step(f"j{j}_over", actions=[straight(scene, "r2", q[f"out{j - 1}_hi"], q["s5_hi"], SWING)])
+        sq.step(f"j{j}_down", actions=[straight(scene, "r2", q["s5_hi"], q["s5_lo"])])
         sq.step(f"j{j}_close", actions=[fingers("r2", CLOSED)])
         sq.step(f"j{j}_grip", actions=[bt.seq.attach(o, robot="r2", touch_links=tooling.FINGER_CONTACTS)
                                                                   for o in parts])
-        sq.step(f"j{j}_lift", actions=[straight("r2", q["s5_lo"], q["s5_hi"])])
+        sq.step(f"j{j}_lift", actions=[straight(scene, "r2", q["s5_lo"], q["s5_hi"])])
         # the shuttle may go now it is lifted clear; the next one must find
         # the handshake down again, so it drops the moment this one leaves
         sq.step(f"j{j}_done", actions=[bt.seq.set_signal("done_s5")], transition=bt.seq.signal("at_s5", False))
         sq.step(f"j{j}_reset", actions=[bt.seq.set_signal("done_s5", False)])
-        sq.step(f"j{j}_to_out", actions=[straight("r2", q["s5_hi"], q[f"out{j}_hi"], SWING)])
-        sq.step(f"j{j}_put", actions=[straight("r2", q[f"out{j}_hi"], q[f"out{j}_lo"])])
+        sq.step(f"j{j}_to_out", actions=[straight(scene, "r2", q["s5_hi"], q[f"out{j}_hi"], SWING)])
+        sq.step(f"j{j}_put", actions=[straight(scene, "r2", q[f"out{j}_hi"], q[f"out{j}_lo"])])
         sq.step(f"j{j}_release", actions=[bt.seq.detach(o) for o in parts] + [fingers("r2", OPEN)])
-        sq.step(f"j{j}_back", actions=[straight("r2", q[f"out{j}_lo"], q[f"out{j}_hi"])])
-    sq.step("park", actions=[straight("r2", q[f"out{len(sch['jobs']['s5']) - 1}_hi"], q["rest"], SWING)])
+        sq.step(f"j{j}_back", actions=[straight(scene, "r2", q[f"out{j}_lo"], q[f"out{j}_hi"])])
+    sq.step("park", actions=[straight(scene, "r2", q[f"out{len(sch['jobs']['s5']) - 1}_hi"], q["rest"], SWING)])
     return "r2"
 
 
@@ -639,13 +642,16 @@ def report(scene: bt.Scene, tl, info: dict) -> None:
 
 
 def main() -> None:
-    global CATALOG_ROOT
+    global CATALOG_ROOT, HANDLER
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("out", nargs="?", default=str(HERE / "shuttle_line.usdc"))
     parser.add_argument("--studio", action="store_true")
     parser.add_argument("--catalog-root", type=Path, default=None)
+    parser.add_argument("--handler", default=HANDLER,
+                        help="Catalog ID for the two LR Mate handlers (default: %(default)s)")
     args = parser.parse_args()
     CATALOG_ROOT = args.catalog_root
+    HANDLER = args.handler
     scene, tl, info = bake()
     report(scene, tl, info)
     tl.export_usd(args.out, fps=30)

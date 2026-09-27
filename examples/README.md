@@ -32,6 +32,21 @@ The `.usdc` files sitting beside some demos are pre-baked recordings of them.
 | `assembly/` | `cover_bolting_demo.py` — a UR5e with an OnRobot RG6 and side-mounted Screwdriver 103961 on a Dual Quick Changer v3 fits a gearbox cover over its dowels and screws it down: six M5 screws from a presenter in the joint's star order, the driver's program timing each rundown from the thread and answering OK/NOK, the fastening report, the tightening sheet, the interlock table (the first screw only once the cover is seated, no start with the E-stop in), the report's assembly section and five FAT rows (NOK retried, NOK twice, E-stop in, presenter empty, START wire open) in the hand-over set; `--length 16` is refused at build (6 mm of thread where the joint needs 10); `--misalign 2` teaches the last screw 2 mm off its hole and the bake refuses it by name (`screw5 x set/cover`); `--catalog` takes the presenter, screws and workpiece set from their packs, the joint read from the set's `mounting`. `shuttle_line_demo.py` — a small-parts assembly line on a linear-motor loop, rebuilt from a picture on a commercial simulator's product page: the camera, layout and scale read off the picture, every machine a real one — an ATS SuperTrak GEN3 set up over-under (seven 1 m sections, two 180° 800 mm ends) with 12 shuttles, each a two-joint robot that runs the whole loop and comes back upside down underneath; two FANUC LR Mate 200iD hanging from the portal with SMC MHZ2-20D and custom fingers (S1 loads housings from a jig pallet on Makitech belts, S5 takes the finished modules off into a tray); three FANUC SR-3iA (the catalog's reference model) with two PFYN 6 cups for PCBs, two ZP3-T10UMN-A5 cups for covers, and SCHUNK MPG-plus 25 fingers for connectors; two fixed SCPMc 05 ejectors supply vacuum. The shuttles run under zone control — into the next stop only when its block reads clear, held at a station until it says done — for one lap from the picture's moment back to the same places: twelve jobs a station, 37 s. The default uses the published catalog; `--catalog-root DIR` selects a local catalog build. Tool adapters and fingers are SI layout designs; vacuum attachment is timed, without seal or pressure dynamics. |
 | `engineering/` | `cell_deliverables_demo.py` — the whole document set derived from one cell source. `equipment_cell_demo.py` — fence, conveyor and rack ordered from the catalog. `urplus_products.py` — public UR+ grippers (Hand-E, 2F-85, Zimmer HRC, RG6, VGC10) on their hosts: the BOM and the mounting report per configuration. |
 
+### LR Mate 200iD visual model
+
+The shuttle-line demo uses the published FANUC official ROS 2 model (`r3`), with
+more detailed meshes, authored surface normals and separate part materials.
+Run it directly from the public catalog:
+
+```bash
+python examples/assembly/shuttle_line_demo.py --studio
+```
+
+The official model uses a J1 range of ±180° (the previous model uses ±170°).
+Its tool frame matches the previous model. Use
+`--handler fanuc/lrmate200id/lrmate200id/r2` to select the previous model,
+or `--catalog-root DIR` to use a local catalog build.
+
 Demos that build on another one (`sequence_demo` on `demo`, `agv_cell_demo` on
 the factory cell, `stairs_delivery_demo` and `building_delivery_demo` on the
 patrol robot) put the sibling
