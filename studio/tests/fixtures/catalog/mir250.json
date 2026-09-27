@@ -1,0 +1,99 @@
+{
+ "schema_version": "0.1",
+ "id": "mobile_industrial_robots/mir/mir250/r2",
+ "kind": "model",
+ "category": "vehicle.amr",
+ "name": "MiR250 (reference model)",
+ "manufacturer": {
+  "name": "Mobile Industrial Robots",
+  "country": "DK",
+  "product_url": "https://mobile-industrial-robots.com/products/robots/mir250"
+ },
+ "lifecycle": "active",
+ "articulated": true,
+ "collision_mode": "merged",
+ "specs": {
+  "payload_kg": 250.0,
+  "mass_kg": 94.0,
+  "ip_rating": "IP21",
+  "max_speed_mps": 2.0,
+  "footprint_mm": [
+   800,
+   580
+  ],
+  "height_mm": 300,
+  "drive": "differential",
+  "ground_clearance_mm": 25,
+  "deck_height_mm": 300
+ },
+ "frames": {
+  "base_frame": "base_footprint",
+  "flange_frame": "deck",
+  "tcp_default": "deck",
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "assets": {
+  "urdf": "urdf/model.urdf",
+  "usd": "usd/model.usdc",
+  "glb": "visual/model.glb",
+  "thumbnail": "previews/thumbnail.webp"
+ },
+ "sources": [
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://mobile-industrial-robots.com/products/robots/mir250/specifications",
+   "ref": "Dimensions, mass, payload, max speed, ground clearance, IP21 and sensor count",
+   "fetched_at": "2026-09-21"
+  },
+  {
+   "kind": "community",
+   "url": "https://github.com/DFKI-NI/mir_robot/blob/c08dfad93be53ac12969f0f37a01a2b74b5c1997/mir_description/urdf/include/mir_v1.urdf.xacro",
+   "ref": "Numeric wheel positions/radii only. Caster X positions approximated at +/-295 mm; no source code or meshes copied."
+  },
+  {
+   "kind": "community",
+   "url": "https://github.com/botrail/botrail-assets.git",
+   "ref": "b0de37187d828dac122c85b3bb4a346d368b8627: mir250 independently authored model and source-value table"
+  },
+  {
+   "kind": "community",
+   "url": "https://github.com/botrail/botrail-assets.git",
+   "ref": "b0de37187d828dac122c85b3bb4a346d368b8627",
+   "fetched_at": "2026-09-21"
+  }
+ ],
+ "licenses": [
+  {
+   "files": "sources/**",
+   "spdx": "CC0-1.0",
+   "redistributable": true,
+   "note": "Independently authored reference geometry. Public numeric specifications only; no manufacturer or third-party meshes, CAD surfaces or textures."
+  }
+ ],
+ "distribution": "public",
+ "validation": {
+  "level": "V2",
+  "report": "validation/report.json"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": [],
+  "model_fidelity": {
+   "geometry": "independently_authored_reference",
+   "collision": "authored_primitives_not_a_guaranteed_envelope",
+   "detailed_fit_verified": false,
+   "inertia": "unknown_link_mass_com_inertia_omitted",
+   "asset_card": "sources/mir250/README.md",
+   "wheels": "visual_only_no_collision",
+   "surface_frame": "corrected_from_r1_352_mm_to_300_mm",
+   "sensor_frames": "uncalibrated_r1_sensor_frames_omitted",
+   "mounting": "deck_plane_only_bolt_pattern_unknown"
+  }
+ }
+}

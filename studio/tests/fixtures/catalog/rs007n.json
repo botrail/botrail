@@ -1,0 +1,106 @@
+{
+ "schema_version": "0.1",
+ "id": "kawasaki/rs/rs007n/r1",
+ "kind": "model",
+ "category": "manipulator",
+ "name": "RS007N",
+ "manufacturer": {
+  "name": "川崎重工業",
+  "country": "JP",
+  "product_url": "https://kawasakirobotics.com/products-robots/rs007n/"
+ },
+ "lifecycle": "active",
+ "articulated": true,
+ "collision_mode": "merged",
+ "specs": {
+  "dof": 6,
+  "payload_kg": 7.0,
+  "reach_mm": 730.0,
+  "repeatability_mm": 0.02,
+  "mass_kg": 35.0,
+  "joint_limits_deg": [
+   [
+    -180.0,
+    180.0
+   ],
+   [
+    -135.0,
+    135.0
+   ],
+   [
+    -155.0,
+    155.0
+   ],
+   [
+    -200.0,
+    200.0
+   ],
+   [
+    -125.0,
+    125.0
+   ],
+   [
+    -360.0,
+    360.0
+   ]
+  ],
+  "ip_rating": "IP65 (wrist IP67)",
+  "controller": [
+   "F60"
+  ],
+  "wrist_allowable": {
+   "torque_nm": 10.0,
+   "inertia_kgm2": 0.2
+  }
+ },
+ "frames": {
+  "base_frame": "base_link",
+  "flange_frame": "link6",
+  "tcp_default": "link6",
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "assets": {
+  "urdf": "urdf/model.urdf",
+  "usd": "usd/model.usdc",
+  "glb": "visual/model.glb",
+  "collision": "collision/",
+  "thumbnail": "previews/thumbnail.webp"
+ },
+ "sources": [
+  {
+   "kind": "official_oss",
+   "url": "https://github.com/Kawasaki-Robotics/khi_robot",
+   "ref": "57200db576c6feb7cea442ff06f27334a520eb7a",
+   "fetched_at": "2026-08-27"
+  }
+ ],
+ "licenses": [
+  {
+   "files": "sources/khi_rs_description/meshes/**",
+   "spdx": "LicenseRef-KHI-CAD-Disclaimer",
+   "redistributable": false,
+   "note": "KHI CAD Data Disclaimer — レイアウト検討目的以外の複製・配布・改変・販売を 書面同意なしに禁止。package.xml の第二 license 宣言と README \"About CAD data\" が根拠"
+  },
+  {
+   "files": "sources/**",
+   "spdx": "BSD-3-Clause",
+   "redistributable": true,
+   "note": "リポジトリ LICENSE (BSD-3-Clause, Kawasaki Heavy Industries 2019-2022)"
+  }
+ ],
+ "distribution": "recipe_only",
+ "validation": {
+  "level": "V2",
+  "report": "validation/report.json"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": []
+ }
+}

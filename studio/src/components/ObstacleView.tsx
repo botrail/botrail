@@ -8,6 +8,7 @@ import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol
 import { collidingObstacleNames, useStudioStore } from "../store";
 import { Aid } from "../three/cameraRig";
 import { cursorEnter, cursorLeave } from "../three/cursor";
+import { hoverEnter, hoverLeave } from "../three/hover";
 import { authoredColor, COLLISION_COLOR } from "../three/palette";
 import { sendUpdatePoses, sendUpdateObstaclePose } from "../ws";
 import { MeshVisual } from "./MeshVisual";
@@ -305,12 +306,13 @@ function ObstacleNode({
             if (group && group.visible && beginPick(e, name, group)) return;
             downAt.current = [e.clientX, e.clientY];
           }}
-          onPointerOver={(e) => { e.stopPropagation(); cursorEnter(); }}
-          onPointerOut={cursorLeave}>
+          onPointerOver={(e) => { e.stopPropagation(); cursorEnter(); hoverEnter("obstacle", name); }}
+          onPointerOut={() => { cursorLeave(); hoverLeave("obstacle", name); }}>
           <UsdVisual source={obstacle.visual_asset} color={color}
             forceColor={colliding || (!!obstacle.visual_asset.color_override && tint !== null)}
             material={obstacle.material} />
         </group> : <ObstacleGeometry
+          name={name}
           geometry={obstacle.geometry}
           color={color}
           // An authored color and a collision highlight both mean
@@ -351,6 +353,7 @@ function ObstacleNode({
 }
 
 function ObstacleGeometry({
+  name,
   geometry,
   color,
   forceColor,
@@ -370,6 +373,7 @@ function ObstacleGeometry({
   selected: boolean;
   onSelect: (e: ThreeEvent<MouseEvent>) => void;
   onDown: (e: ThreeEvent<PointerEvent>) => void;
+  name: string;
 }) {
   const highlight = selected && <Edges color={SELECT_EDGE_COLOR} lineWidth={2} />;
   // A finish draws its tile at a real pitch, so the primitive needs UVs in
@@ -383,8 +387,12 @@ function ObstacleGeometry({
     onPointerOver: (e: ThreeEvent<PointerEvent>) => {
       e.stopPropagation();
       cursorEnter();
+      hoverEnter("obstacle", name);
     },
-    onPointerOut: () => cursorLeave(),
+    onPointerOut: () => {
+      cursorLeave();
+      hoverLeave("obstacle", name);
+    },
     // A see-through proxy casting a hard shadow reads as a glitch, so only
     // solid scenery casts. Everything receives.
     castShadow: solid && (material?.opacity ?? 1) >= 1,

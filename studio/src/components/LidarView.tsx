@@ -6,6 +6,8 @@ import * as THREE from "three";
 import type { LidarMsg, PoseMsg } from "../protocol";
 import { playbackRig } from "../playbackRig";
 import { useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
+import { hoverEnter, hoverLeave } from "../three/hover";
 import { sendUpsertLidarThrottled } from "../ws";
 import { laneActiveAt, parkedFrame, type Frame } from "./SensorView";
 
@@ -169,6 +171,16 @@ function LidarNode({ lidar }: { lidar: LidarMsg }) {
     <group
       position={lidar.pose.position}
       quaternion={new THREE.Quaternion(...lidar.pose.quaternion)}
+    
+      onPointerOver={(e: ThreeEvent<PointerEvent>) => {
+        e.stopPropagation();
+        cursorEnter();
+        hoverEnter("lidar", lidar.name);
+      }}
+      onPointerOut={() => {
+        cursorLeave();
+        hoverLeave("lidar", lidar.name);
+      }}
     >
       <LidarShape
         lidar={lidar}
@@ -182,7 +194,18 @@ function LidarNode({ lidar }: { lidar: LidarMsg }) {
   if (mount.kind === "world") {
     return (
       <>
-        <group ref={setGroup}>
+        <group
+          ref={setGroup}
+          onPointerOver={(e: ThreeEvent<PointerEvent>) => {
+            e.stopPropagation();
+            cursorEnter();
+            hoverEnter("lidar", lidar.name);
+          }}
+          onPointerOut={() => {
+            cursorLeave();
+            hoverLeave("lidar", lidar.name);
+          }}
+        >
           <LidarShape
             lidar={lidar}
             selected={selected}

@@ -12,8 +12,9 @@ import type {
   IoMap,
   IoPointMsg,
   MotionMsg,
+  BomLineMsg,
   ObstacleMsg,
-  PartEntry,
+  PartTargetKind,
   PoseMsg,
   RobotDescMsg,
   CameraMsg,
@@ -37,6 +38,41 @@ import {
 } from "./playback";
 import { appendTracks, forgetLive } from "./playback";
 import { applySample } from "./playbackRig";
+import { hasTarget, indexBom, type BomIndex } from "./partIdentity";
+import type { HoverTarget } from "./hoverChip";
+import { cacheKey, hubUrl, parseManifest, type CatalogInfo } from "./catalogHub";
+import { reconcileOverlays, setOverlay, type Overlays } from "./overlays";
+import { selectionForTarget } from "./bomTable";
+import type { BomTarget } from "./protocol";
+
+/** What the studio knows of a catalog product beyond the wire: read from
+ * the hub once per reference (the id at the revision the cell resolved),
+ * kept for the session. */
+export type CatalogEntry =
+  | { status: "loading" }
+  | { status: "ok"; info: CatalogInfo }
+  | { status: "failed"; error: string };
+
+/** The focus card's shape at the viewport's bottom-left, remembered. */
+export type FocusCardMode = "chip" | "card";
+const FOCUS_CARD_KEY = "botrail-studio.focus-card";
+
+function initialFocusCard(): FocusCardMode {
+  try {
+    return localStorage.getItem(FOCUS_CARD_KEY) === "chip" ? "chip" : "card";
+  } catch {
+    return "card";
+  }
+}
+
+function persistFocusCard(mode: FocusCardMode): FocusCardMode {
+  try {
+    localStorage.setItem(FOCUS_CARD_KEY, mode);
+  } catch {
+    // Private-mode storage failures only cost persistence.
+  }
+  return mode;
+}
 import { attributionIssues } from "./sfc";
 import * as THREE from "three";
 import {
@@ -149,21 +185,40 @@ function persistLdOpen(open: boolean): boolean {
   return open;
 }
 
-/**
- * The SFC chart, the I/O table and the topology share the one panel over
- * the viewport (they overlapped when all three were open, and none of
- * them was readable), so at most one is open: opening one closes the
- * others, and the panel's tab strip switches. Older stored flags may say
- * several were open — the newest feature wins.
- */
-type Overlays = { sfcOpen: boolean; ldOpen: boolean; ioOpen: boolean; topoOpen: boolean };
+const BOM_KEY = "botrail-studio.bom";
 
+function initialBomOpen(): boolean {
+  try {
+    return localStorage.getItem(BOM_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistBomOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(BOM_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
+/**
+ * The SFC chart, the ladder, the I/O table, the topology and the bill
+ * share the one panel over the viewport (they overlapped when several
+ * were open, and none was readable), so at most one is open: opening one
+ * closes the others, and the panel's tab strip switches (`overlays.ts`).
+ * Older stored flags may say several were open — the newest feature wins.
+ */
 function initialOverlays(): Overlays {
-  const ld = initialLdOpen();
-  const topo = !ld && initialTopoOpen();
-  const io = !ld && !topo && initialIoOpen();
-  const sfc = !ld && !topo && !io && initialSfcOpen();
-  return { sfcOpen: sfc, ldOpen: ld, ioOpen: io, topoOpen: topo };
+  return reconcileOverlays({
+    sfcOpen: initialSfcOpen(),
+    ldOpen: initialLdOpen(),
+    ioOpen: initialIoOpen(),
+    topoOpen: initialTopoOpen(),
+    bomOpen: initialBomOpen(),
+  });
 }
 
 function persistOverlays(o: Overlays) {
@@ -171,6 +226,7 @@ function persistOverlays(o: Overlays) {
   persistLdOpen(o.ldOpen);
   persistIoOpen(o.ioOpen);
   persistTopoOpen(o.topoOpen);
+  persistBomOpen(o.bomOpen);
   return o;
 }
 
@@ -232,7 +288,11 @@ export type Selection =
   /** A LiDAR scanner; a world-mounted one gets a move gizmo. */
   | { type: "lidar"; name: string }
   /** An I/O node (controller / station); read-only details in Layout. */
-  | { type: "io_node"; name: string };
+  | { type: "io_node"; name: string }
+  /** A line of the bill with no scene object of its own — a tool welded
+   * to an arm (`arm/tool`), the controller an arm needs
+   * (`arm/controller`); no gizmo, its identity in Layout. */
+  | { type: "line"; kind: PartTargetKind; name: string };
 
 /** Per-robot UI state: the description plus the live server state. */
 export interface RobotUiState {
@@ -495,10 +555,26 @@ export interface StudioState {
   camExportProgress: number;
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
-  /** Part identity pinned to residents and groups (what each thing *is*
-   * commercially); re-sent in full on change. Display only: the scene
-   * tree shows a model badge. */
-  parts: PartEntry[];
+  /** The bill of materials as the host derives it (`Scene::bom`): every
+   * equipment line with the residents, groups and derived lines it stands
+   * for; re-sent in full on change. Display only — the tree badges, the
+   * focus chip — and never re-derived here. */
+  bom: BomLineMsg[];
+  /** `kind:name` → its line, rebuilt with each `bom` message. */
+  bomIndex: BomIndex;
+  /** Σ qty × attribute per numeric attribute key (`mass_kg`, ...). */
+  bomTotals: Record<string, number>;
+  /** The viewport body under the pointer — enter and leave only; the
+   * hover chip follows the pointer imperatively. */
+  hover: HoverTarget | null;
+  /** The focus card at the viewport's bottom-left: the one-line chip, or
+   * the card with the selection's identity (persisted). */
+  focusCard: FocusCardMode;
+  /** Bumped by `details ▸` on the focus card: Layout's PART section
+   * opens and scrolls into view. */
+  partReveal: number;
+  /** The hub's manifests, by `cacheKey` of the catalog reference. */
+  catalog: Record<string, CatalogEntry>;
   /** The I/O map (see `IoState`); re-sent in full on change. */
   io: IoState;
   /** The SFC chart overlay over the viewport (persisted). */
@@ -509,6 +585,8 @@ export interface StudioState {
   ioOpen: boolean;
   /** The topology diagram overlay over the viewport (persisted). */
   topoOpen: boolean;
+  /** The bill of materials overlay over the viewport (persisted). */
+  bomOpen: boolean;
   /** A signal lane picked in the topology diagram, lit on the dock. */
   highlightLane: string | null;
   /** True while a sequence rollout is in flight. */
@@ -656,6 +734,9 @@ export interface StudioState {
   setCamExportProgress: (p: number) => void;
   endCamExport: () => void;
   selectIoNode: (name: string) => void;
+  /** A derived line of the bill (`arm/tool`, `arm/controller`) from the
+   * scene tree: no gizmo, its identity in Layout. */
+  selectLine: (kind: PartTargetKind, name: string) => void;
   /** Motion-tab list click; an existing motion also retargets the robot
    * to its owner, so added waypoints always fit the motion's DOF. */
   selectMotion: (name: string) => void;
@@ -666,10 +747,21 @@ export interface StudioState {
   /** Panel robot selector; retargets a robot-scoped gizmo selection. */
   setSelectedRobot: (robot: string) => void;
   setActiveTab: (tab: SidebarTab) => void;
+  setHover: (hover: HoverTarget | null) => void;
+  setFocusCard: (mode: FocusCardMode) => void;
+  /** `details ▸`: raise Layout and open its PART section. */
+  revealPart: () => void;
+  /** Reads a product's manifest from the hub, once per reference; `force`
+   * tries again after a failure. A local package has nothing to read. */
+  loadCatalog: (ref: { id: string; revision?: string | null }, force?: boolean) => void;
   setSfcOpen: (open: boolean) => void;
   setLdOpen: (open: boolean) => void;
   setIoOpen: (open: boolean) => void;
   setTopoOpen: (open: boolean) => void;
+  setBomOpen: (open: boolean) => void;
+  /** A row of the bill: select what it stands for (as the tree would)
+   * and raise Layout, so the PART card follows. */
+  selectTarget: (target: BomTarget) => void;
   setHighlightLane: (lane: string | null) => void;
   /**
    * Viewport pick: raise the tab holding the picked thing's tools
@@ -743,7 +835,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   camExport: null,
   camExportProgress: 0,
   scenarios: [],
-  parts: [],
+  bom: [],
+  bomIndex: new Map(),
+  bomTotals: {},
+  hover: null,
+  focusCard: initialFocusCard(),
+  partReveal: 0,
+  catalog: {},
   io: emptyIo(),
   highlightLane: null,
   sequenceSimulating: false,
@@ -831,7 +929,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           camExport: null,
           camExportProgress: 0,
           scenarios: [],
-          parts: [],
+          bom: [],
+          bomIndex: new Map(),
+          bomTotals: {},
+          hover: null,
           io: emptyIo(),
           highlightLane: null,
           sequenceSimulating: false,
@@ -962,8 +1063,22 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     } else if (msg.type === "scenarios") {
       set({ scenarios: msg.scenarios });
-    } else if (msg.type === "parts") {
-      set({ parts: msg.parts });
+    } else if (msg.type === "bom") {
+      set((s) => {
+        const sel = s.selection;
+        // A selected derived line the bill no longer has (the tool came
+        // off, a cabinet was declared for the arm) falls back to the TCP.
+        const gone =
+          sel.type === "line" && !hasTarget(msg.lines, sel.kind, sel.name);
+        return {
+          bom: msg.lines,
+          bomIndex: indexBom(msg.lines),
+          bomTotals: msg.totals,
+          selection: gone
+            ? { type: "tcp", robot: s.selectedRobot ?? "" }
+            : sel,
+        };
+      });
     } else if (msg.type === "io") {
       set((s) => {
         const sel = s.selection;
@@ -1403,6 +1518,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   setCamExportProgress: (p) => set({ camExportProgress: p }),
   endCamExport: () => set({ camExport: null, camExportProgress: 0 }),
   selectIoNode: (name) => set({ selection: { type: "io_node", name } }),
+  selectLine: (kind, name) => set({ selection: { type: "line", kind, name } }),
   selectMotion: (name) =>
     set((s) => {
       const motion = s.motions.find((m) => m.name === name);
@@ -1470,38 +1586,41 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : null,
     })),
   setActiveTab: (tab) => set({ activeTab: persistTab(tab) }),
-  setSfcOpen: (open) =>
-    set((s) =>
-      persistOverlays(
-        open
-          ? { sfcOpen: true, ldOpen: false, ioOpen: false, topoOpen: false }
-          : { sfcOpen: false, ldOpen: s.ldOpen, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
-      ),
-    ),
-  setLdOpen: (open) =>
-    set((s) =>
-      persistOverlays(
-        open
-          ? { sfcOpen: false, ldOpen: true, ioOpen: false, topoOpen: false }
-          : { sfcOpen: s.sfcOpen, ldOpen: false, ioOpen: s.ioOpen, topoOpen: s.topoOpen },
-      ),
-    ),
-  setIoOpen: (open) =>
-    set((s) =>
-      persistOverlays(
-        open
-          ? { sfcOpen: false, ldOpen: false, ioOpen: true, topoOpen: false }
-          : { sfcOpen: s.sfcOpen, ldOpen: s.ldOpen, ioOpen: false, topoOpen: s.topoOpen },
-      ),
-    ),
-  setTopoOpen: (open) =>
-    set((s) =>
-      persistOverlays(
-        open
-          ? { sfcOpen: false, ldOpen: false, ioOpen: false, topoOpen: true }
-          : { sfcOpen: s.sfcOpen, ldOpen: s.ldOpen, ioOpen: s.ioOpen, topoOpen: false },
-      ),
-    ),
+  setHover: (hover) => set({ hover }),
+  setFocusCard: (mode) => set({ focusCard: persistFocusCard(mode) }),
+  revealPart: () =>
+    set((s) => ({ activeTab: persistTab("layout"), partReveal: s.partReveal + 1 })),
+  loadCatalog: (ref, force = false) => {
+    const url = hubUrl(ref.id, ref.revision, "manifest.json");
+    if (!url) return;
+    const key = cacheKey(ref);
+    if (!force && get().catalog[key]) return;
+    const put = (entry: CatalogEntry) =>
+      set((s) => ({ catalog: { ...s.catalog, [key]: entry } }));
+    put({ status: "loading" });
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return (await res.json()) as unknown;
+      })
+      .then((json) => put({ status: "ok", info: parseManifest(json, ref) }))
+      .catch((e: unknown) => put({ status: "failed", error: String(e) }));
+  },
+  setSfcOpen: (open) => set((s) => persistOverlays(setOverlay(s, "sfc", open))),
+  setLdOpen: (open) => set((s) => persistOverlays(setOverlay(s, "ld", open))),
+  setIoOpen: (open) => set((s) => persistOverlays(setOverlay(s, "io", open))),
+  setTopoOpen: (open) => set((s) => persistOverlays(setOverlay(s, "topo", open))),
+  setBomOpen: (open) => set((s) => persistOverlays(setOverlay(s, "bom", open))),
+  selectTarget: (target) => {
+    const s = get();
+    const declared = new Set(s.io.io.nodes.map((n) => n.name));
+    const sel = selectionForTarget(target, declared);
+    if (sel.type === "tcp") s.selectTcp(sel.robot);
+    else if (sel.type === "camera") s.selectCamera(sel.name);
+    else set({ selection: sel });
+    // The bill is a Layout thing: the PART card follows the row.
+    s.focusTab("obstacle");
+  },
   setHighlightLane: (lane) => set({ highlightLane: lane }),
   focusTab: (target) =>
     set((s) =>

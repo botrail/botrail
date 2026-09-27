@@ -13,6 +13,7 @@
 //! take `robot: Option<String>` where `None` means the first robot (kept for
 //! pre-multi-robot clients).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use nalgebra::{Isometry3, Vector3};
@@ -1466,11 +1467,16 @@ pub enum ServerMessage {
     Effects {
         flashes: Vec<FlashMsg>,
     },
-    /// The part pinnings (what each resident *is* commercially); resent
-    /// on every change and after any resident removal that pruned one.
-    /// Display only in the studio — a badge on the scene tree.
-    Parts {
-        parts: Vec<crate::part::PartEntry>,
+    /// The bill of materials as the scene derives it (`Scene::bom`):
+    /// every equipment line, identified or not, with the residents and
+    /// derived lines it stands for. Resent whenever a part is pinned or
+    /// unpinned and whenever a resident that has a line comes or goes.
+    /// Display only in the studio — the tree badges, the part card, the
+    /// BOM table — and never re-derived there.
+    Bom {
+        lines: Vec<BomLineMsg>,
+        /// Σ qty × attribute over the lines, per numeric attribute key.
+        totals: BTreeMap<String, f64>,
     },
     /// The I/O map: the assignment layer as authored plus the points and
     /// findings derived from it over every sequence. Resent whenever the
@@ -3339,10 +3345,113 @@ pub fn devices_message(scene: &Scene) -> ServerMessage {
     }
 }
 
-/// The full part-pinning list as a `parts` message.
-pub fn parts_message(scene: &Scene) -> ServerMessage {
-    ServerMessage::Parts {
-        parts: scene.parts().to_vec(),
+/// One line of the bill of materials on the wire: a `BomRow` with the
+/// order data flattened and the derived state made explicit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BomLineMsg {
+    pub category: String,
+    pub manufacturer: Option<String>,
+    /// Model / part number, or the product name — whichever identified it.
+    pub model: Option<String>,
+    pub catalog: Option<crate::part::CatalogRef>,
+    pub qty: u32,
+    pub description: Option<String>,
+    pub attributes: BTreeMap<String, crate::part::PartAttr>,
+    /// Contents per purchase unit, when the catalog states them.
+    pub order: Option<BomOrderMsg>,
+    /// The residents, groups and derived lines this row stands for.
+    pub targets: Vec<crate::part::BomTarget>,
+    /// False while nothing identifies the product (`Bom::unidentified`).
+    pub identified: bool,
+}
+
+/// A catalog product's purchase unit: what one order of it includes and
+/// what its installation documents require alongside it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BomOrderMsg {
+    pub part_number: Option<String>,
+    /// `each`, `set`, ...
+    pub unit: String,
+    pub includes: Vec<BomOrderItemMsg>,
+    pub requires: Vec<BomOrderItemMsg>,
+    pub note: Option<String>,
+}
+
+/// One item of an order's `includes` / `requires`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BomOrderItemMsg {
+    /// The item's name, or its category for a requirement that names none.
+    pub name: String,
+    pub qty: u32,
+    pub part_number: Option<String>,
+    pub catalog: Option<String>,
+    pub note: Option<String>,
+}
+
+fn bom_order_msg(order: &botrail_model::mounting::CatalogOrder) -> BomOrderMsg {
+    BomOrderMsg {
+        part_number: order.part_number.clone(),
+        unit: order.unit.clone(),
+        includes: order
+            .includes
+            .iter()
+            .map(|i| BomOrderItemMsg {
+                name: i.name.clone(),
+                qty: i.qty,
+                part_number: i.part_number.clone(),
+                catalog: i.catalog.clone(),
+                note: i.note.clone(),
+            })
+            .collect(),
+        requires: order
+            .requires
+            .iter()
+            .map(|r| BomOrderItemMsg {
+                name: r
+                    .part_number
+                    .clone()
+                    .or_else(|| r.category.clone())
+                    .or_else(|| r.catalog.clone())
+                    .unwrap_or_default(),
+                qty: r.qty,
+                part_number: r.part_number.clone(),
+                catalog: r.catalog.clone(),
+                note: r.note.clone(),
+            })
+            .collect(),
+        note: order.note.clone(),
+    }
+}
+
+fn bom_line_msg(row: &crate::part::BomRow) -> BomLineMsg {
+    BomLineMsg {
+        category: row.category.clone(),
+        manufacturer: row.manufacturer.clone(),
+        model: row.model.clone(),
+        catalog: row.catalog.clone(),
+        qty: row.qty,
+        description: row.description.clone(),
+        attributes: row.attributes.clone(),
+        order: row.order.as_ref().map(bom_order_msg),
+        targets: row.targets.clone(),
+        identified: !row.is_unidentified(),
+    }
+}
+
+/// The bill of materials as a `bom` message.
+pub fn bom_message(scene: &Scene) -> ServerMessage {
+    let bom = scene.bom();
+    let totals = bom
+        .attribute_keys()
+        .into_iter()
+        .filter_map(|key| bom.total(&key).map(|total| (key, total)))
+        .collect();
+    ServerMessage::Bom {
+        lines: bom.rows.iter().map(bom_line_msg).collect(),
+        totals,
     }
 }
 

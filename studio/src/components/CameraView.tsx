@@ -6,6 +6,8 @@ import * as THREE from "three";
 import type { CameraMsg, PoseMsg } from "../protocol";
 import { playbackRig } from "../playbackRig";
 import { useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
+import { hoverEnter, hoverLeave } from "../three/hover";
 import { cameraRig } from "../three/cameraRig";
 import { sendUpsertCameraThrottled } from "../ws";
 import { laneActiveAt, parkedFrame, type Frame } from "./SensorView";
@@ -138,6 +140,16 @@ function CameraNode({ camera }: { camera: CameraMsg }) {
     <group
       position={camera.pose.position}
       quaternion={new THREE.Quaternion(...camera.pose.quaternion)}
+    
+      onPointerOver={(e: ThreeEvent<PointerEvent>) => {
+        e.stopPropagation();
+        cursorEnter();
+        hoverEnter("camera", camera.name);
+      }}
+      onPointerOut={() => {
+        cursorLeave();
+        hoverLeave("camera", camera.name);
+      }}
     >
       <CameraShape camera={camera} selected={selected} active={visionActive} onClick={onSelect} />
     </group>
@@ -146,7 +158,18 @@ function CameraNode({ camera }: { camera: CameraMsg }) {
   if (mount.kind === "world") {
     return (
       <>
-        <group ref={setGroup}>
+        <group
+          ref={setGroup}
+          onPointerOver={(e: ThreeEvent<PointerEvent>) => {
+            e.stopPropagation();
+            cursorEnter();
+            hoverEnter("camera", camera.name);
+          }}
+          onPointerOut={() => {
+            cursorLeave();
+            hoverLeave("camera", camera.name);
+          }}
+        >
           <CameraShape camera={camera} selected={selected} active={visionActive} onClick={onSelect} />
         </group>
         {selected && group && (

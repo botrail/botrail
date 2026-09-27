@@ -1,0 +1,169 @@
+{
+ "schema_version": "0.1",
+ "id": "robotiq/2f/2f-85-ur-es-062-kit/r2",
+ "kind": "kit",
+ "category": "gripper.parallel",
+ "name": "2F-85 UR e-Series kit (ES-062, public reference model)",
+ "manufacturer": {
+  "name": "Robotiq",
+  "country": "CA",
+  "product_url": "https://robotiq.com/support/archive"
+ },
+ "lifecycle": "active",
+ "articulated": true,
+ "collision_mode": "merged",
+ "specs": {},
+ "order": {
+  "part_number": "AGC-ES-UR-KIT-85",
+  "unit": "kit",
+  "includes": [
+   {
+    "catalog": "robotiq/2f/2f-85/r2",
+    "name": "2F-85 basic gripper",
+    "part_number": "AGC-GRP-2F85",
+    "qty": 1
+   },
+   {
+    "catalog": "robotiq/coupling/grp-es-cpl-062/r1",
+    "name": "e-Series coupling",
+    "part_number": "GRP-ES-CPL-062",
+    "qty": 1
+   },
+   {
+    "name": "Connection protector kit",
+    "part_number": "GRP-ES-CPL-PRO",
+    "qty": 1,
+    "note": "Select protector for robot model; no separate geometry in this representation."
+   },
+   {
+    "name": "Required mounting hardware",
+    "qty": 1,
+    "note": "Supplied set per quick-start: M6 coupling, M5 gripper and M4 protector fixation. Detailed quantities and dimensions are not inferred."
+   }
+  ],
+  "requires": [],
+  "note": "Purchase unit is one kit. Included components are not separate purchase lines. This ID fixes the ES-062 configuration shown by quick-start X-990037-B (2021); it does not assert current availability or substitute ES-077."
+ },
+ "frames": {
+  "mount_frame": "mount",
+  "tcp_default": "gripper/tcp",
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "kit": {
+  "base": "robotiq/coupling/grp-es-cpl-062/r1",
+  "attachments": [
+   {
+    "package": "robotiq/2f/2f-85/r2",
+    "alias": "gripper",
+    "parent_frame": "flange",
+    "mount_frame": "robotiq_arg2f_base_link",
+    "offset": {
+     "xyz": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "rpy": [
+      0.0,
+      0.0,
+      -1.5707963267948966
+     ]
+    }
+   }
+  ],
+  "manufacturer_support": [
+   {
+    "host": "universal_robots/ur/ur5e/r2",
+    "scope": "mechanical_mounting",
+    "evidence": [
+     {
+      "source": 0,
+      "section": "sections 1 and 4: AGC-ES-UR-KIT-85 contents and mounting on e-Series Universal Robots"
+     }
+    ],
+    "note": "ES-062 configuration documented in 2021. This claim covers mechanical mounting only. The cable is for the older male wrist connector; newer female-wrist robots use ES-077."
+   }
+  ],
+  "representation": {
+   "status": "reference",
+   "evidence": [
+    {
+     "source": 0,
+     "section": "sections 1 and 4: physical components and installation"
+    },
+    {
+     "source": 7,
+     "section": "Published hand and PCD50 reference housing meshes. The upstream housing is not a complete ES-062 electronics model."
+    }
+   ],
+   "note": "Public reference meshes with the retained Botrail r2 parallel-motion joint tree and teaching TCP. The mounting housing carries the PCD50 robot-side pattern and four hand-side axes. Electronics, spring contacts, cable, protector and mounting hardware are BOM-only; do not infer their clearance or contact behavior. Physical axial seating, calibrated TCP, adaptive contact motion and actuator limits remain unverified. Previous manufacturer-CAD overlap volumes and contact travel checks do not apply to this representation. Manufacturer support describes the documented purchased ES-062 kit, independently of mesh precision."
+  }
+ },
+ "assets": {},
+ "sources": [
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://blog.robotiq.com/hubfs/support-files/Quick_start_2Finger_e-Series_nocropmarks_EN.pdf",
+   "ref": "X-990037-B; 2021-11",
+   "fetched_at": "2026-09-06"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://blog.robotiq.com/knowledge/couplings-and-cables-for-universal-robots-robots",
+   "ref": "Updated January 2026",
+   "fetched_at": "2026-09-06"
+  },
+  {
+   "kind": "manufacturer_cad",
+   "url": "https://blog.robotiq.com/hubfs/support-files/GRP-ES-CPL-062_20180810_20190617-Sep-06-2024-02-40-32-4920-PM.step",
+   "ref": "20180810_20190617; sha256 13093c8021ea7a4886de38b61df1b070e63b8e25fba214c0ca6d60d92b0432f4",
+   "fetched_at": "2026-09-07"
+  },
+  {
+   "kind": "manufacturer_cad",
+   "url": "https://blog.robotiq.com/hubfs/support-files/2F85_Opened_20190924-Sep-06-2024-02-25-46-4707-PM.step",
+   "ref": "20190924; sha256 f3e2dc56f4db6b2bfac9eed13a8bdfb43e2816db90e06bedd059b17cd57344c1",
+   "fetched_at": "2026-09-07"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://blog.robotiq.com/hubfs/support-files/2F-85_2F-140_UR_PDF_2026-03-17.pdf",
+   "ref": "2026-03-17; sha256 1c71394aafdee2820cc9a5d0d28add79c44e171676d8e07f6d6af29c6732e44d",
+   "fetched_at": "2026-09-07"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://assets.robotiq.com/website-assets/support_documents/document/2F-85_2F-140_Instruction_Manual_e-Series_PDF_20190315.pdf",
+   "ref": "20190315; p.27 section 3.5.1; sha256 4c2f392358e48bdcc4f7f5b44db3045ba8aec65d6997ca60ca673608fa34e90b",
+   "fetched_at": "2026-09-07"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://www.mill-max.com/sites/default/files/external/catalog/2018-07/004-022.pdf",
+   "ref": "2018-07; printed p.13; sha256 940518ef49e41ecfe29ad8d3c3b8e84764b19367f029187db703198795b41428",
+   "fetched_at": "2026-09-07"
+  },
+  {
+   "kind": "community",
+   "url": "https://github.com/google-deepmind/mujoco_menagerie/tree/8161bba264d7fa7c99ca301e91e7fb44737676ad/robotiq_2f85_v4",
+   "ref": "8161bba264d7fa7c99ca301e91e7fb44737676ad",
+   "fetched_at": "2026-09-07"
+  }
+ ],
+ "licenses": [],
+ "distribution": "public",
+ "validation": {
+  "level": "V0",
+  "report": "validation/report.json"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": []
+ }
+}

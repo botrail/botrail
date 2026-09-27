@@ -3,6 +3,7 @@ import { IoNodePanel } from "./components/IoNodePanel";
 import { JointPanel } from "./components/JointPanel";
 import { MotionPanel } from "./components/MotionPanel";
 import { ObstaclePanel } from "./components/ObstaclePanel";
+import { PartPanel } from "./components/PartPanel";
 import { RobotPanel } from "./components/RobotPanel";
 import { SceneTreePanel } from "./components/SceneTreePanel";
 import { SensorDevicePanel } from "./components/SensorDevicePanel";
@@ -48,6 +49,7 @@ export function App() {
             <>
               <RobotPanel />
               <SceneTreePanel />
+              <PartPanel />
               <ObstaclePanel />
               <SensorDevicePanel />
               <IoNodePanel />

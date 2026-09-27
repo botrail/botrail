@@ -247,6 +247,47 @@ def main() -> None:
             print("wrote legged.png")
             server.stop()
 
+        # ---- 5b. what a thing is: the PART section and the focus card for
+        # the catalog light curtain, then the bill over the viewport with the
+        # arm's tool selected from a row.
+        if want("part") or want("bom"):
+            scene = build_scene()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(3.0)
+            page.locator(".tab", has_text="Layout").click()
+            if want("part"):
+                page.evaluate("window.__STUDIO__.getState().selectSensor('gate_curtain')")
+                # The hub's manifest (picture, references) arrives asynchronously.
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    block = page.locator(".part-block", has_text="references")
+                    if block.count() and "fetching" not in block.first.inner_text():
+                        break
+                    time.sleep(0.3)
+                # ... and so does its picture.
+                try:
+                    page.wait_for_function(
+                        "document.querySelector('.part-body img.part-thumb')?.complete === true", timeout=20000
+                    )
+                except Exception:
+                    pass
+                page.evaluate("window.__CAM = {pos: [3.2, -3.4, 2.2], look: [0.3, -0.6, 0.8]}")
+                time.sleep(1.0)
+                page.screenshot(path=OUT / "part.png")
+                print("wrote part.png")
+            if want("bom"):
+                page.locator(".panel-head-right button", has_text="▤").click()
+                time.sleep(0.5)
+                page.locator(".bom-overlay tbody tr", has_text="gate_curtain").first.click()
+                time.sleep(0.5)
+                page.evaluate("window.__CAM = {pos: [3.2, -3.4, 2.2], look: [0.3, -0.6, 0.8]}")
+                time.sleep(1.0)
+                page.screenshot(path=OUT / "bom.png")
+                print("wrote bom.png")
+            server.stop()
+
         # ---- 6. the I/O map: the wired pick cell, table over the viewport,
         # channel chips on the lanes, a fault scenario's diagnosis on the dock
         if want("io"):

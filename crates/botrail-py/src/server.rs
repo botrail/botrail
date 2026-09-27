@@ -23,6 +23,7 @@ pub fn router(hub: Arc<SceneHub>, studio_dir: PathBuf) -> Router {
         .route("/api/scene", get(scene_handler))
         .route("/api/project", get(project_get).post(project_post))
         .route("/api/export.py", get(python_export))
+        .route("/api/bom.csv", get(bom_csv))
         .fallback_service(ServeDir::new(studio_dir).append_index_html_on_directories(true))
         .with_state(hub)
 }
@@ -226,6 +227,22 @@ async fn project_post(State(hub): State<Arc<SceneHub>>, body: String) -> Respons
 }
 
 /// Downloads a generated Python script reproducing the current project.
+/// Downloads the bill of materials the scene derives, as `Scene.export_bom`
+/// writes it (`Bom::to_csv`) — the studio's ⤓ csv on the BOM overlay.
+async fn bom_csv(State(hub): State<Arc<SceneHub>>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"bom.csv\"",
+            ),
+        ],
+        hub.bom().to_csv(),
+    )
+        .into_response()
+}
+
 async fn python_export(State(hub): State<Arc<SceneHub>>) -> Response {
     (
         [

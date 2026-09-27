@@ -63,6 +63,59 @@ toggles display and the checkbox includes/excludes it from collision
 checking (`set_obstacle_enabled`); removal sits in the editor form (and on
 sensor/device rows).
 
+Every row that is a line of the [bill of materials](parts-and-bom.md)
+wears what it is: the model badge on a catalog arm (`UR5e`), on the tool
+welded to it and the controller it needs — two rows under the arm, since
+the bill names them (`arm/tool`, `arm/controller`) though nothing in the
+scene draws them — on a generated conveyor, a pinned group, an I/O node.
+The badges are read off `scene.bom()` as the host derives it, never
+guessed from the tree, so they cannot disagree with the exported BOM; a
+line nobody has identified yet wears an amber **?** — the rows
+`bom.unidentified()` lists, the purchasing to-do read at a glance. The
+chip at the bottom-left of the viewport names the selection's product
+too (`obstacle · conv/belt · botrail BCU-400-3800`), through the group a
+clicked prim belongs to.
+
+## What it is — PART
+
+Under the tree, **PART** is the line of the bill behind whatever is
+selected — a robot, an object or the group it sits in, a sensor, a
+device, a camera, a scanner, an I/O node, one of the derived rows —
+read off `scene.bom()`: model and maker, the catalog reference
+(`universal_robots/ur/ur5e/r2 @1d6bfc1`; click copies it, ↗ opens the
+product in the catalog viewer), quantity and purchase unit, and the
+specs the cell would ask of that kind of line first (payload and reach
+of an arm, stroke of a gripper, length, width, speed and load of a
+conveyor), with every attribute a fold away. A catalog arm's card lists
+its **stack** — the tool welded on, the controller it needs or the
+control box its set includes — each a card of its own; a prim inside a
+pinned group reads *one of 12 — fence/east*. A line nobody has
+identified says so, with the `scene.set_part(...)` that would.
+
+![The PART section and the focus card for a catalog light curtain](../assets/studio/part.png)
+
+A catalog line has a second layer, read from the
+[catalog](robots.md#the-model-catalog) itself at the dataset revision the
+cell resolved the package at — the same bytes the cell was taught on:
+the product's picture (a spec pack shows its plan), the maker's page,
+the datasheets and repositories the package was built from, the licence
+of each set of files and whether they may be redistributed, with the
+maker's note where there is one (a CAD disclaimer lives nowhere else),
+the validation level (`V2`) and who reviewed it, and — for a reference
+model — what its geometry is and is not. The hub is read once per
+product and never waited for: with no network the card is the scene's
+part alone, and *↻* tries again. A package built locally
+(`Robot.from_package`) has nothing on the hub to read.
+
+The same card sits in the viewport: the chip at the bottom-left opens
+into a **focus card** with the selection's name, reference and headline
+specs and a *details ▸* to this section — so a click on the arm, which
+raises MOTION, still says what the arm is. Fold it with ▾ or Esc; the
+studio remembers which shape you keep. Resting the pointer on a body
+names it beside the cursor (`sensor · gate_curtain · KEYENCE GL-R22L`),
+through the group a prim belongs to, and never over what is already
+selected.
+
 ## Posing — TCP and JOINTS
 
 The TCP panel picks the IK link (the dropdown defaults to the model's TCP
@@ -165,10 +218,11 @@ for a beat, so the cause of every transition stays readable at playback
 speed. Clicking any baked step seeks the transport to the moment it
 began; the chart stays up across reloads until closed.
 
-The chart, the ladder, the I/O table and the topology below are four
-views of **one panel** over the viewport — each is wide, and stacked they
-hid each other — so opening one closes the others, and the panel's tab
-strip (SFC · LD · I/O · TOPOLOGY) switches between them.
+The chart, the ladder, the I/O table, the topology and the bill of
+materials below are five views of **one panel** over the viewport — each
+is wide, and stacked they hid each other — so opening one closes the
+others, and the panel's tab strip (SFC · LD · I/O · TOPOLOGY · BOM)
+switches between them.
 
 ## The ladder — ☰ LD
 
@@ -250,6 +304,22 @@ one `export_topology` writes as DOT / Mermaid, so the figure in a design
 document and this overlay cannot disagree.
 
 ![The topology of the weld line, third placement, mid-cycle](../assets/studio/topology.png)
+
+## The bill — ▤ BOM
+
+**▤** on the SCENE section's head (or the BOM tab of the panel) lays the
+[bill of materials](parts-and-bom.md) over the viewport: every line
+`scene.bom()` derives, identified or not, merged by product, in the
+columns the CSV writes — category, maker, model, catalog reference,
+quantity, the names it stands for — plus the attributes that have a
+total, summed in the footer. Lines nobody has identified read amber;
+*unidentified* cuts the table to them (the purchasing to-do,
+`bom.unidentified()`), *derived* to the lines nothing in the scene draws
+(tools, the controller an arm needs). Clicking a row selects what it
+stands for in the scene tree, and the PART card follows. **⤓ csv**
+downloads the bill as `Scene.export_bom` writes it — the same bytes.
+
+![The bill of materials over the viewport, the arm's tool selected](../assets/studio/bom.png)
 
 ## The timeline dock
 

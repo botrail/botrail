@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 const storageKey = (id: string) => `botrail-studio.section.${id}`;
 
@@ -19,15 +19,30 @@ export function Section({
   id,
   title,
   badge,
+  reveal,
   children,
 }: {
   id: string;
   title: string;
   /** Right-side head content (badges, small controls); clicking it never toggles. */
   badge?: ReactNode;
+  /** A counter: each change opens the section and scrolls it into view
+   * (`details ▸` on the focus card reaching Layout's PART). */
+  reveal?: number;
   children: ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(() => initialCollapsed(id));
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!reveal) return;
+    setCollapsed(false);
+    try {
+      localStorage.setItem(storageKey(id), "0");
+    } catch {
+      // Private-mode storage failures only cost persistence.
+    }
+    ref.current?.scrollIntoView({ block: "start" });
+  }, [reveal, id]);
   const toggle = () =>
     setCollapsed((prev) => {
       const next = !prev;
@@ -40,7 +55,7 @@ export function Section({
     });
 
   return (
-    <section className="panel-section">
+    <section className="panel-section" ref={ref}>
       <div className="panel-head" onClick={toggle}>
         <h2>
           <span className="panel-twist">{collapsed ? "▸" : "▾"}</span>

@@ -146,7 +146,9 @@ assert bom.total("power_w") <= 20_000
 
 The generated Python and the `.botrail` project carry the pins, so a
 reloaded cell — or the script `generate_python()` writes — produces the same
-table.
+table. The [studio](studio.md#the-bill-bom) shows the same
+table over the viewport, wears each line on its row of the scene tree,
+and answers "what is this" for whatever is clicked.
 
 ## What it is not
 

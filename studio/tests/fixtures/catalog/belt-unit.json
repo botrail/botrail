@@ -1,0 +1,144 @@
+{
+ "schema_version": "0.1",
+ "id": "botrail/conveyor/belt-unit/r1",
+ "kind": "spec",
+ "category": "conveyor.belt",
+ "name": "Belt Conveyor Unit (generic)",
+ "manufacturer": {
+  "name": "botrail",
+  "product_url": "https://github.com/botrail/botrail-assets"
+ },
+ "lifecycle": "active",
+ "articulated": false,
+ "collision_mode": "merged",
+ "specs": {},
+ "mechanical": {
+  "footprint_mm": [
+   2000.0,
+   360.0
+  ],
+  "height_mm": 750.0,
+  "mass_kg": 29.0,
+  "mount": "floor"
+ },
+ "configuration": {
+  "generator": "conveyor",
+  "params": {
+   "length_mm": {
+    "min": 600.0,
+    "max": 5000.0,
+    "step": 50.0,
+    "default": 2000.0
+   },
+   "width_mm": {
+    "values": [
+     150,
+     200,
+     300,
+     400,
+     500
+    ],
+    "default": 300
+   },
+   "height_mm": {
+    "min": 500.0,
+    "max": 1000.0,
+    "step": 10.0,
+    "default": 750.0
+   }
+  },
+  "components": [
+   {
+    "role": "unit",
+    "category": "conveyor.belt",
+    "part_number": "BCU-{width_mm}-{length_mm}",
+    "dimensions_mm": {
+     "belt_thickness": 50.0,
+     "rail": 30.0
+    },
+    "mass": {
+     "base_kg": 8.0,
+     "per_mm": {
+      "length_mm": 0.0075,
+      "width_mm": 0.02
+     }
+    },
+    "codes": {},
+    "trim": "sources/belt-conveyor/visual/unit.urdf.xacro"
+   },
+   {
+    "role": "stand",
+    "category": "structure.pedestal",
+    "part_number": "BCS-{height_mm}",
+    "dimensions_mm": {
+     "leg": 50.0
+    },
+    "mass": {
+     "base_kg": 2.0,
+     "per_mm": {
+      "height_mm": 0.004
+     }
+    },
+    "codes": {},
+    "trim": "sources/belt-conveyor/visual/stand.urdf.xacro"
+   }
+  ],
+  "behavior": {
+   "speed_mps": {
+    "min": 0.02,
+    "max": 0.5,
+    "default": 0.2
+   },
+   "payload_kg_per_m": 25.0
+  },
+  "rules": {
+   "tolerance_mm": 25.0,
+   "stand_span_max_mm": 1500
+  },
+  "examples": [
+   {
+    "length_mm": 5000,
+    "width_mm": 500
+   },
+   {
+    "length_mm": 600,
+    "width_mm": 150,
+    "height_mm": 500
+   }
+  ]
+ },
+ "frames": {
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "assets": {},
+ "sources": [
+  {
+   "kind": "community",
+   "url": "https://github.com/botrail/botrail-assets",
+   "ref": "a0e7d924d3c217d4a7ff3b9c7c449e1ea0e862f8",
+   "fetched_at": "2026-08-31"
+  }
+ ],
+ "licenses": [
+  {
+   "files": "**",
+   "spdx": "CC0-1.0",
+   "redistributable": true
+  }
+ ],
+ "distribution": "public",
+ "validation": {
+  "level": "V1",
+  "report": "validation/report.json"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": []
+ }
+}

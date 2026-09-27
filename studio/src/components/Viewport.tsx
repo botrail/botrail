@@ -1,11 +1,11 @@
-import { Suspense, useEffect, useMemo, useRef } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
 import { Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { RoomEnvironment } from "three-stdlib";
 
 import { isWasmMode } from "../backend";
-import { robotByName, useStudioStore } from "../store";
+import { useStudioStore } from "../store";
 import { dropUsdScene } from "../ws";
 import { ObstacleView } from "./ObstacleView";
 import { PlaybackDriver } from "./PlaybackDriver";
@@ -18,6 +18,8 @@ import { CameraView } from "./CameraView";
 import { LidarView } from "./LidarView";
 import { CameraPass } from "./CameraPass";
 import { CameraPip } from "./CameraPip";
+import { FocusCard } from "./FocusCard";
+import { HoverChip } from "./HoverChip";
 import { CameraExporter } from "./CameraExporter";
 import { Aid, CameraRigBridge } from "../three/cameraRig";
 import { CutTraceView } from "./CutTraceView";
@@ -28,6 +30,7 @@ import { VehiclePathView } from "./VehiclePathView";
 import { TcpGizmo } from "./TcpGizmo";
 import { DragLineView, PickBridge } from "./DragLineView";
 import { IoOverlay } from "./IoOverlay";
+import { BomOverlay } from "./BomOverlay";
 import { IoTopologyOverlay } from "./IoTopologyOverlay";
 import { LadderOverlay } from "./LadderChart";
 import { SfcOverlay } from "./SfcChart";
@@ -80,39 +83,8 @@ function IndoorLighting() {
 export function Viewport() {
   const view = useMemo(() => initialView(window.location.search), []);
   const connected = useStudioStore((s) => s.connection === "connected");
-  const selection = useStudioStore((s) => s.selection);
-  const multi = useStudioStore((s) => s.robots.length > 1);
-  const focusedTcp = useStudioStore((s) =>
-    selection.type === "tcp"
-      ? (robotByName(s.robots, selection.robot)?.tcpLink ?? null)
-      : null,
-  );
-  const focusedArm = useStudioStore((s) =>
-    selection.type === "tcp"
-      ? (robotByName(s.robots, selection.robot)?.selectedGroup ?? null)
-      : null,
-  );
-
-  // The robot name only disambiguates when several robots share the scene.
-  const scope = (robot: string) => (multi ? `${robot} · ` : "");
-  const focusLabel =
-    selection.type === "obstacle"
-      ? `obstacle · ${selection.name}`
-      : selection.type === "group"
-        ? `group · ${selection.path}`
-        : selection.type === "sensor"
-          ? `sensor · ${selection.name}`
-          : selection.type === "device"
-            ? `device · ${selection.name}`
-            : selection.type === "camera"
-              ? `camera · ${selection.name}`
-            : selection.type === "lidar"
-              ? `lidar · ${selection.name}`
-            : selection.type === "io_node"
-              ? `I/O node · ${selection.name}`
-              : selection.type === "robot"
-                ? `${scope(selection.robot)}robot base`
-                : `${scope(selection.robot)}${focusedArm ? `${focusedArm} · ` : ""}TCP · ${focusedTcp ?? "—"}`;
+  // The hover chip follows the pointer over this element.
+  const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null);
 
   // Wasm mode: drop a USD file to import it into the in-browser session
   // (collision + frames) and render the stage client-side.
@@ -129,6 +101,7 @@ export function Viewport() {
 
   return (
     <div
+      ref={setViewportEl}
       className="viewport"
       onDragOver={(e) => {
         if (isWasmMode()) e.preventDefault();
@@ -241,11 +214,13 @@ export function Viewport() {
         </Suspense>
       </Canvas>
 
-      {connected && <div className="focus-chip">{focusLabel}</div>}
+      <FocusCard />
+      <HoverChip viewport={viewportEl} />
       <CameraPip />
       <SfcOverlay />
       <LadderOverlay />
       <IoOverlay />
+      <BomOverlay />
       <IoTopologyOverlay />
       <LegendHud />
       <TimelineDock />

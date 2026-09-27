@@ -145,6 +145,342 @@ body {
   font-size: 11px;
   letter-spacing: 0.03em;
   pointer-events: none;
+  /* A product name can run long (a kit's full title); the chip stays a
+     chip. */
+  max-width: min(60%, 640px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Above the timeline dock when there is one (the overlays' reserve). */
+  bottom: var(--sfc-reserve, 10px);
+  z-index: 4;
+}
+.focus-chip.expandable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.focus-chip.expandable:hover {
+  color: var(--text);
+}
+.fc-toggle {
+  margin-left: 8px;
+  color: var(--muted);
+}
+
+/* --- the focus card: the chip, opened (design-studio-parts.md §4.4) --- */
+.focus-card {
+  position: absolute;
+  left: 10px;
+  bottom: var(--sfc-reserve, 10px);
+  width: 340px;
+  max-width: calc(100% - 20px);
+  z-index: 4;
+  background: rgba(15, 17, 21, 0.86);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  backdrop-filter: blur(4px);
+}
+.fc-head {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.fc-head .part-thumb {
+  width: 40px;
+  height: 40px;
+  font-size: 16px;
+}
+.fc-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fc-title .muted,
+.fc-foot .muted,
+.part-line .muted,
+.part-sub-card .muted {
+  color: var(--muted);
+  font-weight: 400;
+}
+.fc-fold {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+}
+.fc-specs {
+  font-variant-numeric: tabular-nums;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fc-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+.fc-foot a {
+  color: var(--accent);
+  text-decoration: none;
+  flex: none;
+  white-space: nowrap;
+}
+.fc-chips {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.fc-chips .badge {
+  flex: none;
+}
+.fc-chips .muted {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- the hover chip: positioned on the element, never through React --- */
+.hover-chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 6;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- the part card (Layout's PART section) --- */
+.part-body {
+  padding: 0 14px 14px;
+}
+.part-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.part-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.part-head-text {
+  min-width: 0;
+  flex: 1;
+}
+.part-thumb {
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  object-fit: cover;
+  flex: none;
+}
+.part-thumb.glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 20px;
+}
+.part-title {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.part-sub {
+  color: var(--muted);
+}
+.part-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.part-id-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: copy;
+}
+.part-id a {
+  color: var(--accent);
+  text-decoration: none;
+  flex: none;
+}
+.part-copied {
+  color: var(--ok);
+  flex: none;
+}
+.part-specs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+}
+.part-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.part-kv .k {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.part-kv .v {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.part-fold {
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.part-fold:hover {
+  color: var(--text);
+}
+.part-block {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.part-block .h {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.part-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.part-line .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.part-sub-card {
+  margin: 4px 0 6px 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+.part-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+.part-note code,
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.part-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+/* The hub's chips: links to the maker's page, datasheets and
+   repositories; the licence and whether its files may travel. */
+.part-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+.chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip a {
+  color: inherit;
+  text-decoration: none;
+}
+.chip a:hover {
+  color: var(--accent);
+}
+.chip.ok {
+  color: var(--ok);
+}
+.chip.bad {
+  color: var(--bad);
+}
+.part-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* --- the bill of materials overlay --- */
+.bom-table td.num,
+.bom-table th.num {
+  text-align: right;
+  padding-right: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.bom-table tr.bom-unidentified td {
+  color: #e0a83c;
+}
+.bom-table tr.bom-picked td {
+  background: rgba(77, 163, 255, 0.12);
+}
+.bom-table tfoot td {
+  border-bottom: none;
+  padding-top: 4px;
+}
+.part-code {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--panel-2);
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* --- sidebar --- */
@@ -428,6 +764,13 @@ select:focus {
 .badge.muted {
   color: var(--muted);
   background: var(--panel-2);
+}
+
+/* A line of the bill nobody has identified yet — the purchasing to-do
+   list, read straight off the tree. */
+.badge.warn {
+  color: #e0a83c;
+  background: rgba(224, 168, 60, 0.14);
 }
 
 /* --- shared section controls (motion / sequence) --- */

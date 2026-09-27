@@ -6,6 +6,7 @@ import type { PoseMsg, RobotDescMsg } from "../protocol";
 import { playbackRig } from "../playbackRig";
 import { collidingLinkNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
+import { hoverEnter, hoverLeave } from "../three/hover";
 
 /**
  * Client-side USD robot rendering, one instance per USD-sourced robot: the
@@ -154,8 +155,12 @@ function UsdRobotInstance({ name }: { name: string }) {
       onPointerOver={(e: { stopPropagation: () => void }) => {
         e.stopPropagation();
         cursorEnter();
+        hoverEnter("robot", name);
       }}
-      onPointerOut={cursorLeave}
+      onPointerOut={() => {
+        cursorLeave();
+        hoverLeave("robot", name);
+      }}
     />
   );
 }

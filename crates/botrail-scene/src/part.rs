@@ -227,6 +227,20 @@ pub struct PartEntry {
     pub part: Part,
 }
 
+/// One thing a BOM row stands for: the `(kind, name)` a part is pinned to
+/// and the studio selects by. `derived` marks a line only the bill names —
+/// a tool welded onto an arm (`<robot>/tool`), an arm mounted on a body
+/// (`<robot>/left`), the controller an arm needs (`<robot>/controller`)
+/// before a cabinet is declared — with no scene object of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BomTarget {
+    pub kind: PartTargetKind,
+    pub name: String,
+    #[serde(default)]
+    pub derived: bool,
+}
+
 /// What makes two BOM lines one product: category, catalog reference,
 /// maker, model.
 type MergeKey = (String, Option<String>, Option<String>, Option<String>);
@@ -255,10 +269,14 @@ pub struct BomRow {
     /// Contents per purchase unit; included items are not extra purchasing rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<botrail_model::mounting::CatalogOrder>,
+    /// What stands behind each entry of `names`, in the same order: the
+    /// `(kind, name)` the studio selects by. Not a column of any table.
+    #[serde(skip)]
+    pub targets: Vec<BomTarget>,
 }
 
 impl BomRow {
-    fn from_part(category: &str, name: &str, part: &Part) -> BomRow {
+    fn from_part(kind: PartTargetKind, category: &str, name: &str, part: &Part) -> BomRow {
         BomRow {
             category: part
                 .category
@@ -272,6 +290,11 @@ impl BomRow {
             description: part.description.clone(),
             attributes: part.attributes.clone(),
             order: None,
+            targets: vec![BomTarget {
+                kind,
+                name: name.to_string(),
+                derived: false,
+            }],
         }
     }
 
@@ -553,6 +576,7 @@ fn tool_row_names(scene: &Scene) -> Vec<String> {
         robot_lines(
             &robot.model.source,
             &robot.name,
+            &robot.name,
             "robot",
             &mut tools,
             &mut rows,
@@ -652,9 +676,10 @@ fn controller_word_at(name: &str) -> Option<usize> {
 /// Otherwise unidentified, with what is known in the description — the
 /// candidates, the set note — so the purchasing to-do says what to ask.
 fn controller_row(robot: &crate::SceneRobot) -> BomRow {
+    let name = format!("{}/controller", robot.name);
     let mut row = BomRow {
         category: "robot_controller".into(),
-        names: vec![format!("{}/controller", robot.name)],
+        names: vec![name.clone()],
         manufacturer: None,
         model: None,
         catalog: None,
@@ -662,6 +687,11 @@ fn controller_row(robot: &crate::SceneRobot) -> BomRow {
         description: None,
         attributes: BTreeMap::new(),
         order: None,
+        targets: vec![BomTarget {
+            kind: PartTargetKind::IoNode,
+            name,
+            derived: true,
+        }],
     };
     let mut notes = vec![format!("controller for {}", robot.name)];
     if let Some((id, revision, meta)) = catalog_of(&robot.model.source) {
@@ -787,11 +817,33 @@ fn io_node_category(kind: &IoNodeKind) -> &'static str {
     }
 }
 
+/// The target a robot's line stands for: the first line a robot's
+/// provenance yields is the machine itself — pinned and selected by the
+/// instance name — and every later one a tool or a mounted arm only the
+/// bill names (`<robot>/tool`, `<robot>/left`), with no scene object.
+fn robot_line_target(robot: &str, name: &str, first: bool) -> BomTarget {
+    if first {
+        BomTarget {
+            kind: PartTargetKind::Robot,
+            name: robot.to_string(),
+            derived: false,
+        }
+    } else {
+        BomTarget {
+            kind: PartTargetKind::Tool,
+            name: name.to_string(),
+            derived: true,
+        }
+    }
+}
+
 /// The BOM lines a robot's provenance implies: a catalog package is a
 /// fully identified line, a composite is its base plus its tool(s), a bare
 /// URDF/USD robot is an unidentified line under the instance name.
+/// `robot` is the instance name every line hangs off; `name` the line's own.
 fn robot_lines(
     source: &botrail_model::RobotSource,
+    robot: &str,
     name: &str,
     role_category: &str,
     tool_counter: &mut usize,
@@ -807,6 +859,7 @@ fn robot_lines(
                 .iter()
                 .map(|(k, v)| (k.clone(), PartAttr::Number(*v)))
                 .collect();
+            let target = robot_line_target(robot, name, out.is_empty());
             out.push(BomRow {
                 category: meta
                     .category
@@ -823,6 +876,7 @@ fn robot_lines(
                 description: None,
                 attributes,
                 order: meta.order.clone(),
+                targets: vec![target],
             });
         }
         RobotSource::Composite {
@@ -833,7 +887,7 @@ fn robot_lines(
             prefix,
             ..
         } => {
-            robot_lines(base, name, role_category, tool_counter, out);
+            robot_lines(base, robot, name, role_category, tool_counter, out);
             // An arm bolted to a body is a robot of its own on the bill,
             // named after its group (`pair/left`), not a tool.
             let arm = group
@@ -844,17 +898,24 @@ fn robot_lines(
                         .map(|p| p.trim_end_matches('_').to_string())
                 })
                 .unwrap_or_else(|| "arm".to_string());
-            robot_lines(tool, &format!("{name}/{arm}"), "robot", tool_counter, out);
+            robot_lines(
+                tool,
+                robot,
+                &format!("{name}/{arm}"),
+                "robot",
+                tool_counter,
+                out,
+            );
         }
         RobotSource::Composite { base, tool, .. } => {
-            robot_lines(base, name, role_category, tool_counter, out);
+            robot_lines(base, robot, name, role_category, tool_counter, out);
             *tool_counter += 1;
             let tool_name = if *tool_counter == 1 {
                 format!("{name}/tool")
             } else {
                 format!("{name}/tool{tool_counter}")
             };
-            robot_lines(tool, &tool_name, "tool", tool_counter, out);
+            robot_lines(tool, robot, &tool_name, "tool", tool_counter, out);
         }
         // A URDF that is nothing but frames — the bare body `dual_arm`
         // hangs two arms off — is not something to buy.
@@ -862,17 +923,21 @@ fn robot_lines(
             if !xml.contains("<joint")
                 && !xml.contains("<visual")
                 && !xml.contains("<collision") => {}
-        RobotSource::UrdfXml(_) | RobotSource::Usd { .. } => out.push(BomRow {
-            category: role_category.to_string(),
-            names: vec![name.to_string()],
-            manufacturer: None,
-            model: None,
-            catalog: None,
-            qty: 1,
-            description: None,
-            attributes: BTreeMap::new(),
-            order: None,
-        }),
+        RobotSource::UrdfXml(_) | RobotSource::Usd { .. } => {
+            let target = robot_line_target(robot, name, out.is_empty());
+            out.push(BomRow {
+                category: role_category.to_string(),
+                names: vec![name.to_string()],
+                manufacturer: None,
+                model: None,
+                catalog: None,
+                qty: 1,
+                description: None,
+                attributes: BTreeMap::new(),
+                order: None,
+                targets: vec![target],
+            })
+        }
     }
 }
 
@@ -891,6 +956,7 @@ fn merge_rows(lines: Vec<BomRow>) -> Vec<BomRow> {
             Some(row) => {
                 row.qty += line.qty;
                 row.names.extend(line.names);
+                row.targets.extend(line.targets);
                 if row.description.is_none() {
                     row.description = line.description;
                 }
@@ -1096,6 +1162,7 @@ impl Scene {
             robot_lines(
                 &robot.model.source,
                 &robot.name,
+                &robot.name,
                 "robot",
                 &mut tools,
                 &mut robot_rows,
@@ -1152,7 +1219,12 @@ impl Scene {
             let Some(category) = device_category(&device.kind).or(part.and(Some("device"))) else {
                 continue;
             };
-            let mut row = BomRow::from_part(category, &device.name, &Part::default());
+            let mut row = BomRow::from_part(
+                PartTargetKind::Device,
+                category,
+                &device.name,
+                &Part::default(),
+            );
             if let Some(part) = part {
                 row.apply(part);
             }
@@ -1162,7 +1234,12 @@ impl Scene {
             let Some(category) = sensor_category(&sensor.kind) else {
                 continue;
             };
-            let mut row = BomRow::from_part(category, &sensor.name, &Part::default());
+            let mut row = BomRow::from_part(
+                PartTargetKind::Sensor,
+                category,
+                &sensor.name,
+                &Part::default(),
+            );
             if let Some(part) = explicit(PartTargetKind::Sensor, &sensor.name) {
                 row.apply(part);
             }
@@ -1172,7 +1249,12 @@ impl Scene {
             // The purchasable article: any vision sensors looking through
             // it are judgement, not hardware (they add no line of their
             // own — see `sensor_category`).
-            let mut row = BomRow::from_part("sensor.camera", &camera.name, &Part::default());
+            let mut row = BomRow::from_part(
+                PartTargetKind::Camera,
+                "sensor.camera",
+                &camera.name,
+                &Part::default(),
+            );
             if let Some(part) = explicit(PartTargetKind::Camera, &camera.name) {
                 row.apply(part);
             }
@@ -1182,15 +1264,24 @@ impl Scene {
             // The purchasable article: any field sensors sweeping through
             // it are judgement, not hardware (design/design-lidar.md 判断
             // L1 — the camera rule, applied to scanners).
-            let mut row = BomRow::from_part("sensor.lidar", &lidar.name, &Part::default());
+            let mut row = BomRow::from_part(
+                PartTargetKind::Lidar,
+                "sensor.lidar",
+                &lidar.name,
+                &Part::default(),
+            );
             if let Some(part) = explicit(PartTargetKind::Lidar, &lidar.name) {
                 row.apply(part);
             }
             lines.push(row);
         }
         for node in &self.io.nodes {
-            let mut row =
-                BomRow::from_part(io_node_category(&node.kind), &node.name, &Part::default());
+            let mut row = BomRow::from_part(
+                PartTargetKind::IoNode,
+                io_node_category(&node.kind),
+                &node.name,
+                &Part::default(),
+            );
             // The I/O map's own model column is the node's identity until a
             // part says otherwise.
             row.model = node.model.clone();
@@ -1214,7 +1305,12 @@ impl Scene {
         }
         for entry in &self.parts {
             if matches!(entry.kind, PartTargetKind::Obstacle | PartTargetKind::Group) {
-                lines.push(BomRow::from_part("part", &entry.target, &entry.part));
+                lines.push(BomRow::from_part(
+                    entry.kind,
+                    "part",
+                    &entry.target,
+                    &entry.part,
+                ));
             }
         }
         Bom {
@@ -1564,6 +1660,70 @@ mod tests {
         assert_eq!(bom.rows.iter().filter(|r| r.category == "part").count(), 1);
         // Unknown names are rejected.
         assert!(scene.set_part("nothing", None, part("x")).is_err());
+    }
+
+    #[test]
+    fn rows_say_what_they_stand_for() {
+        // A catalog arm sold as a set with its control box: the machine is
+        // the robot's own line, selected by the instance name; the
+        // controller a derived line nothing in the scene stands for.
+        let mut scene = catalog_arm(botrail_model::CatalogMeta {
+            manufacturer: Some("Universal Robots".into()),
+            product: Some("UR5e".into()),
+            category: Some("manipulator".into()),
+            order: Some(botrail_model::mounting::CatalogOrder {
+                part_number: None,
+                unit: "set".into(),
+                includes: vec![include("Control Box", None)],
+                requires: Vec::new(),
+                note: None,
+            }),
+            ..Default::default()
+        });
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: Isometry3::identity(),
+                zone_size: Vector3::new(1.0, 1.0, 1.0),
+                velocity: Vector3::new(0.1, 0.0, 0.0),
+                running: false,
+            },
+        });
+        for name in ["fence/0", "fence/1", "post"] {
+            scene
+                .add_obstacle(name, box_geometry(), Isometry3::identity())
+                .unwrap();
+        }
+        // A group pin and an obstacle pin of one product merge into one
+        // row that stands for both targets.
+        scene.set_part("fence", None, part("FP-1000")).unwrap();
+        scene.set_part("post", None, part("FP-1000")).unwrap();
+        let bom = scene.bom();
+        let targets: Vec<(&str, &str, bool)> = bom
+            .rows
+            .iter()
+            .flat_map(|r| {
+                r.targets
+                    .iter()
+                    .map(|t| (t.kind.as_str(), t.name.as_str(), t.derived))
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                ("robot", "arm", false),
+                ("io_node", "arm/controller", true),
+                ("device", "belt", false),
+                ("group", "fence", false),
+                ("obstacle", "post", false),
+            ]
+        );
+        for row in &bom.rows {
+            assert_eq!(row.targets.len(), row.names.len(), "{:?}", row.names);
+        }
+        // The set's controller is identified through the arm's package.
+        assert!(!bom.rows[1].is_unidentified());
+        assert!(bom.rows[2].is_unidentified());
     }
 
     #[test]

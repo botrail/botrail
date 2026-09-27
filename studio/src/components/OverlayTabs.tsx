@@ -1,12 +1,14 @@
+import type { OverlayKind } from "../overlays";
 import { useStudioStore } from "../store";
 
-export type OverlayKind = "sfc" | "ld" | "io" | "topo";
+export type { OverlayKind } from "../overlays";
 
 const TABS: { kind: OverlayKind; label: string; title: string }[] = [
   { kind: "sfc", label: "SFC", title: "the programs as an SFC chart" },
   { kind: "ld", label: "LD", title: "the programs as a SET/RST step ladder" },
   { kind: "io", label: "I/O", title: "the I/O table — points, channels, findings, live levels" },
   { kind: "topo", label: "TOPOLOGY", title: "the electrical topology — controllers, channels, wires, handshakes" },
+  { kind: "bom", label: "BOM", title: "the bill of materials — every line, identified or not, with what it stands for" },
 ];
 
 /**
@@ -20,11 +22,13 @@ export function OverlayTabs({ active }: { active: OverlayKind }) {
   const setLdOpen = useStudioStore((s) => s.setLdOpen);
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
+  const setBomOpen = useStudioStore((s) => s.setBomOpen);
   const open = (kind: OverlayKind) => {
     if (kind === "sfc") setSfcOpen(true);
     else if (kind === "ld") setLdOpen(true);
     else if (kind === "io") setIoOpen(true);
-    else setTopoOpen(true);
+    else if (kind === "topo") setTopoOpen(true);
+    else setBomOpen(true);
   };
   return (
     <span className="overlay-tabs">

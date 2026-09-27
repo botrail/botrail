@@ -1303,6 +1303,17 @@ fn bom_row_dict(py: Python<'_>, row: &botrail_scene::part::BomRow) -> PyResult<P
         attributes.set_item(key, part_attr_object(py, value))?;
     }
     d.set_item("attributes", attributes)?;
+    // What each name stands for — the `(kind, name)` a part pins to; a
+    // derived line (a tool, an arm's controller) has no scene object.
+    let targets = pyo3::types::PyList::empty(py);
+    for target in &row.targets {
+        let t = PyDict::new(py);
+        t.set_item("kind", target.kind.as_str())?;
+        t.set_item("name", target.name.clone())?;
+        t.set_item("derived", target.derived)?;
+        targets.append(t)?;
+    }
+    d.set_item("targets", targets)?;
     Ok(d.into_any().unbind())
 }
 

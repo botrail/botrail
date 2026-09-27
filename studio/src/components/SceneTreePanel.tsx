@@ -1,6 +1,13 @@
 import { Fragment, useMemo, useState } from "react";
 
-import type { FrameMsg, ObstacleMsg, PartEntry } from "../protocol";
+import {
+  lookup,
+  partLabel,
+  partTitle,
+  robotStack,
+  type BomIndex,
+} from "../partIdentity";
+import type { BomLineMsg, BomTarget, FrameMsg, ObstacleMsg } from "../protocol";
 import { collidingObstacleNames, robotArms, useStudioStore } from "../store";
 import {
   sendRemoveCamera,
@@ -18,6 +25,11 @@ import { Section } from "./Section";
  * imports group naturally; flat names sit at the root). Per robot: select
  * (focus its TCP) and place its base. Per obstacle: show/hide (display
  * only, client-side) and a collision toggle (server-side `enabled`).
+ *
+ * Every row that is a line of the bill of materials wears what it is —
+ * the badge is read off the `bom` message the host derives, never
+ * guessed here — and a robot lists the lines the bill hangs off it (its
+ * tools, the controller it needs) as rows of their own.
  */
 export function SceneTreePanel() {
   const robots = useStudioStore((s) => s.robots);
@@ -39,8 +51,8 @@ export function SceneTreePanel() {
   const ioNodes = useStudioStore((s) => s.io.io.nodes);
   const ioPoints = useStudioStore((s) => s.io.points);
   const selectIoNode = useStudioStore((s) => s.selectIoNode);
-  const parts = useStudioStore((s) => s.parts);
-  const partIndex = useMemo(() => indexParts(parts), [parts]);
+  const partIndex = useStudioStore((s) => s.bomIndex);
+  const setBomOpen = useStudioStore((s) => s.setBomOpen);
   if (
     robots.length === 0 &&
     obstacles.length === 0 &&
@@ -56,10 +68,19 @@ export function SceneTreePanel() {
       id="scene"
       title="Scene"
       badge={
-        <span className="badge muted">
-          {robots.length > 1 ? `${robots.length} robots · ` : ""}
-          {obstacles.length} obj · {frames.length} frames
-        </span>
+        <>
+          <span className="badge muted">
+            {robots.length > 1 ? `${robots.length} robots · ` : ""}
+            {obstacles.length} obj · {frames.length} frames
+          </span>
+          <button
+            className="timeline-button"
+            title="the bill of materials over the viewport (▤ BOM)"
+            onClick={() => setBomOpen(true)}
+          >
+            ▤
+          </button>
+        </>
       }
     >
       <div className="scene-tree">
@@ -79,7 +100,7 @@ export function SceneTreePanel() {
                   {"\u{1F916} "}
                   {name}
                 </span>
-                <PartBadge entry={partIndex.get(`robot:${name}`)} />
+                <PartBadge hit={lookup(partIndex, "robot", name)} />
                 <button
                   className="tree-toggle"
                   title="place robot base"
@@ -111,8 +132,17 @@ export function SceneTreePanel() {
                     {"\u{1F9BE} "}
                     {g.name}
                   </span>
+                  {/* An arm mounted from the catalog is a line of its own
+                      on the bill, `<robot>/<arm>`. */}
+                  <PartBadge
+                    hit={
+                      lookup(partIndex, "tool", `${name}/${g.name}`) ??
+                      lookup(partIndex, "robot", `${name}/${g.name}`)
+                    }
+                  />
                 </div>
               ))}
+              <StackRows robot={name} index={partIndex} />
             </Fragment>
           );
         })}
@@ -141,7 +171,7 @@ export function SceneTreePanel() {
                 {"\u{1F4E1} "}
                 {s.name}
               </span>
-              <PartBadge entry={partIndex.get(`sensor:${s.name}`)} />
+              <PartBadge hit={lookup(partIndex, "sensor", s.name)} />
               <button
                 className="tree-toggle"
                 title="remove sensor"
@@ -169,7 +199,7 @@ export function SceneTreePanel() {
                 {"\u{2699} "}
                 {d.name}
               </span>
-              <PartBadge entry={partIndex.get(`device:${d.name}`)} />
+              <PartBadge hit={lookup(partIndex, "device", d.name)} />
               <button
                 className="tree-toggle"
                 title="remove device"
@@ -197,7 +227,7 @@ export function SceneTreePanel() {
                 {"\u{1F3A5} "}
                 {c.name}
               </span>
-              <PartBadge entry={partIndex.get(`camera:${c.name}`)} />
+              <PartBadge hit={lookup(partIndex, "camera", c.name)} />
               <button
                 className="tree-toggle"
                 title="remove camera"
@@ -225,7 +255,7 @@ export function SceneTreePanel() {
                 {"\u{1F300} "}
                 {l.name}
               </span>
-              <PartBadge entry={partIndex.get(`lidar:${l.name}`)} />
+              <PartBadge hit={lookup(partIndex, "lidar", l.name)} />
               <button
                 className="tree-toggle"
                 title="remove lidar"
@@ -264,7 +294,7 @@ export function SceneTreePanel() {
                   {n.name}
                   <span className="seq-cond"> · {kind}</span>
                 </span>
-                <PartBadge entry={partIndex.get(`io_node:${n.name}`)} />
+                <PartBadge hit={lookup(partIndex, "io_node", n.name)} />
                 <span className="seq-cond" title="bound points / channels">
                   {bound}/{(n.channels ?? []).length}
                 </span>
@@ -300,38 +330,61 @@ export function ioNodeKindLabel(kind: string): string {
   }
 }
 
-/** `kind:target` → the pinned part, for O(1) lookups while rendering. */
-function indexParts(parts: PartEntry[]): Map<string, PartEntry> {
-  const index = new Map<string, PartEntry>();
-  for (const p of parts) index.set(`${p.kind}:${p.target}`, p);
-  return index;
-}
-
-/** The short label a part reads as on the tree: model, else catalog id,
- * else maker, else category. */
-export function partLabel(entry: PartEntry): string {
-  const p = entry.part;
-  return p.model ?? p.catalog?.id ?? p.manufacturer ?? p.category ?? "part";
-}
-
-/** The full identity for the tooltip. */
-export function partTitle(entry: PartEntry): string {
-  const p = entry.part;
-  const bits = [p.manufacturer, p.model].filter(Boolean).join(" ");
-  const cat = p.catalog ? `${p.catalog.id}${p.catalog.revision ? `@${p.catalog.revision}` : ""}` : "";
-  const qty = p.qty !== 1 ? ` ×${p.qty}` : "";
-  const head = [bits, cat && `(${cat})`].filter(Boolean).join(" ") || "part";
-  return `${head}${qty}${p.description ? ` — ${p.description}` : ""}`;
-}
-
-/** The model badge a pinned resident wears on the scene tree. Display
- * only — parts are authored from Python (`scene.set_part`). */
-function PartBadge({ entry }: { entry: PartEntry | undefined }) {
-  if (!entry) return null;
+/** The badge a line of the bill wears on the scene tree: its model (or
+ * what else identifies it), amber `?` while nobody has identified it.
+ * Display only — identity is authored from Python (`scene.set_part`,
+ * `Robot.from_catalog`, the generators). */
+function PartBadge({
+  hit,
+}: {
+  hit: { line: BomLineMsg; target: BomTarget } | undefined;
+}) {
+  if (!hit) return null;
+  const { line, target } = hit;
   return (
-    <span className="badge muted part-badge" title={partTitle(entry)}>
-      {partLabel(entry)}
+    <span
+      className={`badge ${line.identified ? "muted" : "warn"} part-badge`}
+      title={partTitle(line)}
+    >
+      {partLabel(line, target)}
     </span>
+  );
+}
+
+/** The lines the bill hangs off a robot with no scene object of their
+ * own — its tools (`arm/tool`) and the controller it needs
+ * (`arm/controller`, until a cabinet is declared). Selecting one opens
+ * its identity in Layout; there is nothing to move. */
+function StackRows({ robot, index }: { robot: string; index: BomIndex }) {
+  const selection = useStudioStore((s) => s.selection);
+  const selectLine = useStudioStore((s) => s.selectLine);
+  const { tools, controller } = useMemo(() => robotStack(index, robot), [index, robot]);
+  const rows = [
+    ...tools.map((t) => ({ ...t, icon: "\u{1F527}", label: t.name.slice(robot.length + 1) })),
+    ...(controller ? [{ ...controller, icon: "\u{1F50C}", label: "controller" }] : []),
+  ];
+  return (
+    <>
+      {rows.map((r) => (
+        <div
+          key={r.name}
+          className={`tree-row${
+            selection.type === "line" && selection.name === r.name ? " selected" : ""
+          }`}
+          style={{ paddingLeft: "12px" }}
+        >
+          <span className="tree-twist" />
+          <span
+            className="tree-label"
+            title={`${r.name} — a line of the bill, nothing to move`}
+            onClick={() => selectLine(r.target.kind, r.name)}
+          >
+            {r.icon} {r.label}
+          </span>
+          <PartBadge hit={r} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -373,7 +426,7 @@ function Tree({
 }: {
   obstacles: ObstacleMsg[];
   frames: FrameMsg[];
-  partIndex: Map<string, PartEntry>;
+  partIndex: BomIndex;
 }) {
   const root = useMemo(() => buildTree(obstacles, frames), [obstacles, frames]);
   // Colliding obstacles read red straight in the tree — the tree is the
@@ -398,7 +451,7 @@ function TreeRow({
   node: TreeNode;
   depth: number;
   colliding: Set<string>;
-  partIndex: Map<string, PartEntry>;
+  partIndex: BomIndex;
 }) {
   const [open, setOpen] = useState(depth < 2);
   const selection = useStudioStore((s) => s.selection);
@@ -418,14 +471,11 @@ function TreeRow({
     ? selection.type === "group" && selection.path === node.path
     : o && selection.type === "obstacle" && selection.name === o.name;
   const hidden = o ? hiddenObstacles.has(o.name) : false;
-  // A part pinned to this prim, or to the group it heads (`<path>/…`).
-  // Group targets are name prefixes: USD prim paths keep the tree's
-  // leading slash, `add_box("fence/p0")` names do not — try both.
-  const bare = node.path.replace(/^\//, "");
+  // The line pinned to this prim, or to the group it heads (`<path>/…`);
+  // a prim inside a pinned group wears nothing — the group row does.
   const part =
-    (isGroup
-      ? (partIndex.get(`group:${node.path}`) ?? partIndex.get(`group:${bare}`))
-      : undefined) ?? (o ? partIndex.get(`obstacle:${o.name}`) : undefined);
+    (isGroup ? lookup(partIndex, "group", node.path) : undefined) ??
+    (o ? lookup(partIndex, "obstacle", o.name) : undefined);
 
   return (
     <div>
@@ -449,7 +499,7 @@ function TreeRow({
         >
           {node.label}
         </span>
-        <PartBadge entry={part} />
+        <PartBadge hit={part} />
         {o && (
           <>
             {o.attached_to && (

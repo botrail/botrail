@@ -1,0 +1,606 @@
+{
+ "schema_version": "0.1",
+ "id": "universal_robots/ur/ur5e/r2",
+ "kind": "model",
+ "category": "manipulator",
+ "name": "UR5e",
+ "manufacturer": {
+  "name": "Universal Robots",
+  "country": "DK",
+  "product_url": "https://www.universal-robots.com/products/ur5e/"
+ },
+ "lifecycle": "active",
+ "articulated": true,
+ "collision_mode": "merged",
+ "specs": {
+  "dof": 6,
+  "payload_kg": 5.0,
+  "reach_mm": 850.0,
+  "repeatability_mm": 0.03,
+  "mass_kg": 20.7,
+  "joint_limits_deg": [
+   [
+    -360.0,
+    360.0
+   ],
+   [
+    -360.0,
+    360.0
+   ],
+   [
+    -180.0,
+    180.0
+   ],
+   [
+    -360.0,
+    360.0
+   ],
+   [
+    -360.0,
+    360.0
+   ],
+   [
+    -360.0,
+    360.0
+   ]
+  ],
+  "max_tcp_speed_mps": 1.0,
+  "ip_rating": "IP54"
+ },
+ "electrical": {
+  "supply": {
+   "input": "AC100-240 V, 47-440 Hz",
+   "note": "I/O 電源 DC24 V 2 A (制御箱)、ツール I/O 電源 12/24 V 1.5 A (2 ピン) / 1 A (1 ピン)"
+  },
+  "io": {
+   "standard": "ur",
+   "channels": [
+    {
+     "id": "DI0",
+     "kind": "di",
+     "port": 0,
+     "safety": false
+    },
+    {
+     "id": "DI1",
+     "kind": "di",
+     "port": 1,
+     "safety": false
+    },
+    {
+     "id": "DI2",
+     "kind": "di",
+     "port": 2,
+     "safety": false
+    },
+    {
+     "id": "DI3",
+     "kind": "di",
+     "port": 3,
+     "safety": false
+    },
+    {
+     "id": "DI4",
+     "kind": "di",
+     "port": 4,
+     "safety": false
+    },
+    {
+     "id": "DI5",
+     "kind": "di",
+     "port": 5,
+     "safety": false
+    },
+    {
+     "id": "DI6",
+     "kind": "di",
+     "port": 6,
+     "safety": false
+    },
+    {
+     "id": "DI7",
+     "kind": "di",
+     "port": 7,
+     "safety": false
+    },
+    {
+     "id": "DO0",
+     "kind": "do",
+     "port": 0,
+     "safety": false
+    },
+    {
+     "id": "DO1",
+     "kind": "do",
+     "port": 1,
+     "safety": false
+    },
+    {
+     "id": "DO2",
+     "kind": "do",
+     "port": 2,
+     "safety": false
+    },
+    {
+     "id": "DO3",
+     "kind": "do",
+     "port": 3,
+     "safety": false
+    },
+    {
+     "id": "DO4",
+     "kind": "do",
+     "port": 4,
+     "safety": false
+    },
+    {
+     "id": "DO5",
+     "kind": "do",
+     "port": 5,
+     "safety": false
+    },
+    {
+     "id": "DO6",
+     "kind": "do",
+     "port": 6,
+     "safety": false
+    },
+    {
+     "id": "DO7",
+     "kind": "do",
+     "port": 7,
+     "safety": false
+    },
+    {
+     "id": "CI0",
+     "kind": "di",
+     "port": 8,
+     "safety": false,
+     "note": "configurable (安全入力対に割当可)"
+    },
+    {
+     "id": "CI1",
+     "kind": "di",
+     "port": 9,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI2",
+     "kind": "di",
+     "port": 10,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI3",
+     "kind": "di",
+     "port": 11,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI4",
+     "kind": "di",
+     "port": 12,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI5",
+     "kind": "di",
+     "port": 13,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI6",
+     "kind": "di",
+     "port": 14,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CI7",
+     "kind": "di",
+     "port": 15,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO0",
+     "kind": "do",
+     "port": 8,
+     "safety": false,
+     "note": "configurable (安全出力対に割当可)"
+    },
+    {
+     "id": "CO1",
+     "kind": "do",
+     "port": 9,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO2",
+     "kind": "do",
+     "port": 10,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO3",
+     "kind": "do",
+     "port": 11,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO4",
+     "kind": "do",
+     "port": 12,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO5",
+     "kind": "do",
+     "port": 13,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO6",
+     "kind": "do",
+     "port": 14,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "CO7",
+     "kind": "do",
+     "port": 15,
+     "safety": false,
+     "note": "configurable"
+    },
+    {
+     "id": "AI0",
+     "kind": "ai",
+     "port": 0,
+     "safety": false
+    },
+    {
+     "id": "AI1",
+     "kind": "ai",
+     "port": 1,
+     "safety": false
+    },
+    {
+     "id": "AO0",
+     "kind": "ao",
+     "port": 0,
+     "safety": false
+    },
+    {
+     "id": "AO1",
+     "kind": "ao",
+     "port": 1,
+     "safety": false
+    },
+    {
+     "id": "TDI0",
+     "kind": "di",
+     "port": 16,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "TDI1",
+     "kind": "di",
+     "port": 17,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "TDO0",
+     "kind": "do",
+     "port": 16,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "TDO1",
+     "kind": "do",
+     "port": 17,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "TAI0",
+     "kind": "ai",
+     "port": 2,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "TAI1",
+     "kind": "ai",
+     "port": 3,
+     "safety": false,
+     "note": "ツール I/O"
+    },
+    {
+     "id": "EI0",
+     "kind": "safe_di",
+     "safety": true,
+     "pair": "EI1",
+     "note": "非常停止入力 (固定の安全入力対)"
+    },
+    {
+     "id": "EI1",
+     "kind": "safe_di",
+     "safety": true,
+     "pair": "EI0"
+    },
+    {
+     "id": "SI0",
+     "kind": "safe_di",
+     "safety": true,
+     "pair": "SI1",
+     "note": "セーフガード停止入力 (固定の安全入力対)"
+    },
+    {
+     "id": "SI1",
+     "kind": "safe_di",
+     "safety": true,
+     "pair": "SI0"
+    }
+   ]
+  },
+  "bus": [
+   "modbus_tcp",
+   "profinet",
+   "ethernet_ip"
+  ]
+ },
+ "order": {
+  "unit": "set",
+  "includes": [
+   {
+    "name": "制御箱 (Control Box、460 × 449 × 254 mm、12 kg、IP44)",
+    "qty": 1
+   },
+   {
+    "name": "ティーチペンダント (300 × 231 × 50 mm、1.8 kg、ケーブル 4.5 m)",
+    "qty": 1
+   },
+   {
+    "name": "ロボットケーブル 6 m (アーム〜制御箱)",
+    "qty": 1
+   }
+  ],
+  "requires": [],
+  "note": "UR5e データシートの標準構成。エンドエフェクタ・カップリングは別売"
+ },
+ "frames": {
+  "base_frame": "base_link",
+  "flange_frame": "tool0",
+  "flange_standard": "ISO 9409-1-50-4-M6",
+  "tcp_default": "tool0",
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "mounting": {
+  "interfaces": [
+   {
+    "frame": "tool0",
+    "role": "flange",
+    "interface_id": "ISO 9409-1-50-4-M6",
+    "evidence": [
+     {
+      "source": 0,
+      "section": "E-series / UR5e/UR7e"
+     }
+    ],
+    "note": "Drawing XY uses the indexing hole along +Y. Mapping to ROS-I tool0 remains unverified. Coordinates are derived from nominal PCD 50 and 45 degrees; positional tolerance is not inferred from PCD tolerance. H7/h8 diameter limits and M6 pitch have not been transcribed. Depth max 8 mm is the maximum bolt penetration, not screw length or guaranteed usable engagement.",
+    "geometry": {
+     "normal_z": 1,
+     "frame_verified": false,
+     "complete": false,
+     "holes": [
+      {
+       "id": "m6-1",
+       "position_mm": [
+        -17.67766953,
+        17.67766953
+       ],
+       "kind": "threaded",
+       "thread": {
+        "diameter_mm": 6.0,
+        "left_hand": false
+       },
+       "depth_mm": {
+        "min": 0.0,
+        "max": 8.0
+       },
+       "fastener_rules": {
+        "head_standard": "ISO 4762",
+        "property_class": "8.8",
+        "torque_nm": {
+         "min": 8.0,
+         "max": 8.0
+        }
+       }
+      },
+      {
+       "id": "m6-2",
+       "position_mm": [
+        17.67766953,
+        17.67766953
+       ],
+       "kind": "threaded",
+       "thread": {
+        "diameter_mm": 6.0,
+        "left_hand": false
+       },
+       "depth_mm": {
+        "min": 0.0,
+        "max": 8.0
+       },
+       "fastener_rules": {
+        "head_standard": "ISO 4762",
+        "property_class": "8.8",
+        "torque_nm": {
+         "min": 8.0,
+         "max": 8.0
+        }
+       }
+      },
+      {
+       "id": "m6-3",
+       "position_mm": [
+        17.67766953,
+        -17.67766953
+       ],
+       "kind": "threaded",
+       "thread": {
+        "diameter_mm": 6.0,
+        "left_hand": false
+       },
+       "depth_mm": {
+        "min": 0.0,
+        "max": 8.0
+       },
+       "fastener_rules": {
+        "head_standard": "ISO 4762",
+        "property_class": "8.8",
+        "torque_nm": {
+         "min": 8.0,
+         "max": 8.0
+        }
+       }
+      },
+      {
+       "id": "m6-4",
+       "position_mm": [
+        -17.67766953,
+        -17.67766953
+       ],
+       "kind": "threaded",
+       "thread": {
+        "diameter_mm": 6.0,
+        "left_hand": false
+       },
+       "depth_mm": {
+        "min": 0.0,
+        "max": 8.0
+       },
+       "fastener_rules": {
+        "head_standard": "ISO 4762",
+        "property_class": "8.8",
+        "torque_nm": {
+         "min": 8.0,
+         "max": 8.0
+        }
+       }
+      }
+     ],
+     "locators": [
+      {
+       "id": "index",
+       "kind": "hole",
+       "position_mm": [
+        0.0,
+        25.0
+       ],
+       "diameter_mm": {
+        "min": 6.0,
+        "max": 6.0
+       },
+       "depth_mm": {
+        "min": 6.0,
+        "max": 6.4
+       }
+      },
+      {
+       "id": "center",
+       "kind": "recess",
+       "position_mm": [
+        0.0,
+        0.0
+       ],
+       "diameter_mm": {
+        "min": 31.5,
+        "max": 31.5
+       }
+      },
+      {
+       "id": "outer-pilot",
+       "kind": "boss",
+       "position_mm": [
+        0.0,
+        0.0
+       ],
+       "diameter_mm": {
+        "min": 63.0,
+        "max": 63.0
+       }
+      }
+     ],
+     "evidence": [
+      {
+       "source": 0,
+       "section": "UR5e/UR7e tool drawing and mounting table"
+      }
+     ]
+    },
+    "fasteners": [],
+    "requirements_complete": false
+   }
+  ],
+  "requirements": []
+ },
+ "assets": {
+  "urdf": "urdf/model.urdf",
+  "usd": "usd/model.usdc",
+  "glb": "visual/model.glb",
+  "collision": "collision/",
+  "thumbnail": "previews/thumbnail.webp"
+ },
+ "sources": [
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://www.universal-robots.com/articles/ur/application-installation/end-effector-mounting-on-tool-output-flange/",
+   "ref": "2025-09-08; UR5e/UR7e drawing",
+   "fetched_at": "2026-09-06"
+  },
+  {
+   "kind": "community",
+   "url": "https://github.com/ros-industrial/universal_robot",
+   "ref": "39ad110d8f2e8f66856a201cca88aa7a7025e3eb",
+   "fetched_at": "2026-09-06"
+  }
+ ],
+ "licenses": [
+  {
+   "files": "sources/**",
+   "spdx": "BSD-3-Clause",
+   "redistributable": true,
+   "note": "ur_description/LICENSE (BSD) + package.xml の <license>BSD</license>。 UR Graphical Documentation の個別 LICENSE.txt 参照は ur20/ur8long/ur15/ ur18/ur30 のメッシュのみで ur5e は対象外 (S4 2026-08-10)"
+  }
+ ],
+ "distribution": "public",
+ "validation": {
+  "level": "V2",
+  "report": "validation/report.json"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": []
+ }
+}

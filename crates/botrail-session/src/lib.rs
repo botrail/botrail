@@ -173,7 +173,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::frames_message(scene),
             wire::toolpaths_message(scene),
             wire::io_message(scene),
-            wire::parts_message(scene),
+            wire::bom_message(scene),
             wire::state_message(scene),
         ]
     })
@@ -688,7 +688,7 @@ pub fn remove_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneE
     emit_obstacles_and_state(host);
     // A removed obstacle may have been the last member of a pinned group.
     if pinned {
-        emit_parts(host);
+        emit_bom(host);
     }
     Ok(())
 }
@@ -1094,13 +1094,14 @@ pub fn upsert_io_node(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.upsert_io_node(node))?;
     emit_io(host);
+    emit_bom(host);
     Ok(())
 }
 
 pub fn remove_io_node(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_io_node(name))?;
     emit_io(host);
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1140,7 +1141,7 @@ pub fn set_io_map(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_io_map(io))?;
     emit_io(host);
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1217,13 +1218,14 @@ pub fn upsert_sensor(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.upsert_sensor(sensor))?;
     emit_sensors(host);
+    emit_bom(host);
     Ok(())
 }
 
 pub fn remove_sensor(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_sensor(name))?;
     emit_sensors(host);
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1251,6 +1253,7 @@ pub fn upsert_camera(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.upsert_camera(camera))?;
     emit_cameras(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1266,6 +1269,7 @@ pub fn upsert_cameras(
             .try_for_each(|camera| scene.upsert_camera(camera))
     })?;
     emit_cameras(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1292,7 +1296,7 @@ pub fn remove_camera(host: &impl SessionHost, name: &str) -> Result<(), SceneErr
     host.with_scene(|scene| scene.remove_camera(name))?;
     emit_cameras(host);
     // Removal prunes any part pinned to it (the sensor pattern).
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1311,6 +1315,7 @@ pub fn upsert_lidar(
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.upsert_lidar(lidar))?;
     emit_lidars(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1318,7 +1323,7 @@ pub fn remove_lidar(host: &impl SessionHost, name: &str) -> Result<(), SceneErro
     host.with_scene(|scene| scene.remove_lidar(name))?;
     emit_lidars(host);
     // Removal prunes any part pinned to it (the sensor pattern).
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -1389,20 +1394,24 @@ pub fn add_spin(
 pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
     host.with_scene(|scene| scene.upsert_device(device));
     emit_devices(host);
+    emit_bom(host);
 }
 
 pub fn remove_device(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_device(name))?;
     emit_devices(host);
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
-fn emit_parts(host: &impl SessionHost) {
+/// Rebroadcasts the bill of materials — after a pin changes, and after a
+/// resident that has a line on it comes or goes (its row appears, moves
+/// or disappears, and a pruned pin with it).
+fn emit_bom(host: &impl SessionHost) {
     if !host.has_listeners() {
         return;
     }
-    let msg = host.with_scene(|scene| wire::parts_message(scene));
+    let msg = host.with_scene(|scene| wire::bom_message(scene));
     host.emit(&msg);
 }
 
@@ -1415,14 +1424,14 @@ pub fn set_part(
     part: botrail_scene::part::Part,
 ) -> Result<botrail_scene::part::PartTargetKind, SceneError> {
     let kind = host.with_scene(|scene| scene.set_part(target, kind, part))?;
-    emit_parts(host);
+    emit_bom(host);
     Ok(kind)
 }
 
 /// Unpins the part on `target` and rebroadcasts.
 pub fn remove_part(host: &impl SessionHost, target: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_part(target))?;
-    emit_parts(host);
+    emit_bom(host);
     Ok(())
 }
 
@@ -2608,7 +2617,7 @@ mod tests {
                     ServerMessage::Scenarios { .. } => "scenarios",
                     ServerMessage::Effects { .. } => "effects",
                     ServerMessage::Io { .. } => "io",
-                    ServerMessage::Parts { .. } => "parts",
+                    ServerMessage::Bom { .. } => "bom",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                     ServerMessage::UsdDocument { .. } => "usd_document",
                 })
@@ -3237,7 +3246,7 @@ mod tests {
         assert!(matches!(msgs[10], ServerMessage::Frames { .. }));
         assert!(matches!(msgs[11], ServerMessage::Toolpaths { .. }));
         assert!(matches!(msgs[12], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[13], ServerMessage::Parts { .. }));
+        assert!(matches!(msgs[13], ServerMessage::Bom { .. }));
         assert!(matches!(msgs[14], ServerMessage::State { .. }));
     }
 
@@ -3926,7 +3935,9 @@ mod tests {
                     "channels":[{{"id":"DO0","kind":"do","port":0}},{{"id":"DO1","kind":"do","port":1}}]}}}}"#
             ),
         );
-        assert_eq!(host.message_types(), ["io"]);
+        // A declared cabinet takes the arm's derived controller line, so
+        // the BOM follows the map.
+        assert_eq!(host.message_types(), ["io", "bom"]);
         let (nodes, unbound) = match &host.out.borrow()[0] {
             ServerMessage::Io { io, points, .. } => (
                 io.nodes.len(),
@@ -3991,8 +4002,8 @@ mod tests {
         );
         handle_client_message(&host, r#"{"type":"undeclare_io","name":"estop_ok"}"#);
         handle_client_message(&host, r#"{"type":"remove_io_node","name":"UR"}"#);
-        // Removing a node may unpin a part, so the pinning list follows.
-        assert_eq!(host.message_types(), ["io", "io", "io", "parts"]);
+        // Removing a node moves its line off the bill, so the BOM follows.
+        assert_eq!(host.message_types(), ["io", "io", "io", "bom"]);
         let out = host.out.borrow();
         let last_io = out
             .iter()

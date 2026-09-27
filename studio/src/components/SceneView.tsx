@@ -10,6 +10,7 @@ import {
   type RobotUiState,
 } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
+import { hoverEnter, hoverLeave } from "../three/hover";
 import { beginPick, swallowsClick } from "../physicsPick";
 import { authoredColor, COLLISION_COLOR, UNPAINTED } from "../three/palette";
 import { MeshVisual } from "./MeshVisual";
@@ -67,8 +68,12 @@ function LinkVisualRobot({ robot }: { robot: RobotUiState }) {
       onPointerOver={(e) => {
         e.stopPropagation();
         cursorEnter();
+        hoverEnter("robot", name);
       }}
-      onPointerOut={cursorLeave}
+      onPointerOut={() => {
+        cursorLeave();
+        hoverLeave("robot", name);
+      }}
     >
       {robot.desc.links.map((link, i) => (
         <LinkGroup

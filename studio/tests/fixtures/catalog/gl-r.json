@@ -1,0 +1,725 @@
+{
+ "schema_version": "0.1",
+ "id": "keyence/gl-r/series/r1",
+ "kind": "spec",
+ "category": "sensor.light_curtain",
+ "name": "GL-R シリーズ セーフティライトカーテン (Type 4)",
+ "manufacturer": {
+  "name": "キーエンス",
+  "country": "JP",
+  "product_url": "https://www.keyence.co.jp/products/safety/safety/gl-r/"
+ },
+ "lifecycle": "active",
+ "articulated": false,
+ "collision_mode": "merged",
+ "specs": {
+  "ip_rating": "IP65/IP67",
+  "range_mm": 15000,
+  "resolution_mm": 14,
+  "protective_height_mm": 2084,
+  "response_ms": 6.9,
+  "ossd": 2,
+  "control_output": "PNP/NPN (ケーブルにより切り換え)",
+  "supply_v": "DC24 ±20%",
+  "safety": "Type 4 ESPE/AOPD (IEC 61496-1/-2) / PL e・カテゴリ 4 (EN ISO 13849-1) / SIL 3",
+  "light_source": "赤外 LED 870 nm",
+  "operating_temp_c": "-10〜+55"
+ },
+ "mechanical": {
+  "footprint_mm": [
+   38.0,
+   32.0
+  ],
+  "height_mm": 1225.0,
+  "mass_kg": 3.57
+ },
+ "configuration": {
+  "generator": "light_curtain",
+  "params": {
+   "resolution_mm": {
+    "values": [
+     14,
+     25,
+     45
+    ],
+    "default": 25
+   },
+   "protective_height_mm": {
+    "values": [
+     185,
+     205,
+     244,
+     265,
+     285,
+     324,
+     345,
+     365,
+     404,
+     425,
+     445,
+     484,
+     505,
+     525,
+     564,
+     585,
+     605,
+     644,
+     665,
+     685,
+     724,
+     745,
+     765,
+     804,
+     825,
+     845,
+     884,
+     905,
+     925,
+     964,
+     985,
+     1005,
+     1044,
+     1065,
+     1085,
+     1124,
+     1145,
+     1165,
+     1204,
+     1225,
+     1245,
+     1284,
+     1305,
+     1325,
+     1444,
+     1465,
+     1604,
+     1625,
+     1764,
+     1785,
+     1924,
+     1945,
+     2084
+    ],
+    "default": 1225
+   },
+   "guard": {
+    "values": [
+     "standard",
+     "hard"
+    ],
+    "default": "standard"
+   }
+  },
+  "components": [
+   {
+    "role": "curtain",
+    "category": "sensor.light_curtain",
+    "variants": [
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 244,
+      "guard": "standard",
+      "part_number": "GL-R23F",
+      "kg": 0.65
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 324,
+      "guard": "standard",
+      "part_number": "GL-R31F",
+      "kg": 0.87
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 404,
+      "guard": "standard",
+      "part_number": "GL-R39F",
+      "kg": 1.1
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 484,
+      "guard": "standard",
+      "part_number": "GL-R47F",
+      "kg": 1.33
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 564,
+      "guard": "standard",
+      "part_number": "GL-R55F",
+      "kg": 1.56
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 644,
+      "guard": "standard",
+      "part_number": "GL-R63F",
+      "kg": 1.79
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 724,
+      "guard": "standard",
+      "part_number": "GL-R71F",
+      "kg": 2.01
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 804,
+      "guard": "standard",
+      "part_number": "GL-R79F",
+      "kg": 2.4
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 884,
+      "guard": "standard",
+      "part_number": "GL-R87F",
+      "kg": 2.6
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 964,
+      "guard": "standard",
+      "part_number": "GL-R95F",
+      "kg": 2.8
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1044,
+      "guard": "standard",
+      "part_number": "GL-R103F",
+      "kg": 3
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1124,
+      "guard": "standard",
+      "part_number": "GL-R111F",
+      "kg": 3.2
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1204,
+      "guard": "standard",
+      "part_number": "GL-R119F",
+      "kg": 3.4
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1284,
+      "guard": "standard",
+      "part_number": "GL-R127F",
+      "kg": 3.7
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1444,
+      "guard": "standard",
+      "part_number": "GL-R143F",
+      "kg": 4.2
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1604,
+      "guard": "standard",
+      "part_number": "GL-R159F",
+      "kg": 4.6
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1764,
+      "guard": "standard",
+      "part_number": "GL-R175F",
+      "kg": 5
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 1924,
+      "guard": "standard",
+      "part_number": "GL-R191F",
+      "kg": 5.5
+     },
+     {
+      "resolution_mm": 14,
+      "protective_height_mm": 2084,
+      "guard": "standard",
+      "part_number": "GL-R207F",
+      "kg": 6
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 185,
+      "guard": "hard",
+      "part_number": "GL-R08HG",
+      "kg": 0.42
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 265,
+      "guard": "hard",
+      "part_number": "GL-R12HG",
+      "kg": 0.65
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 345,
+      "guard": "hard",
+      "part_number": "GL-R16HG",
+      "kg": 0.87
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 425,
+      "guard": "hard",
+      "part_number": "GL-R20HG",
+      "kg": 1.1
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 505,
+      "guard": "hard",
+      "part_number": "GL-R24HG",
+      "kg": 1.32
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 585,
+      "guard": "hard",
+      "part_number": "GL-R28HG",
+      "kg": 1.54
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 665,
+      "guard": "hard",
+      "part_number": "GL-R32HG",
+      "kg": 1.77
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 745,
+      "guard": "hard",
+      "part_number": "GL-R36HG",
+      "kg": 2
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 825,
+      "guard": "hard",
+      "part_number": "GL-R40HG",
+      "kg": 2.22
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 905,
+      "guard": "hard",
+      "part_number": "GL-R44HG",
+      "kg": 2.44
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 985,
+      "guard": "hard",
+      "part_number": "GL-R48HG",
+      "kg": 2.67
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1065,
+      "guard": "hard",
+      "part_number": "GL-R52HG",
+      "kg": 2.89
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1145,
+      "guard": "hard",
+      "part_number": "GL-R56HG",
+      "kg": 3.12
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1225,
+      "guard": "hard",
+      "part_number": "GL-R60HG",
+      "kg": 3.35
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1305,
+      "guard": "hard",
+      "part_number": "GL-R64HG",
+      "kg": 3.57
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1465,
+      "guard": "hard",
+      "part_number": "GL-R72HG",
+      "kg": 4.02
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1625,
+      "guard": "hard",
+      "part_number": "GL-R80HG",
+      "kg": 4.47
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1785,
+      "guard": "hard",
+      "part_number": "GL-R88HG",
+      "kg": 4.91
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1945,
+      "guard": "hard",
+      "part_number": "GL-R96HG",
+      "kg": 5.37
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 185,
+      "guard": "standard",
+      "part_number": "GL-R08H",
+      "kg": 0.42
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 265,
+      "guard": "standard",
+      "part_number": "GL-R12H",
+      "kg": 0.65
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 345,
+      "guard": "standard",
+      "part_number": "GL-R16H",
+      "kg": 0.87
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 425,
+      "guard": "standard",
+      "part_number": "GL-R20H",
+      "kg": 1.1
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 505,
+      "guard": "standard",
+      "part_number": "GL-R24H",
+      "kg": 1.32
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 585,
+      "guard": "standard",
+      "part_number": "GL-R28H",
+      "kg": 1.54
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 665,
+      "guard": "standard",
+      "part_number": "GL-R32H",
+      "kg": 1.77
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 745,
+      "guard": "standard",
+      "part_number": "GL-R36H",
+      "kg": 2
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 825,
+      "guard": "standard",
+      "part_number": "GL-R40H",
+      "kg": 2.22
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 905,
+      "guard": "standard",
+      "part_number": "GL-R44H",
+      "kg": 2.44
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 985,
+      "guard": "standard",
+      "part_number": "GL-R48H",
+      "kg": 2.67
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1065,
+      "guard": "standard",
+      "part_number": "GL-R52H",
+      "kg": 2.89
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1145,
+      "guard": "standard",
+      "part_number": "GL-R56H",
+      "kg": 3.12
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1225,
+      "guard": "standard",
+      "part_number": "GL-R60H",
+      "kg": 3.35
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1305,
+      "guard": "standard",
+      "part_number": "GL-R64H",
+      "kg": 3.57
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1465,
+      "guard": "standard",
+      "part_number": "GL-R72H",
+      "kg": 4.02
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1625,
+      "guard": "standard",
+      "part_number": "GL-R80H",
+      "kg": 4.47
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1785,
+      "guard": "standard",
+      "part_number": "GL-R88H",
+      "kg": 4.91
+     },
+     {
+      "resolution_mm": 25,
+      "protective_height_mm": 1945,
+      "guard": "standard",
+      "part_number": "GL-R96H",
+      "kg": 5.37
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 205,
+      "guard": "standard",
+      "part_number": "GL-R04L",
+      "kg": 0.42
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 285,
+      "guard": "standard",
+      "part_number": "GL-R06L",
+      "kg": 0.65
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 365,
+      "guard": "standard",
+      "part_number": "GL-R08L",
+      "kg": 0.87
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 445,
+      "guard": "standard",
+      "part_number": "GL-R10L",
+      "kg": 1.1
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 525,
+      "guard": "standard",
+      "part_number": "GL-R12L",
+      "kg": 1.32
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 605,
+      "guard": "standard",
+      "part_number": "GL-R14L",
+      "kg": 1.54
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 685,
+      "guard": "standard",
+      "part_number": "GL-R16L",
+      "kg": 1.77
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 765,
+      "guard": "standard",
+      "part_number": "GL-R18L",
+      "kg": 2
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 845,
+      "guard": "standard",
+      "part_number": "GL-R20L",
+      "kg": 2.22
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 925,
+      "guard": "standard",
+      "part_number": "GL-R22L",
+      "kg": 2.44
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 1005,
+      "guard": "standard",
+      "part_number": "GL-R24L",
+      "kg": 2.67
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 1085,
+      "guard": "standard",
+      "part_number": "GL-R26L",
+      "kg": 2.89
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 1165,
+      "guard": "standard",
+      "part_number": "GL-R28L",
+      "kg": 3.12
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 1245,
+      "guard": "standard",
+      "part_number": "GL-R30L",
+      "kg": 3.35
+     },
+     {
+      "resolution_mm": 45,
+      "protective_height_mm": 1325,
+      "guard": "standard",
+      "part_number": "GL-R32L",
+      "kg": 3.57
+     }
+    ],
+    "dimensions_mm": {
+     "section_w": 32.0,
+     "section_d": 38.0
+    },
+    "codes": {},
+    "note": "投光器 + 受光器の 1 セット。断面 32 × 38 mm (レンズ面幅 32、要確認)、 全長は保護高さより短い (H 形 -25、F 形 -4、L 形 -45 mm)。質量は投光器 + 受光器の 公表値の和。検出距離は F 形 0.2〜10 m、H/L/HG 形 0.2〜15 m。取付金具・ケーブルは別売"
+   }
+  ],
+  "behavior": {},
+  "rules": {
+   "tolerance_mm": 25.0,
+   "range_mm_by_resolution": {
+    "14": 10000,
+    "25": 15000,
+    "45": 15000
+   }
+  },
+  "examples": [
+   {
+    "resolution_mm": 14,
+    "protective_height_mm": 244,
+    "guard": "standard"
+   },
+   {
+    "resolution_mm": 14,
+    "protective_height_mm": 2084,
+    "guard": "standard"
+   },
+   {
+    "resolution_mm": 25,
+    "protective_height_mm": 185,
+    "guard": "hard"
+   },
+   {
+    "resolution_mm": 25,
+    "protective_height_mm": 1945,
+    "guard": "standard"
+   },
+   {
+    "resolution_mm": 45,
+    "protective_height_mm": 1325,
+    "guard": "standard"
+   }
+  ]
+ },
+ "frames": {
+  "grasp_frames": [],
+  "camera_frames": [],
+  "lidar_frames": [],
+  "arms": [],
+  "groups": []
+ },
+ "assets": {
+  "layout": "previews/layout.svg"
+ },
+ "sources": [
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://www.keyence.co.jp/products/safety/safety/gl-r/specs/",
+   "ref": "GL-R シリーズ 仕様 (型式ごとの光軸数・全長・検出高さ・保護高さ・応答時間・消費電流・質量、共通仕様)",
+   "fetched_at": "2026-09-02"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://www.keyence.co.jp/products/safety/safety/gl-r/models/gl-r08h/",
+   "ref": "GL-R08H 型式ページ (光軸数 8、保護高さ 185、全長 160、検出距離 0.2〜15 m)",
+   "fetched_at": "2026-09-02"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://www.manualsdir.com/manuals/658034/keyence-gl-r-series.html?page=8",
+   "ref": "GL-R シリーズ 取扱説明書 p.8 Dimensions (筐体断面 32 × 38 mm、全長の表) — マニュアル転載サイト経由",
+   "fetched_at": "2026-09-02"
+  },
+  {
+   "kind": "manufacturer_datasheet",
+   "url": "https://5.imimg.com/data5/UP/KF/MY-4242781/keyence-gl-r04l-safety-light-gl-r-series-curtain.pdf",
+   "ref": "GL-R / GL-RHG カタログ (ミラー) 「ROBUST, YET SLIM」— 従来 46.5 mm → 38 mm、40 mm → 32 mm",
+   "fetched_at": "2026-09-02"
+  }
+ ],
+ "licenses": [
+  {
+   "files": "**",
+   "spdx": "CC0-1.0",
+   "redistributable": true,
+   "note": "収載したのは選定・BOM・据付に要る保護高さと型式と質量と断面寸法だけで、 仕様ページの丸写しではない (価格・納期は持たない)。 型式は製品を指し示すための引用で、権利はメーカーにある。 この編集物 (選び方・並べ方) を CC0 で出す"
+  }
+ ],
+ "distribution": "public",
+ "validation": {
+  "level": "V3",
+  "report": "validation/report.json",
+  "reviewed_by": "neka-nat",
+  "reviewed_at": "2026-09-03"
+ },
+ "compatibility": {
+  "mounts": [],
+  "requires_adapter": [],
+  "programs": [],
+  "connections": []
+ }
+}
