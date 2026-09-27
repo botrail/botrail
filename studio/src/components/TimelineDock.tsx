@@ -1,11 +1,32 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
 import type { StepSpanMsg } from "../protocol";
 import { setPhysics } from "../bake";
 import { followsLive, useStudioStore } from "../store";
+import {
+  LANE_GROUPS,
+  clampLanesHeight,
+  isFolded,
+  parseLaneView,
+  serializeLaneView,
+  signalGroup,
+  toggleGroup,
+  type LaneGroup,
+  type LaneView,
+} from "../timelineLanes";
 import { sendExportUsd } from "../ws";
 import { chipsForLane } from "./IoOverlay";
+
+const LANES_KEY = "botrail-studio.lanes";
+
+function initialLaneView(): LaneView {
+  try {
+    return parseLaneView(localStorage.getItem(LANES_KEY));
+  } catch {
+    return parseLaneView(null);
+  }
+}
 
 const BAND_COLORS = ["#4a6fa5", "#5a8f6a", "#a5824a", "#7a5aa5", "#a55a6f"];
 const ROBOT_LANE_COLOR = "#4a8fa5";
@@ -173,7 +194,27 @@ export function TimelineDock() {
   const sequenceError = useStudioStore((s) => s.sequenceError);
   const sequenceErrorScenario = useStudioStore((s) => s.sequenceErrorScenario);
   const barRef = useRef<HTMLDivElement | null>(null);
-  const [showDevices, setShowDevices] = useState(false);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const lanesRef = useRef<HTMLDivElement | null>(null);
+  const [laneView, setLaneView] = useState<LaneView>(initialLaneView);
+  useEffect(() => {
+    try {
+      localStorage.setItem(LANES_KEY, serializeLaneView(laneView));
+    } catch {
+      // Private-mode storage failures only cost persistence.
+    }
+  }, [laneView]);
+  // Signal lanes by group, in the bake's order within each.
+  const signalsByGroup = useMemo(() => {
+    const groups: Record<LaneGroup, NonNullable<typeof timeline>["signals"]> = {
+      robots: [],
+      signals: [],
+      sensors: [],
+      devices: [],
+    };
+    for (const signal of timeline?.signals ?? []) groups[signalGroup(signal.kind)].push(signal);
+    return groups;
+  }, [timeline]);
   // Lane name -> channel chips, from the I/O map's bound points.
   const chips = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -211,8 +252,63 @@ export function TimelineDock() {
 
   const pct = (t: number) => `${(t / duration) * 100}%`;
 
+  // One robot plays alone on the step bar; several get a lane each.
+  const counts: Record<LaneGroup, number> = {
+    robots: lanes.length > 1 ? lanes.length : 0,
+    signals: signalsByGroup.signals.length,
+    sensors: signalsByGroup.sensors.length,
+    devices: signalsByGroup.devices.length,
+  };
+  const groups = LANE_GROUPS.filter((g) => counts[g] > 0);
+  const shown = (g: LaneGroup) => counts[g] > 0 && !isFolded(laneView, g, counts[g]);
+
+  // Drag the dock's top edge to size the lane area (double-click: back to
+  // the default share of the viewport).
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    const area = lanesRef.current;
+    const dock = dockRef.current;
+    if (!area || !dock) return;
+    e.preventDefault();
+    const grip = e.currentTarget;
+    const startY = e.clientY;
+    const startHeight = area.clientHeight;
+    const viewport = dock.parentElement?.clientHeight ?? window.innerHeight;
+    grip.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) =>
+      setLaneView((v) => ({
+        ...v,
+        height: clampLanesHeight(startHeight + (startY - ev.clientY), viewport),
+      }));
+    const up = (ev: PointerEvent) => {
+      grip.releasePointerCapture(ev.pointerId);
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  };
+
+  const signalLanes = (group: LaneGroup) =>
+    signalsByGroup[group].map((signal) => (
+      <SignalLane
+        key={signal.name}
+        signal={signal}
+        duration={duration}
+        chips={chips.get(signal.name) ?? []}
+        hot={highlightLane === signal.name}
+      />
+    ));
+
   return (
-    <div className="timeline-dock">
+    <div className="timeline-dock" ref={dockRef}>
+      {laneView.open && groups.length > 0 && (
+        <div
+          className="timeline-grip"
+          onPointerDown={startResize}
+          onDoubleClick={() => setLaneView((v) => ({ ...v, height: null }))}
+          title="drag to size the lanes · double-click for the default"
+        />
+      )}
       <div className="timeline-head">
         <span>
           {recordingLabel ? `● ${recordingLabel} — ` : ""}
@@ -266,6 +362,19 @@ export function TimelineDock() {
               }
             >
               ⚛ {timeline?.physics ?? "physics"}
+            </button>
+          )}
+          {/* The lanes can bury the viewport on a big line: hide them
+              all (the step bar stays), or fold them group by group below. */}
+          {groups.length > 0 && (
+            <button
+              className={
+                laneView.open ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setLaneView((v) => ({ ...v, open: !v.open }))}
+              title={laneView.open ? "hide the lanes (the step bar stays)" : "show the lanes"}
+            >
+              lanes
             </button>
           )}
           {timeline && (
@@ -385,75 +494,71 @@ export function TimelineDock() {
           ))}
         <div className="timeline-playhead" style={{ left: pct(playbackTime) }} />
       </div>
-      {/* Robot lanes: when several robots (or the arms of one) run, each
-          gets a band lane of its move intervals (labelled with the motion
-          name). */}
-      {lanes.length > 1 &&
-        lanes.map((robot) => (
-          <div key={robot.name} className="timeline-lane">
-            <span
-              className="timeline-lane-name"
-              title={`${robot.name} — ${(utilization(robot.moves, duration) * 100).toFixed(0)}% busy`}
-            >
-              {robot.name}{" "}
-              <span className="timeline-lane-util">
-                {(utilization(robot.moves, duration) * 100).toFixed(0)}%
-              </span>
-            </span>
-            <div className="timeline-lane-track">
-              {robot.moves.map((move, i) => (
-                <div
-                  key={i}
-                  className="timeline-lane-on"
-                  title={`${move.name} · ${move.start.toFixed(2)}–${move.end.toFixed(2)}s`}
-                  style={{
-                    left: pct(move.start),
-                    width: `max(${((move.end - move.start) / duration) * 100}%, 2px)`,
-                    background: ROBOT_LANE_COLOR,
-                  }}
-                />
-              ))}
-            </div>
+      {laneView.open && groups.length > 0 && (
+        <>
+          <div className="timeline-groups">
+            {groups.map((group) => (
+              <button
+                key={group}
+                className={
+                  isFolded(laneView, group, counts[group])
+                    ? "timeline-chip"
+                    : "timeline-chip timeline-chip-on"
+                }
+                onClick={() => setLaneView((v) => toggleGroup(v, group, counts[group]))}
+                title={`${isFolded(laneView, group, counts[group]) ? "show" : "fold"} the ${group} lanes`}
+              >
+                {isFolded(laneView, group, counts[group]) ? "▸" : "▾"} {group} {counts[group]}
+              </button>
+            ))}
           </div>
-        ))}
-      {/* Process lanes (internal signals + sensor inputs) always show;
-          device output lanes fold away by default — a line's worth of
-          sources and sinks is hundreds of them, and unfolded they bury
-          the chart (and the viewport). */}
-      {(timeline?.signals ?? [])
-        .filter((signal) => signal.kind !== "device")
-        .map((signal) => (
-          <SignalLane
-            key={signal.name}
-            signal={signal}
-            duration={duration}
-            chips={chips.get(signal.name) ?? []}
-            hot={highlightLane === signal.name}
-          />
-        ))}
-      {timeline?.signals.some((signal) => signal.kind === "device") && (
-        <div className="timeline-lane">
-          <button
-            className="timeline-button"
-            onClick={() => setShowDevices(!showDevices)}
+          {/* The lanes scroll inside a bounded area: a line's worth of
+              robots and signals never pushes the dock over the viewport. */}
+          <div
+            className="timeline-lanes"
+            ref={lanesRef}
+            style={laneView.height !== null ? { maxHeight: laneView.height } : undefined}
           >
-            {showDevices ? "▾" : "▸"} devices (
-            {timeline.signals.filter((s) => s.kind === "device").length})
-          </button>
-        </div>
+            {/* Robot lanes: when several robots (or the arms of one) run,
+                each gets a band lane of its move intervals (labelled with
+                the motion name). */}
+            {shown("robots") &&
+              lanes.map((robot) => (
+                <div key={robot.name} className="timeline-lane">
+                  <span
+                    className="timeline-lane-name"
+                    title={`${robot.name} — ${(utilization(robot.moves, duration) * 100).toFixed(0)}% busy`}
+                  >
+                    {robot.name}{" "}
+                    <span className="timeline-lane-util">
+                      {(utilization(robot.moves, duration) * 100).toFixed(0)}%
+                    </span>
+                  </span>
+                  <div className="timeline-lane-track">
+                    {robot.moves.map((move, i) => (
+                      <div
+                        key={i}
+                        className="timeline-lane-on"
+                        title={`${move.name} · ${move.start.toFixed(2)}–${move.end.toFixed(2)}s`}
+                        style={{
+                          left: pct(move.start),
+                          width: `max(${((move.end - move.start) / duration) * 100}%, 2px)`,
+                          background: ROBOT_LANE_COLOR,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            {/* Internal signals, then sensor inputs (folded on their own
+                when a line has many), then device outputs (folded until
+                asked for — hundreds on a line of sources and sinks). */}
+            {shown("signals") && signalLanes("signals")}
+            {shown("sensors") && signalLanes("sensors")}
+            {shown("devices") && signalLanes("devices")}
+          </div>
+        </>
       )}
-      {showDevices &&
-        (timeline?.signals ?? [])
-          .filter((signal) => signal.kind === "device")
-          .map((signal) => (
-            <SignalLane
-              key={signal.name}
-              signal={signal}
-              duration={duration}
-              chips={chips.get(signal.name) ?? []}
-              hot={highlightLane === signal.name}
-            />
-          ))}
     </div>
   );
 }

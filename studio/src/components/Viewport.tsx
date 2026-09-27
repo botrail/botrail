@@ -157,8 +157,8 @@ export function Viewport() {
         <ambientLight intensity={0.12} />
         {/* Shadow bounds follow the cell. */}
         <ShadowFollow />
-        {/* Fill from the opposite side so the shadowed faces don't go flat. */}
-        <directionalLight position={[-3, -2, 2]} intensity={0.3} />
+        {/* Broad factory lighting keeps faces below portal beams readable. */}
+        <directionalLight position={[-3, -2, 2]} intensity={1.0} />
         <hemisphereLight position={[0, 0, 1]} args={["#8899aa", "#20242c", 0.25]} />
 
         {/* Something for the cell to stand on. A grid alone reads as graph

@@ -22,6 +22,7 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 # their own command lines and are not listed.
 CELL_DEMOS = [
     "assembly/cover_bolting_demo.py",
+    "assembly/shuttle_line_demo.py",
     "basics/demo.py",
     "basics/friction_grasp_demo.py",
     "basics/gripper_pick_demo.py",

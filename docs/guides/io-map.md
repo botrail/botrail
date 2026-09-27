@@ -532,5 +532,6 @@ tl.signal("belt").kind     # "device"
 tl.signal("seen").kind     # "signal"
 ```
 
-That is the same classification the studio's timing chart uses to fold device
-lanes away.
+That is the same classification the studio's timing chart groups its lanes by:
+device lanes start folded, sensor lanes fold once a cell has more than twelve,
+and each group has a chip to fold it in or out.

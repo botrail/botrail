@@ -865,6 +865,70 @@ button.danger:hover:not(:disabled) {
   pointer-events: none;
 }
 
+/* The dock's top edge: drag to size the lane area (see TimelineDock). */
+.timeline-grip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -5px;
+  height: 10px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.timeline-grip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  width: 36px;
+  height: 2px;
+  margin-left: -18px;
+  border-radius: 1px;
+  background: #3a4356;
+}
+
+.timeline-grip:hover::after {
+  background: #4a6fa5;
+}
+
+/* One chip per lane group — robots, signals, sensors, devices — that folds it. */
+.timeline-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.timeline-chip {
+  background: #1a202c;
+  color: #6b7688;
+  border: 1px solid #2a3242;
+  border-radius: 9px;
+  padding: 0 7px;
+  height: 17px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.timeline-chip:hover {
+  border-color: #4a6fa5;
+}
+
+.timeline-chip-on {
+  color: #aeb8c8;
+}
+
+/* The lanes scroll inside a bounded area; a drag on the grip overrides
+ * the cap inline. */
+.timeline-lanes {
+  max-height: 25vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
 .timeline-lane {
   display: flex;
   align-items: center;

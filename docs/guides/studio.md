@@ -263,6 +263,14 @@ sheet. The playback cursor drives the viewport. Recordings loaded with
 `play_usd_animation` — including two-robot bakes and Isaac captures — play
 through the same dock.
 
+A line's bake can carry a hundred lanes, so they never take the viewport
+over: they scroll inside an area capped at a quarter of the view, and a row of
+chips — *robots*, *signals*, *sensors*, *devices*, each with its count —
+folds a group in or out (device outputs start folded, and sensors do too once
+a cell has more than twelve). **lanes** in the dock's header hides them all,
+leaving the step bar; drag the dock's top edge to size the lane area
+(double-click it for the default). The browser remembers these choices.
+
 ## Serving details
 
 ```python
