@@ -16,6 +16,7 @@ members = [
     "crates/botrail-py",
     "crates/botrail-wasm",
     "crates/botrail-bench",
+    "crates/botrail-cloth",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ botrail-physics-rapier = { path = "crates/botrail-physics-rapier" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
 botrail-session = { path = "crates/botrail-session" }
+botrail-cloth = { path = "crates/botrail-cloth" }
 botrail-usd = { path = "crates/botrail-usd" }
 parry3d-f64 = "0.29"
 xurdf = "0.6"

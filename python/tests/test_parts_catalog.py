@@ -2197,3 +2197,234 @@ def test_a_controller_is_ordered_in_the_enclosure_the_maker_sells(tmp_path: Path
     assert row["model"] == "UR-CB-E" and row["attributes"]["mass_kg"] == 12.0
     with pytest.raises(ValueError, match="drop variant="):
         bt.parts.controller(scene, "CB2", robots=["simple_arm"], catalog=one, variant="A-cabinet")
+
+
+# ------------------------------------------------------------ frame units
+# A maker's profile system as the catalog sells it: profiles cut to the
+# millimetre (the range, the step and the kg/m are MISUMI's for HFS6-3030),
+# the bracket a joint takes, its bolts and nuts, the caps and the feet.
+FRAME_MANIFEST = """
+schema_version: '0.1'
+id: misumi/hfs/6-series/r1
+kind: spec
+category: structure.frame
+name: Aluminium frame 6 series
+manufacturer:
+  name: MISUMI
+distribution: public
+configuration:
+  generator: frame_unit
+  params:
+    finish:
+      values: [clear, black]
+      default: clear
+  components:
+    - role: profile_3030
+      category: structure.frame.profile
+      part_number: "{finish_code}6-3030-{length_mm}"
+      length_mm: {min: 50, max: 4000, step: 0.5, default: 1000}
+      dimensions_mm: {w: 30, d: 30, slot: 8}
+      codes:
+        finish: {clear: HFS, black: HFSB}
+      mass:
+        per_mm: {length_mm: 0.0009}
+    - role: bracket
+      category: structure.frame.hardware
+      part_number: HBLFS6
+      mass: {base_kg: 0.03}
+    - role: bolt
+      category: structure.frame.hardware
+      part_number: CBM6-12
+      mass: {base_kg: 0.006}
+    - role: nut
+      category: structure.frame.hardware
+      part_number: HNTT6-6
+      mass: {base_kg: 0.004}
+    - role: cap
+      category: structure.frame.hardware
+      part_number: HFC6-3030-B
+      mass: {base_kg: 0.002}
+    - role: foot
+      category: structure.frame.hardware
+      part_number: AJ-M12-30
+      dimensions_mm: {height: 30, pad: 50}
+      mass: {base_kg: 0.08}
+  rules:
+    joint: butt
+    brackets_per_joint: 1
+    nuts_per_bracket: 2
+"""
+
+
+@pytest.fixture()
+def profiles(tmp_path: Path) -> Path:
+    directory = tmp_path / "hfs6"
+    directory.mkdir()
+    (directory / "manifest.yaml").write_text(FRAME_MANIFEST)
+    return directory
+
+
+def test_the_frame_unit_reproduces_the_makers_set_contents(profiles: Path) -> None:
+    """MISUMI publishes what its standard unit HAUBA6-3030-W620-D480-H570 is
+    made of: HFS6-3030 620 x2, 560 x2, 420 x4, 540 x4, 24 brackets, 48 bolts,
+    48 nuts, 4 caps. The template cuts the same list from the same size."""
+    scene = scene_()
+    built = bt.parts.frame_unit(scene, "stand", (0.62, 0.48, 0.57), (0.0, 0.0), catalog=profiles, feet=False)
+    assert built.frames == ["stand/top"]
+    assert scene.frame("stand/top")[0] == pytest.approx([0.0, 0.0, 0.57])
+    by = rows(scene)
+    unit = by["stand"]
+    assert unit["model"] == "table 620x480x570 (30x30)" and unit["manufacturer"] == "MISUMI"
+    assert unit["description"] == "Aluminium frame 6 series"
+    assert unit["catalog"].startswith("misumi/hfs/6-series/r1")
+    assert (unit["attributes"]["template"], unit["attributes"]["finish"]) == ("table", "clear")
+    cuts = {
+        (row["model"], row["qty"]): row["attributes"]["mass_kg"]
+        for name, row in by.items() if name.startswith("stand/profiles/")
+    }
+    assert cuts == {
+        ("HFS6-3030-620", 2): pytest.approx(0.558),
+        ("HFS6-3030-560", 2): pytest.approx(0.504),
+        ("HFS6-3030-540", 4): pytest.approx(0.486),
+        ("HFS6-3030-420", 4): pytest.approx(0.378),
+    }
+    hardware = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("stand/hardware/")}
+    assert hardware == {"HBLFS6": 24, "CBM6-12": 48, "HNTT6-6": 48, "HFC6-3030-B": 4}
+    assert scene.bom().total("mass_kg") == pytest.approx(6.788)
+    # The two width rails on top run the full width and sit on the legs.
+    lo, hi = scene.obstacle_bounds("stand/profiles/3030/l620/rail_top_x0")
+    assert (round(lo[0], 3), round(hi[0], 3), round(lo[2], 3), round(hi[2], 3)) == (-0.31, 0.31, 0.54, 0.57)
+    lo, hi = scene.obstacle_bounds("stand/profiles/3030/l540/leg0")
+    assert (round(lo[2], 3), round(hi[2], 3)) == (0.0, 0.54)
+
+
+def test_a_length_the_pack_does_not_cut_is_refused(profiles: Path) -> None:
+    scene = scene_()
+    with pytest.raises(ValueError, match=r"length_mm=620.3 is off the 0.5 step — nearest is 620.5"):
+        bt.parts.frame_unit(scene, "stand", (0.6203, 0.48, 0.57), catalog=profiles)
+    with pytest.raises(ValueError, match=r"length_mm=4200 is out of range 50..4000"):
+        bt.parts.frame_unit(scene, "stand", (4.2, 0.48, 0.57), catalog=profiles)
+    # The same match, asked of the pack directly — a bracket has no length to cut.
+    from botrail._spec import Spec
+
+    spec = Spec.load(profiles)
+    assert spec.choose("length_mm", 1140.5, role="profile_3030") == 1140.5
+    with pytest.raises(ValueError, match="component 'bracket' keeps no 'length_mm'"):
+        spec.choose("length_mm", 100, role="bracket")
+    assert spec.part_number("profile_3030", finish="black", length_mm=1140.5) == "HFSB6-3030-1140.5"
+
+
+def test_the_plan_is_the_cut_list_before_anything_is_built() -> None:
+    """The template's arithmetic is a pure function — what the makers' set
+    contents are checked against, with no scene in the way."""
+    plan = bt.parts.frame_unit_plan("table", (0.62, 0.48, 0.57), 0.03)
+    assert plan.lengths() == {0.62: 2, 0.56: 2, 0.54: 4, 0.42: 4}
+    assert len(plan.joints) == 24 and len(plan.caps) == 4 and plan.feet == () and plan.board is None
+    # A foot under each leg shortens the legs by its height; a board goes on the ring.
+    footed = bt.parts.frame_unit_plan("table", (0.62, 0.48, 0.57), 0.03, foot=0.03, top=0.02)
+    assert footed.lengths()[0.51] == 4 and footed.feet == ("leg0", "leg1", "leg2", "leg3")
+    assert footed.board == ((0.62, 0.48, 0.02), (0.0, 0.0, pytest.approx(0.58)))
+    # No lower ring: eight members and twelve joints.
+    open_ = bt.parts.frame_unit_plan("table", (0.62, 0.48, 0.57), 0.03, lower_rails=None)
+    assert len(open_.members) == 8 and len(open_.joints) == 12
+    with pytest.raises(ValueError, match="template must be one of table"):
+        bt.parts.frame_unit_plan("cover", (0.62, 0.48, 0.57), 0.03)
+    with pytest.raises(ValueError, match="no room for rails"):
+        bt.parts.frame_unit_plan("table", (0.05, 0.48, 0.57), 0.03)
+    with pytest.raises(ValueError, match="not tall enough"):
+        bt.parts.frame_unit_plan("table", (0.62, 0.48, 0.05), 0.03)
+
+
+def test_a_black_frame_takes_the_black_article_and_the_feet_the_pack_sells(profiles: Path) -> None:
+    scene = scene_()
+    bt.parts.frame_unit(scene, "stand", (1.2, 0.8, 0.75), catalog=profiles, finish="black")
+    by = rows(scene)
+    assert by["stand"]["attributes"]["finish"] == "black"
+    cuts = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("stand/profiles/")}
+    # Legs: 750 less the rail on top and the 30 mm adjuster underneath.
+    assert cuts == {"HFSB6-3030-1200": 2, "HFSB6-3030-1140": 2, "HFSB6-3030-740": 4, "HFSB6-3030-690": 4}
+    assert by["stand/hardware/feet"]["model"] == "AJ-M12-30" and by["stand/hardware/feet"]["qty"] == 4
+    lo, _ = scene.obstacle_bounds("stand/profiles/3030/l690/leg0")
+    assert round(lo[2], 3) == 0.03
+
+
+def test_frame_hardware_is_decoration_and_the_bill_does_not_care(profiles: Path, tmp_path: Path) -> None:
+    """Brackets, caps and feet are drawn in full detail and never collided;
+    bolts and nuts are not drawn at all but still counted — on one hidden
+    resident each, since a BOM line has to stand for something. Either way
+    the members are all a robot can hit and the bill is the same."""
+    def build(mode: str):
+        scene = scene_()
+        bt.parts.frame_unit(scene, "stand", (1.2, 0.8, 0.75), catalog=profiles, detail=mode)
+        return scene
+
+    plain, full = build("plain"), build("full")
+    assert sorted(plain.obstacle_names) == sorted(full.obstacle_names)
+    assert plain.bom().to_markdown() == full.bom().to_markdown()
+    members = [n for n in full.obstacle_names if "/profiles/" in n]
+    assert len(members) == 12
+    for scene in (plain, full):
+        assert all(scene.obstacle_enabled(n) for n in members)
+        assert not any(scene.obstacle_enabled(n) for n in scene.obstacle_names if "/hardware/" in n)
+        assert all(plain.obstacle_bounds(n) == full.obstacle_bounds(n) for n in members)
+        for lot in ("stand/hardware/bolts/lot", "stand/hardware/nuts/lot"):
+            assert not scene.obstacle_visible(lot)
+    assert not any(plain.obstacle_visible(n) for n in plain.obstacle_names if "/hardware/" in n)
+    drawn = [n for n in full.obstacle_names if "/hardware/" in n and full.obstacle_visible(n)]
+    assert len(drawn) == 24 + 4 + 4  # brackets, caps, feet
+    # In full detail every member is drawn as the library's T-slot extrusion,
+    # tinted the finish, its length turned along the member; plain keeps boxes.
+    by_full = {o["name"]: o for o in json.loads(full._project_json())["obstacles"]}
+    by_plain = {o["name"]: o for o in json.loads(plain._project_json())["obstacles"]}
+    for n in members:
+        asset = by_full[n]["visual_asset"]
+        assert asset["prim_path"] == "/Shapes/tslot" and asset["color_override"] is True
+        assert "visual_asset" not in by_plain[n]
+    rail = by_full["stand/profiles/3030/l1200/rail_top_x0"]["visual_asset"]["transform"]
+    assert rail[:3] == pytest.approx([0.0, 0.03, 0.0]) and rail[8:11] == pytest.approx([1.2, 0.0, 0.0])
+    leg = by_full["stand/profiles/3030/l690/leg0"]["visual_asset"]["transform"]
+    assert leg[:3] == pytest.approx([0.03, 0.0, 0.0]) and leg[8:11] == pytest.approx([0.0, 0.0, 0.69])
+    # ...and the pinning survives a project round trip (every line stands on a resident).
+    project = tmp_path / "cell.botrail"
+    full.save_project(project)
+    assert len(bt.Scene.load_project(project).bom().rows) == len(full.bom().rows)
+
+
+def test_a_free_form_frame_counts_what_you_join(profiles: Path) -> None:
+    scene = scene_()
+    unit = bt.parts.FrameUnit(scene, "rig", catalog=profiles, finish="black")
+    leg = unit.member("leg", (0.0, 0.0, 0.0), (0.0, 0.0, 0.72))
+    beam = unit.member("beam", (0.0, 0.0, 0.72), (1.14, 0.0, 0.72))
+    unit.joint(leg, beam)
+    unit.cap(beam, "to")
+    unit.frame("tip", (1.14, 0.0, 0.72))
+    built = unit.build()
+    assert built.frames == ["rig/tip"]
+    by = rows(scene)
+    assert by["rig"]["model"] == "frame unit 1155x30x735 (30x30)"
+    assert by["rig/profiles/3030/l720"]["model"] == "HFSB6-3030-720"
+    assert by["rig/profiles/3030/l1140"]["attributes"]["mass_kg"] == pytest.approx(1.026)
+    hardware = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("rig/hardware/")}
+    assert hardware == {"HBLFS6": 1, "CBM6-12": 2, "HNTT6-6": 2, "HFC6-3030-B": 1}
+    with pytest.raises(ValueError, match="no member 'post' to join"):
+        unit.joint("post", beam)
+    with pytest.raises(ValueError, match="must run along one axis"):
+        unit.member("brace", (0.0, 0.0, 0.0), (0.5, 0.0, 0.5))
+    with pytest.raises(ValueError, match="no profile '4040'"):
+        unit.member("fat", (0.0, 0.0, 0.0), (0.0, 0.0, 0.5), section="4040")
+
+
+def test_a_hand_written_frame_unit_is_one_line() -> None:
+    scene = scene_()
+    built = bt.parts.frame_unit(
+        scene, "hand", (1.0, 0.6, 0.7), section=0.04, model="HFS8-4040 frame", manufacturer="MISUMI"
+    )
+    assert len([n for n in built.obstacles if "/members/" in n]) == 12
+    assert not any("/hardware/" in n for n in built.obstacles)
+    by = rows(scene)
+    assert by["hand"]["model"] == "HFS8-4040 frame" and by["hand"]["manufacturer"] == "MISUMI"
+    assert [name for name in by if name.startswith("hand")] == ["hand"]
+    with pytest.raises(ValueError, match="section \\(metres\\) is required"):
+        bt.parts.frame_unit(scene, "bare", (1.0, 0.6, 0.7))
+    with pytest.raises(ValueError, match="size is required"):
+        bt.parts.frame_unit(scene, "bare", section=0.04)

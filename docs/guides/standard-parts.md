@@ -32,6 +32,7 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`fence`][botrail.parts.fence] | panels under `<name>/panels/`, posts under `<name>/posts/`, the door as `<name>/door` | — | — | `<name>` (`structure.fence`, qty = panels), `<name>/posts` (`structure.fence.post`, qty = posts), the door (`structure.door`) |
 | [`table`][botrail.parts.table] | `<name>/top`, four legs | `<name>/top` (centre of the top face) | — | `<name>` (`structure.table`), and with a catalog `<name>/top` (the board, where the maker sells it as its own article) |
 | [`pedestal`][botrail.parts.pedestal] | `<name>/base`, `<name>/column`, `<name>/top` | `<name>/mount` (the robot's base pose) | — | `<name>` (`structure.pedestal`) |
+| [`frame_unit`][botrail.parts.frame_unit] | the profiles under `<name>/profiles/<section>/l<length>/` (they collide), the brackets, caps and feet under `<name>/hardware/` (decoration, drawn in full detail), a board `<name>/top` when one is asked for | `<name>/top` (centre of the top face) | — | `<name>` (`structure.frame`: the template and size), one line per profile length (`structure.frame.profile`, qty = members of that length), one per hardware article (`structure.frame.hardware`: brackets counted from the joints, bolts and nuts from the brackets, caps, feet) |
 | [`conveyor`][botrail.parts.conveyor] | `<name>/belt`, side rails, legs | `<name>/infeed`, `<name>/outfeed` | the conveyor device `<name>`, its zone on the belt | the *device* (`conveyor`) — the body is its geometry, not a second product |
 | [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`cabinet`][botrail.parts.cabinet] | `<name>/body`, its plinth as `<name>/base`, the mounting plate standing inside as `<name>/plate` | `<name>/front` (centre of the door face at floor level — where an operator stands) | — | `<name>` (`structure.cabinet`), and with a catalog `<name>/base` and `<name>/plate` (`structure.cabinet.base` / `.plate` — the plinth and the plate are articles of their own) |
@@ -151,6 +152,59 @@ one name (`conv` the device, `conv/belt` the slab): `scene.set_part("conv",
 …)` then needs `kind="device"` to say which — the generators do this for
 you.
 
+## Aluminium frames from a system pack
+
+A maker's aluminium profile system — MISUMI's HFS series, SUS's SF, item,
+Bosch Rexroth — is not a product but a parts bin: profiles cut to the
+millimetre, the bracket that joins two of them, the bolts and nuts a bracket
+takes, caps, adjuster feet. The catalog carries it as a *frame system pack*
+(`kind: spec`, generator `frame_unit`): each profile with the range and step
+it is cut in and its kg/m, each piece of hardware with its article number.
+What botrail adds is the arrangement.
+
+[`frame_unit`][botrail.parts.frame_unit] builds a template from it — `table`
+for now: four legs under a ring of rails, a lower ring, feet, a board if you
+ask — and the BOM is the **cut list**: the unit on the group line, one line
+per profile length (`HFS6-3030-1140` x2, `HFS6-3030-740` x4 …), one per
+hardware article, counted from the joints. The rule is the one the makers'
+own standard units follow: the two width rails on top run the full width and
+sit on the legs, every other rail is butt-jointed between them two sections
+short, the legs are a section shorter than the height, and every 3-member
+corner is three bracketed joints. For a 620 x 480 x 570 frame on a 30 mm
+section that is exactly MISUMI's published set for
+`HAUBA6-3030-W620-D480-H570` — 620 x2, 560 x2, 420 x4, 540 x4, 24 brackets,
+48 bolts, 48 nuts, 4 caps.
+
+```python
+stand = bt.parts.frame_unit(scene, "stand", (1.2, 0.8, 0.75), (1.0, 0.0),
+                            catalog="misumi/hfs/6-series", finish="black")
+scene.set_robot_base_pose(*scene.frame("stand/top"))
+```
+
+A length the pack does not cut is refused with the nearest one on its grid
+(`length_mm=1140.3 is off the 0.5 step — nearest is 1140.5`), and a size that
+leaves no room for the rails is refused before anything is placed.
+[`frame_unit_plan`][botrail.parts.frame_unit_plan] is the template's
+arithmetic on its own — the cut list as data, without a scene.
+
+For a shape no template has, [`FrameUnit`][botrail.parts.FrameUnit] takes
+the members one by one — `member(tag, frm, to)` in the unit's own frame,
+`joint(a, b)` for every bracketed pair, `cap`, `foot`, `frame` — and
+`build()` cuts and counts the same way.
+
+The members are the massing: boxes at the real section, which a robot can
+hit. In full detail each member is drawn as the shape library's `tslot`
+extrusion — the section scaled to the profile's, the length to the cut,
+tinted clear or black for the finish — the way a carton is drawn over its
+box, so the picture travels with the member and the collision stays the box.
+Brackets, caps and feet are drawn in full detail and never collided; bolts
+and nuts sit inside the slots and are not drawn at all, but they are still
+counted — on one hidden resident each (`<name>/hardware/bolts/lot`), because
+a BOM line has to stand for something in the scene. `detail` changes what
+you see and nothing else. Not yet: rectangular sections (30 x 60) in a
+template and panels (a `cover` template) — a pack's `bracket`, `cap` and
+`foot` components can already name a `trim` of their own.
+
 ## Bringing shapes from CAD — the Geometry Provider pattern
 
 botrail does not model shapes, and will not: no sketches, no features, no
@@ -239,6 +293,7 @@ scale with the box.
 | `handle` | a bent-tube grip, its opening along −Z | brushed steel |
 | `hose` | a hanging drain hose | rubber |
 | `tote` | the ribbed sleeve of a small-load container (a KLT): outer skin, vertical ribs, stacking rim and base band, a grip on each end, a card pocket — open inside and below, drawn a little past the plain boxes that are its walls and floor | polypropylene (tint it) |
+| `tslot` | a T-slot aluminium extrusion: square section, one slot per face, a hollow core — x and y are the section, z the cut length, scaled apart so a 30 mm and a 60 mm member look alike; `frame_unit` turns z along each member | machined aluminium (tint it for the anodising) |
 
 ## Series-specific equipment trims
 

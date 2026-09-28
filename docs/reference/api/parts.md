@@ -1,7 +1,8 @@
 # Standard parts (`bt.parts`)
 
 Generators for the structures every cell has — fences, walls, tables,
-pedestals, racks, conveyor bodies, pallets, light curtains, stairs, a
+pedestals, aluminium frame units cut from a maker's profile system
+(`frame_unit`, `FrameUnit`), racks, conveyor bodies, pallets, light curtains, stairs, a
 machining centre with its door and panel, a screw presenter with its
 magazine, screws and compound solids, the shape library (`appearance`,
 `shaped_box`) and the props drawn from it (trays, stages, cartons, bins,

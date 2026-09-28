@@ -20,8 +20,12 @@ stepped range, and mass is a table, a length coefficient or an areal
 density (or an areal one plus a coefficient, for a panel whose frame runs
 round its edge). A part number is a template over those values — and where a
 maker does not write a dimension as it stands, the pack carries a table of
-the codes it writes instead, per part. See docs/equipment-catalog.md in
-botrail-catalog-builder.
+the codes it writes instead, per part. A dimension that belongs to one part
+rather than to the pack — the widths a fence panel is sold in
+(`widths_mm`), the cut length of an aluminium profile sold by the
+millimetre (`length_mm`, a stepped range) — sits on that component and is
+matched with `choose(name, value, role=...)`. See docs/equipment-catalog.md
+in botrail-catalog-builder.
 """
 
 from __future__ import annotations
@@ -86,12 +90,40 @@ class Spec:
         param = self.params().get(name)
         return param.get("default") if isinstance(param, dict) else None
 
-    def choose(self, name: str, value: Any) -> Any:
-        """Match a requested dimension against what the catalog actually sells."""
+    def components(self) -> list[dict]:
+        """The pack's parts, in the order it declares them."""
+        return [c for c in self.config.get("components") or [] if isinstance(c, dict)]
+
+    def local(self, role: str, name: str) -> Optional[dict]:
+        """A dimension kept on one component, as a param: the cut length of a
+        profile (`length_mm` — min / max / step / default) or the widths a
+        panel is sold in (`widths_mm`, read back as a list of values). None
+        where that part has no such axis."""
+        if not self.has_component(role):
+            return None
+        component = self.component(role)
+        if name == "length_mm" and isinstance(component.get("length_mm"), dict):
+            return component["length_mm"]
+        if name == "width_mm" and component.get("widths_mm"):
+            widths = list(component["widths_mm"])
+            return {"values": widths, "default": widths[0]}
+        return None
+
+    def choose(self, name: str, value: Any, role: Optional[str] = None) -> Any:
+        """Match a requested dimension against what the catalog actually sells.
+
+        With `role`, a dimension the pack keeps on that component rather than
+        on the pack — a profile's cut length (`length_mm`, sold in a stepped
+        range) or a panel's width (`widths_mm`) — is matched the same way:
+        `choose("length_mm", 1140.3, role="profile_3030")` is refused with
+        the nearest length on the 0.5 mm grid."""
         param = self.params().get(name)
+        if param is None and role is not None:
+            param = self.local(role, name)
         if not isinstance(param, dict):
             known = ", ".join(sorted(self.params())) or "none"
-            raise ValueError(f"{self.id}: no parameter {name!r} (it has: {known})")
+            where = f", and component {role!r} keeps no {name!r}" if role is not None else ""
+            raise ValueError(f"{self.id}: no parameter {name!r} (it has: {known}{where})")
         if value is None:
             return param.get("default")
         if "values" in param:
@@ -308,6 +340,8 @@ class Spec:
             # one article); a list of values has a code each, and a missing
             # one is a hole in the pack rather than a band to fall into.
             param = self.params().get(name)
+            if param is None:
+                param = self.local(role, name)
             banded = isinstance(param, dict) and "values" not in param
             code = _code(table, values[name], band=banded)
             if code is None:

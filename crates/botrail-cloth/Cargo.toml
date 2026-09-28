@@ -1,0 +1,19 @@
+[package]
+name = "botrail-cloth"
+description = "Garment cloth for botrail cells: a rapier-cloth simulation driven by gripper poses and grasp events, read back as a per-sample vertex track"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+nalgebra.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+# Developed side by side; switch to a crates.io version once 0.3 is published.
+rapier-cloth = { path = "../../../rapier-cloth", default-features = false, features = ["f64", "implicit"] }
+
+[dev-dependencies]
+serde_json.workspace = true
