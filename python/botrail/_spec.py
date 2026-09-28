@@ -217,6 +217,17 @@ class Spec:
             raise ValueError(f"{self.id}: component {role!r} visual must be '<layer>#<prim path>', not {ref!r}")
         return self.directory / layer, prim
 
+    def visual_scale(self, role: str) -> Optional[str]:
+        """How a part's `visual` follows the size it is built at: `None` — the
+        prim is authored at size and bound as it stands — or `"length"`, a
+        profile sold by the millimetre whose prim is authored at its real
+        cross-section, one metre long along +Z and centred, so the generator
+        stretches it to the cut length and turns it along the member."""
+        if not self.has_component(role):
+            return None
+        value = self.component(role).get("visual_scale")
+        return str(value) if value else None
+
     @property
     def mechanical(self) -> dict:
         """The pack's `mechanical` section — footprint, height, mass, mount,

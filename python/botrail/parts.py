@@ -1087,18 +1087,63 @@ _ANODIZED: _Finish = (0.8, 0.45)
 FRAME_TEMPLATES: tuple[str, ...] = ("table",)
 _CAP_THICKNESS = 0.003
 
+# A profile's cross-section in metres: (w, d), the two sides as the pack
+# names them (`dimensions_mm.w` / `.d`) — equal for a square profile.
+Section = tuple[float, float]
+
+
+def _section(value: Union[float, Section]) -> Section:
+    if isinstance(value, (int, float)):
+        return (float(value), float(value))
+    w, d = value
+    return (float(w), float(d))
+
+
+def _perm_sign(axes: Sequence[int]) -> float:
+    """+1 for an even permutation of (0, 1, 2), -1 for an odd one."""
+    inversions = sum(1 for i in range(3) for j in range(i + 1, 3) if axes[i] > axes[j])
+    return -1.0 if inversions % 2 else 1.0
+
+
+def _columns(axes: Sequence[int], scales: Sequence[float], flip: int) -> tuple[Point3, Point3, Point3]:
+    """The three columns of a column-major transform that send a prim's x,
+    y and z onto the obstacle's axes `axes`, scaled by `scales` (signed).
+    A mirror — an odd permutation, or an odd number of negative scales —
+    would turn the prim inside out, so column `flip` is negated to keep the
+    frame right-handed: pick one the prim is symmetric across (the length
+    of an extrusion, the width of a bracket, the breadth of a cap)."""
+    product = scales[0] * scales[1] * scales[2]
+    sign = _perm_sign(axes) * (1.0 if product > 0 else -1.0)
+    cols = [[0.0, 0.0, 0.0] for _ in range(3)]
+    for k in range(3):
+        cols[k][axes[k]] = scales[k] * (sign if k == flip else 1.0)
+    return (
+        (cols[0][0], cols[0][1], cols[0][2]),
+        (cols[1][0], cols[1][1], cols[1][2]),
+        (cols[2][0], cols[2][1], cols[2][2]),
+    )
+
+
+def _transform(columns: tuple[Point3, Point3, Point3], translation: Point3 = (0.0, 0.0, 0.0)) -> tuple[float, ...]:
+    cx, cy, cz = columns
+    return (*cx, 0.0, *cy, 0.0, *cz, 0.0, *translation, 1.0)
+
 
 @dataclass(frozen=True)
 class Member:
     """One profile of a frame unit: the pack's profile component it is cut
     from (`role`) and its two end centres in the unit's own frame — metres,
     floor centre, x along the width, before `yaw`. Members run along one
-    axis."""
+    axis. `wide` is the axis across the member that the section's `d` side
+    runs along, which only matters for a rectangular profile: left out, a
+    vertical member turns it along x and a horizontal member stands on
+    edge (along z)."""
 
     tag: str
     role: str
     frm: Point3
     to: Point3
+    wide: Optional[int] = None
 
     @property
     def axis(self) -> int:
@@ -1127,10 +1172,32 @@ class Member:
             raise ValueError(f"a member's end is 'frm' or 'to', not {which!r}")
         return self.frm if which == "frm" else self.to
 
-    def bounds(self, section: float) -> tuple[Point3, Point3]:
-        """The box the member fills, for a square `section` (metres)."""
-        half = [section / 2.0] * 3
-        half[self.axis] = self.length / 2.0
+    def across(self) -> tuple[int, int]:
+        """The two axes across the member: (the one the section's `w` side
+        runs along, the one its `d` side runs along)."""
+        axis = self.axis
+        wide = self.wide
+        if wide is None:
+            wide = 0 if axis == 2 else 2
+        if wide not in (0, 1, 2) or wide == axis:
+            raise ValueError(
+                f"member {self.tag!r}: wide must be an axis across the member (not its own, {axis}), not {self.wide!r}"
+            )
+        narrow = next(k for k in range(3) if k not in (axis, wide))
+        return narrow, wide
+
+    def size(self, section: Section) -> Point3:
+        """The box the member fills for a `section` (w, d) in metres."""
+        w_axis, d_axis = self.across()
+        size = [0.0, 0.0, 0.0]
+        size[self.axis] = self.length
+        size[w_axis] = float(section[0])
+        size[d_axis] = float(section[1])
+        return (size[0], size[1], size[2])
+
+    def bounds(self, section: Union[float, Section]) -> tuple[Point3, Point3]:
+        """The box the member fills, for a square side or a (w, d) section (metres)."""
+        half = [v / 2.0 for v in self.size(_section(section))]
         c = self.centre
         return (
             (c[0] - half[0], c[1] - half[1], c[2] - half[2]),
@@ -1164,27 +1231,37 @@ class FramePlan:
 def frame_unit_plan(
     template: str,
     size: Point3,
-    section: float,
+    section: Union[float, Section],
     *,
     lower_rails: Optional[float] = 0.0,
     foot: float = 0.0,
     top: float = 0.0,
     role: str = "profile",
+    legs: Optional[Union[float, Section]] = None,
+    rails: Optional[Union[float, Section]] = None,
+    legs_role: Optional[str] = None,
+    rails_role: Optional[str] = None,
 ) -> FramePlan:
     """The members a template is cut into — arithmetic only, no scene.
 
     `table`: four legs under a ring of rails, `size = (width, depth, height)`
     the frame's envelope (the height is to the top of the ring, a board
-    goes above it), `section` the profile's square side. The rule is the
-    one the makers' standard units follow (MISUMI's HAU-BA set contents):
-    the two width rails on top run the full width and sit **on** the legs;
-    every other rail is butt-jointed between them, two sections short; the
-    legs are a section shorter than the height, less the `foot` under them.
-    `lower_rails` is the height of the lower ring's underside above the
-    legs' bottom (0 = flush with the floor, the standard unit; `None` = no
-    lower ring). Every 3-member corner is three bracketed joints, the four
-    exposed ends of the top width rails get a cap, each leg a foot when
-    `foot` > 0, and `top` > 0 puts a board that thick on the ring.
+    goes above it), `section` the profile's cross-section — a square side,
+    or `(w, d)` for a rectangular one; `legs` / `rails` give the legs and
+    the rails a section of their own (and `legs_role` / `rails_role` the
+    pack component each is cut from). The rule is the one the makers'
+    standard units follow (MISUMI's HAU-BA set contents): the two width
+    rails on top run the full width and sit **on** the legs; every other
+    rail is butt-jointed between them (a depth rail between the width
+    rails, a lower rail between the legs); the legs are a rail's height
+    shorter than the frame, less the `foot` under them. A rectangular rail
+    stands on edge (its `d` side vertical) and a rectangular leg turns its
+    `d` side along the width. `lower_rails` is the height of the lower
+    ring's underside above the legs' bottom (0 = flush with the floor, the
+    standard unit; `None` = no lower ring). Every 3-member corner is three
+    bracketed joints, the four exposed ends of the top width rails get a
+    cap, each leg a foot when `foot` > 0, and `top` > 0 puts a board that
+    thick on the ring.
 
     For W 620 x D 480 x H 570 on a 30 mm section this is 620 x2, 560 x2,
     420 x4, 540 x4 — MISUMI's published set for `HAUBA6-3030-W620-D480-H570`."""
@@ -1193,50 +1270,60 @@ def frame_unit_plan(
             f"frame_unit: template must be one of {'/'.join(FRAME_TEMPLATES)}, not {template!r}"
         )
     w, d, h = (float(v) for v in size)
-    s = float(section)
-    if min(w, d, h, s) <= 0:
+    leg_w, leg_d = _section(section if legs is None else legs)
+    rail_w, rail_d = _section(section if rails is None else rails)
+    if min(w, d, h, leg_w, leg_d, rail_w, rail_d) <= 0:
         raise ValueError("frame_unit: size and section must be positive")
     if foot < 0 or top < 0:
         raise ValueError("frame_unit: foot and top must not be negative")
-    if w <= 2 * s or d <= 2 * s:
+    legs_role = legs_role or role
+    rails_role = rails_role or role
+    # A leg turns its `d` side along x; a rail stands on edge, `d` up.
+    lx, ly = leg_d, leg_w
+    r, rz = rail_w, rail_d
+    if w <= 2 * lx or d <= 2 * ly:
         raise ValueError(
             f"frame_unit: a {w * 1e3:.0f} x {d * 1e3:.0f} mm frame has no room for rails "
-            f"between {s * 1e3:.0f} mm legs"
+            f"between {lx * 1e3:.0f} x {ly * 1e3:.0f} mm legs"
         )
     if lower_rails is not None and lower_rails < 0:
         raise ValueError("frame_unit: lower_rails is a height above the legs' bottom")
-    ring_from = foot + (0.0 if lower_rails is None else lower_rails + s)
-    if h - s <= ring_from + 1e-9:
+    ring_from = foot + (0.0 if lower_rails is None else lower_rails + rz)
+    if h - rz <= ring_from + 1e-9:
         raise ValueError(
             f"frame_unit: a {h * 1e3:.0f} mm frame is not tall enough for its rings "
-            f"({s * 1e3:.0f} mm section, foot {foot * 1e3:.0f} mm)"
+            f"({rz * 1e3:.0f} mm rails, foot {foot * 1e3:.0f} mm)"
         )
 
     members: list[Member] = []
     joints: list[tuple[str, str]] = []
     corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-    cx = w / 2 - s / 2  # leg centres
-    cy = d / 2 - s / 2
-    top_z = h - s / 2
+    cx = w / 2 - lx / 2  # leg centres
+    cy = d / 2 - ly / 2
+    top_z = h - rz / 2
 
     # The ring on top: two full-width rails on the legs, two depth rails between them.
     for iy, sy in enumerate((-1.0, 1.0)):
-        members.append(Member(f"rail_top_x{iy}", role, (-w / 2, sy * cy, top_z), (w / 2, sy * cy, top_z)))
+        y = sy * (d / 2 - r / 2)
+        members.append(Member(f"rail_top_x{iy}", rails_role, (-w / 2, y, top_z), (w / 2, y, top_z), wide=2))
     for ix, sx in enumerate((-1.0, 1.0)):
+        x = sx * (w / 2 - r / 2)
         members.append(
-            Member(f"rail_top_y{ix}", role, (sx * cx, -(d / 2 - s), top_z), (sx * cx, d / 2 - s, top_z))
+            Member(f"rail_top_y{ix}", rails_role, (x, -(d / 2 - r), top_z), (x, d / 2 - r, top_z), wide=2)
         )
     for i, (sx, sy) in enumerate(corners):
-        members.append(Member(f"leg{i}", role, (sx * cx, sy * cy, foot), (sx * cx, sy * cy, h - s)))
+        members.append(Member(f"leg{i}", legs_role, (sx * cx, sy * cy, foot), (sx * cx, sy * cy, h - rz), wide=0))
     if lower_rails is not None:
-        low_z = foot + lower_rails + s / 2
+        low_z = foot + lower_rails + rz / 2
         for iy, sy in enumerate((-1.0, 1.0)):
+            y = sy * (d / 2 - r / 2)
             members.append(
-                Member(f"rail_low_x{iy}", role, (-(w / 2 - s), sy * cy, low_z), (w / 2 - s, sy * cy, low_z))
+                Member(f"rail_low_x{iy}", rails_role, (-(w / 2 - lx), y, low_z), (w / 2 - lx, y, low_z), wide=2)
             )
         for ix, sx in enumerate((-1.0, 1.0)):
+            x = sx * (w / 2 - r / 2)
             members.append(
-                Member(f"rail_low_y{ix}", role, (sx * cx, -(d / 2 - s), low_z), (sx * cx, d / 2 - s, low_z))
+                Member(f"rail_low_y{ix}", rails_role, (x, -(d / 2 - ly), low_z), (x, d / 2 - ly, low_z), wide=2)
             )
     # Three bracketed joints at every corner where a leg meets two rails.
     for i, (sx, sy) in enumerate(corners):
@@ -1258,24 +1345,71 @@ def frame_unit_plan(
     return FramePlan(tuple(members), tuple(joints), caps, feet, board)
 
 
-def _profile_look(scene, name: str, axis: int, size: Point3) -> None:
-    """Draws a frame member as the library's T-slot extrusion: the shape's
-    section (x, y of the unit box) scaled to the member's, its length (z)
-    turned along the member's axis and scaled to the cut length, tinted the
-    member's colour (clear or black anodising). Collision stays the box."""
-    length = size[axis]
-    s = [size[k] for k in range(3) if k != axis][0]
-    # Columns of the column-major transform: where the shape's x, y and z
-    # land in the obstacle's frame. z (the length) goes along the member's
-    # axis and the other two follow cyclically, so the frame stays right-handed.
-    columns = {
-        0: ((0.0, s, 0.0), (0.0, 0.0, s), (length, 0.0, 0.0)),
-        1: ((0.0, 0.0, s), (s, 0.0, 0.0), (0.0, length, 0.0)),
-        2: ((s, 0.0, 0.0), (0.0, s, 0.0), (0.0, 0.0, length)),
-    }[axis]
-    transform = (*columns[0], 0.0, *columns[1], 0.0, *columns[2], 0.0, 0.0, 0.0, 0.0, 1.0)
-    scene.set_obstacle_visual_asset(name, shape_path("tslot"), "/Shapes/tslot", transform, color_override=True)
+def _corner_frame(
+    a: Member, b: Member, size_a: Point3, size_b: Point3, interior: Point3,
+) -> tuple[Point3, int, float, int, float, int, float]:
+    """The inside corner of a bracketed joint between two perpendicular
+    members, where the bracket goes: the corner point — where the face of
+    `a` that looks into the unit meets the face of `b` that does — then
+    `a`'s axis and the way (+1 / -1) `a` runs from the corner, the same for
+    `b`, the fold axis (the third one) and the breadth the two members
+    share along it."""
+    ja, jb = a.axis, b.axis
+    if ja == jb:
+        raise ValueError(f"FrameUnit: members {a.tag!r} and {b.tag!r} are parallel — nothing to bracket")
+    i = next(k for k in range(3) if k not in (ja, jb))
+    lo_a = [a.centre[k] - size_a[k] / 2 for k in range(3)]
+    hi_a = [a.centre[k] + size_a[k] / 2 for k in range(3)]
+    lo_b = [b.centre[k] - size_b[k] / 2 for k in range(3)]
+    hi_b = [b.centre[k] + size_b[k] / 2 for k in range(3)]
+    c = [0.0, 0.0, 0.0]
+    c[ja] = lo_b[ja] if interior[ja] < b.centre[ja] else hi_b[ja]
+    c[jb] = lo_a[jb] if interior[jb] < a.centre[jb] else hi_a[jb]
+    lo_i, hi_i = max(lo_a[i], lo_b[i]), min(hi_a[i], hi_b[i])
+    if hi_i <= lo_i + 1e-9:
+        raise ValueError(
+            f"FrameUnit: members {a.tag!r} and {b.tag!r} do not lie side by side — nothing to bracket"
+        )
+    c[i] = (lo_i + hi_i) / 2
+    sa = 1.0 if a.centre[ja] > c[ja] else -1.0
+    sb = 1.0 if b.centre[jb] > c[jb] else -1.0
+    return (c[0], c[1], c[2]), ja, sa, jb, sb, i, hi_i - lo_i
+
+
+def _profile_look(
+    scene, name: str, member: Member, size: Point3, layer: Optional[Path] = None, prim: Optional[str] = None,
+) -> bool:
+    """Draws a frame member as an extrusion, its length (the prim's z) turned
+    along the member's axis and scaled to the cut length, tinted the member's
+    colour (clear or black anodising). With `layer` / `prim` — the pack's own
+    profile, authored at its real cross-section (x along `w`, y along `d`)
+    one metre long and centred — only the length is scaled; without them
+    the library's T-slot (`tslot` for a square section, `tslot_2` for a
+    1 : 2 one) is scaled to the section too. Collision stays the box either
+    way. Returns False, leaving the box, when no library shape fits."""
+    w_axis, d_axis = member.across()
+    w, d = size[w_axis], size[d_axis]
+    length = size[member.axis]
+    square = abs(w - d) < 1e-9
+    axes = (w_axis, d_axis, member.axis)
+    if square and _perm_sign(axes) < 0:
+        axes = (d_axis, w_axis, member.axis)  # a square section reads the same either way round
+    if layer is None:
+        if square:
+            shape = "tslot"
+        elif abs(d - 2 * w) < 1e-9:
+            shape = "tslot_2"
+        elif abs(w - 2 * d) < 1e-9:
+            shape, axes, w, d = "tslot_2", (d_axis, w_axis, member.axis), d, w  # the short side first
+        else:
+            return False
+        layer, prim = shape_path(shape), f"/Shapes/{shape}"
+        columns = _columns(axes, (w, d, length), flip=2)
+    else:
+        columns = _columns(axes, (1.0, 1.0, length), flip=2)
+    scene.set_obstacle_visual_asset(name, str(layer), str(prim), _transform(columns), color_override=True)
     scene.set_obstacle_material(name)
+    return True
 
 
 class FrameUnit:
@@ -1287,7 +1421,7 @@ class FrameUnit:
 
         F = bt.parts.FrameUnit(scene, "rig", catalog="misumi/hfs/6-series", finish="black")
         leg = F.member("leg", (0.0, 0.0, 0.0), (0.0, 0.0, 0.72))
-        beam = F.member("beam", (0.0, 0.0, 0.72), (1.14, 0.0, 0.72))
+        beam = F.member("beam", (0.0, 0.0, 0.72), (1.14, 0.0, 0.72), section="3060")
         F.joint(leg, beam)          # one bracket, and the bolts and nuts it takes
         F.cap(beam, "to")
         built = F.build()
@@ -1295,18 +1429,28 @@ class FrameUnit:
     Every member is a box the robot can hit, cut to a length the pack sells
     (matched against the profile's `length_mm` range and step — 1140.5 is a
     length on a 0.5 mm grid, 1140.3 is refused with the nearest) and weighed
-    by the pack's kg/m. With `detail="full"` (the default with a catalog) the
-    members are drawn as the shape library's T-slot extrusion (`tslot`, tinted
-    for clear or black anodising) and the brackets, caps and feet are drawn
-    out of collision and counted; bolts and
-    nuts sit inside the slots and are not drawn — each is counted on one
-    hidden resident (`<name>/hardware/bolts/lot`), since a BOM line needs
-    something in the scene to stand for. The BOM is the cut list: the unit
-    on the group line, one line per profile length, one per hardware
-    article. Changing `detail` changes none of it.
+    by the pack's kg/m. A rectangular profile (`w` x `d`) stands on edge when
+    horizontal and turns its `d` side along x when vertical, unless `wide=`
+    says which axis across the member the `d` side takes. With
+    `detail="full"` (the default with a catalog) the members are drawn as
+    the pack's own profile where it ships one (a `visual` authored at the
+    real cross-section, `visual_scale: length`) and as the shape library's
+    generic T-slot extrusion otherwise, tinted for clear or black anodising;
+    the brackets and caps are drawn as the pack's own articles where it
+    ships a `visual` for them (a bracket authored with its fold corner at
+    the origin, a cap as a plate with +z outward) and as the library's
+    bracket and a plain plate otherwise, the feet as the library's adjuster
+    — all out of collision — and counted; bolts and nuts sit inside the
+    slots and are not drawn at all, but they are still counted, on one
+    hidden resident each (`<name>/hardware/bolts/lot`), since a BOM line
+    needs something in the scene to stand for. The BOM is the cut list: the
+    unit on the group line, one line per profile length, one per hardware
+    article — a cap line per section where the pack sells them that way
+    (`cap_3030`, `cap_3060` …). Changing `detail` changes none of it.
 
-    Without a catalog give `section=` (metres): the members are one line
-    (`structure.frame`, `model=` / `manufacturer=`) and nothing is counted."""
+    Without a catalog give `section=` (metres, a square side or `(w, d)`):
+    the members are one line (`structure.frame`, `model=` / `manufacturer=`)
+    and nothing is counted."""
 
     def __init__(
         self,
@@ -1314,7 +1458,7 @@ class FrameUnit:
         name: str,
         *,
         catalog: Optional["CatalogRef"] = None,
-        section: Optional[float] = None,
+        section: Optional[Union[float, Section]] = None,
         position: Point2 | Point3 = (0.0, 0.0),
         yaw: float = 0.0,
         detail: Optional[str] = None,
@@ -1342,7 +1486,7 @@ class FrameUnit:
         self.mode = _detail(detail, self.spec is not None)
         self.model = model
         self.manufacturer = manufacturer
-        self._section_given = section
+        self._section_given = None if section is None else _section(section)
         self._color = color
         self.x, self.y = float(position[0]), float(position[1])
         self.z0 = float(position[2]) if len(position) > 2 else 0.0
@@ -1383,32 +1527,39 @@ class FrameUnit:
             + " / ".join(self._profile_roles)
         )
 
-    def section(self, role: Optional[str] = None) -> float:
-        """The square side of a profile, metres — from the pack's
-        `dimensions_mm.w`, or `section=` without a catalog."""
+    @staticmethod
+    def _short(role: str) -> str:
+        return role.removeprefix("profile_")
+
+    def section(self, role: Optional[str] = None) -> Section:
+        """A profile's cross-section (w, d), metres — from the pack's
+        `dimensions_mm.w` / `.d` (`d` defaults to `w`), or `section=`
+        without a catalog."""
         if self.spec is not None:
             role = role or self.profile_role()
             w = self.spec.dimension_mm(role, "w", None)
             if w is None:
                 raise ValueError(f"{self.spec.id}: profile {role!r} declares no dimensions_mm.w")
             d = self.spec.dimension_mm(role, "d", w)
-            if d is not None and abs(d - w) > 1e-6:
-                raise ValueError(
-                    f"{self.spec.id}: profile {role!r} is {w:g} x {d:g} mm — frame_unit builds "
-                    "with square sections only for now"
-                )
-            return w / 1000.0
+            return (w / 1000.0, (w if d is None else d) / 1000.0)
         if self._section_given is None:
             raise ValueError("FrameUnit: section= (metres) is required without a catalog")
-        return float(self._section_given)
+        return self._section_given
 
-    def member(self, tag: str, frm: Point3, to: Point3, *, section: Optional[str] = None) -> str:
+    def member(
+        self, tag: str, frm: Point3, to: Point3, *, section: Optional[str] = None, wide: Optional[int] = None,
+    ) -> str:
         """A profile from `frm` to `to` (local metres, along one axis), cut
-        from the pack's profile `section` (default: its first). Returns `tag`."""
+        from the pack's profile `section` (default: its first). For a
+        rectangular profile `wide` is the axis across the member its `d`
+        side runs along (default: x for a vertical member, z for a
+        horizontal one — on edge). Returns `tag`."""
         if tag in self._members:
             raise ValueError(f"FrameUnit: a member named {tag!r} is already placed")
-        member = Member(tag, self.profile_role(section), tuple(float(v) for v in frm), tuple(float(v) for v in to))  # type: ignore[arg-type]
-        member.axis  # validates the geometry now, not at build
+        member = Member(
+            tag, self.profile_role(section), tuple(float(v) for v in frm), tuple(float(v) for v in to), wide,  # type: ignore[arg-type]
+        )
+        member.across()  # validates the geometry now, not at build
         self._members[tag] = member
         return tag
 
@@ -1454,7 +1605,10 @@ class FrameUnit:
     def plan(self, plan: FramePlan) -> "FrameUnit":
         """Everything a template planned, in one go."""
         for member in plan.members:
-            self.member(member.tag, member.frm, member.to, section=None if member.role == "profile" else member.role)
+            self.member(
+                member.tag, member.frm, member.to,
+                section=None if member.role == "profile" else member.role, wide=member.wide,
+            )
         for a, b in plan.joints:
             self.joint(a, b)
         for tag, end in plan.caps:
@@ -1479,6 +1633,9 @@ class FrameUnit:
             return BLACK_ANODIZED
         return ALUMINIUM
 
+    def _size(self, member: Member) -> Point3:
+        return member.size(self.section(member.role))
+
     def _extent(self) -> tuple[Point3, Point3]:
         los, his = [], []
         for member in self._members.values():
@@ -1492,57 +1649,63 @@ class FrameUnit:
             (max(p[0] for p in his), max(p[1] for p in his), max(p[2] for p in his)),
         )
 
-    def _bracket_at(self, a: Member, b: Member, centre: Point3, side: float) -> Point3:
-        """Where the bracket of a joint is drawn: the middle of where the two
-        boxes touch, nudged a half-bracket toward the unit's inside."""
-        lo_a, hi_a = a.bounds(self.section(a.role))
-        lo_b, hi_b = b.bounds(self.section(b.role))
-        point = []
-        for k in range(3):
-            lo, hi = max(lo_a[k], lo_b[k]), min(hi_a[k], hi_b[k])
-            if hi < lo - 1e-6:
-                raise ValueError(
-                    f"FrameUnit: members {a.tag!r} and {b.tag!r} do not touch — nothing to bracket"
-                )
-            p = (lo + hi) / 2
-            if p > centre[k] + 1e-9:
-                p -= side / 2
-            elif p < centre[k] - 1e-9:
-                p += side / 2
-            point.append(p)
-        return (point[0], point[1], point[2])
+    def _cap_role(self, member: Member) -> Optional[str]:
+        """The cap article for a member's section: `cap_<section>` where the
+        pack sells caps per section, else its one `cap`, else none."""
+        if self.spec is None:
+            return None
+        per_section = f"cap_{self._short(member.role)}"
+        if self.spec.has_component(per_section):
+            return per_section
+        return "cap" if self.spec.has_component("cap") else None
+
+    def _bracket_dims(self, a: Member, b: Member) -> tuple[float, float, float]:
+        """(leg, width, thickness) of a bracket, metres: the pack's
+        `bracket.dimensions_mm` (`leg` / `width` / `thickness`), else in
+        proportion to the smaller section the way a 30 mm system's bracket
+        is (28 x 20, 4.5 thick)."""
+        s = min(*self.section(a.role), *self.section(b.role))
+
+        def dim(key: str, ratio: float) -> float:
+            value = _mm(self.spec.dimension_mm("bracket", key, None)) if self.spec is not None else None
+            return value if value else s * ratio
+
+        return dim("leg", 28 / 30), dim("width", 20 / 30), dim("thickness", 4.5 / 30)
 
     def build(self) -> Built:
         scene, name, spec, q = self.scene, self.name, self.spec, _yaw_quat(self.yaw)
         built = Built(name)
         colour = self._colour()
         lo, hi = self._extent()
-        centre = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+        interior = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
         full = self.mode == "full"
+
+        def has(role: str) -> bool:
+            return spec is not None and spec.has_component(role)
 
         # Members: the massing, grouped by profile and cut length so the BOM
         # carries one line per part number.
         groups: dict[tuple[str, float], list[str]] = {}
         for member in self._members.values():
-            s = self.section(member.role)
+            size = self._size(member)
             mm = round(member.length * 1000.0, 3)
             if spec is not None:
                 mm = float(spec.choose("length_mm", mm, role=member.role))
-            size = [s, s, s]
-            size[member.axis] = member.length
-            if spec is not None:
-                label = str(_plain(mm))
-                short = member.role[len("profile_"):] if member.role.startswith("profile_") else member.role
-                oname = f"{name}/profiles/{short}/l{label}/{member.tag}"
+                oname = f"{name}/profiles/{self._short(member.role)}/l{_plain(mm)}/{member.tag}"
             else:
                 oname = f"{name}/members/{member.tag}"
-            made = scene.add_box(
-                oname, size=(size[0], size[1], size[2]), position=self._world(member.centre),
-                quaternion=q, color=colour,
-            )
+            made = scene.add_box(oname, size=size, position=self._world(member.centre), quaternion=q, color=colour)
             _finish(scene, made, _ANODIZED)
             if full:
-                _profile_look(scene, made, member.axis, (size[0], size[1], size[2]))
+                # The pack's own profile (its real cross-section, stretched to
+                # the cut) where it ships one; the library's T-slot otherwise.
+                own = spec.visual(member.role) if spec is not None else None
+                if own is not None and spec.visual_scale(member.role) == "length":  # type: ignore[union-attr]
+                    _profile_look(scene, made, member, size, own[0], own[1])
+                elif own is not None:
+                    _load_visual(scene, spec, member.role, made)
+                else:
+                    _profile_look(scene, made, member, size)
             built.obstacles.append(made)
             groups.setdefault((member.role, mm), []).append(made)
 
@@ -1564,62 +1727,110 @@ class FrameUnit:
             built.obstacles.append(made)
             return made
 
-        def has(role: str) -> bool:
-            return spec is not None and spec.has_component(role)
-
         brackets = 0
         if has("bracket"):
             per_joint = int(spec.rule("brackets_per_joint", 1) or 1)  # type: ignore[union-attr]
+            own = spec.visual("bracket")  # type: ignore[union-attr]
             for j, (a_tag, b_tag) in enumerate(self._joints):
                 a, b = self._members[a_tag], self._members[b_tag]
-                side = min(self.section(a.role), self.section(b.role)) * 0.8
-                at = self._bracket_at(a, b, centre, side)
+                c, ja, sa, jb, sb, i, room = _corner_frame(a, b, self._size(a), self._size(b), interior)
+                leg, width, thickness = self._bracket_dims(a, b)
+                width = min(width, room)
+                # The resident is the bracket's own box, in the inside corner
+                # of the joint with its flanges along the two members.
+                centre = list(c)
+                centre[ja] += sa * leg / 2
+                centre[jb] += sb * leg / 2
+                box = [0.0, 0.0, 0.0]
+                box[ja], box[jb], box[i] = leg, leg, width
                 for k in range(per_joint):
-                    oname = f"{name}/hardware/brackets/{j}" + (f"_{k}" if per_joint > 1 else "")
-                    made = scene.add_box(oname, size=(side, side, side), position=self._world(at), quaternion=q, color=DARK_STEEL)
+                    suffix = f"{j}" + (f"_{k}" if per_joint > 1 else "")
+                    made = scene.add_box(
+                        f"{name}/hardware/brackets/{suffix}", size=(box[0], box[1], box[2]),
+                        position=self._world((centre[0], centre[1], centre[2])), quaternion=q, color=DARK_STEEL,
+                    )
                     _finish(scene, made, _CAST_METAL)
                     hidden(made, full)
                     brackets += 1
-                    if full and _load_trim(
-                        scene, built, spec, "bracket", f"{name}/trim/bracket{j}" + (f"_{k}" if per_joint > 1 else ""),
-                        self._world(at), q, parameters=self.params, section=side / 0.8,
+                    if not full:
+                        continue
+                    if own is not None:
+                        # The pack's article: authored with its fold corner at
+                        # the origin, one flange along +x, the other along +y,
+                        # the width centred on z — turned onto the members.
+                        columns = _columns((ja, jb, i), (sa, sb, 1.0), flip=2)
+                        shift = [0.0, 0.0, 0.0]
+                        shift[ja], shift[jb] = -sa * leg / 2, -sb * leg / 2
+                        scene.set_obstacle_visual_asset(
+                            made, str(own[0]), own[1], _transform(columns, (shift[0], shift[1], shift[2])),
+                            color_override=False,
+                        )
+                        scene.set_obstacle_material(made)
+                    elif _load_trim(
+                        scene, built, spec, "bracket", f"{name}/trim/bracket{suffix}", self._world(c), q,
+                        parameters=self.params, leg=leg, width=width, thickness=thickness,
                     ):
                         scene.set_obstacle_visible(made, False)
+                    else:
+                        # The library's bracket: a unit box whose (-x, -y) corner
+                        # is the fold, scaled to (leg, leg, width).
+                        columns = _columns((ja, jb, i), (sa * leg, sb * leg, width), flip=2)
+                        scene.set_obstacle_visual_asset(
+                            made, str(shape_path("bracket")), "/Shapes/bracket", _transform(columns), color_override=False,
+                        )
+                        scene.set_obstacle_material(made)
         for role, plural in (("bolt", "bolts"), ("nut", "nuts")):
             if has(role) and brackets:
                 made = scene.add_box(
                     f"{name}/hardware/{plural}/lot", size=(0.001, 0.001, 0.001),
-                    position=self._world(centre), quaternion=q, color=DARK_STEEL,
+                    position=self._world(interior), quaternion=q, color=DARK_STEEL,
                 )
                 hidden(made, False)
-        if has("cap"):
-            for k, (tag, end) in enumerate(self._caps):
-                member = self._members[tag]
-                s = self.section(member.role)
-                point = list(member.end(end))
-                outward = 1.0 if point[member.axis] > member.centre[member.axis] else -1.0
-                point[member.axis] += outward * _CAP_THICKNESS / 2
-                size = [s, s, s]
-                size[member.axis] = _CAP_THICKNESS
-                made = scene.add_box(
-                    f"{name}/hardware/caps/{k}", size=(size[0], size[1], size[2]),
-                    position=self._world((point[0], point[1], point[2])), quaternion=q, color=CAP_BLACK,
-                )
-                _finish(scene, made, _PLASTIC)
-                hidden(made, full)
-                if full and _load_trim(
-                    scene, built, spec, "cap", f"{name}/trim/cap{k}",
-                    self._world((point[0], point[1], point[2])), q, parameters=self.params, section=s,
-                ):
-                    scene.set_obstacle_visible(made, False)
+        cap_rows: dict[str, tuple[str, int]] = {}
+        for k, (tag, end) in enumerate(self._caps):
+            member = self._members[tag]
+            role = self._cap_role(member)
+            if role is None:
+                continue
+            size = self._size(member)
+            w_axis, d_axis = member.across()
+            thickness = _mm(spec.dimension_mm(role, "thickness", _CAP_THICKNESS * 1000.0)) or _CAP_THICKNESS  # type: ignore[union-attr]
+            point = list(member.end(end))
+            outward = 1.0 if point[member.axis] > member.centre[member.axis] else -1.0
+            point[member.axis] += outward * thickness / 2
+            plate = [0.0, 0.0, 0.0]
+            plate[w_axis], plate[d_axis], plate[member.axis] = size[w_axis], size[d_axis], thickness
+            group = f"{name}/hardware/caps" if role == "cap" else f"{name}/hardware/caps/{self._short(member.role)}"
+            made = scene.add_box(
+                f"{group}/{k}", size=(plate[0], plate[1], plate[2]),
+                position=self._world((point[0], point[1], point[2])), quaternion=q, color=CAP_BLACK,
+            )
+            _finish(scene, made, _PLASTIC)
+            hidden(made, full)
+            cap_rows[group] = (role, cap_rows.get(group, (role, 0))[1] + 1)
+            if not full:
+                continue
+            own = spec.visual(role)  # type: ignore[union-attr]
+            if own is not None:
+                # The pack's cap: a plate authored in the section's frame (x
+                # along w, y along d), centred, its outer face toward +z.
+                columns = _columns((w_axis, d_axis, member.axis), (1.0, 1.0, outward), flip=0)
+                scene.set_obstacle_visual_asset(made, str(own[0]), own[1], _transform(columns), color_override=False)
+                scene.set_obstacle_material(made)
+            elif _load_trim(
+                scene, built, spec, role, f"{name}/trim/cap{k}", self._world((point[0], point[1], point[2])), q,
+                parameters=self.params, w=size[w_axis], d=size[d_axis], thickness=thickness,
+            ):
+                scene.set_obstacle_visible(made, False)
         if has("foot"):
             rise = _mm(spec.dimension_mm("foot", "height", 30.0)) or 0.03  # type: ignore[union-attr]
             for k, tag in enumerate(self._feet):
                 member = self._members[tag]
-                s = self.section(member.role)
+                size = self._size(member)
+                across = max(size[axis] for axis in member.across())
                 bottom = min(member.frm[2], member.to[2])
                 at = (member.centre[0], member.centre[1], bottom - rise / 2)
-                pad = _mm(spec.dimension_mm("foot", "pad", s * 1200.0)) or s * 1.2  # type: ignore[union-attr]
+                pad = _mm(spec.dimension_mm("foot", "pad", across * 1200.0)) or across * 1.2  # type: ignore[union-attr]
                 oname = f"{name}/hardware/feet/{k}"
                 if full and not spec.trim("foot"):  # type: ignore[union-attr]
                     made = shaped_box(scene, oname, "adjuster", (pad, pad, rise), self._world(at), quaternion=q)
@@ -1627,11 +1838,11 @@ class FrameUnit:
                 else:
                     made = scene.add_box(oname, size=(pad, pad, rise), position=self._world(at), quaternion=q, color=DARK_STEEL)
                     hidden(made, False)
-                    if full and _load_trim(
-                        scene, built, spec, "foot", f"{name}/trim/foot{k}", self._world(at), q,
-                        parameters=self.params, section=s, height=rise, pad=pad,
-                    ):
-                        pass
+                    if full:
+                        _load_trim(
+                            scene, built, spec, "foot", f"{name}/trim/foot{k}", self._world(at), q,
+                            parameters=self.params, section=across, height=rise, pad=pad,
+                        )
 
         # The bill: the unit, then one line per profile length, then the hardware.
         extent = tuple(round((hi[i] - lo[i]) * 1000.0) for i in range(3))
@@ -1673,14 +1884,19 @@ class FrameUnit:
                         catalog=spec.catalog_ref, manufacturer=self.manufacturer,
                         model=spec.part_number(role, **self.params), **_kg(spec.mass_kg(role, **self.params)),
                     )
-        for role, plural, count in (("cap", "caps", len(self._caps)), ("foot", "feet", len(self._feet))):
-            if has(role) and count:
-                scene.set_part(
-                    f"{name}/hardware/{plural}", kind="group",
-                    category=spec.category(role, "structure.frame.hardware"), qty=count,
-                    catalog=spec.catalog_ref, manufacturer=self.manufacturer,
-                    model=spec.part_number(role, **self.params), **_kg(spec.mass_kg(role, **self.params)),
-                )
+        for group, (role, count) in cap_rows.items():
+            scene.set_part(
+                group, kind="group", category=spec.category(role, "structure.frame.hardware"), qty=count,
+                catalog=spec.catalog_ref, manufacturer=self.manufacturer,
+                model=spec.part_number(role, **self.params), **_kg(spec.mass_kg(role, **self.params)),
+            )
+        if has("foot") and self._feet:
+            scene.set_part(
+                f"{name}/hardware/feet", kind="group",
+                category=spec.category("foot", "structure.frame.hardware"), qty=len(self._feet),
+                catalog=spec.catalog_ref, manufacturer=self.manufacturer,
+                model=spec.part_number("foot", **self.params), **_kg(spec.mass_kg("foot", **self.params)),
+            )
         for tag, _size, _at, role in self._slabs:
             if role is not None and spec.has_component(role):
                 scene.set_part(
@@ -1691,12 +1907,10 @@ class FrameUnit:
         return built
 
     def _section_label(self) -> str:
-        roles = sorted({m.role for m in self._members.values()})
         labels = []
-        for role in roles:
-            w = self.spec.dimension_mm(role, "w", None) if self.spec is not None else None  # type: ignore[union-attr]
-            d = self.spec.dimension_mm(role, "d", w) if self.spec is not None else None  # type: ignore[union-attr]
-            labels.append(f"{_plain(w)}x{_plain(d)}" if w is not None else role)
+        for role in sorted({m.role for m in self._members.values()}):
+            w, d = self.section(role)
+            labels.append(f"{_plain(round(w * 1000.0, 3))}x{_plain(round(d * 1000.0, 3))}")
         return " + ".join(labels)
 
 
@@ -1709,7 +1923,9 @@ def frame_unit(
     catalog: Optional["CatalogRef"] = None,
     template: str = "table",
     detail: Optional[str] = None,
-    section: Optional[str | float] = None,
+    section: Optional[Union[str, float, Section]] = None,
+    legs: Optional[str] = None,
+    rails: Optional[str] = None,
     lower_rails: Optional[float] = 0.0,
     feet: Optional[bool] = None,
     top: Optional[float] = None,
@@ -1729,26 +1945,27 @@ def frame_unit(
     With `catalog=` — the id of a frame *system* pack (a maker's profile
     series: profiles by the millimetre, brackets, bolts, nuts, caps, feet),
     or a package directory — the members are cut to lengths the pack sells,
-    from the profile `section` chosen (`"3030"`; default the pack's first),
-    and the BOM is the cut list: one line per profile length
-    (`HFS6-3030-1140` x2 …), one per hardware article, counted from the
-    joints the way the makers' own standard units are (see
+    from the profile `section` chosen (`"3030"`; default the pack's first;
+    `legs=` / `rails=` give the legs and the rails a profile of their own —
+    a rectangular rail stands on edge, a rectangular leg turns its wide side
+    along the width), and the BOM is the cut list: one line per profile
+    length (`HFS6-3030-1140` x2 …), one per hardware article, counted from
+    the joints the way the makers' own standard units are (see
     [`frame_unit_plan`][botrail.parts.frame_unit_plan]). `lower_rails` is
     the lower ring's height above the legs' bottom (`None` for none); `feet`
     puts the pack's adjusters under the legs (default: when the pack sells
     them); a pack that sizes `width_mm` / `depth_mm` / `height_mm` may
     leave `size` out. Without a catalog `section` is the profile's side in
-    metres and the unit is one line.
+    metres (or `(w, d)`) and the unit is one line.
 
     `detail="full"` (the default with a catalog) draws the members as T-slot
-    extrusions (the shape library's `tslot`, tinted for the finish) and adds
-    the brackets, caps and feet — decoration that never collides. The members
-    are what a robot can hit in either mode, and the BOM is the same in either
-    mode."""
+    extrusions (the pack's own profile, or the shape library's `tslot`,
+    tinted for the finish) and adds the brackets, caps and feet — decoration
+    that never collides. The members are what a robot can hit in either
+    mode, and the BOM is the same in either mode."""
     spec = None
     params: dict = {}
-    section_role: Optional[str] = None
-    side: Optional[float] = None
+    side: Optional[Section] = None
     if catalog is not None:
         from ._spec import Spec
 
@@ -1769,30 +1986,34 @@ def frame_unit(
         size = (float(sized[0]), float(sized[1]), float(sized[2]))
     elif size is None:
         raise ValueError("frame_unit: size is required without a catalog")
-    elif not isinstance(section, (int, float)):
+    elif section is None or isinstance(section, str):
         raise ValueError("frame_unit: section (metres) is required without a catalog")
     else:
-        side = float(section)
+        side = _section(section)
 
     unit = FrameUnit(
         scene, name, catalog=None if spec is None else catalog, section=side, position=position, yaw=yaw,
         detail=detail, model=model, manufacturer=manufacturer, color=color, **params, **attributes,
     )
     if spec is not None:
-        section_role = unit.profile_role(None if section is None else str(section))
-        side = unit.section(section_role)
+        default_role = unit.profile_role(None if section is None else str(section))
+        legs_role = unit.profile_role(legs) if legs is not None else default_role
+        rails_role = unit.profile_role(rails) if rails is not None else default_role
         if feet is None:
             feet = spec.has_component("foot")
         foot = (_mm(spec.dimension_mm("foot", "height", 30.0)) or 0.03) if feet else 0.0
         if top is None and spec.has_component("top"):
             top = _mm(spec.dimension_mm("top", "thickness", 20.0)) or 0.02
+        plan = frame_unit_plan(
+            template, size, unit.section(default_role), lower_rails=lower_rails, foot=foot, top=top or 0.0,
+            role=default_role, legs=unit.section(legs_role), rails=unit.section(rails_role),
+            legs_role=legs_role, rails_role=rails_role,
+        )
     else:
-        foot = 0.0
-    assert side is not None
-    plan = frame_unit_plan(
-        template, size, side, lower_rails=lower_rails, foot=foot, top=top or 0.0,
-        role=section_role or "profile",
-    )
+        if legs is not None or rails is not None:
+            raise ValueError("frame_unit: legs= and rails= name a pack's profiles — give catalog=")
+        assert side is not None
+        plan = frame_unit_plan(template, size, side, lower_rails=lower_rails, foot=0.0, top=top or 0.0)
     unit.plan(plan)
     unit.frame("top", (0.0, 0.0, size[2] + (top or 0.0)))
     if unit.model is None:
@@ -5855,7 +6076,8 @@ def compound(
 # `/Shapes/<name>` with its finishes as material subsets — vendored from
 # botrail-assets/workshop-shapes by scripts/sync_shapes.py.
 SHAPES: tuple[str, ...] = (
-    "adjuster", "basket", "carton", "handle", "hose", "panel", "rim", "tote", "tray", "tslot", "workpiece",
+    "adjuster", "basket", "bracket", "carton", "handle", "hose", "panel", "rim", "tote", "tray", "tslot", "tslot_2",
+    "workpiece",
 )
 _SHAPES_DIR = Path(__file__).resolve().parent / "_shapes"
 

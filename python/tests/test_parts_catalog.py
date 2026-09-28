@@ -2228,6 +2228,15 @@ configuration:
         finish: {clear: HFS, black: HFSB}
       mass:
         per_mm: {length_mm: 0.0009}
+    - role: profile_3060
+      category: structure.frame.profile
+      part_number: "{finish_code}6-3060-{length_mm}"
+      length_mm: {min: 50, max: 4000, step: 0.5, default: 1000}
+      dimensions_mm: {w: 30, d: 60, slot: 8}
+      codes:
+        finish: {clear: HFS, black: HFSB}
+      mass:
+        per_mm: {length_mm: 0.0016}
     - role: bracket
       category: structure.frame.hardware
       part_number: HBLFS6
@@ -2384,6 +2393,15 @@ def test_frame_hardware_is_decoration_and_the_bill_does_not_care(profiles: Path,
     assert rail[:3] == pytest.approx([0.0, 0.03, 0.0]) and rail[8:11] == pytest.approx([1.2, 0.0, 0.0])
     leg = by_full["stand/profiles/3030/l690/leg0"]["visual_asset"]["transform"]
     assert leg[:3] == pytest.approx([0.03, 0.0, 0.0]) and leg[8:11] == pytest.approx([0.0, 0.0, 0.69])
+    # A bracket is the library's L, scaled to 28 x 28 x 20 on a 30 mm system
+    # and set in the inside corner of its joint: the first joint is leg0
+    # (at -x, -y) to the top width rail at -y, so the bracket hangs under
+    # the rail on the leg's +x face, its fold corner where the two meet.
+    bracket = by_full["stand/hardware/brackets/0"]["visual_asset"]
+    assert bracket["prim_path"] == "/Shapes/bracket" and not bracket.get("color_override")
+    lo, hi = full.obstacle_bounds("stand/hardware/brackets/0")
+    assert lo == pytest.approx([-0.57, -0.395, 0.692]) and hi == pytest.approx([-0.542, -0.375, 0.72])
+    assert "visual_asset" not in by_plain["stand/hardware/brackets/0"]
     # ...and the pinning survives a project round trip (every line stands on a resident).
     project = tmp_path / "cell.botrail"
     full.save_project(project)
@@ -2428,3 +2446,169 @@ def test_a_hand_written_frame_unit_is_one_line() -> None:
         bt.parts.frame_unit(scene, "bare", (1.0, 0.6, 0.7))
     with pytest.raises(ValueError, match="size is required"):
         bt.parts.frame_unit(scene, "bare", section=0.04)
+
+
+def test_a_pack_that_ships_its_own_profile_is_drawn_with_it(profiles: Path, tmp_path: Path) -> None:
+    """The look is the product's data: a pack may ship the maker's cross-section
+    (`visual`, authored at real section and one metre long, `visual_scale:
+    length`), and the members are drawn with it — only the length scaled, the
+    section as authored. Packs without one keep the library's generic T-slot."""
+    import shutil
+
+    own = profiles.parent / "hfs6-own"
+    shutil.copytree(profiles, own)
+    (own / "visual").mkdir()
+    shutil.copy(bt.parts.shape_path("tslot"), own / "visual" / "hfs6-3030.usda")
+    text = (own / "manifest.yaml").read_text()
+    text = text.replace(
+        "      dimensions_mm: {w: 30, d: 30, slot: 8}\n",
+        "      dimensions_mm: {w: 30, d: 30, slot: 8}\n"
+        "      visual: visual/hfs6-3030.usda#/Shapes/tslot\n"
+        "      visual_scale: length\n",
+        1,
+    )
+    (own / "manifest.yaml").write_text(text)
+    scene = scene_()
+    bt.parts.frame_unit(scene, "stand", (1.2, 0.8, 0.75), catalog=own, feet=False)
+    by = {o["name"]: o for o in json.loads(scene._project_json())["obstacles"]}
+    rail = by["stand/profiles/3030/l1200/rail_top_x0"]["visual_asset"]
+    assert rail["url"].endswith("visual/hfs6-3030.usda") and rail["prim_path"] == "/Shapes/tslot"
+    assert rail["color_override"] is True
+    # The section is authored at size (scale 1); the length alone is stretched, along x here.
+    assert rail["transform"][:3] == pytest.approx([0.0, 1.0, 0.0])
+    assert rail["transform"][4:7] == pytest.approx([0.0, 0.0, 1.0])
+    assert rail["transform"][8:11] == pytest.approx([1.2, 0.0, 0.0])
+    leg = by["stand/profiles/3030/l720/leg0"]["visual_asset"]
+    assert leg["transform"][:3] == pytest.approx([1.0, 0.0, 0.0]) and leg["transform"][8:11] == pytest.approx([0.0, 0.0, 0.72])
+    # ...and the generic library shape scales the section as well.
+    generic = scene_()
+    bt.parts.frame_unit(generic, "stand", (1.2, 0.8, 0.75), catalog=profiles, feet=False)
+    asset = {o["name"]: o for o in json.loads(generic._project_json())["obstacles"]}["stand/profiles/3030/l1200/rail_top_x0"]["visual_asset"]
+    assert asset["url"].endswith("_shapes/tslot.usda") and asset["transform"][:3] == pytest.approx([0.0, 0.03, 0.0])
+
+
+def test_rectangular_rails_stand_on_edge_and_the_legs_are_cut_for_them(profiles: Path) -> None:
+    """A 30 x 60 rail on a 30 mm leg: the rails stand on edge (60 tall), the
+    legs lose a rail's height, the depth rails a rail's width each end, and
+    the cut list says which profile every length is cut from."""
+    plan = bt.parts.frame_unit_plan("table", (0.62, 0.48, 0.57), 0.03, rails=(0.03, 0.06), rails_role="profile_3060", role="profile_3030")
+    assert plan.lengths() == {0.62: 2, 0.56: 2, 0.51: 4, 0.42: 4}
+    by_tag = {m.tag: m for m in plan.members}
+    assert by_tag["rail_top_x0"].size((0.03, 0.06)) == pytest.approx([0.62, 0.03, 0.06])
+    assert by_tag["leg0"].role == "profile_3030" and by_tag["rail_low_y1"].role == "profile_3060"
+    scene = scene_()
+    bt.parts.frame_unit(scene, "stand", (0.62, 0.48, 0.57), catalog=profiles, rails="3060", feet=False)
+    by = rows(scene)
+    assert by["stand"]["model"] == "table 620x480x570 (30x30 + 30x60)"
+    cuts = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("stand/profiles/")}
+    assert cuts == {"HFS6-3060-620": 2, "HFS6-3060-560": 2, "HFS6-3060-420": 4, "HFS6-3030-510": 4}
+    assert by["stand/profiles/3060/l620"]["attributes"]["mass_kg"] == pytest.approx(0.992)
+    lo, hi = scene.obstacle_bounds("stand/profiles/3060/l620/rail_top_x0")
+    assert (round(lo[1], 3), round(hi[1], 3), round(lo[2], 3), round(hi[2], 3)) == (-0.24, -0.21, 0.51, 0.57)
+    lo, hi = scene.obstacle_bounds("stand/profiles/3060/l420/rail_top_y0")
+    assert (round(lo[0], 3), round(hi[0], 3), round(lo[1], 3), round(hi[1], 3)) == (-0.31, -0.28, -0.21, 0.21)
+    # Drawn as the library's 1 : 2 T-slot: x the short side, y the long one, z the cut.
+    asset = {o["name"]: o for o in json.loads(scene._project_json())["obstacles"]}
+    rail = asset["stand/profiles/3060/l620/rail_top_x0"]["visual_asset"]
+    assert rail["prim_path"] == "/Shapes/tslot_2"
+    assert rail["transform"][:3] == pytest.approx([0.0, 0.03, 0.0]) and rail["transform"][4:7] == pytest.approx([0.0, 0.0, 0.06])
+    assert rail["transform"][8:11] == pytest.approx([0.62, 0.0, 0.0])
+    side = asset["stand/profiles/3060/l420/rail_top_y0"]["visual_asset"]["transform"]
+    assert side[:3] == pytest.approx([0.03, 0.0, 0.0]) and side[4:7] == pytest.approx([0.0, 0.0, 0.06])
+    assert side[8:11] == pytest.approx([0.0, -0.42, 0.0])  # turned so the frame stays right-handed
+    # Rectangular legs turn their wide side along the width.
+    legged = scene_()
+    bt.parts.frame_unit(legged, "stand", (0.62, 0.48, 0.57), catalog=profiles, legs="3060", feet=False)
+    lo, hi = legged.obstacle_bounds("stand/profiles/3060/l540/leg0")
+    assert (round(hi[0] - lo[0], 3), round(hi[1] - lo[1], 3)) == (0.06, 0.03)
+    cuts = {row["model"]: row["qty"] for name, row in rows(legged).items() if name.startswith("stand/profiles/")}
+    assert cuts == {"HFS6-3030-620": 2, "HFS6-3030-500": 2, "HFS6-3030-420": 4, "HFS6-3060-540": 4}
+    with pytest.raises(ValueError, match="legs= and rails= name a pack's profiles"):
+        bt.parts.frame_unit(scene_(), "hand", (1.0, 0.6, 0.7), section=0.04, rails="3060")
+    with pytest.raises(ValueError, match="wide must be an axis across the member"):
+        bt.parts.FrameUnit(scene_(), "rig", catalog=profiles).member("beam", (0.0, 0.0, 0.7), (1.0, 0.0, 0.7), wide=0)
+
+
+def test_caps_follow_the_section_where_the_pack_sells_them_that_way(profiles: Path) -> None:
+    """A pack may sell a cap per section (`cap_3030`, `cap_3060`): each cap
+    is the article of the member it sits on, on its own BOM line."""
+    import shutil
+
+    per_section = profiles.parent / "hfs6-caps"
+    shutil.copytree(profiles, per_section)
+    text = (per_section / "manifest.yaml").read_text()
+    text = text.replace(
+        "    - role: cap\n      category: structure.frame.hardware\n      part_number: HFC6-3030-B\n      mass: {base_kg: 0.002}\n",
+        "    - role: cap_3030\n      category: structure.frame.hardware\n      part_number: HFC6-3030-B\n      mass: {base_kg: 0.002}\n"
+        "    - role: cap_3060\n      category: structure.frame.hardware\n      part_number: HFC6-3060-B\n"
+        "      dimensions_mm: {thickness: 4}\n      mass: {base_kg: 0.004}\n",
+        1,
+    )
+    (per_section / "manifest.yaml").write_text(text)
+    scene = scene_()
+    bt.parts.frame_unit(scene, "stand", (0.62, 0.48, 0.57), catalog=per_section, rails="3060", feet=False)
+    by = rows(scene)
+    assert by["stand/hardware/caps/3060"]["model"] == "HFC6-3060-B" and by["stand/hardware/caps/3060"]["qty"] == 4
+    assert not any(name.startswith("stand/hardware/caps/3030") for name in by)
+    # The cap is a plate the section's size, the pack's thickness, just past the cut end.
+    lo, hi = scene.obstacle_bounds("stand/hardware/caps/3060/0")
+    assert lo == pytest.approx([-0.314, -0.24, 0.51]) and hi == pytest.approx([-0.31, -0.21, 0.57])
+    unit = bt.parts.FrameUnit(scene_(), "rig", catalog=per_section)
+    post = unit.member("post", (0.0, 0.0, 0.0), (0.0, 0.0, 0.5))
+    unit.cap(post, "to")
+    unit.build()
+    by = rows(unit.scene)
+    assert by["rig/hardware/caps/3030"]["model"] == "HFC6-3030-B" and by["rig/hardware/caps/3030"]["qty"] == 1
+
+
+def test_a_pack_that_ships_its_bracket_and_caps_is_drawn_with_them(profiles: Path) -> None:
+    """The bracket's picture is authored with its fold corner at the origin,
+    the flanges along +x and +y, the width on z; a cap's as a plate in its
+    section's frame with the outer face toward +z. The generator turns
+    them onto the joint and the cut end."""
+    import shutil
+
+    own = profiles.parent / "hfs6-hardware"
+    shutil.copytree(profiles, own)
+    (own / "visual").mkdir()
+    shutil.copy(bt.parts.shape_path("bracket"), own / "visual" / "hblfs6.usda")
+    shutil.copy(bt.parts.shape_path("panel"), own / "visual" / "hfc6.usda")
+    text = (own / "manifest.yaml").read_text()
+    text = text.replace(
+        "      part_number: HBLFS6\n",
+        "      part_number: HBLFS6\n      dimensions_mm: {leg: 28, width: 20, thickness: 4.5}\n"
+        "      visual: visual/hblfs6.usda#/Shapes/bracket\n",
+        1,
+    ).replace(
+        "      part_number: HFC6-3030-B\n",
+        "      part_number: HFC6-3030-B\n      visual: visual/hfc6.usda#/Shapes/panel\n",
+        1,
+    )
+    (own / "manifest.yaml").write_text(text)
+    scene = scene_()
+    unit = bt.parts.FrameUnit(scene, "rig", catalog=own)
+    leg = unit.member("leg", (0.0, 0.0, 0.0), (0.0, 0.0, 0.72))
+    beam = unit.member("beam", (0.0, 0.0, 0.72), (1.14, 0.0, 0.72))
+    unit.joint(leg, beam)
+    unit.cap(beam, "to")
+    unit.build()
+    by = {o["name"]: o for o in json.loads(scene._project_json())["obstacles"]}
+    # The joint's corner is under the beam on the leg's +x face; the bracket's
+    # resident is its 28 x 28 x 20 box there, and the picture is bound with
+    # its x turned down the leg, its y along the beam and its corner at the
+    # box's corner.
+    lo, hi = scene.obstacle_bounds("rig/hardware/brackets/0")
+    assert lo == pytest.approx([0.015, -0.01, 0.677]) and hi == pytest.approx([0.043, 0.01, 0.705])
+    bracket = by["rig/hardware/brackets/0"]["visual_asset"]
+    assert bracket["url"].endswith("visual/hblfs6.usda") and bracket["prim_path"] == "/Shapes/bracket"
+    t = bracket["transform"]
+    assert t[:3] == pytest.approx([0.0, 0.0, -1.0]) and t[4:7] == pytest.approx([1.0, 0.0, 0.0])
+    assert t[8:11] == pytest.approx([0.0, -1.0, 0.0]) and t[12:15] == pytest.approx([-0.014, 0.0, 0.014])
+    # The cap on the beam's far end: +z outward along +x, x and y across the section.
+    cap = by["rig/hardware/caps/0"]["visual_asset"]
+    assert cap["url"].endswith("visual/hfc6.usda") and not cap.get("color_override")
+    t = cap["transform"]
+    assert t[:3] == pytest.approx([0.0, 1.0, 0.0]) and t[4:7] == pytest.approx([0.0, 0.0, 1.0])
+    assert t[8:11] == pytest.approx([1.0, 0.0, 0.0]) and t[12:15] == pytest.approx([0.0, 0.0, 0.0])
+    lo, hi = scene.obstacle_bounds("rig/hardware/caps/0")
+    assert lo == pytest.approx([1.14, -0.015, 0.705]) and hi == pytest.approx([1.143, 0.015, 0.735])

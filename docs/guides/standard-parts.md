@@ -32,7 +32,7 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`fence`][botrail.parts.fence] | panels under `<name>/panels/`, posts under `<name>/posts/`, the door as `<name>/door` | — | — | `<name>` (`structure.fence`, qty = panels), `<name>/posts` (`structure.fence.post`, qty = posts), the door (`structure.door`) |
 | [`table`][botrail.parts.table] | `<name>/top`, four legs | `<name>/top` (centre of the top face) | — | `<name>` (`structure.table`), and with a catalog `<name>/top` (the board, where the maker sells it as its own article) |
 | [`pedestal`][botrail.parts.pedestal] | `<name>/base`, `<name>/column`, `<name>/top` | `<name>/mount` (the robot's base pose) | — | `<name>` (`structure.pedestal`) |
-| [`frame_unit`][botrail.parts.frame_unit] | the profiles under `<name>/profiles/<section>/l<length>/` (they collide), the brackets, caps and feet under `<name>/hardware/` (decoration, drawn in full detail), a board `<name>/top` when one is asked for | `<name>/top` (centre of the top face) | — | `<name>` (`structure.frame`: the template and size), one line per profile length (`structure.frame.profile`, qty = members of that length), one per hardware article (`structure.frame.hardware`: brackets counted from the joints, bolts and nuts from the brackets, caps, feet) |
+| [`frame_unit`][botrail.parts.frame_unit] | the profiles under `<name>/profiles/<section>/l<length>/` (they collide), the brackets, caps and feet under `<name>/hardware/` (decoration, drawn in full detail; caps sold per section under `<name>/hardware/caps/<section>/`), a board `<name>/top` when one is asked for | `<name>/top` (centre of the top face) | — | `<name>` (`structure.frame`: the template and size), one line per profile length (`structure.frame.profile`, qty = members of that length), one per hardware article (`structure.frame.hardware`: brackets counted from the joints, bolts and nuts from the brackets, caps per section, feet) |
 | [`conveyor`][botrail.parts.conveyor] | `<name>/belt`, side rails, legs | `<name>/infeed`, `<name>/outfeed` | the conveyor device `<name>`, its zone on the belt | the *device* (`conveyor`) — the body is its geometry, not a second product |
 | [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`cabinet`][botrail.parts.cabinet] | `<name>/body`, its plinth as `<name>/base`, the mounting plate standing inside as `<name>/plate` | `<name>/front` (centre of the door face at floor level — where an operator stands) | — | `<name>` (`structure.cabinet`), and with a catalog `<name>/base` and `<name>/plate` (`structure.cabinet.base` / `.plate` — the plinth and the plate are articles of their own) |
@@ -187,23 +187,46 @@ leaves no room for the rails is refused before anything is placed.
 [`frame_unit_plan`][botrail.parts.frame_unit_plan] is the template's
 arithmetic on its own — the cut list as data, without a scene.
 
+A rectangular profile (MISUMI's 30 x 60, `dimensions_mm: {w: 30, d: 60}`)
+goes into the same template: `rails="3060"` stands the rails on edge (the
+`d` side up — the legs are cut a rail's height shorter, the depth rails a
+rail's width shorter each end), `legs="3060"` turns the legs' wide side
+along the width, and the cut list names both profiles
+(`HFS6-3060-620` x2 … `HFS6-3030-510` x4). Caps follow the section: a pack
+that sells them per section (`cap_3030`, `cap_3060` …) gets one BOM line per
+section (`<name>/hardware/caps/3060`), a pack with one `cap` gets one line.
+
 For a shape no template has, [`FrameUnit`][botrail.parts.FrameUnit] takes
-the members one by one — `member(tag, frm, to)` in the unit's own frame,
-`joint(a, b)` for every bracketed pair, `cap`, `foot`, `frame` — and
-`build()` cuts and counts the same way.
+the members one by one — `member(tag, frm, to, section=, wide=)` in the
+unit's own frame (`wide` is the axis across a rectangular member its `d`
+side runs along; left out, a horizontal member stands on edge and a vertical
+one turns it along x), `joint(a, b)` for every bracketed pair, `cap`, `foot`,
+`frame` — and `build()` cuts and counts the same way.
 
 The members are the massing: boxes at the real section, which a robot can
-hit. In full detail each member is drawn as the shape library's `tslot`
-extrusion — the section scaled to the profile's, the length to the cut,
-tinted clear or black for the finish — the way a carton is drawn over its
-box, so the picture travels with the member and the collision stays the box.
-Brackets, caps and feet are drawn in full detail and never collided; bolts
-and nuts sit inside the slots and are not drawn at all, but they are still
-counted — on one hidden resident each (`<name>/hardware/bolts/lot`), because
-a BOM line has to stand for something in the scene. `detail` changes what
-you see and nothing else. Not yet: rectangular sections (30 x 60) in a
-template and panels (a `cover` template) — a pack's `bracket`, `cap` and
-`foot` components can already name a `trim` of their own.
+hit. In full detail each member is drawn as an extrusion over its box, the
+way a carton is drawn over its box, so the picture travels with the member
+and the collision stays the box: the pack's own profile where it ships one
+(a `visual` authored at the maker's real cross-section, one metre long along
++Z and centred, marked `visual_scale: length` — the generator stretches the
+length to the cut and turns it along the member), and the shape library's
+generic `tslot` (`tslot_2` for a 1 : 2 section) otherwise, its section
+scaled to the profile's as well. Either is tinted clear or black for the
+finish. Brackets, caps and feet are drawn in full detail and never
+collided: a bracket sits in the inside corner of its joint, its two flanges
+along the two members — the pack's own article where it ships a `visual`
+for it (authored with the fold corner at the origin, one flange along +X,
+the other along +Y, the width centred on Z; `dimensions_mm: {leg, width,
+thickness}` size its resident), the shape library's `bracket` otherwise — and
+a cap is a plate just past the cut end, the pack's own where it ships one
+(authored in the section's frame, x along `w`, y along `d`, centred, the
+outer face toward +Z and the pegs going −Z), a plain black plate otherwise.
+Bolts and nuts sit inside the slots and are not drawn at all, but they are
+still counted — on one hidden resident each (`<name>/hardware/bolts/lot`),
+because a BOM line has to stand for something in the scene. `detail`
+changes what you see and nothing else. Not yet: panels (a `cover`
+template) — a pack's `bracket`, `cap` and `foot` components can also name a
+`trim` of their own.
 
 ## Bringing shapes from CAD — the Geometry Provider pattern
 
@@ -253,7 +276,7 @@ Some of what every cell has is neither a product nor a box: a carton with
 its folded lids and tape, a pressed tray, a perforated basket, the rubber
 foot under a bench leg, a bent handle, a drain hose, a machined part with
 its bores. botrail ships a small library of these forms — `bt.parts.SHAPES`,
-ten unit-box USD layers under `botrail/_shapes/`, authored in
+thirteen unit-box USD layers under `botrail/_shapes/`, authored in
 [botrail-assets](https://github.com/botrail/botrail-assets) (`workshop-shapes/`)
 and vendored by `scripts/sync_shapes.py` — and two ways to use them:
 
@@ -294,6 +317,8 @@ scale with the box.
 | `hose` | a hanging drain hose | rubber |
 | `tote` | the ribbed sleeve of a small-load container (a KLT): outer skin, vertical ribs, stacking rim and base band, a grip on each end, a card pocket — open inside and below, drawn a little past the plain boxes that are its walls and floor | polypropylene (tint it) |
 | `tslot` | a T-slot aluminium extrusion: square section, one slot per face, a hollow core — x and y are the section, z the cut length, scaled apart so a 30 mm and a 60 mm member look alike; `frame_unit` turns z along each member | machined aluminium (tint it for the anodising) |
+| `tslot_2` | the 1 : 2 rectangular member of the same family (a 30 x 60): one slot in each short face, two in each long face, a bore behind each pair and a pocket between them — x the short side, y the long one, z the cut length | machined aluminium (tint it for the anodising) |
+| `bracket` | the die-cast corner bracket of a T-slot frame: two flanges at right angles with a bolt hole each and a rib down either side — the fold corner at the box's (−x, −y) corner, the flanges along +x and +y, the width on z; `frame_unit` scales it to (leg, leg, width) and sets that corner where two members meet | machined aluminium |
 
 ## Series-specific equipment trims
 
