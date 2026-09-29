@@ -1,19 +1,24 @@
 [package]
 name = "botrail-cloth"
 description = "Garment cloth for botrail cells: a rapier-cloth simulation driven by gripper poses and grasp events, read back as a per-sample vertex track"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.12.0"
+edition = "2021"
+license = "PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0"
 readme = "README.md"
-repository.workspace = true
-authors.workspace = true
+repository = "https://github.com/neka-nat/botrail"
+authors = ["neka-nat <nekanat.stock@gmail.com>"]
+publish = false
+
+# Excluded from the workspace (root Cargo.toml) while rapier-cloth is a path
+# dependency on the sibling checkout: CI has no such checkout. Rejoin the
+# workspace with a crates.io version once rapier-cloth 0.3 is published.
 
 [dependencies]
-nalgebra.workspace = true
-serde.workspace = true
-thiserror.workspace = true
+nalgebra = "0.33"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 # Developed side by side; switch to a crates.io version once 0.3 is published.
 rapier-cloth = { path = "../../../rapier-cloth", default-features = false, features = ["f64", "implicit"] }
 
 [dev-dependencies]
-serde_json.workspace = true
+serde_json = "1"

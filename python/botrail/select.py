@@ -647,8 +647,8 @@ class _Cell:
         self.parts: dict[tuple[str, str], dict] = {(p["target"], p["kind"]): p for p in scene.parts()}
         self.bom_rows: list[dict] = list(scene.bom().rows)
         self.points = self._points(sequences)
-        self._grasps: dict[str, list[str]] = {}
-        self._mass_cache: dict[str, Optional[float]] = {}
+        self._holds: dict[str, list[list[str]]] = {}
+        self._mass_cache: dict[str, tuple[str, Optional[float]]] = {}
         self.cable_slack_m = 1.0
 
     def _points(self, sequences: Optional[list[str]]) -> list[dict]:
@@ -721,10 +721,28 @@ class _Cell:
             return device
         return None
 
+    def mast_of(self, robot: str) -> Optional[str]:
+        """The `mast` group of a forklift: a lift with no arm on it — the
+        catalog's forklift packages name it so, and none of the machine's
+        groups states a flange. A mast is not an arm."""
+        try:
+            model = self.scene.robot_of(robot)
+        except ValueError:
+            return None
+        if "mast" not in model.groups or any(model.group(g).flange for g in model.groups):
+            return None
+        return "mast"
+
+    def is_forklift(self, robot: str) -> bool:
+        """A forklift: a robot that rolls its own vehicle (a wheel mount)
+        and lifts with a mast rather than reaching with an arm."""
+        return bool((self.mounts.get(robot) or {}).get("drive")) and self.mast_of(robot) is not None
+
     def category_hint(self, name: str, kind: str) -> Optional[str]:
         """A shopping aisle for a line the author left with the derived
         default category. The aerial machine has exactly one aisle, and so
-        does a robot that rolls its own vehicle (a wheel mount); other
+        does a robot that rolls its own vehicle (a wheel mount): a forklift
+        when it lifts with a mast, a mobile manipulator otherwise; other
         ground vehicles stay unhinted (cart, AGV or AMR is a choice)."""
         if kind == "device":
             device = self.devices.get(name)
@@ -732,7 +750,7 @@ class _Cell:
             ridden = self.vehicle_of(name)
             device = self.devices.get(ridden) if ridden else None
             if device and (self.mounts.get(name) or {}).get("drive"):
-                return "vehicle.mobile_manipulator"
+                return "vehicle.forklift" if self.mast_of(name) else "vehicle.mobile_manipulator"
         else:
             return None
         if device and device.get("kind") == "vehicle" and device.get("aerial"):
@@ -788,24 +806,40 @@ class _Cell:
 
     # ------------------------------------------------------------ lookups
 
+    def mass_part_of(self, obstacle: str) -> tuple[str, Optional[float]]:
+        """Where an obstacle's mass comes from, as `(target, mass_kg)`: its
+        own part, else the nearest group part above it that states a mass
+        — one unit's mass, the group being the unit, not a copy for each
+        piece under it. When nothing states one, the mass is `None` and
+        the target is the part that should (the obstacle's own, else the
+        nearest group's, else the obstacle itself)."""
+        if obstacle in self._mass_cache:
+            return self._mass_cache[obstacle]
+        found: tuple[str, Optional[float]] = (obstacle, None)
+        part = self.parts.get((obstacle, "obstacle"))
+        if part is not None:
+            found = (obstacle, _number((part.get("attributes") or {}).get("mass_kg")))
+        if found[1] is None:
+            named = part is not None
+            prefix = obstacle
+            while "/" in prefix:
+                prefix = prefix.rsplit("/", 1)[0]
+                group = self.parts.get((prefix, "group"))
+                if group is None:
+                    continue
+                m = _number((group.get("attributes") or {}).get("mass_kg"))
+                if m is not None:
+                    found = (prefix, m)
+                    break
+                if not named:
+                    found, named = (prefix, None), True
+        self._mass_cache[obstacle] = found
+        return found
+
     def mass_of(self, obstacle: str) -> Optional[float]:
         """`mass_kg` of an obstacle's own part, else of the nearest group
         part above it (one unit's mass, not the group total)."""
-        if obstacle in self._mass_cache:
-            return self._mass_cache[obstacle]
-        value: Optional[float] = None
-        part = self.parts.get((obstacle, "obstacle"))
-        if part is not None:
-            value = _number((part.get("attributes") or {}).get("mass_kg"))
-        if value is None:
-            prefix = obstacle
-            while "/" in prefix and value is None:
-                prefix = prefix.rsplit("/", 1)[0]
-                group = self.parts.get((prefix, "group"))
-                if group is not None:
-                    value = _number((group.get("attributes") or {}).get("mass_kg"))
-        self._mass_cache[obstacle] = value
-        return value
+        return self.mass_part_of(obstacle)[1]
 
     def extent_of(self, obstacle: str) -> Optional[tuple[float, float, float]]:
         """The obstacle's own size (box sides, a cylinder's diameter and
@@ -859,7 +893,7 @@ class _Cell:
             groups = list(model.groups)
         except ValueError:
             return []
-        if len(groups) <= 1:
+        if len(groups) <= 1 or self.mast_of(robot):
             return []
         flanged = [g for g in groups if model.group(g).flange]
         return flanged or groups
@@ -872,17 +906,19 @@ class _Cell:
             return robot, arm
         return name, None
 
-    def grasped_by(self, robot: str, arm: Optional[str] = None) -> list[str]:
-        """Objects the robot holds now or grasps in a counted sequence —
-        with `arm`, those that arm grasps."""
+    def holds_of(self, robot: str, arm: Optional[str] = None) -> list[list[str]]:
+        """What the robot holds at once: the objects attached to it now
+        (one hold), then what each counted step's `attach` actions take
+        together — a pallet's boards and the load on them go up as one.
+        With `arm`, the holds of that arm."""
         key = robot if arm is None else f"{robot}/{arm}"
-        if key in self._grasps:
-            return self._grasps[key]
+        if key in self._holds:
+            return self._holds[key]
         tip = None
         if arm is not None:
             group = self.scene.robot_of(robot).group(arm)
             tip = group.flange or group.tip
-        names: list[str] = []
+        now: list[str] = []
         for obstacle, entry in self.obstacles.items():
             attached = entry.get("attached_to")
             if (
@@ -890,16 +926,32 @@ class _Cell:
                 and (attached.get("robot") or self.default_robot) == robot
                 and (arm is None or attached.get("link") == tip)
             ):
-                names.append(obstacle)
+                now.append(obstacle)
+        holds: list[list[str]] = [now] if now else []
         for sequence in self.sequences:
-            for action in _walk_actions(sequence.get("steps") or []):
-                if action.get("type") == "attach" and (action.get("robot") or self.default_robot) == robot:
+            for step in _walk_steps(sequence.get("steps") or []):
+                taken: list[str] = []
+                for action in step.get("actions") or []:
+                    if action.get("type") != "attach" or (action.get("robot") or self.default_robot) != robot:
+                        continue
                     if arm is not None and action.get("group") != arm:
                         continue
                     obj = action.get("object")
-                    if obj and obj not in names:
-                        names.append(obj)
-        self._grasps[key] = names
+                    if obj and obj not in taken:
+                        taken.append(obj)
+                if taken:
+                    holds.append(taken)
+        self._holds[key] = holds
+        return holds
+
+    def grasped_by(self, robot: str, arm: Optional[str] = None) -> list[str]:
+        """Objects the robot holds now or grasps in a counted sequence —
+        with `arm`, those that arm grasps."""
+        names: list[str] = []
+        for hold in self.holds_of(robot, arm):
+            for obj in hold:
+                if obj not in names:
+                    names.append(obj)
         return names
 
     def taught_of(self, robot: str, arm: Optional[str] = None) -> list[tuple[str, list[float]]]:
@@ -941,6 +993,42 @@ class _Cell:
                 except ValueError:
                     continue
                 heights.append((float(position[2]) - floor, arm or robot, motion))
+        return heights
+
+    def fork_heights_of(self, robot: str) -> list[tuple[float, str]]:
+        """`(height, step or motion)` of every position the cycle puts a
+        forklift's fork seat (its TCP) at, over the floor it stands on:
+        the targets of the ramps that drive its mast in the counted
+        sequences — each ramp leaving the joints where it put them for the
+        next — and the goals of any taught motion."""
+        mount = self.mounts.get(robot) or {}
+        offset = ((mount.get("offset") or {}).get("position") or [0.0, 0.0, 0.0])[2]
+        floor = self.scene.robot_base_pose_of(robot)[0][2] - float(offset)
+        model = self.scene.robot_of(robot)
+        try:
+            seat = model.tcp_link
+        except ValueError:
+            return []
+        names = list(model.joint_names)
+        rest = list(self.scene.joint_positions_of(robot))
+        goals: list[tuple[list[float], str]] = [(q, motion) for motion, q in self.taught_of(robot)]
+        for sequence in self.sequences:
+            state = list(rest)
+            for step in _walk_steps(sequence.get("steps") or []):
+                for action in step.get("actions") or []:
+                    if action.get("type") != "start_ramp" or (action.get("robot") or self.default_robot) != robot:
+                        continue
+                    for target in action.get("targets") or []:
+                        if target.get("joint") in names:
+                            state[names.index(target["joint"])] = float(target["value"])
+                    goals.append((list(state), str(step.get("name") or "")))
+        heights: list[tuple[float, str]] = []
+        for q, where in goals:
+            try:
+                position, _ = self.scene.link_pose_at(seat, q, robot=robot)
+            except ValueError:
+                continue
+            heights.append((float(position[2]) - floor, where))
         return heights
 
     def targets_of(
@@ -1035,7 +1123,7 @@ class _Cell:
                 tool_known = False
             else:
                 tool_mass += m * int(row.get("qty") or 1)
-        heaviest, unknown = self._heaviest(self.grasped_by(robot, arm))
+        heaviest, unknown = self._heaviest_hold(self.holds_of(robot, arm))
         if (has_tool and tool_known) or heaviest is not None:
             basis: list[str] = []
             if has_tool:
@@ -1051,7 +1139,10 @@ class _Cell:
         # Reach is per arm: from the arm's own base, at its own tip. A
         # dual-arm product (one line, several arms) asks for the farthest
         # arm's figure; an arm mounted from the catalog is its own line.
-        arms = [arm] if arm is not None else (self.arms_of(robot) or [None])
+        # A forklift reaches nowhere: its forks are where its mast puts
+        # them, and what the cell asks of the mast follows below.
+        forklift = arm is None and self.is_forklift(robot)
+        arms = [] if forklift else ([arm] if arm is not None else (self.arms_of(robot) or [None]))
         farthest_arm: Optional[tuple[float, str, Optional[str]]] = None
         for a in arms:
             if a is None:
@@ -1111,8 +1202,12 @@ class _Cell:
         # A machine that rolls its own vehicle works at the heights its
         # torso gives it: the lowest and the highest taught hand position
         # over the floor it stands on — what tells a lift column from a
-        # bowing waist from a fixed pedestal.
-        if arm is None and (self.mounts.get(robot) or {}).get("drive"):
+        # bowing waist from a fixed pedestal. A forklift's are its mast's.
+        if forklift:
+            r, n = self._mast(robot)
+            reqs += r
+            notes += n
+        elif arm is None and (self.mounts.get(robot) or {}).get("drive"):
             heights = self.heights_of(robot)
             if heights:
                 low, high = min(heights), max(heights)
@@ -1185,7 +1280,39 @@ class _Cell:
             r, n = self._vehicle(ridden, self.devices[ridden], margin)
             reqs += r
             notes += n
+            if forklift:
+                # A forklift's sheet quotes two speeds: drive unit first
+                # (its top speed, `max_speed_mps`) and forks first — the
+                # machine's +X, so the vehicle's forward gear.
+                speed = float(self.devices[ridden].get("speed") or 0.0)
+                if speed > _EPS:
+                    reqs.append(
+                        Requirement("max_speed_fork_first_mps", _round(speed, 3), basis="travel speed forks first")
+                    )
         return reqs, notes
+
+    def _mast(self, robot: str) -> tuple[list[Requirement], list[str]]:
+        """What the cell asks of a forklift's mast: the fork seat's highest
+        position over the floor (the lift height a put-away needs) and its
+        lowest (the lowered fork height a floor pallet's pockets allow),
+        read off the cycle's ramps and taught motions."""
+        heights = self.fork_heights_of(robot)
+        if not heights:
+            return [], []
+        low, high = min(heights), max(heights)
+        return [
+            Requirement(
+                "lift_height_mm",
+                _round(high[0] * 1000.0, 1),
+                basis=f"highest fork position {high[0]:.3f} m over the floor (`{high[1]}`)",
+            ),
+            Requirement(
+                "fork_height_lowered_mm",
+                _round(low[0] * 1000.0, 1),
+                op="<=",
+                basis=f"lowest fork position {low[0]:.3f} m over the floor (`{low[1]}`)",
+            ),
+        ], []
 
     def _arm_base(self, robot: str, arm: Optional[str]) -> tuple[float, float, float]:
         """Where reach is measured from: the robot's base, or an arm's
@@ -1202,7 +1329,7 @@ class _Cell:
         notes: list[str] = []
         if category.startswith(("tool.screwdriver", "tool.nutrunner")):
             reqs += self._screwdriver()
-        heaviest, unknown = self._heaviest(grasped)
+        heaviest, unknown = self._heaviest_hold(self.holds_of(robot))
         if heaviest is not None:
             reqs.append(Requirement("payload_kg", _round(heaviest[1], 3), basis=f"grasps {heaviest[0]} {_fmt(heaviest[1])} kg"))
         if unknown and heaviest is None:
@@ -1455,7 +1582,10 @@ class _Cell:
         reqs: list[Requirement] = []
         notes: list[str] = []
         speed = float(kind.get("speed") or 0.0)
-        if speed > _EPS:
+        reverse = float(kind.get("reverse_speed") or 0.0)
+        if reverse > speed + _EPS:
+            reqs.append(Requirement("max_speed_mps", _round(reverse, 3), basis="travel speed in reverse"))
+        elif speed > _EPS:
             reqs.append(Requirement("max_speed_mps", _round(speed, 3), basis="travel speed"))
         aerial = kind.get("aerial")
         if aerial:
@@ -1689,26 +1819,39 @@ class _Cell:
 
     # ----------------------------------------------------------- helpers
 
-    def _heaviest(self, objects: list[str]) -> tuple[Optional[tuple[str, float]], list[str]]:
-        heaviest: Optional[tuple[str, float]] = None
+    def _carried(self, objects: list[str]) -> tuple[float, list[str], list[str]]:
+        """The mass of objects held or carried together, counted by the
+        part it comes from (a group part once, not once per piece): the
+        total, the parts it came from, and what nothing gives a mass."""
+        total = 0.0
+        names: list[str] = []
         unknown: list[str] = []
         for obj in objects:
-            m = self.mass_of(obj)
+            target, m = self.mass_part_of(obj)
             if m is None:
-                unknown.append(obj)
-            elif heaviest is None or m > heaviest[1]:
-                heaviest = (obj, m)
+                if target not in unknown:
+                    unknown.append(target)
+            elif target not in names:
+                names.append(target)
+                total += m
+        return total, names, unknown
+
+    def _heaviest_hold(self, holds: list[list[str]]) -> tuple[Optional[tuple[str, float]], list[str]]:
+        """The heaviest of what is held at once, as `(what, kg)`: one
+        part's name, or the names of the parts lifted together."""
+        heaviest: Optional[tuple[str, float]] = None
+        unknown: list[str] = []
+        for hold in holds:
+            mass, names, missing = self._carried(hold)
+            for name in missing:
+                if name not in unknown:
+                    unknown.append(name)
+            if names and (heaviest is None or mass > heaviest[1]):
+                heaviest = (" + ".join(names), mass)
         return heaviest, unknown
 
     def _total_mass(self, objects: list[str]) -> tuple[float, list[str]]:
-        total = 0.0
-        unknown: list[str] = []
-        for obj in objects:
-            m = self.mass_of(obj)
-            if m is None:
-                unknown.append(obj)
-            else:
-                total += m
+        total, _names, unknown = self._carried(objects)
         return total, unknown
 
     def obstacles_meeting(self, position, quaternion, size, *, exclude: str = "", ground_z: float = 0.02) -> list[str]:
@@ -1765,11 +1908,16 @@ def _kind_hint(category: str) -> str:
     return "group"
 
 
-def _walk_actions(steps: list[dict]) -> Iterator[dict]:
+def _walk_steps(steps: list[dict]) -> Iterator[dict]:
     for step in steps:
-        yield from step.get("actions") or []
+        yield step
         for arm in step.get("select") or []:
-            yield from _walk_actions(arm.get("steps") or [])
+            yield from _walk_steps(arm.get("steps") or [])
+
+
+def _walk_actions(steps: list[dict]) -> Iterator[dict]:
+    for step in _walk_steps(steps):
+        yield from step.get("actions") or []
 
 
 def _merge(reqs: list[Requirement]) -> list[Requirement]:

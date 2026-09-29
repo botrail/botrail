@@ -79,7 +79,7 @@ from .gait import _package_dir, _read_manifest
 
 __all__ = ["Wheels"]
 
-_DRIVES = ("differential", "skid", "mecanum", "omni", "swerve")
+_DRIVES = ("differential", "skid", "tricycle", "mecanum", "omni", "swerve")
 _HOLONOMIC = ("mecanum", "omni", "swerve")
 _MODES = ("auto", "roll", "walk")
 
@@ -108,7 +108,9 @@ class Wheels:
         posture: Joint -> value the machine is put in as it is mounted —
             how it travels (torso down, arms tucked). Other joints keep
             the value they had.
-        drive: What the base is — ``differential``, ``skid``, ``mecanum``,
+        drive: What the base is — ``differential``, ``skid``,
+            ``tricycle`` (one steered drive wheel and a fixed axle: a
+            forklift, which pivots about that axle's midpoint), ``mecanum``,
             ``omni`` or ``swerve``. The wheels turn the same either way;
             this says how the vehicle should be driven
             (:attr:`vehicle_drive`).

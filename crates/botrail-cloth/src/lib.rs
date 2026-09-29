@@ -7,6 +7,10 @@
 //! [`ClothTrack`] of per-sample vertex positions on the bake's sample grid.
 //! The host (the rollout) owns robots, IK and timing; it only has to hand
 //! over end-effector poses. Design: `.internal/docs/cloth-adapter.md`.
+//!
+//! Every pose, position and track of this API is in botrail's Z-up world
+//! frame. The cloth simulation is Y-up; the cell converts at the boundary
+//! (`world = R_x(+90°) · sim`, the usual Y-up to Z-up rotation).
 
 use ::nalgebra::Isometry3;
 use rapier_cloth::core::garment::{Garment, GarmentLayers, Landmark, Side, TShirtPattern};
@@ -37,9 +41,13 @@ pub enum ClothCellError {
 #[derive(Debug, Clone)]
 pub struct GarmentSpec {
     pub pattern: TShirtPattern,
-    /// World position of the pattern centre. With a table, `y` is replaced by
-    /// the resting height above it.
+    /// World position (Z-up) of the pattern centre. With a table, `z` is
+    /// replaced by the resting height above it.
     pub origin: [f64; 3],
+    /// Rotation of the flat garment about the vertical axis through `origin`,
+    /// radians. At zero its width runs along `+x` and its length (hem to
+    /// shoulders) along `-y`.
+    pub yaw: f64,
     /// Contact thickness of the cloth (midsurface to midsurface).
     pub thickness: f64,
     /// Barrier band of the implicit solver; the layers start `thickness +
@@ -61,6 +69,7 @@ impl Default for GarmentSpec {
         GarmentSpec {
             pattern: TShirtPattern::default(),
             origin: [0.0; 3],
+            yaw: 0.0,
             thickness: 0.000318,
             band: 0.001,
             friction: 0.5,
@@ -146,6 +155,7 @@ pub struct StepOutcome {
 pub struct ClothTrack {
     pub name: String,
     pub triangles: Vec<[u32; 3]>,
+    /// World positions (Z-up metres) per vertex per sample.
     pub points: Vec<Vec<[f32; 3]>>,
     /// Vertices held by a gripper at each sample.
     pub held: Vec<Vec<u32>>,
@@ -154,11 +164,22 @@ pub struct ClothTrack {
     pub h: f64,
 }
 
+/// World (Z-up) to simulation (Y-up) coordinates: `sim = R_x(-90°) · world`.
+fn to_sim(p: [f64; 3]) -> Vec3 {
+    Vec3::new(p[0], p[2], -p[1])
+}
+/// Simulation (Y-up) to world (Z-up) coordinates: `world = R_x(+90°) · sim`.
+fn to_world(p: Vec3) -> [f64; 3] {
+    [p.x, -p.z, p.y]
+}
+/// A world pose as the simulation sees it: the same rigid motion composed
+/// with the frame change, so local anchors mean the same in both frames.
 fn to_pose(iso: &Isometry3<f64>) -> Pose {
     let t = iso.translation.vector;
     let q = iso.rotation.quaternion();
-    let mut pose = Pose::from_translation(Vec3::new(t.x, t.y, t.z));
-    pose.rotation = Rotation::from_xyzw(q.i, q.j, q.k, q.w);
+    let mut pose = Pose::from_translation(to_sim([t.x, t.y, t.z]));
+    pose.rotation = Rotation::from_axis_angle(Vec3::X, -std::f64::consts::FRAC_PI_2)
+        * Rotation::from_xyzw(q.i, q.j, q.k, q.w);
     pose
 }
 
@@ -179,10 +200,10 @@ pub struct ClothCell {
 
 impl ClothCell {
     /// Builds the garment lying flat, front up, its lowest layer resting on
-    /// the table whose top is at `table_top` (or at `spec.origin[1]` without
-    /// a table), and `grippers` kinematic bodies without colliders parked at
-    /// the origin. The pattern's `x` runs across the garment and its `z` from
-    /// the hem to the shoulders.
+    /// the table whose top is at height `table_top` (or at `spec.origin[2]`
+    /// without a table), and `grippers` kinematic bodies without colliders
+    /// parked at the origin. The garment's width runs along `+x` and its
+    /// length from the hem to the shoulders along `-y`, turned by `spec.yaw`.
     pub fn new(
         spec: &GarmentSpec,
         table_top: Option<f64>,
@@ -194,7 +215,7 @@ impl ClothCell {
         let mut rigid = PhysicsWorld::new();
         rigid.gravity = Vec3::new(0.0, -9.81, 0.0);
         let gap = spec.thickness + spec.band;
-        let mut origin = Vec3::new(spec.origin[0], spec.origin[1], spec.origin[2]);
+        let mut origin = to_sim(spec.origin);
         if let Some(top) = table_top {
             rigid.colliders.insert(
                 ColliderBuilder::new(SharedShape::halfspace(Vec3::Y))
@@ -220,7 +241,13 @@ impl ClothCell {
             },
         )
         .map_err(cloth_err)?;
-        let placed = garment.placed_positions(origin, gap).map_err(cloth_err)?;
+        let turn = Rotation::from_axis_angle(Vec3::Y, spec.yaw);
+        let placed: Vec<Vec3> = garment
+            .placed_positions(origin, gap)
+            .map_err(cloth_err)?
+            .iter()
+            .map(|&p| origin + turn * (p - origin))
+            .collect();
         cloth.set_positions(&placed).map_err(cloth_err)?;
         cloth
             .set_contact_settings(Some(ClothContactSettings {
@@ -284,11 +311,15 @@ impl ClothCell {
     pub fn garment(&self) -> &Garment {
         &self.garment
     }
-    pub fn positions(&self) -> &[Vec3] {
+    fn sim_positions(&self) -> &[Vec3] {
         self.world
             .cloth(self.cloth)
             .expect("cell cloth")
             .positions()
+    }
+    /// Current world positions of every vertex.
+    pub fn positions(&self) -> Vec<[f64; 3]> {
+        self.sim_positions().iter().map(|&p| to_world(p)).collect()
     }
     pub fn steps(&self) -> u64 {
         self.step
@@ -300,7 +331,7 @@ impl ClothCell {
     /// Current world position of a named landmark.
     pub fn landmark_position(&self, name: &str) -> Option<[f64; 3]> {
         self.landmark(name)
-            .map(|v| self.positions()[v as usize].to_array())
+            .map(|v| to_world(self.sim_positions()[v as usize]))
     }
 
     fn gripper(&self, gripper: usize) -> Result<RigidBodyHandle, ClothCellError> {
@@ -351,7 +382,7 @@ impl ClothCell {
             return Err(ClothCellError::Landmark(spec.landmark.clone()));
         }
         let pose = *self.rigid.bodies[body].position();
-        let positions = self.positions();
+        let positions = self.sim_positions();
         let points = vertices
             .iter()
             .map(|&particle| AttachmentPoint {
@@ -376,6 +407,20 @@ impl ClothCell {
         let count = vertices.len();
         self.held[gripper] = Some((handle, vertices));
         Ok(count)
+    }
+    /// Changes how firmly a gripper holds its patch without moving it: the
+    /// anchors stay and the hold becomes springs of stiffness `1 / compliance`
+    /// from the next step (0 pins again). Raising the compliance tenfold per
+    /// step for a few steps before [`ClothCell::release`] is a soft release: a
+    /// taut flap relaxes instead of snapping free.
+    pub fn soften_grasp(&mut self, gripper: usize, compliance: f64) -> Result<(), ClothCellError> {
+        self.gripper(gripper)?;
+        let (handle, _) = self.held[gripper]
+            .as_ref()
+            .ok_or(ClothCellError::NotHolding(gripper))?;
+        self.world
+            .set_attachment_compliance(*handle, compliance)
+            .map_err(|e| ClothCellError::Cloth(e.to_string()))
     }
     /// Opens a gripper; the cloth keeps the velocity it had.
     pub fn release(&mut self, gripper: usize) -> Result<(), ClothCellError> {
@@ -464,11 +509,10 @@ impl ClothCell {
     }
 
     fn record(&mut self) {
-        let positions = self.positions();
         self.samples.push(
-            positions
+            self.sim_positions()
                 .iter()
-                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                .map(|&p| to_world(p).map(|c| c as f32))
                 .collect(),
         );
         let mut held: Vec<u32> = self
@@ -503,6 +547,7 @@ impl ClothCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::nalgebra::{Translation3, UnitQuaternion, Vector3};
 
     fn coarse() -> GarmentSpec {
         GarmentSpec {
@@ -519,7 +564,7 @@ mod tests {
     fn a_gripper_lifts_the_cuff_and_hands_it_over() {
         let mut cell = ClothCell::new(&coarse(), Some(0.0), 2).unwrap();
         let cuff = cell.landmark_position("cuff_left").unwrap();
-        assert!(cuff[1] > 0.0 && cuff[1] < 0.01, "{cuff:?}");
+        assert!(cuff[2] > 0.0 && cuff[2] < 0.01, "{cuff:?}");
         cell.place_gripper(0, &Isometry3::translation(cuff[0], cuff[1], cuff[2]))
             .unwrap();
         cell.place_gripper(1, &Isometry3::translation(1.0, 0.5, 0.0))
@@ -557,32 +602,34 @@ mod tests {
         for k in 1..=5 {
             cell.set_gripper_pose(
                 0,
-                &Isometry3::translation(cuff[0], cuff[1] + 0.01 * k as f64, cuff[2]),
+                &Isometry3::translation(cuff[0], cuff[1], cuff[2] + 0.01 * k as f64),
             )
             .unwrap();
             cell.step(0.1).unwrap();
         }
         let lifted = cell.positions()[cuff_vertex];
         assert!(
-            (lifted.y - start.y - 0.05).abs() < 1e-6,
+            (lifted[2] - start[2] - 0.05).abs() < 1e-6
+                && (lifted[0] - start[0]).abs() < 1e-6
+                && (lifted[1] - start[1]).abs() < 1e-6,
             "{start:?} -> {lifted:?}"
         );
         // Hand over to the second gripper where the first one is.
-        let pose = Isometry3::translation(cuff[0], cuff[1] + 0.05, cuff[2]);
+        let pose = Isometry3::translation(cuff[0], cuff[1], cuff[2] + 0.05);
         cell.place_gripper(1, &pose).unwrap();
         cell.transfer(0, 1).unwrap();
         assert!(matches!(
             cell.release(0),
             Err(ClothCellError::NotHolding(0))
         ));
-        cell.set_gripper_pose(1, &Isometry3::translation(cuff[0], cuff[1] + 0.06, cuff[2]))
+        cell.set_gripper_pose(1, &Isometry3::translation(cuff[0], cuff[1], cuff[2] + 0.06))
             .unwrap();
-        cell.set_gripper_pose(0, &Isometry3::translation(0.5, 0.5, 0.0))
+        cell.set_gripper_pose(0, &Isometry3::translation(0.5, 0.0, 0.5))
             .unwrap();
         cell.step(0.1).unwrap();
         let moved = cell.positions()[cuff_vertex];
         assert!(
-            (moved.y - lifted.y - 0.01).abs() < 1e-6,
+            (moved[2] - lifted[2] - 0.01).abs() < 1e-6,
             "{lifted:?} -> {moved:?}"
         );
         cell.release(1).unwrap();
@@ -591,6 +638,9 @@ mod tests {
         let track = cell.track("shirt");
         assert_eq!(track.points.len(), cell.steps() as usize + 1);
         assert_eq!(track.points[0].len(), cell.positions().len());
+        let last = track.points.last().unwrap()[cuff_vertex];
+        let now = cell.positions()[cuff_vertex];
+        assert!((0..3).all(|i| (last[i] as f64 - now[i]).abs() < 1e-6));
         assert_eq!(track.h, 0.1);
         assert!(track.held[4].len() >= 2 && track.held.last().unwrap().is_empty());
         assert_eq!(track.landmarks["cuff_left"], cuff_vertex as u32);
@@ -620,5 +670,139 @@ mod tests {
         ));
         assert!(cell.landmark("neck_back").is_some());
         assert_eq!(LANDMARKS.len(), 12);
+    }
+
+    #[test]
+    fn the_cell_is_z_up_and_turns_the_garment_by_yaw() {
+        let cell = ClothCell::new(&coarse(), Some(0.7), 0).unwrap();
+        let hem = cell.landmark_position("hem_center").unwrap();
+        let neck = cell.landmark_position("neck_back").unwrap();
+        let left = cell.landmark_position("hem_left").unwrap();
+        let right = cell.landmark_position("hem_right").unwrap();
+        // Every vertex rests just above the table top.
+        for p in cell.positions() {
+            assert!(p[2] > 0.7 && p[2] < 0.71, "{p:?}");
+        }
+        // Width along x about the origin, length along -y.
+        assert!((left[0] + right[0]).abs() < 1e-9 && (left[0] - right[0]).abs() > 0.4);
+        assert!(
+            hem[1] - neck[1] > 0.5 && (hem[0] - neck[0]).abs() < 1e-9,
+            "{hem:?} {neck:?}"
+        );
+        // A quarter turn sends the length along +x.
+        let turned = ClothCell::new(
+            &GarmentSpec {
+                yaw: std::f64::consts::FRAC_PI_2,
+                origin: [1.0, 2.0, 0.0],
+                ..coarse()
+            },
+            Some(0.7),
+            0,
+        )
+        .unwrap();
+        let hem = turned.landmark_position("hem_center").unwrap();
+        let neck = turned.landmark_position("neck_back").unwrap();
+        assert!(
+            neck[0] - hem[0] > 0.5 && (neck[1] - hem[1]).abs() < 1e-9,
+            "{hem:?} {neck:?}"
+        );
+        assert!((hem[1] - 2.0).abs() < 1e-9 && hem[2] > 0.7, "{hem:?}");
+    }
+
+    #[test]
+    fn gripper_rotations_turn_the_held_patch_about_the_gripper() {
+        let mut cell = ClothCell::new(&coarse(), Some(0.0), 1).unwrap();
+        let cuff = cell.landmark_position("cuff_right").unwrap();
+        let origin = Vector3::new(cuff[0], cuff[1], cuff[2]);
+        cell.place_gripper(0, &Isometry3::translation(cuff[0], cuff[1], cuff[2]))
+            .unwrap();
+        let held = cell
+            .grasp(
+                0,
+                &GraspSpec {
+                    landmark: "cuff_right".into(),
+                    radius: 0.08,
+                    layers: PatchLayers::All,
+                    compliance: 0.0,
+                },
+            )
+            .unwrap();
+        assert!(held >= 3, "{held}");
+        // Lift straight up, then turn about the vertical axis through the
+        // gripper: the patch turns rigidly with it, in world coordinates.
+        for k in 1..=8 {
+            cell.set_gripper_pose(
+                0,
+                &Isometry3::translation(cuff[0], cuff[1], cuff[2] + 0.01 * k as f64),
+            )
+            .unwrap();
+            cell.step(0.1).unwrap();
+        }
+        let vertices = cell.held[0].as_ref().unwrap().1.clone();
+        let before = cell.positions();
+        let centre = origin + Vector3::new(0.0, 0.0, 0.08);
+        let turn = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), 0.3);
+        cell.set_gripper_pose(0, &Isometry3::from_parts(Translation3::from(centre), turn))
+            .unwrap();
+        cell.step(0.1).unwrap();
+        let after = cell.positions();
+        for &v in &vertices {
+            let p = Vector3::from(before[v as usize]);
+            let q = Vector3::from(after[v as usize]);
+            let expected = centre + turn * (p - centre);
+            assert!(
+                (q - expected).norm() < 1e-6,
+                "{p:?} -> {q:?} vs {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_softened_grasp_holds_the_patch_on_springs() {
+        let mut cell = ClothCell::new(&coarse(), Some(0.0), 1).unwrap();
+        assert!(matches!(
+            cell.soften_grasp(0, 0.1),
+            Err(ClothCellError::NotHolding(0))
+        ));
+        let cuff = cell.landmark_position("cuff_left").unwrap();
+        cell.place_gripper(0, &Isometry3::translation(cuff[0], cuff[1], cuff[2]))
+            .unwrap();
+        cell.grasp(
+            0,
+            &GraspSpec {
+                landmark: "cuff_left".into(),
+                radius: 0.06,
+                layers: PatchLayers::All,
+                compliance: 0.0,
+            },
+        )
+        .unwrap();
+        for k in 1..=5 {
+            cell.set_gripper_pose(
+                0,
+                &Isometry3::translation(cuff[0], cuff[1], cuff[2] + 0.01 * k as f64),
+            )
+            .unwrap();
+            cell.step(0.1).unwrap();
+        }
+        let cuff_vertex = cell.landmark("cuff_left").unwrap() as usize;
+        let pinned = cell.positions()[cuff_vertex];
+        assert!(matches!(
+            cell.soften_grasp(0, -1.0),
+            Err(ClothCellError::Cloth(_))
+        ));
+        cell.soften_grasp(0, 0.2).unwrap();
+        for _ in 0..5 {
+            cell.step(0.1).unwrap();
+        }
+        let sagged = cell.positions()[cuff_vertex];
+        let sag = pinned[2] - sagged[2];
+        assert!(sag > 1e-4 && sag < 0.05, "{pinned:?} -> {sagged:?}");
+        assert!(!cell.track("shirt").held.last().unwrap().is_empty());
+        cell.release(0).unwrap();
+        assert!(matches!(
+            cell.soften_grasp(0, 0.0),
+            Err(ClothCellError::NotHolding(0))
+        ));
     }
 }

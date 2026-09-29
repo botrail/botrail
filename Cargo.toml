@@ -16,8 +16,10 @@ members = [
     "crates/botrail-py",
     "crates/botrail-wasm",
     "crates/botrail-bench",
-    "crates/botrail-cloth",
 ]
+# botrail-cloth depends on a sibling checkout of rapier-cloth until 0.3 is on
+# crates.io, so it builds on its own (`--manifest-path crates/botrail-cloth/Cargo.toml`).
+exclude = ["crates/botrail-cloth"]
 
 [workspace.package]
 version = "0.12.0"
@@ -39,7 +41,6 @@ botrail-physics-rapier = { path = "crates/botrail-physics-rapier" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
 botrail-session = { path = "crates/botrail-session" }
-botrail-cloth = { path = "crates/botrail-cloth" }
 botrail-usd = { path = "crates/botrail-usd" }
 parry3d-f64 = "0.29"
 xurdf = "0.6"

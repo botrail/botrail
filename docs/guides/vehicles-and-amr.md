@@ -60,6 +60,32 @@ stops (see [lifts](sensors-and-devices.md#lifts)), ridden by commanding
 the lift, and never walked by `goto` — a station across the edge is
 refused with directions to drive to the near side, ride, and continue.
 
+### A drive that cannot pivot — `turn_radius`
+
+A counterbalance forklift, an Ackermann axle, a tricycle steered short of
+across: `drive="steered"` with a `turn_radius` (metres, the vehicle
+frame's — the fixed axle's midpoint) rounds every corner instead of
+pivoting. Where the gear holds through a corner the machine takes the
+fillet arc tangent to both legs; where it changes — a station past the
+corner demands forks first — it drives past the corner by `R cot(Δ/2)`
+and swings back through the arc, the operator's overshoot and reverse.
+Both are closed-form spans, so the body's sweep round the bend is exact,
+and a steered drive wheel takes the Ackermann angle on it.
+
+```python
+scene.add_vehicle("truck", body=["truck"], path=PATH, stations=STATIONS,
+                  drive="steered", turn_radius=0.656,        # Linde L-MATIC AC 1.6 t: Wa 2033 mm
+                  speed=1.7, reverse_speed=0.8, allow_reverse=True)
+```
+
+Three rules come with it: paths are level (no `max_grade`); a station is
+entered and left along one line, so a corner goes on the waypoint before
+it; and a leg must be long enough for the turns at its ends, or the goto
+is refused naming the leg and the metres it lacks. The arc's rate is
+capped at `turn_speed`, so a tight radius is not taken at cruise. The
+tape in the studio and in the layout drawing is drawn with the fillets a
+same-gear pass takes; the overshoot of a gear change shows in the playback.
+
 ### Holonomic drive — mecanum wheels
 
 `drive="holonomic"` translates the machine in any direction while holding
@@ -209,6 +235,31 @@ half-diagonal, so the clearance that decides whether a dock works is the one
 *around the turn*, not along the straight. If a dead end has no room for
 that, pass `allow_reverse=True` and the vehicle backs out instead of turning
 around in it — which is what a differential-drive machine does anyway.
+
+### Gears: which way it faces a leg
+
+With `allow_reverse` a corner is taken in whichever gear turns the machine
+less — a 135° corner is backed rather than turned around — and a right
+angle, which costs the same either way, goes forward unless the vehicle
+says `prefer="reverse"`. A station can demand the gear of the leg into it,
+and a reversed leg can have its own speed — and once it has one, a corner
+takes the gear that has the leg *done* soonest, turn and run together: a
+forklift turns round to back 10 m down the aisle at 8 km/h and drives the
+last metre into a bay forks first without turning at all:
+
+```python
+scene.add_vehicle("agf", body=[], path=PATH, stations=STATIONS,
+                  speed=0.31, reverse_speed=2.2,          # forks first is slow
+                  allow_reverse=True, prefer="reverse",    # the aisle, drive-unit first
+                  arrive={"bay1": "forward", "charger": "reverse"})
+```
+
+That is a forklift: its forks are its +X, so `arrive="forward"` puts them
+into the pallet and `"reverse"` backs it onto a charger whose plate is on
+the drive unit, while `prefer="reverse"` keeps it backing down the aisle
+between bays at its faster speed. The parked heading is unchanged — it
+faces the leg leaving the station — and a vehicle that states none of this
+behaves exactly as before.
 
 ## The aisle check
 
@@ -367,6 +418,70 @@ flows this way, prints the call-to-supply time the picking station waits,
 and refuses the same shift with `--no-interlock` (the machines meet) or
 `--aisle 1.5` (a column, a wall — by name).
 
+## A forklift: the mast is the machine's own joints
+
+An automated forklift (`vehicle.forklift` in the catalog) is the
+[semi-humanoid's](#the-robot-is-the-vehicle-a-semi-humanoid) shape of
+machine with a mast where the arms were: one package, one robot, mounted
+as the wheels of a vehicle with no body. Its forks are its +X — so a
+station's `arrive="forward"` puts the forks into a pallet — and its mast
+is a planning group named `mast` whose joints a ramp drives, free lift
+first, then the stages. The pallet is `attach`ed to the fork seat, the
+frame the package calls its TCP.
+
+```python
+truck = bt.Robot.from_catalog("sae160")          # Toyota Autopilot SAE160, TX Hi-Lo mast
+wheels = bt.Wheels.from_catalog("sae160")        # drive: tricycle — one steered drive wheel
+scene = bt.Scene(truck, name="agf")
+scene.add_vehicle("agf_base", body=[], path=PATH, stations=STATIONS, start="charger",
+                  speed=0.31, reverse_speed=2.22,         # forks first / drive-unit first, the sheet's
+                  allow_reverse=True, prefer="reverse",
+                  arrive={"recv": "forward", "bay1": "forward", "home": "reverse"})
+scene.mount_robot("agf_base", robot="agf", wheels=wheels)
+
+sq.step("seat", actions=[bt.seq.ramp({"free_lift": 0.0115}, 0.05, robot="agf")])   # up to the stringers
+sq.step("hold", actions=[bt.seq.attach(p, link="forks", robot="agf") for p in pallet_pieces])
+sq.step("raise", actions=[bt.seq.ramp({"free_lift": 1.592, "mast_lift": 1.52}, 17.0, robot="agf")])
+```
+
+Three things the package settles for the cell:
+
+* **Where it pivots.** A tricycle turns about its fixed axle — the support
+  arm wheels — and the package's `base_frame` stands there, so the vehicle
+  frame sweeps the drive unit round exactly as the type sheet's turning
+  radius says (the builder checked that figure against the geometry).
+  With a stated `reverse_speed` a corner takes the gear that has the leg
+  done soonest, so the truck turns round to back down an aisle at 8 km/h
+  and drives the last metre into a bay forks first.
+* **How high it goes.** The mast's travel adds up to the sheet's lift
+  height less the lowered fork height, and the sheet's own rule for an
+  automatic load station (h23 − 200 mm) is what a cell refuses a level by.
+* **What the forks enter.** A pallet from [`bt.parts.pallet`][botrail.parts.pallet]
+  is EPAL 1 timber: the forks and the support arms run between its bottom
+  boards and under its stringers, and every tick the truck drives they are
+  checked against it, against the beams the pallet lands on, and against
+  the racking across the aisle.
+* **What the cell asks of it.** `scene.requirements()["agf"]` reads the
+  truck's line the way its type sheet is written: `lift_height_mm` from
+  the highest position the cycle's ramps put the fork seat at,
+  `fork_height_lowered_mm` from the lowest (the pockets of a pallet on
+  the floor), `payload_kg` from the pallet and the cases lifted as one
+  hold, and both gears — `max_speed_mps` drive unit first,
+  `max_speed_fork_first_mps` forks first. A truck sketched as a package
+  with a `mast` group and no arm is shopped for in the `vehicle.forklift`
+  aisle with those numbers (see [Selection](selection.md)).
+
+`examples/vehicles/forklift_demo.py` puts a received pallet on the upper
+beam level of TRUSCO racking, takes another out to a shipping spot and
+backs the truck onto its charger; `--aisle 2.5` is refused against the
+racking across the aisle at a named time, `--sweep` finds the aisle the
+sheet quotes, `--mast dx` is refused for level 2 by the sheet's rule, and
+`--turn-radius 0.6` drives the same route as a truck that cannot pivot
+would — arcs, an overshoot into each bay, and a lane far enough off the
+rack for the forks to clear a pallet before the swing.
+
+![The automated forklift driving forks first into a bay with the received pallet raised to the upper beam level, the racking across the aisle and its taped route behind it](../assets/studio/forklift.png)
+
 ## The robot is the vehicle: a semi-humanoid
 
 A humanoid upper body on a wheeled base is sold, modelled and loaded as one
@@ -490,3 +605,10 @@ the cell starts waiting on it.
   TRUSCO racking, a UR20 case picker on a Makitech belt; the sketch's three
   flows, the aisle check against the customer's 3.0 m figure, traffic control
   for two machines on one aisle, and `--out` for the document set.
+* `examples/vehicles/forklift_demo.py` — an automated forklift (a catalog Toyota
+  Autopilot SAE160) putting a received pallet on the upper beam level of TRUSCO
+  racking and taking one out to a shipping spot: forks-first into pallets, drive-
+  unit-first down the aisle, the mast a planning group ramped at the sheet's
+  speeds. `--aisle 2.5` is refused against the racking across the aisle, `--sweep`
+  finds the aisle the sheet quotes, `--mast dx` is refused for level 2 by the
+  sheet's own rule, and `--out DIR` writes the document set.

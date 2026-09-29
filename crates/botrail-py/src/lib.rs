@@ -3751,7 +3751,9 @@ impl Scene {
                         climb_speed = None, descent_speed = None,
                         fixed_yaw = None,
                         tray_position = None, tray_size = None,
-                        tray_quaternion = None))]
+                        tray_quaternion = None,
+                        reverse_speed = None, prefer = "forward", arrive = None,
+                        turn_radius = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_vehicle(
         &self,
@@ -3772,6 +3774,10 @@ impl Scene {
         tray_position: Option<[f64; 3]>,
         tray_size: Option<[f64; 3]>,
         tray_quaternion: Option<[f64; 4]>,
+        reverse_speed: Option<f64>,
+        prefer: &str,
+        arrive: Option<std::collections::BTreeMap<String, String>>,
+        turn_radius: Option<f64>,
     ) -> PyResult<()> {
         if path.len() < 2 {
             return Err(PyValueError::new_err(format!(
@@ -3810,6 +3816,43 @@ impl Scene {
                 )));
             }
         }
+        if let Some(v) = reverse_speed {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "reverse_speed must be positive, got {v}"
+                )));
+            }
+        }
+        let gear = |word: &str, what: &str| -> PyResult<botrail_scene::seq::Gear> {
+            match word {
+                "forward" => Ok(botrail_scene::seq::Gear::Forward),
+                "reverse" => Ok(botrail_scene::seq::Gear::Reverse),
+                other => Err(PyValueError::new_err(format!(
+                    "{what} must be \"forward\" or \"reverse\", got {other:?}"
+                ))),
+            }
+        };
+        let prefer = gear(prefer, "prefer")?;
+        let mut arrivals: Vec<(String, botrail_scene::seq::Gear)> = Vec::new();
+        for (station, word) in arrive.iter().flatten() {
+            if !stations.contains_key(station) {
+                return Err(PyValueError::new_err(format!(
+                    "arrive names `{station}`, which is not a station (stations: {})",
+                    stations
+                        .keys()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            arrivals.push((
+                station.clone(),
+                gear(word, &format!("arrive[{station:?}]"))?,
+            ));
+        }
+        let gears = reverse_speed.is_some()
+            || prefer != botrail_scene::seq::Gear::Forward
+            || !arrivals.is_empty();
         let mut waypoints: Vec<nalgebra::Point3<f64>> = Vec::with_capacity(path.len());
         for (i, p) in path.iter().enumerate() {
             match p.as_slice() {
@@ -3823,6 +3866,12 @@ impl Scene {
                 }
             }
         }
+        if turn_radius.is_some() && drive != "steered" {
+            return Err(PyValueError::new_err(
+                "turn_radius belongs to drive=\"steered\" — a machine that rounds its corners \
+                 instead of pivoting",
+            ));
+        }
         let drive = match drive {
             "differential" => {
                 if climb_speed.is_some() || descent_speed.is_some() || fixed_yaw.is_some() {
@@ -3833,6 +3882,36 @@ impl Scene {
                 botrail_scene::seq::Drive::Differential {
                     allow_reverse,
                     max_grade,
+                    reverse_speed,
+                    prefer,
+                }
+            }
+            "steered" => {
+                if climb_speed.is_some() || descent_speed.is_some() || fixed_yaw.is_some() {
+                    return Err(PyValueError::new_err(
+                        "climb_speed / descent_speed / fixed_yaw belong to drive=\"aerial\"",
+                    ));
+                }
+                if max_grade.is_some() {
+                    return Err(PyValueError::new_err(
+                        "a steered drive rounds its corners on the level: max_grade does not apply",
+                    ));
+                }
+                let Some(radius) = turn_radius else {
+                    return Err(PyValueError::new_err(
+                        "drive=\"steered\" needs turn_radius (metres, the vehicle frame's)",
+                    ));
+                };
+                if !(radius.is_finite() && radius > 0.0) {
+                    return Err(PyValueError::new_err(format!(
+                        "turn_radius must be positive, got {radius}"
+                    )));
+                }
+                botrail_scene::seq::Drive::Steered {
+                    turn_radius: radius,
+                    allow_reverse,
+                    reverse_speed,
+                    prefer,
                 }
             }
             "holonomic" => {
@@ -3841,19 +3920,19 @@ impl Scene {
                         "climb_speed / descent_speed / fixed_yaw belong to drive=\"aerial\"",
                     ));
                 }
-                if allow_reverse {
+                if allow_reverse || gears {
                     return Err(PyValueError::new_err(
-                        "allow_reverse is a differential-drive idea; a holonomic \
-                         machine never turns in the first place",
+                        "allow_reverse / reverse_speed / prefer / arrive are differential-drive \
+                         ideas; a holonomic machine never turns in the first place",
                     ));
                 }
                 botrail_scene::seq::Drive::Holonomic { max_grade }
             }
             "aerial" => {
-                if allow_reverse || max_grade.is_some() {
+                if allow_reverse || max_grade.is_some() || gears {
                     return Err(PyValueError::new_err(
-                        "allow_reverse / max_grade belong to a ground drive; an aerial \
-                         machine flies its legs",
+                        "allow_reverse / max_grade / reverse_speed / prefer / arrive belong to a \
+                         ground drive; an aerial machine flies its legs",
                     ));
                 }
                 let (Some(climb), Some(descent)) = (climb_speed, descent_speed) else {
@@ -3876,8 +3955,8 @@ impl Scene {
             }
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "drive must be \"differential\", \"holonomic\" or \"aerial\", \
-                     got {other:?}"
+                    "drive must be \"differential\", \"steered\", \"holonomic\" or \
+                     \"aerial\", got {other:?}"
                 )))
             }
         };
@@ -3954,6 +4033,7 @@ impl Scene {
                     waypoints,
                     stations: stations.into_iter().collect(),
                     ring,
+                    arrivals,
                 },
                 body: members,
                 speed,

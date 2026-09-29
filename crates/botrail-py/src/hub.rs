@@ -1720,6 +1720,7 @@ impl SceneHub {
                     // vehicle frame was not captured, so mounted sensors
                     // draw at the parked frame here.
                     vehicles: Vec::new(),
+                    cloths: Vec::new(),
                     contacts: Vec::new(),
                     physics: None,
                     robots: rec

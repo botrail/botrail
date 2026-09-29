@@ -192,3 +192,25 @@ test("a live stream keeps its programs' part and its last moments, and at its en
   assert.equal(forgetLive(tracks, 3 / 30, 99), false);
   assert.deepEqual(tracks.objects.tracks[0].poses.map((p) => p.position[0]), [1, 2, 3, 12]);
 });
+
+test("cloth tracks interpolate their vertices on the shared grid", () => {
+  const tracks = tracksFromTimeline({
+    duration: 1,
+    robots: [],
+    objects: [],
+    cloths: [{
+      name: "shirt",
+      triangles: [[0, 1, 2]],
+      points: [[[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 0, 1], [1, 0, 1], [0, 1, 1]]],
+      held: [[0], []],
+      landmarks: { hem_left: 0 },
+    }],
+  });
+  assert.equal(tracks.cloths.tracks.length, 1);
+  assert.deepEqual(tracks.cloths.times, [0, 1]);
+  assert.deepEqual(Array.from(samplePlayback(tracks, 0.5).cloths.shirt), [0, 0, 0.5, 1, 0, 0.5, 0, 1, 0.5]);
+  assert.deepEqual(Array.from(samplePlayback(tracks, 5).cloths.shirt), [0, 0, 1, 1, 0, 1, 0, 1, 1]);
+  assert.equal(samplePlayback(tracks, 0).cloths.shirt.length, 9);
+  // A timeline without cloth has no cloth samples.
+  assert.equal(samplePlayback(tracksFromTimeline({ duration: 1, robots: [], objects: [] }), 0).cloths, null);
+});

@@ -2194,6 +2194,7 @@ fn timeline_msg_on(
         robots,
         vehicles,
         objects: object_tracks,
+        cloths: Vec::new(),
         step_spans: timeline
             .step_spans
             .iter()
@@ -2508,6 +2509,7 @@ mod tests {
                     ],
                     stations: vec![("a".into(), 0), ("b".into(), 1)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -2516,6 +2518,8 @@ mod tests {
                 drive: botrail_scene::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: botrail_scene::seq::Gear::Forward,
                 },
                 tray: None,
             },

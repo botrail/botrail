@@ -857,9 +857,13 @@ impl Scene {
                         });
                     }
                 }
-                DeviceKind::Vehicle { path, .. } => {
-                    let mut pts: Vec<[f64; 2]> =
-                        path.waypoints.iter().map(|p| [p.x, p.y]).collect();
+                DeviceKind::Vehicle { path, drive, .. } => {
+                    // A steered drive's tape rounds its corners: the fillet a
+                    // same-gear pass takes, at every waypoint that is no station.
+                    let mut pts: Vec<[f64; 2]> = match drive.turn_radius() {
+                        Some(r) => crate::seq::filleted_path(path, r),
+                        None => path.waypoints.iter().map(|p| [p.x, p.y]).collect(),
+                    };
                     if path.ring && pts.len() > 1 {
                         pts.push(pts[0]);
                     }

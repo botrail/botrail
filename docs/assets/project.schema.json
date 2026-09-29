@@ -1680,6 +1680,25 @@
             "path": {
               "$ref": "#/$defs/VehiclePathMsg"
             },
+            "prefer": {
+              "description": "The gear a right-angle corner takes with `allow_reverse` —\nabsent is `forward`, the historic rule. Differential drives only.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GearMsg"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reverse_speed": {
+              "description": "Cruise speed of a leg driven in reverse; absent backs at\n`speed`. Differential drives only.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "speed": {
               "type": "number",
               "format": "double"
@@ -1697,6 +1716,14 @@
                   "type": "null"
                 }
               ]
+            },
+            "turn_radius": {
+              "description": "A steered drive's turning radius: present means the machine\nrounds its corners with arcs of this radius instead of pivoting\n(`drive=\"steered\"`); `allow_reverse` / `reverse_speed` / `prefer`\napply as for a differential drive, `max_grade` does not (level\npaths only).",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
             },
             "turn_speed": {
               "type": "number",
@@ -2243,6 +2270,14 @@
             "phases"
           ]
         }
+      ]
+    },
+    "GearMsg": {
+      "description": "Which way a differential-drive machine faces on a leg: `forward`\ndrives where it faces, `reverse` backs along the leg.",
+      "type": "string",
+      "enum": [
+        "forward",
+        "reverse"
       ]
     },
     "GeometryMsg": {
@@ -5849,6 +5884,17 @@
     "VehicleStationMsg": {
       "type": "object",
       "properties": {
+        "arrive": {
+          "description": "The gear the leg into this station is driven in — forks first\ninto a pallet, drive-unit first onto a charger. Absent, the\ncorner rule decides. Differential drives only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GearMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "index": {
           "type": "integer",
           "format": "uint",

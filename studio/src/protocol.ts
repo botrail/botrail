@@ -17,6 +17,7 @@ export type { IkStatusMsg } from "./generated/IkStatusMsg";
 export type { ObstacleMsg } from "./generated/ObstacleMsg";
 export type { AttachmentMsg } from "./generated/AttachmentMsg";
 export type { ObjectTrackMsg } from "./generated/ObjectTrackMsg";
+export type { ClothTrackMsg } from "./generated/ClothTrackMsg";
 export type { VehicleTrackMsg } from "./generated/VehicleTrackMsg";
 export type { FrameMsg } from "./generated/FrameMsg";
 export type { ToolpathOverlayMsg } from "./generated/ToolpathOverlayMsg";

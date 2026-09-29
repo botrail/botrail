@@ -390,6 +390,40 @@ pub enum Drive {
         /// climbs is refused by name until the machine declares what it
         /// can do.
         max_grade: Option<f64>,
+        /// Cruise speed of a leg driven in reverse (m/s); `None` backs as
+        /// fast as it drives forward. An automated forklift travels
+        /// drive-unit first at several times its forks-first speed, so the
+        /// gear a leg is taken in prices it — and, stated, decides it: a
+        /// corner then takes the gear that has the leg done soonest, turn
+        /// and run together (a time tie goes to the shorter turn, a full
+        /// tie to `prefer`). Unstated, the shorter turn wins.
+        reverse_speed: Option<f64>,
+        /// The gear a corner takes when facing the next leg costs the same
+        /// turn either way — a right angle. `Forward` is the historic rule;
+        /// a machine that travels drive-unit first says `Reverse` and then
+        /// backs down the aisle it just turned into. Read only with
+        /// `allow_reverse`; a station's arrival gear overrides it on the
+        /// leg into that station.
+        prefer: Gear,
+    },
+    /// A steered drive that cannot turn on the spot — one steered wheel
+    /// against a fixed axle steered short of across, or an Ackermann axle:
+    /// a counterbalance forklift. It rounds every corner with an arc of
+    /// `turn_radius` about a centre beside its fixed axle's midpoint (the
+    /// vehicle frame), and where the gear changes at a corner it drives
+    /// past the corner and swings back through the arc — the operator's
+    /// overshoot and reverse. Level paths only; a station is entered and
+    /// left along one line (the corner goes on the waypoint before it),
+    /// and a leg must be long enough for the turns at its ends. Gears are
+    /// chosen as a differential drive chooses them.
+    Steered {
+        /// The vehicle frame's turning radius, metres (the fixed axle's
+        /// midpoint, not the type sheet's outer radius Wa — that is what
+        /// the body sweeps about it).
+        turn_radius: f64,
+        allow_reverse: bool,
+        reverse_speed: Option<f64>,
+        prefer: Gear,
     },
     /// Holonomic drive (mecanum / omni wheels): the machine translates in
     /// any direction while holding its heading — no pivot turns, ever.
@@ -428,18 +462,72 @@ pub enum AerialYaw {
     Fixed(f64),
 }
 
+/// Which way a differential-drive machine faces while it travels a leg:
+/// `Forward` drives where it faces, `Reverse` backs along the leg (heading
+/// = travel + π). A forklift's forks are its +X, so `Forward` is forks
+/// first — how it enters a pallet — and `Reverse` is drive-unit first, how
+/// it travels the aisle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Gear {
+    #[default]
+    Forward,
+    Reverse,
+}
+
 impl Drive {
     pub fn allow_reverse(&self) -> bool {
         match self {
-            Drive::Differential { allow_reverse, .. } => *allow_reverse,
+            Drive::Differential { allow_reverse, .. } | Drive::Steered { allow_reverse, .. } => {
+                *allow_reverse
+            }
             Drive::Holonomic { .. } | Drive::Aerial { .. } => false,
+        }
+    }
+
+    /// Does the drive face a leg — forward or in reverse? Holonomic and
+    /// aerial drives have no gears to choose.
+    pub fn has_gears(&self) -> bool {
+        matches!(self, Drive::Differential { .. } | Drive::Steered { .. })
+    }
+
+    /// The turning radius of a steered drive; `None` pivots on the spot.
+    pub fn turn_radius(&self) -> Option<f64> {
+        match self {
+            Drive::Steered { turn_radius, .. } => Some(*turn_radius),
+            _ => None,
         }
     }
 
     pub fn max_grade(&self) -> Option<f64> {
         match self {
             Drive::Differential { max_grade, .. } | Drive::Holonomic { max_grade } => *max_grade,
-            Drive::Aerial { .. } => None,
+            Drive::Steered { .. } | Drive::Aerial { .. } => None,
+        }
+    }
+
+    /// The reverse cruise speed the drive states, if any. Stated, it also
+    /// decides gears: a corner takes the gear that has the leg done soonest,
+    /// turn and run together; unstated, the shorter turn.
+    pub fn reverse_speed_stated(&self) -> Option<f64> {
+        match self {
+            Drive::Differential { reverse_speed, .. } | Drive::Steered { reverse_speed, .. } => {
+                *reverse_speed
+            }
+            _ => None,
+        }
+    }
+
+    /// The cruise speed of a leg driven in reverse, given the forward
+    /// `speed`: the drive's own figure, or `speed` when it states none.
+    pub fn reverse_speed(&self, speed: f64) -> f64 {
+        self.reverse_speed_stated().unwrap_or(speed)
+    }
+
+    /// The gear a corner with no shorter side takes.
+    pub fn prefer(&self) -> Gear {
+        match self {
+            Drive::Differential { prefer, .. } | Drive::Steered { prefer, .. } => *prefer,
+            _ => Gear::Forward,
         }
     }
 }
@@ -449,6 +537,8 @@ impl Default for Drive {
         Drive::Differential {
             allow_reverse: false,
             max_grade: None,
+            reverse_speed: None,
+            prefer: Gear::Forward,
         }
     }
 }
@@ -537,6 +627,11 @@ pub struct VehiclePath {
     pub stations: Vec<(String, usize)>,
     /// A closed loop: a goto walks whichever way around is shorter.
     pub ring: bool,
+    /// `(station, gear)` pairs: the gear the leg *into* that station is
+    /// driven in, whatever the corner rule would have picked — forks
+    /// first into a pallet, drive-unit first onto a charger. A station
+    /// not listed arrives by the rule. Differential drives only.
+    pub arrivals: Vec<(String, Gear)>,
 }
 
 impl VehiclePath {
@@ -546,6 +641,14 @@ impl VehiclePath {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, i)| *i)
+    }
+
+    /// The gear a goto must arrive at the named station in, if stated.
+    pub fn arrival(&self, station: &str) -> Option<Gear> {
+        self.arrivals
+            .iter()
+            .find(|(n, _)| n == station)
+            .map(|(_, g)| *g)
     }
 
     /// The heading a vehicle parked at waypoint `at` faces: along the leg
@@ -591,6 +694,54 @@ impl VehiclePath {
         let p = self.waypoints.get(at)?;
         Some(vehicle_frame(p, self.heading_at(at)))
     }
+}
+
+/// The tape a steered drive follows, as a polyline for drawing: every
+/// waypoint that is not a station is rounded with the fillet arc of
+/// `radius` tangent to both legs — what a same-gear pass drives — when the
+/// legs beside it have room for it; a corner with no room, and every
+/// station, stays sharp. The studio keeps the same mirror in TS.
+pub fn filleted_path(path: &VehiclePath, radius: f64) -> Vec<[f64; 2]> {
+    let n = path.waypoints.len();
+    let mut out = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let p = path.waypoints[i];
+        let station = path.stations.iter().any(|(_, s)| *s == i);
+        let (prev, next) = if path.ring && n > 2 {
+            (Some((i + n - 1) % n), Some((i + 1) % n))
+        } else {
+            (i.checked_sub(1), (i + 1 < n).then_some(i + 1))
+        };
+        let (Some(a), Some(b)) = (prev, next) else {
+            out.push([p.x, p.y]);
+            continue;
+        };
+        let (a, b) = (path.waypoints[a], path.waypoints[b]);
+        let (u, v) = (p - a, b - p);
+        let (la, lb) = (u.x.hypot(u.y), v.x.hypot(v.y));
+        if station || la < 1e-9 || lb < 1e-9 {
+            out.push([p.x, p.y]);
+            continue;
+        }
+        let (ux, uy, vx, vy) = (u.x / la, u.y / la, v.x / lb, v.y / lb);
+        let delta = (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+        let tangent = radius * (delta.abs() / 2.0).tan();
+        if delta.abs() < 1e-6 || tangent > la / 2.0 || tangent > lb / 2.0 {
+            out.push([p.x, p.y]);
+            continue;
+        }
+        let (sx, sy) = (p.x - ux * tangent, p.y - uy * tangent);
+        let (cx, cy) = (
+            sx - uy * radius * delta.signum(),
+            sy + ux * radius * delta.signum(),
+        );
+        let a0 = (sy - cy).atan2(sx - cx);
+        for j in 0..=8 {
+            let ang = a0 + delta * (j as f64) / 8.0;
+            out.push([cx + radius * ang.cos(), cy + radius * ang.sin()]);
+        }
+    }
+    out
 }
 
 /// The frame of a vehicle: its position on the guidance surface (z is the
@@ -2528,6 +2679,89 @@ impl Scene {
             return Err(format!(
                 "vehicle `{dev}` turn_speed must be positive, got {turn_speed}"
             ));
+        }
+        if let Some(v) = drive.reverse_speed_stated() {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(format!(
+                    "vehicle `{dev}` reverse_speed must be positive, got {v}"
+                ));
+            }
+        }
+        if let Drive::Steered { turn_radius, .. } = drive {
+            if !(turn_radius.is_finite() && *turn_radius > 0.0) {
+                return Err(format!(
+                    "vehicle `{dev}` turn_radius must be positive, got {turn_radius}"
+                ));
+            }
+            // A steered drive rounds corners on the level, and stops only
+            // where it can leave along the line it arrived by.
+            let n = path.waypoints.len();
+            if let Some(w) = path
+                .waypoints
+                .iter()
+                .find(|w| (w.z - path.waypoints[0].z).abs() > 1e-9)
+            {
+                return Err(format!(
+                    "vehicle `{dev}` has a turn_radius, which drives level paths only, but its \
+                     path climbs to z = {:.3} m",
+                    w.z
+                ));
+            }
+            for (name, at) in &path.stations {
+                let at = *at;
+                let prev = if at > 0 {
+                    Some(at - 1)
+                } else if path.ring && n > 2 {
+                    Some(n - 1)
+                } else {
+                    None
+                };
+                let next = if at + 1 < n {
+                    Some(at + 1)
+                } else if path.ring && n > 2 {
+                    Some(0)
+                } else {
+                    None
+                };
+                let (Some(i), Some(j)) = (prev, next) else {
+                    continue;
+                };
+                let a = path.waypoints[at] - path.waypoints[i];
+                let b = path.waypoints[j] - path.waypoints[at];
+                if a.norm() < 1e-9 || b.norm() < 1e-9 {
+                    continue;
+                }
+                let cross = (a.x * b.y - a.y * b.x).abs() / (a.norm() * b.norm());
+                if cross > 1e-6 {
+                    return Err(format!(
+                        "vehicle `{dev}` station `{name}` (waypoint {at}) sits on a {:.1}° corner, \
+                         but a steered drive arrives at and leaves a station along one line — \
+                         put the corner on the waypoint before the station",
+                        cross.asin().to_degrees()
+                    ));
+                }
+            }
+        }
+        // Gears are a differential drive's: a holonomic machine never
+        // turns to face a leg, an aerial one flies its yaw policy.
+        for (i, (name, gear)) in path.arrivals.iter().enumerate() {
+            if path.station(name).is_none() {
+                return Err(format!(
+                    "vehicle `{dev}` states an arrival gear for `{name}`, which is not a station"
+                ));
+            }
+            if path.arrivals[..i].iter().any(|(n, _)| n == name) {
+                return Err(format!(
+                    "vehicle `{dev}` states two arrival gears for station `{name}`"
+                ));
+            }
+            if !drive.has_gears() {
+                return Err(format!(
+                    "vehicle `{dev}` station `{name}` arrives in {gear:?} gear, but only a \
+                     differential or steered drive has gears — a holonomic or aerial machine \
+                     docks facing whatever it faced when parked"
+                ));
+            }
         }
         if let Drive::Aerial {
             climb_speed,

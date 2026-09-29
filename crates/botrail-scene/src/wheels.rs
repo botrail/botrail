@@ -576,9 +576,24 @@ pub(crate) fn roll(
                 // About a steering axis that points down, the same turn
                 // in the world is the opposite joint travel.
                 let signed = delta * up.z.signum();
+                let within = |angle: f64| match steer_spec.limits {
+                    Some(l) => angle >= l.lower - 1e-9 && angle <= l.upper + 1e-9,
+                    None => true,
+                };
+                let mut aimed = q[steer_q] + signed;
+                if !within(aimed) {
+                    // Half a turn the other way rolls the wheel backwards
+                    // instead — for a steer that stops at ±90° (a
+                    // forklift's drive wheel, turned across for a pivot)
+                    // it is the only way back to straight ahead.
+                    let other = aimed - std::f64::consts::PI * signed.signum();
+                    if within(other) {
+                        aimed = other;
+                    }
+                }
                 let aimed = match steer_spec.limits {
-                    Some(l) => (q[steer_q] + signed).clamp(l.lower, l.upper),
-                    None => q[steer_q] + signed,
+                    Some(l) => aimed.clamp(l.lower, l.upper),
+                    None => aimed,
                 };
                 let applied = (aimed - q[steer_q]) * up.z.signum();
                 q[steer_q] = aimed;

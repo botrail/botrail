@@ -550,6 +550,27 @@ pub struct ObjectTrackMsg {
     pub visible: Vec<bool>,
 }
 
+/// Per-sample vertex positions of one simulated cloth (a garment folded by
+/// the grippers), aligned with the timeline's shared sample grid like an
+/// [`ObjectTrackMsg`]. Produced by `botrail-cloth`'s `ClothCell`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ClothTrackMsg {
+    /// Cloth name.
+    pub name: String,
+    /// Triangles over the vertex indices of `points`.
+    pub triangles: Vec<[u32; 3]>,
+    /// One `[x, y, z]` per vertex per sample (world metres). A track with
+    /// one sample never moves.
+    pub points: Vec<Vec<[f32; 3]>>,
+    /// Vertices held by a gripper at each sample; empty when free.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<Vec<u32>>,
+    /// Garment landmark name → vertex index (hem corners, cuffs, shoulders…).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub landmarks: std::collections::BTreeMap<String, u32>,
+}
+
 /// A TCP path constraint (see `motion::Constraint`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -916,6 +937,21 @@ pub enum DeviceKindMsg {
         /// (0.10 = 10 %). Absent means level paths only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_grade: Option<f64>,
+        /// Cruise speed of a leg driven in reverse; absent backs at
+        /// `speed`. Differential drives only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reverse_speed: Option<f64>,
+        /// The gear a right-angle corner takes with `allow_reverse` —
+        /// absent is `forward`, the historic rule. Differential drives only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefer: Option<GearMsg>,
+        /// A steered drive's turning radius: present means the machine
+        /// rounds its corners with arcs of this radius instead of pivoting
+        /// (`drive="steered"`); `allow_reverse` / `reverse_speed` / `prefer`
+        /// apply as for a differential drive, `max_grade` does not (level
+        /// paths only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_radius: Option<f64>,
         /// Holonomic drive: the machine translates while holding its
         /// heading — no pivot turns. `allow_reverse` is then unused;
         /// `max_grade` still applies (it is a ground drive).
@@ -982,6 +1018,35 @@ where
         .collect())
 }
 
+/// Which way a differential-drive machine faces on a leg: `forward`
+/// drives where it faces, `reverse` backs along the leg.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GearMsg {
+    Forward,
+    Reverse,
+}
+
+impl From<crate::seq::Gear> for GearMsg {
+    fn from(gear: crate::seq::Gear) -> Self {
+        match gear {
+            crate::seq::Gear::Forward => GearMsg::Forward,
+            crate::seq::Gear::Reverse => GearMsg::Reverse,
+        }
+    }
+}
+
+impl From<GearMsg> for crate::seq::Gear {
+    fn from(gear: GearMsg) -> Self {
+        match gear {
+            GearMsg::Forward => crate::seq::Gear::Forward,
+            GearMsg::Reverse => crate::seq::Gear::Reverse,
+        }
+    }
+}
+
 /// The aerial drive of a flying vehicle: present on the wire means the
 /// machine flies its legs — z is free, each axis at its own rate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1010,6 +1075,11 @@ pub struct VehicleTrayMsg {
 pub struct VehicleStationMsg {
     pub name: String,
     pub index: usize,
+    /// The gear the leg into this station is driven in — forks first
+    /// into a pallet, drive-unit first onto a charger. Absent, the
+    /// corner rule decides. Differential drives only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrive: Option<GearMsg>,
 }
 
 /// One named stop of a lift, metres along its axis from the reference.
@@ -1353,6 +1423,10 @@ pub struct TimelineMsg {
     /// World-pose track per moving scene object, aligned with the (shared)
     /// trajectory sample grid. Empty when nothing rides along.
     pub objects: Vec<ObjectTrackMsg>,
+    /// Vertex track per simulated cloth, on the same grid. Empty (and absent
+    /// from older files) when the cell has no cloth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cloths: Vec<ClothTrackMsg>,
     /// Reference-frame track per vehicle that drove, on the same grid.
     #[serde(default)]
     pub vehicles: Vec<VehicleTrackMsg>,
@@ -2770,6 +2844,12 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 wheels: wheels.clone(),
                 allow_reverse: drive.allow_reverse(),
                 max_grade: drive.max_grade(),
+                reverse_speed: drive.reverse_speed_stated(),
+                prefer: match drive.prefer() {
+                    crate::seq::Gear::Forward => None,
+                    gear => Some(gear.into()),
+                },
+                turn_radius: drive.turn_radius(),
                 holonomic: matches!(drive, crate::seq::Drive::Holonomic { .. }),
                 aerial: match drive {
                     crate::seq::Drive::Aerial {
@@ -2785,6 +2865,7 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                         },
                     }),
                     crate::seq::Drive::Differential { .. }
+                    | crate::seq::Drive::Steered { .. }
                     | crate::seq::Drive::Holonomic { .. } => None,
                 },
                 tray: tray.map(|(pose, size)| VehicleTrayMsg {
@@ -2799,6 +2880,7 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                         .map(|(name, index)| VehicleStationMsg {
                             name: name.clone(),
                             index: *index,
+                            arrive: path.arrival(name).map(GearMsg::from),
                         })
                         .collect(),
                     ring: path.ring,
@@ -2899,6 +2981,9 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 start,
                 allow_reverse,
                 max_grade,
+                reverse_speed,
+                prefer,
+                turn_radius,
                 holonomic,
                 aerial,
                 tray,
@@ -2916,9 +3001,17 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                     None if *holonomic => crate::seq::Drive::Holonomic {
                         max_grade: *max_grade,
                     },
+                    None if turn_radius.is_some() => crate::seq::Drive::Steered {
+                        turn_radius: turn_radius.unwrap_or(0.0),
+                        allow_reverse: *allow_reverse,
+                        reverse_speed: *reverse_speed,
+                        prefer: prefer.map(Into::into).unwrap_or_default(),
+                    },
                     None => crate::seq::Drive::Differential {
                         allow_reverse: *allow_reverse,
                         max_grade: *max_grade,
+                        reverse_speed: *reverse_speed,
+                        prefer: prefer.map(Into::into).unwrap_or_default(),
                     },
                 },
                 tray: tray.as_ref().map(|t| {
@@ -2939,6 +3032,11 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                         .map(|s| (s.name.clone(), s.index))
                         .collect(),
                     ring: path.ring,
+                    arrivals: path
+                        .stations
+                        .iter()
+                        .filter_map(|s| s.arrive.map(|g| (s.name.clone(), g.into())))
+                        .collect(),
                 },
                 body: body.clone(),
                 speed: *speed,
@@ -3743,6 +3841,7 @@ mod tests {
             duration: 1.0,
             robots: vec![],
             objects: vec![],
+            cloths: vec![],
             step_spans: vec![StepSpanMsg {
                 name: "a/wait".into(),
                 start: 0.0,

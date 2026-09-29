@@ -49,13 +49,65 @@ export function VehiclePathView() {
   );
 }
 
+/**
+ * A steered drive's tape rounds its corners: the fillet arc of `radius`
+ * tangent to both legs at every waypoint that is no station, when the legs
+ * beside it have room (the TS mirror of `seq::filleted_path`).
+ */
+function filleted(
+  waypoints: [number, number, number][],
+  stations: { index: number }[],
+  ring: boolean,
+  radius: number,
+): [number, number, number][] {
+  const n = waypoints.length;
+  const out: [number, number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const [px, py, pz] = waypoints[i];
+    const station = stations.some((s) => s.index === i);
+    const prev = ring && n > 2 ? (i + n - 1) % n : i > 0 ? i - 1 : -1;
+    const next = ring && n > 2 ? (i + 1) % n : i + 1 < n ? i + 1 : -1;
+    if (prev < 0 || next < 0 || station) {
+      out.push([px, py, pz]);
+      continue;
+    }
+    const [ax, ay] = waypoints[prev];
+    const [bx, by] = waypoints[next];
+    const la = Math.hypot(px - ax, py - ay);
+    const lb = Math.hypot(bx - px, by - py);
+    if (la < 1e-9 || lb < 1e-9) {
+      out.push([px, py, pz]);
+      continue;
+    }
+    const ux = (px - ax) / la, uy = (py - ay) / la;
+    const vx = (bx - px) / lb, vy = (by - py) / lb;
+    const delta = Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+    const tangent = radius * Math.tan(Math.abs(delta) / 2);
+    if (Math.abs(delta) < 1e-6 || tangent > la / 2 || tangent > lb / 2) {
+      out.push([px, py, pz]);
+      continue;
+    }
+    const sx = px - ux * tangent, sy = py - uy * tangent;
+    const sign = Math.sign(delta);
+    const cx = sx - uy * radius * sign, cy = sy + ux * radius * sign;
+    const a0 = Math.atan2(sy - cy, sx - cx);
+    for (let j = 0; j <= 8; j++) {
+      const ang = a0 + (delta * j) / 8;
+      out.push([cx + radius * Math.cos(ang), cy + radius * Math.sin(ang), pz]);
+    }
+  }
+  return out;
+}
+
 function GuidePath({ device, moving }: { device: DeviceMsg; moving: boolean }) {
   const kind = device.kind;
   const points = useMemo(() => {
     if (kind.kind !== "vehicle") return [];
-    const pts = kind.path.waypoints.map(
-      ([x, y, z]) => new THREE.Vector3(x, y, (z ?? 0) + FLOOR_LIFT),
-    );
+    const radius = kind.turn_radius ?? null;
+    const tape = radius
+      ? filleted(kind.path.waypoints, kind.path.stations, kind.path.ring, radius)
+      : kind.path.waypoints;
+    const pts = tape.map(([x, y, z]) => new THREE.Vector3(x, y, (z ?? 0) + FLOOR_LIFT));
     if (kind.path.ring && pts.length > 1) pts.push(pts[0].clone());
     return pts;
   }, [kind]);

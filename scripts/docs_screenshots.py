@@ -219,6 +219,38 @@ def main() -> None:
                 print("wrote warehouse.png")
                 server.stop()
 
+        if want("forklift"):
+            # ---- the automated forklift: the truck driving forks first into
+            # a bay with the received pallet raised to the upper level, the
+            # racking across the aisle and the taped route behind it --------
+            # The SAE160 and the racking are catalog products, on the hub; a
+            # catalog builder's build/ is used when it has them.
+            build_dir = Path(os.environ.get("BOTRAIL_CATALOG_BUILD")
+                             or ROOT.parent / "botrail-catalog-builder" / "build")
+            import forklift_demo
+            if (build_dir / "toyota_material_handling/autopilot/sae160/r1/manifest.yaml").is_file():
+                forklift_demo.CATALOG_ROOT = build_dir.resolve()
+            try:
+                scene, _truck, _info, tl = forklift_demo.bake()
+            except Exception as e:  # noqa: BLE001 — no packages, no picture
+                print(f"skipping forklift: {e}")
+            else:
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                time.sleep(4.0)
+                page.wait_for_selector(".timeline-bands", timeout=60000)
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                span = tl.step_span("to_bay1")
+                t = span.start + 0.6 * span.duration
+                bands = page.locator(".timeline-bands").bounding_box()
+                page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+                page.evaluate("window.__CAM = {pos: [16.5, 4.0, 5.0], look: [9.8, 8.0, 1.5]}")
+                time.sleep(3.0)
+                page.screenshot(path=OUT / "forklift.png")
+                print("wrote forklift.png")
+                server.stop()
+
         if want("legged"):
             # ---- 5b. the legged cell: a quadruped carrying a part out ----
             # The Go2 is fetched from Unitree's repository on first run

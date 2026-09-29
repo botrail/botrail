@@ -25,10 +25,11 @@ came from:
 
 | line kind | requirement | derived from |
 |---|---|---|
-| robot | `payload_kg` | the tool's mass plus the heaviest part the robot grasps (now, or in an `attach` of a counted sequence) |
+| robot | `payload_kg` | the tool's mass plus the heaviest hold: a part the robot grasps (now, or in an `attach` of a counted sequence), or the parts one step attaches together — a group part's mass counted once, not once per piece |
 | robot | `reach_mm` | the farthest taught segment goal from the base, measured at the flange a catalog robot declares (the TCP for a plain URDF), plus `margin` (10 % by default); per arm on a dual-arm robot, from the arm's own first joint (its shoulder — `group.first_link`, not the origin of the body link the shoulder is bolted to) *as each target was taught* — a torso moves it between targets — not asked of a robot mounted as its vehicle's wheels (next row but one): it carries its arms' bases itself, so that distance is the machine's, not the cell's — (an arm mounted from the catalog is its own line, `<robot>/<arm>`) |
 | robot (dual-arm product) | `arm_count` | the arms the cell's motions use — a motion of a torso-with-arm composite teaches the arm inside it |
 | robot, mounted as its vehicle's wheels (`mount_robot(wheels=)`) | `vertical_reach_min_mm` (≤), `vertical_reach_max_mm` (≥) | the lowest and the highest taught hand position over the floor the machine stands on — what tells a lift column from a bowing waist; the line is shopped for as `vehicle.mobile_manipulator`, and asks no `reach_mm` (a note on the line says why: whether a machine reaches is its teaching's and its bake's to say) |
+| robot, a forklift (mounted as its vehicle's wheels, lifting with a `mast` group and no arm) | `lift_height_mm` (≥), `fork_height_lowered_mm` (≤), `max_speed_fork_first_mps` | the highest and the lowest position the cycle's ramps and motions put the fork seat (the package's TCP) at, over the floor the truck stands on — the put-away's height, a floor pallet's pockets; the forks-first travel speed (the vehicle's forward gear: a forklift's forks are its +X), beside the `max_speed_mps` of the faster gear. The line is shopped for as `vehicle.forklift` and asks no `reach_mm`; a pallet's boards and the load on them, attached in one step, are one hold for `payload_kg` |
 | tool (`<robot>/tool`) | `payload_kg` | the heaviest grasped part |
 | tool, `gripper.parallel` | `stroke_mm` | the smallest side of the grasped parts — the least the fingers must open |
 | beam sensor | `sensing_range_mm` | the beam's span |
@@ -36,7 +37,7 @@ came from:
 | zone sensor | `range_mm` | the half-diagonal of the zone |
 | conveyor | `length_mm`, `width_mm`, `speed_mps`, `load_kg` | the transport zone along and across the belt, the belt speed, the mass of the parts starting on it |
 | linear axis | `stroke_mm`, `speed_mps`, `load_kg` | the range, the speed, the mass of what it carries |
-| vehicle | `max_speed_mps`, `payload_kg` | the travel speed; the mass of the parts starting on its deck (`tray`), counted at the parked frame |
+| vehicle | `max_speed_mps`, `payload_kg` | the travel speed (the faster gear, where a `reverse_speed` is stated); the mass of the parts starting on its deck (`tray`), counted at the parked frame |
 | vehicle, aerial | `max_climb_mps`, `max_descent_mps` | the authored climb and descent rates |
 | vehicle, aerial | `flight_time_min` | the airborne time of the baked cycle — pass `requirements(timeline=tl)`; without it the comparison is left as a note |
 | I/O node | `di`, `do`, `ai`, `ao`, `safe_di`, `safe_do` | the points assigned to it |
@@ -167,7 +168,7 @@ for p in bt.catalog.search_for(req["machine"]):
     print(p.id, p.unstated)
 # unitree/g1/g1-d/r1 ()
 # ...
-# rainbow_robotics/rb-y1/rb-y1-a/r2 ('vertical_reach_max_mm',)   <- the vendor publishes no working height
+# rainbow_robotics/rb-y1/rb-y1-a/r2 ('vertical_reach_max_mm', 'vertical_reach_min_mm')   <- the vendor publishes no working heights
 ```
 
 — and once identified, that line reads `unknown` until someone supplies the
@@ -176,7 +177,8 @@ product's category is asked at all, which the index says by itself: a spec
 *some* product of that category states. Nobody states a vacuum gripper's
 stroke, so a vacuum gripper is not a candidate for one. `strict=True` leaves
 the unconfirmed out, and `search_for(row, key=None)` drops a requirement from
-the search without changing what the row asks.
+the search without changing what the row asks; a `<=` requirement (a fork
+height, a lowest working height) travels as the `key__max` filter.
 
 Results come ordered by how much is unstated (nothing first), then by
 validation level, then by closeness to the minimums (the snuggest fit first),

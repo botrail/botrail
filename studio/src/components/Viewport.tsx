@@ -8,6 +8,7 @@ import { isWasmMode } from "../backend";
 import { useStudioStore } from "../store";
 import { dropUsdScene } from "../ws";
 import { ObstacleView } from "./ObstacleView";
+import { ClothView } from "./ClothView";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { SceneView } from "./SceneView";
@@ -174,6 +175,7 @@ export function Viewport() {
           <UsdRobotView />
           <WasmStageView />
           <ObstacleView />
+          <ClothView />
           {/* Aids the camera pass hides: sensor volumes, camera gizmos,
               guide paths, toolpath overlays, contact markers, transform
               gizmos. Process light (flash/spray/trace) stays — a camera

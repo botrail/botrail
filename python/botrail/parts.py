@@ -2708,9 +2708,18 @@ def conveyor(
 def _pallet_boards(scene, name: str, x: float, y: float, z0: float, size: Point3, yaw: float,
                    colors: Sequence[Color], deck_boards: int = 5) -> list[str]:
     """The timber of a pallet `size = (length, width, height)` standing at
-    `(x, y, z0)` turned by `yaw`: three bottom boards, nine blocks,
-    `deck_boards` top boards, coloured plank by plank from `colors`.
-    Returns the boxes' names."""
+    `(x, y, z0)` turned by `yaw`, laid out like an EPAL 1 (EN 13698-1):
+    three bottom boards along the length (100 / 145 / 100 wide), nine
+    blocks (145 along the length, 100 across on the outer rows and 145 in
+    the middle), three stringer boards across the width under the deck, and
+    `deck_boards` deck boards along the length — coloured plank by plank
+    from `colors`. Returns the boxes' names.
+
+    The pockets are what a fork enters. From the short side it runs between
+    the bottom boards (227.5 mm on an EUR pallet) and under the stringers;
+    from the long side, between the blocks. A pallet truck's or a stacker's
+    support arms roll between the bottom boards, so the short side is the
+    one they take — which is why the bottom deck runs along the length."""
     lx, wy, h = size
     q = _yaw_quat(yaw)
     c, s = math.cos(yaw), math.sin(yaw)
@@ -2725,18 +2734,26 @@ def _pallet_boards(scene, name: str, x: float, y: float, z0: float, size: Point3
                                    color=colors[len(names) % len(colors)]))
 
     board = 0.022
-    # The blocks stand a millimetre clear of the boards above and below:
-    # a pallet carried as one attached group (a pallet lift, a fork) is
-    # checked as the machine's own body, and layers in exact contact would
-    # read as that body touching itself.
+    # Every layer stands a millimetre clear of the next: a pallet carried as
+    # one attached group (a pallet lift, a fork) is checked as the machine's
+    # own body, and layers in exact contact would read as that body
+    # touching itself.
     clear = 0.001
-    block = h - 2 * board - 2 * clear
-    # Bottom boards run along y at three x positions, blocks sit on them,
-    # deck boards run along x at `deck_boards` y positions.
-    for i, bx in enumerate((-lx / 2 + 0.05, 0.0, lx / 2 - 0.05)):
-        add(f"bottom{i}", (0.1, wy, board), (*place(bx, 0.0), z0 + board / 2))
-        for j, by in enumerate((-wy / 2 + 0.07, 0.0, wy / 2 - 0.07)):
-            add(f"block{i}{j}", (0.1, 0.14, block), (*place(bx, by), z0 + board + clear + block / 2))
+    block = h - 3 * board - 3 * clear
+    outer, mid = 0.100, 0.145
+    columns = (-lx / 2 + mid / 2, 0.0, lx / 2 - mid / 2)          # block columns along the length
+    rows = ((-wy / 2 + outer / 2, outer), (0.0, mid), (wy / 2 - outer / 2, outer))   # rows across the width
+    # Bottom boards run along the length, one under each row of blocks.
+    for j, (by, bw) in enumerate(rows):
+        add(f"bottom{j}", (lx, bw, board), (*place(0.0, by), z0 + board / 2))
+    z_block = z0 + board + clear + block / 2
+    for i, bx in enumerate(columns):
+        for j, (by, bw) in enumerate(rows):
+            add(f"block{i}{j}", (mid, bw, block), (*place(bx, by), z_block))
+    # Stringer boards run across the width, one over each column of blocks.
+    z_stringer = z0 + board + clear + block + clear + board / 2
+    for i, bx in enumerate(columns):
+        add(f"stringer{i}", (mid, wy, board), (*place(bx, 0.0), z_stringer))
     n = max(1, deck_boards)
     pitch = wy / n
     for k in range(n):
@@ -2758,9 +2775,11 @@ def pallet(
     **attributes,
 ) -> Built:
     """A wooden pallet `size = (length, width, height)` on the floor at
-    `position` (centre): three bottom boards, nine blocks, `deck_boards`
-    top boards. Adds the frame `<name>/top` at the centre of the deck and
-    pins one part (`pallet`)."""
+    `position` (centre), laid out like an EPAL 1: three bottom boards along
+    the length, nine blocks, three stringers and `deck_boards` deck boards,
+    so a fork — or a pallet truck's arms — enters from the short side
+    between the bottom boards. Adds the frame `<name>/top` at the centre
+    of the deck and pins one part (`pallet`)."""
     lx, wy, h = size
     x, y = float(position[0]), float(position[1])
     z0 = float(position[2]) if len(position) > 2 else 0.0

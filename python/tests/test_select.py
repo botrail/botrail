@@ -569,3 +569,130 @@ def test_cli_check_fails_on_a_short_cable(tmp_path: Path) -> None:
     path = tmp_path / "far.botrail"
     scene.save_project(path)
     assert main(["check", str(path)]) == 1
+
+
+AGF_URDF = """
+<robot name="agf_sketch">
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/><origin xyz="0 0 0.1"/>
+  </joint>
+  <link name="base_link">
+    <visual><origin xyz="-0.6 0 0.5"/><geometry><box size="1.0 0.8 1.0"/></geometry></visual>
+    <collision><origin xyz="-0.6 0 0.5"/><geometry><box size="1.0 0.8 1.0"/></geometry></collision>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="left_wheel"/><origin xyz="0 0.35 0"/><axis xyz="0 1 0"/>
+  </joint>
+  <link name="left_wheel"/>
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="right_wheel"/><origin xyz="0 -0.35 0"/><axis xyz="0 1 0"/>
+  </joint>
+  <link name="right_wheel"/>
+  <joint name="lift" type="prismatic">
+    <parent link="base_link"/><child link="carriage"/><origin xyz="0 0 -0.1"/><axis xyz="0 0 1"/>
+    <limit lower="0" upper="2.0" effort="1000" velocity="0.3"/>
+  </joint>
+  <link name="carriage">
+    <visual><origin xyz="0.6 0.25 0.065"/><geometry><box size="1.2 0.1 0.05"/></geometry></visual>
+    <collision><origin xyz="0.6 0.25 0.065"/><geometry><box size="1.2 0.1 0.05"/></geometry></collision>
+    <visual><origin xyz="0.6 -0.25 0.065"/><geometry><box size="1.2 0.1 0.05"/></geometry></visual>
+    <collision><origin xyz="0.6 -0.25 0.065"/><geometry><box size="1.2 0.1 0.05"/></geometry></collision>
+  </link>
+  <joint name="fork_seat" type="fixed">
+    <parent link="carriage"/><child link="forks"/><origin xyz="0 0 0.09"/>
+  </joint>
+  <link name="forks"/>
+</robot>
+"""
+
+# A sketched stacker: no category, no specs — what a builder's package
+# looks like before anyone has ordered it. The `mast` group and the wheels
+# are what make it a forklift to the derivations.
+AGF_MANIFEST = """schema_version: '0.1'
+id: acme/agf/sketch/r1
+distribution: public
+name: Sketch stacker
+manufacturer:
+  name: ACME
+assets:
+  urdf: urdf/model.urdf
+frames:
+  base_frame: base_footprint
+  tcp_default: forks
+  groups:
+    - {name: mast, tip: carriage, joints: [lift]}
+locomotion:
+  kind: wheeled
+  drive: differential
+  wheels:
+    - {joint: left_wheel_joint, radius_m: 0.1}
+    - {joint: right_wheel_joint, radius_m: 0.1}
+"""
+
+
+def test_a_forklift_asks_its_mast_its_gears_and_what_it_lifts_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A robot that rolls its own vehicle and lifts with a `mast` (no arm)
+    is a forklift: shopped in `vehicle.forklift`, asked no reach and no
+    hand heights but the fork seat's highest and lowest positions over the
+    cycle's ramps, both gears' speeds, and the mass of what it lifts at
+    once — a pallet's boards and the load on them go up as one hold, the
+    pallet's mass counted once, not once per board."""
+    pkg = tmp_path / "sketch"
+    (pkg / "urdf").mkdir(parents=True)
+    (pkg / "urdf" / "model.urdf").write_text(AGF_URDF)
+    (pkg / "manifest.yaml").write_text(AGF_MANIFEST)
+    scene = bt.Scene(bt.Robot.from_package(pkg), name="agf")
+    scene.add_vehicle(
+        "base", body=[], path=[(0.0, 0.0), (4.0, 0.0), (4.0, 3.0)],
+        stations={"home": 0, "pick": 1, "rack": 2}, start="home",
+        speed=0.5, reverse_speed=1.5, allow_reverse=True,
+        arrive={"pick": "forward", "rack": "forward"},
+    )
+    scene.mount_robot("base", robot="agf", wheels=bt.Wheels.from_catalog(pkg))
+    pallet = bt.parts.pallet(scene, "pallet", (4.7, 0.0), size=(1.2, 0.8, 0.144), mass_kg=20.0)
+    load = scene.add_box("pallet/load", size=(1.1, 0.7, 0.6), position=(4.7, 0.0, 0.144 + 0.3))
+    scene.set_part(load, category="workpiece", mass_kg=100.0)
+    sq = scene.sequence("shift")
+    sq.step("to_pick", actions=[bt.seq.goto("base", "pick")], transition=bt.seq.device_done("base"))
+    sq.step("seat", actions=[bt.seq.ramp({"lift": 0.01}, 0.1, robot="agf")], transition=bt.seq.done())
+    sq.step(
+        "hold",
+        actions=[bt.seq.attach(p, link="forks", robot="agf") for p in [*pallet.obstacles, load]],
+        transition=bt.seq.immediately(),
+    )
+    sq.step("raise", actions=[bt.seq.ramp({"lift": 1.2}, 4.0, robot="agf")], transition=bt.seq.done())
+    sq.step("to_rack", actions=[bt.seq.goto("base", "rack")], transition=bt.seq.device_done("base"))
+    sq.step("land", actions=[bt.seq.ramp({"lift": 1.15}, 0.2, robot="agf")], transition=bt.seq.done())
+
+    row = scene.requirements()["agf"]
+    assert row.category == "vehicle.forklift" and row.notes == []
+    r = by_key(row)
+    assert set(r) == {"payload_kg", "lift_height_mm", "fork_height_lowered_mm", "max_speed_mps", "max_speed_fork_first_mps"}
+    assert r["payload_kg"].value == pytest.approx(120.0)
+    assert r["payload_kg"].basis == "grasps pallet + pallet/load 120 kg"
+    # The fork seat is 0.09 m over the carriage: the `raise` ramp puts it
+    # at 1.29 m, the `seat` ramp at 0.10 m, and each ramp leaves the mast
+    # where it put it for the next.
+    assert r["lift_height_mm"].value == pytest.approx(1290.0) and "`raise`" in r["lift_height_mm"].basis
+    assert r["fork_height_lowered_mm"].op == "<=" and r["fork_height_lowered_mm"].value == pytest.approx(100.0)
+    assert "`seat`" in r["fork_height_lowered_mm"].basis
+    assert r["max_speed_mps"].value == pytest.approx(1.5) and r["max_speed_mps"].basis == "travel speed in reverse"
+    assert r["max_speed_fork_first_mps"].value == pytest.approx(0.5)
+    # Shopping carries the maximum along as a `__max` filter, the minimums as they are.
+    asked: dict = {}
+    monkeypatch.setattr(bt.catalog, "search", lambda category, index=None, **filters: asked.update(category=category, **filters) or [])
+    bt.catalog.search_for(row)
+    assert asked["category"] == "vehicle.forklift" and asked["lift_height_mm"] == 1290.0
+    assert asked["fork_height_lowered_mm__max"] == 100.0 and "fork_height_lowered_mm" not in asked
+    # A stacker that lifts 1.2 m falls short by name; forks that lower to
+    # 90 mm get under the pallet.
+    scene.set_part("agf", manufacturer="ACME", model="ST-12", lift_height_mm=1200, fork_height_lowered_mm=90,
+                   payload_kg=1000, max_speed_mps=1.6, max_speed_fork_first_mps=0.6)
+    r = by_key(scene.requirements()["agf"])
+    assert r["lift_height_mm"].status == "short" and r["fork_height_lowered_mm"].status == "ok"
+    assert {k: v.status for k, v in r.items() if k != "lift_height_mm"} == dict.fromkeys(
+        ["payload_kg", "fork_height_lowered_mm", "max_speed_mps", "max_speed_fork_first_mps"], "ok"
+    )

@@ -3506,6 +3506,8 @@ enum DeviceRuntime {
         name: String,
         waypoints: Vec<nalgebra::Point3<f64>>,
         stations: Vec<(String, usize)>,
+        /// The gear a goto must arrive at a station in (`VehiclePath::arrivals`).
+        arrivals: Vec<(String, crate::seq::Gear)>,
         ring: bool,
         body: Vec<String>,
         speed: f64,
@@ -3559,6 +3561,15 @@ enum Leg {
     Straight {
         to: nalgebra::Point3<f64>,
         velocity: Vector3<f64>,
+    },
+    /// Swing about the floor point `center` at the signed rate `omega`
+    /// until the heading is `to_heading` — a steered drive rounding a
+    /// corner: the vehicle frame rides the arc and ends at `to`.
+    Arc {
+        center: nalgebra::Point3<f64>,
+        omega: f64,
+        to: nalgebra::Point3<f64>,
+        to_heading: f64,
     },
 }
 
@@ -3654,7 +3665,11 @@ fn vehicle_route(
 }
 
 /// Expands a route into turn/straight legs from the vehicle's current
-/// heading. Coincident waypoints contribute no leg.
+/// heading — arcs for a steered drive. Coincident waypoints contribute no
+/// leg. `arrive` is the gear the destination station demands of the leg
+/// into it, if any. A route a steered drive cannot take is an error naming
+/// the leg.
+#[allow(clippy::too_many_arguments)]
 fn build_legs(
     waypoints: &[nalgebra::Point3<f64>],
     route: &[usize],
@@ -3663,12 +3678,47 @@ fn build_legs(
     speed: f64,
     turn_speed: f64,
     drive: &crate::seq::Drive,
-) -> std::collections::VecDeque<Leg> {
-    use crate::seq::{AerialYaw, Drive};
+    arrive: Option<crate::seq::Gear>,
+) -> Result<std::collections::VecDeque<Leg>, String> {
+    use crate::seq::{AerialYaw, Drive, Gear};
+    if let Drive::Steered {
+        turn_radius,
+        allow_reverse,
+        reverse_speed,
+        prefer,
+    } = drive
+    {
+        return build_steered_legs(
+            waypoints,
+            route,
+            start,
+            heading,
+            speed,
+            turn_speed,
+            *turn_radius,
+            *allow_reverse,
+            *reverse_speed,
+            *prefer,
+            arrive,
+        );
+    }
     let mut legs = std::collections::VecDeque::new();
     let mut position = start;
     let mut heading = heading;
-    for &i in route {
+    // The last waypoint that actually moves the machine is the arrival;
+    // coincident trailing waypoints must not steal the station's gear.
+    let last_leg = {
+        let mut prev = start;
+        let mut last = None;
+        for (k, &i) in route.iter().enumerate() {
+            if (waypoints[i] - prev).norm() >= 1e-9 {
+                last = Some(k);
+            }
+            prev = waypoints[i];
+        }
+        last
+    };
+    for (k, &i) in route.iter().enumerate() {
         let to = waypoints[i];
         let d = to - position;
         if d.norm() < 1e-9 {
@@ -3685,7 +3735,11 @@ fn build_legs(
                     velocity: d / d.norm() * speed,
                 });
             }
-            Drive::Differential { allow_reverse, .. } => {
+            Drive::Differential {
+                allow_reverse,
+                prefer,
+                ..
+            } => {
                 // Heading is set by the horizontal run — a graded leg
                 // still faces where it is going on the floor plan. (A
                 // vertical stack cannot face anywhere; validation refuses
@@ -3694,14 +3748,46 @@ fn build_legs(
                 // Backing up is just facing the other way while travelling
                 // the same direction — worth it whenever it is the shorter
                 // turn, which is exactly when a machine would reverse
-                // rather than turn around.
-                let leg_heading = if *allow_reverse
-                    && run > 1e-9
-                    && wrap_angle(travel - heading).abs() > std::f64::consts::FRAC_PI_2
-                {
-                    wrap_angle(travel + std::f64::consts::PI)
-                } else {
-                    travel
+                // rather than turn around. A right angle is no shorter
+                // either way: the drive's preference takes it. The leg
+                // into the destination takes the gear the station demands.
+                let gear = match arrive.filter(|_| Some(k) == last_leg) {
+                    Some(gear) => gear,
+                    None if !*allow_reverse || run <= 1e-9 => Gear::Forward,
+                    None => {
+                        let turn = wrap_angle(travel - heading).abs();
+                        let back = std::f64::consts::PI - turn;
+                        match drive.reverse_speed_stated() {
+                            // Gears run at different speeds: take the one
+                            // that has the leg done soonest, turn and run
+                            // together — a forklift turns round to back
+                            // down an aisle at speed, but not for a metre.
+                            // A time tie goes to the shorter turn.
+                            Some(reverse) => {
+                                let t_forward = turn / turn_speed + d.norm() / speed;
+                                let t_reverse = back / turn_speed + d.norm() / reverse;
+                                if t_reverse < t_forward {
+                                    Gear::Reverse
+                                } else if t_forward < t_reverse || turn < back {
+                                    Gear::Forward
+                                } else if back < turn {
+                                    Gear::Reverse
+                                } else {
+                                    *prefer
+                                }
+                            }
+                            None if turn > std::f64::consts::FRAC_PI_2 => Gear::Reverse,
+                            None if turn < std::f64::consts::FRAC_PI_2 => Gear::Forward,
+                            None => *prefer,
+                        }
+                    }
+                };
+                let (leg_heading, cruise) = match gear {
+                    Gear::Forward => (travel, speed),
+                    Gear::Reverse => (
+                        wrap_angle(travel + std::f64::consts::PI),
+                        drive.reverse_speed(speed),
+                    ),
                 };
                 let dphi = wrap_angle(leg_heading - heading);
                 if dphi.abs() > 1e-9 {
@@ -3715,10 +3801,11 @@ fn build_legs(
                     // Cruise speed is spent along the leg — 3D arc length,
                     // so a graded leg takes proportionally longer, like
                     // the machine it models.
-                    velocity: d / d.norm() * speed,
+                    velocity: d / d.norm() * cruise,
                 });
                 heading = leg_heading;
             }
+            Drive::Steered { .. } => unreachable!("handled above"),
             Drive::Aerial {
                 climb_speed,
                 descent_speed,
@@ -3759,7 +3846,286 @@ fn build_legs(
         }
         position = to;
     }
-    legs
+    Ok(legs)
+}
+
+/// A corner of a steered route: the fillet arc tangent to both legs when
+/// the gear holds (`extent` = the tangent length taken off each leg), or —
+/// when the gear changes there — the overshoot past the corner and the
+/// arc back onto the next leg (`extent` = how far past the corner the
+/// cusp lies, and how far along the next leg the arc lands).
+struct SteeredCorner {
+    cusp: bool,
+    extent: f64,
+    /// Signed turn of the motion direction at the corner.
+    delta: f64,
+}
+
+/// A steered drive's route: straights joined by arcs of the turning radius.
+/// Gears go leg by leg as a differential drive's do — the fastest, then
+/// the shorter turn, then the preference — except that the first leg's is
+/// set by the parked heading (a steered machine leaves a station along
+/// the line it stands on) and the last leg's by the station's arrival
+/// gear. A corner the gear holds through is a fillet; one it changes at
+/// is driven past and swung back through. Level paths only.
+#[allow(clippy::too_many_arguments)]
+fn build_steered_legs(
+    waypoints: &[nalgebra::Point3<f64>],
+    route: &[usize],
+    start: nalgebra::Point3<f64>,
+    heading: f64,
+    speed: f64,
+    turn_speed: f64,
+    radius: f64,
+    allow_reverse: bool,
+    reverse_speed: Option<f64>,
+    prefer: crate::seq::Gear,
+    arrive: Option<crate::seq::Gear>,
+) -> Result<std::collections::VecDeque<Leg>, String> {
+    use crate::seq::Gear;
+    use std::f64::consts::PI;
+    let mut pts: Vec<nalgebra::Point3<f64>> = vec![start];
+    let mut names: Vec<String> = vec!["here".to_string()];
+    for &i in route {
+        let p = waypoints[i];
+        if (p - pts[pts.len() - 1]).norm() >= 1e-9 {
+            pts.push(p);
+            names.push(format!("waypoint {i}"));
+        }
+    }
+    let n = pts.len() - 1;
+    let mut legs = std::collections::VecDeque::new();
+    if n == 0 {
+        return Ok(legs);
+    }
+    if let Some(w) = pts.iter().find(|w| (w.z - pts[0].z).abs() > 1e-9) {
+        return Err(format!(
+            "a steered drive rounds its corners on the level, but the route climbs to z = {:.3} m",
+            w.z
+        ));
+    }
+    let dirs: Vec<Vector3<f64>> = (0..n).map(|k| (pts[k + 1] - pts[k]).normalize()).collect();
+    let lens: Vec<f64> = (0..n).map(|k| (pts[k + 1] - pts[k]).norm()).collect();
+    let angle = |u: &Vector3<f64>| u.y.atan2(u.x);
+    let v_of = |g: Gear| match g {
+        Gear::Forward => speed,
+        Gear::Reverse => reverse_speed.unwrap_or(speed),
+    };
+    // Slower round a bend: the arc's rate is the drive's turn rate at
+    // most, so a tight radius is not taken at cruise.
+    let omega_of = |g: Gear| (v_of(g) / radius).min(turn_speed);
+    let flip = |g: Gear| match g {
+        Gear::Forward => Gear::Reverse,
+        Gear::Reverse => Gear::Forward,
+    };
+
+    // ---- gears, leg by leg
+    let mut gears: Vec<Gear> = Vec::with_capacity(n);
+    let off = wrap_angle(angle(&dirs[0]) - heading);
+    let first = if off.abs() < 1e-6 {
+        Gear::Forward
+    } else if (off.abs() - PI).abs() < 1e-6 {
+        Gear::Reverse
+    } else {
+        return Err(format!(
+            "a steered drive cannot turn on the spot, but the leg to {} leaves {:.1}° off the \
+             heading it stands at — put the corner on a waypoint after the station",
+            names[1],
+            off.to_degrees()
+        ));
+    };
+    if first == Gear::Reverse && !allow_reverse {
+        return Err(format!(
+            "the leg to {} runs against the heading the machine stands at, and allow_reverse is off",
+            names[1]
+        ));
+    }
+    if n == 1 {
+        if let Some(a) = arrive {
+            if a != first {
+                return Err(format!(
+                    "the station demands {a:?} gear, but the machine stands facing the other way \
+                     and a steered drive cannot turn round in place — put a corner before it"
+                ));
+            }
+        }
+    }
+    gears.push(first);
+    for k in 1..n {
+        let prev = gears[k - 1];
+        let delta = wrap_angle(angle(&dirs[k]) - angle(&dirs[k - 1]));
+        let turn = delta.abs();
+        let fillet = turn < PI - 1e-9;
+        let tangent = radius * (turn / 2.0).tan();
+        // A gear change with no corner would flip the heading on a
+        // straight — a pivot. Only a bend gives a cusp somewhere to go.
+        let overshoot = if turn > 1e-9 {
+            radius / (turn / 2.0).tan()
+        } else {
+            f64::INFINITY
+        };
+        let other = flip(prev);
+        let may_change = overshoot.is_finite() && (other == Gear::Forward || allow_reverse);
+        let forced = if k == n - 1 { arrive } else { None };
+        let gear = match forced {
+            Some(a) if a == prev => {
+                if !fillet {
+                    return Err(format!(
+                        "the leg to {} turns back on the one before it, and the station demands \
+                         the same gear — a steered drive cannot turn round there",
+                        names[k + 1]
+                    ));
+                }
+                a
+            }
+            Some(a) => {
+                if !may_change {
+                    return Err(format!(
+                        "the station demands {a:?} gear, but the gear cannot change at {} \
+                         ({})",
+                        names[k],
+                        if overshoot.is_finite() {
+                            "allow_reverse is off"
+                        } else {
+                            "there is no corner to swing back through"
+                        }
+                    ));
+                }
+                a
+            }
+            None => {
+                let keep_cost = if fillet {
+                    turn / omega_of(prev) + (lens[k] - 2.0 * tangent) / v_of(prev)
+                } else {
+                    f64::INFINITY
+                };
+                let change_cost = if may_change {
+                    overshoot / v_of(prev)
+                        + (PI - turn) / omega_of(other)
+                        + (lens[k] - overshoot) / v_of(other)
+                } else {
+                    f64::INFINITY
+                };
+                if keep_cost.is_infinite() && change_cost.is_infinite() {
+                    return Err(format!(
+                        "the leg to {} turns back on the one before it, and allow_reverse is off",
+                        names[k + 1]
+                    ));
+                }
+                if change_cost < keep_cost {
+                    other
+                } else if keep_cost < change_cost || turn < PI - turn {
+                    prev
+                } else if PI - turn < turn {
+                    other
+                } else if prefer == prev {
+                    prev
+                } else {
+                    other
+                }
+            }
+        };
+        gears.push(gear);
+    }
+
+    // ---- what every corner takes off the legs beside it
+    let corners: Vec<SteeredCorner> = (1..n)
+        .map(|k| {
+            let delta = wrap_angle(angle(&dirs[k]) - angle(&dirs[k - 1]));
+            let turn = delta.abs();
+            if gears[k] == gears[k - 1] {
+                SteeredCorner {
+                    cusp: false,
+                    extent: radius * (turn / 2.0).tan(),
+                    delta,
+                }
+            } else {
+                SteeredCorner {
+                    cusp: true,
+                    extent: if turn > 1e-9 && turn < PI - 1e-9 {
+                        radius / (turn / 2.0).tan()
+                    } else {
+                        0.0
+                    },
+                    delta,
+                }
+            }
+        })
+        .collect();
+    for k in 0..n {
+        let front = if k == 0 { 0.0 } else { corners[k - 1].extent };
+        let back = if k == n - 1 || corners[k].cusp {
+            0.0
+        } else {
+            corners[k].extent
+        };
+        if lens[k] + 1e-9 < front + back {
+            return Err(format!(
+                "the leg {} → {} ({:.2} m) is shorter than the turns at its ends need \
+                 ({:.2} + {:.2} m at turn_radius {:.2}); move the waypoints apart or lower \
+                 turn_radius",
+                names[k],
+                names[k + 1],
+                lens[k],
+                front,
+                back,
+                radius
+            ));
+        }
+    }
+
+    // ---- the legs
+    let left = |u: &Vector3<f64>| Vector3::new(-u.y, u.x, 0.0);
+    let heading_of = |k: usize| match gears[k] {
+        Gear::Forward => angle(&dirs[k]),
+        Gear::Reverse => wrap_angle(angle(&dirs[k]) + PI),
+    };
+    for k in 0..n {
+        let front = if k == 0 { 0.0 } else { corners[k - 1].extent };
+        let s = pts[k] + dirs[k] * front;
+        let e = if k < n - 1 && corners[k].cusp {
+            pts[k + 1] + dirs[k] * corners[k].extent
+        } else if k < n - 1 {
+            pts[k + 1] - dirs[k] * corners[k].extent
+        } else {
+            pts[k + 1]
+        };
+        if (e - s).norm() > 1e-9 {
+            legs.push_back(Leg::Straight {
+                to: e,
+                velocity: dirs[k] * v_of(gears[k]),
+            });
+        }
+        if k == n - 1 {
+            break;
+        }
+        let c = &corners[k];
+        let to = pts[k + 1] + dirs[k + 1] * c.extent;
+        if !c.cusp {
+            if c.delta.abs() > 1e-9 {
+                legs.push_back(Leg::Arc {
+                    center: e + left(&dirs[k]) * (radius * c.delta.signum()),
+                    omega: omega_of(gears[k]) * c.delta.signum(),
+                    to,
+                    to_heading: heading_of(k + 1),
+                });
+            }
+        } else {
+            // From the cusp past the corner, back through the arc that is
+            // tangent to both legs, onto the next leg.
+            let phi = wrap_angle(angle(&dirs[k + 1]) - angle(&-dirs[k]));
+            if phi.abs() > 1e-9 {
+                let side = (dirs[k].x * dirs[k + 1].y - dirs[k].y * dirs[k + 1].x).signum();
+                legs.push_back(Leg::Arc {
+                    center: e + left(&dirs[k]) * (radius * side),
+                    omega: omega_of(gears[k + 1]) * phi.signum(),
+                    to,
+                    to_heading: heading_of(k + 1),
+                });
+            }
+        }
+    }
+    Ok(legs)
 }
 
 impl Rollout {
@@ -4102,6 +4468,7 @@ impl Rollout {
                             name: device.name.clone(),
                             waypoints: path.waypoints.clone(),
                             stations: path.stations.clone(),
+                            arrivals: path.arrivals.clone(),
                             ring: path.ring,
                             body: body.clone(),
                             speed: *speed,
@@ -6755,6 +7122,42 @@ impl Rollout {
                                 }
                                 remaining -= step;
                             }
+                            Leg::Arc {
+                                center,
+                                omega,
+                                to,
+                                to_heading,
+                            } => {
+                                let need = wrap_angle(to_heading - *heading) / omega;
+                                if need <= 1e-12 {
+                                    *position = *to;
+                                    *heading = *to_heading;
+                                    legs.pop_front();
+                                    continue;
+                                }
+                                let step = need.min(remaining);
+                                pieces.push((
+                                    tau0,
+                                    tau0 + step,
+                                    VehiclePiece::Piv {
+                                        center: *center,
+                                        omega: *omega,
+                                    },
+                                ));
+                                if step >= need - 1e-12 {
+                                    *position = *to;
+                                    *heading = *to_heading;
+                                    legs.pop_front();
+                                } else {
+                                    let swing = nalgebra::UnitQuaternion::from_axis_angle(
+                                        &Vector3::z_axis(),
+                                        omega * step,
+                                    );
+                                    *position = center + swing * (*position - center);
+                                    *heading = wrap_angle(*heading + omega * step);
+                                }
+                                remaining -= step;
+                            }
                             Leg::Straight { to, velocity } => {
                                 let need = (to - *position).norm() / velocity.norm();
                                 if need <= 1e-12 {
@@ -9335,6 +9738,7 @@ impl Rollout {
                         DeviceRuntime::Vehicle {
                             waypoints,
                             stations,
+                            arrivals,
                             ring,
                             speed,
                             turn_speed,
@@ -9396,6 +9800,7 @@ impl Rollout {
                                 prev = k;
                             }
                         }
+                        let arrive = arrivals.iter().find(|(n, _)| n == station).map(|(_, g)| *g);
                         *legs = build_legs(
                             waypoints,
                             &route,
@@ -9404,7 +9809,9 @@ impl Rollout {
                             *speed,
                             *turn_speed,
                             drive,
-                        );
+                            arrive,
+                        )
+                        .map_err(|m| err(format!("vehicle `{device}`: {m}")))?;
                         *target = to;
                         if legs.is_empty() {
                             // Already there (or a zero-length route).
@@ -9887,6 +10294,29 @@ fn body_profile(
                 }
                 position = *to;
             }
+            Leg::Arc {
+                center,
+                omega,
+                to,
+                to_heading,
+            } => {
+                let need = wrap_angle(to_heading - heading) / omega;
+                if need > 1e-12 {
+                    pieces.push((
+                        t,
+                        t + need,
+                        frame,
+                        VehiclePiece::Piv {
+                            center: *center,
+                            omega: *omega,
+                        },
+                    ));
+                    piece_modes.extend(modes.get(i).copied());
+                    t += need;
+                }
+                heading = *to_heading;
+                position = *to;
+            }
         }
     }
     crate::gait::BodyProfile {
@@ -10121,6 +10551,18 @@ impl Rollout {
                         (len, found)
                     }
                     Leg::Turn { .. } => (0.0, Vec::new()),
+                    // An arc is level by construction (a steered drive rounds
+                    // its corners on the level); its floor is the straights'.
+                    Leg::Arc { center, to, .. } => {
+                        let len = (pos - center).norm()
+                            * ((to - center)
+                                .cross(&(pos - center))
+                                .norm()
+                                .atan2((to - center).dot(&(pos - center))))
+                            .abs();
+                        pos = *to;
+                        (len, Vec::new())
+                    }
                 };
                 let mode = if found.is_empty() {
                     LegMode::Roll
@@ -10228,7 +10670,7 @@ impl Rollout {
                     .iter()
                     .map(|(leg, _, _)| {
                         let start = pos;
-                        if let Leg::Straight { to, .. } = leg {
+                        if let Leg::Straight { to, .. } | Leg::Arc { to, .. } = leg {
                             pos = *to;
                         }
                         start
@@ -10265,7 +10707,7 @@ impl Rollout {
                 }
                 // A turn is walked when either straight beside it is.
                 for i in 0..route.len() {
-                    if !matches!(route[i].0, Leg::Turn { .. }) {
+                    if !matches!(route[i].0, Leg::Turn { .. } | Leg::Arc { .. }) {
                         continue;
                     }
                     let before = (0..i)
@@ -10290,6 +10732,9 @@ impl Rollout {
                         match leg {
                             Leg::Straight { velocity, .. } => len / velocity.norm(),
                             Leg::Turn { to, omega } => wrap_angle(to - head).abs() / omega.abs(),
+                            Leg::Arc {
+                                to_heading, omega, ..
+                            } => wrap_angle(to_heading - head).abs() / omega.abs(),
                         }
                     };
                     let mut head = heading;
@@ -10298,6 +10743,9 @@ impl Rollout {
                         costs.push((*len, seconds(leg, *len, head)));
                         if let Leg::Turn { to, .. } = leg {
                             head = *to;
+                        }
+                        if let Leg::Arc { to_heading, .. } = leg {
+                            head = *to_heading;
                         }
                     }
                     let mut i = 0;
@@ -10346,7 +10794,9 @@ impl Rollout {
                         Leg::Straight { velocity, .. } => {
                             *velocity = *velocity / velocity.norm() * v_walk;
                         }
-                        Leg::Turn { omega, .. } => *omega = omega.signum() * w_walk,
+                        Leg::Turn { omega, .. } | Leg::Arc { omega, .. } => {
+                            *omega = omega.signum() * w_walk
+                        }
                     }
                 }
             }
@@ -14258,6 +14708,7 @@ mod vehicle_tests {
             ],
             stations: vec![("a".into(), 0), ("c".into(), 2)],
             ring: false,
+            arrivals: Vec::new(),
         }
     }
 
@@ -14275,6 +14726,8 @@ mod vehicle_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -14318,6 +14771,500 @@ mod vehicle_tests {
             .iter()
             .map(|r| vec![Isometry3::identity(); r.model.links.len()])
             .collect()
+    }
+
+    /// What `build_legs` faces and how fast it drives, straight leg by
+    /// straight leg, walking every waypoint of `path` from its first
+    /// (parked facing +x) with the destination's arrival gear `arrive`.
+    fn straights(
+        path: &[(f64, f64)],
+        drive: &crate::seq::Drive,
+        arrive: Option<crate::seq::Gear>,
+    ) -> Vec<(f64, f64)> {
+        let waypoints: Vec<Point3<f64>> =
+            path.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect();
+        let route: Vec<usize> = (1..waypoints.len()).collect();
+        let legs = build_legs(
+            &waypoints,
+            &route,
+            waypoints[0],
+            0.0,
+            0.5,
+            FRAC_PI_2,
+            drive,
+            arrive,
+        )
+        .unwrap();
+        let mut heading = 0.0;
+        let mut out = Vec::new();
+        for leg in legs {
+            match leg {
+                Leg::Turn { to, .. } => heading = to,
+                Leg::Arc { to_heading, .. } => heading = to_heading,
+                Leg::Straight { velocity, .. } => out.push((heading, velocity.norm())),
+            }
+        }
+        out
+    }
+
+    fn gears(
+        allow_reverse: bool,
+        prefer: crate::seq::Gear,
+        reverse_speed: Option<f64>,
+    ) -> crate::seq::Drive {
+        crate::seq::Drive::Differential {
+            allow_reverse,
+            max_grade: None,
+            reverse_speed,
+            prefer,
+        }
+    }
+
+    fn same_legs(got: &[(f64, f64)], want: &[(f64, f64)]) {
+        assert_eq!(got.len(), want.len(), "got {got:?}, want {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                wrap_angle(g.0 - w.0).abs() < 1e-12 && (g.1 - w.1).abs() < 1e-12,
+                "got {got:?}, want {want:?}"
+            );
+        }
+    }
+
+    /// Right angles, then a 135° corner: the historic rule faces every
+    /// leg unless backing is the shorter turn, and a right angle is not.
+    #[test]
+    fn the_corner_rule_faces_a_leg_unless_backing_is_the_shorter_turn() {
+        use crate::seq::Gear;
+        use std::f64::consts::{FRAC_PI_4, PI};
+        // +x, +y, -x, then up-right at 45°: the last corner turns 135°.
+        let path = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0), (1.0, 2.0)];
+        same_legs(
+            &straights(&path, &gears(false, Gear::Forward, None), None),
+            &[(0.0, 0.5), (FRAC_PI_2, 0.5), (PI, 0.5), (FRAC_PI_4, 0.5)],
+        );
+        // Allowed to reverse, only the 135° corner is worth backing (a
+        // 45° turn instead), at the forward speed when none is stated.
+        same_legs(
+            &straights(&path, &gears(true, Gear::Forward, None), None),
+            &[
+                (0.0, 0.5),
+                (FRAC_PI_2, 0.5),
+                (PI, 0.5),
+                (FRAC_PI_4 + PI, 0.5),
+            ],
+        );
+    }
+
+    /// A machine that prefers reverse backs down every right angle it
+    /// meets — a forklift travelling drive-unit first — at its reverse
+    /// speed, and keeps backing through the next one.
+    #[test]
+    fn a_right_angle_takes_the_preferred_gear_at_its_speed() {
+        use crate::seq::Gear;
+        use std::f64::consts::PI;
+        let path = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)];
+        same_legs(
+            &straights(&path, &gears(true, Gear::Reverse, Some(1.0)), None),
+            &[(0.0, 0.5), (-FRAC_PI_2, 1.0), (0.0, 1.0)],
+        );
+        // Without permission to reverse the preference is moot.
+        same_legs(
+            &straights(&path, &gears(false, Gear::Reverse, Some(1.0)), None),
+            &[(0.0, 0.5), (FRAC_PI_2, 0.5), (PI, 0.5)],
+        );
+    }
+
+    /// With a reverse speed stated, a corner takes the gear that has the
+    /// leg done soonest: a forklift parked forks-first turns round to back
+    /// 10 m down the aisle at 2 m/s, but drives the metre to the next
+    /// stand forwards rather than turn round for it.
+    #[test]
+    fn a_stated_reverse_speed_picks_the_gear_by_time() {
+        use crate::seq::Gear;
+        use std::f64::consts::PI;
+        // 10 m ahead, then 1 m more: turning round (2 s at 90°/s) and
+        // backing at 2 m/s (5 s) beats 20 s forwards; for the last metre
+        // forwards (2 s) beats the turn (2 s) plus 0.5 s.
+        let long = [(0.0, 0.0), (10.0, 0.0), (11.0, 0.0)];
+        same_legs(
+            &straights(&long, &gears(true, Gear::Forward, Some(2.0)), None),
+            &[(PI, 2.0), (PI, 2.0)],
+        );
+        let short = [(0.0, 0.0), (1.0, 0.0)];
+        same_legs(
+            &straights(&short, &gears(true, Gear::Forward, Some(2.0)), None),
+            &[(0.0, 0.5)],
+        );
+        // A time tie goes to the shorter turn: 2 m at 0.5 (4 s) against a
+        // half turn (2 s) and 2 m at 1.0 (2 s) stays forwards, whatever
+        // the preference says.
+        same_legs(
+            &straights(
+                &[(0.0, 0.0), (2.0, 0.0)],
+                &gears(true, Gear::Reverse, Some(1.0)),
+                None,
+            ),
+            &[(0.0, 0.5)],
+        );
+    }
+
+    /// The destination's arrival gear decides the leg into it whatever
+    /// the corner rule would have picked — and only that leg.
+    #[test]
+    fn a_station_arrival_gear_forces_the_last_leg() {
+        use crate::seq::Gear;
+        let path = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (2.0, 1.0)];
+        // Forks first into the bay although the machine prefers backing:
+        // the trailing coincident waypoint does not steal the arrival.
+        same_legs(
+            &straights(
+                &path,
+                &gears(true, Gear::Reverse, Some(1.0)),
+                Some(Gear::Forward),
+            ),
+            &[(0.0, 0.5), (FRAC_PI_2, 0.5)],
+        );
+        // Backing onto the charger although the machine never reverses
+        // on its own.
+        same_legs(
+            &straights(
+                &path,
+                &gears(false, Gear::Forward, Some(1.0)),
+                Some(Gear::Reverse),
+            ),
+            &[(0.0, 0.5), (-FRAC_PI_2, 1.0)],
+        );
+        // Corners before the last are the rule's: a 135° corner still
+        // backs, the arrival then turns the machine round to face in.
+        let bent = [(0.0, 0.0), (2.0, 0.0), (1.0, 1.0), (1.0, 2.0)];
+        let got = straights(
+            &bent,
+            &gears(true, Gear::Forward, None),
+            Some(Gear::Forward),
+        );
+        same_legs(
+            &got,
+            &[
+                (0.0, 0.5),
+                (
+                    3.0 * std::f64::consts::FRAC_PI_4 + std::f64::consts::PI,
+                    0.5,
+                ),
+                (FRAC_PI_2, 0.5),
+            ],
+        );
+    }
+
+    fn steered(radius: f64, allow_reverse: bool) -> crate::seq::Drive {
+        crate::seq::Drive::Steered {
+            turn_radius: radius,
+            allow_reverse,
+            reverse_speed: None,
+            prefer: crate::seq::Gear::Forward,
+        }
+    }
+
+    fn legs_of(
+        path: &[(f64, f64)],
+        drive: &crate::seq::Drive,
+        arrive: Option<crate::seq::Gear>,
+    ) -> Vec<Leg> {
+        let waypoints: Vec<Point3<f64>> =
+            path.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect();
+        let route: Vec<usize> = (1..waypoints.len()).collect();
+        build_legs(
+            &waypoints,
+            &route,
+            waypoints[0],
+            0.0,
+            0.5,
+            FRAC_PI_2,
+            drive,
+            arrive,
+        )
+        .unwrap()
+        .into_iter()
+        .collect()
+    }
+
+    fn close(p: &Point3<f64>, x: f64, y: f64) -> bool {
+        (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9
+    }
+
+    /// A steered drive takes the L's corner as the fillet tangent to both
+    /// legs: the straights stop R short of the corner, the arc between
+    /// them swings about the centre R to the left, and the machine faces
+    /// +y as it comes off it.
+    #[test]
+    fn a_steered_drive_rounds_a_corner_with_an_arc() {
+        let legs = legs_of(
+            &[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)],
+            &steered(0.5, false),
+            None,
+        );
+        assert_eq!(legs.len(), 3, "{legs:?}");
+        let Leg::Straight { to, velocity } = &legs[0] else {
+            panic!("{legs:?}")
+        };
+        assert!(close(to, 1.5, 0.0) && (velocity.norm() - 0.5).abs() < 1e-12);
+        let Leg::Arc {
+            center,
+            omega,
+            to,
+            to_heading,
+        } = &legs[1]
+        else {
+            panic!("{legs:?}")
+        };
+        assert!(close(center, 1.5, 0.5), "{center}");
+        assert!((omega - 1.0).abs() < 1e-12, "{omega}"); // v / R, under the turn rate
+        assert!(close(to, 2.0, 0.5) && (to_heading - FRAC_PI_2).abs() < 1e-12);
+        let Leg::Straight { to, .. } = &legs[2] else {
+            panic!("{legs:?}")
+        };
+        assert!(close(to, 2.0, 1.0));
+        // A tight radius is not taken at cruise: the arc's rate stops at
+        // the turn rate (π/2 rad/s here) when v / R would exceed it.
+        let legs = legs_of(
+            &[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)],
+            &steered(0.2, false),
+            None,
+        );
+        let Leg::Arc { omega, .. } = &legs[1] else {
+            panic!("{legs:?}")
+        };
+        assert!((omega - FRAC_PI_2).abs() < 1e-12, "{omega}");
+    }
+
+    /// Where the gear changes at a corner the machine drives past it by
+    /// R cot(Δ/2) — R at a right angle — and swings back through the arc
+    /// tangent to both legs, arriving on the next leg in the new gear.
+    #[test]
+    fn a_gear_change_at_a_corner_overshoots_and_swings_back() {
+        use crate::seq::Gear;
+        let legs = legs_of(
+            &[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)],
+            &steered(0.5, true),
+            Some(Gear::Reverse),
+        );
+        assert_eq!(legs.len(), 3, "{legs:?}");
+        let Leg::Straight { to, .. } = &legs[0] else {
+            panic!("{legs:?}")
+        };
+        assert!(close(to, 2.5, 0.0), "{to}"); // past the corner
+        let Leg::Arc {
+            center,
+            omega,
+            to,
+            to_heading,
+        } = &legs[1]
+        else {
+            panic!("{legs:?}")
+        };
+        assert!(close(center, 2.5, 0.5), "{center}");
+        assert!((omega + 1.0).abs() < 1e-12, "{omega}"); // clockwise, backing
+        assert!(close(to, 2.0, 0.5) && (to_heading + FRAC_PI_2).abs() < 1e-12);
+        let Leg::Straight { to, velocity } = &legs[2] else {
+            panic!("{legs:?}")
+        };
+        assert!(close(to, 2.0, 1.0) && velocity.y > 0.0); // moving +y, facing -y
+                                                          // A dead end is the overshoot's limit: nothing to drive past, no
+                                                          // arc — straight in, straight back.
+        let legs = legs_of(
+            &[(0.0, 0.0), (2.0, 0.0), (0.0, 0.0)],
+            &steered(0.5, true),
+            None,
+        );
+        assert_eq!(legs.len(), 2, "{legs:?}");
+        assert!(matches!(&legs[1], Leg::Straight { velocity, .. } if velocity.x < 0.0));
+    }
+
+    /// What a steered drive refuses by name: a leg too short for its
+    /// turns, a first leg off the parked heading, a turn-round it may not
+    /// make, and a gear change with no corner to swing through.
+    #[test]
+    fn a_steered_drive_names_the_routes_it_cannot_take() {
+        use crate::seq::Gear;
+        let attempt = |path: &[(f64, f64)], drive: &crate::seq::Drive, arrive: Option<Gear>| {
+            let waypoints: Vec<Point3<f64>> =
+                path.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect();
+            let route: Vec<usize> = (1..waypoints.len()).collect();
+            build_legs(
+                &waypoints,
+                &route,
+                waypoints[0],
+                0.0,
+                0.5,
+                FRAC_PI_2,
+                drive,
+                arrive,
+            )
+            .err()
+            .unwrap_or_default()
+        };
+        let short = attempt(
+            &[(0.0, 0.0), (0.4, 0.0), (0.4, 1.0)],
+            &steered(0.5, false),
+            None,
+        );
+        assert!(short.contains("shorter than the turns"), "{short}");
+        let spot = attempt(&[(0.0, 0.0), (0.0, 1.0)], &steered(0.5, false), None);
+        assert!(spot.contains("cannot turn on the spot"), "{spot}");
+        let back = attempt(
+            &[(0.0, 0.0), (2.0, 0.0), (0.0, 0.0)],
+            &steered(0.5, false),
+            None,
+        );
+        assert!(back.contains("allow_reverse is off"), "{back}");
+        let flip = attempt(
+            &[(0.0, 0.0), (2.0, 0.0)],
+            &steered(0.5, true),
+            Some(Gear::Reverse),
+        );
+        assert!(flip.contains("cannot turn round in place"), "{flip}");
+    }
+
+    /// The bake: the L at 0.5 m/s with R = 0.5 takes 1.5 m, a quarter arc
+    /// at 1 rad/s and 0.5 m — 5.571 s — and parks facing +y at the end.
+    #[test]
+    fn a_steered_vehicle_arrives_at_the_analytic_time() {
+        let mut scene = chassis_scene();
+        let mut device = agv(vec!["chassis".into()]);
+        if let DeviceKind::Vehicle { drive, .. } = &mut device.kind {
+            *drive = steered(0.5, false);
+        }
+        scene.upsert_device(device);
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap();
+        let want = 1.5 / 0.5 + FRAC_PI_2 / 1.0 + 0.5 / 0.5;
+        assert!(
+            (tl.duration - want).abs() < 0.011,
+            "duration = {}",
+            tl.duration
+        );
+        let track = tl.objects.iter().find(|o| o.name == "chassis").unwrap();
+        let pose = SequenceTimeline::object_pose(track, &no_fk(&scene), tl.duration).unwrap();
+        let (_, _, yaw) = pose.rotation.euler_angles();
+        assert!((yaw - FRAC_PI_2).abs() < 1e-6, "yaw = {yaw}");
+        // The chassis sits (0.3, 0.2) off the vehicle frame: at (2, 1)
+        // facing +y that is (1.8, 1.3).
+        assert!(
+            (pose.translation.x - 1.8).abs() < 1e-6 && (pose.translation.y - 1.3).abs() < 1e-6,
+            "{pose}"
+        );
+    }
+
+    /// A station cannot sit on a corner of a steered route: the machine
+    /// leaves along the line it arrived by.
+    #[test]
+    fn a_station_on_a_corner_is_refused_for_a_steered_drive() {
+        let mut scene = chassis_scene();
+        let mut device = agv(vec!["chassis".into()]);
+        if let DeviceKind::Vehicle { drive, path, .. } = &mut device.kind {
+            *drive = steered(0.5, false);
+            path.stations.push(("b".into(), 1));
+        }
+        scene.upsert_device(device);
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("station `b`") && err.contains("along one line"),
+            "{err}"
+        );
+    }
+
+    /// The bake prices a reversed leg at the reverse speed: the L's 1 m
+    /// leg, backed at 1 m/s instead of driven at 0.5, saves a second.
+    #[test]
+    fn a_reversed_leg_is_priced_at_the_reverse_speed() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "chassis",
+                Geometry::Box {
+                    size: Vector3::new(0.2, 0.2, 0.2),
+                },
+                iso(0.3, 0.2, 0.1),
+            )
+            .unwrap();
+        let mut device = agv(vec!["chassis".into()]);
+        if let DeviceKind::Vehicle { drive, path, .. } = &mut device.kind {
+            *drive = gears(true, crate::seq::Gear::Reverse, Some(1.0));
+            path.arrivals = vec![("a".into(), crate::seq::Gear::Forward)];
+        }
+        scene.upsert_device(device);
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![
+                step("go", vec![goto("c")], device_done()),
+                step("back", vec![goto("a")], device_done()),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap();
+        // Out: 2 m at 0.5, a quarter turn the other way, 1 m backed at 1.0
+        // = 6 s. Back, forced to arrive forward: parked facing -y after
+        // backing, it turns to face -y... it already does — the leg is
+        // driven forward at 0.5 (2 s), then a right angle (1 s) and 2 m
+        // at 0.5 (4 s): 7 s more.
+        let out = tl.step_spans[0].end;
+        assert!((out - 6.0).abs() < 0.011, "out = {out}");
+        assert!(
+            (tl.duration - 13.0).abs() < 0.021,
+            "duration = {}",
+            tl.duration
+        );
+    }
+
+    /// An arrival gear must name a station of the path, and only a
+    /// differential drive has gears at all.
+    #[test]
+    fn arrival_gears_are_validated_by_name() {
+        let mut scene = sample_scene();
+        let mut device = agv(Vec::new());
+        if let DeviceKind::Vehicle { path, .. } = &mut device.kind {
+            path.arrivals = vec![("dock".into(), crate::seq::Gear::Forward)];
+        }
+        scene.upsert_device(device);
+        scene.upsert_sequence(Sequence {
+            name: "out".into(),
+            steps: vec![step("go", vec![goto("c")], device_done())],
+        });
+        let err = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`dock`") && err.contains("not a station"),
+            "{err}"
+        );
+
+        let mut device = agv(Vec::new());
+        if let DeviceKind::Vehicle { path, drive, .. } = &mut device.kind {
+            path.arrivals = vec![("c".into(), crate::seq::Gear::Reverse)];
+            *drive = crate::seq::Drive::Holonomic { max_grade: None };
+        }
+        scene.upsert_device(device);
+        let err = scene
+            .simulate_sequence("out", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only a differential or steered drive has gears"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -14412,6 +15359,7 @@ mod vehicle_tests {
                     waypoints: vec![Point3::new(0.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.3)],
                     stations: vec![("a".into(), 0), ("b".into(), 1)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -14420,6 +15368,8 @@ mod vehicle_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -14718,6 +15668,7 @@ mod vehicle_tests {
                     ],
                     stations: vec![("lobby".into(), 0), ("car".into(), 1), ("dock".into(), 3)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -14726,6 +15677,8 @@ mod vehicle_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.35), Vector3::new(0.5, 0.4, 0.2))),
             },
@@ -14962,6 +15915,7 @@ mod vehicle_tests {
                     waypoints: path,
                     stations,
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["airframe".into()],
                 speed: 0.8,
@@ -15528,6 +16482,7 @@ mod vehicle_tests {
                     waypoints: vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
                     stations: vec![("a".into(), 0), ("ghost".into(), 9)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -15536,6 +16491,8 @@ mod vehicle_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -15572,6 +16529,7 @@ mod vehicle_tests {
                     ],
                     stations: vec![("a".into(), 0), ("d".into(), 3)],
                     ring: true,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["cart".into()],
                 speed: 0.5,
@@ -15580,6 +16538,8 @@ mod vehicle_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -15699,6 +16659,7 @@ mod tray_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -15707,6 +16668,8 @@ mod tray_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.25), Vector3::new(0.35, 0.3, 0.2))),
             },
@@ -15765,6 +16728,7 @@ mod tray_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -15773,6 +16737,8 @@ mod tray_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.2), Vector3::new(0.4, 0.3, 0.2))),
             },
@@ -16197,6 +17163,7 @@ mod mount_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.5,
@@ -16205,6 +17172,8 @@ mod mount_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -16565,6 +17534,7 @@ mod wheel_mount_tests {
                     ],
                     stations: vec![("a".into(), 0), ("b".into(), 1), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: Vec::new(),
                 speed: 0.5,
@@ -16580,6 +17550,8 @@ mod wheel_mount_tests {
         crate::seq::Drive::Differential {
             allow_reverse,
             max_grade: None,
+            reverse_speed: None,
+            prefer: crate::seq::Gear::Forward,
         }
     }
 
@@ -17009,6 +17981,150 @@ mod wheel_mount_tests {
             "{}",
             q(end, "roll_r")
         );
+    }
+
+    /// A forklift's running gear: one steered drive wheel that stops at
+    /// ±90°, on the wheelbase behind two fixed load wheels under the origin.
+    const TRICYCLE: &str = r#"<robot name="tricycle">
+      <link name="base"/>
+      <link name="yoke"/><link name="drive"/><link name="load_l"/><link name="load_r"/>
+      <joint name="steer" type="revolute">
+        <parent link="base"/><child link="yoke"/>
+        <origin xyz="-1 0 0"/><axis xyz="0 0 1"/>
+        <limit lower="-1.5707963267948966" upper="1.5707963267948966" effort="1" velocity="1"/>
+      </joint>
+      <joint name="drive_wheel" type="continuous">
+        <parent link="yoke"/><child link="drive"/>
+        <origin xyz="0 0 0.1"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="load_l_wheel" type="continuous">
+        <parent link="base"/><child link="load_l"/>
+        <origin xyz="0 0.2 0.05"/><axis xyz="0 1 0"/>
+      </joint>
+      <joint name="load_r_wheel" type="continuous">
+        <parent link="base"/><child link="load_r"/>
+        <origin xyz="0 -0.2 0.05"/><axis xyz="0 1 0"/>
+      </joint>
+    </robot>"#;
+
+    /// Turned across for the pivot, a steer that stops at ±90° cannot
+    /// turn on to face the next leg the short way; it comes back to
+    /// straight ahead and rolls the wheel backwards instead.
+    #[test]
+    fn a_limited_steer_comes_back_from_a_pivot_by_rolling_backwards() {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(TRICYCLE).unwrap(),
+        ));
+        scene.upsert_device(base(differential(true)));
+        scene
+            .mount_robot_on_wheels(
+                0,
+                "base",
+                None,
+                WheelDrive {
+                    wheels: vec![
+                        MountWheel {
+                            steer: Some("steer".into()),
+                            ..wheel("drive_wheel", 0.1)
+                        },
+                        wheel("load_l_wheel", 0.05),
+                        wheel("load_r_wheel", 0.05),
+                    ],
+                    base_frame: Some("base".into()),
+                    mode: crate::seq::LocomotionMode::Auto,
+                    max_step: 0.0,
+                },
+            )
+            .unwrap();
+        let tl = run(&mut scene, vec![step("go", vec![goto("c")], device_done())]).unwrap();
+        let names: Vec<String> = scene.robots()[0]
+            .model
+            .actuated_joint_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let q = |t: f64, joint: &str| {
+            tl.robots[0].trajectory.sample(t)[names.iter().position(|n| n == joint).unwrap()]
+        };
+        // Straight ahead, then across for the pivot (4–5 s), then straight
+        // again for the last metre — not stuck at the stop.
+        assert!(q(2.0, "steer").abs() < 1e-9, "{}", q(2.0, "steer"));
+        assert!(
+            (q(4.5, "steer").abs() - FRAC_PI_2).abs() < 1e-9,
+            "{}",
+            q(4.5, "steer")
+        );
+        assert!(q(6.0, "steer").abs() < 1e-9, "{}", q(6.0, "steer"));
+        // The drive wheel rolls the last metre (10 rad at r = 0.1), either
+        // way round; the load wheels roll it at their own radius.
+        let rolled = (q(tl.duration, "drive_wheel") - q(5.0, "drive_wheel")).abs();
+        assert!((rolled - 10.0).abs() < 1e-6, "{rolled}");
+        let load = (q(tl.duration, "load_l_wheel") - q(5.0, "load_l_wheel")).abs();
+        assert!((load - 20.0).abs() < 1e-6, "{load}");
+    }
+
+    /// Round an arc a steered drive wheel takes the Ackermann angle: a
+    /// metre behind the axle on a 0.5 m radius, atan(1 / 0.5), and rolls
+    /// the hub's own, wider circle.
+    #[test]
+    fn a_drive_wheel_takes_the_ackermann_angle_round_an_arc() {
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(TRICYCLE).unwrap(),
+        ));
+        // The L's corner is no station for a steered drive: only its ends.
+        let mut device = base(crate::seq::Drive::Steered {
+            turn_radius: 0.5,
+            allow_reverse: true,
+            reverse_speed: None,
+            prefer: crate::seq::Gear::Forward,
+        });
+        if let DeviceKind::Vehicle { path, .. } = &mut device.kind {
+            path.stations.retain(|(name, _)| name != "b");
+        }
+        scene.upsert_device(device);
+        scene
+            .mount_robot_on_wheels(
+                0,
+                "base",
+                None,
+                WheelDrive {
+                    wheels: vec![
+                        MountWheel {
+                            steer: Some("steer".into()),
+                            ..wheel("drive_wheel", 0.1)
+                        },
+                        wheel("load_l_wheel", 0.05),
+                        wheel("load_r_wheel", 0.05),
+                    ],
+                    base_frame: Some("base".into()),
+                    mode: crate::seq::LocomotionMode::Auto,
+                    max_step: 0.0,
+                },
+            )
+            .unwrap();
+        let tl = run(&mut scene, vec![step("go", vec![goto("c")], device_done())]).unwrap();
+        let names: Vec<String> = scene.robots()[0]
+            .model
+            .actuated_joint_names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let q = |t: f64, joint: &str| {
+            tl.robots[0].trajectory.sample(t)[names.iter().position(|n| n == joint).unwrap()]
+        };
+        // The arc runs from 3.0 s (1.5 m at 0.5) for a quarter turn at 1 rad/s.
+        assert!(q(2.0, "steer").abs() < 1e-9, "{}", q(2.0, "steer"));
+        let ackermann = (1.0f64 / 0.5).atan();
+        assert!(
+            (q(3.8, "steer").abs() - ackermann).abs() < 1e-6,
+            "{}",
+            q(3.8, "steer")
+        );
+        assert!(q(5.0, "steer").abs() < 1e-9, "{}", q(5.0, "steer"));
+        // Over the arc the hub travels sqrt(0.5² + 1²) · π/2 metres.
+        let rolled = (q(3.0 + FRAC_PI_2, "drive_wheel") - q(3.0, "drive_wheel")).abs();
+        let want = (0.5f64.powi(2) + 1.0).sqrt() * FRAC_PI_2 / 0.1;
+        assert!((rolled - want).abs() < 1e-3, "{rolled} vs {want}");
     }
 
     #[test]
@@ -17645,6 +18761,7 @@ mod gait_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: Vec::new(),
                 speed,
@@ -17653,6 +18770,8 @@ mod gait_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -17857,6 +18976,8 @@ mod gait_tests {
             *drive = crate::seq::Drive::Differential {
                 allow_reverse: false,
                 max_grade: Some(0.2),
+                reverse_speed: None,
+                prefer: crate::seq::Gear::Forward,
             };
         }
         device
@@ -17932,6 +19053,8 @@ mod gait_tests {
             *drive = crate::seq::Drive::Differential {
                 allow_reverse: false,
                 max_grade: Some(0.2),
+                reverse_speed: None,
+                prefer: crate::seq::Gear::Forward,
             };
             if footprint {
                 *body = vec!["footprint".into()];
@@ -18813,6 +19936,7 @@ mod biped_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: Vec::new(),
                 speed: 0.3,
@@ -18821,6 +19945,8 @@ mod biped_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -20294,6 +21420,7 @@ mod physics_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec!["chassis".into()],
                 speed: 0.4,
@@ -20302,6 +21429,8 @@ mod physics_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((
                     Isometry3::translation(0.0, 0.0, 0.25),
@@ -21699,6 +22828,7 @@ mod wheel_leg_tests {
                     ],
                     stations: vec![("a".into(), 0), ("c".into(), 2)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: Vec::new(),
                 speed: 0.5,
@@ -21707,6 +22837,8 @@ mod wheel_leg_tests {
                 drive: crate::seq::Drive::Differential {
                     allow_reverse: false,
                     max_grade: None,
+                    reverse_speed: None,
+                    prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
             },
@@ -22141,6 +23273,8 @@ mod wheel_leg_tests {
             *drive = crate::seq::Drive::Differential {
                 allow_reverse: false,
                 max_grade: Some(0.2),
+                reverse_speed: None,
+                prefer: crate::seq::Gear::Forward,
             };
         }
         scene.upsert_device(device);
@@ -22403,6 +23537,8 @@ mod wheel_leg_tests {
             *drive = crate::seq::Drive::Differential {
                 allow_reverse: false,
                 max_grade: Some(0.2),
+                reverse_speed: None,
+                prefer: crate::seq::Gear::Forward,
             };
         }
         scene.upsert_device(device);

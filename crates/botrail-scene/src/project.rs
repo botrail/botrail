@@ -2374,6 +2374,9 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 start,
                 allow_reverse,
                 max_grade,
+                reverse_speed,
+                prefer,
+                turn_radius,
                 holonomic,
                 aerial,
                 tray,
@@ -2415,8 +2418,33 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 if let Some(g) = max_grade {
                     extras.push_str(&format!(", max_grade={g}"));
                 }
+                if let Some(v) = reverse_speed {
+                    extras.push_str(&format!(", reverse_speed={v}"));
+                }
+                if matches!(prefer, Some(crate::wire::GearMsg::Reverse)) {
+                    extras.push_str(", prefer=\"reverse\"");
+                }
+                let arrivals: Vec<String> = path
+                    .stations
+                    .iter()
+                    .filter_map(|s| {
+                        s.arrive.map(|g| {
+                            let gear = match g {
+                                crate::wire::GearMsg::Forward => "forward",
+                                crate::wire::GearMsg::Reverse => "reverse",
+                            };
+                            format!("{:?}: {gear:?}", s.name)
+                        })
+                    })
+                    .collect();
+                if !arrivals.is_empty() {
+                    extras.push_str(&format!(", arrive={{{}}}", arrivals.join(", ")));
+                }
                 if *holonomic {
                     extras.push_str(", drive=\"holonomic\"");
+                }
+                if let Some(r) = turn_radius {
+                    extras.push_str(&format!(", drive=\"steered\", turn_radius={r}"));
                 }
                 if let Some(a) = aerial {
                     extras.push_str(&format!(
@@ -3631,6 +3659,96 @@ mod tests {
             .min_obstacle_distance()
             .expect("the rebuilt collider lost its obstacles");
         assert!((clearance - scene.min_obstacle_distance().unwrap()).abs() < 1e-12);
+    }
+
+    /// A vehicle's gears — the reverse speed, the corner preference and a
+    /// station's arrival gear — survive the project file and come back
+    /// out of the generated Python as the kwargs that set them.
+    #[test]
+    fn vehicle_gears_roundtrip_and_generate_python() {
+        use crate::seq::{Device, DeviceKind, Drive, Gear, VehiclePath};
+        let mut scene = sample_scene();
+        scene.upsert_device(Device {
+            name: "agf".into(),
+            kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
+                path: VehiclePath {
+                    waypoints: vec![
+                        nalgebra::Point3::new(0.0, 0.0, 0.0),
+                        nalgebra::Point3::new(2.0, 0.0, 0.0),
+                        nalgebra::Point3::new(2.0, 1.0, 0.0),
+                    ],
+                    stations: vec![("charger".into(), 0), ("bay".into(), 2)],
+                    ring: false,
+                    arrivals: vec![
+                        ("bay".into(), Gear::Forward),
+                        ("charger".into(), Gear::Reverse),
+                    ],
+                },
+                body: Vec::new(),
+                speed: 0.3,
+                turn_speed: 0.8,
+                start: "charger".into(),
+                drive: Drive::Differential {
+                    allow_reverse: true,
+                    max_grade: None,
+                    reverse_speed: Some(2.2),
+                    prefer: Gear::Reverse,
+                },
+                tray: None,
+            },
+        });
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        let device = reloaded.devices().iter().find(|d| d.name == "agf").unwrap();
+        let DeviceKind::Vehicle { path, drive, .. } = &device.kind else {
+            panic!("not a vehicle");
+        };
+        assert_eq!(path.arrival("bay"), Some(Gear::Forward));
+        assert_eq!(path.arrival("charger"), Some(Gear::Reverse));
+        assert!(matches!(
+            drive,
+            Drive::Differential { allow_reverse: true, reverse_speed: Some(v), prefer: Gear::Reverse, .. }
+                if (*v - 2.2).abs() < 1e-12
+        ));
+        let py = generate_python(&reloaded.to_project());
+        assert!(
+            py.contains("allow_reverse=True, reverse_speed=2.2, prefer=\"reverse\""),
+            "{py}"
+        );
+        assert!(
+            py.contains("arrive={\"charger\": \"reverse\", \"bay\": \"forward\"}"),
+            "{py}"
+        );
+        // The historic default writes none of it.
+        let mut scene = sample_scene();
+        scene.upsert_device(Device {
+            name: "agv".into(),
+            kind: DeviceKind::Vehicle {
+                wheels: Vec::new(),
+                path: VehiclePath {
+                    waypoints: vec![
+                        nalgebra::Point3::new(0.0, 0.0, 0.0),
+                        nalgebra::Point3::new(1.0, 0.0, 0.0),
+                    ],
+                    stations: vec![("a".into(), 0)],
+                    ring: false,
+                    arrivals: Vec::new(),
+                },
+                body: Vec::new(),
+                speed: 0.5,
+                turn_speed: 1.0,
+                start: "a".into(),
+                drive: Drive::default(),
+                tray: None,
+            },
+        });
+        let py = generate_python(&scene.to_project());
+        assert!(
+            !py.contains("reverse_speed") && !py.contains("prefer") && !py.contains("arrive"),
+            "{py}"
+        );
+        assert!(!scene.to_project().to_json().contains("\"prefer\""));
     }
 
     #[test]

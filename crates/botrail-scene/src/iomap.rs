@@ -4144,6 +4144,7 @@ pub(crate) mod tests {
                     ],
                     stations: vec![("a".into(), 0), ("b".into(), 1)],
                     ring: false,
+                    arrivals: Vec::new(),
                 },
                 body: vec![],
                 speed: 1.0,

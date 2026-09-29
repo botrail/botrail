@@ -787,6 +787,10 @@ class Scene:
         tray_position: Optional[tuple[float, float, float]] = None,
         tray_size: Optional[tuple[float, float, float]] = None,
         tray_quaternion: Optional[tuple[float, float, float, float]] = None,
+        reverse_speed: Optional[float] = None,
+        prefer: str = "forward",
+        arrive: Optional[dict[str, str]] = None,
+        turn_radius: Optional[float] = None,
     ) -> None: ...
     def add_lift(
         self,

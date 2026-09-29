@@ -499,12 +499,14 @@ def search(
 
 def search_for(row, *, category: Optional[str] = None, index: Union[Index, str, Path, None] = None, **extra: Any) -> list[Product]:
     """Candidates for one requirement row (`scene.requirements()["tool"]`):
-    its category and every `>=` requirement become the filters; `extra`
-    adds or overrides filters (`level="V3"`, `ip_rating="IP54"`), and
-    `key=None` drops one. Candidates that do not state an asked spec come
-    back too, marked (`Product.unstated`) and last — `strict=True` leaves
-    them out (see :meth:`Index.search`)."""
+    its category, every `>=` requirement (a minimum) and every `<=` one
+    (a `key__max` maximum) become the filters; `extra` adds or overrides
+    filters (`level="V3"`, `ip_rating="IP54"`), and `key=None` drops one.
+    Candidates that do not state an asked spec come back too, marked
+    (`Product.unstated`) and last — `strict=True` leaves them out (see
+    :meth:`Index.search`)."""
     filters: dict[str, Any] = dict(row.minimum)
+    filters.update({f"{r.key}__max": r.value for r in row.requirements if r.op == "<="})
     options: dict[str, Any] = {}
     for key in ("kind", "manufacturer", "level", "text", "limit", "strict"):
         if key in extra:

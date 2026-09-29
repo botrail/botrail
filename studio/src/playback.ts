@@ -7,6 +7,7 @@
 
 import type {
   ObjectTrackMsg,
+  ClothTrackMsg,
   PoseMsg,
   TimelineMsg,
   TrajectoryMsg,
@@ -24,6 +25,8 @@ export interface PlaybackTracks {
   objects: { times: number[]; tracks: ObjectTrackMsg[] } | null;
   /** Vehicle reference-frame tracks — what places mounted sensors. */
   vehicles: { times: number[]; tracks: VehicleTrackMsg[] } | null;
+  /** Simulated cloth vertex tracks, sampled on `times`. */
+  cloths: { times: number[]; tracks: ClothTrackMsg[] } | null;
 }
 
 /** Display overrides at one playback instant. */
@@ -40,6 +43,8 @@ export interface PlaybackSample {
   bases: Record<string, PoseMsg> | null;
   /** Vehicle name -> reference-frame pose (places mounted sensors). */
   vehicles: Record<string, PoseMsg> | null;
+  /** Cloth name -> interpolated vertex positions (x, y, z per vertex). */
+  cloths: Record<string, Float32Array> | null;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -55,6 +60,7 @@ export function tracksFromTrajectory(
         ? { times: traj.times, tracks: traj.object_tracks }
         : null,
     vehicles: null,
+    cloths: null,
   };
 }
 
@@ -69,6 +75,7 @@ function timelineTimes(timeline: TimelineMsg): number[] {
     0,
     ...timeline.objects.map((o) => o.poses.length),
     ...(timeline.vehicles ?? []).map((v) => v.poses.length),
+    ...(timeline.cloths ?? []).map((c) => c.points.length),
   );
   if (n <= 1) return [0];
   return Array.from({ length: n }, (_, k) => (k / (n - 1)) * timeline.duration);
@@ -96,6 +103,13 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
         ? {
             times,
             tracks: timeline.vehicles,
+          }
+        : null,
+    cloths:
+      timeline.cloths && timeline.cloths.length > 0
+        ? {
+            times,
+            tracks: timeline.cloths,
           }
         : null,
   };
@@ -148,6 +162,7 @@ export function appendTracks(
     chunk.robots[0]?.trajectory.times.length ?? 0,
     ...chunk.objects.map((o) => o.poses.length),
     ...(chunk.vehicles ?? []).map((v) => v.poses.length),
+    ...(chunk.cloths ?? []).map((c) => c.points.length),
   );
   const times = chunk.robots[0]?.trajectory.times.length
     ? chunk.robots[0].trajectory.times
@@ -219,11 +234,35 @@ export function appendTracks(
 
   const objects = extend(prev?.objects?.tracks, chunk.objects, true);
   const vehicles = extend(prev?.vehicles?.tracks, chunk.vehicles ?? [], false);
+  // Cloth samples grow like poses: a one-sample track repeats, a track the
+  // window brings for the first time is padded back with its first sample.
+  const earlierCloths = new Map((prev?.cloths?.tracks ?? []).map((c) => [c.name, c]));
+  const cloths = (chunk.cloths ?? []).map((track) => {
+    const before = earlierCloths.get(track.name);
+    const now =
+      track.points.length === n
+        ? track.points
+        : Array.from({ length: n }, (_, k) => track.points[Math.min(k, track.points.length - 1)]);
+    const points =
+      before && before.points.length === m
+        ? grow(before.points, now)
+        : [...(before?.points ?? Array.from({ length: m }, () => now[0])), ...now];
+    const trackHeld = track.held ?? [];
+    const heldNow =
+      trackHeld.length === n ? trackHeld : Array.from({ length: n }, () => [] as number[]);
+    const beforeHeld = before?.held;
+    const held =
+      beforeHeld && beforeHeld.length === m
+        ? grow(beforeHeld, heldNow)
+        : [...(beforeHeld ?? Array.from({ length: m }, () => [] as number[])), ...heldNow];
+    return { ...track, points, held };
+  });
   const tracks: PlaybackTracks = {
     duration: chunk.duration,
     robots,
     objects: objects.length > 0 ? { times: allTimes, tracks: objects } : null,
     vehicles: vehicles.length > 0 ? { times: allTimes, tracks: vehicles } : null,
+    cloths: cloths.length > 0 ? { times: allTimes, tracks: cloths } : null,
   };
   streamTracks.add(tracks);
   return tracks;
@@ -277,6 +316,13 @@ export function forgetLive(tracks: PlaybackTracks, liveFrom: number, keepFrom: n
     add(tracks.vehicles.times);
     for (const v of tracks.vehicles.tracks) add(v.poses);
   }
+  if (tracks.cloths) {
+    add(tracks.cloths.times);
+    for (const c of tracks.cloths.tracks) {
+      add(c.points);
+      if (c.held) add(c.held);
+    }
+  }
   for (const a of arrays) a.splice(first, count);
   return true;
 }
@@ -322,7 +368,36 @@ export function samplePlayback(
     vehicles,
     objects: sampleObjectPoses(tracks.objects, t),
     stowed: sampleStowedObjects(tracks.objects, t),
+    cloths: sampleCloths(tracks.cloths, t),
   };
+}
+
+/** Every cloth's vertices at time `t`, linearly blended between the two
+ * samples around it (a one-sample track is constant). */
+function sampleCloths(
+  cloths: PlaybackTracks["cloths"],
+  t: number,
+): Record<string, Float32Array> | null {
+  if (!cloths) return null;
+  const out: Record<string, Float32Array> = {};
+  for (const track of cloths.tracks) {
+    const frames = track.points;
+    if (frames.length === 0) continue;
+    const [i, j, u] =
+      frames.length === 1 ? [0, 0, 0] : bracket(cloths.times, t);
+    const a = frames[Math.min(i, frames.length - 1)];
+    const b = frames[Math.min(j, frames.length - 1)] ?? a;
+    const positions = new Float32Array(a.length * 3);
+    for (let k = 0; k < a.length; k++) {
+      const p = a[k];
+      const q = b[k] ?? p;
+      positions[3 * k] = lerp(p[0], q[0], u);
+      positions[3 * k + 1] = lerp(p[1], q[1], u);
+      positions[3 * k + 2] = lerp(p[2], q[2], u);
+    }
+    out[track.name] = positions;
+  }
+  return out;
 }
 
 /** One interpolated pose from a pose track sampled on `times`. */

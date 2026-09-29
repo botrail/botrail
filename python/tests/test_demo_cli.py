@@ -57,6 +57,7 @@ CELL_DEMOS = [
     "vehicles/amr_demo.py",
     "vehicles/lift_demo.py",
     "vehicles/semi_humanoid_demo.py",
+    "vehicles/forklift_demo.py",
     "vehicles/warehouse_demo.py",
     "welding/nimak_spot_welding_demo.py",
     "welding/weld_line_demo.py",

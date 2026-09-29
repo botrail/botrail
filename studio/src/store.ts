@@ -437,6 +437,7 @@ function startPlayback(tracks: PlaybackTracks) {
     overrideBases: sample.bases,
     overrideVehiclePoses: sample.vehicles,
     overrideObstaclePoses: sample.objects,
+    clothSamples: sample.cloths,
     stowedObstacles: sample.stowed,
   };
 }
@@ -509,6 +510,8 @@ export interface StudioState {
   overrideVehiclePoses: Record<string, PoseMsg> | null;
   /** Playback poses of attached objects, keyed by obstacle name. */
   overrideObstaclePoses: Record<string, PoseMsg> | null;
+  /** Cloth name -> interpolated vertex positions during playback. */
+  clothSamples: Record<string, Float32Array> | null;
   /** Objects stowed at the current playback instant — waiting in a
    * magazine or off the line — and therefore not drawn. */
   stowedObstacles: Set<string>;
@@ -820,6 +823,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   overrideBases: null,
   overrideVehiclePoses: null,
   overrideObstaclePoses: null,
+      clothSamples: null,
   stowedObstacles: new Set<string>(),
   motions: [],
   sequences: [],
@@ -916,6 +920,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           overrideBases: null,
           overrideVehiclePoses: null,
           overrideObstaclePoses: null,
+      clothSamples: null,
           stowedObstacles: new Set<string>(),
           motions: [],
           sequences: [],
@@ -1670,6 +1675,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideBases: null,
       overrideVehiclePoses: null,
       overrideObstaclePoses: null,
+      clothSamples: null,
       stowedObstacles: new Set<string>(),
     }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
@@ -1682,6 +1688,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideBases: sample.bases,
       overrideVehiclePoses: sample.vehicles,
       overrideObstaclePoses: sample.objects,
+      clothSamples: sample.cloths,
       stowedObstacles: sample.stowed,
     }),
   setPlaying: (playing) => set({ playing }),
@@ -1696,6 +1703,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideBases: null,
       overrideVehiclePoses: null,
       overrideObstaclePoses: null,
+      clothSamples: null,
     }),
   setDroppedStage: (stage) => set({ droppedStage: stage }),
   toggleObstacleHidden: (name) =>
