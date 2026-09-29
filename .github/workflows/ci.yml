@@ -31,6 +31,17 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: studio/pnpm-lock.yaml
+      # The wheel check below wants the studio bundle a release ships.
+      - name: Bundle studio assets into the python package
+        run: ./scripts/build_studio.sh
       - name: Build extension and run tests
         run: |
           uv venv .venv
@@ -41,6 +52,13 @@ jobs:
           uv pip install --python .venv/bin/python maturin pytest pyyaml usd-core jsonschema
           VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv
           .venv/bin/python -m pytest python/tests -q
+      # maturin applies .gitignore to the package, so what a wheel ships only
+      # shows in a wheel: build one (the develop build above is reused) and
+      # import from it.
+      - name: Build a wheel and check what it ships
+        run: |
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin build --out dist
+          .venv/bin/python scripts/check_wheel.py dist/*.whl
       # The API reference is generated from the extension built above; --strict
       # fails on broken links and unresolved API cross-references.
       - name: Build the docs site

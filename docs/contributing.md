@@ -40,7 +40,14 @@ python examples/basics/demo.py --studio
 ```bash
 cargo test                          # Rust workspace
 python -m pytest python/tests       # Python bindings
+maturin build --out dist && python scripts/check_wheel.py dist/*.whl   # what a wheel ships
 ```
+
+The wheel check exists because maturin applies `.gitignore` to the package:
+the built studio and any ignored `.usda` silently stay out of a wheel while
+`maturin develop` (editable) keeps working. `pyproject.toml` includes the
+studio bundle explicitly and `.gitignore` exempts the shape library; CI and
+the release workflow import from the wheel they built to prove it.
 
 Two extra harnesses skip themselves unless you opt in:
 

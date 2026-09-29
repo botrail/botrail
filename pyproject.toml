@@ -63,3 +63,8 @@ docs = [
 manifest-path = "crates/botrail-py/Cargo.toml"
 module-name = "botrail._core"
 python-source = "python"
+# maturin walks the package with .gitignore applied, which drops the built
+# studio (the scripts/build_studio.sh output, ignored there): include it in
+# the wheel explicitly. The path is relative to `python-source`, not to this
+# file. scripts/check_wheel.py verifies every release and CI wheel.
+include = [{ path = "botrail/_studio/**/*", format = "wheel" }]

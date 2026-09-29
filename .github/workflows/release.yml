@@ -32,6 +32,14 @@ jobs:
         with:
           command: build
           args: --release --out dist
+      # maturin applies .gitignore to the package (the built studio is ignored,
+      # *.usda too): import from the wheel before it leaves the runner.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the wheel ships the studio and the shape library
+        shell: bash
+        run: python scripts/check_wheel.py dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
