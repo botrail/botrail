@@ -3,7 +3,7 @@
 *Walks through [`examples/basics/demo.py`](https://github.com/botrail/botrail/blob/main/examples/basics/demo.py)
 — a Franka Panda in a small USD factory cell, live in the studio.*
 
-![The demo cell in the studio](../assets/botrail_demo.png)
+![The demo cell in the studio](../assets/studio/overview.png)
 
 ```bash
 python examples/basics/demo.py --studio

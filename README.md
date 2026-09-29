@@ -6,7 +6,7 @@
 Documentation: https://botrail.github.io/botrail/ ·
 Live Demo: https://botrail.github.io/botrail/demo/
 
-![botrail-demo](assets/botrail_demo.png)
+![Two FANUC palletizers stacking cases off roller conveyors onto pallets, beside a stretch wrapper and a pallet dispenser](assets/botrail_demo.png)
 
 <table>
   <tr>
@@ -15,8 +15,8 @@ Live Demo: https://botrail.github.io/botrail/demo/
       <sub><b>Robot machining</b> — spindle toolpaths with stepwise stock removal</sub>
     </td>
     <td align="center" width="50%">
-      <img src="assets/botrail_demo_amr.png" alt="A UR arm riding an AMR between warehouse racks, pallet and outfeed conveyor"/><br/>
-      <sub><b>Mobile manipulation</b> — an arm riding a catalog AMR between stations</sub>
+      <img src="assets/botrail_demo_assembly.png" alt="Ceiling-mounted FANUC arms and SCARAs working over red carriers on a linear-motor shuttle loop"/><br/>
+      <sub><b>Assembly line</b> — a linear-motor shuttle loop serving ceiling-mounted arms and SCARAs</sub>
     </td>
   </tr>
   <tr>
@@ -25,8 +25,8 @@ Live Demo: https://botrail.github.io/botrail/demo/
       <sub><b>Legged mobility</b> — a quadruped climbs a catalog stair flight, payload on board</sub>
     </td>
     <td align="center" width="50%">
-      <img src="assets/botrail_demo_humanoid.png" alt="A humanoid carrying a tote between tables along a planned walking path"/><br/>
-      <sub><b>Humanoid pick-and-carry</b> — walking is just another sequence step</sub>
+      <img src="assets/botrail_demo_humanoid.png" alt="A G1 humanoid carrying a part along a planned walking path in a fenced cell, its head-camera view inset"/><br/>
+      <sub><b>Humanoid finishing line</b> — walking is just another sequence step; inset, the robot's head camera</sub>
     </td>
   </tr>
   <tr>

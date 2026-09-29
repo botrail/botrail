@@ -15,7 +15,7 @@ dependencies, no GPU.
 [Get started](getting-started/installation.md){ .md-button .md-button--primary }
 [Try the live studio](https://botrail.github.io/botrail/demo/){ .md-button }
 
-![The botrail studio](assets/botrail_demo.png)
+![A palletizing line in the botrail studio](assets/botrail_demo.png)
 
 ![A four-station body-in-white line — eight arms, three bodies in flight,
 one takt](assets/weld_line_hero.gif)
