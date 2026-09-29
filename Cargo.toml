@@ -22,7 +22,7 @@ members = [
 exclude = ["crates/botrail-cloth"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 license = "PolyForm-Small-Business-1.0.0 OR PolyForm-Noncommercial-1.0.0"
 readme = "README.md"
