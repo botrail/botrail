@@ -7,6 +7,7 @@
 
 pub mod apt;
 pub mod carve;
+pub mod cloth;
 pub mod coat;
 pub mod connections;
 pub mod dynamics;
@@ -2813,6 +2814,7 @@ impl Scene {
             physics: None,
             physics_scope: None,
             contacts: Vec::new(),
+            cloths: Vec::new(),
             grasps: Vec::new(),
             robots,
             objects: Vec::new(),

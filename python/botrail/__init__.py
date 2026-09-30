@@ -1,11 +1,12 @@
 """botrail: ROS-free robot motion authoring with a web-based 3D studio."""
 
-from . import assembly, catalog, gait, io, mounting, paint, parts, select, seq, study, tending, toolpath, tools, trace, wheels
+from . import assembly, catalog, cloth, gait, io, mounting, paint, parts, select, seq, study, tending, toolpath, tools, trace, wheels
 from ._core import (
     Bom,
     CellReport,
     InterlockTable,
     Clearance,
+    ClothTrack,
     FeedReport,
     FilmCoat,
     Group,
@@ -45,6 +46,7 @@ __all__ = [
     "CellReport",
     "InterlockTable",
     "Clearance",
+    "ClothTrack",
     "FeedReport",
     "FilmCoat",
     "Gait",
@@ -71,6 +73,7 @@ __all__ = [
     "catalog_package",
     "project_schema",
     "catalog",
+    "cloth",
     "gait",
     "io",
     "paint",

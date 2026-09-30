@@ -25,8 +25,8 @@ export interface PlaybackTracks {
   objects: { times: number[]; tracks: ObjectTrackMsg[] } | null;
   /** Vehicle reference-frame tracks — what places mounted sensors. */
   vehicles: { times: number[]; tracks: VehicleTrackMsg[] } | null;
-  /** Simulated cloth vertex tracks, sampled on `times`. */
-  cloths: { times: number[]; tracks: ClothTrackMsg[] } | null;
+  /** Simulated cloth tracks, each on its own sample times. */
+  cloths: ClothTrackMsg[] | null;
 }
 
 /** Display overrides at one playback instant. */
@@ -45,6 +45,8 @@ export interface PlaybackSample {
   vehicles: Record<string, PoseMsg> | null;
   /** Cloth name -> interpolated vertex positions (x, y, z per vertex). */
   cloths: Record<string, Float32Array> | null;
+  /** Cloth name -> the vertices a gripper holds. */
+  clothHeld: Record<string, number[]> | null;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -75,7 +77,6 @@ function timelineTimes(timeline: TimelineMsg): number[] {
     0,
     ...timeline.objects.map((o) => o.poses.length),
     ...(timeline.vehicles ?? []).map((v) => v.poses.length),
-    ...(timeline.cloths ?? []).map((c) => c.points.length),
   );
   if (n <= 1) return [0];
   return Array.from({ length: n }, (_, k) => (k / (n - 1)) * timeline.duration);
@@ -105,14 +106,30 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
             tracks: timeline.vehicles,
           }
         : null,
-    cloths:
-      timeline.cloths && timeline.cloths.length > 0
-        ? {
-            times,
-            tracks: timeline.cloths,
-          }
-        : null,
+    cloths: clothTracks(timeline.cloths, timeline.duration),
   };
+}
+
+/** Cloth tracks with a usable clock: one that arrives without sample
+ * times gets an even spread over the cycle. */
+function clothTracks(
+  cloths: ClothTrackMsg[] | undefined,
+  duration: number,
+): ClothTrackMsg[] | null {
+  if (!cloths || cloths.length === 0) return null;
+  return cloths.map((c) => {
+    if (c.times && c.times.length === c.points.length) return c;
+    const last = Math.max(c.points.length - 1, 1);
+    return { ...c, times: c.points.map((_, k) => (duration * k) / last) };
+  });
+}
+
+/** The vertices a gripper holds at `t`: those of the sample at or before
+ * it. */
+export function clothHeldAt(track: ClothTrackMsg, t: number): number[] {
+  const held = track.held;
+  if (!held || held.length === 0 || held.length !== track.times.length) return [];
+  return held[bracket(track.times, t)[0]] ?? [];
 }
 
 /** The 30 Hz lattice a streamed window was sampled on: the `n` points
@@ -162,7 +179,6 @@ export function appendTracks(
     chunk.robots[0]?.trajectory.times.length ?? 0,
     ...chunk.objects.map((o) => o.poses.length),
     ...(chunk.vehicles ?? []).map((v) => v.poses.length),
-    ...(chunk.cloths ?? []).map((c) => c.points.length),
   );
   const times = chunk.robots[0]?.trajectory.times.length
     ? chunk.robots[0].trajectory.times
@@ -234,35 +250,32 @@ export function appendTracks(
 
   const objects = extend(prev?.objects?.tracks, chunk.objects, true);
   const vehicles = extend(prev?.vehicles?.tracks, chunk.vehicles ?? [], false);
-  // Cloth samples grow like poses: a one-sample track repeats, a track the
-  // window brings for the first time is padded back with its first sample.
-  const earlierCloths = new Map((prev?.cloths?.tracks ?? []).map((c) => [c.name, c]));
-  const cloths = (chunk.cloths ?? []).map((track) => {
-    const before = earlierCloths.get(track.name);
-    const now =
-      track.points.length === n
-        ? track.points
-        : Array.from({ length: n }, (_, k) => track.points[Math.min(k, track.points.length - 1)]);
-    const points =
-      before && before.points.length === m
-        ? grow(before.points, now)
-        : [...(before?.points ?? Array.from({ length: m }, () => now[0])), ...now];
-    const trackHeld = track.held ?? [];
-    const heldNow =
-      trackHeld.length === n ? trackHeld : Array.from({ length: n }, () => [] as number[]);
-    const beforeHeld = before?.held;
-    const held =
-      beforeHeld && beforeHeld.length === m
-        ? grow(beforeHeld, heldNow)
-        : [...(beforeHeld ?? Array.from({ length: m }, () => [] as number[])), ...heldNow];
-    return { ...track, points, held };
+  // Cloth tracks keep their own clocks: a window's samples follow the
+  // ones already there, and a track the window does not mention stays.
+  const windowCloths = new Map(
+    (clothTracks(chunk.cloths, chunk.duration) ?? []).map((c) => [c.name, c]),
+  );
+  const heldPer = (c: ClothTrackMsg): number[][] =>
+    c.held && c.held.length === c.points.length ? c.held : c.points.map(() => []);
+  const cloths = (prev?.cloths ?? []).map((before) => {
+    const now = windowCloths.get(before.name);
+    if (!now) return before;
+    windowCloths.delete(before.name);
+    const held = before.held?.length || now.held?.length ? [...heldPer(before), ...heldPer(now)] : [];
+    return {
+      ...now,
+      times: [...before.times, ...now.times],
+      points: [...before.points, ...now.points],
+      held,
+    };
   });
+  cloths.push(...windowCloths.values());
   const tracks: PlaybackTracks = {
     duration: chunk.duration,
     robots,
     objects: objects.length > 0 ? { times: allTimes, tracks: objects } : null,
     vehicles: vehicles.length > 0 ? { times: allTimes, tracks: vehicles } : null,
-    cloths: cloths.length > 0 ? { times: allTimes, tracks: cloths } : null,
+    cloths: cloths.length > 0 ? cloths : null,
   };
   streamTracks.add(tracks);
   return tracks;
@@ -317,10 +330,17 @@ export function forgetLive(tracks: PlaybackTracks, liveFrom: number, keepFrom: n
     for (const v of tracks.vehicles.tracks) add(v.poses);
   }
   if (tracks.cloths) {
-    add(tracks.cloths.times);
-    for (const c of tracks.cloths.tracks) {
-      add(c.points);
-      if (c.held) add(c.held);
+    // Cloth has its own clock: the same stretch of time goes from it,
+    // its last sample never.
+    const t0 = times[first];
+    const t1 = times[first + count - 1];
+    for (const c of tracks.cloths) {
+      const keep = c.times.map((t, k) => k === c.times.length - 1 || t < t0 - 1e-9 || t > t1 + 1e-9);
+      if (keep.every(Boolean)) continue;
+      const pick = <T>(a: T[]): T[] => a.filter((_, k) => keep[k]);
+      if (c.held && c.held.length === c.times.length) c.held = pick(c.held);
+      c.points = pick(c.points);
+      c.times = pick(c.times);
     }
   }
   for (const a of arrays) a.splice(first, count);
@@ -369,22 +389,25 @@ export function samplePlayback(
     objects: sampleObjectPoses(tracks.objects, t),
     stowed: sampleStowedObjects(tracks.objects, t),
     cloths: sampleCloths(tracks.cloths, t),
+    clothHeld: tracks.cloths
+      ? Object.fromEntries(tracks.cloths.map((c) => [c.name, clothHeldAt(c, t)]))
+      : null,
   };
 }
 
 /** Every cloth's vertices at time `t`, linearly blended between the two
- * samples around it (a one-sample track is constant). */
+ * samples of its own clock around it (a one-sample track is constant). */
 function sampleCloths(
   cloths: PlaybackTracks["cloths"],
   t: number,
 ): Record<string, Float32Array> | null {
   if (!cloths) return null;
   const out: Record<string, Float32Array> = {};
-  for (const track of cloths.tracks) {
+  for (const track of cloths) {
     const frames = track.points;
     if (frames.length === 0) continue;
     const [i, j, u] =
-      frames.length === 1 ? [0, 0, 0] : bracket(cloths.times, t);
+      frames.length === 1 ? [0, 0, 0] : bracket(track.times, t);
     const a = frames[Math.min(i, frames.length - 1)];
     const b = frames[Math.min(j, frames.length - 1)] ?? a;
     const positions = new Float32Array(a.length * 3);

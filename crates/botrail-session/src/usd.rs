@@ -11,8 +11,9 @@ use botrail_scene::seq::{CameraMount, DeviceKind};
 use botrail_scene::Scene;
 use botrail_usd::export::{
     export_animation, export_simulation, AnimationInput, ArticulationSpec, BeltSpec, BodyRole,
-    CameraSpec, CarrierSpec, CurveSpec, ExportOptions, ExportedAnimation, ObjectBody, ObjectSpec,
-    PhysicsSpec, PoseTrack, Ride, RobotAnimation, ServoSpec, SimulationSpec, UnitSpec, WeldSpec,
+    CameraSpec, CarrierSpec, ClothSpec, CurveSpec, ExportOptions, ExportedAnimation, ObjectBody,
+    ObjectSpec, PhysicsSpec, PoseTrack, Ride, RobotAnimation, ServoSpec, SimulationSpec, UnitSpec,
+    WeldSpec,
 };
 use nalgebra::Isometry3;
 
@@ -373,16 +374,49 @@ pub fn bake_timeline(
         })
         .collect();
     let curves = toolpath_curves(scene);
+    // A cloth keeps its own clock: the samples inside the window, and the
+    // window's two ends blended from their neighbours.
+    let cloths: Vec<ClothSpec> = timeline
+        .cloths
+        .iter()
+        .filter(|track| !track.times.is_empty())
+        .map(|track| {
+            let mut samples = vec![(0.0, track.positions_at(from))];
+            samples.extend(
+                track
+                    .times
+                    .iter()
+                    .zip(&track.points)
+                    .filter(|(t, _)| **t > from + 1e-9 && **t < to - 1e-9)
+                    .map(|(t, points)| (*t - from, points.clone())),
+            );
+            samples.push((duration, track.positions_at(to)));
+            if samples.iter().all(|(_, points)| *points == samples[0].1) {
+                samples.truncate(1);
+            }
+            ClothSpec {
+                name: track.name.clone(),
+                triangles: track.triangles.clone(),
+                samples,
+                color: CLOTH_COLOR,
+            }
+        })
+        .collect();
     let input = AnimationInput {
         robots: &robots,
         times: &times,
         objects: &objects,
         curves: &curves,
         cameras: &cameras,
+        cloths: &cloths,
     };
     let options = options.clone();
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
 }
+
+/// The cloth's colour in an export (linear RGB): the unbleached cotton the
+/// studio draws it in.
+const CLOTH_COLOR: [f32; 3] = [0.58, 0.45, 0.32];
 
 /// Bakes the scene as it stands — no timeline — into a static USD layer:
 /// every robot at its current joint positions, every visible obstacle at
@@ -862,6 +896,7 @@ fn bake_scene_stage(
         objects: &objects,
         curves: &curves,
         cameras: &cameras,
+        cloths: &[],
     };
     let (Some(sim), Some(physics)) = (&simulation, physics) else {
         let options = ExportOptions {

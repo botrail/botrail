@@ -805,6 +805,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let anim = dir.join("anim.usda");
         let warnings = write_animation(&anim, &input, &ExportOptions::default()).unwrap();
@@ -992,6 +993,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let anim = dir.join("cell.usda");
         write_animation(&anim, &input, &ExportOptions::default()).unwrap();

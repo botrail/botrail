@@ -71,6 +71,12 @@ pub struct SceneHub {
     hand: Mutex<Hand>,
     /// This hub's own `Arc`, for the stream thread to hold.
     self_weak: Weak<SceneHub>,
+    /// The cloths every bake of this cell is followed by (`bt.cloth.add`):
+    /// simulated against the finished cycle and laid on its timeline.
+    cloths: Mutex<Vec<crate::cloth::PassDecl>>,
+    /// Why the cloth passes of the last bake could not run, if any could
+    /// not — taken by the Python call that asked for the bake.
+    cloth_errors: Mutex<Vec<String>>,
 }
 
 /// A streaming bake on its thread and the flag that ends it.
@@ -340,6 +346,41 @@ impl SessionHost for SceneHub {
         self.join_bake_stream();
     }
 
+    /// The registered cloths, simulated against the cycle just baked. A
+    /// pass that cannot run (a signal or a frame the cell no longer has)
+    /// leaves the bake as it is and is reported; one the solver stops part
+    /// way keeps what it reached (`ClothTrack::failure`).
+    fn after_bake(&self, scene: &Scene, timeline: &mut botrail_scene::rollout::SequenceTimeline) {
+        let cloths = self.cloths.lock().expect("cloths mutex poisoned").clone();
+        let mut errors = Vec::new();
+        for decl in &cloths {
+            let track = decl.resolve(scene).and_then(|pass| {
+                botrail_cloth::pass::animate(scene, timeline, &pass).map_err(|e| e.to_string())
+            });
+            match track {
+                Ok(track) => {
+                    if let Some((t, reason)) = &track.failure {
+                        self.log(&format!(
+                            "cloth `{}` stopped at {t:.2} s: {reason}",
+                            track.name
+                        ));
+                    }
+                    timeline.cloths.retain(|c| c.name != track.name);
+                    timeline.cloths.push(track);
+                }
+                Err(e) => {
+                    let message = format!("cloth `{}`: {e}", decl.name());
+                    self.log(&message);
+                    errors.push(message);
+                }
+            }
+        }
+        *self
+            .cloth_errors
+            .lock()
+            .expect("cloth errors mutex poisoned") = errors;
+    }
+
     fn store_baked(&self, scene: &Scene, timeline: &botrail_scene::rollout::SequenceTimeline) {
         *self.baked.lock().expect("baked mutex poisoned") = Some((scene.clone(), timeline.clone()));
     }
@@ -385,7 +426,49 @@ impl SceneHub {
             bake_stream: Mutex::new(None),
             hand: Mutex::new(Hand::default()),
             self_weak: weak.clone(),
+            cloths: Mutex::new(Vec::new()),
+            cloth_errors: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Registers a cloth pass (replacing one of the same name): every bake
+    /// from here on carries its track.
+    pub fn add_cloth(&self, decl: crate::cloth::PassDecl) {
+        let mut cloths = self.cloths.lock().expect("cloths mutex poisoned");
+        cloths.retain(|c| c.name() != decl.name());
+        cloths.push(decl);
+    }
+
+    /// Removes a registered cloth pass; false if there was none.
+    pub fn remove_cloth(&self, name: &str) -> bool {
+        let mut cloths = self.cloths.lock().expect("cloths mutex poisoned");
+        let before = cloths.len();
+        cloths.retain(|c| c.name() != name);
+        cloths.len() != before
+    }
+
+    pub fn cloth_names(&self) -> Vec<String> {
+        self.cloths
+            .lock()
+            .expect("cloths mutex poisoned")
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect()
+    }
+
+    /// What kept the last bake's cloth passes from running, cleared.
+    fn take_cloth_errors(&self) -> Result<(), String> {
+        let errors = std::mem::take(
+            &mut *self
+                .cloth_errors
+                .lock()
+                .expect("cloth errors mutex poisoned"),
+        );
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     /// Ends a running streaming bake and waits for its last chunk.
@@ -1497,6 +1580,7 @@ impl SceneHub {
         let timeline = botrail_session::simulate_sequences_and_emit_driven(
             self, names, scenario, options, backend, policies,
         )?;
+        self.take_cloth_errors()?;
         Ok((timeline, snapshot))
     }
 
@@ -1623,6 +1707,7 @@ impl SceneHub {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let options = botrail_usd::export::ExportOptions {
             fps,

@@ -129,6 +129,13 @@ pub trait SessionHost {
     /// new result.
     fn before_bake(&self) {}
 
+    /// Called on every successful bake before it is retained and
+    /// broadcast: the host's chance to add what it simulates on top of a
+    /// finished cycle — cloth (`botrail-cloth`), which this crate does not
+    /// link because the browser build cannot. `scene` is the snapshot the
+    /// bake ran against. The default adds nothing.
+    fn after_bake(&self, _scene: &Scene, _timeline: &mut SequenceTimeline) {}
+
     /// Retains the last successful rollout — the pre-rollout scene
     /// snapshot plus its timeline — so a later `export_usd` request can
     /// bake it without re-simulating. Hosts that never export keep the
@@ -1758,7 +1765,21 @@ pub fn run_bake_stream(
     }
     let mut timeline = live.finish();
     timeline.scenario = scenario;
+    host.after_bake(scene, &mut timeline);
     host.store_baked(scene, &timeline);
+    if !timeline.cloths.is_empty() && host.has_listeners() {
+        // The chunks went out before the cloth existed: the whole bake,
+        // cloth included, replaces the streamed clip.
+        host.emit(&ServerMessage::SequenceResult {
+            ok: true,
+            sequence: bake_label(&timeline.sequences),
+            scenario: timeline.scenario.clone(),
+            error: None,
+            timeline: Some(timeline_msg(scene, &timeline)),
+            planning_time_ms: None,
+            stream: None,
+        });
+    }
     Ok(Some(timeline))
 }
 
@@ -1876,6 +1897,7 @@ fn bake_and_emit(
         let mut result = run(&snapshot);
         if let Ok(timeline) = &mut result {
             timeline.scenario = applied.map(str::to_string);
+            host.after_bake(&snapshot, timeline);
         }
         result.map(|timeline| (timeline, host.now_ms() - t0))
     });
@@ -2021,6 +2043,27 @@ pub fn timeline_window_msg(
         .map(|track| grid.iter().map(|&t| track.trajectory.sample(t)).collect())
         .collect();
     timeline_msg_on(scene, timeline, grid, rows, Some(from))
+}
+
+/// A cloth track's wire form: its own samples, not the playback grid's. A
+/// window after `from` keeps the samples after it.
+fn cloth_track_msg(
+    track: &botrail_scene::cloth::ClothTrack,
+    window: Option<f64>,
+) -> wire::ClothTrackMsg {
+    let first = window.map_or(0, |from| track.times.partition_point(|&t| t <= from + 1e-9));
+    wire::ClothTrackMsg {
+        name: track.name.clone(),
+        triangles: track.triangles.clone(),
+        times: track.times[first..].to_vec(),
+        points: track.points[first..].to_vec(),
+        held: if track.held.iter().all(Vec::is_empty) {
+            Vec::new()
+        } else {
+            track.held[first..].to_vec()
+        },
+        landmarks: track.landmarks.clone(),
+    }
 }
 
 /// The wire form of a timeline sampled on `grid`, with `rows[r][k]` robot
@@ -2194,7 +2237,11 @@ fn timeline_msg_on(
         robots,
         vehicles,
         objects: object_tracks,
-        cloths: Vec::new(),
+        cloths: timeline
+            .cloths
+            .iter()
+            .map(|track| cloth_track_msg(track, window))
+            .collect(),
         step_spans: timeline
             .step_spans
             .iter()
@@ -2683,6 +2730,105 @@ mod tests {
                 botrail_scene::rollout::PhysicsOptions::world(),
             ))
         }
+    }
+
+    /// The test host with a cloth pass: it lays a three-sample track on
+    /// every bake, as `bt.cloth` does on the Python host.
+    struct ClothHost(TestHost);
+
+    impl SessionHost for ClothHost {
+        fn with_scene<R>(&self, f: impl FnOnce(&mut Scene) -> R) -> R {
+            self.0.with_scene(f)
+        }
+        fn emit(&self, msg: &ServerMessage) {
+            self.0.emit(msg)
+        }
+        fn now_ms(&self) -> f64 {
+            0.0
+        }
+        fn log(&self, message: &str) {
+            self.0.log(message)
+        }
+        fn store_baked(&self, scene: &Scene, timeline: &SequenceTimeline) {
+            self.0.store_baked(scene, timeline)
+        }
+        fn baked(&self) -> Option<(Scene, SequenceTimeline)> {
+            self.0.baked()
+        }
+        fn after_bake(&self, _scene: &Scene, timeline: &mut SequenceTimeline) {
+            let at = |z: f32| vec![[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+            timeline.cloths.push(botrail_scene::cloth::ClothTrack {
+                name: "sheet".into(),
+                triangles: vec![[0, 1, 2]],
+                times: vec![0.0, 0.5, timeline.duration],
+                points: vec![at(0.0), at(0.1), at(0.2)],
+                held: vec![vec![], vec![1], vec![]],
+                ..Default::default()
+            });
+        }
+    }
+
+    /// A pass the host runs after the bake (`after_bake`) reaches every
+    /// consumer of the cycle: the result message, the retained bake a late
+    /// joiner and the USD download read, a window of it, and — since the
+    /// chunks of a streamed bake went out before the cloth existed — a
+    /// whole result after the stream.
+    #[test]
+    fn a_host_pass_after_the_bake_puts_cloth_on_the_timeline() {
+        let host = ClothHost(TestHost::from_scene(hover_scene()));
+        handle_client_message(
+            &host,
+            r#"{"type":"simulate_sequence","name":"wait","max_duration":2.0}"#,
+        );
+        let (ok, _, timeline, error) = last_result(&host.0.out.borrow());
+        assert!(ok, "{error:?}");
+        let timeline = timeline.unwrap();
+        let cloth = &timeline.cloths[0];
+        assert_eq!(cloth.name, "sheet");
+        assert_eq!(cloth.times, [0.0, 0.5, timeline.duration]);
+        assert_eq!(cloth.points[1][2], [0.0, 1.0, 0.1]);
+        assert_eq!(cloth.held, [vec![], vec![1], vec![]]);
+        assert_eq!(cloth.triangles, [[0, 1, 2]]);
+        let (scene, baked) = host.baked().expect("the bake is retained");
+        assert_eq!(baked.cloths.len(), 1);
+        match baked_result_message(&host) {
+            Some(ServerMessage::SequenceResult {
+                timeline: Some(replayed),
+                ..
+            }) => assert_eq!(replayed.cloths, timeline.cloths),
+            other => panic!("expected the replayed bake, got {other:?}"),
+        }
+        // A window keeps the samples after its start.
+        let window = timeline_window_msg(&scene, &baked, 0.5);
+        assert_eq!(window.cloths[0].times, [baked.duration]);
+        assert_eq!(window.cloths[0].points.len(), 1);
+        assert_eq!(window.cloths[0].triangles, [[0, 1, 2]]);
+        // Streamed: the whole bake follows the last chunk.
+        host.0.out.borrow_mut().clear();
+        let streamed = run_bake_stream(
+            &host,
+            &scene,
+            &["wait"],
+            None,
+            &botrail_scene::rollout::RolloutOptions::default(),
+            None,
+            &|| false,
+            &|_| {},
+            StreamMode::default(),
+            &|_| {},
+        )
+        .unwrap()
+        .expect("a program bake is kept");
+        assert_eq!(streamed.cloths.len(), 1);
+        let out = host.0.out.borrow();
+        assert!(matches!(
+            out[out.len() - 2],
+            ServerMessage::BakeChunk { done: true, .. }
+        ));
+        let (ok, label, whole, _) = last_result(&out);
+        assert!(ok);
+        assert_eq!(label, "wait");
+        assert_eq!(whole.unwrap().cloths[0].times.len(), 3);
     }
 
     /// A cell for the physics toggle: a box hovering over nothing, and a

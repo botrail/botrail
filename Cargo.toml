@@ -16,10 +16,8 @@ members = [
     "crates/botrail-py",
     "crates/botrail-wasm",
     "crates/botrail-bench",
+    "crates/botrail-cloth",
 ]
-# botrail-cloth depends on a sibling checkout of rapier-cloth until 0.3 is on
-# crates.io, so it builds on its own (`--manifest-path crates/botrail-cloth/Cargo.toml`).
-exclude = ["crates/botrail-cloth"]
 
 [workspace.package]
 version = "0.12.1"
@@ -41,6 +39,7 @@ botrail-physics-rapier = { path = "crates/botrail-physics-rapier" }
 botrail-export = { path = "crates/botrail-export" }
 botrail-scene = { path = "crates/botrail-scene" }
 botrail-session = { path = "crates/botrail-session" }
+botrail-cloth = { path = "crates/botrail-cloth" }
 botrail-usd = { path = "crates/botrail-usd" }
 parry3d-f64 = "0.29"
 xurdf = "0.6"
@@ -49,6 +48,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = { version = "1", features = ["derive"] }
 thiserror = "2"
+# The garment, stitch and soft-release APIs are newer than rapier-cloth 0.2.0
+# on crates.io: pinned to the commit until 0.3 is published.
+rapier-cloth = { git = "https://github.com/neka-nat/rapier-cloth", rev = "1c4584e69101217aecbad71ab506ec64207f8356", default-features = false, features = ["f64", "implicit"] }
 
 [profile.release]
 lto = "thin"
+
+# The cloth solver is numeric code that runs a hundred times slower
+# unoptimized; its tests and a `maturin develop` build would not be usable.
+[profile.dev.package.rapier-cloth-core]
+opt-level = 3
+
+[profile.dev.package.rapier-cloth]
+opt-level = 3
+
+[profile.dev.package.faer]
+opt-level = 3

@@ -2163,6 +2163,7 @@ mod tests {
             physics_scope: None,
             grasps: Vec::new(),
             contacts: vec![],
+            cloths: vec![],
             robots: vec![track(ramp_to)],
             objects: vec![],
             vehicles: vec![],

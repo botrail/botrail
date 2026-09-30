@@ -177,6 +177,22 @@ pub struct CurveSpec {
     pub width: f32,
 }
 
+/// A deforming triangle mesh authored as one `Mesh` prim under
+/// `/World/Cloths` — a simulated cloth: the topology once, the points
+/// time-sampled on the cloth's own sample times (USD blends point arrays
+/// linearly between them, as the studio does). Purely visual: no collision,
+/// no physics.
+pub struct ClothSpec {
+    /// Prim name (sanitized and uniquified on authoring).
+    pub name: String,
+    pub triangles: Vec<[u32; 3]>,
+    /// `(seconds from the start of the export, world points)`, increasing
+    /// in time. A single sample is a cloth that never moves.
+    pub samples: Vec<(f64, Vec<[f32; 3]>)>,
+    /// `primvars:displayColor`, linear RGB.
+    pub color: [f32; 3],
+}
+
 /// One camera, authored as a `UsdGeomCamera` under `/World/Cameras` with
 /// its (possibly sampled) world pose. botrail's camera convention — -Z is
 /// the view direction, +Y is image-up — is USD's, so the pose is authored
@@ -212,6 +228,8 @@ pub struct AnimationInput<'a> {
     pub curves: &'a [CurveSpec],
     /// Cameras; empty = no `/World/Cameras` prim.
     pub cameras: &'a [CameraSpec],
+    /// Simulated cloths; empty = no `/World/Cloths` prim.
+    pub cloths: &'a [ClothSpec],
 }
 
 /// How one exported object stands in a simulation stage.
@@ -723,6 +741,7 @@ fn export_stage(
     assets.extend(appearances.copies);
     author_curves(&mut layer, input.curves, &mut warnings);
     author_cameras(&mut layer, input.cameras, &codes);
+    author_cloths(&mut layer, input.cloths, fps, &mut warnings);
 
     Ok(ExportedAnimation {
         data: layer.finish(),
@@ -784,6 +803,126 @@ fn author_cameras(layer: &mut LayerBuilder, cameras: &[CameraSpec], codes: &[f64
                 y: spec.resolution[1] as i32,
             })),
             &[(FieldKey::Custom.as_ref(), Value::Bool(true))],
+        );
+    }
+}
+
+/// Authors each [`ClothSpec`] as a `Mesh` prim under `/World/Cloths`
+/// (created only when there is something to hold): triangles as they are,
+/// `points` as time samples at the cloth's own times with the first sample
+/// as the default, so a reader that ignores animation still finds the mesh.
+fn author_cloths(
+    layer: &mut LayerBuilder,
+    cloths: &[ClothSpec],
+    fps: f64,
+    warnings: &mut Vec<String>,
+) {
+    let mut used: HashMap<String, usize> = HashMap::new();
+    for spec in cloths {
+        let Some((_, first)) = spec.samples.first() else {
+            warnings.push(format!("cloth `{}` has no samples; skipped", spec.name));
+            continue;
+        };
+        let count = first.len();
+        if spec.triangles.is_empty()
+            || spec.samples.iter().any(|(_, points)| points.len() != count)
+            || spec
+                .triangles
+                .iter()
+                .flatten()
+                .any(|&i| i as usize >= count)
+        {
+            warnings.push(format!(
+                "cloth `{}` has no triangles, or samples that do not match them; skipped",
+                spec.name
+            ));
+            continue;
+        }
+        if !layer.has_prim("/World/Cloths") {
+            layer.ensure_prim("/World/Cloths", Specifier::Def, Some("Xform"));
+        }
+        let prim = format!(
+            "/World/Cloths/{}",
+            unique_child(&mut used, &sanitize_name(&spec.name))
+        );
+        layer.ensure_prim(&prim, Specifier::Def, Some("Mesh"));
+        layer.attr(
+            &prim,
+            "faceVertexCounts",
+            "int[]",
+            AttrValue::Default(Value::IntVec(vec![3; spec.triangles.len()])),
+        );
+        layer.attr(
+            &prim,
+            "faceVertexIndices",
+            "int[]",
+            AttrValue::Default(Value::IntVec(
+                spec.triangles.iter().flatten().map(|&i| i as i32).collect(),
+            )),
+        );
+        layer.attr(
+            &prim,
+            "subdivisionScheme",
+            "token",
+            AttrValue::Uniform(Value::Token(tf::Token::from("none"))),
+        );
+        layer.attr(
+            &prim,
+            "doubleSided",
+            "bool",
+            AttrValue::Uniform(Value::Bool(true)),
+        );
+        let points = |frame: &[[f32; 3]]| {
+            Value::Vec3fVec(frame.iter().map(|p| gf::vec3f(p[0], p[1], p[2])).collect())
+        };
+        if spec.samples.len() == 1 {
+            layer.attr(
+                &prim,
+                "points",
+                "point3f[]",
+                AttrValue::Default(points(first)),
+            );
+        } else {
+            let samples: sdf::TimeSampleMap = spec
+                .samples
+                .iter()
+                .map(|(t, frame)| (t * fps, points(frame)))
+                .collect();
+            layer.attr_meta(
+                &prim,
+                "points",
+                "point3f[]",
+                AttrValue::Samples(samples),
+                &[(FieldKey::Default.as_ref(), points(first))],
+            );
+        }
+        // One extent for the whole cycle: everywhere the cloth goes.
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for p in spec.samples.iter().flat_map(|(_, frame)| frame) {
+            for i in 0..3 {
+                min[i] = min[i].min(p[i]);
+                max[i] = max[i].max(p[i]);
+            }
+        }
+        layer.attr(
+            &prim,
+            "extent",
+            "float3[]",
+            AttrValue::Default(Value::Vec3fVec(vec![
+                gf::vec3f(min[0], min[1], min[2]),
+                gf::vec3f(max[0], max[1], max[2]),
+            ])),
+        );
+        layer.attr(
+            &prim,
+            "primvars:displayColor",
+            "color3f[]",
+            AttrValue::Default(Value::Vec3fVec(vec![gf::vec3f(
+                spec.color[0],
+                spec.color[1],
+                spec.color[2],
+            )])),
         );
     }
 }
@@ -2998,6 +3137,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let exported = export_animation(&input, &ExportOptions::default(), "phys").unwrap();
         let text = exported.to_usda().unwrap();
@@ -3159,6 +3299,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -3294,6 +3435,7 @@ mod tests {
                 objects: &[],
                 curves: &[],
                 cameras: &[],
+                cloths: &[],
             },
             &ExportOptions::default(),
         )
@@ -3384,6 +3526,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         // Inline, the per-face colours are on the prim, uniform.
         let out = dir.join("inline/anim.usda");
@@ -3465,6 +3608,7 @@ mod tests {
                 objects: &objects,
                 curves: &[],
                 cameras: &[],
+                cloths: &[],
             };
             let exported = export_animation(&input, &ExportOptions::default(), "nest").unwrap();
             let dir = temp_dir(if flip { "nest_flip" } else { "nest" });
@@ -3555,6 +3699,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let spec = SimulationSpec {
             welds: &[],
@@ -3723,6 +3868,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let articulation = ArticulationSpec {
             powered: true,
@@ -3953,6 +4099,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let export = |articulation: ArticulationSpec, ride: Option<Ride>| {
             let spec = SimulationSpec {
@@ -4195,6 +4342,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let powered = ArticulationSpec {
             powered: true,
@@ -4415,6 +4563,7 @@ mod tests {
                 objects: &objects,
                 curves: &[],
                 cameras: &[],
+                cloths: &[],
             };
             let spec = SimulationSpec {
                 welds: &[],
@@ -4574,6 +4723,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
@@ -4716,6 +4866,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -4827,6 +4978,109 @@ mod tests {
     /// `.usdc` (and `.usd`) must produce a binary crate file that composes
     /// to the same world transforms and metadata as the text layer — the
     /// extension picks the serialization, never the content.
+    /// A simulated cloth goes out as a `Mesh` whose points are time-sampled
+    /// on the cloth's own clock, with the first sample as the default; a
+    /// cloth that never moves is a plain mesh, and one whose samples do not
+    /// match its triangles is skipped with a warning.
+    #[test]
+    fn cloths_author_as_time_sampled_meshes() {
+        let dir = temp_dir("cloths");
+        let urdf = r#"
+        <robot name="r">
+          <link name="base"><visual><geometry><box size="0.2 0.1 0.4"/></geometry></visual></link>
+        </robot>"#;
+        let model = RobotModel::from_urdf_str(urdf).unwrap();
+        let times = [0.0, 1.0];
+        let link_poses: Vec<Vec<Isometry3<f64>>> = (0..2)
+            .map(|_| botrail_kin::forward_kinematics(&model, &[]).unwrap())
+            .collect();
+        let robots = [RobotAnimation {
+            name: "Robot",
+            model: &model,
+            link_poses: &link_poses,
+            joint_samples: None,
+        }];
+        let at = |z: f32| vec![[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let cloths = vec![
+            ClothSpec {
+                name: "tea towel".into(),
+                triangles: vec![[0, 1, 2]],
+                samples: vec![(0.0, at(0.0)), (0.1, at(0.5)), (1.0, at(0.25))],
+                color: [0.58, 0.45, 0.32],
+            },
+            ClothSpec {
+                name: "still".into(),
+                triangles: vec![[0, 1, 2]],
+                samples: vec![(0.0, at(0.1))],
+                color: [0.5, 0.5, 0.5],
+            },
+            ClothSpec {
+                name: "torn".into(),
+                triangles: vec![[0, 1, 5]],
+                samples: vec![(0.0, at(0.0))],
+                color: [0.5, 0.5, 0.5],
+            },
+        ];
+        let warnings = write_animation(
+            &dir.join("anim.usda"),
+            &AnimationInput {
+                robots: &robots,
+                times: &times,
+                objects: &[],
+                curves: &[],
+                cameras: &[],
+                cloths: &cloths,
+            },
+            &ExportOptions {
+                fps: 30.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("torn"), "{warnings:?}");
+
+        let text = std::fs::read_to_string(dir.join("anim.usda")).unwrap();
+        assert!(
+            text.contains("def Xform \"Cloths\"") && text.contains("def Mesh \"tea_towel\""),
+            "no cloth mesh:\n{text}"
+        );
+        assert!(!text.contains("torn"), "{text}");
+        let stage = Stage::open(&dir.join("anim.usda").display().to_string()).unwrap();
+        let points: Vec<gf::Vec3f> = stage
+            .prim("/World/Cloths/tea_towel")
+            .attribute("points")
+            .get()
+            .unwrap()
+            .expect("the default points");
+        assert_eq!(points.len(), 3);
+        // The default is the first sample; the samples sit at the cloth's
+        // times in frames: 0 s, 0.1 s and 1 s at 30 fps.
+        assert!(
+            text.contains("point3f[] points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]"),
+            "{text}"
+        );
+        assert!(text.contains("point3f[] points.timeSamples"), "{text}");
+        for code in [
+            "0.0: [(0.0, 0.0, 0.0)",
+            "3.0: [(0.0, 0.0, 0.5)",
+            "30.0: [(0.0, 0.0, 0.25)",
+        ] {
+            assert!(text.contains(code), "no sample `{code}`:\n{text}");
+        }
+        assert!(text.contains("uniform bool doubleSided = true"), "{text}");
+        assert!(
+            text.contains("uniform token subdivisionScheme = \"none\""),
+            "{text}"
+        );
+        // The still cloth has no animation at all.
+        let still = text
+            .split("def Mesh \"still\"")
+            .nth(1)
+            .expect("the still cloth");
+        assert!(!still.contains("timeSamples"), "{still}");
+    }
+
     #[test]
     fn toolpath_curves_author_as_basis_curves() {
         let dir = temp_dir("curves");
@@ -4879,6 +5133,7 @@ mod tests {
                 objects: &[],
                 curves: &curves,
                 cameras: &[],
+                cloths: &[],
             },
             &ExportOptions::default(),
         )
@@ -4965,6 +5220,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
 
         for name in ["anim.usda", "anim.usdc", "anim.usd"] {
@@ -5045,6 +5301,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         assert!(matches!(
             export_animation(&empty, &ExportOptions::default(), "a"),
@@ -5058,6 +5315,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         assert!(matches!(
             export_animation(&bad_len, &ExportOptions::default(), "a"),
@@ -5070,6 +5328,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         assert!(matches!(
             export_animation(&no_robots, &ExportOptions::default(), "a"),
@@ -5123,6 +5382,7 @@ mod tests {
             objects: &objects,
             curves: &[],
             cameras: &cameras,
+            cloths: &[],
         };
         let exported = export_animation(&input, &ExportOptions::default(), "cams").unwrap();
         let text = exported.to_usda().unwrap();
@@ -5152,6 +5412,7 @@ mod tests {
                 objects: &objects,
                 curves: &[],
                 cameras: &bad,
+                cloths: &[],
             },
             &ExportOptions::default(),
             "cams",
@@ -5207,6 +5468,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
@@ -5278,6 +5540,7 @@ mod tests {
             objects: &[],
             curves: &[],
             cameras: &[],
+            cloths: &[],
         };
         write_animation(&out.join("anim.usda"), &input, &ExportOptions::default()).unwrap()
     }

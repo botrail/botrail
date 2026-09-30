@@ -550,9 +550,13 @@ pub struct ObjectTrackMsg {
     pub visible: Vec<bool>,
 }
 
-/// Per-sample vertex positions of one simulated cloth (a garment folded by
-/// the grippers), aligned with the timeline's shared sample grid like an
-/// [`ObjectTrackMsg`]. Produced by `botrail-cloth`'s `ClothCell`.
+/// Vertex positions of one simulated cloth (a garment folded by the
+/// grippers, a sheet) over a baked cycle, on the cloth's own clock: a
+/// sample per step of its solver rather than per playback frame, and only
+/// the two ends of a span in which it lies still. The viewer blends between
+/// the samples around the playback time. A chunk of a streaming bake
+/// carries the samples of its window. Produced by a cloth pass
+/// (`botrail-cloth`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ClothTrackMsg {
@@ -560,13 +564,17 @@ pub struct ClothTrackMsg {
     pub name: String,
     /// Triangles over the vertex indices of `points`.
     pub triangles: Vec<[u32; 3]>,
+    /// When each sample of `points` holds (s), increasing.
+    pub times: Vec<f64>,
     /// One `[x, y, z]` per vertex per sample (world metres). A track with
     /// one sample never moves.
     pub points: Vec<Vec<[f32; 3]>>,
-    /// Vertices held by a gripper at each sample; empty when free.
+    /// Vertices a gripper holds from each sample on; empty for a cloth
+    /// that is never held.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<Vec<u32>>,
-    /// Garment landmark name → vertex index (hem corners, cuffs, shoulders…).
+    /// Landmark name → vertex index (a garment's hem corners, cuffs and
+    /// shoulders; a sheet's corners).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub landmarks: std::collections::BTreeMap<String, u32>,
 }

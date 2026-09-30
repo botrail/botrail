@@ -29,6 +29,7 @@ botrail-physics.workspace = true
 botrail-physics-rapier.workspace = true
 botrail-session.workspace = true
 botrail-usd.workspace = true
+botrail-cloth.workspace = true
 nalgebra.workspace = true
 serde_json.workspace = true
 serde.workspace = true

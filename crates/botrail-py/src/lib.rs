@@ -1,6 +1,7 @@
 //! Python bindings for botrail (`botrail._core`).
 
 mod catalog;
+mod cloth;
 mod hub;
 mod rl;
 mod server;
@@ -5531,6 +5532,64 @@ impl Scene {
         Ok(name)
     }
 
+    /// Where a cloth's landmarks lie before anything moves it, as
+    /// `[(name, (x, y, z))]` — what `bt.cloth.landmarks` wraps. `json` is
+    /// the cloth's declaration.
+    fn _cloth_landmarks_json(&self, json: &str) -> PyResult<Vec<(String, [f64; 3])>> {
+        let decl = cloth::PassDecl::parse(json).map_err(PyValueError::new_err)?;
+        let (spec, table_top) = decl
+            .spec(&self.hub.snapshot())
+            .map_err(PyValueError::new_err)?;
+        botrail_cloth::rest_landmarks(&spec, table_top)
+            .map(|landmarks| landmarks.into_iter().collect())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Registers a cloth and its grippers on the cell (`bt.cloth.add`):
+    /// every bake from here on is followed by the cloth's simulation.
+    fn _cloth_add_json(&self, json: &str) -> PyResult<()> {
+        let decl = cloth::PassDecl::parse(json).map_err(PyValueError::new_err)?;
+        // Names are checked now, against the cell as it stands; the
+        // signals are checked against each cycle.
+        decl.resolve(&self.hub.snapshot())
+            .map_err(PyValueError::new_err)?;
+        self.hub.add_cloth(decl);
+        Ok(())
+    }
+
+    /// Unregisters a cloth (`bt.cloth.remove`); false if it was not there.
+    fn _cloth_remove(&self, name: &str) -> bool {
+        self.hub.remove_cloth(name)
+    }
+
+    /// Names of the registered cloths.
+    fn _cloth_names(&self) -> Vec<String> {
+        self.hub.cloth_names()
+    }
+
+    /// Simulates one cloth against a baked cycle and returns the timeline
+    /// with its track (`bt.cloth.animate`), re-broadcast like any bake.
+    fn _animate_cloth_json(
+        &self,
+        timeline: PyRef<'_, SequenceTimeline>,
+        json: &str,
+    ) -> PyResult<SequenceTimeline> {
+        let decl = cloth::PassDecl::parse(json).map_err(PyValueError::new_err)?;
+        let pass = decl
+            .resolve(&timeline.scene)
+            .map_err(PyValueError::new_err)?;
+        let track = botrail_cloth::pass::animate(&timeline.scene, &timeline.inner, &pass)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut augmented = timeline.inner.clone();
+        augmented.cloths.retain(|c| c.name != track.name);
+        augmented.cloths.push(track);
+        self.hub.emit_timeline(&timeline.scene, &augmented);
+        Ok(SequenceTimeline {
+            inner: augmented,
+            scene: timeline.scene.clone(),
+        })
+    }
+
     /// Progressive material removal for a baked cycle: carves `stock` in
     /// `stages` equal time slices (default: one slice per second of
     /// cycle, capped at 240 — the display lags the tool by at most one
@@ -7968,6 +8027,101 @@ impl LiveRollout {
     }
 }
 
+/// One cloth over a baked cycle: where every vertex was, on the cloth's
+/// own clock (`times`), and which vertices a gripper held.
+#[pyclass(frozen, module = "botrail._core")]
+struct ClothTrack {
+    inner: botrail_scene::cloth::ClothTrack,
+}
+
+#[pymethods]
+impl ClothTrack {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// Sample times (s): a step of the cloth solver apart while the cloth
+    /// moves, the two ends only of a span in which it lies still.
+    #[getter]
+    fn times(&self) -> Vec<f64> {
+        self.inner.times.clone()
+    }
+
+    /// Triangles over the vertex indices.
+    #[getter]
+    fn triangles(&self) -> Vec<(u32, u32, u32)> {
+        self.inner
+            .triangles
+            .iter()
+            .map(|t| (t[0], t[1], t[2]))
+            .collect()
+    }
+
+    /// Landmark name to vertex index: a T-shirt's `cuff_left`,
+    /// `hem_right`, `shoulder_left`…; a sheet's `corner_nw`, `edge_s`,
+    /// `center`….
+    #[getter]
+    fn landmarks(&self) -> BTreeMap<String, u32> {
+        self.inner.landmarks.clone()
+    }
+
+    /// `(time, reason)` when the simulation stopped before the end of the
+    /// cycle — the track holds its last state from there — else `None`.
+    #[getter]
+    fn failure(&self) -> Option<(f64, String)> {
+        self.inner.failure.clone()
+    }
+
+    /// What the pass noticed without stopping: a gripper that closed on
+    /// nothing, a step it took in parts.
+    #[getter]
+    fn warnings(&self) -> Vec<String> {
+        self.inner.warnings.clone()
+    }
+
+    /// World position of every vertex at `t`, blended between the samples
+    /// around it.
+    fn positions(&self, t: f64) -> Vec<(f32, f32, f32)> {
+        self.inner
+            .positions_at(t)
+            .into_iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect()
+    }
+
+    /// World position of one landmark at `t`.
+    fn position(&self, landmark: &str, t: f64) -> PyResult<(f32, f32, f32)> {
+        let vertex = *self.inner.landmarks.get(landmark).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "cloth `{}` has no landmark `{landmark}` (landmarks: {:?})",
+                self.inner.name,
+                self.inner.landmarks.keys().collect::<Vec<_>>()
+            ))
+        })?;
+        let p = self.inner.positions_at(t)[vertex as usize];
+        Ok((p[0], p[1], p[2]))
+    }
+
+    /// The vertices a gripper holds at `t`.
+    fn held(&self, t: f64) -> Vec<u32> {
+        self.inner.held_at(t).to_vec()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ClothTrack(name={:?}, vertices={}, samples={}{})",
+            self.inner.name,
+            self.inner.points.first().map_or(0, Vec::len),
+            self.inner.times.len(),
+            match &self.inner.failure {
+                Some((t, _)) => format!(", stopped at {t:.2} s"),
+                None => String::new(),
+            }
+        )
+    }
+}
+
 /// A baked sequence rollout: per-robot joint tracks, grasped-object
 /// motion, signal waveforms, and step spans (the timing chart).
 #[pyclass(frozen, module = "botrail._core")]
@@ -8268,6 +8422,29 @@ impl SequenceTimeline {
         Ok(botrail_scene::rollout::SequenceTimeline::object_visible(
             track, t,
         ))
+    }
+
+    /// Names of the cloths simulated against this cycle (`bt.cloth`).
+    #[getter]
+    fn cloths(&self) -> Vec<String> {
+        self.inner.cloths.iter().map(|c| c.name.clone()).collect()
+    }
+
+    /// The vertex track of a cloth simulated against this cycle.
+    fn cloth(&self, name: &str) -> PyResult<ClothTrack> {
+        self.inner
+            .cloths
+            .iter()
+            .find(|c| c.name == name)
+            .map(|track| ClothTrack {
+                inner: track.clone(),
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "this timeline has no cloth `{name}` (cloths: {:?})",
+                    self.cloths()
+                ))
+            })
     }
 
     /// Carves `stock` with the cutter swept along this cycle: a voxel
@@ -11429,6 +11606,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Group>()?;
     m.add_class::<Trajectory>()?;
     m.add_class::<SequenceTimeline>()?;
+    m.add_class::<ClothTrack>()?;
     m.add_class::<LiveRollout>()?;
     m.add_class::<rl::VecRollout>()?;
     m.add_class::<ScenarioRuns>()?;

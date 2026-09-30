@@ -882,6 +882,10 @@ pub struct SequenceTimeline {
     /// Touch episodes of a physics bake, in opening order; empty on a
     /// kinematic bake.
     pub contacts: Vec<ContactSpan>,
+    /// Cloth simulated against this cycle after the bake (a cloth pass —
+    /// `botrail-cloth`): one vertex track per cloth. Empty unless a pass
+    /// ran; the rollout itself never fills it.
+    pub cloths: Vec<crate::cloth::ClothTrack>,
 }
 
 /// One resolved selection divergence: which arm `sequence` took at the
@@ -10192,6 +10196,7 @@ impl Rollout {
             },
             branches: self.branches.clone(),
             grasps,
+            cloths: Vec::new(),
             contacts: self
                 .physics
                 .as_ref()

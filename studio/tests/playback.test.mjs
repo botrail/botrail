@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { samplePlayback, tracksFromTimeline } from "../src/playback.ts";
+import { clothHeldAt, samplePlayback, tracksFromTimeline } from "../src/playback.ts";
 
 const pose = (x) => ({ position: [x, 0, 0], quaternion: [0, 0, 0, 1] });
 
@@ -193,24 +193,76 @@ test("a live stream keeps its programs' part and its last moments, and at its en
   assert.deepEqual(tracks.objects.tracks[0].poses.map((p) => p.position[0]), [1, 2, 3, 12]);
 });
 
-test("cloth tracks interpolate their vertices on the shared grid", () => {
+test("cloth tracks play on their own sample times", () => {
+  const at = (z) => [[0, 0, z], [1, 0, z], [0, 1, z]];
   const tracks = tracksFromTimeline({
-    duration: 1,
+    duration: 2,
     robots: [],
     objects: [],
     cloths: [{
       name: "shirt",
       triangles: [[0, 1, 2]],
-      points: [[[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 0, 1], [1, 0, 1], [0, 1, 1]]],
-      held: [[0], []],
+      times: [0, 0.5, 2],
+      points: [at(0), at(1), at(4)],
+      held: [[], [0, 2], []],
       landmarks: { hem_left: 0 },
     }],
   });
-  assert.equal(tracks.cloths.tracks.length, 1);
-  assert.deepEqual(tracks.cloths.times, [0, 1]);
-  assert.deepEqual(Array.from(samplePlayback(tracks, 0.5).cloths.shirt), [0, 0, 0.5, 1, 0, 0.5, 0, 1, 0.5]);
-  assert.deepEqual(Array.from(samplePlayback(tracks, 5).cloths.shirt), [0, 0, 1, 1, 0, 1, 0, 1, 1]);
-  assert.equal(samplePlayback(tracks, 0).cloths.shirt.length, 9);
+  const shirt = tracks.cloths[0];
+  assert.deepEqual(shirt.times, [0, 0.5, 2]);
+  // Blended between the cloth's own samples, not the robots' grid.
+  assert.deepEqual(Array.from(samplePlayback(tracks, 0.25).cloths.shirt), [0, 0, 0.5, 1, 0, 0.5, 0, 1, 0.5]);
+  assert.deepEqual(Array.from(samplePlayback(tracks, 1.0).cloths.shirt), [0, 0, 2, 1, 0, 2, 0, 1, 2]);
+  assert.deepEqual(Array.from(samplePlayback(tracks, 5).cloths.shirt), [0, 0, 4, 1, 0, 4, 0, 1, 4]);
+  // The sample carries what the driver hands the cloth's view each frame.
+  assert.deepEqual(samplePlayback(tracks, 0.25).clothHeld, { shirt: [] });
+  assert.deepEqual(samplePlayback(tracks, 1.0).clothHeld, { shirt: [0, 2] });
+  // Held vertices step with the sample at or before the time.
+  assert.deepEqual(clothHeldAt(shirt, 0.4), []);
+  assert.deepEqual(clothHeldAt(shirt, 0.5), [0, 2]);
+  assert.deepEqual(clothHeldAt(shirt, 1.9), [0, 2]);
+  assert.deepEqual(clothHeldAt(shirt, 2), []);
+  // A track without times is spread evenly over the cycle.
+  const bare = tracksFromTimeline({
+    duration: 2,
+    robots: [],
+    objects: [],
+    cloths: [{ name: "s", triangles: [[0, 1, 2]], points: [at(0), at(2)] }],
+  });
+  assert.deepEqual(bare.cloths[0].times, [0, 2]);
+  assert.deepEqual(clothHeldAt(bare.cloths[0], 1), []);
   // A timeline without cloth has no cloth samples.
-  assert.equal(samplePlayback(tracksFromTimeline({ duration: 1, robots: [], objects: [] }), 0).cloths, null);
+  const bareSample = samplePlayback(tracksFromTimeline({ duration: 1, robots: [], objects: [] }), 0);
+  assert.equal(bareSample.cloths, null);
+  assert.equal(bareSample.clothHeld, null);
+});
+
+test("a streamed window appends to a cloth track and a live stream forgets its past", () => {
+  const at = (z) => [[0, 0, z], [1, 0, z], [0, 1, z]];
+  const window = (times, from) => ({
+    duration: times[times.length - 1],
+    robots: [],
+    objects: [{ name: "box", poses: times.map(() => ({ position: [0, 0, 0], quaternion: [0, 0, 0, 1] })) }],
+    cloths: [{
+      name: "sheet",
+      triangles: [[0, 1, 2]],
+      times: times.filter((t) => t > from),
+      points: times.filter((t) => t > from).map(at),
+      held: times.filter((t) => t > from).map((t) => (t < 0.2 ? [1] : [])),
+    }],
+  });
+  const lattice = (a, b) => Array.from({ length: b - a }, (_, k) => (a + k + 1) / 30);
+  let tracks = appendTracks(null, window(lattice(0, 6), 0), 0);
+  tracks = appendTracks(tracks, window(lattice(6, 12), 6 / 30), 6 / 30);
+  const sheet = tracks.cloths[0];
+  assert.equal(sheet.times.length, 12);
+  assert.equal(sheet.points.length, 12);
+  assert.equal(sheet.held.length, 12);
+  assert.ok(Math.abs(samplePlayback(tracks, 0.3).cloths.sheet[2] - 0.3) < 1e-6);
+  assert.deepEqual(clothHeldAt(sheet, 0.1), [1]);
+  // Forgetting the first stretch of the live part drops those cloth samples too.
+  assert.ok(forgetLive(tracks, 0, 0.2));
+  assert.ok(tracks.cloths[0].times[0] >= 0.2 - 1e-9);
+  assert.equal(tracks.cloths[0].points.length, tracks.cloths[0].times.length);
+  assert.equal(tracks.cloths[0].held.length, tracks.cloths[0].times.length);
 });
