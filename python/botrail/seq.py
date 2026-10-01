@@ -46,10 +46,16 @@ def ramp(
     targets: Mapping[str, float],
     duration: float,
     robot: Optional[str] = None,
+    check: bool = False,
 ) -> Action:
     """Ramp joints to targets over ``duration`` s (gripper open/close);
     await it with ``done()``. ``robot`` names the instance (required when
-    the scene has several robots)."""
+    the scene has several robots). A ramp is not planned: with ``check``,
+    its straight joint line is checked against the cell as it stands when
+    the ramp starts — as a planned motion's is — and a contact fails the
+    bake by name. A walk that has just stopped still sways for a moment:
+    each point is then held where the body will be when the arm gets
+    there. Leave it off for a gripper closing on its part."""
     action: Action = {
         "type": "start_ramp",
         "targets": [{"joint": j, "value": float(v)} for j, v in targets.items()],
@@ -57,6 +63,8 @@ def ramp(
     }
     if robot is not None:
         action["robot"] = robot
+    if check:
+        action["check"] = True
     return action
 
 

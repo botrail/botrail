@@ -67,4 +67,7 @@ python-source = "python"
 # studio (the scripts/build_studio.sh output, ignored there): include it in
 # the wheel explicitly. The path is relative to `python-source`, not to this
 # file. scripts/check_wheel.py verifies every release and CI wheel.
-include = [{ path = "botrail/_studio/**/*", format = "wheel" }]
+include = [
+    { path = "botrail/_studio/**/*", format = "wheel" },
+    { path = "botrail/_licenses/rapier-rope/*", format = "wheel" },
+]

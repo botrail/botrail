@@ -4,6 +4,7 @@ mod catalog;
 mod cloth;
 mod hub;
 mod rl;
+mod rope;
 mod server;
 
 use std::collections::BTreeMap;
@@ -515,8 +516,12 @@ impl Robot {
     /// `restarts=0` to solve strictly from the given seed. Always returns
     /// the best configuration found; check `result.converged`.
     /// `group` names the arm to solve with (its tip is the default `link`);
-    /// the joints of any other arm stay at the seed.
-    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100, restarts = None, group = None))]
+    /// the joints of any other arm stay at the seed. `centering` is how
+    /// strongly a redundant arm's free joints are drawn toward mid-range
+    /// once the pose is met (default 0.1): `0` leaves them where the seed
+    /// had them, so the answer lands next to the seed — what teaching a
+    /// pose from a near one, or a step along a path, wants.
+    #[pyo3(signature = (position, quaternion = None, link = None, seed = None, max_iters = 100, restarts = None, group = None, centering = None))]
     #[allow(clippy::too_many_arguments)]
     fn ik(
         &self,
@@ -527,6 +532,7 @@ impl Robot {
         max_iters: usize,
         restarts: Option<usize>,
         group: Option<&str>,
+        centering: Option<f64>,
     ) -> PyResult<IkResult> {
         let (target, mode) = ik_target(position, quaternion);
         let (group, link_index) = resolve_group_link(&self.inner, group, link)?;
@@ -537,6 +543,7 @@ impl Robot {
             max_iters,
             restarts: restarts.unwrap_or(defaults.restarts),
             joint_mask: group_joint_mask(&self.inner, group),
+            null_space_gain: centering_gain(centering, defaults.null_space_gain)?,
             ..defaults
         };
         let result = botrail_kin::solve_ik(&self.inner, link_index, &target, &seed, &options)
@@ -4047,6 +4054,18 @@ impl Scene {
         Ok(())
     }
 
+    /// Places the vehicle `name` at `station` as if it had been authored
+    /// there: its body moves, what rests in its tray rides along, the
+    /// robots mounted on it stand on it there (holding what they hold),
+    /// and the station becomes the one a bake starts from. This is how a
+    /// mounted robot is taught where it works: `set_robot_base_pose`
+    /// moves the robot alone and leaves the vehicle's body at the start,
+    /// so a part in hand meeting the body only shows in the bake. Place it
+    /// back at the station it started at to undo.
+    fn place_vehicle(&self, name: &str, station: &str) -> PyResult<()> {
+        self.hub.place_vehicle(name, station).map_err(scene_err)
+    }
+
     /// Rotates a disabled wheel visual from the vehicle's travelled distance.
     /// Axis and pivot are in the visual's local frame; radius is in metres.
     /// A mecanum wheel uses lateral_ratio=-1 or +1 for its roller handedness.
@@ -5590,6 +5609,24 @@ impl Scene {
         })
     }
 
+    /// An explicit one-way rope pass against a completed bake.
+    fn _animate_rope_json(
+        &self,
+        timeline: PyRef<'_, SequenceTimeline>,
+        json: &str,
+    ) -> PyResult<SequenceTimeline> {
+        let pass = rope::Decl::parse(json).map_err(PyValueError::new_err)?;
+        let replay = botrail_rope::pass::animate(&timeline.scene, &timeline.inner, &pass)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut augmented = timeline.inner.clone();
+        botrail_rope::track::install(&mut augmented, &replay);
+        self.hub.emit_timeline(&timeline.scene, &augmented);
+        Ok(SequenceTimeline {
+            inner: augmented,
+            scene: timeline.scene.clone(),
+        })
+    }
+
     /// Progressive material removal for a baked cycle: carves `stock` in
     /// `stages` equal time slices (default: one slice per second of
     /// cycle, capped at 240 — the display lags the tool by at most one
@@ -6775,7 +6812,12 @@ impl Scene {
     /// position only; `link` defaults to the TCP link.
     /// `group` names the arm (its tip is the default `link`; only its
     /// joints move); a `link` alone names the arm it hangs off.
-    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100, robot = None, group = None))]
+    /// `centering` is how strongly a redundant arm's free joints are drawn
+    /// toward mid-range once the pose is met (default 0.1): `0` leaves them
+    /// where the current configuration has them, so the answer lands next
+    /// to it — teaching a pose from a near one.
+    #[pyo3(signature = (position, quaternion = None, link = None, max_iters = 100, robot = None, group = None, centering = None))]
+    #[allow(clippy::too_many_arguments)]
     fn set_tcp_target(
         &self,
         position: [f64; 3],
@@ -6784,6 +6826,7 @@ impl Scene {
         max_iters: usize,
         robot: Option<&str>,
         group: Option<&str>,
+        centering: Option<f64>,
     ) -> PyResult<IkResult> {
         let index = self.resolve_robot(robot)?;
         let model = self.hub.robot_model(index);
@@ -6800,10 +6843,12 @@ impl Scene {
             Some(_) => botrail_kin::IkMode::Pose,
             None => botrail_kin::IkMode::Position,
         };
+        let defaults = botrail_kin::IkOptions::default();
         let options = botrail_kin::IkOptions {
             mode,
             max_iters,
-            ..botrail_kin::IkOptions::default()
+            null_space_gain: centering_gain(centering, defaults.null_space_gain)?,
+            ..defaults
         };
         let result = self
             .hub
@@ -6818,6 +6863,17 @@ impl Scene {
             [single] => format!("Scene(robot='{single}')"),
             names => format!("Scene(robots={names:?})"),
         }
+    }
+}
+
+/// The IK's null-space centering gain from a `centering=` argument.
+fn centering_gain(centering: Option<f64>, default: f64) -> PyResult<f64> {
+    match centering {
+        None => Ok(default),
+        Some(g) if g.is_finite() && g >= 0.0 => Ok(g),
+        Some(g) => Err(PyValueError::new_err(format!(
+            "centering must be a non-negative number, got {g}"
+        ))),
     }
 }
 
@@ -8428,6 +8484,21 @@ impl SequenceTimeline {
     #[getter]
     fn cloths(&self) -> Vec<String> {
         self.inner.cloths.iter().map(|c| c.name.clone()).collect()
+    }
+
+    #[getter]
+    fn ropes(&self) -> Vec<String> {
+        self.inner.ropes.iter().map(|r| r.name.clone()).collect()
+    }
+
+    fn _rope_track_json(&self, name: &str) -> PyResult<String> {
+        let track = self
+            .inner
+            .ropes
+            .iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| PyValueError::new_err(format!("no rope track `{name}`")))?;
+        serde_json::to_string(track).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// The vertex track of a cloth simulated against this cycle.

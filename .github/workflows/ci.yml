@@ -17,9 +17,10 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: python3 scripts/check_rope_dependency.py
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo test -p botrail-model -p botrail-kin -p botrail-collide -p botrail-plan -p botrail-traj -p botrail-scene
+      - run: cargo test -p botrail-model -p botrail-kin -p botrail-collide -p botrail-plan -p botrail-traj -p botrail-scene -p botrail-rope -p botrail-session -p botrail-cloth
 
   python:
     runs-on: ubuntu-latest

@@ -204,22 +204,23 @@ def test_lap_overlap_buys_uniformity_and_not_monotonically(scene):
 
 def test_the_film_rides_the_baked_trajectory(scene):
     """The claim a constant-speed film calculator cannot make. Command a
-    paint robot's 300 mm/s on this cobot: it holds a fraction of it, the
-    cycle gets *slower*, and the extra dwell puts the panel far over
-    spec."""
+    paint robot's 300 mm/s on this cobot: it holds about 60% of it, so
+    three times the command buys well under twice the speed, and the
+    extra dwell puts the panel over spec."""
     slow_tl, slow_film, _, _ = demo.coat(scene, 0.6, 0.10)
     fast_tl, fast_film, _, _ = demo.coat(scene, 0.6, 0.30)
     slow_held = slow_tl.feed_report("coat").hold_ratio
     fast_held = fast_tl.feed_report("coat").hold_ratio
     assert slow_held > 0.95
-    assert fast_held < 0.35
-    # Commanding three times the speed made the cycle longer, not shorter.
-    assert fast_tl.duration > slow_tl.duration
+    assert fast_held < 0.7
+    # Three times the commanded speed, well under twice the pace.
+    assert slow_tl.duration / fast_tl.duration < 2.0
     # And the film went with the speed actually achieved, not the
-    # commanded one: over spec, by roughly the ratio of the two.
+    # commanded one: over spec, by roughly the ratio of the two holds
+    # (the flow is trimmed for the commanded speed).
     assert slow_film.in_spec_ratio > 0.95
     assert fast_film.in_spec_ratio == 0.0
-    assert fast_film.mean > 3 * slow_film.mean
+    assert fast_film.mean == pytest.approx(slow_film.mean * slow_held / fast_held, rel=0.2)
 
 
 def test_the_film_map_writes_colors_that_survive_the_round_trip(coated, tmp_path):

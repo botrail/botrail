@@ -148,7 +148,8 @@ def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> 
     code, report = run(capsys, "simulate", str(DEMO), "--report", str(tmp_path / "r.md"), "--usd", str(tmp_path / "c.usda"))
     assert code == 0
     assert [c["name"] for c in report["cycles"]] == ["pick"]
-    assert report["cycles"][0]["duration"] == pytest.approx(11.75, abs=0.05)
+    # 2026-10-01: 11.75 → 8.79 when the timing stopped stretching multi-joint moves down their whole length (botrail-traj).
+    assert report["cycles"][0]["duration"] == pytest.approx(8.79, abs=0.05)
     assert report["cycles"][0]["clearance"]["distance"] > 0
     assert (tmp_path / "r.md").read_text().startswith("# ")
     assert (tmp_path / "c.usda").exists()

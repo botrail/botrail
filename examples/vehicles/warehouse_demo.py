@@ -34,8 +34,11 @@ What the bake answers, in the order the customer asked:
   * **Can two machines share it?** A vehicle that meets another while both
     drive is a hard error, so the fleet manager's traffic control has to be
     written down: each carrier *requests* the aisle and drives on a *grant*;
-    a small arbiter program hands the aisle to one machine at a time. Run
-    `--no-interlock` and the two meet head-on at a named time and place.
+    a small arbiter program hands the aisle to one machine at a time.
+    Without it, whether the two meet is down to when the picker calls: on
+    schedule they happen to pass 1.7 m apart. Run `--no-interlock` — the
+    arbiter dropped and the call 15 s late, one case re-picked — and they
+    meet at a named time and place; with the arbiter the late call passes.
   * **What does call-based supply cost?** The picking station raises `call`
     when its pallet is empty; the chart shows how long it waits for the swap.
   * **Does it clear the existing equipment?** The finished pallet is taken
@@ -165,6 +168,7 @@ HOVER = 0.25
 SPEED = 1.0                         # cruise, under the 1.2 m/s data sheet: a loaded machine among people
 TURN = math.radians(45.0)
 LIFT_UP, LIFT_DOWN = 4.0, 3.2       # the lift's own figures
+LATE_CALL = 15.0                    # `--no-interlock`: the picker calls this late (a case re-picked)
 READY = [0.0, -1.9, 1.9, -1.6, -math.pi / 2, 0.0]
 CUPS = ["cup_a1", "cup_a2", "cup_b1", "cup_b2", "tcp"]
 
@@ -916,8 +920,11 @@ def group_of(scene: bt.Scene, prefix: str) -> list[str]:
     return [n for n in scene.obstacle_names if n == prefix or n.startswith(prefix + "/")]
 
 
-def programs(scene: bt.Scene, machine: PalletAmr, lifts: dict, loads: dict, interlock: bool) -> list[str]:
-    """The three flows, the picker, and the traffic control between them."""
+def programs(scene: bt.Scene, machine: PalletAmr, lifts: dict, loads: dict, interlock: bool,
+             late_call: float = 0.0) -> list[str]:
+    """The three flows, the picker, and the traffic control between them.
+    `late_call` holds the picker's call back that many seconds: a pallet
+    that empties later than planned (a case re-picked)."""
     for sig in ("req_amr1", "grant_amr1", "req_amr2", "grant_amr2", "call", "supply_done", "vacuum"):
         scene.define_signal(sig, initial=(not interlock) and sig.startswith("grant"))
 
@@ -982,6 +989,8 @@ def programs(scene: bt.Scene, machine: PalletAmr, lifts: dict, loads: dict, inte
 
     for k, case in enumerate(loads["p2"]):
         pick(k, case)
+    if late_call > 0.0:
+        pk.step("re-pick", transition=bt.seq.elapsed(late_call))
     # The pallet is empty: call for the next one and get out of the way.
     pk.step("call", actions=[bt.seq.set_signal("call")], transition=bt.seq.immediately())
     pk.step("park", actions=[bt.seq.motion("parked")])
@@ -1028,7 +1037,7 @@ def programs(scene: bt.Scene, machine: PalletAmr, lifts: dict, loads: dict, inte
 
 
 # ================================================================== the cell
-def build(*, aisle: float = AISLE, interlock: bool = True) -> tuple[bt.Scene, PalletAmr]:
+def build(*, aisle: float = AISLE, interlock: bool = True, late_call: float = 0.0) -> tuple[bt.Scene, PalletAmr]:
     lane = AISLE_S + aisle / 2
     stand_y = AISLE_S + aisle + STAND_LEN / 2
     rack_y0 = AISLE_S + aisle + STAND_LEN + 0.35
@@ -1053,13 +1062,13 @@ def build(*, aisle: float = AISLE, interlock: bool = True) -> tuple[bt.Scene, Pa
         for link in CUPS:
             scene.allow_link_obstacle_contact(link, case, robot="picker")
     teach(scene, loads["p2"])
-    programs(scene, machine, lifts, loads, interlock)
+    programs(scene, machine, lifts, loads, interlock, late_call)
     scene.set_obstacle_material("floor/slab", metalness=0.0, roughness=0.9)
     return scene, machine
 
 
-def bake(*, aisle: float = AISLE, interlock: bool = True):
-    scene, machine = build(aisle=aisle, interlock=interlock)
+def bake(*, aisle: float = AISLE, interlock: bool = True, late_call: float = 0.0):
+    scene, machine = build(aisle=aisle, interlock=interlock, late_call=late_call)
     names = ["receiving", "picking", "supply"] + (["traffic"] if interlock else [])
     return scene, machine, scene.simulate_sequences(names, max_duration=900.0)
 
@@ -1156,7 +1165,7 @@ def main() -> None:
     parser.add_argument("recording", nargs="?", default="warehouse_cell.usdc", help="write the baked shift as USD here")
     parser.add_argument("--aisle", type=float, default=AISLE, help="main aisle width in metres (the sketch says 3.0 minimum)")
     parser.add_argument("--no-interlock", dest="no_interlock", action="store_true",
-                        help="drop the traffic control: both machines drive on their own clock, refused")
+                        help="drop the traffic control and have the picker call late: refused")
     parser.add_argument("--out", type=Path, default=None, help="write the document set here")
     parser.add_argument("--catalog-root", type=Path, default=None, help="a catalog builder's build/ directory")
     parser.add_argument("--studio", action="store_true")
@@ -1165,8 +1174,10 @@ def main() -> None:
         CATALOG_ROOT = args.catalog_root.resolve()
 
     if args.no_interlock or args.aisle != AISLE:
+        if args.no_interlock:
+            print(f"no traffic control, and the picker calls {LATE_CALL:.0f} s late (a case re-picked):")
         try:
-            bake(aisle=args.aisle, interlock=not args.no_interlock)
+            bake(aisle=args.aisle, interlock=not args.no_interlock, late_call=LATE_CALL if args.no_interlock else 0.0)
         except ValueError as err:
             print("refused, as it should be:")
             print(f"  {err}")

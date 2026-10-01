@@ -1398,6 +1398,19 @@ pub fn add_spin(
     Ok(())
 }
 
+/// Places a vehicle at one of its stations as if authored there — its
+/// body, its load and the robots on it (`Scene::place_vehicle`).
+pub fn place_vehicle(
+    host: &impl SessionHost,
+    device: &str,
+    station: &str,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.place_vehicle(device, station))?;
+    emit_devices(host);
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
 pub fn upsert_device(host: &impl SessionHost, device: botrail_scene::seq::Device) {
     host.with_scene(|scene| scene.upsert_device(device));
     emit_devices(host);
@@ -2237,6 +2250,24 @@ fn timeline_msg_on(
         robots,
         vehicles,
         objects: object_tracks,
+        ropes: timeline
+            .ropes
+            .iter()
+            .map(|track| {
+                let mut t = track.clone();
+                // Keep the predecessor for standalone window interpolation.
+                let first = window.map_or(0, |from| {
+                    t.times.partition_point(|s| *s < from).saturating_sub(1)
+                });
+                t.times.drain(..first);
+                t.points.drain(..first);
+                t.held.drain(..first);
+                for c in &mut t.connectors {
+                    c.poses.drain(..first);
+                }
+                t
+            })
+            .collect(),
         cloths: timeline
             .cloths
             .iter()
@@ -2324,9 +2355,7 @@ fn plan_to_snapshot(
         .plan_joint_path_for(robot, group, &start, goal, options)
         .map_err(|e| e.to_string())?;
     let limits = traj_limits(&snapshot.robots()[robot].model);
-    let traj =
-        botrail_traj::time_parameterize(&path, &limits, &botrail_traj::TimingOptions::default())
-            .map_err(|e| e.to_string())?;
+    let traj = botrail_scene::motion::time_joint_path(&path, &limits).map_err(|e| e.to_string())?;
     let ms = host.now_ms() - t0;
     Ok((traj, path, ms))
 }

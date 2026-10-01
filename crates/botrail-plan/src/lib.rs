@@ -298,7 +298,12 @@ pub fn plan(
 }
 
 /// Random shortcut: repeatedly tries to replace a sub-path with a straight
-/// segment. Keeps endpoints; result never gets longer.
+/// segment between two of its waypoints; then one deterministic pass keeps,
+/// from each kept waypoint, the farthest one a straight segment reaches —
+/// what the random draws leave of an RRT detour's vertices. Keeps the
+/// endpoints; the result never gets longer. (Cuts between points *along*
+/// the path were tried: they pull it taut round the obstacles it went
+/// round, and the clearance went with it — contacts between samples.)
 fn shortcut(
     mut path: Vec<Vec<f64>>,
     options: &PlanOptions,
@@ -315,7 +320,17 @@ fn shortcut(
             path.drain(i + 1..j);
         }
     }
-    path
+    let mut out = vec![path[0].clone()];
+    let mut i = 0;
+    while i < path.len() - 1 {
+        let reach = (i + 2..path.len())
+            .rev()
+            .find(|&j| edge_valid(&path[i], &path[j], options.resolution, is_valid))
+            .unwrap_or(i + 1);
+        out.push(path[reach].clone());
+        i = reach;
+    }
+    out
 }
 
 /// Total joint-space L2 length of a path.

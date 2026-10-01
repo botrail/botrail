@@ -186,6 +186,11 @@ Q_ROLE = {"up": (S2, 0.0, S2, 0.0), "dn": (0.0, -S2, 0.0, S2)}
 READY = [0.0, -0.9, -0.3, -math.pi, -0.9, 0.0, GUN_OPEN]
 
 BODIES = 2                         # cycles through the station
+# The planner checks a joint path every `plan_resolution` (L2, rad). Its
+# default, 0.05, is up to 10 cm of travel at the gun of this 2.6 m arm —
+# enough to step over a 12 mm tab between two checks: the moves home and
+# across the body clipped the tabs, and only the bake's sampling hid it.
+PLAN_RESOLUTION = 0.02
 # Bare steel with a zinc cast, which is what a body looks like before paint
 # — a body-in-white is only "white" in the trade sense.
 STEEL = (0.42, 0.45, 0.48)
@@ -853,13 +858,14 @@ def main() -> None:
         # the guns meet where the survey said they would. The rollout
         # reports it as a hard failure with a timestamp.
         try:
-            scene.simulate_sequence(build_clash(scene, poses), max_duration=60.0)
+            scene.simulate_sequence(build_clash(scene, poses), max_duration=60.0,
+                                    plan_resolution=PLAN_RESOLUTION)
             raise SystemExit("expected a robot-robot collision")
         except ValueError as e:
             print(f"unarbitrated seam, as caught by the rollout:\n   {e}")
         return
 
-    timeline = scene.simulate_sequence(name, max_duration=400.0)
+    timeline = scene.simulate_sequence(name, max_duration=400.0, plan_resolution=PLAN_RESOLUTION)
     welds = BODIES * len(ARMS) * len(SPOT_X["up"])
     print(f"body: {station.length:.2f} m long, {station.height:.2f} m tall, "
           f"seam at y=±{station.seam_y:.3f}, z={station.seam_z:.3f}")

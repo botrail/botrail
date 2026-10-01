@@ -1345,11 +1345,12 @@ mod tests {
             .plan_toolpath("cut", 0, None, &ToolpathOptions::default())
             .unwrap();
         // 10 cm at 20 mm/s = 5 s; the joints could do it far faster, so
-        // the feed floor must own the timing.
+        // the feed floor must own the timing — plus the moment it takes to
+        // reach the feed from rest and to leave it (a few hundredths).
         let cut_time = planned.move_ends[1] - planned.move_ends[0];
         assert!(
-            (cut_time - 5.0).abs() < 0.05,
-            "cut time {cut_time}, expected ~5.0"
+            (5.0 - 1e-9..5.1).contains(&cut_time),
+            "cut time {cut_time}, expected 5.0 and a little to start and stop"
         );
         assert!((planned.cut_length - 0.10).abs() < 1e-9);
         assert_eq!(planned.move_ends.len(), 2);

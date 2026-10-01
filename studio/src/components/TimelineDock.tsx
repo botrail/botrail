@@ -246,8 +246,7 @@ export function TimelineDock() {
       setPlaying(true);
       return;
     }
-    setPlaying(false);
-    setPlayback(t, samplePlayback(playback, t));
+    useStudioStore.getState().seek(t);
   };
 
   const pct = (t: number) => `${(t / duration) * 100}%`;

@@ -1090,11 +1090,16 @@ pub enum Action {
     /// [`Condition::Done`].
     StartMotion { motion: String },
     /// Linearly ramp a subset of joints (a gripper open/close) over
-    /// `duration` seconds. Await it with [`Condition::Done`].
+    /// `duration` seconds. Await it with [`Condition::Done`]. A ramp is not
+    /// planned; with `check`, its straight joint line is checked against
+    /// the world as it stands when the ramp starts — as a planned motion's
+    /// is — and a contact fails the bake (an arm moved by ramps; a gripper
+    /// closing on its part is the usual unchecked ramp).
     StartRamp {
         robot: Option<String>,
         targets: Vec<(String, f64)>,
         duration: f64,
+        check: bool,
     },
     /// Hand the robot — or one arm (`group`) — to a registered policy for
     /// this step: a learned or scripted controller supplied at bake time
@@ -2997,6 +3002,7 @@ impl Scene {
                 robot,
                 targets,
                 duration,
+                ..
             } => {
                 let model = &self.robots()[self.resolve_seq_robot(robot)?].model;
                 if targets.is_empty() {

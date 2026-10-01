@@ -271,44 +271,55 @@ fn parameterize_impl(
     }
 
     // 2. Stretch durations until interface accelerations (with rest-to-rest
-    //    boundaries) are within bounds.
+    //    boundaries) are within bounds. A violated interface slows only the
+    //    piece on its *faster* side for that joint — the slower piece already
+    //    meets the bound — and the pieces are swept forward and back, so the
+    //    acceleration from rest grows out of the start and the braking into
+    //    the end. A piece leaving or reaching rest ends at twice its average
+    //    speed (constant acceleration from rest), so the boundaries count the
+    //    speed change double. (Stretching both neighbours in one forward
+    //    sweep ran each stretch down the whole path: a straight ten-joint
+    //    line came out at 3.3x its slowest joint's trapezoid, a dense one at
+    //    14x; and a short move beat the bang-bang optimum.)
     for _ in 0..options.max_passes {
         let mut changed = false;
-        for i in 0..=nseg {
-            // j indexes points/dt/limits in parallel.
-            #[allow(clippy::needless_range_loop)]
-            for j in 0..dof {
-                let v_prev = if i > 0 {
-                    (points[i][j] - points[i - 1][j]) / dt[i - 1]
-                } else {
-                    0.0
-                };
-                let v_next = if i < nseg {
-                    (points[i + 1][j] - points[i][j]) / dt[i]
-                } else {
-                    0.0
-                };
-                // Conservative span: the shorter adjacent segment. The
-                // average span makes the discrete estimate optimistic vs
-                // the continuous profile; min biases toward stretching.
-                let span = match (i > 0, i < nseg) {
-                    (true, true) => dt[i - 1].min(dt[i]),
-                    (true, false) => dt[i - 1],
-                    (false, true) => dt[i],
-                    (false, false) => unreachable!("n >= 2"),
-                };
-                let acc = (v_next - v_prev) / span;
-                if acc.abs() > limits.acceleration[j] * 1.001 {
-                    // Stretching by sqrt(ratio) halves the acceleration
-                    // roughly quadratically; cap the growth per pass.
-                    let scale = (acc.abs() / limits.acceleration[j]).sqrt().min(1.5);
-                    if i > 0 {
-                        dt[i - 1] *= scale;
+        for forward in [true, false] {
+            for k in 0..=nseg {
+                let i = if forward { k } else { nseg - k };
+                // j indexes points/dt/limits in parallel.
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..dof {
+                    let v_prev = if i > 0 {
+                        (points[i][j] - points[i - 1][j]) / dt[i - 1]
+                    } else {
+                        0.0
+                    };
+                    let v_next = if i < nseg {
+                        (points[i + 1][j] - points[i][j]) / dt[i]
+                    } else {
+                        0.0
+                    };
+                    // Conservative span: the shorter adjacent segment. The
+                    // average span makes the discrete estimate optimistic vs
+                    // the continuous profile; min biases toward stretching.
+                    let (span, rest) = match (i > 0, i < nseg) {
+                        (true, true) => (dt[i - 1].min(dt[i]), 1.0),
+                        (true, false) => (dt[i - 1], 2.0),
+                        (false, true) => (dt[i], 2.0),
+                        (false, false) => unreachable!("n >= 2"),
+                    };
+                    let acc = rest * (v_next - v_prev) / span;
+                    if acc.abs() > limits.acceleration[j] * 1.001 {
+                        // Stretching by sqrt(ratio) halves the acceleration
+                        // roughly quadratically; cap the growth per visit.
+                        let scale = (acc.abs() / limits.acceleration[j]).sqrt().min(1.5);
+                        if i < nseg && (i == 0 || v_next.abs() >= v_prev.abs()) {
+                            dt[i] *= scale;
+                        } else {
+                            dt[i - 1] *= scale;
+                        }
+                        changed = true;
                     }
-                    if i < nseg {
-                        dt[i] *= scale;
-                    }
-                    changed = true;
                 }
             }
         }
@@ -401,6 +412,78 @@ mod tests {
         // optimum of 2s; it also should not be pathologically slow.
         let d = traj.duration();
         assert!((1.9..6.0).contains(&d), "duration = {d}");
+    }
+
+    /// The ideal rest-to-rest time of a straight joint line: the joint
+    /// slowest against its bounds sets a trapezoid (or a triangle).
+    fn trapezoid(delta: &[f64], limits: &Limits) -> f64 {
+        let v = delta
+            .iter()
+            .zip(&limits.velocity)
+            .filter(|(d, _)| d.abs() > 1e-12)
+            .map(|(d, v)| v / d.abs())
+            .fold(f64::INFINITY, f64::min);
+        let a = delta
+            .iter()
+            .zip(&limits.acceleration)
+            .filter(|(d, _)| d.abs() > 1e-12)
+            .map(|(d, a)| a / d.abs())
+            .fold(f64::INFINITY, f64::min);
+        if v * v / a < 1.0 {
+            1.0 / v + v / a
+        } else {
+            2.0 / a.sqrt()
+        }
+    }
+
+    /// A ten-joint straight line (an arm and a waist, as a humanoid reaches)
+    /// is timed by its slowest joint — it used to come out at 3.3x that,
+    /// each acceleration check stretching both neighbours down the line.
+    #[test]
+    fn a_straight_multi_joint_line_is_timed_by_its_slowest_joint() {
+        let delta = [
+            -0.441, 0.364, -0.146, -0.301, -0.773, 0.332, 0.723, -0.108, 0.219, -1.447,
+        ];
+        let velocity = vec![1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.4, 2.0, 2.0, 2.0];
+        let limits = Limits {
+            acceleration: velocity.iter().map(|v| 2.0 * v).collect(),
+            velocity,
+        };
+        let ideal = trapezoid(&delta, &limits);
+        let line = |points: usize| -> f64 {
+            let path: Vec<Vec<f64>> = (0..points)
+                .map(|k| {
+                    delta
+                        .iter()
+                        .map(|d| d * k as f64 / (points - 1) as f64)
+                        .collect()
+                })
+                .collect();
+            time_parameterize(&path, &limits, &TimingOptions::default())
+                .unwrap()
+                .duration()
+        };
+        let sparse = line(2);
+        assert!(
+            (ideal..1.25 * ideal).contains(&sparse),
+            "{sparse} s for a {ideal} s trapezoid"
+        );
+        // The same line through 46 points (a Cartesian follower's centimetre
+        // steps) is not slowed by its waypoints: it was 14x the trapezoid.
+        let dense = line(46);
+        assert!(dense < 1.6 * ideal, "{dense} s for a {ideal} s trapezoid");
+    }
+
+    /// A short move from rest to rest cannot beat bang-bang either.
+    #[test]
+    fn a_short_move_is_no_faster_than_bang_bang() {
+        let path = vec![vec![0.0], vec![0.3]];
+        let traj = time_parameterize(&path, &limits1(), &TimingOptions::default()).unwrap();
+        assert!(
+            traj.duration() >= 2.0 * 0.3f64.sqrt() - 1e-9,
+            "{}",
+            traj.duration()
+        );
     }
 
     #[test]

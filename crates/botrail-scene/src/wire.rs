@@ -1239,11 +1239,15 @@ pub enum ActionMsg {
         toolpath: String,
     },
     /// Linearly ramp joints (gripper open/close); await with `done`.
+    /// `check`: the straight joint line is checked against the world when
+    /// the ramp starts.
     StartRamp {
         #[serde(default)]
         robot: Option<String>,
         targets: Vec<RampTargetMsg>,
         duration: f64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check: bool,
     },
     /// Hand the robot (or one arm) to a registered policy — a learned or
     /// scripted controller supplied at bake time — for at most
@@ -1435,6 +1439,8 @@ pub struct TimelineMsg {
     /// from older files) when the cell has no cloth.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cloths: Vec<ClothTrackMsg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ropes: Vec<crate::rope::RopeTrack>,
     /// Reference-frame track per vehicle that drove, on the same grid.
     #[serde(default)]
     pub vehicles: Vec<VehicleTrackMsg>,
@@ -2280,6 +2286,7 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             robot,
             targets,
             duration,
+            check,
         } => ActionMsg::StartRamp {
             robot: robot.clone(),
             targets: targets
@@ -2290,6 +2297,7 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 })
                 .collect(),
             duration: *duration,
+            check: *check,
         },
         Action::Policy {
             policy,
@@ -2375,10 +2383,12 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             robot,
             targets,
             duration,
+            check,
         } => Action::StartRamp {
             robot: robot.clone(),
             targets: targets.iter().map(|t| (t.joint.clone(), t.value)).collect(),
             duration: *duration,
+            check: *check,
         },
         ActionMsg::Policy {
             policy,
@@ -3850,6 +3860,7 @@ mod tests {
             robots: vec![],
             objects: vec![],
             cloths: vec![],
+            ropes: Vec::new(),
             step_spans: vec![StepSpanMsg {
                 name: "a/wait".into(),
                 start: 0.0,

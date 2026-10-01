@@ -77,9 +77,8 @@ def test_every_sample_of_both_paths_solves(cell):
 
 def test_the_commanded_feed_owns_the_clock(cell, baked):
     """Cutting time is the process's number. The feed floors make
-    `path length / feed` a hard lower bound on the feed moves' spans;
-    the few percent above it is the acceleration limit slowing corners
-    (plunge -> rim is a right angle) — not the joints stealing the feed."""
+    `path length / feed` a hard lower bound on the feed moves' spans, and
+    at these feeds the joints keep up: the bound is met to the rounding."""
     _, _, contour, pocket = cell
     for name, tp in (("contour", contour), ("pocket", pocket)):
         traj = baked[name]
@@ -90,15 +89,17 @@ def test_the_commanded_feed_owns_the_clock(cell, baked):
             for i, move in enumerate(tp["moves"])
             if move["type"] == "feed"
         )
-        assert commanded <= feed_time <= commanded * 1.05, (
+        assert commanded * (1 - 1e-12) <= feed_time <= commanded * 1.05, (
             f"{name}: feed moves took {feed_time:.2f}s, commanded {commanded:.2f}s"
         )
 
 
 # Baked on the pinned dependency set. The tolerance absorbs libm-level
 # drift between machines, not behaviour changes — a re-taught reference
-# pose or a solver change moves these by far more.
-GOLDEN = {"contour": 35.93, "pocket": 27.04}
+# pose or a solver change moves these by far more. 2026-10-01: 35.93 / 27.04
+# → 35.54 / 26.60 when the timing stopped stretching a dense path's pieces
+# past what the joints needed (botrail-traj).
+GOLDEN = {"contour": 35.54, "pocket": 26.60}
 
 
 def test_cycle_times_hold_their_golden(baked):
@@ -209,8 +210,9 @@ def test_toolpaths_survive_the_project_round_trip(cell, tmp_path):
 # Baked on the pinned dependency set: clamp 0.5 + spin-up 1.5 + trim
 # (approach + cut) + pocket + the 5-axis rim chamfer + spin-down 1.0 +
 # unclamp 0.5. It sits under the rollout's default 120 s budget on
-# purpose — the plate is sized for that.
-CYCLE_GOLDEN = 110.63
+# purpose — the plate is sized for that. 2026-10-01: 110.63 → 99.15 when the
+# timing stopped stretching multi-joint moves down their whole length (botrail-traj).
+CYCLE_GOLDEN = 99.15
 
 
 @pytest.fixture(scope="module")
@@ -359,12 +361,14 @@ def test_the_optimized_cycle_is_deterministic(cell, cycle):
 
 def test_feed_reports_name_their_limiting_axis(cycle):
     """The report says where the joints stole feed and which axis owned
-    it. The flat cuts hold well; the tilted rim honestly loses a third of
-    its feed to the corners."""
+    it. The flat cuts hold their feed; the tilted rim gives a little of it
+    up at its corners (about 1.5%), and the spans say which joints took it.
+    (It read a third, once: the timing used to stretch a dense path's
+    pieces far past what the joints needed.)"""
     contour = cycle.feed_report("contour")
     rim = cycle.feed_report("rim")
-    assert contour.hold_ratio > 0.85
-    assert 0.5 < rim.hold_ratio < 0.85
+    assert contour.hold_ratio > 0.95
+    assert 0.9 < rim.hold_ratio < 1.0
     assert rim.hold_ratio < contour.hold_ratio
     assert len(rim.slow_spans) >= 3
     joints = {span["limiting_joint"] for span in rim.slow_spans}

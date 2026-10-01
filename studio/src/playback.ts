@@ -8,6 +8,7 @@
 import type {
   ObjectTrackMsg,
   ClothTrackMsg,
+  RopeTrack,
   PoseMsg,
   TimelineMsg,
   TrajectoryMsg,
@@ -27,6 +28,7 @@ export interface PlaybackTracks {
   vehicles: { times: number[]; tracks: VehicleTrackMsg[] } | null;
   /** Simulated cloth tracks, each on its own sample times. */
   cloths: ClothTrackMsg[] | null;
+  ropes?: RopeTrack[] | null;
 }
 
 /** Display overrides at one playback instant. */
@@ -47,6 +49,9 @@ export interface PlaybackSample {
   cloths: Record<string, Float32Array> | null;
   /** Cloth name -> the vertices a gripper holds. */
   clothHeld: Record<string, number[]> | null;
+  ropes?: Record<string, Float32Array> | null;
+  ropeHeld?: Record<string, number[]> | null;
+  ropeBodies?: Record<string, PoseMsg[]> | null;
 }
 
 /** Tracks for a single-robot result trajectory (plan / motion preview). */
@@ -63,6 +68,7 @@ export function tracksFromTrajectory(
         : null,
     vehicles: null,
     cloths: null,
+    ropes: null,
   };
 }
 
@@ -107,6 +113,7 @@ export function tracksFromTimeline(timeline: TimelineMsg): PlaybackTracks {
           }
         : null,
     cloths: clothTracks(timeline.cloths, timeline.duration),
+    ropes: timeline.ropes?.length ? timeline.ropes : null,
   };
 }
 
@@ -126,7 +133,7 @@ function clothTracks(
 
 /** The vertices a gripper holds at `t`: those of the sample at or before
  * it. */
-export function clothHeldAt(track: ClothTrackMsg, t: number): number[] {
+export function clothHeldAt(track: Pick<ClothTrackMsg, "times" | "held">, t: number): number[] {
   const held = track.held;
   if (!held || held.length === 0 || held.length !== track.times.length) return [];
   return held[bracket(track.times, t)[0]] ?? [];
@@ -276,6 +283,7 @@ export function appendTracks(
     objects: objects.length > 0 ? { times: allTimes, tracks: objects } : null,
     vehicles: vehicles.length > 0 ? { times: allTimes, tracks: vehicles } : null,
     cloths: cloths.length > 0 ? cloths : null,
+    ropes: mergeRopes(prev?.ropes, chunk.ropes),
   };
   streamTracks.add(tracks);
   return tracks;
@@ -389,6 +397,9 @@ export function samplePlayback(
     objects: sampleObjectPoses(tracks.objects, t),
     stowed: sampleStowedObjects(tracks.objects, t),
     cloths: sampleCloths(tracks.cloths, t),
+    ropes: sampleCloths(tracks.ropes ?? null, t),
+    ropeHeld: tracks.ropes ? Object.fromEntries(tracks.ropes.map((r) => [r.name, clothHeldAt(r, t)])) : null,
+    ropeBodies: tracks.ropes ? Object.fromEntries(tracks.ropes.map((r) => [r.name, r.connectors.map((c) => samplePose(r.times, c.poses, t))])) : null,
     clothHeld: tracks.cloths
       ? Object.fromEntries(tracks.cloths.map((c) => [c.name, clothHeldAt(c, t)]))
       : null,
@@ -398,7 +409,7 @@ export function samplePlayback(
 /** Every cloth's vertices at time `t`, linearly blended between the two
  * samples of its own clock around it (a one-sample track is constant). */
 function sampleCloths(
-  cloths: PlaybackTracks["cloths"],
+  cloths: { name: string; times: number[]; points: number[][][] }[] | null,
   t: number,
 ): Record<string, Float32Array> | null {
   if (!cloths) return null;
@@ -554,4 +565,19 @@ export function samplePoses(
   return traj.link_poses[lo].map((pa, link) =>
     lerpPose(pa, traj.link_poses[hi][link], u),
   );
+}
+
+/** Reconcile overlapping window predecessors on each rope's own clock. */
+function mergeRopes(before: RopeTrack[] | null | undefined, window: RopeTrack[] | undefined): RopeTrack[] | null {
+  const tracks = new Map((before ?? []).map((r) => [r.name, r]));
+  for (const r of window ?? []) {
+    const old = tracks.get(r.name);
+    if (!old || !r.times.length) { tracks.set(r.name, r); continue; }
+    const cut = old.times.findIndex((t) => t >= r.times[0]);
+    const n = cut < 0 ? old.times.length : cut;
+    tracks.set(r.name, { ...r, times: [...old.times.slice(0,n), ...r.times],
+      points: [...old.points.slice(0,n), ...r.points], held: [...old.held.slice(0,n), ...r.held],
+      connectors: r.connectors.map((c,i) => ({ ...c, poses: [...(old.connectors[i]?.poses.slice(0,n) ?? []), ...c.poses] })) });
+  }
+  return tracks.size ? [...tracks.values()] : null;
 }

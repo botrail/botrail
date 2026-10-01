@@ -1,7 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 
 import { useDockReserve } from "../dockReserve";
-import { samplePlayback } from "../playback";
 import type {
   BranchTakenMsg,
   SequenceMsg,
@@ -183,15 +182,6 @@ type BakedTimeline = {
   duration: number;
   scenario: string | null;
 };
-
-/** Box clicks seek the shared transport to the step's entry instant —
- * the chart-side half of the chart ⇄ timeline linking. */
-function seekTo(t: number) {
-  const s = useStudioStore.getState();
-  if (!s.playback) return;
-  s.setPlaying(false);
-  s.setPlayback(t, samplePlayback(s.playback, t));
-}
 
 type Mode =
   | { kind: "authored" }
@@ -412,7 +402,7 @@ function ProgramChart({
               style={{ left: b.x, top: b.y, width: BOX_W, height: BOX_H }}
               title={boxTitle(b, span)}
               data-flat={b.flat}
-              onClick={span ? () => seekTo(span.start) : undefined}
+              onClick={span ? () => useStudioStore.getState().seek(span.start) : undefined}
             >
               <span className="sfc-name">
                 {b.branching ? "◇ " : ""}

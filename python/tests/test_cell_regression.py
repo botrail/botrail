@@ -24,8 +24,9 @@ HOME = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # Baked on the pinned dependency set; the tolerance absorbs libm-level
 # drift between machines, not behavior changes (a replan that adds a
-# detour shifts the cycle by far more than 0.25 s).
-GOLDEN_CYCLE = 7.45
+# detour shifts the cycle by far more than 0.25 s). 2026-10-01: 7.45 → 4.25 when
+# the timing stopped stretching multi-joint moves down their whole length (botrail-traj).
+GOLDEN_CYCLE = 4.25
 CYCLE_BUDGET = 8.0
 
 

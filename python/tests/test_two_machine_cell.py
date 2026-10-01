@@ -46,9 +46,10 @@ def test_one_arm_serves_both_machines_in_turn(cell) -> None:
         (jx, jy, _), _ = scene.frame(f"vise_{tag}/jaw")
         p, _ = tl.object_pose(f"blank_{tag}", tl.duration)
         assert (p[0], p[1]) == pytest.approx((jx, jy), abs=1e-3)
-    # With a part program longer than the swap, the arm is the constraint:
-    # busy most of the cycle, and the first machine cutting most of it.
-    assert tl.utilization(two.ROBOT) > 0.5
+    # A part program longer than the swap: the first machine cuts most of the
+    # cycle, and the arm, its moves timed to its limits, is busy about 40% of
+    # it (over half, while the timing stretched multi-joint moves).
+    assert tl.utilization(two.ROBOT) > 0.35
     # Nothing closer than the jaws around a blank — the far machine's
     # door leaf included, with the standard Hand-E fingers.
     assert float(tl.min_clearance()) > 0.0015

@@ -19,15 +19,15 @@ python examples/multi_robot/dual_cell_demo.py
 ```
 
 ```text
-cycle time: 84.16s
-  near  moving 26.27s of 84.16s
-  far   moving 24.88s of 84.16s
-both arms in motion for 9.0s of it
+cycle time: 75.43s
+  near  moving 13.18s of 75.43s
+  far   moving 11.01s of 75.43s
+both arms in motion for 4.7s of it
 stacked 2 course(s) on each pallet from a pool of 6
 exported to cell_dual.usda — view with: usdview cell_dual.usda
 ```
 
-The third line is what the second arm bought: 9 s in which both arms were in
+The third line is what the second arm bought: 4.7 s in which both arms were in
 motion at once — picks overlapped with transfers instead of queueing behind
 them.
 
@@ -132,19 +132,19 @@ python examples/multi_robot/dual_cell_demo.py --clash
 ```
 
 ```text
-the unarbitrated cell happens to run (84.16s), but both arms are over the
-station together for 0.13s.
+the unarbitrated cell happens to run (75.43s), but both arms are over the
+station together for 0.07s.
    Nothing separated them — the transfers merely missed each other.
 
 asked to enter together, they are caught:
-   robots `near` and `far` collide at t = 4.990s (/panda/panda_link5 ×
+   robots `near` and `far` collide at t = 0.570s (/panda/panda_link5 ×
    /panda/panda_link6); add an interlock (zone sensor / robot_done) so one
    waits for the other
 ```
 
 Two lessons in one run. Dropping the interlock does **not** necessarily crash
 the cell: the unarbitrated bake can succeed, with the zones reporting how long
-both arms were over the station together — 0.13 s here, and that number is
+both arms were over the station together — 0.07 s here, and that number is
 the point. It is not a margin anybody designed; it is how much the two
 transfers happened to miss by, and it moves whenever anything in the layout
 does. Nothing separated them, and "it worked when we tried it" is not a

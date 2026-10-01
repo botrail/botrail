@@ -28,6 +28,7 @@ pub mod raster;
 pub mod report;
 pub mod rl;
 pub mod rollout;
+pub mod rope;
 pub mod scan;
 pub mod script;
 pub mod seq;
@@ -973,6 +974,96 @@ impl Scene {
         Ok(())
     }
 
+    /// Places the vehicle `device` at `station` as if it had been authored
+    /// there: its body moves, what rests in its tray rides along (what a
+    /// drive would carry), the robots mounted on it stand on it there —
+    /// holding what they hold — and the station becomes the one a bake
+    /// starts from. A mounted robot is taught where it works this way:
+    /// `set_robot_base_pose_for` moves the robot alone and leaves the
+    /// vehicle's body at the start, so a part in hand meeting the body
+    /// shows only in the bake. Placing it back at the station it started
+    /// at undoes it.
+    pub fn place_vehicle(&mut self, device: &str, station: &str) -> Result<(), SceneError> {
+        let (path, body, start, tray) = match self.devices().iter().find(|d| d.name == device) {
+            Some(crate::seq::Device {
+                kind:
+                    crate::seq::DeviceKind::Vehicle {
+                        path,
+                        body,
+                        start,
+                        tray,
+                        ..
+                    },
+                ..
+            }) => (path.clone(), body.clone(), start.clone(), *tray),
+            Some(_) => {
+                return Err(SceneError::BadMount(format!(
+                    "`{device}` is not a vehicle; only a vehicle is placed at a station"
+                )))
+            }
+            None => return Err(SceneError::UnknownDevice(device.to_string())),
+        };
+        let from = path.frame_at(&start).ok_or_else(|| {
+            SceneError::BadMount(format!(
+                "vehicle `{device}` starts at unknown station `{start}`"
+            ))
+        })?;
+        let to = path.frame_at(station).ok_or_else(|| {
+            let names: Vec<String> = path
+                .stations
+                .iter()
+                .map(|(n, _)| format!("`{n}`"))
+                .collect();
+            SceneError::BadMount(format!(
+                "vehicle `{device}` has no station `{station}` (stations: {})",
+                names.join(", ")
+            ))
+        })?;
+        let moved = to * from.inverse();
+        let riders: Vec<String> = match tray {
+            None => Vec::new(),
+            Some((zone, size)) => {
+                let zone = from * zone;
+                self.obstacles
+                    .iter()
+                    .filter(|o| {
+                        let local = zone.inverse_transform_point(&nalgebra::Point3::from(
+                            o.pose.translation.vector,
+                        ));
+                        !body.contains(&o.name)
+                            && !self.is_attached(&o.name)
+                            && local.x.abs() <= size.x / 2.0
+                            && local.y.abs() <= size.y / 2.0
+                            && local.z.abs() <= size.z / 2.0
+                    })
+                    .map(|o| o.name.clone())
+                    .collect()
+            }
+        };
+        for name in body.iter().chain(&riders) {
+            if self.is_attached(name) {
+                continue;
+            }
+            let pose = moved * self.obstacles[self.obstacle_index(name)?].pose;
+            self.set_obstacle_pose(name, pose)?;
+        }
+        for d in &mut self.devices {
+            if let crate::seq::DeviceKind::Vehicle { start, .. } = &mut d.kind {
+                if d.name == device {
+                    *start = station.to_string();
+                }
+            }
+        }
+        for r in 0..self.robots.len() {
+            let offset = match &self.robots[r].mount {
+                Some(mount) if mount.device == device => mount.offset,
+                _ => continue,
+            };
+            self.set_robot_base_pose_for(r, to * offset);
+        }
+        Ok(())
+    }
+
     /// Records a carrier frame captured from a loaded model. This does not
     /// move the robot; a mismatched actual offset remains visible to review.
     pub fn set_mount_reference(
@@ -1158,7 +1249,7 @@ impl Scene {
     /// The obstacle and its collider, by name (carving needs the solid
     /// shapes for containment).
     /// The collision colliders, aligned with [`Self::obstacles`].
-    pub(crate) fn obstacle_colliders(&self) -> &[ObstacleCollider] {
+    pub fn obstacle_colliders(&self) -> &[ObstacleCollider] {
         &self.obstacle_colliders
     }
 
@@ -2815,6 +2906,7 @@ impl Scene {
             physics_scope: None,
             contacts: Vec::new(),
             cloths: Vec::new(),
+            ropes: Vec::new(),
             grasps: Vec::new(),
             robots,
             objects: Vec::new(),

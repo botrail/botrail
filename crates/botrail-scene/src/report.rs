@@ -1158,6 +1158,7 @@ mod tests {
                             robot: None,
                             targets: vec![("right_elbow".into(), 0.8)],
                             duration: 0.5,
+                            check: false,
                         },
                     ],
                     transition: Condition::GroupDone {

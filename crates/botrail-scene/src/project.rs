@@ -3117,15 +3117,17 @@ fn py_action(action: &ActionMsg) -> String {
             robot,
             targets,
             duration,
+            check,
         } => {
             let entries: Vec<String> = targets
                 .iter()
                 .map(|t| format!("{:?}: {:?}", t.joint, t.value))
                 .collect();
             format!(
-                "bt.seq.ramp({{{}}}, duration={duration}{})",
+                "bt.seq.ramp({{{}}}, duration={duration}{}{})",
                 entries.join(", "),
-                robot_kwarg(robot)
+                robot_kwarg(robot),
+                if *check { ", check=True" } else { "" }
             )
         }
         ActionMsg::Attach {

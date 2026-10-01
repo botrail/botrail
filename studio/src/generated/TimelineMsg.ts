@@ -4,6 +4,7 @@ import type { ClothTrackMsg } from "./ClothTrackMsg";
 import type { ContactMsg } from "./ContactMsg";
 import type { ObjectTrackMsg } from "./ObjectTrackMsg";
 import type { RobotTimelineMsg } from "./RobotTimelineMsg";
+import type { RopeTrack } from "./RopeTrack";
 import type { SignalTrackMsg } from "./SignalTrackMsg";
 import type { StepSpanMsg } from "./StepSpanMsg";
 import type { VehicleTrackMsg } from "./VehicleTrackMsg";
@@ -32,7 +33,7 @@ objects: Array<ObjectTrackMsg>,
  * Vertex track per simulated cloth, on the same grid. Empty (and absent
  * from older files) when the cell has no cloth.
  */
-cloths?: Array<ClothTrackMsg>, 
+cloths?: Array<ClothTrackMsg>, ropes?: Array<RopeTrack>,
 /**
  * Reference-frame track per vehicle that drove, on the same grid.
  */

@@ -127,8 +127,12 @@ def test_the_call_is_answered(shift) -> None:
 
 @needs_packages
 def test_without_traffic_control_the_machines_meet() -> None:
+    """Without the arbiter, whether the machines meet is down to when the
+    picker calls. 2026-10-01: on schedule they now pass 1.7 m apart (the
+    picker got faster when the timing stopped stretching multi-joint moves,
+    botrail-traj), so the refusal is shown with the call 15 s late."""
     with pytest.raises(ValueError, match="amr1.*amr2|amr2.*amr1"):
-        demo.bake(interlock=False)
+        demo.bake(interlock=False, late_call=demo.LATE_CALL)
 
 
 @needs_packages

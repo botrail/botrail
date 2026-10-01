@@ -209,9 +209,12 @@
           ]
         },
         {
-          "description": "Linearly ramp joints (gripper open/close); await with `done`.",
+          "description": "Linearly ramp joints (gripper open/close); await with `done`.\n`check`: the straight joint line is checked against the world when\nthe ramp starts.",
           "type": "object",
           "properties": {
+            "check": {
+              "type": "boolean"
+            },
             "duration": {
               "type": "number",
               "format": "double"

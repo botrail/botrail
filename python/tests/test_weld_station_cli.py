@@ -49,7 +49,9 @@ def test_export_and_optional_studio(cli, monkeypatch, args, output, studio):
     demo.bt.studio.side_effect = open_studio
     demo.main()
 
-    scene.simulate_sequence.assert_called_once_with("weld_station", max_duration=400.0)
+    scene.simulate_sequence.assert_called_once_with(
+        "weld_station", max_duration=400.0, plan_resolution=demo.PLAN_RESOLUTION
+    )
     timeline.export_usd.assert_called_once_with(Path(output), fps=60.0)
     if studio:
         demo.bt.studio.assert_called_once_with(scene)
@@ -68,6 +70,6 @@ def test_clash_does_not_launch_studio(cli, monkeypatch, collision):
         with pytest.raises(SystemExit, match="expected a robot-robot collision"):
             demo.main()
 
-    scene.simulate_sequence.assert_called_once_with("clash", max_duration=60.0)
+    scene.simulate_sequence.assert_called_once_with("clash", max_duration=60.0, plan_resolution=demo.PLAN_RESOLUTION)
     timeline.export_usd.assert_not_called()
     demo.bt.studio.assert_not_called()

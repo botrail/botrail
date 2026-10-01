@@ -43,7 +43,8 @@ def test_sweep_tables_the_grid_in_order_and_keeps_failed_rows() -> None:
     # is a row with the planner's reason, not an exception.
     ok = result.ok
     assert len(ok) == 4 and all(r["ok"] and r["error"] is None for r in ok)
-    assert ok[0]["cycle"] == pytest.approx(10.30, abs=0.01) and ok[0]["clearance"] == pytest.approx(0.53, abs=0.01)
+    # 2026-10-01: 10.30 → 7.10 when the timing stopped stretching multi-joint moves down their whole length (botrail-traj).
+    assert ok[0]["cycle"] == pytest.approx(7.10, abs=0.01) and ok[0]["clearance"] == pytest.approx(0.53, abs=0.01)
     failed = result.failed
     assert [r["lane_y"] for r in failed] == [0.05, 0.05]
     assert "planning failed" in failed[0]["error"] and "cycle" not in failed[0]
@@ -64,11 +65,11 @@ def test_sweep_tables_the_grid_in_order_and_keeps_failed_rows() -> None:
     # cells marked.
     pivot = result.pivot("lane_y", "velocity", "cycle")
     assert pivot.splitlines()[0] == "| lane_y \\ velocity | 0.1 | 0.3 |"
-    assert "| 0.6 | 10.30 | 7.13 |" in pivot and "| 0.05 | — | — |" in pivot
+    assert "| 0.6 | 7.10 | 3.93 |" in pivot and "| 0.05 | — | — |" in pivot
     # Renderings.
     md = result.to_markdown()
     assert md.splitlines()[0] == "| velocity | lane_y | cycle | feed | clearance | ok | error |"
-    assert "| 0.1 | 0.6 | 10.30 | 4.76 | 0.530 | True |  |" in md
+    assert "| 0.1 | 0.6 | 7.10 | 4.76 | 0.530 | True |  |" in md
     csv = result.to_csv()
     assert csv.splitlines()[0] == "velocity,lane_y,cycle,feed,clearance,ok,error"
     assert csv.splitlines()[3].startswith("0.1,0.05,,,,false,ValueError")
@@ -84,10 +85,10 @@ def test_sweep_points_default_metrics_and_errors(tmp_path: Path) -> None:
     # Explicit points, the default metric, a scene with one sequence
     # needs no `sequence=`.
     result = bt.sweep(sd.build_cell, points=[{"velocity": 0.2, "lane_y": 0.6}, {"velocity": 0.3, "lane_y": 0.6}])
-    assert result.metrics == ["cycle"] and [round(r["cycle"], 2) for r in result] == [7.92, 7.13]
+    assert result.metrics == ["cycle"] and [round(r["cycle"], 2) for r in result] == [4.72, 3.93]
     # A build that hands back a timeline is used as is.
     result2 = bt.sweep(lambda v: sd.build_cell(v, 0.6).simulate_sequence("cycle"), grid={"v": [0.2]})
-    assert round(result2.rows[0]["cycle"], 2) == 7.92
+    assert round(result2.rows[0]["cycle"], 2) == 4.72
     # A metrics function that misbehaves is a failed row, not a crash.
     bad = bt.sweep(sd.build_cell, grid={"velocity": [0.2], "lane_y": [0.6]}, metrics=lambda tl: 3, sequence="cycle")
     assert not bad.rows[0]["ok"] and "TypeError" in bad.rows[0]["error"]
@@ -112,7 +113,7 @@ def test_optimize_grid_and_descent_agree_and_report_their_search() -> None:
                        metrics=metrics, sequence="cycle", method="grid")
     assert grid.ok and grid.method == "grid" and len(grid.evaluated) == 7 * 9
     assert grid.params == {"velocity": 0.4, "lane_y": 0.5}
-    assert grid.row["cycle"] == pytest.approx(6.73, abs=0.01) and grid.row["clearance"] >= 0.4
+    assert grid.row["cycle"] == pytest.approx(3.53, abs=0.01) and grid.row["clearance"] >= 0.4
     descent = bt.optimize(sd.build_cell, space=space, objective="cycle", constraints={"clearance": (">=", 0.4)},
                           metrics=metrics, sequence="cycle", method="descent")
     assert descent.ok and descent.params == grid.params
@@ -123,7 +124,7 @@ def test_optimize_grid_and_descent_agree_and_report_their_search() -> None:
     assert (first["velocity"], first["lane_y"]) == (0.25, 0.5)
     doc = json.loads(descent.to_json())
     assert doc["ok"] and doc["params"] == descent.params and doc["evaluated"] == len(descent.evaluated)
-    assert repr(descent).startswith("Optimum({'velocity': 0.4, 'lane_y': 0.5} → cycle=6.73")
+    assert repr(descent).startswith("Optimum({'velocity': 0.4, 'lane_y': 0.5} → cycle=3.53")
     # A callable objective and constraint, maximisation, a start point.
     widest = bt.optimize(sd.build_cell, space=space, objective=lambda r: r["clearance"], minimize=False,
                          constraints=lambda r: r["cycle"] <= 7.5, metrics=metrics, sequence="cycle",

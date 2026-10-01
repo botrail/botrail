@@ -48,6 +48,9 @@ pub fn bake_timeline(
     end: Option<f64>,
     asset_stem: &str,
 ) -> Result<ExportedAnimation, String> {
+    if !timeline.ropes.is_empty() {
+        return Err("rope tracks are playback-only; rope USD export is not implemented".into());
+    }
     let fps = options.fps;
     if !(fps.is_finite() && fps > 0.0) {
         return Err(format!("fps must be positive, got {fps}"));

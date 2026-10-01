@@ -415,8 +415,11 @@ and a small arbiter sequence hands the aisle to one at a time — and then it
 shows on the timing chart as the wait it costs.
 `examples/vehicles/warehouse_demo.py` runs a consultation sketch's three
 flows this way, prints the call-to-supply time the picking station waits,
-and refuses the same shift with `--no-interlock` (the machines meet) or
-`--aisle 1.5` (a column, a wall — by name).
+and refuses the shift with `--no-interlock` or `--aisle 1.5` (a column, a
+wall — by name). Without the arbiter, whether the machines meet is down to
+when the picker calls — on schedule they happen to pass 1.7 m apart — so
+`--no-interlock` also has the call come 15 s late, one case re-picked, and
+the two meet; with the arbiter the same late call passes.
 
 ## A forklift: the mast is the machine's own joints
 

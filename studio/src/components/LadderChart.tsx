@@ -18,7 +18,6 @@ import {
   type LTon,
   type Ladder,
 } from "../ladder";
-import { samplePlayback } from "../playback";
 import type {
   BranchTakenMsg,
   SequenceMsg,
@@ -58,13 +57,6 @@ type BakedTimeline = {
   duration: number;
   scenario: string | null;
 };
-
-function seekTo(t: number) {
-  const s = useStudioStore.getState();
-  if (!s.playback) return;
-  s.setPlaying(false);
-  s.setPlayback(t, samplePlayback(s.playback, t));
-}
 
 // ---------------------------------------------------------------- glyphs
 
@@ -363,7 +355,7 @@ function ProgramLadder({
                 .join(" ")}
               style={{ left: railL + 4, top: g.top, maxWidth: ladder.width - 28 }}
               title={[label, actions, when].filter(Boolean).join("\n")}
-              onClick={span ? () => seekTo(span.start) : undefined}
+              onClick={span ? () => useStudioStore.getState().seek(span.start) : undefined}
             >
               {label}
             </div>

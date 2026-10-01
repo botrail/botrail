@@ -39,32 +39,32 @@ the table says where the cliff is.
 == belt speed sweep (lane_y = 0.60 m) ==
 | velocity | lane_y | cycle | feed | clearance |
 |---|---|---|---|---|
-| 0.1 | 0.6 | 10.30 | 4.76 | 0.530 |
-| 0.15 | 0.6 | 8.71 | 3.17 | 0.530 |
-| 0.2 | 0.6 | 7.92 | 2.38 | 0.530 |
-| 0.25 | 0.6 | 7.44 | 1.90 | 0.530 |
-| 0.3 | 0.6 | 7.13 | 1.59 | 0.530 |
-| 0.35 | 0.6 | 6.90 | 1.36 | 0.530 |
+| 0.1 | 0.6 | 7.10 | 4.76 | 0.530 |
+| 0.15 | 0.6 | 5.51 | 3.17 | 0.530 |
+| 0.2 | 0.6 | 4.72 | 2.38 | 0.530 |
+| 0.25 | 0.6 | 4.24 | 1.90 | 0.530 |
+| 0.3 | 0.6 | 3.93 | 1.59 | 0.530 |
+| 0.35 | 0.6 | 3.70 | 1.36 | 0.530 |
 
 -> only the feed wait moves; the motion part of the cycle is fixed
 
 == conveyor lane sweep (belt = 0.25 m/s) ==
 | velocity | lane_y | cycle | feed | clearance |
 |---|---|---|---|---|
-| 0.25 | 0.7 | 7.44 | 1.90 | 0.630 |
-| 0.25 | 0.6 | 7.44 | 1.90 | 0.530 |
-| 0.25 | 0.5 | 7.45 | 1.91 | 0.430 |
-| 0.25 | 0.4 | 7.45 | 1.91 | 0.330 |
-| 0.25 | 0.35 | 7.45 | 1.91 | 0.280 |
+| 0.25 | 0.7 | 4.24 | 1.90 | 0.630 |
+| 0.25 | 0.6 | 4.24 | 1.90 | 0.530 |
+| 0.25 | 0.5 | 4.25 | 1.91 | 0.430 |
+| 0.25 | 0.4 | 4.25 | 1.91 | 0.330 |
+| 0.25 | 0.35 | 4.25 | 1.91 | 0.280 |
 
 -> the cycle barely moves, the safety margin is what shrinks
 
 == both at once: cycle time over the grid ==
 | lane_y \ velocity | 0.15 | 0.25 | 0.35 |
 |---|---|---|---|
-| 0.7 | 8.71 | 7.44 | 6.90 |
-| 0.5 | 8.71 | 7.45 | 6.90 |
-| 0.35 | 8.71 | 7.45 | 6.90 |
+| 0.7 | 5.51 | 4.24 | 3.70 |
+| 0.5 | 5.51 | 4.25 | 3.70 |
+| 0.35 | 5.51 | 4.25 | 3.70 |
 
 (clearance over the same grid)
 | lane_y \ velocity | 0.15 | 0.25 | 0.35 |
@@ -74,15 +74,15 @@ the table says where the cliff is.
 | 0.35 | 0.280 | 0.280 | 0.280 |
 
 == the question a layout meeting asks: fastest cycle with 0.4 m of clearance ==
-{'velocity': 0.4, 'lane_y': 0.5} -> cycle 6.73 s, clearance 0.43 m (13 bakes, coordinate descent; the full grid is 63)
+{'velocity': 0.4, 'lane_y': 0.5} -> cycle 3.53 s, clearance 0.43 m (13 bakes, coordinate descent; the full grid is 63)
 ```
 
 ## Reading the tables
 
 The two sweeps fail in opposite ways, which is the lesson:
 
-* **Belt speed moves the cycle.** The whole difference between 10.30 s and
-  6.90 s is the feed wait — the planned motions are untouched. If the cell
+* **Belt speed moves the cycle.** The whole difference between 7.10 s and
+  3.70 s is the feed wait — the planned motions are untouched. If the cell
   misses takt, this column says whether a faster belt buys it back.
 * **Lane position eats the clearance.** The cycle barely moves (the approach
   is a hair longer), but the safety margin drops linearly — at `lane_y = 0.35`

@@ -886,6 +886,8 @@ pub struct SequenceTimeline {
     /// `botrail-cloth`): one vertex track per cloth. Empty unless a pass
     /// ran; the rollout itself never fills it.
     pub cloths: Vec<crate::cloth::ClothTrack>,
+    /// Simulated after baking in an independent 0.36 world, with no source reaction.
+    pub ropes: Vec<crate::rope::RopeTrack>,
 }
 
 /// One resolved selection divergence: which arm `sequence` took at the
@@ -1885,6 +1887,25 @@ struct GaitRuntime {
     /// its route: the body tilts onto a grade and rides up the steps, so
     /// what it carries rides that, not the guide line underneath.
     carried: Vec<(String, Isometry3<f64>)>,
+}
+
+impl GaitRuntime {
+    /// Where the body of a walk whose vehicle has stopped will be at `t`:
+    /// the parked ride under it, with the tilt, the rise over the steps and
+    /// the sway still fading out, composed as the gait tick composes them —
+    /// all closed form, so a check can look ahead. `base_now` is the world
+    /// base as of this tick.
+    fn settling_body_at(&self, base_now: &Isometry3<f64>, t: f64) -> Isometry3<f64> {
+        let plan = self.plan.as_ref().expect("walking");
+        let was = nalgebra::Translation3::new(0.0, 0.0, self.rise);
+        let rigid = was.inverse() * base_now * (self.pitch * self.sway).inverse();
+        let sway = match &plan.sway {
+            Some(s) if t < plan.done - 1e-9 => s.offset_at(t),
+            _ => Isometry3::identity(),
+        };
+        let lift = nalgebra::Translation3::new(0.0, 0.0, crate::gait::rise_at(&plan.rise, t));
+        lift * rigid * crate::gait::pitch_offset(&plan.pitch, t) * sway
+    }
 }
 
 /// One program's scan-loop cursor. Several of these advancing over one
@@ -3393,6 +3414,69 @@ const TRACK_IK: botrail_kin::IkOptions = botrail_kin::IkOptions {
     restarts: 0,
     null_space_gain: 0.0,
 };
+
+/// The arm swing a walk keeps. A swing is for arms that hang: shoulders
+/// swung under a pose held before the body run the hands into the torso
+/// (a humanoid walking in a ready pose). A joint keeps its swing while both
+/// of its ends stay clear of the robot itself, and the whole swing is kept
+/// while both ends of the phase are — every swung joint at `center ±
+/// amplitude` together. Contacts the robot already makes at `q` do not
+/// count. Leaves the world's joints at the last pose tried.
+fn clear_swing(
+    world: &mut Scene,
+    r: usize,
+    q: &[f64],
+    swing: Vec<crate::gait::ArmSwing>,
+) -> Vec<crate::gait::ArmSwing> {
+    if swing.is_empty() {
+        return swing;
+    }
+    let key = |id: botrail_collide::ColliderId| match id {
+        botrail_collide::ColliderId::Link { robot, link } => (0u8, robot, link),
+        botrail_collide::ColliderId::Obstacle(k) => (1, k, 0),
+        botrail_collide::ColliderId::Attached(k) => (2, k, 0),
+    };
+    let contacts = |world: &mut Scene, at: &[(usize, f64)]| {
+        let mut q = q.to_vec();
+        for &(qi, v) in at {
+            q[qi] = v;
+        }
+        world
+            .set_joint_positions_for(r, q)
+            .expect("commanded q has robot DOF");
+        world
+            .check_self_collisions_for(r)
+            .into_iter()
+            .map(|p| {
+                let (a, b) = (key(p.a), key(p.b));
+                if a <= b {
+                    (a, b)
+                } else {
+                    (b, a)
+                }
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let before = contacts(world, &[]);
+    let clashes = |world: &mut Scene, at: &[(usize, f64)]| !contacts(world, at).is_subset(&before);
+    let mut kept: Vec<crate::gait::ArmSwing> = swing
+        .into_iter()
+        .filter(|s| {
+            !clashes(world, &[(s.joint, s.center + s.amplitude)])
+                && !clashes(world, &[(s.joint, s.center - s.amplitude)])
+        })
+        .collect();
+    let phase = |sign: f64| -> Vec<(usize, f64)> {
+        kept.iter()
+            .map(|s| (s.joint, s.center + sign * s.amplitude))
+            .collect()
+    };
+    let (ahead, behind) = (phase(1.0), phase(-1.0));
+    if !kept.is_empty() && (clashes(world, &ahead) || clashes(world, &behind)) {
+        kept.clear();
+    }
+    kept
+}
 
 /// An active conveyor track: taught poses are carried by `offset`, which is
 /// the part's rigid motion since the latch — recomputed every tick until the
@@ -9115,15 +9199,21 @@ impl Rollout {
                     group,
                 });
                 // Joints follow the trajectory tick by tick (advance_world),
-                // so mid-motion sensors see the true robot state.
-                rt.active.push(ActiveMove {
-                    owned,
-                    label: motion.clone(),
-                    kind: MoveKind::Traj {
-                        start: self.t,
-                        traj,
-                    },
-                });
+                // so mid-motion sensors see the true robot state. A motion to
+                // where the arm already is plans to nothing: it ends as it
+                // starts and drives no joint — in flight, it would hold its
+                // joints until the next scan retires it, and the step `done`
+                // lets through in this same scan could not take them.
+                if traj.duration() > 1e-9 {
+                    rt.active.push(ActiveMove {
+                        owned,
+                        label: motion.clone(),
+                        kind: MoveKind::Traj {
+                            start: self.t,
+                            traj,
+                        },
+                    });
+                }
             }
             Action::StartToolpath { robot, toolpath } => {
                 let r = self.action_robot(robot)?;
@@ -9186,12 +9276,8 @@ impl Rollout {
                         name: self.cur_step_name(),
                         message: format!("approach to toolpath `{toolpath}`: {e}"),
                     })?;
-                    let approach = botrail_traj::time_parameterize(
-                        &approach_path,
-                        &limits,
-                        &botrail_traj::TimingOptions::default(),
-                    )
-                    .map_err(|e| err(e.to_string()))?;
+                    let approach = crate::motion::time_joint_path(&approach_path, &limits)
+                        .map_err(|e| err(e.to_string()))?;
                     segments.push(crate::motion::PlannedSegment {
                         kind: crate::motion::SegmentKind::Joint,
                         waypoints: approach_path,
@@ -9349,6 +9435,7 @@ impl Rollout {
                 robot,
                 targets,
                 duration,
+                check,
             } => {
                 let r = self.action_robot(robot)?;
                 let model = self.world.robots()[r].model.clone();
@@ -9390,6 +9477,76 @@ impl Rollout {
                         )));
                     }
                     goal[qi] = *value;
+                }
+                // A ramp is not planned. Asked to (`check`), its straight
+                // joint line is held against the world as it stands now —
+                // what a planned motion's segment is — at the planner's
+                // resolution; the first contact fails the bake by name.
+                // A walk that has just stopped is still settling — the
+                // body sways back onto its stance for a moment — so there
+                // each point is held where the body will be when the arm
+                // gets there: the ramp's cubic, every scan tick.
+                if *check {
+                    let from = &rt.q_nom;
+                    let span = from
+                        .iter()
+                        .zip(&goal)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f64>()
+                        .sqrt();
+                    let resolution = self.options.plan.resolution;
+                    let base_now = *self.world.robots()[r].base_pose();
+                    let settling = rt.gait.as_ref().filter(|g| {
+                        g.plan
+                            .as_ref()
+                            .is_some_and(|p| now >= p.profile.t_end - 1e-9)
+                    });
+                    let n = match settling {
+                        // The cubic's steepest stretch covers 1.5 times
+                        // the mean.
+                        Some(_) => ((1.5 * span / resolution).ceil() as usize)
+                            .max((duration / self.options.dt).ceil() as usize),
+                        None => (span / resolution).ceil() as usize,
+                    }
+                    .max(1);
+                    let mut hit = None;
+                    for k in 0..=n {
+                        let u = k as f64 / n as f64;
+                        let s = match settling {
+                            Some(g) => {
+                                self.world.set_robot_base_pose_for(
+                                    r,
+                                    g.settling_body_at(&base_now, now + u * duration),
+                                );
+                                u * u * (3.0 - 2.0 * u)
+                            }
+                            None => u,
+                        };
+                        let q: Vec<f64> = from
+                            .iter()
+                            .zip(&goal)
+                            .map(|(a, b)| a + (b - a) * s)
+                            .collect();
+                        if !self.world.is_state_valid_for(r, &q) {
+                            hit =
+                                Some((s, crate::motion::collision_names(&self.world, r, None, &q)));
+                            break;
+                        }
+                    }
+                    if settling.is_some() {
+                        self.world.set_robot_base_pose_for(r, base_now);
+                    }
+                    if let Some((s, names)) = hit {
+                        return Err(err(format!(
+                            "the ramp meets the cell {:.0}% of the way: {}",
+                            s * 100.0,
+                            if names.is_empty() {
+                                "a joint limit".to_string()
+                            } else {
+                                names.join(", ")
+                            }
+                        )));
+                    }
                 }
                 // Two rest-to-rest waypoints: cubic Hermite eases in/out.
                 // A tracked ramp cannot bake ahead — its poses are carried
@@ -10197,6 +10354,7 @@ impl Rollout {
             branches: self.branches.clone(),
             grasps,
             cloths: Vec::new(),
+            ropes: Vec::new(),
             contacts: self
                 .physics
                 .as_ref()
@@ -10924,6 +11082,7 @@ impl Rollout {
                 amplitude,
             })
             .collect();
+        let swing = clear_swing(&mut self.world, r, &self.robots[r].q, swing);
         self.world
             .set_joint_positions_for(r, self.robots[r].q.clone())
             .expect("commanded q has robot DOF");
@@ -11657,6 +11816,114 @@ pub(crate) mod tests {
             tl.robots[0].trajectory.positions,
             again.robots[0].trajectory.positions
         );
+    }
+
+    /// A checked ramp is held against the cell as a planned segment is:
+    /// the cube turning from +45 to -45 degrees clears the post at both
+    /// ends but sweeps a corner through it at 0 — checked, the bake fails
+    /// naming the post; unchecked, the ramp runs (the author's to keep clear).
+    #[test]
+    fn a_checked_ramp_fails_where_its_line_meets_the_cell() {
+        let bake = |check: bool| {
+            let mut scene = sample_scene();
+            scene.set_joint_positions_for(0, vec![0.785]).unwrap();
+            let d = 0.072 / 2f64.sqrt();
+            scene
+                .add_obstacle(
+                    "post",
+                    Geometry::Box {
+                        size: Vector3::new(0.02, 0.02, 0.02),
+                    },
+                    Isometry3::from_parts(
+                        Translation3::new(d, d, 0.5),
+                        UnitQuaternion::from_axis_angle(
+                            &Vector3::z_axis(),
+                            std::f64::consts::FRAC_PI_4,
+                        ),
+                    ),
+                )
+                .unwrap();
+            scene.upsert_sequence(Sequence {
+                name: "cycle".into(),
+                steps: vec![step(
+                    "turn",
+                    vec![Action::StartRamp {
+                        robot: None,
+                        targets: vec![("j".into(), -0.785)],
+                        duration: 1.0,
+                        check,
+                    }],
+                    Condition::Done,
+                )],
+            });
+            scene.simulate_sequence("cycle", &RolloutOptions::default())
+        };
+        let err = bake(true).unwrap_err().to_string();
+        assert!(err.contains("post") && err.contains("ramp"), "{err}");
+        assert!(bake(false).is_ok());
+    }
+
+    /// A swing that would run the arm into the body it hangs off is not
+    /// swung; a small one that stays clear is. The arm hangs 3 cm beside
+    /// a tall body: 0.3 rad toward it puts its end inside, 0.05 does not.
+    #[test]
+    fn a_swing_into_the_robot_itself_is_dropped() {
+        const SWINGER: &str = r#"<robot name="swinger">
+          <link name="body"><collision><geometry><box size="0.2 0.2 0.6"/></geometry></collision></link>
+          <link name="shoulder"><collision><geometry><sphere radius="0.01"/></geometry></collision></link>
+          <joint name="mount" type="fixed"><parent link="body"/><child link="shoulder"/>
+            <origin xyz="0.15 0 0.25"/></joint>
+          <link name="arm"><collision><origin xyz="0 0 -0.15"/><geometry><box size="0.04 0.04 0.3"/></geometry></collision></link>
+          <joint name="swing" type="revolute"><parent link="shoulder"/><child link="arm"/>
+            <axis xyz="0 1 0"/><limit lower="-1" upper="1" effort="1" velocity="1"/></joint>
+        </robot>"#;
+        let mut scene = Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(SWINGER).unwrap(),
+        ));
+        let q = scene.robots()[0].joint_positions().to_vec();
+        let swing = |amplitude| {
+            vec![crate::gait::ArmSwing {
+                joint: 0,
+                center: 0.0,
+                amplitude,
+            }]
+        };
+        assert!(clear_swing(&mut scene, 0, &q, swing(0.3)).is_empty());
+        assert_eq!(clear_swing(&mut scene, 0, &q, swing(0.05)).len(), 1);
+    }
+
+    /// A motion to where the arm already is plans to nothing: the next
+    /// step drives the same joints at once (it used to find them held
+    /// "until t = 0.00 s" by the motion that had not moved them).
+    #[test]
+    fn a_zero_length_motion_frees_its_joints_at_once() {
+        let mut scene = sample_scene();
+        joint_motion(&mut scene, "stay", 0.0);
+        joint_motion(&mut scene, "go", 0.8);
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![
+                step(
+                    "stay",
+                    vec![Action::StartMotion {
+                        motion: "stay".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "go",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("cycle", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(tl.step_spans[0].start, tl.step_spans[0].end);
+        assert!((tl.robots[0].trajectory.sample(tl.duration)[0] - 0.8).abs() < 1e-9);
     }
 
     #[test]
@@ -12822,6 +13089,7 @@ pub(crate) mod tests {
                         robot: None,
                         targets: vec![("j".into(), 0.6)],
                         duration: 0.3,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -13065,6 +13333,7 @@ pub(crate) mod tests {
                     robot: None,
                     targets: vec![("j".into(), 5.0)],
                     duration: 0.2,
+                    check: false,
                 }],
                 Condition::Done,
             )],
@@ -13082,6 +13351,7 @@ pub(crate) mod tests {
                         robot: None,
                         targets: vec![("j".into(), 0.1)],
                         duration: 0.2,
+                        check: false,
                     },
                 ],
                 Condition::Done,
@@ -14155,6 +14425,7 @@ mod multi_actor_tests {
                     robot: None,
                     targets: vec![("s".into(), 0.1)],
                     duration: 0.2,
+                    check: false,
                 }],
                 Condition::Done,
             )],
@@ -14172,6 +14443,7 @@ mod multi_actor_tests {
                         robot: Some("a".into()),
                         targets: vec![("s".into(), 0.1)],
                         duration: 0.2,
+                        check: false,
                     },
                 ],
                 Condition::Done,
@@ -14326,6 +14598,7 @@ mod tracking_tests {
                         // taught: straight down onto the part at x = 0
                         targets: vec![("jz".into(), 0.05)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -14386,6 +14659,7 @@ mod tracking_tests {
                         robot: None,
                         targets: vec![("jz".into(), 0.05)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -14406,6 +14680,7 @@ mod tracking_tests {
                         robot: None,
                         targets: vec![("jz".into(), 0.4)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -14544,6 +14819,7 @@ mod tracking_tests {
                         robot: None,
                         targets: vec![("finger_left".into(), 0.02)],
                         duration: 0.4,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -14589,6 +14865,7 @@ mod tracking_tests {
                     robot: None,
                     targets: vec![("finger_right".into(), -0.02)],
                     duration: 0.4,
+                    check: false,
                 }],
                 Condition::Done,
             )],
@@ -14737,6 +15014,51 @@ mod vehicle_tests {
                 tray: None,
             },
         }
+    }
+
+    /// A vehicle placed at another station takes its body and the robot on
+    /// it along (the L's end faces +y: the chassis 0.3 ahead and 0.2 left
+    /// of the start comes to (1.8, 1.3)), starts its bakes there, and is put
+    /// back the same way.
+    #[test]
+    fn a_vehicle_placed_at_a_station_takes_its_body_and_robot() {
+        let mut scene = chassis_scene();
+        scene.mount_robot(0, "agv", iso(0.0, 0.0, 0.2)).unwrap();
+        let chassis = |scene: &Scene| {
+            scene
+                .obstacles()
+                .iter()
+                .find(|o| o.name == "chassis")
+                .unwrap()
+                .pose
+        };
+        let (body0, base0) = (chassis(&scene), *scene.robots()[0].base_pose());
+        scene.place_vehicle("agv", "c").unwrap();
+        assert!((chassis(&scene).translation.vector - Vector3::new(1.8, 1.3, 0.1)).norm() < 1e-9);
+        let base = *scene.robots()[0].base_pose();
+        assert!((base.translation.vector - Vector3::new(2.0, 1.0, 0.2)).norm() < 1e-9);
+        assert!((base.rotation.angle() - FRAC_PI_2).abs() < 1e-9);
+        let DeviceKind::Vehicle { start, .. } = &scene.devices()[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(start, "c");
+        // a bake starts there: back to `a` is the L the other way round
+        scene.upsert_sequence(Sequence {
+            name: "back".into(),
+            steps: vec![step("back", vec![goto("a")], device_done())],
+        });
+        let tl = scene
+            .simulate_sequence("back", &RolloutOptions::default())
+            .unwrap();
+        assert!(tl.duration > 6.0, "{}", tl.duration);
+        scene.place_vehicle("agv", "a").unwrap();
+        assert!((chassis(&scene).translation.vector - body0.translation.vector).norm() < 1e-9);
+        assert!(
+            (scene.robots()[0].base_pose().translation.vector - base0.translation.vector).norm()
+                < 1e-9
+        );
+        let err = scene.place_vehicle("agv", "z").unwrap_err().to_string();
+        assert!(err.contains("`z`") && err.contains("`c`"), "{err}");
     }
 
     fn goto(station: &str) -> Action {
@@ -17417,6 +17739,7 @@ mod mount_tests {
                         robot: None,
                         targets: vec![("j".into(), 0.4)],
                         duration: 1.0,
+                        check: false,
                     },
                 ],
                 device_done(),
@@ -17521,6 +17844,7 @@ mod wheel_mount_tests {
             robot: None,
             targets: vec![(joint.into(), to)],
             duration,
+            check: false,
         }
     }
 
@@ -18242,6 +18566,7 @@ mod parallel_program_tests {
             robot: None,
             targets: vec![(joint.to_string(), value)],
             duration,
+            check: false,
         }
     }
 
@@ -19500,6 +19825,7 @@ mod gait_tests {
             robot: None,
             targets: vec![(joint.into(), value)],
             duration: 1.0,
+            check: false,
         };
         scene.upsert_sequence(Sequence {
             name: "nod".into(),
@@ -19747,6 +20073,7 @@ mod gait_tests {
                         robot: None,
                         targets: vec![("neck".into(), 0.3)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -20266,6 +20593,7 @@ mod biped_tests {
             robot: None,
             targets: vec![(joint.into(), value)],
             duration,
+            check: false,
         };
         // A raise still in flight at dispatch finishes as ramped; the other
         // arm swings.
@@ -20311,6 +20639,88 @@ mod biped_tests {
         assert!(err.contains("driven by the gait"), "{err}");
     }
 
+    /// A checked ramp started on arrival is held where the body will be
+    /// when the arm gets there, not where the sway has it as the ramp
+    /// starts. The hand comes down onto a slab. Started on the arrival
+    /// tick, the body is high: a slab 5 mm into the standing hand fails,
+    /// where the starting body would have passed it. Started 0.15 s later,
+    /// the body is low: a slab clearing the standing hand by 2 mm passes,
+    /// where the starting body would have put the hand in it.
+    #[test]
+    fn a_checked_ramp_on_arrival_is_held_where_the_settling_body_will_be() {
+        let mut spec = biped_gait(true);
+        spec.bob = 0.02;
+        spec.arm_swing.clear();
+        let ramp = |value: f64, check: bool| Action::StartRamp {
+            robot: None,
+            targets: vec![("R_shoulder_pitch_joint".into(), value)],
+            duration: 1.5,
+            check,
+        };
+        let bake = |wait: f64, slab: Option<Isometry3<f64>>| {
+            let mut scene = biped_scene(BIPED, spec.clone());
+            if let Some(pose) = slab {
+                let size = Vector3::new(0.2, 0.2, 0.02);
+                scene
+                    .add_obstacle("slab", Geometry::Box { size }, pose)
+                    .unwrap();
+            }
+            scene.upsert_sequence(Sequence {
+                name: "set".into(),
+                steps: vec![
+                    step("raise", vec![ramp(-2.0, false)], Condition::Done),
+                    step("go", vec![goto("c")], device_done()),
+                    step("wait", vec![], Condition::Elapsed { seconds: wait }),
+                    step("lower", vec![ramp(-1.4, true)], Condition::Done),
+                    step("stand", vec![], Condition::Elapsed { seconds: 0.5 }),
+                ],
+            });
+            let tl = scene.simulate_sequence("set", &RolloutOptions::default());
+            (scene, tl)
+        };
+        // Where the hand ends (its lowest point, the body standing), and
+        // how much lower than standing the body is as the ramp starts.
+        let low = |wait: f64| {
+            let (scene, tl) = bake(wait, None);
+            let tl = tl.unwrap();
+            let track = &tl.robots[0];
+            let start = tl
+                .step_spans
+                .iter()
+                .find(|s| s.name == "lower")
+                .unwrap()
+                .start;
+            let stood = SequenceTimeline::base_pose(track, tl.duration).unwrap();
+            let swaying = SequenceTimeline::base_pose(track, start).unwrap();
+            let q = track.trajectory.sample(tl.duration);
+            (scene, stood, q, stood.translation.z - swaying.translation.z)
+        };
+        let (mut scene, stood, q, high) = low(0.0);
+        let (.., sunk) = low(0.15);
+        assert!(
+            high < -0.006 && sunk > 0.006,
+            "sway as the ramp starts: {high}, {sunk}"
+        );
+        let hand = scene.robots()[0].model.link_index("R_hand").unwrap();
+        scene.set_robot_base_pose_for(0, stood);
+        scene.set_joint_positions_for(0, q).unwrap();
+        let pose = scene.link_poses_for(0)[hand];
+        let r = pose.rotation.to_rotation_matrix();
+        let half = Vector3::new(0.03, 0.02, 0.05);
+        let bottom = pose.translation.z - (0..3).map(|i| r[(2, i)].abs() * half[i]).sum::<f64>();
+        let slab =
+            |top: f64| Isometry3::translation(pose.translation.x, pose.translation.y, top - 0.01);
+
+        let (_, tl) = bake(0.0, Some(slab(bottom + 0.005)));
+        let err = tl.unwrap_err().to_string();
+        assert!(
+            err.contains("ramp meets the cell") && err.contains("slab"),
+            "{err}"
+        );
+        let (_, tl) = bake(0.15, Some(slab(bottom - 0.002)));
+        assert!(tl.is_ok(), "{:?}", tl.err());
+    }
+
     #[test]
     fn a_swung_arm_is_free_the_moment_the_walk_is_over() {
         // The reach a walk ends in: a ramp started on the arrival tick
@@ -20329,6 +20739,7 @@ mod biped_tests {
                         robot: None,
                         targets: vec![("R_shoulder_pitch_joint".into(), -1.0)],
                         duration: 2.0,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -21254,6 +21665,7 @@ mod physics_tests {
                         robot: None,
                         targets: vec![("spin".into(), -1.4)],
                         duration: 1.0,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -21329,6 +21741,7 @@ mod physics_tests {
                             robot: None,
                             targets: vec![("spin".into(), 2.4)],
                             duration: 1.0,
+                            check: false,
                         }],
                         Condition::Elapsed {
                             seconds: detach_delay,
@@ -21631,6 +22044,7 @@ mod dual_arm_tests {
             robot: None,
             targets: vec![(joint.to_string(), value)],
             duration,
+            check: false,
         }
     }
 
@@ -22220,6 +22634,7 @@ mod live_tests {
                         robot: None,
                         targets: vec![("shoulder_lift".into(), 0.6), ("elbow".into(), -0.4)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -22229,6 +22644,7 @@ mod live_tests {
                         robot: None,
                         targets: vec![("shoulder_lift".into(), 0.0)],
                         duration: 0.3,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -22337,6 +22753,7 @@ mod live_tests {
                         robot: None,
                         targets: vec![("shoulder_lift".into(), 0.6)],
                         duration: 1.0,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -22500,6 +22917,7 @@ mod policy_tests {
                         robot: None,
                         targets: vec![("shoulder_pan".into(), 0.0)],
                         duration: 0.5,
+                        check: false,
                     }],
                     Condition::Done,
                 ),
@@ -23094,6 +23512,7 @@ mod wheel_leg_tests {
                         robot: None,
                         targets: vec![("FL_wheel_joint".into(), 1.0)],
                         duration: 1.0,
+                        check: false,
                     }],
                     Condition::Done,
                 )],

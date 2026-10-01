@@ -476,6 +476,7 @@ impl<'a> Pou<'a> {
                     robot,
                     targets,
                     duration,
+                    ..
                 } => {
                     let robot = self.robot_name(robot);
                     let inst = self.instance(

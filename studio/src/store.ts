@@ -438,6 +438,7 @@ function startPlayback(tracks: PlaybackTracks) {
     overrideVehiclePoses: sample.vehicles,
     overrideObstaclePoses: sample.objects,
     clothSamples: sample.cloths,
+    ropeSamples: sample.ropes ?? null,
     stowedObstacles: sample.stowed,
   };
 }
@@ -512,6 +513,7 @@ export interface StudioState {
   overrideObstaclePoses: Record<string, PoseMsg> | null;
   /** Cloth name -> interpolated vertex positions during playback. */
   clothSamples: Record<string, Float32Array> | null;
+  ropeSamples: Record<string, Float32Array> | null;
   /** Objects stowed at the current playback instant — waiting in a
    * magazine or off the line — and therefore not drawn. */
   stowedObstacles: Set<string>;
@@ -790,6 +792,11 @@ export interface StudioState {
   /** Playhead only — the driver applies poses imperatively while playing
    * and syncs the full sample into state on pause/seek/end. */
   setPlaybackTime: (t: number) => void;
+  /** Pauses and shows the baked cycle at `t` (clamped to the bake): the
+   * playhead and the sample there. What a click on the timeline, the
+   * sequence chart or the ladder does — and the one call a script makes
+   * through `window.__STUDIO__` (setting `playbackTime` moves no pose). */
+  seek: (t: number) => void;
   setPlaybackSpeed: (speed: number) => void;
   setPlaybackLoop: (loop: boolean) => void;
   /** Ends playback and returns the display to the live state. */
@@ -823,7 +830,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   overrideBases: null,
   overrideVehiclePoses: null,
   overrideObstaclePoses: null,
-      clothSamples: null,
+  clothSamples: null,
+  ropeSamples: null,
   stowedObstacles: new Set<string>(),
   motions: [],
   sequences: [],
@@ -920,7 +928,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           overrideBases: null,
           overrideVehiclePoses: null,
           overrideObstaclePoses: null,
-      clothSamples: null,
+          clothSamples: null,
+          ropeSamples: null,
           stowedObstacles: new Set<string>(),
           motions: [],
           sequences: [],
@@ -1676,6 +1685,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideVehiclePoses: null,
       overrideObstaclePoses: null,
       clothSamples: null,
+      ropeSamples: null,
       stowedObstacles: new Set<string>(),
     }),
   beginMotionPlanning: () => set({ motionPlanning: true, motionError: null }),
@@ -1689,10 +1699,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideVehiclePoses: sample.vehicles,
       overrideObstaclePoses: sample.objects,
       clothSamples: sample.cloths,
+      ropeSamples: sample.ropes ?? null,
       stowedObstacles: sample.stowed,
     }),
   setPlaying: (playing) => set({ playing }),
   setPlaybackTime: (t) => set({ playbackTime: t }),
+  seek: (t) => {
+    const tracks = get().playback;
+    if (!tracks) return;
+    const at = Math.min(Math.max(t, 0), tracks.duration);
+    set({ playing: false });
+    get().setPlayback(at, samplePlayback(tracks, at));
+  },
   setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
   setPlaybackLoop: (loop) => set({ playbackLoop: loop }),
   stopPlayback: () =>
@@ -1704,6 +1722,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       overrideVehiclePoses: null,
       overrideObstaclePoses: null,
       clothSamples: null,
+      ropeSamples: null,
     }),
   setDroppedStage: (stage) => set({ droppedStage: stage }),
   toggleObstacleHidden: (name) =>

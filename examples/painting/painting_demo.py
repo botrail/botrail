@@ -29,11 +29,11 @@ What the cell shows:
 * **Why the film has to ride the baked trajectory.** Film goes as
   `flow / (speed x pitch)`, so a gun that cannot hold its commanded speed
   lays on more paint. Command 0.30 m/s — ordinary for a paint robot — on
-  this cobot and it holds 22% of it, so the panel comes out at 109 um
-  against a 20-30 um spec: nothing in spec, a cycle that got *slower*,
-  and a defect a constant-speed simulation would never show. That
-  coupling of `feed_report` to film is the thing botrail can say that a
-  kinematics-free film calculator cannot.
+  this cobot and it holds about 60% of it, so the panel comes out at
+  37 um against a 20-30 um spec: nothing in spec, for a cycle no shorter
+  than at 0.20 m/s, and a defect a constant-speed simulation would never
+  show. That coupling of `feed_report` to film is the thing botrail can
+  say that a kinematics-free film calculator cannot.
 
 `spray_coat` reports over the surface the gun *addressed* — in range and
 within `max_incidence` of square on. A part's back face is not a holiday,
@@ -267,8 +267,9 @@ def main() -> None:
         )
     print(
         "  ^ the film rides the *baked* trajectory: at 300 mm/s this arm\n"
-        "    holds a fifth of the commanded speed, so the panel comes out\n"
-        "    four times over spec — and the cycle gets slower, not faster."
+        "    holds about 60% of the commanded speed, so the panel comes out\n"
+        "    half again over the target film — off spec — for a cycle no\n"
+        "    shorter than at 200 mm/s."
     )
 
     # --- the film map ---------------------------------------------------

@@ -1524,6 +1524,10 @@ impl SceneHub {
         botrail_session::upsert_device(self, device);
     }
 
+    pub fn place_vehicle(&self, device: &str, station: &str) -> Result<(), SceneError> {
+        botrail_session::place_vehicle(self, device, station)
+    }
+
     pub fn remove_device(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_device(self, name)
     }
@@ -1806,6 +1810,7 @@ impl SceneHub {
                     // draw at the parked frame here.
                     vehicles: Vec::new(),
                     cloths: Vec::new(),
+                    ropes: Vec::new(),
                     contacts: Vec::new(),
                     physics: None,
                     robots: rec

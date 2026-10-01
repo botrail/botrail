@@ -69,7 +69,9 @@ pytestmark = pytest.mark.skipif(
 # commanded and lands to 1e-9 — not one scan short, not one past.
 # Re-pinned 2026-09-10 (was 182.50): the collision layer now builds hull pieces
 # on the mesh surface instead of voxel corners, which moved this planned cycle.
-GOLDEN_CYCLE = 187.68
+# 2026-10-01: 187.68 → 109.52 when the timing stopped stretching multi-joint moves down their whole length (botrail-traj), and the
+# demo plans at 0.02 rad (`PLAN_RESOLUTION`: the default stepped over the tabs).
+GOLDEN_CYCLE = 109.52
 CYCLE_BUDGET = 1.0
 
 
@@ -80,7 +82,9 @@ def baked():
     scene, station, riders = demo.build_cell()
     poses = demo.teach(scene, station, riders)
     name = demo.build_sequence(scene, poses, riders)
-    return demo, scene, station, riders, scene.simulate_sequence(name, max_duration=400.0)
+    return demo, scene, station, riders, scene.simulate_sequence(
+        name, max_duration=400.0, plan_resolution=demo.PLAN_RESOLUTION
+    )
 
 
 def spans(timeline) -> dict:
@@ -92,7 +96,7 @@ def test_the_station_bakes_one_deterministic_takt(baked) -> None:
     assert sorted(timeline.robots) == sorted(demo.ARMS)
     assert timeline.duration == pytest.approx(GOLDEN_CYCLE, abs=CYCLE_BUDGET)
 
-    again = scene.simulate_sequence("weld_station", max_duration=400.0)
+    again = scene.simulate_sequence("weld_station", max_duration=400.0, plan_resolution=demo.PLAN_RESOLUTION)
     assert again.duration == timeline.duration
     for robot in timeline.robots:
         assert (
@@ -290,7 +294,7 @@ def test_simultaneous_entry_is_a_caught_collision(baked) -> None:
     poses = demo.teach(scene, station, riders)
     demo.build_sequence(scene, poses, riders)
     with pytest.raises(ValueError, match=r"collide at t = "):
-        scene.simulate_sequence(demo.build_clash(scene, poses), max_duration=60.0)
+        scene.simulate_sequence(demo.build_clash(scene, poses), max_duration=60.0, plan_resolution=demo.PLAN_RESOLUTION)
 
 
 def test_the_body_travels_in_and_recirculates(baked) -> None:

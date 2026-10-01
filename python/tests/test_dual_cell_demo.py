@@ -37,8 +37,9 @@ pytestmark = pytest.mark.skipif(
 # gained null-space joint centering; the taught 7-DOF configurations moved
 # off their limits and the transfer plans shortened. 2026-08-22: 83.71 →
 # 84.16 when both pallets moved 160 mm clear of the pedestal they were
-# standing inside — every transfer reaches that much further.
-GOLDEN_CYCLE = 84.16
+# standing inside — every transfer reaches that much further. 2026-10-01:
+# 84.16 → 75.43 when the timing stopped stretching multi-joint moves down their whole length (botrail-traj).
+GOLDEN_CYCLE = 75.43
 CYCLE_BUDGET = 1.0
 
 

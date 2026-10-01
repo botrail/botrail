@@ -258,7 +258,12 @@ fn constraints_ok(
 /// the pairs the moving `group` is party to (every pair without one) —
 /// so a refused line or start says what it met, not that it met
 /// something. Empty when the state is only out of limits.
-fn collision_names(scene: &Scene, robot: usize, group: Option<&Group>, q: &[f64]) -> Vec<String> {
+pub(crate) fn collision_names(
+    scene: &Scene,
+    robot: usize,
+    group: Option<&Group>,
+    q: &[f64],
+) -> Vec<String> {
     let Ok(pairs) = scene.collisions_at_for(robot, q) else {
         return Vec::new();
     };
@@ -343,6 +348,10 @@ fn cartesian_line(
         tol_pos: 1e-5,
         tol_rot: 1e-4,
         joint_mask,
+        // Each step stays where the last one left the redundant joints (as a
+        // conveyor track's solve does): re-centring them at every centimetre
+        // made a redundant arm's path ragged, and the timing slowed to suit.
+        null_space_gain: 0.0,
         ..botrail_kin::IkOptions::default()
     };
 
@@ -518,7 +527,12 @@ pub fn plan_motion(
             group.as_ref(),
         )?;
         current = path.last().expect("paths are non-empty").clone();
-        let traj = botrail_traj::time_parameterize(&path, limits, &timing)?;
+        // A planned path stops at its vertices (`time_joint_path`); a
+        // Cartesian line is a dense IK path, timed through as one.
+        let traj = match segment.kind {
+            SegmentKind::Joint => time_joint_path(&path, limits)?,
+            SegmentKind::CartesianLine => botrail_traj::time_parameterize(&path, limits, &timing)?,
+        };
         combined = Some(match combined {
             None => traj,
             Some(head) => concatenate(head, traj),
@@ -536,6 +550,29 @@ pub fn plan_motion(
         segment_ends,
         segments,
     })
+}
+
+/// Times a planned joint path — the planner's straight edges, each checked
+/// against the cell — edge by edge, coming to rest at each vertex. Timed
+/// through a vertex, the trajectory's curve cuts the corner off the checked
+/// path: 2 cm on a welding arm, through the tab beside it.
+pub fn time_joint_path(
+    path: &[Vec<f64>],
+    limits: &botrail_traj::Limits,
+) -> Result<JointTrajectory, botrail_traj::TrajError> {
+    let timing = botrail_traj::TimingOptions::default();
+    if path.len() <= 2 {
+        return botrail_traj::time_parameterize(path, limits, &timing);
+    }
+    let mut out: Option<JointTrajectory> = None;
+    for edge in path.windows(2) {
+        let traj = botrail_traj::time_parameterize(edge, limits, &timing)?;
+        out = Some(match out {
+            None => traj,
+            Some(head) => concatenate(head, traj),
+        });
+    }
+    Ok(out.expect("a path of three or more waypoints"))
 }
 
 /// Appends `tail` to `head`, shifting its timestamps. The duplicated

@@ -95,3 +95,5 @@ export type { PartTargetKind } from "./generated/PartTargetKind";
 export type { CatalogRef } from "./generated/CatalogRef";
 export type { ServerMessage } from "./generated/ServerMessage";
 export type { ClientMessage } from "./generated/ClientMessage";
+
+export type { RopeTrack } from "./generated/RopeTrack";

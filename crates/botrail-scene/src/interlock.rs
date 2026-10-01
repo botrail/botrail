@@ -951,6 +951,7 @@ mod tests {
                             robot: None,
                             targets: vec![("right_finger".into(), 0.5)],
                             duration: 0.2,
+                            check: false,
                         },
                     ],
                     Condition::GroupDone {
