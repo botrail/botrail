@@ -143,3 +143,41 @@ test("an authored colour leaves a textured material's texture alone; a highlight
   const red = new THREE.Color("red");
   assert.ok(meshMaterial(scan, { color: red, forceColor: true, keepTextures: false }).color.equals(red));
 });
+
+test("an MTL material that states Pm/Pr is drawn physically based; one that does not stays Phong", async () => {
+  const { adoptMtlPbr } = await import("../src/three/meshAppearance.ts");
+  const silver = new THREE.MeshPhongMaterial({ name: "silver", color: new THREE.Color(0.45, 0.47, 0.5), opacity: 0.9, transparent: true });
+  const rough = new THREE.MeshPhongMaterial({ name: "rough" });
+  const plain = new THREE.MeshPhongMaterial({ name: "plain" });
+  const creator = {
+    materialsInfo: {
+      silver: { name: "silver", kd: [0.45, 0.47, 0.5], pm: "0.85", pr: "0.35" },
+      rough: { name: "rough", kd: [0.1, 0.1, 0.1], pr: "0.6" },
+      plain: { name: "plain", kd: [0.2, 0.2, 0.2], ns: "30" },
+    },
+    materials: { silver, rough, plain },
+  };
+  adoptMtlPbr(creator);
+  const m = creator.materials.silver;
+  assert.ok(m.isMeshStandardMaterial);
+  assert.equal(m.metalness, 0.85);
+  assert.equal(m.roughness, 0.35);
+  assert.ok(m.color.equals(silver.color));
+  assert.equal(m.opacity, 0.9);
+  assert.equal(m.transparent, true);
+  assert.equal(m.name, "silver");
+  // Only roughness stated: a dielectric.
+  assert.ok(creator.materials.rough.isMeshStandardMaterial);
+  assert.equal(creator.materials.rough.metalness, 0);
+  assert.equal(creator.materials.rough.roughness, 0.6);
+  // Neither: the Phong the file describes, the very object.
+  assert.equal(creator.materials.plain, plain);
+  // An instance keeps the PBR channels under a colour override.
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(), m);
+  const red = new THREE.Color("red");
+  const painted = meshInstance(mesh, true, { color: red, forceColor: true }, true, true);
+  assert.ok(painted.object.material.color.equals(red));
+  assert.equal(painted.object.material.metalness, 0.85);
+  assert.equal(painted.object.material.roughness, 0.35);
+  painted.dispose();
+});

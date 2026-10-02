@@ -2,11 +2,14 @@
 // apply our own material); OBJ is parsed to an Object3D we clone per instance,
 // with its `mtllib` materials when it names one — a catalog arm ships the
 // manufacturer's own colors that way, and inventing a palette for it would
-// throw away the better answer.
+// throw away the better answer. A material the MTL gives `Pm`/`Pr` (its PBR
+// extension) is drawn physically based; the rest stay Phong.
 // Unsupported extensions are warned about and skipped.
 
 import * as THREE from "three";
 import { MaterialCreator, MTLLoader, OBJLoader, STLLoader } from "three-stdlib";
+
+import { adoptMtlPbr } from "./meshAppearance.ts";
 
 export type LoadedMesh =
   | { kind: "geometry"; geometry: THREE.BufferGeometry }
@@ -73,6 +76,7 @@ async function loadMaterials(
     loader.setResourcePath(base);
     const creator = loader.parse(mtl, base);
     creator.preload();
+    adoptMtlPbr(creator);
     return creator;
   } catch (err) {
     console.warn(

@@ -29,24 +29,7 @@ export function meshMaterial(
       color, roughness, metalness: 0.05, opacity, transparent: opacity < 1,
     });
   } else if (material && !(source as THREE.MeshStandardMaterial).isMeshStandardMaterial) {
-    // OBJ/MTL uses Phong. Preserve shared surface channels, without deriving
-    // a metalness or a measured roughness from its diffuse colour/shininess.
-    const pbr = new THREE.MeshStandardMaterial();
-    THREE.Material.prototype.copy.call(pbr, source);
-    const legacy = source as THREE.MeshPhongMaterial;
-    if (legacy.color) pbr.color.copy(legacy.color);
-    if (legacy.emissive) pbr.emissive.copy(legacy.emissive);
-    if (legacy.normalScale) pbr.normalScale.copy(legacy.normalScale);
-    if (legacy.envMapRotation) pbr.envMapRotation.copy(legacy.envMapRotation);
-    for (const key of [
-      "map", "lightMap", "lightMapIntensity", "aoMap", "aoMapIntensity",
-      "emissiveMap", "emissiveIntensity", "bumpMap", "bumpScale", "normalMap",
-      "normalMapType", "displacementMap", "displacementScale", "displacementBias",
-      "alphaMap", "envMap", "flatShading", "wireframe",
-    ] as const) {
-      if (key in legacy) Object.assign(pbr, { [key]: legacy[key] });
-    }
-    result = pbr;
+    result = standardFrom(source);
   } else {
     result = source.clone();
   }
@@ -62,6 +45,51 @@ export function meshMaterial(
     }
   }
   return result;
+}
+
+/** A legacy material (OBJ/MTL's Phong) as PBR: the shared surface channels
+ * kept, no metalness or measured roughness derived from its diffuse
+ * colour/shininess. */
+export function standardFrom(source: THREE.Material): THREE.MeshStandardMaterial {
+  const pbr = new THREE.MeshStandardMaterial();
+  THREE.Material.prototype.copy.call(pbr, source);
+  const legacy = source as THREE.MeshPhongMaterial;
+  if (legacy.color) pbr.color.copy(legacy.color);
+  if (legacy.emissive) pbr.emissive.copy(legacy.emissive);
+  if (legacy.normalScale) pbr.normalScale.copy(legacy.normalScale);
+  if (legacy.envMapRotation) pbr.envMapRotation.copy(legacy.envMapRotation);
+  for (const key of [
+    "map", "lightMap", "lightMapIntensity", "aoMap", "aoMapIntensity",
+    "emissiveMap", "emissiveIntensity", "bumpMap", "bumpScale", "normalMap",
+    "normalMapType", "displacementMap", "displacementScale", "displacementBias",
+    "alphaMap", "envMap", "flatShading", "wireframe",
+  ] as const) {
+    if (key in legacy) Object.assign(pbr, { [key]: legacy[key] });
+  }
+  return pbr;
+}
+
+/** MTL's PBR extension taken up: a material that states `Pm` (metallic) or
+ * `Pr` (roughness) — Blender writes both — is drawn physically based, so it
+ * takes the environment's light the way a glTF or USD material does. One
+ * that states neither stays the Phong the file describes. `creator` is the
+ * MTL loader's material set after `preload()`; its keys are lower-cased. */
+export function adoptMtlPbr(creator: {
+  materialsInfo: Record<string, object>;
+  materials: Record<string, THREE.Material>;
+}): void {
+  for (const [name, entry] of Object.entries(creator.materialsInfo)) {
+    const info = entry as Record<string, unknown>;
+    const metalness = parseFloat(String(info.pm ?? ""));
+    const roughness = parseFloat(String(info.pr ?? ""));
+    const legacy = creator.materials[name];
+    if (!legacy || (Number.isNaN(metalness) && Number.isNaN(roughness))) continue;
+    const pbr = standardFrom(legacy);
+    pbr.metalness = Number.isNaN(metalness) ? 0 : metalness;
+    pbr.roughness = Number.isNaN(roughness) ? 1 : roughness;
+    creator.materials[name] = pbr;
+    legacy.dispose();
+  }
 }
 
 /** Clone the graph and its materials, sharing only the immutable geometry and

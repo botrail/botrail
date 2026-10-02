@@ -16,8 +16,11 @@ robot = bt.Robot.from_usd("franka.usd")
 **URDF** — mesh paths resolve relative to the file, and `package://` URIs are
 resolved heuristically, so most real-world URDFs load without a workspace.
 Meshes load from STL and OBJ; an OBJ that names an `mtllib` keeps its
-material colors, in the studio and in exported USD alike. There is also
-`from_urdf_string(xml)` for generated descriptions.
+material colors, in the studio and in exported USD alike. A material that
+states `Pm` (metallic) or `Pr` (roughness) — the MTL PBR extension Blender
+writes — is drawn physically based in the studio, so painted metal reflects
+the room instead of reading as matte plastic; exported USD keeps its color.
+There is also `from_urdf_string(xml)` for generated descriptions.
 
 **Xacro** — expanded without ROS: properties, macros, includes, and
 conditionals all work. Most real robot descriptions are xacro, and needing a
