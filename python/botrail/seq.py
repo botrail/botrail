@@ -4,8 +4,8 @@ the step builder returned by ``scene.sequence(name)``.
 A sequence is a list of steps (工程). Each step fires its entry ``actions``
 and completes when its ``transition`` condition holds — the SFC /
 step-ladder mental model. When ``transition`` is omitted, a step that
-starts a motion or ramp waits for it (``done()``); anything else moves on
-``immediately()``.
+starts a motion, ramp, policy or crouch waits for it (``done()``);
+anything else moves on ``immediately()``.
 
     sq = scene.sequence("pick_place")
     sq.step("approach", actions=[bt.seq.motion("approach")])
@@ -92,6 +92,42 @@ def policy(
         action["robot"] = robot
     if group is not None:
         action["group"] = group
+    return action
+
+
+def crouch(
+    robot: Optional[str],
+    depth: float,
+    *,
+    lean: float = 0.0,
+    duration: Optional[float] = None,
+) -> Action:
+    """Lower a parked walker's body while it stands: over ``duration`` s
+    its body (the root link) goes from the crouch it is in to ``depth``
+    metres below its standing height, pitched nose-down by ``lean`` rad
+    about its own lateral axis — the feet stay where they stand, each leg
+    re-solved every scan tick by the walk's own leg IK. ``crouch(robot,
+    0)`` stands it back up. Await it with ``done()``.
+
+    ``robot`` names the mounted walker (``None``: the scene's sole robot).
+    ``duration=None`` takes a pace: 0.3 m/s of depth and 0.6 rad/s of
+    lean at the mean (the smoothstep peaks at 1.5 × that), at least 0.6 s.
+
+    The bake prices the whole crouch when the step fires — a leg that
+    cannot keep its foot planted fails it by name — and checks the robot
+    and what it holds against the cell every tick on the way down. Fired
+    while the walk before it is still settling, it begins when the last
+    foot lands. While the body is lowered the vehicle does not drive (a
+    goto is refused until it stands up), and a planned motion waits for
+    the crouch to finish; ramps may run alongside it (with ``check``,
+    each point is held where the body will be)."""
+    action: Action = {"type": "crouch", "depth": float(depth)}
+    if robot is not None:
+        action["robot"] = robot
+    if lean:
+        action["lean"] = float(lean)
+    if duration is not None:
+        action["duration"] = float(duration)
     return action
 
 
@@ -296,7 +332,7 @@ def any_of(*conditions: Condition) -> Condition:
     return {"type": "any", "conditions": list(conditions)}
 
 
-_DRIVERS = ("start_motion", "start_ramp", "policy")
+_DRIVERS = ("start_motion", "start_ramp", "policy", "crouch")
 
 
 def _step_dict(name: str, actions: Iterable[Action], transition: Optional[Condition]) -> dict:

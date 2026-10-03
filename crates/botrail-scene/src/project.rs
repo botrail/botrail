@@ -3214,6 +3214,27 @@ fn py_action(action: &ActionMsg) -> String {
                 format!("bt.seq.move_to({device:?}, {stop:?})")
             }
         },
+        ActionMsg::Crouch {
+            robot,
+            depth,
+            lean,
+            duration,
+        } => {
+            // The robot is the call's first argument (`None`: the scene's
+            // sole robot, as everywhere else).
+            let mut out = match robot {
+                Some(name) => format!("bt.seq.crouch({name:?}, {depth:?}"),
+                None => format!("bt.seq.crouch(None, {depth:?}"),
+            };
+            if *lean != 0.0 {
+                out.push_str(&format!(", lean={lean:?}"));
+            }
+            if let Some(d) = duration {
+                out.push_str(&format!(", duration={d:?}"));
+            }
+            out.push(')');
+            out
+        }
     }
 }
 

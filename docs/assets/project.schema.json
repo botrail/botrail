@@ -454,6 +454,42 @@
             "device",
             "command"
           ]
+        },
+        {
+          "description": "Lower a parked walker's body `depth` metres below standing (and\npitch it nose-down by `lean` rad), feet planted; `depth = 0`\nstands it up. `duration` defaults to a pace. Await with `done`.",
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "number",
+              "format": "double"
+            },
+            "duration": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "lean": {
+              "type": "number",
+              "format": "double"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "crouch"
+            }
+          },
+          "required": [
+            "type",
+            "depth"
+          ]
         }
       ]
     },

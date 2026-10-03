@@ -1064,6 +1064,77 @@ impl Scene {
         Ok(())
     }
 
+    /// The posture walker `robot` takes crouched `depth` metres below its
+    /// standing height and leaned `lean` rad nose-down, where it stands now
+    /// (its current base pose, taken as standing): `(base pose, joint
+    /// positions)` — the body lowered and pitched as a crouch moves it
+    /// (`seq::Action::Crouch`), each leg of its gait solved so its foot
+    /// stays where the stance puts it, walked there from the stance in
+    /// small steps with the bake's own per-leg solve, so a pose taught on
+    /// it is the one the bake reaches. The scene is not changed. Errors
+    /// name the leg that cannot keep its foot planted.
+    pub fn crouch_pose(
+        &self,
+        robot: usize,
+        depth: f64,
+        lean: f64,
+    ) -> Result<(Isometry3<f64>, Vec<f64>), SceneError> {
+        let r = self
+            .robots
+            .get(robot)
+            .ok_or_else(|| SceneError::UnknownRobot(robot.to_string()))?;
+        let spec = r
+            .mount
+            .as_ref()
+            .and_then(|m| m.gait.as_ref())
+            .ok_or_else(|| {
+                SceneError::BadMount(format!(
+                    "`{}` has no gait to crouch on — mount it with `gait=`",
+                    r.name
+                ))
+            })?;
+        if !(depth.is_finite() && depth >= 0.0) || !lean.is_finite() {
+            return Err(SceneError::BadMount(format!(
+                "a crouch is a depth >= 0 (m) and a finite lean (rad), got {depth} / {lean}"
+            )));
+        }
+        let gait = crate::gait::resolve_gait(&r.model, spec, r.joint_positions())
+            .map_err(|m| SceneError::BadMount(format!("gait: {m}")))?;
+        let base = *r.base_pose();
+        let mut q = r.joint_positions().to_vec();
+        for qi in gait.leg_joints() {
+            q[qi] = gait.stance[qi];
+        }
+        let poses = botrail_kin::forward_kinematics_with_base(&r.model, &q, &base)
+            .map_err(|e| SceneError::BadMount(e.to_string()))?;
+        let feet: Vec<Isometry3<f64>> = gait.legs.iter().map(|l| poses[l.foot]).collect();
+        const STEPS: usize = 16;
+        let mut body = base;
+        for k in 1..=STEPS {
+            let s = k as f64 / STEPS as f64;
+            body = nalgebra::Translation3::new(0.0, 0.0, -depth * s)
+                * base
+                * Isometry3::from_parts(
+                    nalgebra::Translation3::identity(),
+                    nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), lean * s),
+                );
+            q = crate::rollout::solve_planted_legs(&r.model, &gait, &body, &feet, &q).map_err(
+                |(i, result)| {
+                    SceneError::BadMount(format!(
+                        "`{}` cannot crouch to {depth:.3} m (lean {lean:.3} rad): leg `{}` cannot \
+                         keep its foot planted {:.0}% of the way ({:.1e} m / {:.1e} rad short)",
+                        r.name,
+                        gait.legs[i].name,
+                        s * 100.0,
+                        result.pos_error,
+                        result.rot_error
+                    ))
+                },
+            )?;
+        }
+        Ok((body, q))
+    }
+
     /// Records a carrier frame captured from a loaded model. This does not
     /// move the robot; a mismatched actual offset remains visible to review.
     pub fn set_mount_reference(

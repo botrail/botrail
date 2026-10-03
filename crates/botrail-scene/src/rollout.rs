@@ -156,6 +156,37 @@ pub enum SeqError {
         /// How far the solve fell short.
         detail: String,
     },
+    /// A crouching leg could not keep its foot planted: the body was asked
+    /// lower (or further forward) than the leg reaches from where the foot
+    /// stands. Authoring — a shallower crouch, less lean.
+    #[error(
+        "robot `{robot}`: leg `{leg}` cannot keep its foot planted crouching to \
+         {depth:.3} m (lean {lean:.3} rad) at t = {t:.3}s ({detail}); crouch less \
+         deep or lean less"
+    )]
+    CrouchReach {
+        t: f64,
+        robot: String,
+        leg: String,
+        /// The depth and lean the crouch was asked for.
+        depth: f64,
+        lean: f64,
+        detail: String,
+    },
+    /// A crouching robot — its legs, its body, what it holds — met the
+    /// environment while its body went down (or came back up): the knees
+    /// into a cart, a held box into the shelf it is lowered past.
+    #[error(
+        "robot `{robot}` crouching to {depth:.3} m meets `{obstacle}` at t = {t:.3}s \
+         (`{part}`); stand it further back, crouch less, or move the obstacle"
+    )]
+    CrouchCollision {
+        t: f64,
+        robot: String,
+        part: String,
+        obstacle: String,
+        depth: f64,
+    },
     /// A rolling machine's route crosses a break in the floor its wheels
     /// cannot take — and it may not walk it (a mount set to roll, or one
     /// with no legs at all).
@@ -1789,6 +1820,12 @@ impl RobotRuntime {
         self.gait.as_ref().is_some_and(|g| g.plan.is_some())
     }
 
+    /// Whether a crouch is driving the legs (and the body) — fired, and
+    /// not yet over. Like a walk, it bakes the robot tick by tick.
+    fn crouching(&self) -> bool {
+        self.gait.as_ref().is_some_and(|g| g.crouch.is_some())
+    }
+
     /// The `q` slots the mount moves rather than a motor: a walker's legs,
     /// a rolling machine's wheels and steering. Kinematic even on a
     /// dynamic robot.
@@ -1887,9 +1924,48 @@ struct GaitRuntime {
     /// its route: the body tilts onto a grade and rides up the steps, so
     /// what it carries rides that, not the guide line underneath.
     carried: Vec<(String, Isometry3<f64>)>,
+    /// How far the parked body stands lowered (m) and leaned nose-down
+    /// (rad) from its standing pose, as the crouches so far left it —
+    /// `(0, 0)` standing. While it is not, the vehicle stays put: a walk
+    /// starts from the stance.
+    crouched: (f64, f64),
+    /// The crouch in progress (`bt.seq.crouch`).
+    crouch: Option<CrouchMove>,
+}
+
+/// A crouch in progress: the body goes to `to` — `(depth, lean)` below
+/// and ahead of standing — over `[t0, t1]` on the rise and pitch spans
+/// recorded for it, every foot held where it stood when the crouch began
+/// and each leg re-solved every scan tick.
+#[derive(Clone)]
+struct CrouchMove {
+    t0: f64,
+    t1: f64,
+    to: (f64, f64),
+    /// The planted feet (world), per leg, read the tick the crouch
+    /// begins. `None` until then: a crouch fired while the walk before it
+    /// is still settling waits for the last foot.
+    feet: Option<Vec<Isometry3<f64>>>,
 }
 
 impl GaitRuntime {
+    /// Where the parked body is at `t` on the rise and pitch spans so far
+    /// — a crouch's included — composed onto the ride under it as the
+    /// crouch tick composes them: closed form, so a check can look ahead.
+    /// `base_now` is the world base as of this tick; the walk before it
+    /// must be over (no sway).
+    fn parked_body_at(&self, base_now: &Isometry3<f64>, t: f64) -> Isometry3<f64> {
+        let was = nalgebra::Translation3::new(0.0, 0.0, self.rise);
+        let rigid = was.inverse() * base_now * (self.pitch * self.sway).inverse();
+        let lift = nalgebra::Translation3::new(0.0, 0.0, crate::gait::rise_at(&self.rises, t));
+        lift * rigid * crate::gait::pitch_offset(&self.pitches, t)
+    }
+
+    /// Whether the body stands lowered or leaned — or is on its way.
+    fn crouched_now(&self) -> bool {
+        self.crouch.is_some() || self.crouched.0.abs() > 1e-6 || self.crouched.1.abs() > 1e-6
+    }
+
     /// Where the body of a walk whose vehicle has stopped will be at `t`:
     /// the parked ride under it, with the tilt, the rise over the steps and
     /// the sway still fading out, composed as the gait tick composes them —
@@ -3260,6 +3336,10 @@ struct Rollout {
     /// and load) — what its riding robots are checked against the rest of
     /// the world *not* being.
     moving: Vec<(String, Vec<String>)>,
+    /// The robots a crouch moved this tick, each with the depth it was
+    /// asked for — checked against the world like a rider (knees meet a
+    /// cart, a held box meets the shelf it is lowered past).
+    crouching: Vec<(usize, f64)>,
 
     /// The physics world, when this bake runs one (`None` reproduces the
     /// purely kinematic bake bit for bit). Built by `init_physics`.
@@ -4682,6 +4762,8 @@ impl Rollout {
                         rise: 0.0,
                         rises: Vec::new(),
                         carried: Vec::new(),
+                        crouched: (0.0, 0.0),
+                        crouch: None,
                     })
                 });
                 let spin = sr.mount.as_ref().and_then(|mount| {
@@ -4813,6 +4895,7 @@ impl Rollout {
             devices,
             forced,
             moving: Vec::new(),
+            crouching: Vec::new(),
             physics: backend.map(|backend| PhysicsRuntime {
                 backend,
                 substeps: 0,
@@ -6915,9 +6998,14 @@ impl Rollout {
                 self.world
                     .set_joint_positions_for(r, rt.q.clone())
                     .expect("sampled q has robot DOF");
-                // Two moves in flight bake tick by tick (a tracked, walking
-                // or rolling robot already does, on its own path).
-                if rt.tick_bake && rt.tracking.is_empty() && !rt.walking() && !rt.rolling() {
+                // Two moves in flight bake tick by tick (a tracked, walking,
+                // crouching or rolling robot already does, on its own path).
+                if rt.tick_bake
+                    && rt.tracking.is_empty()
+                    && !rt.walking()
+                    && !rt.crouching()
+                    && !rt.rolling()
+                {
                     let velocity: Vec<f64> =
                         rt.q.iter()
                             .zip(&rt.q_prev)
@@ -7418,10 +7506,12 @@ impl Rollout {
         // Legs after the vehicles: a foot target is solved against where
         // the body is *now*.
         self.advance_gaits()?;
+        self.advance_crouches()?;
         self.advance_spins();
         self.advance_wheels();
         self.follow_tracked_parts()?;
         self.check_rider_collisions()?;
+        self.check_crouch_collisions()?;
         self.check_robot_collisions()?;
         self.check_group_collisions()?;
         self.check_device_collisions(&device_moves)?;
@@ -8039,6 +8129,25 @@ impl Rollout {
                         wheels.device,
                     ),
                 });
+            }
+        }
+        if let Some(gr) = self.robots[r].gait.as_ref() {
+            if let Some(c) = &gr.crouch {
+                let legs = gr.gait.leg_joints();
+                if let Some(&qi) = owned.iter().find(|qi| legs.contains(qi)) {
+                    let model = &self.world.robots()[r].model;
+                    return Err(SeqError::Action {
+                        step: self.cur_step(),
+                        name: self.cur_step_name(),
+                        message: format!(
+                            "`{label}` cannot start: joint `{}` of `{}` is a leg, driven by a \
+                             crouch until t = {:.2}s; wait for it first (done, or robot_done)",
+                            model.joints[model.actuated_joints[qi]].name,
+                            self.world.robots()[r].name,
+                            c.t1
+                        ),
+                    });
+                }
             }
         }
         if let Some(active) = self.robots[r].driver_of(owned) {
@@ -8923,10 +9032,11 @@ impl Rollout {
                 .move_ends
                 .iter()
                 .all(|end| self.t >= end - 1e-9),
+            // A crouch in progress keeps the robot busy like a move.
             Condition::RobotDone { robot } => self
                 .world
                 .robot_index(robot)
-                .map(|r| self.robots[r].active.is_empty())
+                .map(|r| self.robots[r].active.is_empty() && !self.robots[r].crouching())
                 .unwrap_or(true),
             Condition::GroupDone { robot, group } => match self.world.robot_index(robot) {
                 Some(r) => match self.world.robots()[r].model.group_index(group) {
@@ -9103,6 +9213,16 @@ impl Rollout {
                         )));
                     }
                 }
+                // Likewise a body going down (or up) under the plan.
+                if let Some(c) = self.robots[owner].gait.as_ref().and_then(|g| g.crouch.as_ref()) {
+                    return Err(err(format!(
+                        "motion `{motion}` cannot start while `{}` crouches (until t = {:.2}s): \
+                         plans are baked in world coordinates, so wait for done first (a ramp \
+                         may run meanwhile)",
+                        self.world.robots()[owner].name,
+                        c.t1
+                    )));
+                }
                 // Plan against the world as it stands *now*: current q,
                 // moved obstacles, live grasps — the other robots are
                 // frozen collision bodies at their current configuration.
@@ -9233,6 +9353,14 @@ impl Rollout {
                             mount.device
                         )));
                     }
+                }
+                if let Some(c) = self.robots[r].gait.as_ref().and_then(|g| g.crouch.as_ref()) {
+                    return Err(err(format!(
+                        "toolpath `{toolpath}` cannot start while `{}` crouches (until t = \
+                         {:.2}s): the bake is world-frame, so wait for done first",
+                        self.world.robots()[r].name,
+                        c.t1
+                    )));
                 }
                 // Bake against the world as it stands now.
                 self.world
@@ -9459,6 +9587,37 @@ impl Rollout {
                 let concurrent =
                     !self.robots[r].active.is_empty() || !self.robots[r].tracking.is_empty();
                 let now = self.t;
+                // A crouch in progress moves the body (and the legs) under
+                // the ramp: a checked ramp is held where they will be when
+                // the arm gets there — the ramp's cubic, every scan tick.
+                let crouch_look = if *check && self.robots[r].crouching() {
+                    let rt = &self.robots[r];
+                    let mut goal = rt.q_nom.clone();
+                    for ((_, value), &qi) in targets.iter().zip(&driven) {
+                        goal[qi] = *value;
+                    }
+                    let span = rt
+                        .q_nom
+                        .iter()
+                        .zip(&goal)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f64>()
+                        .sqrt();
+                    let n = ((1.5 * span / self.options.plan.resolution).ceil() as usize)
+                        .max((duration / self.options.dt).ceil() as usize)
+                        .max(1);
+                    let times: Vec<f64> = (0..=n)
+                        .map(|k| now + k as f64 / n as f64 * duration)
+                        .collect();
+                    let legs = rt
+                        .gait
+                        .as_ref()
+                        .map(|g| g.gait.leg_joints())
+                        .unwrap_or_default();
+                    self.crouch_poses_at(r, &times).map(|poses| (poses, legs))
+                } else {
+                    None
+                };
                 let rt = &mut self.robots[r];
                 let walking = rt.walking();
                 let legs: Vec<usize> = rt
@@ -9501,39 +9660,49 @@ impl Rollout {
                             .as_ref()
                             .is_some_and(|p| now >= p.profile.t_end - 1e-9)
                     });
-                    let n = match settling {
+                    let n = match (&crouch_look, settling) {
+                        (Some((poses, _)), _) => poses.len() - 1,
                         // The cubic's steepest stretch covers 1.5 times
                         // the mean.
-                        Some(_) => ((1.5 * span / resolution).ceil() as usize)
+                        (None, Some(_)) => ((1.5 * span / resolution).ceil() as usize)
                             .max((duration / self.options.dt).ceil() as usize),
-                        None => (span / resolution).ceil() as usize,
+                        (None, None) => (span / resolution).ceil() as usize,
                     }
                     .max(1);
                     let mut hit = None;
                     for k in 0..=n {
                         let u = k as f64 / n as f64;
-                        let s = match settling {
-                            Some(g) => {
+                        let s = match (&crouch_look, settling) {
+                            (Some((poses, _)), _) => {
+                                self.world.set_robot_base_pose_for(r, poses[k].0);
+                                u * u * (3.0 - 2.0 * u)
+                            }
+                            (None, Some(g)) => {
                                 self.world.set_robot_base_pose_for(
                                     r,
                                     g.settling_body_at(&base_now, now + u * duration),
                                 );
                                 u * u * (3.0 - 2.0 * u)
                             }
-                            None => u,
+                            (None, None) => u,
                         };
-                        let q: Vec<f64> = from
+                        let mut q: Vec<f64> = from
                             .iter()
                             .zip(&goal)
                             .map(|(a, b)| a + (b - a) * s)
                             .collect();
+                        if let Some((poses, legs)) = &crouch_look {
+                            for &qi in legs {
+                                q[qi] = poses[k].1[qi];
+                            }
+                        }
                         if !self.world.is_state_valid_for(r, &q) {
                             hit =
                                 Some((s, crate::motion::collision_names(&self.world, r, None, &q)));
                             break;
                         }
                     }
-                    if settling.is_some() {
+                    if settling.is_some() || crouch_look.is_some() {
                         self.world.set_robot_base_pose_for(r, base_now);
                     }
                     if let Some((s, names)) = hit {
@@ -9554,11 +9723,13 @@ impl Rollout {
                 // Nor can one alongside a walk: the legs bake tick by tick,
                 // and the ramp's samples ride with them. Nor alongside
                 // another move: the robot bakes tick by tick from here.
-                // Nor while the wheels roll, for the same reason.
+                // Nor while the wheels roll, or a crouch moves the legs, for
+                // the same reason.
                 if concurrent {
                     rt.truncate_after(self.t);
                     rt.tick_bake = true;
-                } else if rt.tracking.is_empty() && !walking && !rt.rolling() {
+                } else if rt.tracking.is_empty() && !walking && !rt.rolling() && !rt.crouching()
+                {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
@@ -9594,6 +9765,15 @@ impl Rollout {
                         to: goal,
                     },
                 });
+            }
+            Action::Crouch {
+                robot,
+                depth,
+                lean,
+                duration,
+            } => {
+                let r = self.action_robot(robot)?;
+                self.start_crouch(r, (*depth, *lean), *duration, step_index)?;
             }
             Action::Attach {
                 robot,
@@ -9760,6 +9940,20 @@ impl Rollout {
                 self.set_lane(lane, t, *value);
             }
             Action::Device { device, command } => {
+                // A walk starts from the stance: a crouched rider is stood
+                // up first, by the program, not quietly by the dispatch.
+                if let DeviceCommand::Goto { .. } = command {
+                    if let Some((rider, depth, lean, until)) = self.crouched_rider(device) {
+                        return Err(err(format!(
+                            "`{rider}` rides `{device}` {} {depth:.3} m (lean {lean:.3} rad) — \
+                             stand it up first: bt.seq.crouch({rider:?}, 0)",
+                            match until {
+                                Some(t1) => format!("crouching until t = {t1:.2}s, to"),
+                                None => "crouched".to_string(),
+                            }
+                        )));
+                    }
+                }
                 let t = self.t;
                 let mut lane_update = None;
                 // A vehicle dispatched this scan: its drive, closed form,
@@ -10489,6 +10683,52 @@ fn body_profile(
         end_frame: vehicle_frame(&position, heading),
         modes: piece_modes,
     }
+}
+
+/// How long a crouch takes when the program does not say: the body's
+/// smoothstep peaks at 1.5 × its mean rate, held to 0.3 m/s going down
+/// (or up) and 0.6 rad/s leaning — a deliberate squat, not a drop — and
+/// never quicker than 0.6 s.
+pub(crate) fn crouch_duration(from: (f64, f64), to: (f64, f64)) -> f64 {
+    let depth = (to.0 - from.0).abs();
+    let lean = (to.1 - from.1).abs();
+    (1.5 * depth / 0.30).max(1.5 * lean / 0.6).max(0.6)
+}
+
+/// The legs of `gait` solved so that each foot stands at `feet[i]` (world)
+/// with the root at `body`, warm-started from `seed` — the walk's own
+/// per-leg solve for a planted foot (a yaw-free sole's hip yaw seeded from
+/// geometry, as `gait_tick` seeds it). Every other joint keeps the seed's
+/// value. `Err((leg, result))` names the first leg that falls short by
+/// more than the walk tolerates (a tenth of a millimetre, a milliradian).
+pub(crate) fn solve_planted_legs(
+    model: &botrail_model::RobotModel,
+    gait: &crate::gait::ResolvedGait,
+    body: &Isometry3<f64>,
+    feet: &[Isometry3<f64>],
+    seed: &[f64],
+) -> Result<Vec<f64>, (usize, botrail_kin::IkResult)> {
+    let poses = botrail_kin::forward_kinematics_with_base(model, seed, body)
+        .expect("seed has robot DOF");
+    let mut q = seed.to_vec();
+    for (i, (leg, foot)) in gait.legs.iter().zip(feet).enumerate() {
+        let mut start = q.clone();
+        if let Some(ys) = &leg.yaw_seed {
+            let point = nalgebra::Point3::from(foot.translation.vector);
+            if let Some(yaw) = ys.yaw_for(&poses[ys.parent], &point) {
+                start[ys.joint] = yaw;
+            }
+        }
+        let result = botrail_kin::solve_ik(model, leg.foot, &(body.inverse() * foot), &start, &leg.ik)
+            .expect("seed has robot DOF");
+        if !result.converged && (result.pos_error > 1e-4 || result.rot_error > 1e-3) {
+            return Err((i, result));
+        }
+        for &qi in &leg.joints {
+            q[qi] = result.q[qi];
+        }
+    }
+    Ok(q)
 }
 
 impl ActiveMove {
@@ -11663,6 +11903,408 @@ impl Rollout {
             rt.rebake_active_tail(t);
         }
         Ok(())
+    }
+
+    /// `bt.seq.crouch`: robot `r`'s body goes to `to = (depth, lean)`
+    /// below and ahead of standing over `duration` (a pace when `None`),
+    /// its feet planted. The whole crouch is priced here — every leg must
+    /// keep its foot where it stands the whole way — and recorded as the
+    /// rise and pitch spans the timeline composes onto the base; the legs
+    /// are solved tick by tick in `advance_crouches`. Fired while the walk
+    /// before it is still settling, it begins when the last foot lands.
+    fn start_crouch(
+        &mut self,
+        r: usize,
+        to: (f64, f64),
+        duration: Option<f64>,
+        step_index: usize,
+    ) -> Result<(), SeqError> {
+        let now = self.t;
+        let step_name = self.cur_step_name();
+        let err = move |message: String| SeqError::Action {
+            step: step_index,
+            name: step_name.clone(),
+            message,
+        };
+        let name = self.world.robots()[r].name.clone();
+        let Some(gr) = self.robots[r].gait.as_ref() else {
+            return Err(err(format!(
+                "`{name}` has no gait to crouch on — crouch is for a legged robot mounted \
+                 with `gait=`"
+            )));
+        };
+        if let Some(c) = &gr.crouch {
+            return Err(err(format!(
+                "`{name}` is still crouching (until t = {:.2}s); wait for done before the \
+                 next crouch",
+                c.t1
+            )));
+        }
+        // The walk has the legs while its vehicle drives; a crouch fired in
+        // the settle after it waits for the last foot.
+        let t0 = match &gr.plan {
+            Some(plan) if now < plan.profile.t_end - 1e-9 => {
+                return Err(err(format!(
+                    "`{name}` is walking (its vehicle drives until t = {:.2}s); crouch after \
+                     device_done",
+                    plan.profile.t_end
+                )));
+            }
+            Some(plan) => plan.done.max(now),
+            None => now,
+        };
+        let legs = gr.gait.leg_joints();
+        self.claim_joints(r, &legs, "crouch")?;
+        let gr = self.robots[r].gait.as_ref().expect("checked above");
+        let from = gr.crouched;
+        let program = self.current;
+        if (to.0 - from.0).abs() <= 1e-9 && (to.1 - from.1).abs() <= 1e-9 {
+            // Already in that posture: over once the legs stand (it waits
+            // out a settle, and nothing else).
+            self.programs[program].move_ends.push(t0);
+            return Ok(());
+        }
+        let span = duration.unwrap_or_else(|| crouch_duration(from, to));
+        let t1 = t0 + span;
+        // The body's ride over the crouch, on the spans the timeline will
+        // carry: the rise and the pitch it holds at t0, moved by the change
+        // in depth (down) and lean (nose-down is a negative nose-up angle).
+        let mut rises = gr.rises.clone();
+        if let Some(open) = rises.last_mut() {
+            if open.t1 > t0 {
+                open.t1 = t0;
+            }
+        }
+        let rise0 = crate::gait::rise_at(&rises, t0);
+        rises.push(crate::gait::BodyRise {
+            t0,
+            t1,
+            from: rise0,
+            to: rise0 - (to.0 - from.0),
+        });
+        let mut pitches = gr.pitches.clone();
+        if let Some(open) = pitches.last_mut() {
+            if open.t1 > t0 {
+                open.t1 = t0;
+            }
+        }
+        let pitch0 = crate::gait::pitch_angle(&pitches, t0);
+        pitches.push(crate::gait::BodyPitch {
+            t0,
+            t1,
+            from: pitch0,
+            to: pitch0 - (to.1 - from.1),
+        });
+        // The feet: where they stand — or, the walk still settling, where
+        // its stance will put them under the parked body.
+        let settling = t0 > now + 1e-9;
+        let feet = if settling {
+            self.settled_feet(r, t0)
+        } else {
+            let poses = self.world.link_poses_for(r);
+            gr.gait.legs.iter().map(|l| poses[l.foot]).collect()
+        };
+        // Every leg keeps its foot planted the whole way: priced now, on
+        // the closed-form body, each sample warm-started from the last.
+        let model = self.world.robots()[r].model.clone();
+        let base_now = *self.world.robots()[r].base_pose();
+        let was = nalgebra::Translation3::new(0.0, 0.0, gr.rise);
+        let rigid = was.inverse() * base_now * (gr.pitch * gr.sway).inverse();
+        let mut seed = self.robots[r].q.clone();
+        if settling {
+            let rest = gr.plan.as_ref().expect("settling").rest(&gr.gait);
+            for &qi in &legs {
+                seed[qi] = rest[qi];
+            }
+        }
+        const SAMPLES: usize = 16;
+        for k in 1..=SAMPLES {
+            let u = k as f64 / SAMPLES as f64;
+            let tau = t0 + u * span;
+            let body = nalgebra::Translation3::new(0.0, 0.0, crate::gait::rise_at(&rises, tau))
+                * rigid
+                * crate::gait::pitch_offset(&pitches, tau);
+            match solve_planted_legs(&model, &gr.gait, &body, &feet, &seed) {
+                Ok(solved) => seed = solved,
+                Err((i, result)) => {
+                    return Err(err(format!(
+                        "`{name}` cannot crouch to {:.3} m (lean {:.3} rad): leg `{}` cannot keep \
+                         its foot planted {:.0}% of the way ({:.1e} m / {:.1e} rad short) — \
+                         crouch less deep, or lean less",
+                        to.0,
+                        to.1,
+                        gr.gait.legs[i].name,
+                        u * 100.0,
+                        result.pos_error,
+                        result.rot_error
+                    )));
+                }
+            }
+        }
+        let gr = self.robots[r].gait.as_mut().expect("checked above");
+        gr.rises = rises;
+        gr.pitches = pitches;
+        gr.crouch = Some(CrouchMove {
+            t0,
+            t1,
+            to,
+            feet: (!settling).then_some(feet),
+        });
+        let rt = &mut self.robots[r];
+        // The timeline composes the crouch onto the base's ride: a machine
+        // whose vehicle has not moved yet has no ride on record, so it gets
+        // the one it stands on — held from the start.
+        if let Some(spans) = rt.base.as_mut().filter(|spans| spans.is_empty()) {
+            spans.push(TrackSpan::Hold {
+                t0: 0.0,
+                t1: now,
+                pose: rigid,
+            });
+        }
+        // The legs bake tick by tick from here (a settling walk already
+        // does); a move's pre-baked future would block it, and is re-baked
+        // when the crouch lets go.
+        if !settling {
+            rt.truncate_after(now);
+            let (q, zeros) = (rt.q.clone(), vec![0.0; rt.q.len()]);
+            rt.append_waypoint(now, q, zeros);
+        }
+        self.programs[program].move_ends.push(t1);
+        rt.moves.push(StepSpan {
+            name: "crouch".to_string(),
+            start: now,
+            end: t1,
+            sequence: self.programs[program].sequence.name.clone(),
+            step: step_index,
+            group: None,
+        });
+        Ok(())
+    }
+
+    /// Where robot `r`'s feet will stand once the walk now settling is
+    /// over: its rest posture under the parked body at `t0`.
+    fn settled_feet(&self, r: usize, t0: f64) -> Vec<Isometry3<f64>> {
+        let gr = self.robots[r].gait.as_ref().expect("a walker");
+        let base_now = *self.world.robots()[r].base_pose();
+        let rest = match &gr.plan {
+            Some(plan) => plan.rest(&gr.gait),
+            None => gr.gait.stance.clone(),
+        };
+        let mut q = self.robots[r].q.clone();
+        for qi in gr.gait.leg_joints() {
+            q[qi] = rest[qi];
+        }
+        let body = gr.parked_body_at(&base_now, t0);
+        let poses = botrail_kin::forward_kinematics_with_base(&self.world.robots()[r].model, &q, &body)
+            .expect("q has robot DOF");
+        gr.gait.legs.iter().map(|l| poses[l.foot]).collect()
+    }
+
+    /// Where a crouching robot's body and legs will be at each of `times`:
+    /// the crouch in progress (or waiting out its settle) in closed form for
+    /// the body, the walk's leg solve onto the planted feet for the legs,
+    /// every other joint as it stands — what a checked ramp started
+    /// meanwhile is held against. `None` without a crouch in progress.
+    fn crouch_poses_at(&self, r: usize, times: &[f64]) -> Option<Vec<(Isometry3<f64>, Vec<f64>)>> {
+        let gr = self.robots[r].gait.as_ref()?;
+        let c = gr.crouch.as_ref()?;
+        let base_now = *self.world.robots()[r].base_pose();
+        let model = &self.world.robots()[r].model;
+        let feet = match &c.feet {
+            Some(feet) => feet.clone(),
+            None => self.settled_feet(r, c.t0),
+        };
+        let mut q = self.robots[r].q.clone();
+        let mut out = Vec::with_capacity(times.len());
+        for &tau in times {
+            let body = match &gr.plan {
+                Some(plan) if tau < plan.done - 1e-9 => gr.settling_body_at(&base_now, tau),
+                _ => gr.parked_body_at(&base_now, tau),
+            };
+            if tau >= c.t0 - 1e-9 {
+                // A leg out of reach fails the crouch itself on that tick.
+                if let Ok(solved) = solve_planted_legs(model, &gr.gait, &body, &feet, &q) {
+                    q = solved;
+                }
+            }
+            out.push((body, q.clone()));
+        }
+        Some(out)
+    }
+
+    /// One scan tick of every crouch in progress: the body where its spans
+    /// put it, each leg solved onto its planted foot, the result merged
+    /// over whatever else drives the robot, and the tick baked. On the last
+    /// tick the legs come to rest there and are handed back — standing
+    /// lowered, they are the nominal posture every later move starts from.
+    fn advance_crouches(&mut self) -> Result<(), SeqError> {
+        let t = self.t;
+        for r in 0..self.robots.len() {
+            let ready = self.robots[r].gait.as_ref().is_some_and(|g| {
+                g.plan.is_none() && g.crouch.as_ref().is_some_and(|c| t >= c.t0 - 1e-9)
+            });
+            if !ready {
+                continue;
+            }
+            let mut gr = self.robots[r].gait.take().expect("crouching");
+            let result = self.crouch_tick(r, &mut gr);
+            self.robots[r].gait = Some(gr);
+            result?;
+            // The body has moved — take what it carries with it.
+            self.place_carried(r);
+        }
+        Ok(())
+    }
+
+    fn crouch_tick(&mut self, r: usize, gr: &mut GaitRuntime) -> Result<(), SeqError> {
+        let t = self.t;
+        let base_now = *self.world.robots()[r].base_pose();
+        let c = gr.crouch.as_mut().expect("crouching");
+        if c.feet.is_none() {
+            // The walk before it has just settled: the feet stand where it
+            // left them.
+            let poses = self.world.link_poses_for(r);
+            c.feet = Some(gr.gait.legs.iter().map(|l| poses[l.foot]).collect());
+        }
+        let c = c.clone();
+        let finishing = t >= c.t1 - 1e-9;
+        let at = if finishing { c.t1 } else { t };
+        let body = gr.parked_body_at(&base_now, at);
+        self.world.set_robot_base_pose_for(r, body);
+        gr.rise = crate::gait::rise_at(&gr.rises, at);
+        gr.pitch = crate::gait::pitch_offset(&gr.pitches, at);
+        gr.sway = Isometry3::identity();
+        let model = self.world.robots()[r].model.clone();
+        let feet = c.feet.as_ref().expect("read above");
+        let solved = solve_planted_legs(&model, &gr.gait, &body, feet, &self.robots[r].q)
+            .map_err(|(i, result)| SeqError::CrouchReach {
+                t,
+                robot: self.world.robots()[r].name.clone(),
+                leg: gr.gait.legs[i].name.clone(),
+                depth: c.to.0,
+                lean: c.to.1,
+                detail: format!(
+                    "{:.1e} m / {:.1e} rad short after {} iterations",
+                    result.pos_error, result.rot_error, result.iters
+                ),
+            })?;
+        let legs = gr.gait.leg_joints();
+        let dt = self.options.dt;
+        let rt = &mut self.robots[r];
+        let previous = rt.q.clone();
+        for &qi in &legs {
+            rt.q[qi] = solved[qi];
+            // A move alongside samples every joint it does not own from
+            // the nominal (`advance_world`), and a later move starts from
+            // it: the legs live there now, not at the stance.
+            rt.q_nom[qi] = solved[qi];
+        }
+        self.world
+            .set_joint_positions_for(r, rt.q.clone())
+            .expect("solved q has robot DOF");
+        // Velocities by difference — except on the last tick, where the
+        // legs come to rest: a hold follows (see `gait_tick`).
+        let velocity: Vec<f64> = rt
+            .q
+            .iter()
+            .zip(&previous)
+            .enumerate()
+            .map(|(qi, (now, before))| {
+                if finishing && legs.contains(&qi) {
+                    0.0
+                } else {
+                    (now - before) / dt
+                }
+            })
+            .collect();
+        let q = rt.q.clone();
+        // A move's future re-baked when the walk before it let go (a ramp
+        // fired in the settle) would swallow these ticks: the crouch bakes
+        // tick by tick, and the tail goes back on when it lets go.
+        rt.truncate_after(t);
+        rt.append_waypoint(t, q, velocity);
+        self.crouching.push((r, c.to.0));
+        if finishing {
+            gr.crouch = None;
+            gr.crouched = c.to;
+            // A move that outlives the crouch keeps the legs where it left
+            // them, and its remaining samples go back on the bake.
+            let values = rt.q.clone();
+            for active in &mut rt.active {
+                active.pin_joints(&legs, &values);
+            }
+            rt.rebake_active_tail(t);
+        }
+        Ok(())
+    }
+
+    /// The crouch's tick check: a robot a crouch moved this tick — its
+    /// links and what it holds — against everything it neither stands on
+    /// nor carries (walkable treads, its vehicle's body, its deck load and
+    /// physics-dynamic parts excepted), the way a rider is checked while
+    /// its vehicle drives.
+    fn check_crouch_collisions(&mut self) -> Result<(), SeqError> {
+        let crouching = std::mem::take(&mut self.crouching);
+        for (r, depth) in crouching {
+            let mut skip: Vec<String> = self
+                .world
+                .obstacles()
+                .iter()
+                .filter(|o| o.walkable)
+                .map(|o| o.name.clone())
+                .collect();
+            skip.extend(self.dynamic_names.iter().cloned());
+            if let Some(gr) = &self.robots[r].gait {
+                skip.extend(gr.carried.iter().map(|(name, _)| name.clone()));
+            }
+            if let Some(mount) = &self.world.robots()[r].mount {
+                for device in self.world.devices() {
+                    if let DeviceKind::Vehicle { body, .. } = &device.kind {
+                        if device.name == mount.device {
+                            skip.extend(body.iter().cloned());
+                        }
+                    }
+                }
+            }
+            if let Some((part, obstacle)) = self
+                .world
+                .rider_obstacle_contacts(r, &skip)
+                .into_iter()
+                .next()
+            {
+                return Err(SeqError::CrouchCollision {
+                    t: self.t,
+                    robot: self.world.robots()[r].name.clone(),
+                    part,
+                    obstacle,
+                    depth,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The robot riding `device` that stands crouched (or is on its way):
+    /// `(name, depth, lean, crouching until)` — a goto would walk it off
+    /// from a posture no walk starts from.
+    fn crouched_rider(&self, device: &str) -> Option<(String, f64, f64, Option<f64>)> {
+        (0..self.robots.len()).find_map(|r| {
+            let rides = self.world.robots()[r]
+                .mount
+                .as_ref()
+                .is_some_and(|m| m.device == device);
+            let gr = self.robots[r].gait.as_ref()?;
+            if !rides || !gr.crouched_now() {
+                return None;
+            }
+            let (depth, lean) = gr.crouch.as_ref().map(|c| c.to).unwrap_or(gr.crouched);
+            Some((
+                self.world.robots()[r].name.clone(),
+                depth,
+                lean,
+                gr.crouch.as_ref().map(|c| c.t1),
+            ))
+        })
     }
 }
 
@@ -20964,6 +21606,313 @@ mod biped_tests {
             "walked to x = {}",
             base.translation.x
         );
+    }
+
+    // ------------------------------------------------------------ crouch
+
+    fn crouch(depth: f64, lean: f64, duration: Option<f64>) -> Action {
+        Action::Crouch {
+            robot: None,
+            depth,
+            lean,
+            duration,
+        }
+    }
+
+    fn bake(scene: &mut Scene, steps: Vec<Step>) -> Result<SequenceTimeline, SeqError> {
+        scene.upsert_sequence(Sequence {
+            name: "crouch".into(),
+            steps,
+        });
+        scene.simulate_sequence("crouch", &RolloutOptions::default())
+    }
+
+    fn feet_at_t(scene: &Scene, tl: &SequenceTimeline, t: f64) -> [Isometry3<f64>; 2] {
+        [foot_pose(scene, tl, "L", t), foot_pose(scene, tl, "R", t)]
+    }
+
+    fn assert_planted(scene: &Scene, tl: &SequenceTimeline, from: f64, to: f64) {
+        let start = feet_at_t(scene, tl, from);
+        let n = ((to - from) / 0.01).round() as usize;
+        for k in 0..=n {
+            let t = from + k as f64 * 0.01;
+            for (a, b) in start.iter().zip(feet_at_t(scene, tl, t)) {
+                let slip = (a.translation.vector - b.translation.vector).norm();
+                let turn = a.rotation.angle_to(&b.rotation);
+                assert!(slip < 1e-4, "a foot slipped {slip:.2e} m by t = {t:.2}");
+                assert!(turn < 1e-3, "a foot turned {turn:.2e} rad by t = {t:.2}");
+            }
+        }
+    }
+
+    /// The body goes down `depth` on a smoothstep while both soles stay
+    /// where they stood, and the legs are left bent there.
+    #[test]
+    fn a_crouch_lowers_the_body_with_the_feet_planted() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let z0 = scene.robots()[0].base_pose().translation.z;
+        let tl = bake(
+            &mut scene,
+            vec![
+                step("down", vec![crouch(0.1, 0.0, Some(1.0))], Condition::Done),
+                step("hold", vec![], Condition::Elapsed { seconds: 0.5 }),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0];
+        let z = |t: f64| SequenceTimeline::base_pose(track, t).unwrap().translation.z;
+        assert!((z(0.0) - z0).abs() < 1e-9, "{}", z(0.0));
+        assert!((z(0.5) - (z0 - 0.05)).abs() < 1e-9, "mid-way z = {}", z(0.5));
+        assert!((z(1.0) - (z0 - 0.1)).abs() < 1e-9, "z = {}", z(1.0));
+        assert!((z(tl.duration) - (z0 - 0.1)).abs() < 1e-9);
+        assert_planted(&scene, &tl, 0.0, tl.duration);
+        // Pinned once down: the legs hold their bent posture.
+        let legs: Vec<usize> = ["L_knee_joint", "R_knee_joint", "L_hip_pitch_joint"]
+            .iter()
+            .map(|j| qi(&scene, j))
+            .collect();
+        let down = track.trajectory.sample(1.0);
+        for k in 0..=50 {
+            let q = track.trajectory.sample(1.0 + k as f64 * 0.01);
+            for &j in &legs {
+                assert!((q[j] - down[j]).abs() < 1e-9, "q{j} moved after the crouch");
+            }
+        }
+        // A leg of two 0.35 m links standing at 0.4 rad each, 0.1 m
+        // shorter: each link at acos(height / 0.7) to the vertical, the
+        // knee twice that.
+        let height = 0.7 * 0.4f64.cos() - 0.1;
+        let knee = 2.0 * (height / 0.7).acos();
+        assert!((down[legs[0]] - knee).abs() < 1e-3, "knee {}", down[legs[0]]);
+        // The move is the step's: `done` waited for it.
+        let span = track.moves.iter().find(|m| m.name == "crouch").unwrap();
+        assert!((span.end - 1.0).abs() < 1e-9, "{span:?}");
+    }
+
+    /// Fired the scan the walk arrives, the crouch waits for the last
+    /// foot to land, then goes down with the feet where the walk left
+    /// them — an arm ramp fired with it running on across the settle and
+    /// the crouch to its end.
+    #[test]
+    fn a_crouch_after_a_walk_waits_for_the_settle() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let z0 = scene.robots()[0].base_pose().translation.z;
+        let shoulder = qi(&scene, "L_shoulder_pitch_joint");
+        let tl = bake(
+            &mut scene,
+            vec![
+                step("go", vec![goto("c")], device_done()),
+                step(
+                    "down",
+                    vec![
+                        crouch(0.1, 0.0, Some(0.8)),
+                        Action::StartRamp {
+                            robot: None,
+                            targets: vec![("L_shoulder_pitch_joint".into(), -0.4)],
+                            duration: 2.5,
+                            check: false,
+                        },
+                    ],
+                    Condition::Done,
+                ),
+                step("hold", vec![], Condition::Elapsed { seconds: 0.3 }),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0];
+        let end = track.trajectory.sample(tl.duration);
+        assert!((end[shoulder] + 0.4).abs() < 1e-9, "{}", end[shoulder]);
+        let span = track.moves.iter().find(|m| m.name == "crouch").unwrap();
+        let t0 = span.end - 0.8;
+        let landed = track.footfalls.iter().map(|f| f.land).fold(0.0, f64::max);
+        assert!(span.start < landed - 1e-6, "fired before the settle ({span:?}, {landed})");
+        assert!((t0 - landed).abs() < 1e-9, "began at {t0}, the last foot landed at {landed}");
+        let z = |t: f64| SequenceTimeline::base_pose(track, t).unwrap().translation.z;
+        assert!((z(t0) - z0).abs() < 1e-9);
+        assert!((z(span.end) - (z0 - 0.1)).abs() < 1e-9, "{}", z(span.end));
+        assert_planted(&scene, &tl, (t0 / 0.01).ceil() * 0.01, tl.duration);
+    }
+
+    /// A walk starts from the stance: crouched, the goto is refused by
+    /// name; stood back up, the walk is the one it always was.
+    #[test]
+    fn a_crouched_walker_must_stand_up_before_it_walks() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let err = bake(
+            &mut scene,
+            vec![
+                step("down", vec![crouch(0.1, 0.2, None)], Condition::Done),
+                step("go", vec![goto("c")], device_done()),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stand it up first"), "{err}");
+        let plain = bake(
+            &mut scene,
+            vec![
+                step("go", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        )
+        .unwrap();
+        let stood = bake(
+            &mut scene,
+            vec![
+                step("down", vec![crouch(0.1, 0.2, Some(1.0))], Condition::Done),
+                step("up", vec![crouch(0.0, 0.0, Some(1.0))], Condition::Done),
+                step("go", vec![goto("c")], device_done()),
+                step("stand", vec![], Condition::Elapsed { seconds: 1.0 }),
+            ],
+        )
+        .unwrap();
+        // The same walk, two seconds later.
+        let (a, b) = (&plain.robots[0], &stood.robots[0]);
+        assert_eq!(a.footfalls.len(), b.footfalls.len());
+        for (f, g) in a.footfalls.iter().zip(&b.footfalls) {
+            assert!((f.position - g.position).norm() < 1e-6, "{f:?} vs {g:?}");
+            assert!((g.land - f.land - 2.0).abs() < 1e-6, "{f:?} vs {g:?}");
+        }
+        assert!((stood.duration - plain.duration - 2.0).abs() < 0.011);
+        let end = |tl: &SequenceTimeline| {
+            SequenceTimeline::base_pose(&tl.robots[0], tl.duration).unwrap()
+        };
+        assert!((end(&plain).translation.vector - end(&stood).translation.vector).norm() < 1e-9);
+    }
+
+    /// Deeper than the ankles bend: refused when the step fires, with the
+    /// depth asked and the leg that gives out.
+    #[test]
+    fn an_unreachable_crouch_is_refused_by_name() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let err = bake(
+            &mut scene,
+            vec![step("down", vec![crouch(0.45, 0.0, None)], Condition::Done)],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot crouch to 0.450 m"), "{err}");
+        assert!(err.contains("leg `L`") || err.contains("leg `R`"), "{err}");
+    }
+
+    /// A post just under the hanging left hand: going down puts the hand
+    /// into it — the crouch's own tick check says so, and a checked ramp
+    /// fired alongside sees it before a tick runs (it is held where the
+    /// body will be). Standing, the same ramp is clear. (6 cm keeps this
+    /// primitive biped's shank and foot boxes apart: bent further, its
+    /// ankle folds one into the other.)
+    #[test]
+    fn a_crouch_is_checked_on_the_way_down() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let model = scene.robots()[0].model.clone();
+        let hand = model.link_index("L_hand").unwrap();
+        let poses = scene.fk_for(0, scene.robots()[0].joint_positions()).unwrap();
+        let p = poses[hand].translation.vector;
+        // The hand box is 0.10 tall about its origin: the post's top 3 cm
+        // under its bottom.
+        let top = p.z - 0.05 - 0.03;
+        scene
+            .add_obstacle(
+                "post",
+                Geometry::Box {
+                    size: Vector3::new(0.06, 0.06, top),
+                },
+                Isometry3::translation(p.x, p.y, top / 2.0),
+            )
+            .unwrap();
+        let err = bake(
+            &mut scene,
+            vec![step("down", vec![crouch(0.06, 0.0, Some(1.0))], Condition::Done)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, SeqError::CrouchCollision { .. }), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("`post`") && text.contains("L_hand"), "{text}");
+        let elbow = |check: bool| Action::StartRamp {
+            robot: None,
+            targets: vec![("L_elbow_joint".into(), -0.05)],
+            duration: 1.0,
+            check,
+        };
+        let err = bake(
+            &mut scene,
+            vec![step(
+                "down",
+                vec![crouch(0.06, 0.0, Some(1.0)), elbow(true)],
+                Condition::Done,
+            )],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("the ramp meets the cell") && err.contains("post"), "{err}");
+        bake(
+            &mut scene,
+            vec![step("bend", vec![elbow(true)], Condition::Done)],
+        )
+        .unwrap();
+    }
+
+    /// An arm ramp alongside the crouch rides the lowering body: both
+    /// arrive, the feet stay put.
+    #[test]
+    fn a_ramp_alongside_a_crouch_rides_the_body() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let z0 = scene.robots()[0].base_pose().translation.z;
+        let shoulder = qi(&scene, "L_shoulder_pitch_joint");
+        let tl = bake(
+            &mut scene,
+            vec![
+                step(
+                    "reach low",
+                    vec![
+                        crouch(0.05, 0.1, Some(1.2)),
+                        Action::StartRamp {
+                            robot: None,
+                            targets: vec![("L_shoulder_pitch_joint".into(), -0.6)],
+                            duration: 1.5,
+                            check: true,
+                        },
+                    ],
+                    Condition::Done,
+                ),
+                step("hold", vec![], Condition::Elapsed { seconds: 0.3 }),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0];
+        let end = track.trajectory.sample(tl.duration);
+        assert!((end[shoulder] + 0.6).abs() < 1e-9, "{}", end[shoulder]);
+        // Mid-ramp the arm is on its cubic (the crouch baked it per tick).
+        let mid = track.trajectory.sample(0.75)[shoulder];
+        assert!((mid + 0.3).abs() < 0.01, "{mid}");
+        let base = SequenceTimeline::base_pose(track, tl.duration).unwrap();
+        assert!((base.translation.z - (z0 - 0.05)).abs() < 1e-9);
+        assert_planted(&scene, &tl, 0.0, tl.duration);
+    }
+
+    /// The static posture a pose is taught on is the one the bake reaches.
+    #[test]
+    fn crouch_pose_is_where_the_bake_crouches_to() {
+        let mut scene = biped_scene(BIPED, biped_gait(true));
+        let (base, q) = scene.crouch_pose(0, 0.1, 0.2).unwrap();
+        let tl = bake(
+            &mut scene,
+            vec![step("down", vec![crouch(0.1, 0.2, Some(1.0))], Condition::Done)],
+        )
+        .unwrap();
+        let track = &tl.robots[0];
+        let baked = SequenceTimeline::base_pose(track, tl.duration).unwrap();
+        assert!((baked.translation.vector - base.translation.vector).norm() < 1e-9);
+        assert!(baked.rotation.angle_to(&base.rotation) < 1e-9);
+        let q_end = track.trajectory.sample(tl.duration);
+        for (j, (a, b)) in q.iter().zip(&q_end).enumerate() {
+            assert!((a - b).abs() < 1e-5, "q{j}: {a} vs {b}");
+        }
+        // The scene itself is untouched.
+        assert!(scene.robots()[0].base_pose().translation.z > base.translation.z + 0.09);
+        // Unreachable: by name.
+        let err = scene.crouch_pose(0, 0.45, 0.0).unwrap_err().to_string();
+        assert!(err.contains("cannot crouch to 0.450 m"), "{err}");
     }
 }
 

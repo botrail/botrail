@@ -1171,6 +1171,22 @@ pub enum Action {
         robot: Option<String>,
         toolpath: String,
     },
+    /// Lower a parked walker's body while it stands: over `duration` the
+    /// body (its root link) goes from the crouch it is in to `depth`
+    /// metres below its standing height, pitched nose-down by `lean`
+    /// radians about its own lateral axis, on a smoothstep — every foot
+    /// held where it stands and each leg re-solved every scan tick by the
+    /// walk's own leg IK. `depth = 0, lean = 0` stands it back up.
+    /// `None` takes the duration from a pace (0.3 m/s of depth, 0.6 rad/s
+    /// of lean, peak 1.5 × mean, at least 0.6 s). Await it with
+    /// [`Condition::Done`]; while the body is lowered its vehicle does not
+    /// drive (a walk starts from the stance).
+    Crouch {
+        robot: Option<String>,
+        depth: f64,
+        lean: f64,
+        duration: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1231,7 +1247,8 @@ impl Action {
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
             | Action::Untrack { robot, .. }
-            | Action::StartToolpath { robot, .. } => robot.as_mut(),
+            | Action::StartToolpath { robot, .. }
+            | Action::Crouch { robot, .. } => robot.as_mut(),
             _ => None,
         }
     }
@@ -2048,8 +2065,33 @@ impl Scene {
                 };
                 Ok(Some((r, self.group_joints(r, g))))
             }
+            // A crouch drives the legs (the arms ride the body).
+            Action::Crouch { robot, .. } => {
+                let r = self.resolve_seq_robot(robot)?;
+                Ok(Some((r, self.crouch_legs(r)?)))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// The legs a crouch of robot `r` moves: its mounted gait's leg DOF.
+    /// An error names the robot when it has no gait to crouch on.
+    pub(crate) fn crouch_legs(&self, r: usize) -> Result<Vec<usize>, String> {
+        let robot = &self.robots()[r];
+        let spec = robot
+            .mount
+            .as_ref()
+            .and_then(|m| m.gait.as_ref())
+            .ok_or_else(|| {
+                format!(
+                    "`{}` has no gait to crouch on — crouch is for a legged robot mounted \
+                     with `gait=` (mount_robot)",
+                    robot.name
+                )
+            })?;
+        crate::gait::resolve_gait(&robot.model, spec, robot.joint_positions())
+            .map(|g| g.leg_joints())
+            .map_err(|m| format!("`{}`: gait: {m}", robot.name))
     }
 
     /// The joints a motion drives: its group's, or every joint of its
@@ -2158,7 +2200,7 @@ impl Scene {
                             claim_robot(&mut owners, r, group.clone(), index)?;
                         }
                     }
-                    Action::StartToolpath { robot, .. } => {
+                    Action::StartToolpath { robot, .. } | Action::Crouch { robot, .. } => {
                         if let Ok(r) = self.resolve_seq_robot(robot) {
                             claim_robot(&mut owners, r, None, index)?;
                         }
@@ -3128,6 +3170,29 @@ impl Scene {
                 Ok(())
             }
             Action::Untrack { robot, .. } => self.resolve_seq_robot(robot).map(|_| ()),
+            Action::Crouch {
+                robot,
+                depth,
+                lean,
+                duration,
+            } => {
+                let r = self.resolve_seq_robot(robot)?;
+                self.crouch_legs(r)?;
+                if !(depth.is_finite() && *depth >= 0.0) {
+                    return Err(format!(
+                        "crouch depth is how far the body goes down, in metres (>= 0), got {depth}"
+                    ));
+                }
+                if !lean.is_finite() {
+                    return Err(format!("crouch lean must be finite, got {lean}"));
+                }
+                if let Some(d) = duration {
+                    if !(d.is_finite() && *d > 0.0) {
+                        return Err(format!("crouch duration must be positive, got {d}"));
+                    }
+                }
+                Ok(())
+            }
             Action::Set { signal, .. } => {
                 if !self.signals.iter().any(|s| &s.name == signal) {
                     if self.sensors.iter().any(|s| &s.name == signal) {

@@ -4066,6 +4066,27 @@ impl Scene {
         self.hub.place_vehicle(name, station).map_err(scene_err)
     }
 
+    /// The posture a mounted walker takes crouched `depth` metres below its
+    /// standing height and leaned `lean` rad nose-down, where it stands now
+    /// (its current base pose, taken as standing): `(base_pose, joints)`,
+    /// with `base_pose` as `(position, quaternion_xyzw)`. Each leg of its
+    /// gait is solved so its foot stays where the stance puts it — the same
+    /// solve `bt.seq.crouch` runs every scan tick, so an arm pose taught on
+    /// this posture (`set_robot_base_pose(*base_pose)`,
+    /// `set_joint_positions(joints)`, then IK) is the one the bake reaches.
+    /// The scene is not changed. Raises ValueError naming the leg that
+    /// cannot keep its foot planted.
+    #[pyo3(signature = (depth, lean = 0.0, robot = None))]
+    fn crouch_pose(
+        &self,
+        depth: f64,
+        lean: f64,
+        robot: Option<&str>,
+    ) -> PyResult<(([f64; 3], [f64; 4]), Vec<f64>)> {
+        let index = self.resolve_robot(robot)?;
+        self.hub.crouch_pose(index, depth, lean).map_err(scene_err)
+    }
+
     /// Rotates a disabled wheel visual from the vehicle's travelled distance.
     /// Axis and pivot are in the visual's local frame; radius is in metres.
     /// A mecanum wheel uses lateral_ratio=-1 or +1 for its roller handedness.

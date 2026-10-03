@@ -142,6 +142,47 @@ Two things worth knowing before you teach one:
   does: sample it and ask `check_collisions()` — the demo refuses to bake
   a ramp that sweeps through the cell.
 
+### Crouching
+
+Standing, a humanoid's hands reach only so low: a waist that pitches a
+fraction of a radian leaves a box on the floor, or the bottom shelf of a
+cage trolley, out of reach. `bt.seq.crouch` lowers the body while the
+machine stands — its feet stay where they are, and every leg is re-solved
+each scan tick by the same leg IK the walk uses:
+
+```python
+sq.step("go", actions=[bt.seq.goto("legs", "cage")], transition=bt.seq.device_done("legs"))
+sq.step("down", actions=[bt.seq.crouch("h2", 0.35, lean=0.3)])   # 0.35 m down, 0.3 rad forward
+sq.step("place", actions=[bt.seq.ramp(place_pose, 1.2, robot="h2", check=True)])
+sq.step("up", actions=[bt.seq.crouch("h2", 0.0)])                  # stand back up
+```
+
+* `depth` is metres below the standing height, `lean` a nose-down pitch of
+  the body (radians) about its own lateral axis — the forward lean of a
+  real squat. A crouch goes from the posture it finds to the one asked, on
+  a smoothstep; `duration` defaults to a pace (0.3 m/s, 0.6 rad/s). It is
+  a move: the step waits for it, and so does `robot_done`.
+* The whole crouch is priced when the step fires: a leg that cannot keep
+  its foot planted fails the bake by name, with the depth asked. On the
+  way down the robot — legs, body, what it holds — is checked against the
+  cell every tick, like a rider (the knees meet the trolley; the held box
+  meets the shelf it is lowered past).
+* Fired the scan the walk arrives, a crouch waits for the last foot to
+  land. While the body is lowered the vehicle does not drive: a `goto` is
+  refused until `crouch(robot, 0)` has stood it up, and a planned motion
+  waits for the crouch to finish. Ramps may run alongside it; with
+  `check=True` each point of the ramp is held where the body will be.
+* `scene.crouch_pose(depth, lean=, robot=)` returns the crouched posture —
+  `(base_pose, joints)` — where the robot stands now, without changing the
+  scene: set it with `set_robot_base_pose` / `set_joint_positions` and
+  solve the arms there, and the pose is the one the bake reaches.
+* Nothing balances: the bake does not ask whether the machine would tip
+  over squatting with a load held out front. Neither does it check the
+  legs against each other — a coarse collision model can fold a shank into
+  a foot at a deep crouch, which a checked ramp or a plan then reports as
+  the robot touching itself; declare such pairs with
+  `Robot.allow_collisions` if the real machine folds that far.
+
 ## From the catalog
 
 A legged machine in the catalog is a `vehicle.legged` package, and its

@@ -817,6 +817,12 @@ class Scene:
         start: Optional[str] = None,
     ) -> None: ...
     def place_vehicle(self, name: str, station: str) -> None: ...
+    def crouch_pose(
+        self, depth: float, lean: float = 0.0, robot: Optional[str] = None
+    ) -> tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float, float]],
+        list[float],
+    ]: ...
     def set_vehicle_wheel(
         self,
         vehicle: str,

@@ -173,6 +173,10 @@ fn condition_text(c: &Condition, after: Option<&Step>) -> String {
                             )),
                             Action::StartToolpath { toolpath, .. } => Some(toolpath.clone()),
                             Action::Policy { policy, .. } => Some(format!("policy {policy}")),
+                            Action::Crouch { robot, .. } => Some(format!(
+                                "crouch{}",
+                                robot.as_ref().map(|r| format!(" {r}")).unwrap_or_default()
+                            )),
                             _ => None,
                         })
                         .collect()
@@ -398,6 +402,24 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 OutputKind::Motion,
                 policy.clone(),
                 format!("policy {policy}{}", with_robot(robot)),
+            )),
+            Action::Crouch {
+                robot, depth, lean, ..
+            } => out.push((
+                OutputKind::Motion,
+                "crouch".to_string(),
+                if *depth == 0.0 && *lean == 0.0 {
+                    format!("stand up{}", with_robot(robot))
+                } else if *lean == 0.0 {
+                    format!("crouch {}{}", trim_num(*depth), with_robot(robot))
+                } else {
+                    format!(
+                        "crouch {} lean {}{}",
+                        trim_num(*depth),
+                        trim_num(*lean),
+                        with_robot(robot)
+                    )
+                },
             )),
             Action::Attach {
                 robot,

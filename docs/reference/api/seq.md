@@ -27,6 +27,8 @@ waits for it (`done()`), a step that starts nothing falls through
 | `start(device)` / `stop(device)` | Run or halt a device — a conveyor or a source |
 | `set_speed(device, speed)` | Rescale a conveyor's velocity, direction kept |
 | `move_to(device, position)` | Command a linear axis; await with `device_done` |
+| `goto(device, station)` | Dispatch a vehicle; await with `device_done` |
+| `crouch(robot, depth, lean=)` | Lower a parked walker's body, feet planted; `crouch(robot, 0)` stands it up |
 
 ## Conditions at a glance
 

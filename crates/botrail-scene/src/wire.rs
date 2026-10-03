@@ -1305,6 +1305,22 @@ pub enum ActionMsg {
         device: String,
         command: DeviceCommandMsg,
     },
+    /// Lower a parked walker's body `depth` metres below standing (and
+    /// pitch it nose-down by `lean` rad), feet planted; `depth = 0`
+    /// stands it up. `duration` defaults to a pace. Await with `done`.
+    Crouch {
+        #[serde(default)]
+        robot: Option<String>,
+        depth: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        lean: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<f64>,
+    },
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2367,6 +2383,17 @@ pub fn action_msg(action: &Action) -> ActionMsg {
                 },
             },
         },
+        Action::Crouch {
+            robot,
+            depth,
+            lean,
+            duration,
+        } => ActionMsg::Crouch {
+            robot: robot.clone(),
+            depth: *depth,
+            lean: *lean,
+            duration: *duration,
+        },
     }
 }
 
@@ -2451,6 +2478,17 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
                 DeviceCommandMsg::MoveToStop { stop } => DeviceCommand::MoveToStop(stop.clone()),
                 DeviceCommandMsg::Advance { distance } => DeviceCommand::Advance(*distance),
             },
+        },
+        ActionMsg::Crouch {
+            robot,
+            depth,
+            lean,
+            duration,
+        } => Action::Crouch {
+            robot: robot.clone(),
+            depth: *depth,
+            lean: *lean,
+            duration: *duration,
         },
     }
 }

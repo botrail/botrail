@@ -532,6 +532,26 @@ impl<'a> Pou<'a> {
                     ));
                     started.push(format!("{inst}.done"));
                 }
+                // The walker's own controller lowers the body; the PLC
+                // asks for the posture and waits, as for a motion program.
+                Action::Crouch {
+                    robot, depth, lean, ..
+                } => {
+                    let robot = self.robot_name(robot);
+                    let inst = self.instance(
+                        format!("{}_crouch", ident(&robot)),
+                        "FB_Crouch",
+                        Some(&robot),
+                    );
+                    st.push(format!(
+                        "{inst}(robot := {}, name := {}, start := TRUE); (* body {} m down, {} rad lean *)",
+                        st_string(&robot),
+                        st_string("crouch"),
+                        st_real(*depth),
+                        st_real(*lean)
+                    ));
+                    started.push(format!("{inst}.done"));
+                }
                 Action::Attach { robot, object, .. } => {
                     let robot = self.robot_name(robot);
                     let inst = self.instance(
@@ -852,6 +872,10 @@ const STUB_FBS: &[(&str, &str)] = &[
     (
         "FB_StartPolicy",
         "start the named controller-side policy on the robot",
+    ),
+    (
+        "FB_Crouch",
+        "lower (or raise back) the walking robot's body, feet planted",
     ),
     (
         "FB_Attach",

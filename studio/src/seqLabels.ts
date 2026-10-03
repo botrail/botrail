@@ -22,6 +22,8 @@ export function actionLabel(action: ActionMsg): string {
       return "⇥ untrack";
     case "set":
       return `${action.signal}=${action.value ? "1" : "0"}`;
+    case "crouch":
+      return action.depth === 0 && !action.lean ? "⇡ stand" : `⇣ ${action.depth}m`;
     case "device": {
       const cmd = action.command;
       const verb =

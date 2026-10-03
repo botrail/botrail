@@ -1528,6 +1528,21 @@ impl SceneHub {
         botrail_session::place_vehicle(self, device, station)
     }
 
+    /// Robot `robot` crouched `depth` m (leaned `lean` rad) where it
+    /// stands: `(base pose, joints)`, the scene untouched.
+    pub fn crouch_pose(
+        &self,
+        robot: usize,
+        depth: f64,
+        lean: f64,
+    ) -> Result<(PoseArrays, Vec<f64>), SceneError> {
+        self.with_scene(|scene| {
+            scene
+                .crouch_pose(robot, depth, lean)
+                .map(|(base, q)| (pose_arrays(&base), q))
+        })
+    }
+
     pub fn remove_device(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_device(self, name)
     }

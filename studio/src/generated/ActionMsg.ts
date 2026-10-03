@@ -18,4 +18,4 @@ group?: string | null, } | { "type": "untrack", robot: string | null,
 /**
  * The arm whose track to release (a robot tracking with both).
  */
-group?: string | null, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, };
+group?: string | null, } | { "type": "set", signal: string, value: boolean, } | { "type": "device", device: string, command: DeviceCommandMsg, } | { "type": "crouch", robot: string | null, depth: number, lean?: number, duration?: number | null, };

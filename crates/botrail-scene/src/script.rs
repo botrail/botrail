@@ -724,6 +724,14 @@ impl<'a> Lowering<'a> {
                     local_q.clone_from(q);
                 }
             }
+            // Only a walking robot crouches, and its program is refused
+            // before any step is lowered (its legs are a gait).
+            Action::Crouch { .. } => {
+                return Err(format!(
+                    "{label}: a crouch is a walking robot's posture, not a controller \
+                     program's move"
+                ));
+            }
             Action::StartRamp {
                 targets, duration, ..
             } => {
@@ -927,7 +935,8 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
             | Action::Attach { robot, .. }
             | Action::Track { robot, .. }
             | Action::Untrack { robot, .. }
-            | Action::StartToolpath { robot, .. } => scene.resolve_seq_robot(robot)?,
+            | Action::StartToolpath { robot, .. }
+            | Action::Crouch { robot, .. } => scene.resolve_seq_robot(robot)?,
             _ => return Ok(()),
         };
         match driven {
