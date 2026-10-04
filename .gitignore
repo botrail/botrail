@@ -17,6 +17,8 @@ examples/**/*.usd
 examples/**/*.usd[ac]
 !examples/assets/*.usd
 !examples/assets/*.usd[ac]
+# the GTP station demo's props (examples/legged/_gtp_station.py)
+!examples/assets/gtp_station/**/*.usd[ac]
 !python/tests/**/*.usd[ac]
 # the vendored shape library (scripts/sync_shapes.py): tracked, and maturin
 # applies this file to the wheel too, so an ignored .usda would ship nowhere

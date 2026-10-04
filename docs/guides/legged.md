@@ -183,6 +183,11 @@ sq.step("up", actions=[bt.seq.crouch("h2", 0.0)])                  # stand back 
   the robot touching itself; declare such pairs with
   `Robot.allow_collisions` if the real machine folds that far.
 
+`examples/legged/gtp_station_demo.py` puts this to work: a Unitree H2 at a
+goods-to-person station crouches to take cartons from an AGV's rack and to
+set them low into a roll cage, every pose taught at its crouch with
+`crouch_pose` and every crouch baked with `crouch`.
+
 ## From the catalog
 
 A legged machine in the catalog is a `vehicle.legged` package, and its

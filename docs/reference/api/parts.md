@@ -5,8 +5,8 @@ pedestals, aluminium frame units cut from a maker's profile system
 (`frame_unit`, `FrameUnit`), racks, conveyor bodies, pallets, light curtains, stairs, a
 machining centre with its door and panel, a screw presenter with its
 magazine, screws and compound solids, the shape library (`appearance`,
-`shaped_box`) and the props drawn from it (trays, stages, cartons, bins,
-stock on pallets, floor markings, a person, a gantry), and catalog objects set down
+`shaped_box`) and the props drawn from it (trays, stages, cartons, bins, roll cages,
+the racks a goods-to-person drive unit carries, stock on pallets, floor markings, a person, a gantry), and catalog objects set down
 as they ship (`prop` — the scanned YCB objects) — built from ordinary residents
 (boxes, frames, a device or a sensor) with their [part](../../guides/parts-and-bom.md)
 identity pinned, so the BOM counts them and the layout sheet labels them.

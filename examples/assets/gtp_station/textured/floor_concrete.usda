@@ -1,0 +1,86 @@
+#usda 1.0
+(
+    defaultPrim = "Shapes"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Shapes"
+{
+    def Mesh "floor_concrete" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        float3[] extent = [(-20, -20, 0), (40, 20, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </Shapes/Looks/floor_concrete>
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "faceVarying"
+        )
+        point3f[] points = [(-20, -20, 0), (40, -20, 0), (40, 20, 0), (-20, 20, 0)]
+        texCoord2f[] primvars:st = [(0.16666667, 0.16666667), (10.166667, 0.16666667), (10.166667, 6.8333335), (0.16666667, 6.8333335)] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+
+        def GeomSubset "surface_0" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [0]
+            rel material:binding = </Shapes/Looks/floor_concrete>
+        }
+    }
+
+    def Scope "Looks"
+    {
+        def Material "floor_concrete"
+        {
+            token outputs:surface.connect = </Shapes/Looks/floor_concrete/PreviewSurface.outputs:surface>
+
+            def Shader "PreviewSurface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </Shapes/Looks/floor_concrete/diffuse_tex.outputs:rgb>
+                float inputs:metallic = 0
+                float inputs:roughness.connect = </Shapes/Looks/floor_concrete/roughness_tex.outputs:g>
+                token outputs:surface
+            }
+
+            def Shader "st_reader"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "diffuse_tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex/floor_concrete.jpg@
+                token inputs:sourceColorSpace = "sRGB"
+                float2 inputs:st.connect = </Shapes/Looks/floor_concrete/st_reader.outputs:result>
+                token inputs:wrapS = "repeat"
+                token inputs:wrapT = "repeat"
+                float outputs:g
+                float3 outputs:rgb
+            }
+
+            def Shader "roughness_tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex/floor_concrete_rough.png@
+                token inputs:sourceColorSpace = "raw"
+                float2 inputs:st.connect = </Shapes/Looks/floor_concrete/st_reader.outputs:result>
+                token inputs:wrapS = "repeat"
+                token inputs:wrapT = "repeat"
+                float outputs:g
+                float3 outputs:rgb
+            }
+        }
+    }
+}
+

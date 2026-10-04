@@ -88,6 +88,11 @@ def test_table_pedestal_and_pallet_stand_on_the_floor_and_offer_a_frame() -> Non
     assert hi[2] == pytest.approx(0.75) and (hi[0] - lo[0], hi[1] - lo[1]) == pytest.approx((1.2, 0.8))
     lo, hi = scene.obstacle_bounds("table/leg0")
     assert lo[2] == pytest.approx(0.0)
+    # a laminate top on a painted frame
+    bt.parts.table(scene, "station", size=(1.0, 1.0, 0.75), position=(4.0, 0.0), color=(0.02, 0.02, 0.02),
+                   top_color=(0.8, 0.3, 0.05))
+    colours = {o["name"]: o["color"] for o in json.loads(scene._project_json())["obstacles"]}
+    assert colours["station/top"] == pytest.approx([0.8, 0.3, 0.05]) and colours["station/leg0"] == pytest.approx([0.02, 0.02, 0.02])
 
     p = bt.parts.pedestal(scene, "ped", height=0.5, position=(0.0, 0.0), model="PD-500")
     assert p.frames == ["ped/mount"]

@@ -800,13 +800,15 @@ def table(
     manufacturer: Optional[str] = None,
     top_model: Optional[str] = None,
     color: Color = STEEL,
+    top_color: Optional[Color] = None,
     **attributes,
 ) -> Built:
     """A table `size = (length, width, height)` standing on the floor at
     `position` (its centre, x, y[, floor z]): a top of `top_thickness` on
     four legs. Adds the frame `<name>/top` at the centre of the top face —
     where a fixture or a workpiece sits — and pins one part
-    (`structure.table`) on the group.
+    (`structure.table`) on the group. `top_color` paints the board apart
+    from the legs (a laminate top on a painted frame); `color` is both.
 
     With `catalog=` — the id of a table spec pack, or a package directory — a
     stand you can order: the sides are matched against the ones that are sold
@@ -870,7 +872,7 @@ def table(
     built = Built(name)
     built.obstacles.append(
         scene.add_box(f"{name}/top", size=(lx, wy, top_thickness), position=(x, y, z0 + h - top_thickness / 2),
-                      quaternion=q, color=color)
+                      quaternion=q, color=top_color or color)
     )
     corners = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
     _finish(scene, f"{name}/top", _PAINT)
@@ -6095,8 +6097,8 @@ def compound(
 # `/Shapes/<name>` with its finishes as material subsets — vendored from
 # botrail-assets/workshop-shapes by scripts/sync_shapes.py.
 SHAPES: tuple[str, ...] = (
-    "adjuster", "basket", "bracket", "carton", "handle", "hose", "panel", "rim", "tote", "tray", "tslot", "tslot_2",
-    "workpiece",
+    "adjuster", "basket", "bracket", "carton", "handle", "highbay", "hose", "orikon", "panel", "person", "person_pick",
+    "person_reach", "pod", "rim", "roll_cage", "tote", "tray", "tslot", "tslot_2", "waste_bin", "workpiece",
 )
 _SHAPES_DIR = Path(__file__).resolve().parent / "_shapes"
 
@@ -6370,6 +6372,8 @@ def carton(
 # proud of that, whatever the bin's size (the sleeve's depths are fractions
 # of the side — see botrail-assets workshop-shapes `tote`).
 _TOTE_OVERHANG = 0.015
+# The sleeves a bin can wear (library shapes, open inside and below).
+_BIN_SLEEVES = ("tote", "orikon")
 
 
 def bin(
@@ -6384,12 +6388,13 @@ def bin(
     yaw: float = 0.0,
     detail: str | None = None,
     color: Color | None = None,
+    sleeve: str | None = None,
     mass_kg: float | None = None,
     model: str | None = None,
     manufacturer: str | None = None,
     **attributes,
 ) -> Built:
-    """A small-load container — a KLT, a tote: `size = (length, width,
+    """A small-load container — a KLT, a tote, a folding container: `size = (length, width,
     height)` outside, standing at `position` (the centre of its underside;
     a bench top) turned by `yaw`. Four walls `wall` thick (one figure, or
     `(across the length, across the width)`) stand under `<name>/wall0..3`
@@ -6399,9 +6404,11 @@ def bin(
     floor's top centre, where a part sets down. Pinned as one part (`bin`)
     on the group, so a physics bake keeps the five boxes one rigid unit
     that rests, slides and is carried whole; `mass_kg` is what that unit
-    weighs. Full detail draws the library's ribbed sleeve — skin, ribs,
-    stacking rim, grips, card pocket — round the boxes under
-    `<name>/trim/`, out of collision, in the bin's colour.
+    weighs. Full detail draws the library's sleeve round the boxes under
+    `<name>/trim/`, out of collision, in the bin's colour: `sleeve` names
+    it — "tote" (a KLT's ribs, stacking rim, grips and card pocket, the
+    default) or "orikon" (a folding container's walls with their hinge
+    bead, rib frame and hand holes) — or the pack does.
 
     With `catalog=` — a bin spec pack such as `botrail/bin/klt-vda4500` — a
     container you can order: `size` (or `length_mm` / `width_mm` /
@@ -6430,6 +6437,10 @@ def bin(
         albedo = (spec.manifest.get("specs") or {}).get("albedo_rgb")
         if color is None and isinstance(albedo, (list, tuple)) and len(albedo) == 3:
             color = (float(albedo[0]), float(albedo[1]), float(albedo[2]))
+        sleeve = sleeve or (spec.manifest.get("specs") or {}).get("sleeve")
+    sleeve = sleeve or "tote"
+    if sleeve not in _BIN_SLEEVES:
+        raise ValueError(f"{name}: sleeve must be one of {', '.join(_BIN_SLEEVES)}, not {sleeve!r}")
     mode = _prop_detail(detail)
     if size is None:
         raise ValueError("bin: size is required without a catalog")
@@ -6462,7 +6473,7 @@ def bin(
     if mode == "full":
         g = 1.0 + 2.0 * _TOTE_OVERHANG
         built.obstacles.append(
-            shaped_box(scene, f"{name}/trim/sleeve", "tote", (lx * g, ly * g, h), (x, y, z0 + h / 2),
+            shaped_box(scene, f"{name}/trim/sleeve", sleeve, (lx * g, ly * g, h), (x, y, z0 + h / 2),
                        quaternion=q, color=color)
         )
 
@@ -6542,6 +6553,242 @@ def _prop_model(directory: Path, manifest: dict, pid: str):
     scale = tuple(float(v) for v in mesh.get("scale").split()) if mesh.get("scale") else None
     return path, scale, position, quaternion
 
+
+# The library's roll cage is drawn 1.70 tall with its deck's top at 0.243
+# (150 mm casters under a 40 mm frame): a cage the cell builds without a
+# pack keeps that proportion, so the picture's deck is the one it collides on.
+_CAGE_DECK_FRACTION = 0.243 / 1.70
+_CAGE_FRAME = 0.03
+
+
+def roll_container(
+    scene,
+    name: str,
+    size: Optional[Point3] = None,
+    position=(0.0, 0.0),
+    *,
+    catalog: Optional["CatalogRef"] = None,
+    yaw: float = 0.0,
+    detail: str | None = None,
+    color: Color | None = None,
+    mass_kg: float | None = None,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A roll cage — the two-sided roll box pallet (カゴ台車) cartons are
+    loaded into by hand: `size = (width, depth, height)` outside, standing
+    at `position` (the floor point under its centre) turned by `yaw`. Its
+    two long faces (along x, the width) are open; a mesh frame stands at
+    each end. What collides: the base `<name>/base` from the floor to the
+    deck's top (casters and frame as one block) and the two end frames
+    `<name>/side0` / `<name>/side1`, thin slabs up to the full height. The
+    frame `<name>/deck` is the deck's top centre — where the first layer
+    sets down. Pinned as one part (`vehicle.cart`) on the group. Full detail
+    hides the boxes inside the library's zinc-plated cage (`<name>/trim/cage`).
+
+    With `catalog=` — a roll-cage spec pack such as
+    `makitech/roll-box-pallet/mrc-s` — a cart you can order: `size` (or
+    `width_mm` / `depth_mm`) is matched against the sizes sold and a size
+    nobody sells is refused, the deck's height comes from the pack, and the
+    BOM row carries the type number, the mass and the load. Without one the
+    deck is at the library cage's proportion (0.243 of a 1.70 cage)."""
+    spec = None
+    params: dict = {}
+    part_number = None
+    deck = None
+    if catalog is not None:
+        from ._spec import Spec
+
+        spec = Spec.load(catalog)
+        spec.expect_generator("roll_container")
+        params = {key: spec.default(key) for key in spec.params()}
+        for key in [key for key in attributes if key in params]:
+            params[key] = spec.choose(key, attributes.pop(key))
+        size = _sized_box(spec, params, size, ("width_mm", "depth_mm", "height_mm"))
+        part_number = spec.part_number("cart", **params)  # refuses a combination nobody sells
+        deck_mm = (spec.manifest.get("specs") or {}).get("deck_height_mm")
+        deck = float(deck_mm) / 1000.0 if deck_mm is not None else None
+        manufacturer = manufacturer or spec.manufacturer
+        albedo = (spec.manifest.get("specs") or {}).get("albedo_rgb")
+        if color is None and isinstance(albedo, (list, tuple)) and len(albedo) == 3:
+            color = (float(albedo[0]), float(albedo[1]), float(albedo[2]))
+    mode = _prop_detail(detail)
+    if size is None:
+        raise ValueError("roll_container: size is required without a catalog")
+    w, d, h = (float(v) for v in size)
+    deck = h * _CAGE_DECK_FRACTION if deck is None else deck
+    if min(w, d, h) <= 0 or not 0 < deck < h or w <= 2 * _CAGE_FRAME:
+        raise ValueError(f"{name}: a roll cage needs positive sides wider than its end frames and a deck below "
+                         f"its top, not {size} / deck {deck * 1e3:.0f} mm")
+    color = ZINC if color is None else color
+
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+    built = Built(name)
+    made = scene.add_box(f"{name}/base", size=(w, d, deck), position=(x, y, z0 + deck / 2), quaternion=q, color=color)
+    built.obstacles.append(made)
+    for k, side in enumerate((-1.0, 1.0)):
+        px, py = _turned(x, y, yaw, side * (w - _CAGE_FRAME) / 2, 0.0)
+        made = scene.add_box(f"{name}/side{k}", size=(_CAGE_FRAME, d, h - deck), position=(px, py, z0 + (deck + h) / 2),
+                             quaternion=q, color=color)
+        built.obstacles.append(made)
+    for made in built.obstacles:
+        _finish(scene, made, _TUBE_STEEL)
+    scene.add_frame(f"{name}/deck", position=(x, y, z0 + deck), quaternion=q)
+    built.frames.append(f"{name}/deck")
+    if mode == "full":
+        for made in built.obstacles:
+            scene.set_obstacle_visible(made, False)
+        built.obstacles.append(shaped_box(scene, f"{name}/trim/cage", "roll_cage", (w, d, h), (x, y, z0 + h / 2), quaternion=q))
+
+    if spec is None:
+        identity = _identity(model or f"CART-{round(w * 1000)}x{round(d * 1000)}x{round(h * 1000)}", manufacturer, attributes)
+        if mass_kg is not None:
+            identity["mass_kg"] = mass_kg
+        scene.set_part(name, kind="group", category=identity.pop("category", "vehicle.cart"), **identity)
+        return built
+    recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
+    weighed = mass_kg if mass_kg is not None else spec.mass_kg("cart", **params)
+    scene.set_part(
+        name, kind="group", category=spec.category("cart", "vehicle.cart"), qty=1,
+        catalog=spec.catalog_ref, manufacturer=manufacturer,
+        model=model or part_number, description=spec.name,
+        **{**recorded, **_kg(weighed), **attributes},
+    )
+    return built
+
+
+
+# A goods-to-person rack stands on 40 mm uprights; its base frame — what a
+# drive unit lifts it by — and the frame round its top are 60 mm deep. An
+# open rack's deck is the frame and plate with a pressed tray on them.
+_MOBILE_UPRIGHT = 0.04
+_MOBILE_BAND = 0.06
+_MOBILE_DECK = 0.085
+_MOBILE_TRAY = 0.045
+POD_YELLOW: Color = (0.36, 0.46, 0.0)
+_POD_SILVER: Color = (0.62, 0.64, 0.67)
+_POD_TUBE: _Finish = (0.35, 0.42)       # a pod's frame: brushed, not chrome
+_RACK_TRAY: Color = (0.20, 0.22, 0.23)  # the grey polypropylene tray on a case rack's deck
+
+
+def mobile_rack(
+    scene,
+    name: str,
+    size: Point3,
+    position=(0.0, 0.0),
+    *,
+    clearance: float = 0.40,
+    style: str = "bins",
+    lift: float = 0.0,
+    yaw: float = 0.0,
+    collide: bool = True,
+    detail: str | None = None,
+    color: Color | None = None,
+    model: str | None = None,
+    manufacturer: str | None = None,
+    **attributes,
+) -> Built:
+    """A rack a drive unit carries — the shelf of a goods-to-person (GTP)
+    system: `size = (width, depth, height)` on four corner uprights, standing
+    at `position` (the floor point under its centre) turned by `yaw`, its
+    underside `clearance` above the floor — the room a drive unit drives into
+    to lift it. `lift` raises the whole rack that far: one a drive unit
+    carries, its feet off the floor.
+
+    `style="bins"` is the inventory pod: the storage from the base frame to
+    the top collides as one block (`<name>/storage`) and is drawn as the
+    library's fabric bins on all four faces. `style="open"` is a case rack:
+    a deck with a tray on it (`<name>/deck`), a rail round the top of three
+    sides (`<name>/rail_*`) and the face at +x open — what stands on the deck
+    comes out that way; the frame `<name>/deck` is the tray's top centre,
+    where a load sits. The uprights (`<name>/upright0..3`) collide in both,
+    floor to top.
+
+    Full detail draws the base frame and the top frame (or the deck's frame,
+    plate and tray, and a mid rail), out of collision under `<name>/trim/`; `collide=False` takes the whole rack
+    out of collision (a field of pods nothing drives past). Pins one part
+    (`structure.rack`) on the group."""
+    if style not in ("bins", "open"):
+        raise ValueError(f"{name}: style must be 'bins' or 'open', not {style!r}")
+    mode = _prop_detail(detail)
+    w, d, h = (float(v) for v in size)
+    u, band = _MOBILE_UPRIGHT, _MOBILE_BAND
+    floor = clearance + (band if style == "bins" else _MOBILE_DECK)
+    if min(w, d) <= 2 * u or clearance < 0 or lift < 0 or h <= floor + band:
+        raise ValueError(f"{name}: a mobile rack needs sides wider than two uprights and its top above the base, "
+                         f"not {size} with clearance {clearance}")
+    x, y, z0 = _floor_point(position)
+    z0 += lift
+    q = _yaw_quat(yaw)
+    frame = color if color is not None else (_POD_SILVER if style == "bins" else DARK_STEEL)
+    tube = _POD_TUBE if style == "bins" else _TUBE_STEEL
+    built = Built(name)
+
+    def box(tag, dims, local, z, colour, *, trim=False, finish=None):
+        finish = tube if finish is None else finish
+        px, py = _turned(x, y, yaw, local[0], local[1])
+        if trim:
+            return _trim(scene, built, f"{name}/trim/{tag}", dims, (px, py, z0 + z), q, colour, finish=finish)
+        made = scene.add_box(f"{name}/{tag}", size=dims, position=(px, py, z0 + z), quaternion=q, color=colour)
+        _finish(scene, made, finish)
+        built.obstacles.append(made)
+        return made
+
+    for i, (sx, sy) in enumerate(((-1, -1), (1, -1), (1, 1), (-1, 1))):
+        box(f"upright{i}", (u, u, h), (sx * (w - u) / 2, sy * (d - u) / 2), h / 2, frame)
+    if style == "bins":
+        made = box("storage", (w, d, h - clearance), (0.0, 0.0), (clearance + h) / 2, POD_YELLOW, finish=_PAINT)
+    else:
+        made = box("deck", (w, d, _MOBILE_DECK), (0.0, 0.0), clearance + _MOBILE_DECK / 2, DARK_STEEL)
+        rail = h - 0.01 - u / 2
+        box("rail_back", (u, d - 2 * u, u), (-(w - u) / 2, 0.0), rail, frame)
+        for k, side in enumerate((-1.0, 1.0)):
+            box(f"rail_side{k}", (w - 2 * u, u, u), (0.0, side * (d - u) / 2), rail, frame)
+        scene.add_frame(f"{name}/deck", position=(x, y, z0 + floor), quaternion=q)
+        built.frames.append(f"{name}/deck")
+    if mode == "full":
+        scene.set_obstacle_visible(made, False)
+        base = DARK_STEEL if style == "open" else (0.037, 0.040, 0.045)
+        # the band a drive unit lifts by (an open rack's deck frame); what is
+        # under it — the plate it docks against — the drive unit and the floor hide
+        for k, side in enumerate((-1.0, 1.0)):
+            box(f"band_x{k}", (w - 2 * u, 0.05, band), (0.0, side * (d / 2 - 0.025)), clearance + band / 2, base, trim=True)
+            box(f"band_y{k}", (0.05, d - 2 * u, band), (side * (w / 2 - 0.025), 0.0), clearance + band / 2, base, trim=True)
+        if style == "bins":
+            top = band
+            for k, side in enumerate((-1.0, 1.0)):
+                box(f"top_x{k}", (w, u, top), (0.0, side * (d - u) / 2), h - top / 2, frame, trim=True)
+                box(f"top_y{k}", (u, d, top), (side * (w - u) / 2, 0.0), h - top / 2, frame, trim=True)
+            px, py = _turned(x, y, yaw, 0.0, 0.0)
+            built.obstacles.append(
+                shaped_box(scene, f"{name}/trim/bins", "pod", (w - 0.044, d - 0.044, h - top - floor),
+                           (px, py, z0 + (floor + h - top) / 2), quaternion=q)
+            )
+        else:
+            plate = clearance + band
+            box("plate", (w - 2 * u, d - 2 * u, 0.008), (0.0, 0.0), plate + 0.004, base, trim=True)
+            # the tray: a moulded floor inside a low rim
+            tl, td, rim = w - 0.06, d - 0.06, 0.008
+            tray0 = floor - _MOBILE_TRAY
+            box("tray", (tl, td, 0.01), (0.0, 0.0), tray0 + 0.005, _RACK_TRAY, trim=True, finish=_PLASTIC)
+            for k, side in enumerate((-1.0, 1.0)):
+                box(f"tray_x{k}", (tl, rim, _MOBILE_TRAY), (0.0, side * (td - rim) / 2), floor - _MOBILE_TRAY / 2,
+                    _RACK_TRAY, trim=True, finish=_PLASTIC)
+                box(f"tray_y{k}", (rim, td - 2 * rim, _MOBILE_TRAY), (side * (tl - rim) / 2, 0.0), floor - _MOBILE_TRAY / 2,
+                    _RACK_TRAY, trim=True, finish=_PLASTIC)
+            mid = (floor + h - 0.01 - u / 2) / 2
+            box("mid_back", (0.03, d - 2 * u, 0.03), (-(w / 2 - u / 2), 0.0), mid, frame, trim=True)
+            for k, side in enumerate((-1.0, 1.0)):
+                box(f"mid_side{k}", (w - 2 * u, 0.03, 0.03), (0.0, side * (d / 2 - u / 2)), mid, frame, trim=True)
+    if not collide:
+        for made in built.obstacles:
+            scene.set_obstacle_enabled(made, False)
+    identity = _identity(model or f"GTP-RACK-{round(w * 1000)}x{round(d * 1000)}x{round(h * 1000)}", manufacturer,
+                         attributes)
+    scene.set_part(name, kind="group", category=identity.pop("category", "structure.rack"), **identity)
+    return built
 
 def prop(
     scene,
@@ -6756,6 +7003,18 @@ def marking(
     return built
 
 
+# The postures the shape library draws a person in (botrail-assets
+# workshop-shapes `person`, `person_reach`, `person_pick`): the shape, its
+# bounds at the height it was drawn at (x the way the figure faces, y its
+# left, z up) and their centre from the floor point between its feet. A figure is
+# scaled by its own proportions, never stretched to a box.
+_PERSON_POSES: dict[str, tuple[str, Point3, Point3]] = {
+    "stand": ("person", (0.3859, 0.5344, 1.7407), (0.0564, 0.0, 0.8702)),
+    "reach": ("person_reach", (0.5146, 0.5487, 1.7373), (0.1208, 0.0045, 0.8685)),
+    "pick": ("person_pick", (0.8349, 0.5581, 1.7319), (0.2778, 0.0411, 0.8658)),
+}
+
+
 def person(
     scene,
     name: str,
@@ -6765,17 +7024,33 @@ def person(
     footprint: Point2 = (0.4, 0.4),
     yaw: float = 0.0,
     color: Color = HI_VIS,
+    pose: str = "stand",
+    detail: str | None = None,
 ) -> str:
     """A person, as the safety scenarios need one: a box `footprint` by
-    `height` standing at `position`, in collision — a walk into it is
-    refused, a light curtain or a zone reads it, a scenario moves it into
-    the gate. Nothing is pinned. Returns the name."""
+    `height` standing at `position` (the floor point between the feet),
+    facing `yaw`, in collision — a walk into it is refused, a light curtain
+    or a zone reads it, a scenario moves it into the gate. Full detail draws
+    the library's figure in it, scaled to `height` by its own proportions:
+    `pose` "stand" (at ease), "reach" (handling something before the hips
+    with both hands) or "pick" (reaching into a bin at chest height half a
+    metre ahead — the arm out of the box, which stays the body). `color` is
+    the box's, for what draws no figure (a colour picture, a USD without
+    materials). Nothing is pinned. Returns the name."""
     fx, fy = footprint
     if height <= 0 or fx <= 0 or fy <= 0:
         raise ValueError(f"{name}: a person needs a positive height and footprint")
+    if pose not in _PERSON_POSES:
+        raise ValueError(f"{name}: pose must be one of {', '.join(_PERSON_POSES)}, not {pose!r}")
+    mode = _prop_detail(detail)
     x, y, z0 = _floor_point(position)
-    return scene.add_box(name, size=(fx, fy, height), position=(x, y, z0 + height / 2), quaternion=_yaw_quat(yaw),
+    made = scene.add_box(name, size=(fx, fy, height), position=(x, y, z0 + height / 2), quaternion=_yaw_quat(yaw),
                          color=color)
+    if mode == "full":
+        shape, (sx, sy, sz), (cx, cy, cz) = _PERSON_POSES[pose]
+        k = height / sz
+        appearance(scene, made, shape, (sx * k, sy * k, height), offset=(cx * k, cy * k, cz * k - height / 2))
+    return made
 
 
 def gantry(

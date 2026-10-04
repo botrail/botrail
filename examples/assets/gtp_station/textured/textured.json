@@ -1,0 +1,59 @@
+{
+ "paper_list": {
+  "size": [
+   0.21,
+   0.297,
+   0.0005
+  ],
+  "center": [
+   0.0,
+   0.0,
+   0.00025
+  ],
+  "triangles": 12,
+  "unit": true,
+  "kind": "paper"
+ },
+ "paper_stack": {
+  "size": [
+   0.229865,
+   0.310131,
+   0.00572
+  ],
+  "center": [
+   0.000642,
+   -0.001007,
+   0.00286
+  ],
+  "triangles": 60,
+  "unit": true,
+  "kind": "paper"
+ },
+ "floor_concrete": {
+  "size": [
+   60.0,
+   40.0,
+   0.0
+  ],
+  "center": [
+   10.0,
+   0.0,
+   0.0
+  ],
+  "triangles": 2,
+  "unit": false,
+  "kind": "floor",
+  "tile_m": 6.0,
+  "tile_origin": [
+   -21.0,
+   -21.0
+  ],
+  "joints_every_m": 6.0,
+  "mean_srgb": [
+   93.9,
+   92.0,
+   86.3
+  ],
+  "note": "identity transform; z = 0; joints at x, y = origin + k * tile"
+ }
+}

@@ -173,6 +173,22 @@ def test_person_stands_in_collision_and_gantry_frames_its_beam():
     assert bt.parts.person(scene, "visitor", (-7.7, 2.1)) == "visitor"
     lo, hi = scene.obstacle_bounds("visitor")
     assert (hi[2] - lo[2], hi[0] - lo[0]) == pytest.approx((1.7, 0.4)) and objects(scene)["visitor"]["enabled"]
+    # drawn as the library's figure at its own proportions, 1.7 m tall, the
+    # feet on the floor (the box's bottom) and the reach ahead of the box
+    look = objects(scene)["visitor"]["visual_asset"]
+    assert look["prim_path"] == "/Shapes/person"
+    m = look["transform"]
+    assert m[10] == pytest.approx(1.7) and m[0] / m[5] == pytest.approx(0.3859 / 0.5344, rel=1e-3)
+    assert m[14] - m[10] / 2 == pytest.approx(-0.85, abs=1e-3)  # the figure's underside on the box's
+    bt.parts.person(scene, "picker", (0.0, 0.0), pose="pick", yaw=math.pi / 2)
+    look = objects(scene)["picker"]["visual_asset"]
+    assert look["prim_path"] == "/Shapes/person_pick" and look["transform"][12] > 0.2  # the reach ahead, in his frame
+    bt.parts.person(scene, "massing", (3.0, 0.0), detail="plain")
+    assert "visual_asset" not in objects(scene)["massing"]
+    with pytest.raises(ValueError, match="pose"):
+        bt.parts.person(scene, "dancer", (5.0, 0.0), pose="dance")
+    for extra in ("picker", "massing"):
+        scene.remove_obstacle(extra)
     built = bt.parts.gantry(scene, "inspector", 0.84, 2.05, (3.0, 2.0), yaw=0.0, category="machine.inspection",
                             manufacturer="柳下技研", model="画像検査ステーション")
     assert sorted(built.obstacles) == ["inspector/beam", "inspector/post_l", "inspector/post_r"]
@@ -186,3 +202,65 @@ def test_person_stands_in_collision_and_gantry_frames_its_beam():
     assert scene.check_collisions() == []
     built.remove(scene)
     assert scene.obstacle_names == ["visitor"] and not scene.frames
+
+
+def test_a_mobile_rack_leaves_its_drive_unit_room_and_opens_its_case_face():
+    """A GTP rack: under its clearance only the four uprights (a drive unit
+    drives in there), the pod's storage one block drawn as the library's
+    bins; a case rack's deck carries the frame where its load sits, three
+    rails and the +x face open; `lift` raises all of it."""
+    scene = bt.Scene()
+    pod = bt.parts.mobile_rack(scene, "pod", (1.2, 1.2, 2.25), (0.0, 0.0))
+    by = objects(scene)
+    solid = [n for n in pod.obstacles if by[n]["enabled"]]
+    assert solid == ["pod/upright0", "pod/upright1", "pod/upright2", "pod/upright3", "pod/storage"]
+    lo, hi = scene.obstacle_bounds("pod/storage")
+    assert (lo[2], hi[2]) == pytest.approx((0.40, 2.25)) and not by["pod/storage"]["visible"]
+    assert by["pod/trim/bins"]["visual_asset"]["prim_path"] == "/Shapes/pod" and not by["pod/trim/bins"]["enabled"]
+    scene.add_box("drive_unit", (0.92, 0.96, 0.38), (0.0, 0.0, 0.19))     # what drives in under it
+    assert scene.check_collisions() == []
+    case = bt.parts.mobile_rack(scene, "case", (1.0, 1.0, 1.45), (3.0, 0.0), style="open", lift=0.03, yaw=math.pi)
+    assert case.frames == ["case/deck"] and scene.frame("case/deck")[0] == pytest.approx((3.0, 0.0, 0.03 + 0.40 + 0.085))
+    lo, hi = scene.obstacle_bounds("case/upright0")
+    assert (lo[2], hi[2]) == pytest.approx((0.03, 1.48))                  # carried: its feet off the floor
+    lo, hi = scene.obstacle_bounds("case/rail_back")
+    assert lo[0] > 3.4                                                    # turned half round: the open face to -x
+    assert "case/rail_front" not in scene.obstacle_names
+    scene.add_box("carton", (0.40, 0.30, 0.25), (2.75, 0.0, 0.515 + 0.126))  # a case comes out of the open face
+    assert scene.check_collisions() == []
+    row = rows(scene)["pod"]
+    assert (row["category"], row["model"]) == ("structure.rack", "GTP-RACK-1200x1200x2250")
+    plain = bt.parts.mobile_rack(scene, "plain", (1.0, 1.0, 2.0), (6.0, 0.0), detail="plain")
+    assert not any("/trim/" in n for n in plain.obstacles) and objects(scene)["plain/storage"]["visible"]
+    field = bt.parts.mobile_rack(scene, "field", (1.2, 1.2, 2.25), (12.0, 0.0), collide=False)
+    assert not any(objects(scene)[n]["enabled"] for n in field.obstacles)
+    with pytest.raises(ValueError, match="style"):
+        bt.parts.mobile_rack(scene, "x", (1.0, 1.0, 2.0), (9.0, 0.0), style="shelves")
+
+
+def test_a_roll_cage_is_open_along_its_width_and_decked_where_its_picture_is():
+    """Two end frames and a deck, the long faces open; without a pack the
+    deck is at the library cage's proportion, so a carton set on the frame
+    `<name>/deck` rests on the deck drawn there."""
+    scene = bt.Scene()
+    built = bt.parts.roll_container(scene, "cage", (1.10, 0.80, 1.70), (2.0, 1.0), yaw=math.pi / 2)
+    assert built.obstacles == ["cage/base", "cage/side0", "cage/side1", "cage/trim/cage"] and built.frames == ["cage/deck"]
+    assert scene.frame("cage/deck")[0] == pytest.approx((2.0, 1.0, 0.243))
+    lo, hi = scene.obstacle_bounds("cage/base")
+    assert (hi[0] - lo[0], hi[1] - lo[1], lo[2], hi[2]) == pytest.approx((0.80, 1.10, 0.0, 0.243))
+    lo, hi = scene.obstacle_bounds("cage/side1")  # turned a quarter: the end frames stand at the ends of y
+    assert (hi[1] - lo[1], hi[1], lo[2], hi[2]) == pytest.approx((0.03, 1.55, 0.243, 1.70))
+    by = objects(scene)
+    assert all(by[n]["enabled"] and not by[n]["visible"] for n in ("cage/base", "cage/side0", "cage/side1"))
+    trim = by["cage/trim/cage"]
+    assert not trim["enabled"] and trim["visual_asset"]["prim_path"] == "/Shapes/roll_cage"
+    row = rows(scene)["cage"]
+    assert (row["category"], row["model"], row["qty"]) == ("vehicle.cart", "CART-1100x800x1700", 1)
+    # the open faces: a carton slides in along the depth without touching the frames
+    scene.add_box("carton", (0.40, 0.30, 0.25), (2.0, 1.0, 0.243 + 0.126))
+    assert scene.check_collisions() == []
+    plain = bt.parts.roll_container(scene, "plain", (0.80, 0.60, 1.80), (5.0, 0.0), detail="plain")
+    assert "plain/trim/cage" not in plain.obstacles and objects(scene)["plain/base"]["visible"]
+    assert scene.frame("plain/deck")[0][2] == pytest.approx(1.80 * 0.243 / 1.70)
+    with pytest.raises(ValueError, match="size is required"):
+        bt.parts.roll_container(scene, "nothing", position=(8.0, 0.0))

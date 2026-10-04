@@ -1907,6 +1907,69 @@ configuration:
 """
 
 
+CAGE_MANIFEST = """
+schema_version: '0.1'
+id: makitech/roll-box-pallet/mrc-s/r1
+kind: spec
+category: vehicle.cart
+name: Roll box pallet MRC-S (steel deck)
+manufacturer:
+  name: Makitech
+distribution: public
+specs:
+  deck_height_mm: 243
+  load_kg: 500
+  albedo_rgb: [0.62, 0.63, 0.66]
+configuration:
+  generator: roll_container
+  params:
+    width_mm: {values: [800, 850, 1100], default: 1100}
+    depth_mm: {values: [600, 800], default: 800}
+    height_mm: {values: [1700], default: 1700}
+  components:
+    - role: cart
+      category: vehicle.cart
+      variants:
+        - {width_mm: 800, depth_mm: 600, height_mm: 1700, part_number: MRC-S1, kg: 41}
+        - {width_mm: 850, depth_mm: 600, height_mm: 1700, part_number: MRC-S2, kg: 42}
+        - {width_mm: 1100, depth_mm: 800, height_mm: 1700, part_number: MRC-S5, kg: 52}
+"""
+
+
+ORIKON_MANIFEST = """
+schema_version: '0.1'
+id: sanko/oricon/oricon/r1
+kind: spec
+category: bin
+name: オリコン (フタ無)
+manufacturer:
+  name: 三甲
+distribution: public
+specs:
+  fill_kg: 20
+  sleeve: orikon
+  albedo_rgb: [0.03, 0.15, 0.48]
+configuration:
+  generator: bin
+  params:
+    length_mm: {values: [530, 651], default: 530}
+    width_mm: {values: [366, 442], default: 366}
+    height_mm: {values: [205, 321, 327], default: 321}
+  components:
+    - role: bin
+      category: bin
+      variants:
+        - {length_mm: 530, width_mm: 366, height_mm: 205, part_number: オリコン30B, kg: 1.955}
+        - {length_mm: 530, width_mm: 366, height_mm: 321, part_number: オリコン50B, kg: 2.405}
+        - {length_mm: 651, width_mm: 442, height_mm: 327, part_number: オリコン75B, kg: 3.37}
+  rules:
+    inner_mm:
+      オリコン30B: [491, 333, 195]
+      オリコン50B: [491, 333, 311]
+      オリコン75B: [600, 407, 315]
+"""
+
+
 def _pack(tmp_path: Path, name: str, manifest: str) -> Path:
     directory = tmp_path / name
     directory.mkdir()
@@ -1944,6 +2007,55 @@ def test_a_bin_is_ordered_by_its_type_number_and_sized_inside_from_the_pack(tmp_
     with pytest.raises(ValueError, match="not available"):
         bt.parts.bin(scene, "nope", catalog=pack, length_mm=500, position=(4, 0))
     assert "nope/floor" not in scene.obstacle_names
+
+
+def test_a_folding_container_wears_the_sleeve_its_pack_names(tmp_path: Path) -> None:
+    """A folding container is a bin with thicker walls (they fold): the
+    walls from the inside dimensions, the pack's sleeve drawn round them,
+    and a sleeve the caller names wins."""
+    import json
+
+    scene = scene_()
+    pack = _pack(tmp_path, "oricon", ORIKON_MANIFEST)
+    bt.parts.bin(scene, "box", catalog=pack, position=(0.0, 0.0, 0.75))   # the pack's default: 50B
+    lo, hi = scene.obstacle_bounds("box/wall0")  # an end wall: (530 - 491) / 2
+    assert hi[0] - lo[0] == pytest.approx(0.0195)
+    assert scene.frame("box/floor")[0][2] == pytest.approx(0.76)
+    looks = {o["name"]: o.get("visual_asset") for o in json.loads(scene._project_json())["obstacles"]}
+    assert looks["box/trim/sleeve"]["prim_path"] == "/Shapes/orikon"
+    assert scene.obstacle_color("box/wall0") == pytest.approx((0.03, 0.15, 0.48))
+    row = rows(scene)["box"]
+    assert (row["model"], row["manufacturer"], row["attributes"]["mass_kg"]) == ("オリコン50B", "三甲", 2.405)
+    bt.parts.bin(scene, "low", catalog=pack, height_mm=205, position=(1.0, 0.0), sleeve="tote")
+    looks = {o["name"]: o.get("visual_asset") for o in json.loads(scene._project_json())["obstacles"]}
+    assert looks["low/trim/sleeve"]["prim_path"] == "/Shapes/tote" and rows(scene)["low"]["model"] == "オリコン30B"
+    with pytest.raises(ValueError, match="sleeve"):
+        bt.parts.bin(scene, "odd", catalog=pack, position=(2.0, 0.0), sleeve="crate")
+
+
+def test_a_roll_cage_is_ordered_by_its_type_number_with_the_deck_from_the_pack(tmp_path: Path) -> None:
+    """A roll box pallet is bought by its type: the width and depth sold,
+    the deck where the maker puts it, the type number and mass on the BOM,
+    and a size nobody makes refused."""
+    scene = scene_()
+    pack = _pack(tmp_path, "cage", CAGE_MANIFEST)
+    built = bt.parts.roll_container(scene, "cage", catalog=pack, position=(1.0, 2.0))   # the pack's default: MRC-S5
+    assert scene.frame("cage/deck")[0] == pytest.approx((1.0, 2.0, 0.243))
+    lo, hi = scene.obstacle_bounds("cage/side0")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2]) == pytest.approx((0.03, 0.80, 1.70)) and lo[0] == pytest.approx(0.45)
+    row = rows(scene)["cage"]
+    assert (row["model"], row["manufacturer"], row["category"], row["catalog"]) == (
+        "MRC-S5", "Makitech", "vehicle.cart", "makitech/roll-box-pallet/mrc-s/r1")
+    assert row["attributes"]["mass_kg"] == 52 and row["attributes"]["load_kg"] == "500"
+    assert len(built.obstacles) == 4
+    small = bt.parts.roll_container(scene, "small", catalog=pack, size=(0.85, 0.60, 1.70), position=(4.0, 0.0))
+    assert rows(scene)["small"]["model"] == "MRC-S2" and rows(scene)["small"]["attributes"]["mass_kg"] == 42
+    assert len(small.obstacles) == 4
+    with pytest.raises(ValueError, match="is sold"):
+        bt.parts.roll_container(scene, "nope", catalog=pack, size=(0.80, 0.80, 1.70), position=(7.0, 0.0))
+    with pytest.raises(ValueError, match="not available"):
+        bt.parts.roll_container(scene, "nope", catalog=pack, width_mm=1000, position=(7.0, 0.0))
+    assert "nope/base" not in scene.obstacle_names
 
 
 def test_a_machine_tool_is_ordered_from_its_envelope_pack(tmp_path: Path) -> None:

@@ -56,17 +56,20 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`tray`][botrail.parts.tray] | the tray `<name>` (collides), its foam insert `<name>/insert` (a picture), and in full detail a bent grip each side under `<name>/trim/` | `<name>/seat` (the insert's top centre — where a part sets down) | — | `<name>` (`tray`) |
 | [`stage`][botrail.parts.stage] | the block `<name>` (collides; hidden in full detail behind the plate and legs under `<name>/trim/`), `<name>/insert` | `<name>/seat` | — | `<name>` (`fixture`) |
 | [`carton`][botrail.parts.carton] | one box `<name>`, drawn as the library's carton | — | — | `<name>` (`workpiece`, the RSC size as its model, `mass_kg` when given) |
-| [`bin`][botrail.parts.bin] | a small-load container: the floor `<name>/floor` between four walls `<name>/wall0..3` (all collide), and in full detail the library's ribbed sleeve round them under `<name>/trim/` | `<name>/floor` (the floor's top centre — where a part sets down) | — | `<name>` (`bin`, one part on the group so a physics bake carries the five boxes as one unit; with a catalog the VDA type number, mass and inside dimensions — `botrail/bin/klt-vda4500`) |
+| [`bin`][botrail.parts.bin] | a small-load container: the floor `<name>/floor` between four walls `<name>/wall0..3` (all collide), and in full detail the library's sleeve round them under `<name>/trim/` — a KLT's ribbed `tote`, or a folding container's `orikon` (`sleeve=`, or the pack's) | `<name>/floor` (the floor's top centre — where a part sets down) | — | `<name>` (`bin`, one part on the group so a physics bake carries the five boxes as one unit; with a catalog the type number, mass and inside dimensions — `botrail/bin/klt-vda4500`, `sanko/oricon/oricon`) |
+| [`roll_container`][botrail.parts.roll_container] | a roll cage (two-sided roll box pallet): the base `<name>/base` from the floor to the deck's top and the end frames `<name>/side0|1` (all collide, hidden in full detail inside the library's cage under `<name>/trim/`) — the long faces open | `<name>/deck` (the deck's top centre — where the first layer sets down) | — | `<name>` (`vehicle.cart`; with a catalog the type number, mass and load — `makitech/roll-box-pallet/mrc-s`) |
+| [`mobile_rack`][botrail.parts.mobile_rack] | a goods-to-person rack a drive unit carries: four uprights `<name>/upright0..3` floor to top and nothing else under its `clearance` (a drive unit's room); `style="bins"` the inventory pod — its storage `<name>/storage` one block, drawn as the library's `pod` bins — or `"open"` a case rack — the deck `<name>/deck` with its tray, rails `<name>/rail_*` round three sides, the +x face open; `lift` raises it (carried, its feet off the floor) | `<name>/deck` (`"open"`: the tray's top centre — where a load sits) | — | `<name>` (`structure.rack`) |
 | [`unit_load`][botrail.parts.unit_load] | the envelopes `<name>/pallet` and `<name>/load` (collide, hidden in full detail), the timber, cartons, film and labels under `<name>/visual/` | — | — | nothing: stock is not a purchase |
 | [`marking`][botrail.parts.marking] | paint out of collision — `<name>/0`…`<name>/3` round a rect, `<name>` for a line, `<name>/0`… for its dashes | — | — | nothing (the layout sheet draws them on its ground layer) |
-| [`person`][botrail.parts.person] | one box `<name>` (collides) | — | — | nothing |
+| [`person`][botrail.parts.person] | one box `<name>` (collides), drawn in full detail as the library's figure in `pose` (`stand`, `reach`, `pick`), scaled to `height` by its own proportions | — | — | nothing |
 | [`gantry`][botrail.parts.gantry] | `<name>/post_l`, `<name>/post_r`, `<name>/beam` (collide) | `<name>/beam` (the beam's centre underside — a camera's mount) | — | `<name>` (`structure.gantry`) |
 | [`prop`][botrail.parts.prop] | one mesh `<name>`: a catalog object's model (a scanned YCB object) drawn with its textures, colliding as its convex decomposition, dynamic at the pack's mass | — | — | `<name>` (the pack's category, name and maker, the catalog id, `mass_kg`) |
 
-The last eight are *props*: the generic things a cell is full of and nobody
+The last ten are *props*: the generic things a cell is full of and nobody
 orders by part number — the tray a part waits in, the stage under a camera,
-the carton, the bin, the stock on a pallet, the paint on the floor, the
-person a scenario stands in the gate, the portal a camera hangs from. They
+the carton, the bin, the roll cage, the rack a goods-to-person drive unit
+brings, the stock on a pallet, the paint on the floor, the person a scenario
+stands in the gate, the portal a camera hangs from. They
 are generated from their dimensions like everything else, drawn from the
 [shape library](#shapes-a-box-cannot-draw-the-shape-library) where a box
 cannot draw the thing, and `detail="plain"` keeps just the massing. The bin
@@ -74,7 +77,11 @@ is the one of them you can also order: with `catalog="botrail/bin/klt-vda4500"`
 it is a VDA 4500 R-KLT — the size is matched against the seven the standard
 names (300 × 200 × 147 up to 600 × 400 × 280), the walls and floor are as
 thick as the inside dimensions leave, and the row carries the type number
-and the mass.
+and the mass; `catalog="sanko/oricon/oricon"` is a 三甲 folding container
+(オリコン 30B / 40B / 50B / 75B), its thicker folding walls from the inside
+dimensions and the pack choosing the `orikon` sleeve. So is the roll cage: with
+`catalog="makitech/roll-box-pallet/mrc-s"` it is a Makitech MRC-S (800 × 600
+up to 1100 × 800, 1700 tall), the deck at the maker's 243 mm.
 `prop` is the other way round: the thing *is* a catalog product — one of
 the YCB objects under `ycb/objects/*`, a scan with its texture and its
 measured mass — and the generator only sets it down, the middle of its
@@ -275,8 +282,8 @@ its manifest, so the BOM line writes itself.
 Some of what every cell has is neither a product nor a box: a carton with
 its folded lids and tape, a pressed tray, a perforated basket, the rubber
 foot under a bench leg, a bent handle, a drain hose, a machined part with
-its bores. botrail ships a small library of these forms — `bt.parts.SHAPES`,
-thirteen unit-box USD layers under `botrail/_shapes/`, authored in
+its bores, a person. botrail ships a small library of these forms — `bt.parts.SHAPES`,
+unit-box USD layers under `botrail/_shapes/`, authored in
 [botrail-assets](https://github.com/botrail/botrail-assets) (`workshop-shapes/`)
 and vendored by `scripts/sync_shapes.py` — and two ways to use them:
 
@@ -302,7 +309,9 @@ A shape is a form, never a dimension: the same file draws a 200 mm tray and
 a 600 mm one, and nothing a cell verifies — a set-down height, a grip — lives
 in it. Scale it anisotropically within reason (a tube's thickness is its
 smallest side) and keep `workpiece` for near-cubic boxes, since its bores
-scale with the box.
+scale with the box. A person is the exception that is never stretched:
+[`person`][botrail.parts.person] scales the figure by its own proportions to
+the height it is given.
 
 | shape | draws | finishes |
 |---|---|---|
@@ -319,6 +328,12 @@ scale with the box.
 | `tslot` | a T-slot aluminium extrusion: square section, one slot per face, a hollow core — x and y are the section, z the cut length, scaled apart so a 30 mm and a 60 mm member look alike; `frame_unit` turns z along each member | machined aluminium (tint it for the anodising) |
 | `tslot_2` | the 1 : 2 rectangular member of the same family (a 30 x 60): one slot in each short face, two in each long face, a bore behind each pair and a pocket between them — x the short side, y the long one, z the cut length | machined aluminium (tint it for the anodising) |
 | `bracket` | the die-cast corner bracket of a T-slot frame: two flanges at right angles with a bolt hole each and a rib down either side — the fold corner at the box's (−x, −y) corner, the flanges along +x and +y, the width on z; `frame_unit` scales it to (leg, leg, width) and sets that corner where two members meet | machined aluminium |
+| `orikon` | the sleeve of a folding container (オリコン), drawn at a 50B's proportions: four folding walls with the hinge bead along the bottom, a rib frame on each long wall and a hand hole through each end wall under the rim (real holes), rounded corners, the stacking rim and an inset base band — open inside and below like `tote`; `bin(sleeve="orikon")` | polypropylene (tint it) |
+| `roll_cage` | a two-sided roll cage (カゴ台車) 1.10 wide, 0.80 deep, 1.70 tall: a ribbed deck at 0.243 on a square-tube base and four 150 mm casters, a mesh frame at each end of the width (a bent tube, four rungs, vertical wires), both long faces open — `roll_container` keeps its deck proportion | zinc-plated steel, rubber |
+| `pod` | the storage of a goods-to-person inventory pod, drawn 0.956 square by 1.822 tall: six tiers of fabric bins on all four faces (three to five a tier, a label on each lip) running back to an X partition, and the cap — the frame is `mobile_rack`'s, so this stretches between its base and top frames | lime-yellow fabric, labels |
+| `waste_bin` | a grey waste bin 0.35 × 0.30 × 0.55: walls widening to the top, a rolled rim, a black liner folded over it — open at the top | grey plastic, liner |
+| `highbay` | a round LED high-bay luminaire Ø 0.44 × 0.164: a dark housing stepping in to its driver can, the diffuser underneath — emissive, its face at the bottom of the box | housing, lit diffuser |
+| `person`, `person_reach`, `person_pick` | a man in a knit top, jeans and leather shoes, facing +x: standing at ease, handling something before the hips with both hands, reaching into a bin at chest height half a metre ahead — `person` draws them at their own proportions | knit, denim, leather, skin, hair |
 
 ## Series-specific equipment trims
 

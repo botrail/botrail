@@ -1,22 +1,30 @@
 {
   "repository": "https://github.com/botrail/botrail-assets",
   "path": "workshop-shapes/usd",
-  "commit": "2b463ba475c0e1814be0f3c746b89dbda915d06a",
-  "dirty": false,
-  "synced": "2026-09-28",
+  "commit": "790ca6bce4a9bca79ca27f077ddd2f6ae04e1b2e",
+  "dirty": true,
+  "synced": "2026-10-04",
   "files": {
     "adjuster.usda": "4f31395fe0ec4c77fe00bdc34ccafada40840729244ef48a1c0f4a1c232804ac",
     "basket.usda": "fc7931a51fa038b90d267804e61459f6ec295f91d1cfd1bcd8609ca84c2334c8",
     "bracket.usda": "a3aafb59431950d6be11ea1fc752e13b56140bc0d803f15075813b99420c89a7",
     "carton.usda": "cdc4320861bea329fb7dd9a7676c9e49f96675c1558a7815351a99671e389c42",
     "handle.usda": "c149c6d34736fe889230a17e1e53f70a50c470b96cd4dd65da5658de9961861b",
+    "highbay.usda": "cf2d28cb62ac580879d8d7e2bd2c27a092b7f559c8d087c565ba1fd9c10ca7a7",
     "hose.usda": "6f117a2359a52d1122e2ec672869c727e47a4d47961a060740682f8c379b9394",
+    "orikon.usda": "279edd413ec7a16209548f3f749f6c1463994b8a0fcc9b62f3486ffdb3de4dc6",
     "panel.usda": "931b3abc41b25c875500c9d63708f3d15de02a33cbdad63a1300181920af53c7",
+    "person.usda": "c2821d8091f3107af125f169149aeac2247616d9f54c5e50f37ec4f2d88d2b8b",
+    "person_pick.usda": "33a15a6e2c74aec9dbf5ddca85dd3b6338c940da8075969cbe2df44d96cee206",
+    "person_reach.usda": "057d4ede064fdd4bdae1cc2b2d2c8789a16cb32709040f16dd358c8ae0bd7373",
+    "pod.usda": "3d4bee1f648b526244cbc28df59f5d2d564393f0f45f162082192c643384f2f4",
     "rim.usda": "f464d2737c22c78f86438cd01f4af2ce1c39de1949f59dbf1850d9d60111eb05",
+    "roll_cage.usda": "0d10a919e6ed8c8fcda689a1543fea8543abb095d34fb1e914e33e887e902e22",
     "tote.usda": "f71e1f939762b771e23303bfe61b8116e2c1b6d57d5a45891201f0fd517164b4",
     "tray.usda": "74cee1025277247ab14a5346cd4ac06c25a2160d348d1ba92339ea816f39fef1",
     "tslot.usda": "6a2c7b2014f8dd44ec5dcb10c985ff745c01828db3169040fa24f2370b5fa750",
     "tslot_2.usda": "6e96f2b726b48e0f1061d5c137efe4b822dd19b2d6f6a3301a8d86aed5218642",
+    "waste_bin.usda": "5c8c2d4e1cdb8f3b0440545fb58bc0cd01894eb7861bd5c213719d6e720d50a9",
     "workpiece.usda": "c588b7ce1b3938a175caec928d6ad319023fbd5d0626c73ce68caba1c0af3e5f"
   }
 }
