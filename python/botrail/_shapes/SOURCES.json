@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/botrail/botrail-assets",
   "path": "workshop-shapes/usd",
-  "commit": "790ca6bce4a9bca79ca27f077ddd2f6ae04e1b2e",
-  "dirty": true,
+  "commit": "fb05d7918e6d71307b3d1018ed580af3066d291d",
+  "dirty": false,
   "synced": "2026-10-04",
   "files": {
     "adjuster.usda": "4f31395fe0ec4c77fe00bdc34ccafada40840729244ef48a1c0f4a1c232804ac",
