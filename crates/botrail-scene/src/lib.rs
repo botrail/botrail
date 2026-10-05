@@ -1093,7 +1093,7 @@ impl Scene {
                     r.name
                 ))
             })?;
-        if !(depth.is_finite() && depth >= 0.0) || !lean.is_finite() {
+        if !(depth.is_finite() && depth >= 0.0 && lean.is_finite()) {
             return Err(SceneError::BadMount(format!(
                 "a crouch is a depth >= 0 (m) and a finite lean (rad), got {depth} / {lean}"
             )));

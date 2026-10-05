@@ -659,6 +659,9 @@ fn pose_from(position: [f64; 3], quaternion: Option<[f64; 4]>) -> nalgebra::Isom
 /// One footfall as Python sees it: `(leg, lift, land, (x, y, z))`.
 type FootfallRow = (String, f64, f64, (f64, f64, f64));
 
+/// A crouch as Python sees it: `((position, quaternion_xyzw), joints)`.
+type CrouchPose = (([f64; 3], [f64; 4]), Vec<f64>);
+
 /// A gait from a `bt.Gait` (anything with a `_spec()` returning the plain
 /// dict `bt.gait.Gait._spec` builds) or from such a dict directly.
 /// The plain dict an authoring dataclass (`bt.Gait`, `bt.Wheels`) builds for
@@ -4077,12 +4080,7 @@ impl Scene {
     /// The scene is not changed. Raises ValueError naming the leg that
     /// cannot keep its foot planted.
     #[pyo3(signature = (depth, lean = 0.0, robot = None))]
-    fn crouch_pose(
-        &self,
-        depth: f64,
-        lean: f64,
-        robot: Option<&str>,
-    ) -> PyResult<(([f64; 3], [f64; 4]), Vec<f64>)> {
+    fn crouch_pose(&self, depth: f64, lean: f64, robot: Option<&str>) -> PyResult<CrouchPose> {
         let index = self.resolve_robot(robot)?;
         self.hub.crouch_pose(index, depth, lean).map_err(scene_err)
     }

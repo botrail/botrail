@@ -2397,7 +2397,7 @@ impl Scene {
                                 .to_string(),
                         ));
                     }
-                    self.validate_condition(&arm.condition).map_err(&wrap)?;
+                    self.validate_condition(&arm.condition).map_err(wrap)?;
                     let mut arm_tracked = entry_tracked.clone();
                     let mut arm_held = entry_held.clone();
                     self.validate_steps(&arm.steps, &mut arm_tracked, &mut arm_held)

@@ -253,7 +253,7 @@ pub(crate) fn resolve_wheel_drive(
             .as_deref()
             .map(|name| actuated(name, "steer"))
             .transpose()
-            .map_err(&fail)?;
+            .map_err(fail)?;
         if let Some((steer_joint, _)) = steer {
             let steer_spec = &model.joints[steer_joint];
             if matches!(steer_spec.joint_type, JointType::Prismatic) {
