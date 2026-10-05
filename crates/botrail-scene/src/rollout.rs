@@ -9214,7 +9214,11 @@ impl Rollout {
                     }
                 }
                 // Likewise a body going down (or up) under the plan.
-                if let Some(c) = self.robots[owner].gait.as_ref().and_then(|g| g.crouch.as_ref()) {
+                if let Some(c) = self.robots[owner]
+                    .gait
+                    .as_ref()
+                    .and_then(|g| g.crouch.as_ref())
+                {
                     return Err(err(format!(
                         "motion `{motion}` cannot start while `{}` crouches (until t = {:.2}s): \
                          plans are baked in world coordinates, so wait for done first (a ramp \
@@ -9728,8 +9732,7 @@ impl Rollout {
                 if concurrent {
                     rt.truncate_after(self.t);
                     rt.tick_bake = true;
-                } else if rt.tracking.is_empty() && !walking && !rt.rolling() && !rt.crouching()
-                {
+                } else if rt.tracking.is_empty() && !walking && !rt.rolling() && !rt.crouching() {
                     rt.append_waypoint(self.t + duration, goal.clone(), vec![0.0; goal.len()]);
                 }
                 let end = self.t + duration;
@@ -10708,8 +10711,8 @@ pub(crate) fn solve_planted_legs(
     feet: &[Isometry3<f64>],
     seed: &[f64],
 ) -> Result<Vec<f64>, (usize, botrail_kin::IkResult)> {
-    let poses = botrail_kin::forward_kinematics_with_base(model, seed, body)
-        .expect("seed has robot DOF");
+    let poses =
+        botrail_kin::forward_kinematics_with_base(model, seed, body).expect("seed has robot DOF");
     let mut q = seed.to_vec();
     for (i, (leg, foot)) in gait.legs.iter().zip(feet).enumerate() {
         let mut start = q.clone();
@@ -10719,8 +10722,9 @@ pub(crate) fn solve_planted_legs(
                 start[ys.joint] = yaw;
             }
         }
-        let result = botrail_kin::solve_ik(model, leg.foot, &(body.inverse() * foot), &start, &leg.ik)
-            .expect("seed has robot DOF");
+        let result =
+            botrail_kin::solve_ik(model, leg.foot, &(body.inverse() * foot), &start, &leg.ik)
+                .expect("seed has robot DOF");
         if !result.converged && (result.pos_error > 1e-4 || result.rot_error > 1e-3) {
             return Err((i, result));
         }
@@ -12095,8 +12099,9 @@ impl Rollout {
             q[qi] = rest[qi];
         }
         let body = gr.parked_body_at(&base_now, t0);
-        let poses = botrail_kin::forward_kinematics_with_base(&self.world.robots()[r].model, &q, &body)
-            .expect("q has robot DOF");
+        let poses =
+            botrail_kin::forward_kinematics_with_base(&self.world.robots()[r].model, &q, &body)
+                .expect("q has robot DOF");
         gr.gait.legs.iter().map(|l| poses[l.foot]).collect()
     }
 
@@ -12176,8 +12181,8 @@ impl Rollout {
         gr.sway = Isometry3::identity();
         let model = self.world.robots()[r].model.clone();
         let feet = c.feet.as_ref().expect("read above");
-        let solved = solve_planted_legs(&model, &gr.gait, &body, feet, &self.robots[r].q)
-            .map_err(|(i, result)| SeqError::CrouchReach {
+        let solved = solve_planted_legs(&model, &gr.gait, &body, feet, &self.robots[r].q).map_err(
+            |(i, result)| SeqError::CrouchReach {
                 t,
                 robot: self.world.robots()[r].name.clone(),
                 leg: gr.gait.legs[i].name.clone(),
@@ -12187,7 +12192,8 @@ impl Rollout {
                     "{:.1e} m / {:.1e} rad short after {} iterations",
                     result.pos_error, result.rot_error, result.iters
                 ),
-            })?;
+            },
+        )?;
         let legs = gr.gait.leg_joints();
         let dt = self.options.dt;
         let rt = &mut self.robots[r];
@@ -12204,19 +12210,18 @@ impl Rollout {
             .expect("solved q has robot DOF");
         // Velocities by difference — except on the last tick, where the
         // legs come to rest: a hold follows (see `gait_tick`).
-        let velocity: Vec<f64> = rt
-            .q
-            .iter()
-            .zip(&previous)
-            .enumerate()
-            .map(|(qi, (now, before))| {
-                if finishing && legs.contains(&qi) {
-                    0.0
-                } else {
-                    (now - before) / dt
-                }
-            })
-            .collect();
+        let velocity: Vec<f64> =
+            rt.q.iter()
+                .zip(&previous)
+                .enumerate()
+                .map(|(qi, (now, before))| {
+                    if finishing && legs.contains(&qi) {
+                        0.0
+                    } else {
+                        (now - before) / dt
+                    }
+                })
+                .collect();
         let q = rt.q.clone();
         // A move's future re-baked when the walk before it let go (a ramp
         // fired in the settle) would swallow these ticks: the crouch bakes
@@ -21662,7 +21667,11 @@ mod biped_tests {
         let track = &tl.robots[0];
         let z = |t: f64| SequenceTimeline::base_pose(track, t).unwrap().translation.z;
         assert!((z(0.0) - z0).abs() < 1e-9, "{}", z(0.0));
-        assert!((z(0.5) - (z0 - 0.05)).abs() < 1e-9, "mid-way z = {}", z(0.5));
+        assert!(
+            (z(0.5) - (z0 - 0.05)).abs() < 1e-9,
+            "mid-way z = {}",
+            z(0.5)
+        );
         assert!((z(1.0) - (z0 - 0.1)).abs() < 1e-9, "z = {}", z(1.0));
         assert!((z(tl.duration) - (z0 - 0.1)).abs() < 1e-9);
         assert_planted(&scene, &tl, 0.0, tl.duration);
@@ -21683,7 +21692,11 @@ mod biped_tests {
         // knee twice that.
         let height = 0.7 * 0.4f64.cos() - 0.1;
         let knee = 2.0 * (height / 0.7).acos();
-        assert!((down[legs[0]] - knee).abs() < 1e-3, "knee {}", down[legs[0]]);
+        assert!(
+            (down[legs[0]] - knee).abs() < 1e-3,
+            "knee {}",
+            down[legs[0]]
+        );
         // The move is the step's: `done` waited for it.
         let span = track.moves.iter().find(|m| m.name == "crouch").unwrap();
         assert!((span.end - 1.0).abs() < 1e-9, "{span:?}");
@@ -21725,8 +21738,14 @@ mod biped_tests {
         let span = track.moves.iter().find(|m| m.name == "crouch").unwrap();
         let t0 = span.end - 0.8;
         let landed = track.footfalls.iter().map(|f| f.land).fold(0.0, f64::max);
-        assert!(span.start < landed - 1e-6, "fired before the settle ({span:?}, {landed})");
-        assert!((t0 - landed).abs() < 1e-9, "began at {t0}, the last foot landed at {landed}");
+        assert!(
+            span.start < landed - 1e-6,
+            "fired before the settle ({span:?}, {landed})"
+        );
+        assert!(
+            (t0 - landed).abs() < 1e-9,
+            "began at {t0}, the last foot landed at {landed}"
+        );
         let z = |t: f64| SequenceTimeline::base_pose(track, t).unwrap().translation.z;
         assert!((z(t0) - z0).abs() < 1e-9);
         assert!((z(span.end) - (z0 - 0.1)).abs() < 1e-9, "{}", z(span.end));
@@ -21806,7 +21825,9 @@ mod biped_tests {
         let mut scene = biped_scene(BIPED, biped_gait(true));
         let model = scene.robots()[0].model.clone();
         let hand = model.link_index("L_hand").unwrap();
-        let poses = scene.fk_for(0, scene.robots()[0].joint_positions()).unwrap();
+        let poses = scene
+            .fk_for(0, scene.robots()[0].joint_positions())
+            .unwrap();
         let p = poses[hand].translation.vector;
         // The hand box is 0.10 tall about its origin: the post's top 3 cm
         // under its bottom.
@@ -21822,7 +21843,11 @@ mod biped_tests {
             .unwrap();
         let err = bake(
             &mut scene,
-            vec![step("down", vec![crouch(0.06, 0.0, Some(1.0))], Condition::Done)],
+            vec![step(
+                "down",
+                vec![crouch(0.06, 0.0, Some(1.0))],
+                Condition::Done,
+            )],
         )
         .unwrap_err();
         assert!(matches!(err, SeqError::CrouchCollision { .. }), "{err}");
@@ -21844,7 +21869,10 @@ mod biped_tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("the ramp meets the cell") && err.contains("post"), "{err}");
+        assert!(
+            err.contains("the ramp meets the cell") && err.contains("post"),
+            "{err}"
+        );
         bake(
             &mut scene,
             vec![step("bend", vec![elbow(true)], Condition::Done)],
@@ -21897,7 +21925,11 @@ mod biped_tests {
         let (base, q) = scene.crouch_pose(0, 0.1, 0.2).unwrap();
         let tl = bake(
             &mut scene,
-            vec![step("down", vec![crouch(0.1, 0.2, Some(1.0))], Condition::Done)],
+            vec![step(
+                "down",
+                vec![crouch(0.1, 0.2, Some(1.0))],
+                Condition::Done,
+            )],
         )
         .unwrap();
         let track = &tl.robots[0];

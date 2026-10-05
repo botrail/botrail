@@ -1116,7 +1116,10 @@ impl Scene {
                 * base
                 * Isometry3::from_parts(
                     nalgebra::Translation3::identity(),
-                    nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::y_axis(), lean * s),
+                    nalgebra::UnitQuaternion::from_axis_angle(
+                        &nalgebra::Vector3::y_axis(),
+                        lean * s,
+                    ),
                 );
             q = crate::rollout::solve_planted_legs(&r.model, &gait, &body, &feet, &q).map_err(
                 |(i, result)| {
