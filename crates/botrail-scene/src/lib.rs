@@ -122,6 +122,17 @@ pub enum SceneError {
     UnknownFrame(String),
 }
 
+/// Whether the obstacle `name` is one `to` names: an entry equal to it, or
+/// a group it sits in (`guard` for `guard/panels/back`, not `guardrail`).
+pub fn names_match(to: &[String], name: &str) -> bool {
+    to.iter().any(|entry| {
+        name == entry
+            || name
+                .strip_prefix(entry.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
 /// Rewrites `RobotDone` references inside a (possibly nested) condition.
 fn rename_in_condition(condition: &mut seq::Condition, old: &str, new: &str) {
     match condition {
@@ -2591,6 +2602,43 @@ impl Scene {
             &attached,
             &self.contact_allowance(&map, &attached_map),
         )
+    }
+
+    /// [`Scene::min_obstacle_distance`] against only the environment
+    /// obstacles `to` names — each an obstacle's name or a group it sits
+    /// in (`guard` stands for every `guard/...`; see [`names_match`]). The
+    /// robot side is unchanged: the links and the objects they carry.
+    /// `None` when nothing `to` names is enabled with collision geometry.
+    pub fn min_obstacle_distance_to(&self, to: &[String]) -> Option<f64> {
+        let poses = self.all_link_poses();
+        let (query, map) = self.obstacle_query();
+        let (query, map): (Vec<_>, Vec<_>) = query
+            .into_iter()
+            .zip(map)
+            .filter(|(_, i)| names_match(to, &self.obstacles[*i].name))
+            .unzip();
+        let (attached, attached_map) = self.attached_query();
+        botrail_collide::min_robot_obstacle_distance(
+            &self.robot_queries(&poses),
+            &query,
+            &attached,
+            &self.contact_allowance(&map, &attached_map),
+        )
+    }
+
+    /// The entries of `to` that name no obstacle in the scene, neither
+    /// one by its name nor a group of them — a typo, reported rather than
+    /// measured as nothing.
+    pub fn unmatched_obstacle_names(&self, to: &[String]) -> Vec<String> {
+        to.iter()
+            .filter(|entry| {
+                !self
+                    .obstacles
+                    .iter()
+                    .any(|o| names_match(std::slice::from_ref(*entry), &o.name))
+            })
+            .cloned()
+            .collect()
     }
 
     /// The first robot's intra-robot ACM (legacy accessor).

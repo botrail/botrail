@@ -2560,6 +2560,95 @@ def test_a_hand_written_frame_unit_is_one_line() -> None:
         bt.parts.frame_unit(scene, "bare", section=0.04)
 
 
+def test_an_enclosure_is_the_box_clad_in_its_bays() -> None:
+    """The guard template: the table's box with its lower ring at the
+    bottom, a panel set 6 mm into the slots around every bay, an opening
+    framed by the members its sides need, and a leaf over it."""
+    plan = bt.parts.frame_unit_plan("enclosure", (1.1, 1.0, 1.0), 0.03)
+    # Twelve members cut the way the table's are, a panel on each of five faces.
+    assert plan.lengths() == {1.1: 2, 1.04: 2, 0.97: 4, 0.94: 4}
+    assert len(plan.joints) == 24 and plan.feet == () and plan.board is None and plan.door is None
+    panels = {tag: (size, at) for tag, size, at in plan.panels}
+    assert sorted(panels) == ["back", "front", "left", "right", "top"]
+    assert panels["back"][0] == pytest.approx((1.052, 0.005, 0.952))  # 1040 x 940 inside, 6 mm into each slot
+    assert panels["back"][1] == pytest.approx((0.0, 0.485, 0.5))  # on the members' centre line
+    assert panels["top"][0] == pytest.approx((1.052, 0.952, 0.005))
+    # A loading window across the front from the lower ring up to 450 mm:
+    # a mid-rail across its top, the panel above it, the leaf over it.
+    window = bt.parts.frame_unit_plan(
+        "enclosure", (1.1, 1.0, 1.0), 0.03, openings={"front": ((None, None), (None, 0.45))}, door="front"
+    )
+    assert window.lengths()[1.04] == 3 and len(window.joints) == 26
+    front = [(size, at) for tag, size, at in window.panels if tag.startswith("front")]
+    assert front == [(pytest.approx((1.052, 0.005, 0.502)), pytest.approx((0.0, -0.485, 0.725)))]
+    size, at, face = window.door
+    assert face == "front" and size == pytest.approx((1.07, 0.005, 0.45))  # half a member over every edge
+    assert at == pytest.approx((0.0, -0.5125, 0.24))  # 10 mm proud of the face
+    # A door in the middle of a side: two full-height mid-posts and a
+    # mid-rail over it, panels beside it and above it.
+    side = bt.parts.frame_unit_plan(
+        "enclosure", (1.1, 1.0, 1.0), 0.03, panels=("left",), openings={"left": ((-0.2, 0.3), (None, 0.8))}
+    )
+    assert [m.tag for m in side.members if m.tag.startswith("left_")] == ["left_post0", "left_post1", "left_rail1"]
+    assert [tag for tag, _, _ in side.panels] == ["left0", "left1", "left2"]
+    assert len(side.joints) == 24 + 6
+
+
+def test_an_enclosure_refuses_what_it_cannot_frame() -> None:
+    size = (1.1, 1.0, 1.0)
+    with pytest.raises(ValueError, match="front opening .* does not fit its face"):
+        bt.parts.frame_unit_plan("enclosure", size, 0.03, openings={"front": ((-0.53, 0.2), (None, 0.45))})
+    with pytest.raises(ValueError, match="needs an opening on that face"):
+        bt.parts.frame_unit_plan("enclosure", size, 0.03, door="back")
+    with pytest.raises(ValueError, match="side face, not the top"):
+        bt.parts.frame_unit_plan("enclosure", size, 0.03, openings={"top": ((-0.2, 0.2), (-0.2, 0.2))}, door="top")
+    with pytest.raises(ValueError, match="a face is one of"):
+        bt.parts.frame_unit_plan("enclosure", size, 0.03, panels=("bottom",))
+    with pytest.raises(ValueError, match="flush with its bottom"):
+        bt.parts.frame_unit_plan("enclosure", size, 0.03, lower_rails=None)
+    with pytest.raises(ValueError, match="belong to template='enclosure'"):
+        bt.parts.frame_unit_plan("table", size, 0.03, panels=("back",))
+
+
+def test_an_enclosure_counts_its_panels_and_its_door_after_the_frame(profiles: Path, tmp_path: Path) -> None:
+    scene = scene_()
+    built = bt.parts.frame_unit(
+        scene, "guard", (1.1, 1.0, 1.0), (0.0, 0.0, 0.76), catalog=profiles, template="enclosure",
+        finish="black", openings={"front": ((None, None), (None, 0.45))}, door="front",
+    )
+    by = rows(scene)
+    assert by["guard"]["model"] == "enclosure 1100x1000x1000 (30x30)"
+    cuts = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("guard/profiles/")}
+    assert cuts == {"HFSB6-3030-1100": 2, "HFSB6-3030-1040": 3, "HFSB6-3030-970": 4, "HFSB6-3030-940": 4}
+    # Two more joints for the mid-rail, and no feet: a guard stands on its base.
+    hardware = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("guard/hardware/")}
+    assert hardware == {"HBLFS6": 26, "CBM6-12": 52, "HNTT6-6": 52, "HFC6-3030-B": 4}
+    # The sheets after the frame: one line per size, then the door.
+    sheets = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("guard/panels/")}
+    assert sheets == {"PC panel 1052x502 t5": 1, "PC panel 1052x952 t5": 2, "PC panel 952x952 t5": 2}
+    assert list(by)[-1] == "guard/door" and by["guard/door"]["category"] == "structure.door"
+    assert by["guard/door"]["model"] == "PC door 1070x450 t5"
+    # Every sheet collides and is drawn see-through; the leaf hangs closed.
+    clad = [n for n in built.obstacles if "/panels/" in n or n == "guard/door"]
+    assert len(clad) == 6
+    assert all(scene.obstacle_enabled(n) and scene.obstacle_opacity(n) == pytest.approx(0.16) for n in clad)
+    assert "guard/door" in built.frames
+    lo, hi = scene.obstacle_bounds("guard/door")
+    assert lo == pytest.approx([-0.535, -0.515, 0.775]) and hi == pytest.approx([0.535, -0.51, 1.225])
+    project = tmp_path / "guard.botrail"
+    scene.save_project(project)
+    assert len(bt.Scene.load_project(project).bom().rows) == len(scene.bom().rows)
+    # Without a catalog the frame is one line; the sheets are still counted.
+    hand = scene_()
+    bt.parts.frame_unit(hand, "box", (0.8, 0.6, 0.7), section=0.03, template="enclosure",
+                        panels=("back", "top"), panel=0.003, panel_material="aluminium composite")
+    by = rows(hand)
+    assert by["box"]["model"] == "enclosure 800x600x700"
+    sheets = {row["model"]: row["qty"] for name, row in by.items() if name.startswith("box/panels/")}
+    assert sheets == {"aluminium composite panel 752x652 t3": 1, "aluminium composite panel 752x552 t3": 1}
+    assert hand.obstacle_opacity("box/panels/aluminium_composite-752x652/back") is None
+
+
 def test_a_pack_that_ships_its_own_profile_is_drawn_with_it(profiles: Path, tmp_path: Path) -> None:
     """The look is the product's data: a pack may ship the maker's cross-section
     (`visual`, authored at real section and one metre long, `visual_scale:

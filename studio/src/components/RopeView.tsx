@@ -4,6 +4,9 @@ import { clothHeldAt, samplePlayback } from "../playback";
 import { playbackRig } from "../playbackRig";
 import type { RopeTrack, PoseMsg } from "../protocol";
 import { useStudioStore } from "../store";
+import { authoredColor } from "../three/palette";
+
+const ROPE_COLOR = "#368aaf";
 
 /** Actual-radius straight tubes over the simulated wire segments. Rendering
  * does not smooth away contact geometry or claim torsion/cross-section state. */
@@ -14,6 +17,8 @@ function RopeMesh({ track }: { track: RopeTrack }) {
   const dots = useRef<THREE.Points>(null);
   const connectors = useRef<(THREE.Group | null)[]>([]);
   const heldGeometry = useMemo(() => new THREE.BufferGeometry(), []);
+  // An authored colour is linear RGB, the way obstacles carry theirs.
+  const color = useMemo(() => track.color ? authoredColor(track.color) : new THREE.Color(ROPE_COLOR), [track.color]);
   useEffect(() => () => heldGeometry.dispose(), [heldGeometry]);
   const apply = useCallback((positions: Float32Array, held: number[], bodies: PoseMsg[]) => {
     const matrix = new THREE.Matrix4();
@@ -55,10 +60,10 @@ function RopeMesh({ track }: { track: RopeTrack }) {
   }, [sample,track,apply]);
   return <group name={`rope/${track.name}`}>
     <instancedMesh ref={tubes} args={[undefined,undefined,track.segments.length]} castShadow>
-      <cylinderGeometry args={[1,1,1,10]} /><meshStandardMaterial color="#368aaf" roughness={0.65} />
+      <cylinderGeometry args={[1,1,1,10]} /><meshStandardMaterial color={color} roughness={0.65} />
     </instancedMesh>
     <instancedMesh ref={ends} args={[undefined,undefined,track.points[0]?.length ?? 0]} castShadow>
-      <sphereGeometry args={[1,10,6]} /><meshStandardMaterial color="#368aaf" roughness={0.65} />
+      <sphereGeometry args={[1,10,6]} /><meshStandardMaterial color={color} roughness={0.65} />
     </instancedMesh>
     <points ref={dots} geometry={heldGeometry} renderOrder={2} visible={false}>
       <pointsMaterial color="#ffb020" size={8} sizeAttenuation={false} depthTest={false} />

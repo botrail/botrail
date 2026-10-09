@@ -26,6 +26,35 @@ pub struct GripperBinding {
     /// An explicit material point, not collision-inferred gripping.
     pub location: RopeLocation,
 }
+/// What an [`Anchor`] holds the rope to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AnchorBody {
+    Link(LinkBinding),
+    /// A scene obstacle, at its baked pose: one a robot carries moves.
+    Obstacle(String),
+}
+impl AnchorBody {
+    /// The proxy name: `robot/link`, or `obstacle/<name>`.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Link(link) => link.key(),
+            Self::Obstacle(name) => format!("obstacle/{name}"),
+        }
+    }
+}
+/// A material span held by a body for the whole replay — the crimp and
+/// boot inside a connector housing, the clip on a harness. The rope
+/// follows the body and never pulls it back. The anchor captures each
+/// held particle's offset from the body at time zero; nothing teleports.
+#[derive(Debug, Clone)]
+pub struct Anchor {
+    pub body: AnchorBody,
+    pub location: RopeLocation,
+    /// Reference arc length held: inward from `Start`/`End`, centred on
+    /// any other location. Zero holds one sample, which stays free to
+    /// turn; a span holding two or more also holds the rope's direction.
+    pub length_m: f64,
+}
 #[derive(Debug, Clone)]
 pub struct Connector {
     pub name: String,
@@ -48,6 +77,11 @@ pub struct RopePass {
     pub step_s: f64,
     /// Optional constant pins throughout replay (e.g. a fixed harness end).
     pub pins: Vec<(RopeLocation, [f64; 3])>,
+    /// Spans held by links or obstacles throughout replay. Their bodies
+    /// get frame proxies; geometry collides only when also selected.
+    pub anchors: Vec<Anchor>,
+    /// Display colour carried to the track (linear RGB).
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +118,94 @@ pub struct Bake {
     pub signals: Vec<Signal>,
 }
 
+/// The playback track's sampling: the physics steps every `step_s`, but
+/// the track keeps every event (signal edges, the first and final
+/// samples), at most `RECORD_HZ` frames a second otherwise, and only the two
+/// ends of a hold — frames within `HOLD_M` of the last kept one. Linear
+/// blending between kept frames (studio, `positions_at`) is then within
+/// `HOLD_M` of the rope during a hold. The native track keeps every step.
+pub const RECORD_HZ: f64 = 60.0;
+pub const HOLD_M: f64 = 2e-5;
+
+struct Frame {
+    time: f64,
+    points: Vec<[f64; 3]>,
+    held: Vec<u32>,
+    connectors: Vec<botrail_scene::wire::PoseMsg>,
+}
+
+#[derive(Default)]
+struct Recorder {
+    /// The latest frame not kept because the rope was at rest: the end of
+    /// a hold, kept when the rope moves again.
+    hold: Option<Frame>,
+}
+impl Recorder {
+    fn offer(&mut self, track: &mut RopeTrack, frame: Frame, event: bool) {
+        let Some(&last) = track.times.last() else {
+            Self::keep(track, frame);
+            return;
+        };
+        let moved = Self::moved(track, &frame);
+        let due = frame.time - last >= 1.0 / RECORD_HZ - 1e-12;
+        if event || (due && moved) {
+            if let Some(hold) = self.hold.take() {
+                if hold.time > last && hold.time < frame.time {
+                    Self::keep(track, hold);
+                }
+            }
+            Self::keep(track, frame);
+        } else if !moved {
+            self.hold = Some(frame);
+        }
+    }
+    fn moved(track: &RopeTrack, frame: &Frame) -> bool {
+        let points = track.points.last().expect("a kept frame");
+        let far = |a: &[f64; 3], b: &[f64; 3]| (0..3).any(|i| (a[i] - b[i]).abs() > HOLD_M);
+        track.held.last() != Some(&frame.held)
+            || points.iter().zip(&frame.points).any(|(a, b)| far(a, b))
+            || track
+                .connectors
+                .iter()
+                .zip(&frame.connectors)
+                .any(|(c, p)| {
+                    c.poses.last().is_some_and(|q| {
+                        far(&q.position, &p.position)
+                            || (0..4).any(|i| (q.quaternion[i] - p.quaternion[i]).abs() > 1e-4)
+                    })
+                })
+    }
+    fn keep(track: &mut RopeTrack, frame: Frame) {
+        track.times.push(frame.time);
+        track.points.push(frame.points);
+        track.held.push(frame.held);
+        for (c, pose) in track.connectors.iter_mut().zip(frame.connectors) {
+            c.poses.push(pose);
+        }
+    }
+}
+
 fn invalid(message: impl Into<String>) -> Error {
     Error::Input(message.into())
+}
+
+/// A track ending at the cycle's duration up to roundoff: the rollout sums
+/// the duration and each robot's knot times separately, so they can differ
+/// in the last bit.
+fn ends_at(last: f64, duration: f64) -> bool {
+    (last - duration).abs() <= 1e-9 * duration.abs().max(1.0)
+}
+
+/// A wire pose lattice on the replay's clock: its last knot is the
+/// duration exactly (it may differ from it in the last bit, see `ends_at`).
+fn on_clock(times: &[f64], duration: f64) -> Vec<f64> {
+    let mut times = times.to_vec();
+    if let Some(last) = times.last_mut() {
+        if ends_at(*last, duration) {
+            *last = duration;
+        }
+    }
+    times
 }
 
 /// Capture the same 30 Hz pose lattice sent to Studio. FK is evaluated at
@@ -107,7 +227,7 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
             || t.times.len() != t.positions.len()
             || t.times.len() != t.velocities.len()
             || t.times[0] != 0.0
-            || *t.times.last().unwrap() != timeline.duration
+            || !ends_at(*t.times.last().unwrap(), timeline.duration)
             || t.times.iter().any(|t| !t.is_finite())
             || t.times.windows(2).any(|w| w[0] >= w[1])
             || t.positions
@@ -126,6 +246,10 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
         .collision_links
         .iter()
         .chain(pass.grippers.iter().map(|g| &g.link))
+        .chain(pass.anchors.iter().filter_map(|a| match &a.body {
+            AnchorBody::Link(link) => Some(link),
+            AnchorBody::Obstacle(_) => None,
+        }))
         .cloned()
         .collect();
     let mut proxies = Vec::new();
@@ -142,7 +266,7 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
             .iter()
             .position(|l| l.name == binding.link)
             .ok_or_else(|| invalid(format!("unknown link {}", binding.key())))?;
-        let times = wire.robots[ri].trajectory.times.clone();
+        let times = on_clock(&wire.robots[ri].trajectory.times, timeline.duration);
         let poses = times
             .iter()
             .map(|&t| {
@@ -184,14 +308,25 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
         });
     }
     // Moving obstacles use the same baked object pose samples as the viewer.
-    for name in &pass.obstacles {
+    // An anchor's obstacle that is not also selected for collision is a
+    // frame only, and may be one the cell does not collision-check.
+    let mut selected_obstacles: Vec<(&String, bool)> =
+        pass.obstacles.iter().map(|name| (name, true)).collect();
+    for anchor in &pass.anchors {
+        if let AnchorBody::Obstacle(name) = &anchor.body {
+            if !selected_obstacles.iter().any(|(n, _)| *n == name) {
+                selected_obstacles.push((name, false));
+            }
+        }
+    }
+    for (name, collides) in selected_obstacles {
         let i = scene
             .obstacles()
             .iter()
             .position(|o| o.name == *name)
             .ok_or_else(|| invalid(format!("unknown obstacle {name}")))?;
         let obstacle = &scene.obstacles()[i];
-        if !obstacle.enabled {
+        if collides && !obstacle.enabled {
             return Err(invalid(format!("disabled obstacle {name}")));
         }
         let object = wire.objects.iter().find(|o| o.name == *name);
@@ -203,7 +338,7 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
         let times = wire
             .robots
             .first()
-            .map(|r| r.trajectory.times.clone())
+            .map(|r| on_clock(&r.trajectory.times, timeline.duration))
             .unwrap_or_else(|| {
                 let n = (timeline.duration * 30.0).ceil().max(1.0) as usize;
                 (0..=n)
@@ -231,11 +366,15 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
         } else {
             vec![PoseData::from_iso(&obstacle.pose); times.len()]
         };
-        let shapes = scene.obstacle_colliders()[i]
-            .parts()
-            .iter()
-            .map(|(p, s)| Ok((PoseData::from_old(p), shape_bridge::extract(s)?)))
-            .collect::<Result<_, Error>>()?;
+        let shapes = if collides {
+            scene.obstacle_colliders()[i]
+                .parts()
+                .iter()
+                .map(|(p, s)| Ok((PoseData::from_old(p), shape_bridge::extract(s)?)))
+                .collect::<Result<_, Error>>()?
+        } else {
+            Vec::new()
+        };
         proxies.push(Proxy {
             name: format!("obstacle/{name}"),
             times,
@@ -326,6 +465,17 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
         times.extend(s.edges.iter().map(|(t, _)| *t));
         signals.push(s);
     }
+    for a in &pass.anchors {
+        if !proxies.contains_key(&a.body.key()) {
+            return Err(invalid(format!("missing proxy {}", a.body.key())));
+        }
+        if !a.length_m.is_finite() || a.length_m < 0.0 {
+            return Err(invalid(format!(
+                "anchor on {} needs a finite, nonnegative length",
+                a.body.key()
+            )));
+        }
+    }
     // Signal edges and the final time are authoritative. Remove only
     // redundant numerical-grid knots within roundoff of those edges;
     // distinct event times, however close, are never merged.
@@ -397,6 +547,7 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
         coupling: "baked_one_way_no_source_reaction".into(),
         coordinate_system: "right-handed Z-up SI".into(),
         solver: "rapier3d-f64 0.36.0".into(),
+        color: pass.color,
     };
     let mut connector_bodies = Vec::new();
     let mut initial = pass
@@ -448,7 +599,43 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
             poses: Vec::new(),
         });
     }
+    // An anchor holds every sample inside its span where it lies at time
+    // zero; two or more held samples also hold the rope's direction.
+    let samples = ropes.get(id, &world, rope)?.samples.clone();
+    let slack = 1e-9 * samples.reference_length_m().max(1.0);
+    for a in &pass.anchors {
+        let at = samples
+            .resolve_location(&a.location)
+            .map_err(|e| invalid(e.to_string()))?
+            .actual_arc_length_m;
+        let (lo, hi) = match a.location {
+            RopeLocation::Start => (at, at + a.length_m),
+            RopeLocation::End => (at - a.length_m, at),
+            _ => (at - a.length_m / 2.0, at + a.length_m / 2.0),
+        };
+        for &s in samples.arc_lengths_m() {
+            if s >= lo - slack && s <= hi + slack {
+                initial.push(AttachmentCommand::Attach {
+                    rope,
+                    location: RopeLocation::ArcLength {
+                        arc_length_m: s,
+                        tolerance_m: slack,
+                    },
+                    body: bodies[&a.body.key()],
+                });
+            }
+        }
+    }
     let mut held = vec![None; pass.grippers.len()];
+    // Every signal edge is kept in the playback track; between them, at most
+    // `RECORD_HZ` frames a second, and a rope at rest costs its hold's ends.
+    let mut events: Vec<f64> = signals
+        .iter()
+        .flat_map(|s| s.edges.iter().map(|(t, _)| *t))
+        .collect();
+    events.sort_by(f64::total_cmp);
+    events.dedup();
+    let mut recorder = Recorder::default();
     for (k, &time) in times.iter().enumerate() {
         let dt = times.get(k + 1).map_or(pass.step_s, |t| t - time);
         world.integration_parameters.dt = dt;
@@ -600,21 +787,26 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
                 local_anchor_m: Some(a.local_anchor_m),
             });
         }
-        track.times.push(time);
-        track
-            .points
-            .push(ropes.centerline(id, &world, rope)?.positions_m().collect());
         let mut particles = Vec::new();
         for h in held.iter().flatten() {
             particles.push(ropes.get_attachment(id, &world, *h)?.particle);
         }
         particles.sort_unstable();
-        track.held.push(particles);
-        for (i, &b) in connector_bodies.iter().enumerate() {
-            track.connectors[i]
-                .poses
-                .push(PoseData::from_native(world.bodies[b].position()).message());
-        }
+        recorder.offer(
+            &mut track,
+            Frame {
+                time,
+                points: ropes.centerline(id, &world, rope)?.positions_m().collect(),
+                held: particles,
+                connectors: connector_bodies
+                    .iter()
+                    .map(|&b| PoseData::from_native(world.bodies[b].position()).message())
+                    .collect(),
+            },
+            k == 0
+                || k == times.len() - 1
+                || events.binary_search_by(|e| e.total_cmp(&time)).is_ok(),
+        );
         let stamp = CaptureStamp::new(CapturePhase::BeforeStep, Some(k as u64), time, dt)?;
         native.push_frame(TrackFrame {
             capture: stamp.clone(),

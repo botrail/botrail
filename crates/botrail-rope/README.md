@@ -20,10 +20,15 @@ lattice and returns `track::Replay`; `track::install` adds it to a timeline.
 `pass::drive` accepts neutral input from other bakers. Both consume their
 private world and never mutate the source scene, timeline or physics world.
 
-The public track is Z-up SI and carries `baked_one_way_no_source_reaction`,
-exact source/applied signal times and acquisition local anchors. The native
-track additionally carries checked snapshots, velocities and raw last-substep
-impulses. It is playback data, not a restart checkpoint or average force report.
+`RopePass::anchors` hold material spans on robot links or scene obstacles for
+the whole replay (a cable crimped in a housing a robot carries); `color` is
+carried to the track. The public track is Z-up SI and carries
+`baked_one_way_no_source_reaction`, exact source/applied signal times and
+acquisition local anchors; it keeps every event, at most `pass::RECORD_HZ`
+frames a second otherwise, and only the ends of a hold. The native track keeps
+every step and additionally carries checked snapshots, velocities and raw
+last-substep impulses. It is playback data, not a restart checkpoint or
+average force report. The session's USD export writes ropes as tube meshes.
 
 This adapter follows the botrail workspace license. `rapier-rope` remains MIT;
 its upstream dependency licenses remain separate.

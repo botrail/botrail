@@ -230,6 +230,9 @@ pub struct AnimationInput<'a> {
     pub cameras: &'a [CameraSpec],
     /// Simulated cloths; empty = no `/World/Cloths` prim.
     pub cloths: &'a [ClothSpec],
+    /// Simulated ropes and cables, each a tube in the same deforming-mesh
+    /// form as a cloth; empty = no `/World/Ropes` prim.
+    pub ropes: &'a [ClothSpec],
 }
 
 /// How one exported object stands in a simulation stage.
@@ -741,7 +744,15 @@ fn export_stage(
     assets.extend(appearances.copies);
     author_curves(&mut layer, input.curves, &mut warnings);
     author_cameras(&mut layer, input.cameras, &codes);
-    author_cloths(&mut layer, input.cloths, fps, &mut warnings);
+    author_deforming(
+        &mut layer,
+        "Cloths",
+        "cloth",
+        input.cloths,
+        fps,
+        &mut warnings,
+    );
+    author_deforming(&mut layer, "Ropes", "rope", input.ropes, fps, &mut warnings);
 
     Ok(ExportedAnimation {
         data: layer.finish(),
@@ -807,20 +818,24 @@ fn author_cameras(layer: &mut LayerBuilder, cameras: &[CameraSpec], codes: &[f64
     }
 }
 
-/// Authors each [`ClothSpec`] as a `Mesh` prim under `/World/Cloths`
+/// Authors each [`ClothSpec`] as a `Mesh` prim under `/World/<scope>`
 /// (created only when there is something to hold): triangles as they are,
-/// `points` as time samples at the cloth's own times with the first sample
+/// `points` as time samples at the mesh's own times with the first sample
 /// as the default, so a reader that ignores animation still finds the mesh.
-fn author_cloths(
+/// `kind` names the thing in warnings (`cloth`, `rope`).
+fn author_deforming(
     layer: &mut LayerBuilder,
+    scope: &str,
+    kind: &str,
     cloths: &[ClothSpec],
     fps: f64,
     warnings: &mut Vec<String>,
 ) {
+    let root = format!("/World/{scope}");
     let mut used: HashMap<String, usize> = HashMap::new();
     for spec in cloths {
         let Some((_, first)) = spec.samples.first() else {
-            warnings.push(format!("cloth `{}` has no samples; skipped", spec.name));
+            warnings.push(format!("{kind} `{}` has no samples; skipped", spec.name));
             continue;
         };
         let count = first.len();
@@ -833,16 +848,16 @@ fn author_cloths(
                 .any(|&i| i as usize >= count)
         {
             warnings.push(format!(
-                "cloth `{}` has no triangles, or samples that do not match them; skipped",
+                "{kind} `{}` has no triangles, or samples that do not match them; skipped",
                 spec.name
             ));
             continue;
         }
-        if !layer.has_prim("/World/Cloths") {
-            layer.ensure_prim("/World/Cloths", Specifier::Def, Some("Xform"));
+        if !layer.has_prim(&root) {
+            layer.ensure_prim(&root, Specifier::Def, Some("Xform"));
         }
         let prim = format!(
-            "/World/Cloths/{}",
+            "{root}/{}",
             unique_child(&mut used, &sanitize_name(&spec.name))
         );
         layer.ensure_prim(&prim, Specifier::Def, Some("Mesh"));
@@ -3138,6 +3153,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let exported = export_animation(&input, &ExportOptions::default(), "phys").unwrap();
         let text = exported.to_usda().unwrap();
@@ -3300,6 +3316,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -3436,6 +3453,7 @@ mod tests {
                 curves: &[],
                 cameras: &[],
                 cloths: &[],
+                ropes: &[],
             },
             &ExportOptions::default(),
         )
@@ -3527,6 +3545,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         // Inline, the per-face colours are on the prim, uniform.
         let out = dir.join("inline/anim.usda");
@@ -3609,6 +3628,7 @@ mod tests {
                 curves: &[],
                 cameras: &[],
                 cloths: &[],
+                ropes: &[],
             };
             let exported = export_animation(&input, &ExportOptions::default(), "nest").unwrap();
             let dir = temp_dir(if flip { "nest_flip" } else { "nest" });
@@ -3700,6 +3720,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let spec = SimulationSpec {
             welds: &[],
@@ -3869,6 +3890,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let articulation = ArticulationSpec {
             powered: true,
@@ -4100,6 +4122,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let export = |articulation: ArticulationSpec, ride: Option<Ride>| {
             let spec = SimulationSpec {
@@ -4343,6 +4366,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let powered = ArticulationSpec {
             powered: true,
@@ -4564,6 +4588,7 @@ mod tests {
                 curves: &[],
                 cameras: &[],
                 cloths: &[],
+                ropes: &[],
             };
             let spec = SimulationSpec {
                 welds: &[],
@@ -4724,6 +4749,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
@@ -4867,6 +4893,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let warnings =
             write_animation(&dir.join("anim.usda"), &input, &ExportOptions::default()).unwrap();
@@ -5030,6 +5057,7 @@ mod tests {
                 curves: &[],
                 cameras: &[],
                 cloths: &cloths,
+                ropes: &[],
             },
             &ExportOptions {
                 fps: 30.0,
@@ -5134,6 +5162,7 @@ mod tests {
                 curves: &curves,
                 cameras: &[],
                 cloths: &[],
+                ropes: &[],
             },
             &ExportOptions::default(),
         )
@@ -5221,6 +5250,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
 
         for name in ["anim.usda", "anim.usdc", "anim.usd"] {
@@ -5302,6 +5332,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         assert!(matches!(
             export_animation(&empty, &ExportOptions::default(), "a"),
@@ -5316,6 +5347,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         assert!(matches!(
             export_animation(&bad_len, &ExportOptions::default(), "a"),
@@ -5329,6 +5361,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         assert!(matches!(
             export_animation(&no_robots, &ExportOptions::default(), "a"),
@@ -5383,6 +5416,7 @@ mod tests {
             curves: &[],
             cameras: &cameras,
             cloths: &[],
+            ropes: &[],
         };
         let exported = export_animation(&input, &ExportOptions::default(), "cams").unwrap();
         let text = exported.to_usda().unwrap();
@@ -5413,6 +5447,7 @@ mod tests {
                 curves: &[],
                 cameras: &bad,
                 cloths: &[],
+                ropes: &[],
             },
             &ExportOptions::default(),
             "cams",
@@ -5469,6 +5504,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let warnings =
             write_animation(&dir.join("cell.usda"), &input, &ExportOptions::default()).unwrap();
@@ -5541,6 +5577,7 @@ mod tests {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         write_animation(&out.join("anim.usda"), &input, &ExportOptions::default()).unwrap()
     }

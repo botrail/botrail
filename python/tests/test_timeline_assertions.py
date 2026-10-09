@@ -117,6 +117,27 @@ def test_min_clearance_contact_names_the_pair() -> None:
     assert "contact" in repr(c)
 
 
+def test_min_clearance_to_a_guard_leaves_the_fixture_out(scene: bt.Scene) -> None:
+    """`to=` measures against the obstacles it names — a group by its
+    prefix — so the guard's margin is not hidden by the part the tool is
+    meant to come close to."""
+    scene.add_box("guard/back", (1.2, 0.02, 1.0), (0.0, 0.9, 0.5))
+    scene.add_box("guard/left", (0.02, 1.2, 1.0), (-0.9, 0.0, 0.5))
+    tl = _cycle(scene)
+    everything = tl.min_clearance()
+    guard = tl.min_clearance(to=["guard"])
+    back = tl.min_clearance(to=["guard/back"])
+    assert float(everything) <= 0.02 + 1e-9  # the dropped box, as above
+    assert float(guard) > 0.2 and guard.pair is None
+    assert float(back) >= float(guard)
+    # The live query takes the same names.
+    assert scene.min_obstacle_distance(to=["guard"]) >= float(guard) - 1e-9
+    with pytest.raises(ValueError, match="to= names no obstacle: gaurd"):
+        tl.min_clearance(to=["gaurd"])
+    with pytest.raises(ValueError, match="to= names no obstacle: guard/b"):
+        scene.min_obstacle_distance(to=["guard/b"])
+
+
 def test_min_clearance_argument_errors(scene: bt.Scene) -> None:
     tl = _cycle(scene)
     with pytest.raises(ValueError, match="dt must be positive"):

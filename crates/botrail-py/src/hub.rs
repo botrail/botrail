@@ -1727,6 +1727,7 @@ impl SceneHub {
             curves: &[],
             cameras: &[],
             cloths: &[],
+            ropes: &[],
         };
         let options = botrail_usd::export::ExportOptions {
             fps,
@@ -1967,6 +1968,19 @@ impl SceneHub {
 
     pub fn min_obstacle_distance(&self) -> Option<f64> {
         self.with_scene(|scene| scene.min_obstacle_distance())
+    }
+
+    /// [`Self::min_obstacle_distance`] against only the obstacles `to`
+    /// names; `Err` names the entries that match nothing.
+    pub fn min_obstacle_distance_to(&self, to: &[String]) -> Result<Option<f64>, String> {
+        self.with_scene(|scene| {
+            let unknown = scene.unmatched_obstacle_names(to);
+            if unknown.is_empty() {
+                Ok(scene.min_obstacle_distance_to(to))
+            } else {
+                Err(format!("to= names no obstacle: {}", unknown.join(", ")))
+            }
+        })
     }
 
     pub fn collision_warnings(&self) -> Vec<String> {

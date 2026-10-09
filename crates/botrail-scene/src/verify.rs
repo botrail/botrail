@@ -44,6 +44,19 @@ impl Scene {
         timeline: &SequenceTimeline,
         dt: f64,
     ) -> Result<Option<Clearance>, SceneError> {
+        self.timeline_min_clearance_to(timeline, dt, None)
+    }
+
+    /// [`Scene::timeline_min_clearance`] against only the environment
+    /// obstacles `to` names (see [`crate::names_match`]) — the clearance
+    /// to a guard, say, apart from the fixture the tool is meant to
+    /// approach. `None` measures against everything.
+    pub fn timeline_min_clearance_to(
+        &self,
+        timeline: &SequenceTimeline,
+        dt: f64,
+        to: Option<&[String]>,
+    ) -> Result<Option<Clearance>, SceneError> {
         let mut world = self.clone();
         let mut span_at: Vec<Option<usize>> = vec![None; timeline.objects.len()];
         let mut best: Option<Clearance> = None;
@@ -51,7 +64,11 @@ impl Scene {
         for k in 0..=samples {
             let t = (k as f64 * dt).min(timeline.duration);
             apply_state(&mut world, timeline, t, &mut span_at)?;
-            let Some(distance) = world.min_obstacle_distance() else {
+            let measured = match to {
+                Some(to) => world.min_obstacle_distance_to(to),
+                None => world.min_obstacle_distance(),
+            };
+            let Some(distance) = measured else {
                 continue;
             };
             if best.as_ref().is_none_or(|b| distance < b.distance) {
@@ -66,7 +83,7 @@ impl Scene {
                 // stands. Keep scanning for the pair: a sample that lands
                 // exactly on the touch boundary has no boolean overlap yet,
                 // so take the witness from the first sample that does.
-                if let Some(pair) = touching_pair(&world) {
+                if let Some(pair) = touching_pair(&world, to) {
                     best.as_mut().expect("just set").pair = Some(pair);
                     break;
                 }
@@ -196,8 +213,9 @@ fn active_span(track: &ObjectTrack, t: f64) -> Option<usize> {
 
 /// A `(robot side, environment obstacle)` collision pair at the current
 /// configuration, for naming a zero-clearance contact. The robot side is a
-/// link (`robot:link` with several robots) or a carried object.
-fn touching_pair(world: &Scene) -> Option<(String, String)> {
+/// link (`robot:link` with several robots) or a carried object; the
+/// environment side one of the obstacles `to` names, when given.
+fn touching_pair(world: &Scene, to: Option<&[String]>) -> Option<(String, String)> {
     let link_name = |robot: usize, link: usize| {
         let name = world.robots()[robot].model.links[link].name.clone();
         if world.robots().len() > 1 {
@@ -217,7 +235,8 @@ fn touching_pair(world: &Scene) -> Option<(String, String)> {
     let env_side = |id: &ColliderId| match id {
         ColliderId::Obstacle(k) => {
             let name = &world.obstacles()[*k].name;
-            world.attachment(name).is_none().then(|| name.clone())
+            (world.attachment(name).is_none() && to.is_none_or(|to| crate::names_match(to, name)))
+                .then(|| name.clone())
         }
         _ => None,
     };
@@ -364,6 +383,54 @@ mod tests {
             (c.t - move_end).abs() <= 0.02,
             "t {} vs move end {move_end}",
             c.t
+        );
+    }
+
+    /// `to` narrows the environment side to the obstacles it names — a
+    /// group by its prefix, never a name that merely starts the same way.
+    #[test]
+    fn clearance_to_named_obstacles_leaves_the_rest_out() {
+        let mut scene = sample_scene();
+        let cube = || Geometry::Box {
+            size: Vector3::new(0.02, 0.02, 0.02),
+        };
+        // Link `b` is a 0.1 m cube around (0, 0, 0.5): 20 mm to the
+        // fixture, 60 mm to the guardrail, 190 mm to the guard's panel.
+        scene
+            .add_obstacle("fixture", cube(), iso(0.08, 0.0, 0.5))
+            .unwrap();
+        scene
+            .add_obstacle("guardrail", cube(), iso(-0.12, 0.0, 0.5))
+            .unwrap();
+        scene
+            .add_obstacle("guard/back", cube(), iso(0.0, 0.25, 0.5))
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "s".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 0.1 })],
+        });
+        let tl = scene
+            .simulate_sequence("s", &RolloutOptions::default())
+            .unwrap();
+        let all = scene.timeline_min_clearance(&tl, 0.01).unwrap().unwrap();
+        assert!((all.distance - 0.02).abs() < 1e-9, "{}", all.distance);
+        let guard = ["guard".to_string()];
+        let to_guard = scene
+            .timeline_min_clearance_to(&tl, 0.01, Some(&guard))
+            .unwrap()
+            .unwrap();
+        assert!(
+            (to_guard.distance - 0.19).abs() < 1e-9,
+            "{}",
+            to_guard.distance
+        );
+        assert_eq!(
+            scene.min_obstacle_distance_to(&["guardrail".to_string()]),
+            Some(0.06)
+        );
+        assert_eq!(
+            scene.unmatched_obstacle_names(&["guard".into(), "fence".into()]),
+            vec!["fence".to_string()]
         );
     }
 

@@ -399,6 +399,40 @@ fn bbox_center(points: &[[f64; 2]]) -> [f64; 2] {
     [(fp.min[0] + fp.max[0]) / 2.0, (fp.min[1] + fp.max[1]) / 2.0]
 }
 
+/// Where a label of `text` at `size` (centred on its point) reads clear of
+/// the labels already `placed` (their boxes, which this one joins): `at`
+/// itself when it is free, else the nearest free line below or above it,
+/// three lines either way at most — `None` past that.
+fn free_spot(
+    at: [f64; 2],
+    text: &str,
+    size: f64,
+    placed: &mut Vec<([f64; 2], [f64; 2])>,
+) -> Option<[f64; 2]> {
+    let clear = |(lo, hi): ([f64; 2], [f64; 2]), placed: &[([f64; 2], [f64; 2])]| {
+        placed.iter().all(|(plo, phi)| {
+            hi[0] <= plo[0] || phi[0] <= lo[0] || hi[1] <= plo[1] || phi[1] <= lo[1]
+        })
+    };
+    let line = 1.2 * size;
+    let spot = std::iter::once(0.0)
+        .chain((1..=3).flat_map(|k| [-(k as f64) * line, k as f64 * line]))
+        .map(|dy| [at[0], at[1] + dy])
+        .find(|c| clear(label_box(*c, text, size), placed))?;
+    placed.push(label_box(spot, text, size));
+    Some(spot)
+}
+
+/// The box a label of `text` at `size` takes centred on `at`, estimated
+/// from its character count (a sans-serif's average width).
+fn label_box(at: [f64; 2], text: &str, size: f64) -> ([f64; 2], [f64; 2]) {
+    let half = [0.3 * size * text.chars().count() as f64, 0.6 * size];
+    (
+        [at[0] - half[0], at[1] - half[1]],
+        [at[0] + half[0], at[1] + half[1]],
+    )
+}
+
 /// Shoelace area of an outline (0 for lines and points).
 fn polygon_area(points: &[[f64; 2]]) -> f64 {
     if points.len() < 3 {
@@ -1193,6 +1227,9 @@ impl Scene {
         }
 
         // ---- frames ----------------------------------------------------
+        // (The labels so far are the ones the equipment labels keep off;
+        // a frame's small mark and name give way to them.)
+        let named = items.len();
         if options.frames {
             for frame in self.frames() {
                 let t = frame.pose.translation.vector;
@@ -1219,6 +1256,13 @@ impl Scene {
         }
 
         // ---- equipment labels ------------------------------------------
+        // Units that share a centre — a guard standing on its base, the
+        // plate between them, the screws in a presenter — would print
+        // their labels over each other. The biggest units label first, at
+        // their spot; a label that would land on one already placed steps
+        // a line down, then up, and one with no room within a few lines of
+        // its unit is left off rather than printed over another.
+        let mut spots: Vec<(Footprint, [f64; 2], bool, &String)> = Vec::new();
         for (_, label, outlines) in &label_units {
             let all: Vec<[f64; 2]> = outlines.iter().flatten().copied().collect();
             let mut bb = Footprint::empty();
@@ -1230,10 +1274,53 @@ impl Scene {
             // as one thing and the label stays off whatever it encloses.
             let covered: f64 = outlines.iter().map(|o| polygon_area(o)).sum();
             let ring = bb.area() > 1e-9 && covered / bb.area() < 0.3 && outlines.len() > 1;
-            let at = if ring {
-                [(bb.min[0] + bb.max[0]) / 2.0, bb.max[1] + 0.12]
-            } else {
-                bbox_center(&all)
+            spots.push((bb, bbox_center(&all), ring, label));
+        }
+        // So is anything with other things inside it — a base with the
+        // cell on its plate, a guard over it: its label inside would sit
+        // on theirs.
+        let within = |bb: &Footprint, p: [f64; 2]| {
+            bb.min[0] < p[0] && p[0] < bb.max[0] && bb.min[1] < p[1] && p[1] < bb.max[1]
+        };
+        let outside: Vec<bool> = spots
+            .iter()
+            .map(|(bb, _, ring, _)| {
+                *ring
+                    || spots
+                        .iter()
+                        .any(|(other, at, _, _)| other.area() < bb.area() && within(bb, *at))
+            })
+            .collect();
+        let mut spots: Vec<(f64, [f64; 2], &String)> = spots
+            .iter()
+            .zip(outside)
+            .map(|((bb, at, _, label), outside)| {
+                let at = if outside {
+                    [(bb.min[0] + bb.max[0]) / 2.0, bb.max[1] + 0.12]
+                } else {
+                    *at
+                };
+                (bb.area(), at, *label)
+            })
+            .collect();
+        spots.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // The robots', the devices' and the sensors' labels go first, and
+        // keep off each other the same way — two switches at the ends of
+        // one stroke share a plan position — except that one with no room
+        // stays where it is: an input is not left off the sheet.
+        let mut placed: Vec<([f64; 2], [f64; 2])> = Vec::new();
+        for item in items[..named].iter_mut() {
+            if let LayoutShape::Text { at, text, size } = &mut item.shape {
+                match free_spot(*at, text, *size, &mut placed) {
+                    Some(spot) => *at = spot,
+                    None => placed.push(label_box(*at, text, *size)),
+                }
+            }
+        }
+        let size = 0.1;
+        for (_, at, label) in spots {
+            let Some(at) = free_spot(at, label, size, &mut placed) else {
+                continue;
             };
             items.push(LayoutItem {
                 layer: LayoutLayer::Label,
@@ -1241,7 +1328,7 @@ impl Scene {
                 shape: LayoutShape::Text {
                     at,
                     text: label.clone(),
-                    size: 0.1,
+                    size,
                 },
                 dashed: false,
             });
@@ -1831,6 +1918,98 @@ mod tests {
             .items
             .iter()
             .any(|i| matches!(&i.shape, LayoutShape::Text { text, .. } if text == "table")));
+    }
+
+    /// Units stacked on one centre — a guard on its base — label on lines
+    /// of their own; the first keeps the centre.
+    #[test]
+    fn stacked_units_label_on_lines_of_their_own() {
+        let mut scene = scene();
+        for name in ["base/plate", "guard/roof"] {
+            scene
+                .add_obstacle(
+                    name,
+                    Geometry::Box {
+                        size: Vector3::new(1.0, 1.0, 0.02),
+                    },
+                    Isometry3::translation(0.0, 0.0, 0.8),
+                )
+                .unwrap();
+        }
+        let sheet = scene.layout(&LayoutOptions::default());
+        let at: Vec<[f64; 2]> = sheet
+            .items
+            .iter()
+            .filter_map(|i| match &i.shape {
+                LayoutShape::Text { at, text, .. } if text == "base" || text == "guard" => {
+                    Some(*at)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(at.len(), 2, "{:?}", sheet.items);
+        assert_eq!(at[0], [0.0, 0.0]);
+        assert!(
+            at[0][0] == at[1][0] && (at[0][1] - at[1][1]).abs() >= 0.12 - 1e-9,
+            "{at:?}"
+        );
+    }
+
+    /// Something with things inside it labels above its outline, like a
+    /// fence, and what it holds keeps its own spot; two sensors on one
+    /// plan position read on lines of their own.
+    #[test]
+    fn a_container_labels_above_what_it_holds() {
+        let mut scene = scene();
+        let block = |x: f64, y: f64, z: f64| Geometry::Box {
+            size: Vector3::new(x, y, z),
+        };
+        scene
+            .add_obstacle(
+                "base/plate",
+                block(1.0, 1.0, 0.02),
+                Isometry3::translation(0.0, 0.0, 0.75),
+            )
+            .unwrap();
+        scene
+            .add_obstacle(
+                "nest/body",
+                block(0.2, 0.2, 0.05),
+                Isometry3::translation(0.2, -0.2, 0.8),
+            )
+            .unwrap();
+        for name in ["shutter/closed", "shutter/open"] {
+            scene
+                .upsert_sensor(Sensor {
+                    name: name.into(),
+                    kind: SensorKind::Zone {
+                        pose: Isometry3::translation(0.0, -0.6, 1.0),
+                        size: Vector3::new(0.02, 0.02, 0.02),
+                    },
+                    watch: SensorWatch::All,
+                    mount: None,
+                })
+                .unwrap();
+        }
+        let sheet = scene.layout(&LayoutOptions::default());
+        let at = |label: &str| {
+            sheet
+                .items
+                .iter()
+                .find_map(|i| match &i.shape {
+                    LayoutShape::Text { at, text, .. } if text == label => Some(*at),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no label {label}"))
+        };
+        assert_eq!(at("base"), [0.0, 0.62]);
+        assert_eq!(at("nest"), [0.2, -0.2]);
+        let (closed, open) = (at("shutter/closed"), at("shutter/open"));
+        assert_eq!(closed, [0.0, -0.6]);
+        assert!(
+            open[0] == closed[0] && (open[1] - closed[1]).abs() >= 0.096 - 1e-9,
+            "{open:?}"
+        );
     }
 
     #[test]

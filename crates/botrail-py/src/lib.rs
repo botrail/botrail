@@ -6397,9 +6397,18 @@ impl Scene {
     }
 
     /// Minimum robot-obstacle distance (0 when colliding); `None` without
-    /// obstacles.
-    fn min_obstacle_distance(&self) -> Option<f64> {
-        self.hub.min_obstacle_distance()
+    /// obstacles. `to=[...]` measures against only those obstacles — each
+    /// a name or a group it sits in (`"guard"` for every `guard/...`); a
+    /// name that matches nothing raises.
+    #[pyo3(signature = (*, to = None))]
+    fn min_obstacle_distance(&self, to: Option<Vec<String>>) -> PyResult<Option<f64>> {
+        match to {
+            None => Ok(self.hub.min_obstacle_distance()),
+            Some(to) => self
+                .hub
+                .min_obstacle_distance_to(&to)
+                .map_err(PyValueError::new_err),
+        }
     }
 
     /// Link shapes skipped for collision checking (e.g. meshes, until the
@@ -8989,22 +8998,38 @@ impl SequenceTimeline {
     /// (carried and conveyed objects replay their baked motion; robot-robot
     /// contact is already a hard rollout error). Raises when the cell has
     /// nothing to measure.
-    #[pyo3(signature = (dt = 0.01))]
-    fn min_clearance(&self, dt: f64) -> PyResult<Clearance> {
+    ///
+    /// `to=[...]` measures against only those environment obstacles — each
+    /// an obstacle's name or a group it sits in (`"guard"` for every
+    /// `guard/...`): the clearance to a guard, apart from the fixture the
+    /// tool is meant to approach. A name that matches nothing raises.
+    #[pyo3(signature = (dt = 0.01, *, to = None))]
+    fn min_clearance(&self, dt: f64, to: Option<Vec<String>>) -> PyResult<Clearance> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(PyValueError::new_err(format!(
                 "dt must be positive, got {dt}"
             )));
         }
+        if let Some(to) = &to {
+            let unknown = self.scene.unmatched_obstacle_names(to);
+            if !unknown.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "to= names no obstacle: {}",
+                    unknown.join(", ")
+                )));
+            }
+        }
         self.scene
-            .timeline_min_clearance(&self.inner, dt)
+            .timeline_min_clearance_to(&self.inner, dt, to.as_deref())
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .map(|inner| Clearance { inner })
             .ok_or_else(|| {
-                PyValueError::new_err(
+                PyValueError::new_err(if to.is_some() {
+                    "nothing to measure: no obstacle to= names is enabled with collision geometry"
+                } else {
                     "nothing to measure: the cell has no enabled environment \
-                     obstacle with collision geometry",
-                )
+                     obstacle with collision geometry"
+                })
             })
     }
 

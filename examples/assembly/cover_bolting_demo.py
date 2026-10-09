@@ -361,9 +361,9 @@ def build(*, length_mm: int = SCREW_LENGTH_MM, rpm: float = RPM_RUN, misalign_mm
 
 # ------------------------------------------------------------------ teach
 def teach(scene: bt.Scene, joint: A.Joint, feeder: bt.parts.ScrewFeeder, driver: A.Driver, *,
-          misalign_mm: float = 0.0) -> dict:
+          misalign_mm: float = 0.0, ready: list = READY) -> dict:
     """Every pose, solved from the cell's frames against the arm's own
-    kinematics — nothing typed in joints but the park. Returns the
+    kinematics — nothing typed in joints but the park, `ready`. Returns the
     gripper's close on the cover's boss. `misalign_mm` shifts the last
     screw's taught poses off their hole along +X."""
     robot = scene.robot_of(ROBOT)
@@ -421,7 +421,7 @@ def teach(scene: bt.Scene, joint: A.Joint, feeder: bt.parts.ScrewFeeder, driver:
         scene.add_segment(motion, goal=q, kind="cartesian_line", robot=ROBOT)
         return q
 
-    ready = full(READY)
+    ready = full(ready)
     scene.set_joint_positions(ready, robot=ROBOT)
     if found := hits():
         raise RuntimeError(f"the park pose fouls: {', '.join(found)}")

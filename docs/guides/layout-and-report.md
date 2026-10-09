@@ -48,7 +48,12 @@ What is on it, layer by layer (the DXF layer names in capitals):
   pinned to an obstacle or a group labels it (`Pedestal (PD-500)`); the rest
   label by their name-derived unit, so a USD subtree reads once as `Conveyor`
   and twelve fence panels once as `fence`. A ring-shaped group (a fence, a
-  guard) is labelled above its top edge, a compact one at its centre.
+  guard) and anything with other labelled things inside it (a base with the
+  cell on its plate) is labelled above its top edge, a compact one at its
+  centre. Labels do not print over each other: the robots', devices' and
+  sensors' names first, then the biggest things', each stepping a line down
+  or up off one already there; a thing's name with no room within three
+  lines of it is left off (a frame's small name gives way to all of them).
 * **DIM** / **GRID** — the overall width and depth, and a metre grid.
 
 `frames=False`, `labels=False`, `reach=False`, `grid=None` switch the extras

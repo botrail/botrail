@@ -32,7 +32,7 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`fence`][botrail.parts.fence] | panels under `<name>/panels/`, posts under `<name>/posts/`, the door as `<name>/door` | — | — | `<name>` (`structure.fence`, qty = panels), `<name>/posts` (`structure.fence.post`, qty = posts), the door (`structure.door`) |
 | [`table`][botrail.parts.table] | `<name>/top`, four legs | `<name>/top` (centre of the top face) | — | `<name>` (`structure.table`), and with a catalog `<name>/top` (the board, where the maker sells it as its own article) |
 | [`pedestal`][botrail.parts.pedestal] | `<name>/base`, `<name>/column`, `<name>/top` | `<name>/mount` (the robot's base pose) | — | `<name>` (`structure.pedestal`) |
-| [`frame_unit`][botrail.parts.frame_unit] | the profiles under `<name>/profiles/<section>/l<length>/` (they collide), the brackets, caps and feet under `<name>/hardware/` (decoration, drawn in full detail; caps sold per section under `<name>/hardware/caps/<section>/`), a board `<name>/top` when one is asked for | `<name>/top` (centre of the top face) | — | `<name>` (`structure.frame`: the template and size), one line per profile length (`structure.frame.profile`, qty = members of that length), one per hardware article (`structure.frame.hardware`: brackets counted from the joints, bolts and nuts from the brackets, caps per section, feet) |
+| [`frame_unit`][botrail.parts.frame_unit] | the profiles under `<name>/profiles/<section>/l<length>/` (they collide), the brackets, caps and feet under `<name>/hardware/` (decoration, drawn in full detail; caps sold per section under `<name>/hardware/caps/<section>/`), a board `<name>/top` when one is asked for; an enclosure's panels under `<name>/panels/<material>-<w>x<h>/` and its door leaf `<name>/door` (they collide) | `<name>/top` (centre of the top face), `<name>/door` (the leaf's centre) | — | `<name>` (`structure.frame`: the template and size), one line per profile length (`structure.frame.profile`, qty = members of that length), one per hardware article (`structure.frame.hardware`: brackets counted from the joints, bolts and nuts from the brackets, caps per section, feet), one per panel size (`structure.frame.panel`) and the door (`structure.door`) |
 | [`conveyor`][botrail.parts.conveyor] | `<name>/belt`, side rails, legs | `<name>/infeed`, `<name>/outfeed` | the conveyor device `<name>`, its zone on the belt | the *device* (`conveyor`) — the body is its geometry, not a second product |
 | [`rack`][botrail.parts.rack] | four uprights under `<name>/uprights/`, a board per level under `<name>/shelves/` | `<name>/level0` … upwards (the centre of each deck) | — | `<name>` (`structure.rack`), and with a catalog `<name>/shelves` (`structure.rack.shelf`, qty = levels) |
 | [`cabinet`][botrail.parts.cabinet] | `<name>/body`, its plinth as `<name>/base`, the mounting plate standing inside as `<name>/plate` | `<name>/front` (centre of the door face at floor level — where an operator stands) | — | `<name>` (`structure.cabinet`), and with a catalog `<name>/base` and `<name>/plate` (`structure.cabinet.base` / `.plate` — the plinth and the plate are articles of their own) |
@@ -203,12 +203,51 @@ along the width, and the cut list names both profiles
 that sells them per section (`cap_3030`, `cap_3060` …) gets one BOM line per
 section (`<name>/hardware/caps/3060`), a pack with one `cap` gets one line.
 
+The second template is the machine guard that stands on such a base:
+`template="enclosure"` is the same box of twelve members with its lower
+ring flush with the bottom (no feet unless asked), clad with sheets set into
+the slots around every bay — 6 mm into each slot, on the members' centre
+line — on the faces `panels` names (`front` −y, `back`, `left`, `right`,
+`top`; default all five). `openings` cuts one opening in a face, given in
+the unit's own coordinates along the face's two axes, `None` for a side
+that runs to the edge; every side that stops short gets a mid-post or a
+mid-rail, butt-jointed and bracketed like the rest, and the bays left
+around the opening get panels. `door` hangs a leaf over a face's opening,
+lapping half a member over every edge and standing 10 mm proud of the face
+so it can slide over the panels beside it — `<name>/door`, with a frame of
+the same name, standing closed:
+
+```python
+base = bt.parts.frame_unit(scene, "base", (1.1, 1.0, 0.74), catalog="misumi/hfs/6-series",
+                           legs="6060", rails="3060", top=0.02, finish="black")
+(_x, _y, top), _ = scene.frame("base/top")
+guard = bt.parts.frame_unit(scene, "guard", (1.1, 1.0, 1.0), (0.0, 0.0, top),
+                            catalog="misumi/hfs/6-series", template="enclosure", finish="black",
+                            openings={"front": ((None, None), (None, 0.45))}, door="front")
+scene.add_linear_axis("shutter", objects=["guard/door"], axis=(0, 0, 1), speed=0.25,
+                      range=(0.0, 0.45), stops={"closed": 0.0, "open": 0.45})
+```
+
+The window across the front takes one mid-rail (a third `HFSB6-3030-1040`
+and two more brackets), and the sheets join the bill after the frame —
+one line per size (`PC panel 1052x952 t5` x2: the back and the top are the
+same sheet), the door one line (`PC door 1070x450 t5`). The pack sells
+profiles and hardware, not sheets, so those lines carry no part number;
+`panel=` is the thickness, `panel_material=` what the lines say (PC,
+acrylic and PET are drawn see-through), `door_model=` the leaf's name. How
+the leaf opens is the cell's: a linear axis lifts it (as above) or slides
+it, and its stops are the limit switches an interlock waits on.
+`examples/assembly/misumi_frame_cell_demo.py` builds a screwdriving cell
+this way and sizes its guard to the program, face by face, with
+[`min_clearance(to=...)`](timeline-assertions.md#clearance).
+
 For a shape no template has, [`FrameUnit`][botrail.parts.FrameUnit] takes
 the members one by one — `member(tag, frm, to, section=, wide=)` in the
 unit's own frame (`wide` is the axis across a rectangular member its `d`
 side runs along; left out, a horizontal member stands on edge and a vertical
 one turns it along x), `joint(a, b)` for every bracketed pair, `cap`, `foot`,
-`frame` — and `build()` cuts and counts the same way.
+`panel(tag, size, at, material=)`, `door(size, at)`, `frame` — and `build()`
+cuts and counts the same way.
 
 The members are the massing: boxes at the real section, which a robot can
 hit. In full detail each member is drawn as an extrusion over its box, the
@@ -231,9 +270,8 @@ outer face toward +Z and the pegs going −Z), a plain black plate otherwise.
 Bolts and nuts sit inside the slots and are not drawn at all, but they are
 still counted — on one hidden resident each (`<name>/hardware/bolts/lot`),
 because a BOM line has to stand for something in the scene. `detail`
-changes what you see and nothing else. Not yet: panels (a `cover`
-template) — a pack's `bracket`, `cap` and `foot` components can also name a
-`trim` of their own.
+changes what you see and nothing else. A pack's `bracket`, `cap` and `foot`
+components can also name a `trim` of their own.
 
 ## Bringing shapes from CAD — the Geometry Provider pattern
 

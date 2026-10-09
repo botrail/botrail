@@ -26,6 +26,8 @@ fn pass() -> RopePass {
         connectors: vec![],
         step_s: 1.0 / 240.0,
         pins: vec![],
+        anchors: vec![],
+        color: None,
     }
 }
 fn proxy() -> Proxy {
@@ -363,6 +365,119 @@ fn simultaneous_release_and_acquisition_handoff_preserves_one_attachment() {
     assert_eq!(handoff.len(), 2);
     assert!(!handoff[0].closed && handoff[1].closed);
     assert_eq!(handoff[1].body, "robot/b");
+}
+#[test]
+fn an_anchored_span_rides_its_body_and_holds_the_ropes_direction() {
+    let anchored = |length_m: f64| {
+        let mut p = pass();
+        p.anchors.push(Anchor {
+            body: AnchorBody::Link(binding().link),
+            location: RopeLocation::Start,
+            length_m,
+        });
+        drive(
+            &Bake {
+                duration_s: 1.0,
+                proxies: vec![proxy()],
+                signals: vec![],
+            },
+            &p,
+        )
+        .unwrap()
+        .track
+    };
+    // 0.5 m on 1/64 m samples: a 0.05 m span holds samples 0..=3.
+    let t = anchored(0.05);
+    let (start, end) = (t.positions_at(0.0), t.positions_at(1.0));
+    for i in 0..4 {
+        assert!(
+            (end[i][0] - start[i][0] - 0.1).abs() < 2e-3
+                && (end[i][2] - start[i][2] - 0.1).abs() < 2e-3,
+            "sample {i}: {:?} -> {:?}",
+            start[i],
+            end[i]
+        );
+    }
+    assert!((end[3][2] - end[0][2]).abs() < 2e-3, "the span stays level");
+    assert!(end.last().unwrap()[2] < end[3][2] - 0.05, "the rest hangs");
+    assert!(
+        t.held.iter().all(|h| h.is_empty()),
+        "an anchor is not a grip"
+    );
+    // One held sample is a pivot: the rope swings down from it.
+    let pivot = anchored(0.0).positions_at(1.0);
+    assert!(
+        pivot[3][2] < pivot[0][2] - 0.01,
+        "{:?} {:?}",
+        pivot[0],
+        pivot[3]
+    );
+    // An anchor needs its body's proxy and a sane length.
+    let mut p = pass();
+    p.anchors.push(Anchor {
+        body: AnchorBody::Obstacle("clamp".into()),
+        location: RopeLocation::End,
+        length_m: 0.0,
+    });
+    let empty = Bake {
+        duration_s: 0.0,
+        proxies: vec![],
+        signals: vec![],
+    };
+    assert!(drive(&empty, &p)
+        .unwrap_err_string()
+        .contains("missing proxy obstacle/clamp"));
+    p.anchors[0].body = AnchorBody::Link(binding().link);
+    p.anchors[0].length_m = -0.01;
+    let one = Bake {
+        duration_s: 1.0,
+        proxies: vec![proxy()],
+        signals: vec![],
+    };
+    assert!(drive(&one, &p)
+        .unwrap_err_string()
+        .contains("nonnegative length"));
+}
+#[test]
+fn the_playback_track_is_thinned_to_display_rate_and_holds() {
+    // A rope dropped 2 cm onto a floor bounces, then lies still: 4 s of
+    // 1/240 s physics.
+    let mut p = pass();
+    p.spec
+        .reference_centerline_m
+        .iter_mut()
+        .for_each(|q| q[2] = 0.026);
+    let floor = Proxy {
+        name: "floor".into(),
+        times: vec![0.0, 4.0],
+        poses: vec![PoseData::default(); 2],
+        shapes: vec![(PoseData::default(), ShapeData::HalfSpace([0.0, 0.0, 1.0]))],
+    };
+    let t = drive(
+        &Bake {
+            duration_s: 4.0,
+            proxies: vec![floor],
+            signals: vec![],
+        },
+        &p,
+    )
+    .unwrap()
+    .track;
+    assert_eq!(t.times.first(), Some(&0.0));
+    assert_eq!(t.times.last(), Some(&4.0));
+    assert!(t
+        .times
+        .windows(2)
+        .all(|w| w[1] - w[0] >= 1.0 / RECORD_HZ - 1e-9 || w[1] == 4.0));
+    let resting = t.times.iter().filter(|&&s| s > 2.0 && s < 4.0).count();
+    assert!(
+        resting <= 1,
+        "a rope at rest costs its hold's ends, not {resting} frames"
+    );
+    // Blending between kept frames stays on the rope.
+    let lying = t.positions_at(3.0)[16][2];
+    assert!((lying - 0.005).abs() < 0.002, "{lying}");
+    assert!((lying - t.positions_at(4.0)[16][2]).abs() < 2.0 * HOLD_M);
 }
 trait ErrorString {
     fn unwrap_err_string(self) -> String;

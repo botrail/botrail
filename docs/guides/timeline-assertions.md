@@ -115,6 +115,19 @@ when the minimum first happens; `clr.pair` names the touching
 the "and nothing ever touched" half of a safety check. Robot-*robot* contact
 never appears here — it is already a hard error during the bake itself.
 
+A cell's tightest approach is usually one it means — the bit over the screw,
+the fingers at the part. To ask about one thing, name it:
+
+```python
+assert tl.min_clearance(to=["guard"]) > 0.05      # every obstacle under guard/
+```
+
+`to` takes obstacle names and groups (`"guard"` stands for every
+`guard/...`, not `guardrail`); the robot side stays the links and what they
+carry, and a name that matches nothing raises rather than measuring nothing.
+`scene.min_obstacle_distance(to=[...])` is the same question for the pose
+the scene stands in.
+
 ## Robot tracks and object motion
 
 ```python

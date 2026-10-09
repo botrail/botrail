@@ -14,4 +14,8 @@ held: Array<Array<number>>, events: Array<RopeEvent>, connectors: Array<RopeConn
 /**
  * Always `baked_one_way_no_source_reaction`; never a live solver checkpoint.
  */
-coupling: string, coordinate_system: string, solver: string, };
+coupling: string, coordinate_system: string, solver: string,
+/**
+ * Display colour, linear RGB like an obstacle's; `None` draws the default.
+ */
+color?: [number, number, number] | null, };

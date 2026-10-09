@@ -1078,16 +1078,25 @@ def pedestal(
 # (sold by the millimetre — the pack states the range, the step and the kg/m),
 # the bracket that joins two of them, the bolts and nuts a bracket takes, the
 # caps and the feet. What botrail adds is the arrangement — a template
-# (`frame_unit(template="table")`) or the members you place yourself
-# (`FrameUnit`) — and from either the cut list falls out: one BOM line per
-# profile length, one per hardware article, counted from the joints.
+# (`frame_unit(template="table" / "enclosure")`) or the members you place
+# yourself (`FrameUnit`) — and from either the cut list falls out: one BOM
+# line per profile length, one per hardware article, counted from the joints.
 
 ALUMINIUM: Color = (0.72, 0.74, 0.76)
 BLACK_ANODIZED: Color = (0.09, 0.09, 0.10)
 CAP_BLACK: Color = (0.05, 0.05, 0.06)
+# A clear polycarbonate or acrylic sheet, drawn faintly tinted and mostly
+# see-through (an authored look, like the finishes above).
+CLEAR_SHEET: Color = (0.78, 0.85, 0.90)
+_CLEAR_OPACITY = 0.16
+_CLEAR_SHEETS: tuple[str, ...] = ("PC", "acrylic", "PET")
 _ANODIZED: _Finish = (0.8, 0.45)
-FRAME_TEMPLATES: tuple[str, ...] = ("table",)
+FRAME_TEMPLATES: tuple[str, ...] = ("table", "enclosure")
+FACES: tuple[str, ...] = ("front", "back", "left", "right", "top")
 _CAP_THICKNESS = 0.003
+_PANEL_INSERT = 0.006  # how far a panel runs into the slot of each member around it
+_DOOR_GAP = 0.010  # a door leaf's clearance off the face it closes
+_MIN_BAY = 0.020  # the narrowest strip of panel a member is worth putting beside
 
 # A profile's cross-section in metres: (w, d), the two sides as the pack
 # names them (`dimensions_mm.w` / `.d`) — equal for a square profile.
@@ -1211,15 +1220,18 @@ class Member:
 class FramePlan:
     """A template's cut list before anything is built: the members, the pairs
     joined with a bracket, the member ends that take a cap, the members that
-    stand on a foot, and the board on top (size, centre) if there is one.
-    Pure data — `frame_unit_plan` makes it, `frame_unit` builds it, tests
-    read it without a scene."""
+    stand on a foot, the board on top (size, centre) if there is one, and an
+    enclosure's panels (tag, size, centre) and door leaf (size, centre, the
+    face it closes). Pure data — `frame_unit_plan` makes it, `frame_unit`
+    builds it, tests read it without a scene."""
 
     members: tuple[Member, ...]
     joints: tuple[tuple[str, str], ...]
     caps: tuple[tuple[str, str], ...]
     feet: tuple[str, ...]
     board: Optional[tuple[Point3, Point3]] = None
+    panels: tuple[tuple[str, Point3, Point3], ...] = ()
+    door: Optional[tuple[Point3, Point3, str]] = None
 
     def lengths(self) -> dict[float, int]:
         """How many members there are of each length (metres, to 0.1 mm)."""
@@ -1243,6 +1255,10 @@ def frame_unit_plan(
     rails: Optional[Union[float, Section]] = None,
     legs_role: Optional[str] = None,
     rails_role: Optional[str] = None,
+    panels: Optional[Sequence[str]] = None,
+    openings: Optional[dict] = None,
+    door: Optional[str] = None,
+    panel: float = 0.005,
 ) -> FramePlan:
     """The members a template is cut into — arithmetic only, no scene.
 
@@ -1266,11 +1282,35 @@ def frame_unit_plan(
     thick on the ring.
 
     For W 620 x D 480 x H 570 on a 30 mm section this is 620 x2, 560 x2,
-    420 x4, 540 x4 — MISUMI's published set for `HAUBA6-3030-W620-D480-H570`."""
+    420 x4, 540 x4 — MISUMI's published set for `HAUBA6-3030-W620-D480-H570`.
+
+    `enclosure`: the same box of twelve members — the lower ring flush with
+    the bottom, standing on whatever is under it — clad with `panel`-thick
+    sheets set into the slots of the members around each bay (6 mm into
+    each slot, the sheet on the members' centre line) on the faces
+    `panels` names (`front` -y, `back` +y, `left` -x, `right` +x, `top`;
+    default all five). `openings` maps a face to the one opening it has,
+    `((lo, hi), (lo, hi))` along the face's two axes in the unit's frame
+    (x then z for front / back, y then z for left / right, x then y for the
+    top; `None` runs that side to the face's edge): a mid-post or mid-rail
+    frames each side that stops short of the edge, butt-jointed between the
+    members around it, and the bays left beside, below and above the
+    opening take panels. `door` names a side face whose opening gets a
+    leaf: a sheet lapping half a member over every edge, standing just
+    proud of the face so it can slide over the panels beside it."""
     if template not in FRAME_TEMPLATES:
         raise ValueError(
             f"frame_unit: template must be one of {'/'.join(FRAME_TEMPLATES)}, not {template!r}"
         )
+    if template != "enclosure" and (panels is not None or openings or door is not None):
+        raise ValueError("frame_unit: panels, openings and door belong to template='enclosure'")
+    if template == "enclosure":
+        if lower_rails != 0.0:
+            raise ValueError("frame_unit: an enclosure's lower ring is flush with its bottom (lower_rails=0)")
+        if top:
+            raise ValueError("frame_unit: an enclosure takes a top panel, not a board — leave top out")
+        if panel <= 0:
+            raise ValueError("frame_unit: panel is a sheet's thickness in metres")
     w, d, h = (float(v) for v in size)
     leg_w, leg_d = _section(section if legs is None else legs)
     rail_w, rail_d = _section(section if rails is None else rails)
@@ -1344,7 +1384,145 @@ def frame_unit_plan(
     caps = tuple((f"rail_top_x{iy}", end) for iy in (0, 1) for end in ("frm", "to"))
     feet = tuple(f"leg{i}" for i in range(4)) if foot > 0 else ()
     board = ((w, d, top), (0.0, 0.0, h + top / 2)) if top > 0 else None
-    return FramePlan(tuple(members), tuple(joints), caps, feet, board)
+    if template != "enclosure":
+        return FramePlan(tuple(members), tuple(joints), caps, feet, board)
+
+    def section_of(member: Member) -> Section:
+        if member.tag.startswith("leg"):
+            return (leg_w, leg_d)
+        if member.tag.startswith("rail_"):
+            return (rail_w, rail_d)
+        return _section(section)
+
+    sheets, leaf = _clad(members, joints, section_of, role, panels, openings or {}, door, panel)
+    return FramePlan(tuple(members), tuple(joints), caps, feet, None, sheets, leaf)
+
+
+# A face of the box: the axis it looks along and which way is out, its two
+# axes (u, v), and the members around it — u low, u high, v low (whose
+# centre line the panels sit on), v high.
+_FACE = {
+    "front": (1, -1.0, 0, 2, ("leg0", "leg1", "rail_low_x0", "rail_top_x0")),
+    "back": (1, 1.0, 0, 2, ("leg3", "leg2", "rail_low_x1", "rail_top_x1")),
+    "left": (0, -1.0, 1, 2, ("leg0", "leg3", "rail_low_y0", "rail_top_y0")),
+    "right": (0, 1.0, 1, 2, ("leg1", "leg2", "rail_low_y1", "rail_top_y1")),
+    "top": (2, 1.0, 0, 1, ("rail_top_y0", "rail_top_y1", "rail_top_x0", "rail_top_x1")),
+}
+
+
+def _clad(
+    members: list[Member],
+    joints: list[tuple[str, str]],
+    section_of,
+    role: str,
+    panels: Optional[Sequence[str]],
+    openings: dict,
+    door: Optional[str],
+    thickness: float,
+) -> tuple[tuple[tuple[str, Point3, Point3], ...], Optional[tuple[Point3, Point3, str]]]:
+    """An enclosure's cladding on a box frame: frames each opening with
+    mid-members (appended to `members` / `joints`) and returns the panels
+    for the bays and the door leaf."""
+    faces = FACES if panels is None else tuple(panels)
+    for face in (*faces, *openings):
+        if face not in FACES:
+            raise ValueError(f"frame_unit: a face is one of {'/'.join(FACES)}, not {face!r}")
+    if door is not None:
+        if door not in openings:
+            raise ValueError(f"frame_unit: door={door!r} needs an opening on that face (openings={{{door!r}: ...}})")
+        if door == "top":
+            raise ValueError("frame_unit: a door goes on a side face, not the top")
+    by_tag = {m.tag: m for m in members}
+
+    def bounds(member: Member) -> tuple[Point3, Point3]:
+        return member.bounds(section_of(member))
+
+    def extent(member: Member, axis: int) -> float:
+        return member.size(section_of(member))[axis]
+
+    sheets: list[tuple[str, Point3, Point3]] = []
+    leaf: Optional[tuple[Point3, Point3, str]] = None
+    for face in FACES:
+        n, out, u, v, (ulo, uhi, vlo, vhi) = _FACE[face]
+        a0, a1 = bounds(by_tag[ulo])[1][u], bounds(by_tag[uhi])[0][u]
+        b0, b1 = bounds(by_tag[vlo])[1][v], bounds(by_tag[vhi])[0][v]
+        plane = by_tag[vlo].centre[n]
+
+        def at(pu: float, pv: float, pn: float = plane) -> Point3:
+            p = [0.0, 0.0, 0.0]
+            p[n], p[u], p[v] = pn, pu, pv
+            return (p[0], p[1], p[2])
+
+        bays = [((a0, a1), (b0, b1))]
+        hole = openings.get(face)
+        if hole is not None:
+            try:
+                (u0, u1), (v0, v1) = hole
+            except (TypeError, ValueError):
+                raise ValueError(f"frame_unit: an opening is ((lo, hi), (lo, hi)) along the face, not {hole!r}") from None
+            post = extent(Member("probe", role, at(0.0, b0), at(0.0, b1)), u)
+            rail = extent(Member("probe", role, at(a0, 0.0), at(a1, 0.0)), v)
+            lo_u = a0 if u0 is None else float(u0)
+            hi_u = a1 if u1 is None else float(u1)
+            lo_v = b0 if v0 is None else float(v0)
+            hi_v = b1 if v1 is None else float(v1)
+            # Every side that stops short of the edge needs a member of its
+            # own and a strip of panel beyond it worth the member.
+            if (
+                (u0 is not None and lo_u - post < a0 + _MIN_BAY)
+                or (u1 is not None and hi_u + post > a1 - _MIN_BAY)
+                or (v0 is not None and lo_v - rail < b0 + _MIN_BAY)
+                or (v1 is not None and hi_v + rail > b1 - _MIN_BAY)
+                or hi_u - lo_u < _MIN_BAY
+                or hi_v - lo_v < _MIN_BAY
+            ):
+                raise ValueError(
+                    f"frame_unit: the {face} opening {hole!r} does not fit its face — inside "
+                    f"({a0:.3f}, {a1:.3f}) x ({b0:.3f}, {b1:.3f}) with a {post * 1e3:.0f} mm member and "
+                    f"{_MIN_BAY * 1e3:.0f} mm of panel beside every side that stops short (None runs to the edge)"
+                )
+            bays = []
+            sides = {"lo_u": ulo, "hi_u": uhi}
+            if u0 is not None:
+                tag = f"{face}_post0"
+                members.append(Member(tag, role, at(lo_u - post / 2, b0), at(lo_u - post / 2, b1)))
+                joints += [(tag, vlo), (tag, vhi)]
+                sides["lo_u"] = tag
+                bays.append(((a0, lo_u - post), (b0, b1)))
+            if u1 is not None:
+                tag = f"{face}_post1"
+                members.append(Member(tag, role, at(hi_u + post / 2, b0), at(hi_u + post / 2, b1)))
+                joints += [(tag, vlo), (tag, vhi)]
+                sides["hi_u"] = tag
+                bays.append(((hi_u + post, a1), (b0, b1)))
+            if v0 is not None:
+                tag = f"{face}_rail0"
+                members.append(Member(tag, role, at(lo_u, lo_v - rail / 2), at(hi_u, lo_v - rail / 2)))
+                joints += [(tag, sides["lo_u"]), (tag, sides["hi_u"])]
+                bays.append(((lo_u, hi_u), (b0, lo_v - rail)))
+            if v1 is not None:
+                tag = f"{face}_rail1"
+                members.append(Member(tag, role, at(lo_u, hi_v + rail / 2), at(hi_u, hi_v + rail / 2)))
+                joints += [(tag, sides["lo_u"]), (tag, sides["hi_u"])]
+                bays.append(((lo_u, hi_u), (hi_v + rail, b1)))
+            if face == door:
+                # Lapping half a member over each edge, just proud of the
+                # face: it slides over the panels beside it.
+                lap = min(post, rail) / 2
+                around = [by_tag[t] for t in (ulo, uhi, vlo, vhi)]
+                outer = (min(bounds(m)[0][n] for m in around) if out < 0 else max(bounds(m)[1][n] for m in around))
+                size = [0.0, 0.0, 0.0]
+                size[n], size[u], size[v] = thickness, hi_u - lo_u + 2 * lap, hi_v - lo_v + 2 * lap
+                centre = at((lo_u + hi_u) / 2, (lo_v + hi_v) / 2, outer + out * (_DOOR_GAP + thickness / 2))
+                leaf = ((size[0], size[1], size[2]), centre, face)
+        if face not in faces:
+            continue
+        for k, ((p0, p1), (q0, q1)) in enumerate(bays):
+            size = [0.0, 0.0, 0.0]
+            size[n], size[u], size[v] = thickness, p1 - p0 + 2 * _PANEL_INSERT, q1 - q0 + 2 * _PANEL_INSERT
+            tag = face if len(bays) == 1 else f"{face}{k}"
+            sheets.append((tag, (size[0], size[1], size[2]), at((p0 + p1) / 2, (q0 + q1) / 2)))
+    return tuple(sheets), leaf
 
 
 def _corner_frame(
@@ -1414,6 +1592,29 @@ def _profile_look(
     return True
 
 
+def _sheet_mm(size: Point3) -> tuple[str, str, str]:
+    """A sheet's width, height and thickness in mm, as its BOM line reads:
+    the thinnest side is the thickness, the other two in axis order (across,
+    then up — or x then y for a sheet lying flat)."""
+    t_axis = min(range(3), key=lambda k: size[k])
+    w, h = (size[k] for k in range(3) if k != t_axis)
+    return (
+        str(_plain(round(w * 1000.0))), str(_plain(round(h * 1000.0))),
+        str(_plain(round(size[t_axis] * 1000.0, 1))),
+    )
+
+
+def _sheet_colour(material: str) -> Color:
+    return CLEAR_SHEET if material in _CLEAR_SHEETS else STEEL
+
+
+def _sheet_look(scene, name: str, material: str) -> None:
+    if material in _CLEAR_SHEETS:
+        scene.set_obstacle_material(name, metalness=0.0, roughness=0.08, opacity=_CLEAR_OPACITY)
+    else:
+        _finish(scene, name, _PAINT)
+
+
 class FrameUnit:
     """A frame built member by member from a system pack — for the shapes no
     template has (an L-shaped bench, a camera post with an outrigger, a
@@ -1449,6 +1650,9 @@ class FrameUnit:
     unit on the group line, one line per profile length, one per hardware
     article — a cap line per section where the pack sells them that way
     (`cap_3030`, `cap_3060` …). Changing `detail` changes none of it.
+    `panel` sets a sheet into a bay and `door` hangs a leaf over an
+    opening; they collide, and they are counted on lines of their own
+    (by size, without a part number) in either mode.
 
     Without a catalog give `section=` (metres, a square side or `(w, d)`):
     the members are one line (`structure.frame`, `model=` / `manufacturer=`)
@@ -1498,6 +1702,8 @@ class FrameUnit:
         self._caps: list[tuple[str, str]] = []
         self._feet: list[str] = []
         self._slabs: list[tuple[str, Point3, Point3, Optional[str]]] = []
+        self._panels: list[tuple[str, Point3, Point3, str]] = []
+        self._door: Optional[tuple[Point3, Point3, str, Optional[str]]] = None
         self._frames: list[tuple[str, Point3]] = []
         self._profile_roles = (
             [
@@ -1600,12 +1806,43 @@ class FrameUnit:
         self._slabs.append((tag, tuple(float(v) for v in size), tuple(float(v) for v in at), role))  # type: ignore[arg-type]
         return tag
 
+    def panel(self, tag: str, size: Point3, at: Point3, *, material: str = "PC") -> str:
+        """A sheet set into the slots of the members around a bay: a box
+        (local size and centre, its thinnest side the thickness) that
+        collides, drawn see-through for a clear `material` (PC, acrylic,
+        PET). Panels are counted by size — one BOM line per `material`
+        and width x height (`<name>/panels/PC-1040x690`) — and carry no
+        part number: the pack does not sell them."""
+        if any(t == tag for t, _, _, _ in self._panels):
+            raise ValueError(f"FrameUnit: a panel named {tag!r} is already placed")
+        size_ = tuple(float(v) for v in size)
+        if min(size_) <= 0:
+            raise ValueError(f"FrameUnit: panel {tag!r} needs a positive size, not {size}")
+        self._panels.append((tag, size_, tuple(float(v) for v in at), material))  # type: ignore[arg-type]
+        return tag
+
+    def door(self, size: Point3, at: Point3, *, material: str = "PC", model: Optional[str] = None) -> str:
+        """The leaf that closes an opening: a box (local size and centre)
+        that collides, `<name>/door`, drawn like a panel of `material`, with
+        a frame of the same name at its centre and a BOM line of its own
+        (`structure.door`, `model` or one made from its size). It stands
+        closed; how it opens is the cell's — `scene.add_linear_axis` on
+        `<name>/door` makes it a sliding or a lifting door."""
+        if self._door is not None:
+            raise ValueError("FrameUnit: one door per unit")
+        size_ = tuple(float(v) for v in size)
+        if min(size_) <= 0:
+            raise ValueError(f"FrameUnit: the door needs a positive size, not {size}")
+        self._door = (size_, tuple(float(v) for v in at), material, model)  # type: ignore[assignment]
+        return f"{self.name}/door"
+
     def frame(self, tag: str, at: Point3) -> None:
         """A named frame `<name>/<tag>` at a local point (the unit's yaw applies)."""
         self._frames.append((tag, tuple(float(v) for v in at)))  # type: ignore[arg-type]
 
-    def plan(self, plan: FramePlan) -> "FrameUnit":
-        """Everything a template planned, in one go."""
+    def plan(self, plan: FramePlan, *, panel_material: str = "PC", door_model: Optional[str] = None) -> "FrameUnit":
+        """Everything a template planned, in one go — an enclosure's panels
+        and door in `panel_material`."""
         for member in plan.members:
             self.member(
                 member.tag, member.frm, member.to,
@@ -1620,6 +1857,11 @@ class FrameUnit:
         if plan.board is not None:
             size, at = plan.board
             self.slab("top", size, at, role="top")
+        for tag, size, at in plan.panels:
+            self.panel(tag, size, at, material=panel_material)
+        if plan.door is not None:
+            size, at, _face = plan.door
+            self.door(size, at, material=panel_material, model=door_model)
         return self
 
     # ---------------------------------------------------------------- build
@@ -1716,6 +1958,37 @@ class FrameUnit:
             made = scene.add_box(f"{name}/{tag}", size=size, position=self._world(at), quaternion=q, color=STEEL)
             _finish(scene, made, _PAINT)
             built.obstacles.append(made)
+        # Panels and the door leaf: massing too, counted after the frame.
+        sheets: dict[str, list[str]] = {}
+        sheet_rows: dict[str, str] = {}
+        for tag, size, at, material in self._panels:
+            w_mm, h_mm, t_mm = _sheet_mm(size)
+            group = f"{name}/panels/{''.join(c if c.isalnum() else '_' for c in material)}-{w_mm}x{h_mm}"
+            made = scene.add_box(f"{group}/{tag}", size=size, position=self._world(at), quaternion=q,
+                                 color=_sheet_colour(material))
+            _sheet_look(scene, made, material)
+            built.obstacles.append(made)
+            sheets.setdefault(group, []).append(made)
+            sheet_rows[group] = f"{material} panel {w_mm}x{h_mm} t{t_mm}"
+        leaf_row: Optional[str] = None
+        if self._door is not None:
+            size, at, material, door_model = self._door
+            made = scene.add_box(f"{name}/door", size=size, position=self._world(at), quaternion=q,
+                                 color=_sheet_colour(material))
+            _sheet_look(scene, made, material)
+            built.obstacles.append(made)
+            scene.add_frame(f"{name}/door", position=self._world(at), quaternion=q)
+            built.frames.append(f"{name}/door")
+            w_mm, h_mm, t_mm = _sheet_mm(size)
+            leaf_row = door_model or f"{material} door {w_mm}x{h_mm} t{t_mm}"
+
+        def pin_sheets() -> None:
+            for group, names in sheets.items():
+                scene.set_part(group, kind="group", category="structure.frame.panel", qty=len(names),
+                               model=sheet_rows[group])
+            if leaf_row is not None:
+                scene.set_part(f"{name}/door", category="structure.door", qty=1, model=leaf_row)
+
         for tag, at in self._frames:
             scene.add_frame(f"{name}/{tag}", position=self._world(at), quaternion=q)
             built.frames.append(f"{name}/{tag}")
@@ -1854,6 +2127,7 @@ class FrameUnit:
                 name, kind="group", category="structure.frame", qty=1,
                 **_identity(self.model or f"frame unit {label}", self.manufacturer, self.attributes),
             )
+            pin_sheets()
             return built
 
         section_label = self._section_label()
@@ -1906,6 +2180,7 @@ class FrameUnit:
                     catalog=spec.catalog_ref, manufacturer=self.manufacturer,
                     model=spec.part_number(role, **self.params), **_kg(spec.mass_kg(role, **self.params)),
                 )
+        pin_sheets()
         return built
 
     def _section_label(self) -> str:
@@ -1931,6 +2206,12 @@ def frame_unit(
     lower_rails: Optional[float] = 0.0,
     feet: Optional[bool] = None,
     top: Optional[float] = None,
+    panels: Optional[Sequence[str]] = None,
+    openings: Optional[dict] = None,
+    door: Optional[str] = None,
+    panel: float = 0.005,
+    panel_material: str = "PC",
+    door_model: Optional[str] = None,
     yaw: float = 0.0,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -1943,6 +2224,20 @@ def frame_unit(
     turned by `yaw`. Adds the frame `<name>/top` at the centre of the top
     face (the board's, if `top` gives one a thickness) and pins the unit
     (`structure.frame`) on the group.
+
+    `enclosure`: a machine guard — the same box of twelve members, its
+    lower ring flush with the bottom so it stands on a base (`position`
+    with the base's top as its z; no feet unless asked), clad with
+    `panel`-thick sheets of `panel_material` in the slots of the members
+    on the faces `panels` names (default all five: `front` -y, `back`,
+    `left`, `right`, `top`). `openings={face: ((lo, hi), (lo, hi))}` cuts
+    one opening in a face — the unit's own coordinates along the face's
+    two axes (x, z for front and back; y, z for the sides; x, y for the
+    top), `None` for a side that runs to the edge — framed by mid-posts and
+    mid-rails that join the cut list; `door=face` hangs a leaf over that
+    face's opening, `<name>/door`, standing closed just proud of the face
+    (drive it with `scene.add_linear_axis`). Panels are BOM lines by size
+    and the door one line, without part numbers (`door_model` names it).
 
     With `catalog=` — the id of a frame *system* pack (a maker's profile
     series: profiles by the millimetre, brackets, bolts, nuts, caps, feet),
@@ -1997,26 +2292,28 @@ def frame_unit(
         scene, name, catalog=None if spec is None else catalog, section=side, position=position, yaw=yaw,
         detail=detail, model=model, manufacturer=manufacturer, color=color, **params, **attributes,
     )
+    cladding = {"panels": panels, "openings": openings, "door": door, "panel": panel}
     if spec is not None:
         default_role = unit.profile_role(None if section is None else str(section))
         legs_role = unit.profile_role(legs) if legs is not None else default_role
         rails_role = unit.profile_role(rails) if rails is not None else default_role
         if feet is None:
-            feet = spec.has_component("foot")
+            # A guard stands on the base it guards; a table on the floor.
+            feet = template == "table" and spec.has_component("foot")
         foot = (_mm(spec.dimension_mm("foot", "height", 30.0)) or 0.03) if feet else 0.0
-        if top is None and spec.has_component("top"):
+        if top is None and template == "table" and spec.has_component("top"):
             top = _mm(spec.dimension_mm("top", "thickness", 20.0)) or 0.02
         plan = frame_unit_plan(
             template, size, unit.section(default_role), lower_rails=lower_rails, foot=foot, top=top or 0.0,
             role=default_role, legs=unit.section(legs_role), rails=unit.section(rails_role),
-            legs_role=legs_role, rails_role=rails_role,
+            legs_role=legs_role, rails_role=rails_role, **cladding,
         )
     else:
         if legs is not None or rails is not None:
             raise ValueError("frame_unit: legs= and rails= name a pack's profiles — give catalog=")
         assert side is not None
-        plan = frame_unit_plan(template, size, side, lower_rails=lower_rails, foot=0.0, top=top or 0.0)
-    unit.plan(plan)
+        plan = frame_unit_plan(template, size, side, lower_rails=lower_rails, foot=0.0, top=top or 0.0, **cladding)
+    unit.plan(plan, panel_material=panel_material, door_model=door_model)
     unit.frame("top", (0.0, 0.0, size[2] + (top or 0.0)))
     if unit.model is None:
         w, d, h = (round(v * 1000.0) for v in size)

@@ -103,6 +103,8 @@ pub fn scene_and_pass() -> (Scene, SequenceTimeline, RopePass) {
         }],
         step_s: 1.0 / 240.0,
         pins: vec![],
+        anchors: vec![],
+        color: None,
     };
     (scene, timeline, pass)
 }

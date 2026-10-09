@@ -12,6 +12,7 @@ scene.in_collision()             # bool, the fast yes/no
 scene.check_collisions()         # who: [(('link', 'forearm_link'), ('obstacle', 'wall')), ...]
 scene.min_obstacle_distance()    # tightest robot-obstacle distance in meters
                                  # 0 when colliding, None with no obstacles
+scene.min_obstacle_distance(to=["guard"])   # ... to the obstacles under guard/ only
 ```
 
 `check_collisions` names pairs as `(kind, name)` tuples with kind `"link"` or

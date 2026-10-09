@@ -48,9 +48,6 @@ pub fn bake_timeline(
     end: Option<f64>,
     asset_stem: &str,
 ) -> Result<ExportedAnimation, String> {
-    if !timeline.ropes.is_empty() {
-        return Err("rope tracks are playback-only; rope USD export is not implemented".into());
-    }
     let fps = options.fps;
     if !(fps.is_finite() && fps > 0.0) {
         return Err(format!("fps must be positive, got {fps}"));
@@ -405,6 +402,11 @@ pub fn bake_timeline(
             }
         })
         .collect();
+    let ropes: Vec<ClothSpec> = timeline
+        .ropes
+        .iter()
+        .filter_map(|track| rope_tube(track, &sample_at, &times))
+        .collect();
     let input = AnimationInput {
         robots: &robots,
         times: &times,
@@ -412,6 +414,7 @@ pub fn bake_timeline(
         curves: &curves,
         cameras: &cameras,
         cloths: &cloths,
+        ropes: &ropes,
     };
     let options = options.clone();
     export_animation(&input, &options, asset_stem).map_err(|e| e.to_string())
@@ -420,6 +423,131 @@ pub fn bake_timeline(
 /// The cloth's colour in an export (linear RGB): the unbleached cotton the
 /// studio draws it in.
 const CLOTH_COLOR: [f32; 3] = [0.58, 0.45, 0.32];
+
+/// A rope without a colour of its own, as the studio draws it (#368aaf,
+/// linear RGB).
+const ROPE_COLOR: [f32; 3] = [0.037, 0.254, 0.429];
+/// Sides of an exported rope's tube.
+const ROPE_SIDES: usize = 8;
+/// Frames closer than this (m, at every point) to the last one kept are a
+/// hold: only the hold's two ends are written, and USD's linear blend
+/// between them is still the rope at rest.
+const ROPE_HOLD_M: f64 = 2e-5;
+
+/// A rope track as an exported tube: its centerline sampled on the
+/// export's frames (`sample_at` in the timeline's clock, `times` the
+/// exported zero-based one), a ring of `ROPE_SIDES` around each point at
+/// the rope's radius (the studio's tubes), capped at both ends. Frames
+/// within `ROPE_HOLD_M` of the last kept one are holds: a cable lying in
+/// its tray for most of a cycle costs two frames, not hundreds.
+fn rope_tube(
+    track: &botrail_scene::rope::RopeTrack,
+    sample_at: &[f64],
+    times: &[f64],
+) -> Option<ClothSpec> {
+    let count = track.points.first()?.len();
+    if count < 2 || sample_at.is_empty() {
+        return None;
+    }
+    let frames: Vec<Vec<[f64; 3]>> = sample_at.iter().map(|&t| track.positions_at(t)).collect();
+    let moved = |a: &[[f64; 3]], b: &[[f64; 3]]| {
+        a.iter()
+            .zip(b)
+            .any(|(p, q)| (0..3).any(|i| (p[i] - q[i]).abs() > ROPE_HOLD_M))
+    };
+    let mut kept = vec![0usize];
+    for k in 1..frames.len() {
+        let last = *kept.last().unwrap();
+        if moved(&frames[k], &frames[last]) {
+            if last != k - 1 {
+                kept.push(k - 1);
+            }
+            kept.push(k);
+        }
+    }
+    if kept.len() > 1 && *kept.last().unwrap() != frames.len() - 1 {
+        kept.push(frames.len() - 1);
+    }
+    let samples = kept
+        .into_iter()
+        .map(|k| (times[k], tube_points(&frames[k], track.radius_m)))
+        .collect();
+    Some(ClothSpec {
+        name: track.name.clone(),
+        triangles: tube_triangles(count),
+        samples,
+        color: track.color.unwrap_or(ROPE_COLOR),
+    })
+}
+
+/// Rings of `ROPE_SIDES` points around a centerline, framed by parallel
+/// transport (each ring's reference direction is the last one's, taken
+/// square to the new tangent), then the two end centres.
+fn tube_points(center: &[[f64; 3]], radius: f64) -> Vec<[f32; 3]> {
+    use nalgebra::Vector3;
+    let n = center.len();
+    let at = |i: usize| Vector3::from(center[i]);
+    let mut tangent = Vector3::x();
+    let mut normal: Option<Vector3<f64>> = None;
+    let mut out = Vec::with_capacity(n * ROPE_SIDES + 2);
+    for i in 0..n {
+        let chord = at((i + 1).min(n - 1)) - at(i.saturating_sub(1));
+        if chord.norm() > 1e-12 {
+            tangent = chord.normalize();
+        }
+        let seed = normal.unwrap_or_else(|| {
+            // Any direction square to the first tangent.
+            let other = if tangent.x.abs() < 0.9 {
+                Vector3::x()
+            } else {
+                Vector3::y()
+            };
+            other.cross(&tangent)
+        });
+        let mut along = seed - tangent * seed.dot(&tangent);
+        if along.norm() < 1e-12 {
+            along = tangent.cross(&Vector3::z());
+            if along.norm() < 1e-12 {
+                along = tangent.cross(&Vector3::x());
+            }
+        }
+        let u = along.normalize();
+        let v = tangent.cross(&u);
+        normal = Some(u);
+        for s in 0..ROPE_SIDES {
+            let a = std::f64::consts::TAU * s as f64 / ROPE_SIDES as f64;
+            let p = at(i) + (u * a.cos() + v * a.sin()) * radius;
+            out.push([p.x as f32, p.y as f32, p.z as f32]);
+        }
+    }
+    for i in [0, n - 1] {
+        out.push([
+            center[i][0] as f32,
+            center[i][1] as f32,
+            center[i][2] as f32,
+        ]);
+    }
+    out
+}
+
+/// The tube's triangles over `count` rings (see [`tube_points`]): two per
+/// side per span, a fan over each end.
+fn tube_triangles(count: usize) -> Vec<[u32; 3]> {
+    let ring = |i: usize, s: usize| (i * ROPE_SIDES + s % ROPE_SIDES) as u32;
+    let mut triangles = Vec::with_capacity(2 * ROPE_SIDES * count);
+    for i in 0..count - 1 {
+        for s in 0..ROPE_SIDES {
+            triangles.push([ring(i, s), ring(i, s + 1), ring(i + 1, s + 1)]);
+            triangles.push([ring(i, s), ring(i + 1, s + 1), ring(i + 1, s)]);
+        }
+    }
+    let (first, last) = ((count * ROPE_SIDES) as u32, (count * ROPE_SIDES + 1) as u32);
+    for s in 0..ROPE_SIDES {
+        triangles.push([first, ring(0, s + 1), ring(0, s)]);
+        triangles.push([last, ring(count - 1, s), ring(count - 1, s + 1)]);
+    }
+    triangles
+}
 
 /// Bakes the scene as it stands — no timeline — into a static USD layer:
 /// every robot at its current joint positions, every visible obstacle at
@@ -900,6 +1028,7 @@ fn bake_scene_stage(
         curves: &curves,
         cameras: &cameras,
         cloths: &[],
+        ropes: &[],
     };
     let (Some(sim), Some(physics)) = (&simulation, physics) else {
         let options = ExportOptions {
@@ -1007,4 +1136,64 @@ fn toolpath_curves(scene: &Scene) -> Vec<CurveSpec> {
         }
     }
     specs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use botrail_scene::rope::RopeTrack;
+
+    fn track(points: Vec<Vec<[f64; 3]>>, times: Vec<f64>) -> RopeTrack {
+        RopeTrack {
+            name: "cable".into(),
+            segments: (0..points[0].len() as u32 - 1)
+                .map(|i| [i, i + 1])
+                .collect(),
+            radius_m: 0.006,
+            held: vec![Vec::new(); times.len()],
+            times,
+            points,
+            events: Vec::new(),
+            connectors: Vec::new(),
+            coupling: "baked_one_way_no_source_reaction".into(),
+            coordinate_system: "right-handed Z-up SI".into(),
+            solver: "test".into(),
+            color: Some([0.9, 0.16, 0.015]),
+        }
+    }
+
+    #[test]
+    fn a_rope_exports_as_a_capped_tube_and_holds_cost_two_frames() {
+        let line = |z: f64| (0..5).map(|i| [0.1 * i as f64, 0.0, z]).collect::<Vec<_>>();
+        // At rest for a second, lifted 0.1 m over the next, at rest again.
+        let rope = track(
+            vec![line(0.5), line(0.5), line(0.6), line(0.6)],
+            vec![0.0, 1.0, 2.0, 3.0],
+        );
+        let grid: Vec<f64> = (0..=30).map(|k| k as f64 * 0.1).collect();
+        let tube = rope_tube(&rope, &grid, &grid).unwrap();
+        assert_eq!(tube.color, [0.9, 0.16, 0.015]);
+        assert_eq!(tube.triangles.len(), 2 * ROPE_SIDES * 4 + 2 * ROPE_SIDES);
+        let (_, first) = &tube.samples[0];
+        assert_eq!(first.len(), 5 * ROPE_SIDES + 2);
+        // Every ring point sits at the radius from its centre, square to the line.
+        for (i, p) in first[..5 * ROPE_SIDES].iter().enumerate() {
+            let c = line(0.5)[i / ROPE_SIDES];
+            let (dy, dz) = (p[1] as f64 - c[1], p[2] as f64 - c[2]);
+            assert!((p[0] as f64 - c[0]).abs() < 1e-6);
+            assert!(((dy * dy + dz * dz).sqrt() - 0.006).abs() < 1e-6);
+        }
+        // Both holds are their two ends; the lift is every frame of it.
+        let times: Vec<f64> = tube.samples.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times.first(), Some(&0.0));
+        assert_eq!(times.last(), Some(&3.0));
+        assert!(times.contains(&1.0) && times.contains(&2.0), "{times:?}");
+        assert!(!times
+            .iter()
+            .any(|t| (*t - 0.5).abs() < 1e-9 || (*t - 2.5).abs() < 1e-9));
+        assert_eq!(times.len(), 2 + 11, "{times:?}");
+        // A rope that never moves is one frame.
+        let still = track(vec![line(0.5), line(0.5)], vec![0.0, 3.0]);
+        assert_eq!(rope_tube(&still, &grid, &grid).unwrap().samples.len(), 1);
+    }
 }

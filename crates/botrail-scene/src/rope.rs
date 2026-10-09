@@ -45,6 +45,9 @@ pub struct RopeTrack {
     pub coupling: String,
     pub coordinate_system: String,
     pub solver: String,
+    /// Display colour, linear RGB like an obstacle's; `None` draws the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
 }
 
 impl RopeTrack {
