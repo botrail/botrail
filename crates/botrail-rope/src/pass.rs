@@ -95,8 +95,10 @@ impl Guide {
     /// The ring as plates around its bore, in the body's frame at time zero.
     fn plates(&self, body_at_zero: &Pose) -> Result<Vec<(PoseData, ShapeData)>, Error> {
         use ::nalgebra::{Matrix3, Point3, Rotation3, UnitQuaternion, Vector3};
-        if !(self.length_m.is_finite() && self.length_m > 0.0)
-            || !(self.inner_radius_m.is_finite() && self.inner_radius_m > 0.0)
+        if !self.length_m.is_finite()
+            || self.length_m <= 0.0
+            || !self.inner_radius_m.is_finite()
+            || self.inner_radius_m <= 0.0
             || self
                 .position
                 .iter()

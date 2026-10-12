@@ -505,7 +505,7 @@ fn swing_angle(q: &nalgebra::UnitQuaternion<f64>, axes: &[Vector3<f64>]) -> f64 
             continue;
         }
         let twist = nalgebra::UnitQuaternion::from_quaternion(twist);
-        q = q * twist.inverse();
+        q *= twist.inverse();
     }
     q.angle()
 }
@@ -991,6 +991,19 @@ fn nearest_sample(points: &[[f64; 3]], p: [f64; 3]) -> usize {
         .unwrap_or(0)
 }
 
+/// Where a check puts its findings: severity, code, message, place, and
+/// the way along the route.
+type FindingSink<'a> = dyn FnMut(&str, &str, String, Option<[f64; 3]>, Option<f64>) + 'a;
+
+/// The links a span's replay collides with, and the ones it is exempt
+/// from, as `(robot, link)` pairs.
+type ReplayLinks = (Vec<(String, String)>, Vec<(String, String)>);
+
+/// Clamp lines of the BOM grouped by article (manufacturer, model, kind):
+/// the routes and clamp names under each.
+type ClampGroups =
+    BTreeMap<(Option<String>, Option<String>, Option<String>), Vec<(String, String)>>;
+
 /// One check result, located on the route when it has a place.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RoutingFinding {
@@ -1218,6 +1231,7 @@ impl Scene {
     /// On a robot link the run's ends are drawn in until they clear the
     /// robot's other links (the joint housings at either end), and
     /// `room` draws them in further — the loop that leads in needs it.
+    #[allow(clippy::too_many_arguments)]
     fn dress_run(
         &self,
         on: &Body,
@@ -1714,8 +1728,8 @@ impl Scene {
             let mut clamps = Vec::new();
             let mut auto: Vec<String> = Vec::new();
             let mut prev = stub_a;
-            for i in 0..raw.len() {
-                match &raw[i] {
+            for (i, item) in raw.iter().enumerate() {
+                match item {
                     Raw::Point(p) => {
                         middle.push(Vert {
                             p: *p,
@@ -2522,7 +2536,7 @@ impl Scene {
         route: &Route,
         spec: Option<&CableSpec>,
         g: &RouteGeometry,
-        finding: &mut dyn FnMut(&str, &str, String, Option<[f64; 3]>, Option<f64>),
+        finding: &mut FindingSink<'_>,
     ) {
         for bend in &g.bends {
             if bend.ok == Some(false) {
@@ -2644,7 +2658,7 @@ impl Scene {
         route: &Route,
         spec: Option<&CableSpec>,
         g: &RouteGeometry,
-        finding: &mut dyn FnMut(&str, &str, String, Option<[f64; 3]>, Option<f64>),
+        finding: &mut FindingSink<'_>,
     ) {
         let ports = &self.connection_plan().ports;
         let radius = g.od_m.map(|d| d / 2.0).unwrap_or(0.0);
@@ -2768,10 +2782,13 @@ impl Scene {
             .iter()
             .filter(|s| s.kind == SpanKind::Moving)
             .count();
-        let mut seen = 0usize;
-        for span in g.spans.iter().filter(|s| s.kind == SpanKind::Moving) {
+        for (seen, span) in g
+            .spans
+            .iter()
+            .filter(|s| s.kind == SpanKind::Moving)
+            .enumerate()
+        {
             let share = route.slack_of_moving(seen, moving);
-            seen += 1;
             let material = (span.to_s - span.from_s) + share;
             let (Some(a), Some(b)) = (anchor(&span.from), anchor(&span.to)) else {
                 continue;
@@ -2871,12 +2888,7 @@ impl Scene {
     /// runs in and the residents its anchors sit on) and against every
     /// robot at its current configuration (less the links its anchors sit
     /// on).
-    fn check_clashes(
-        &self,
-        route: &Route,
-        g: &RouteGeometry,
-        finding: &mut dyn FnMut(&str, &str, String, Option<[f64; 3]>, Option<f64>),
-    ) {
+    fn check_clashes(&self, route: &Route, g: &RouteGeometry, finding: &mut FindingSink<'_>) {
         let radius = g.od_m.map(|d| d / 2.0).unwrap_or(0.0);
         // Obstacles the route is meant to touch: the residents its anchors
         // sit on. Robot links are judged span by span, by how its ends are
@@ -3152,7 +3164,7 @@ impl Scene {
         route: &str,
         k: usize,
         radius: f64,
-    ) -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+    ) -> Result<ReplayLinks, String> {
         let g = self.route_geometry(route)?;
         let span = g
             .spans
@@ -5070,10 +5082,7 @@ pub(crate) fn bom_rows(scene: &Scene) -> Vec<BomRow> {
         });
     }
     // Clamps: one line per article; the unidentified ones one line together.
-    let mut groups: BTreeMap<
-        (Option<String>, Option<String>, Option<String>),
-        Vec<(String, String)>,
-    > = BTreeMap::new();
+    let mut groups: ClampGroups = BTreeMap::new();
     for support in &plan.supports {
         if let Support::Clamp { name, .. } = support {
             let (manufacturer, model, catalog) = support.identity();

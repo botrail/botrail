@@ -275,8 +275,10 @@ impl<'a> Solve<'a> {
         if !(settings.rigidity_nm2.is_finite() && settings.rigidity_nm2 > 0.0) {
             return Err(invalid("rigidity_nm2 must be finite and positive"));
         }
-        if !(settings.record_hz.is_finite() && settings.record_hz > 0.0)
-            || !(settings.tolerance_m.is_finite() && settings.tolerance_m > 0.0)
+        if !settings.record_hz.is_finite()
+            || settings.record_hz <= 0.0
+            || !settings.tolerance_m.is_finite()
+            || settings.tolerance_m <= 0.0
             || settings.rounds == 0
         {
             return Err(invalid(
@@ -317,7 +319,7 @@ impl<'a> Solve<'a> {
         }
         let length = *cumulative.last().unwrap();
         let spacing = spec.sampling.max_segment_length_m;
-        if !(length > 0.0) || !(spacing.is_finite() && spacing > 0.0) {
+        if !length.is_finite() || length <= 0.0 || !spacing.is_finite() || spacing <= 0.0 {
             return Err(invalid(
                 "the line needs a positive length and sample spacing",
             ));
@@ -495,7 +497,7 @@ impl<'a> Solve<'a> {
 
         let radius = spec.collision.radius_m;
         let mass = spec.material.linear_density_kg_m * ds;
-        if !(radius.is_finite() && radius > 0.0) || !(mass.is_finite() && mass > 0.0) {
+        if !radius.is_finite() || radius <= 0.0 || !mass.is_finite() || mass <= 0.0 {
             return Err(invalid("the line needs a positive radius and density"));
         }
         // The explicit step must stay under the stiffest bending mode's
@@ -996,6 +998,7 @@ pub fn animate_many(
 
 /// The held samples at the bodies' poses, and the bodies' shapes where the
 /// poses put them.
+#[allow(clippy::too_many_arguments)]
 fn place<'a>(
     holds: &[Option<Hold>],
     carriages: &[Carriage],
@@ -1057,6 +1060,7 @@ impl Rod {
     /// (kinetic damping), given up after `stall` rounds without the motion
     /// slowing further. Returns the rounds taken and the farthest any
     /// sample moved in the last of them.
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
     fn relax(
         &mut self,
         world: &[(Pose, &SharedShape, Aabb)],
@@ -1075,7 +1079,7 @@ impl Rod {
         // own, two or more segments away), looked up as the bodies are.
         let mut near_lines: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n.saturating_sub(1)];
         let mut relook = vec![false; n.saturating_sub(1)];
-        let segments: Vec<(&[Vector], f64)> = others.iter().copied().collect();
+        let segments: Vec<(&[Vector], f64)> = others.to_vec();
         let boxes: Vec<(Vector, Vector)> = segments
             .iter()
             .map(|(line, _)| {
@@ -1319,6 +1323,7 @@ impl Rod {
         world: &[(Pose, &SharedShape, Aabb)],
         near: &mut [Vec<(usize, Contact)>],
     ) {
+        #[allow(clippy::needless_range_loop)]
         for i in 0..self.x.len() {
             if self.w[i] <= 0.0 {
                 continue;
@@ -1370,6 +1375,7 @@ impl Rod {
     /// centrelines, the segment's ends moved by their share of the
     /// nearest point (a held end stays).
     fn collide_lines(&mut self, lines: &[(&[Vector], f64)], near: &[Vec<(usize, usize)>]) {
+        #[allow(clippy::needless_range_loop)]
         for e in 0..self.x.len().saturating_sub(1) {
             let (wa, wb) = (self.w[e], self.w[e + 1]);
             if wa <= 0.0 && wb <= 0.0 {
