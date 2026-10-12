@@ -27,8 +27,7 @@ import type {
   SignalDefMsg,
   SignalTrackMsg,
   StepSpanMsg,
-  TopologyMsg,
-} from "./protocol";
+  TopologyMsg, RouteSupportMsg, RouteCandidate } from "./protocol";
 import {
   samplePlayback,
   tracksFromTimeline,
@@ -43,7 +42,7 @@ import type { HoverTarget } from "./hoverChip";
 import { cacheKey, hubUrl, parseManifest, type CatalogInfo } from "./catalogHub";
 import { reconcileOverlays, setOverlay, type Overlays } from "./overlays";
 import { selectionForTarget } from "./bomTable";
-import type { BomTarget } from "./protocol";
+import type { BomTarget, RouteFindingMsg, RouteMsg } from "./protocol";
 
 /** What the studio knows of a catalog product beyond the wire: read from
  * the hub once per reference (the id at the revision the cell resolved),
@@ -185,6 +184,44 @@ function persistLdOpen(open: boolean): boolean {
   return open;
 }
 
+const ROUTING_KEY = "botrail-studio.routing";
+
+function initialRoutingOpen(): boolean {
+  try {
+    return localStorage.getItem(ROUTING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistRoutingOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(ROUTING_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
+const ROUTE_DESIGN_KEY = "botrail-studio.route-design-line";
+
+function initialRouteDesignLine(): boolean {
+  try {
+    return localStorage.getItem(ROUTE_DESIGN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistRouteDesignLine(on: boolean): boolean {
+  try {
+    localStorage.setItem(ROUTE_DESIGN_KEY, on ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return on;
+}
+
 const BOM_KEY = "botrail-studio.bom";
 
 function initialBomOpen(): boolean {
@@ -218,6 +255,7 @@ function initialOverlays(): Overlays {
     ioOpen: initialIoOpen(),
     topoOpen: initialTopoOpen(),
     bomOpen: initialBomOpen(),
+    routingOpen: initialRoutingOpen(),
   });
 }
 
@@ -227,6 +265,7 @@ function persistOverlays(o: Overlays) {
   persistIoOpen(o.ioOpen);
   persistTopoOpen(o.topoOpen);
   persistBomOpen(o.bomOpen);
+  persistRoutingOpen(o.routingOpen);
   return o;
 }
 
@@ -289,6 +328,8 @@ export type Selection =
   | { type: "lidar"; name: string }
   /** An I/O node (controller / station); read-only details in Layout. */
   | { type: "io_node"; name: string }
+  /** A route's way point (ROUTING › edit); a point gets a move gizmo. */
+  | { type: "route_via"; route: string; index: number }
   /** A line of the bill with no scene object of its own — a tool welded
    * to an arm (`arm/tool`), the controller an arm needs
    * (`arm/controller`); no gizmo, its identity in Layout. */
@@ -472,6 +513,18 @@ export interface StudioState {
   obstacles: ObstacleMsg[];
   /** Named world frames (mount points); re-sent in full on every change. */
   frames: FrameMsg[];
+  /** Cable / tube routes resolved at the current poses; re-sent in full
+   * whenever the plan or a resident they hang on changes. */
+  routes: RouteMsg[];
+  /** The ducts, clamps and carriers a way may pass (for the editor). */
+  routeSupports: RouteSupportMsg[];
+  /** The ways a route could take, per route, as the host last answered. */
+  routeCandidates: Record<string, RouteCandidate[]>;
+  /** The route lit in the viewport (a row picked in ROUTING or the tree). */
+  routeFocus: string | null;
+  /** ROUTING › design line: during a playback, draw the routes as designed
+   * (thin, at the scene's pose) where a rope or the motion hides them. */
+  routeDesignLine: boolean;
   /** Toolpath overlays (world-resolved polylines); re-sent in full on
    * every toolpath or part-frame change. */
   toolpaths: ToolpathOverlayMsg[];
@@ -592,6 +645,8 @@ export interface StudioState {
   topoOpen: boolean;
   /** The bill of materials overlay over the viewport (persisted). */
   bomOpen: boolean;
+  /** The cable list and route findings overlay over the viewport (persisted). */
+  routingOpen: boolean;
   /** A signal lane picked in the topology diagram, lit on the dock. */
   highlightLane: string | null;
   /** True while a sequence rollout is in flight. */
@@ -646,6 +701,9 @@ export interface StudioState {
   timeline: {
     duration: number;
     stepSpans: StepSpanMsg[];
+    /** What the routes' moving spans did over this cycle (bt.routing),
+     * each finding with the time to seek to; empty without a replay. */
+    routeFindings: RouteFindingMsg[];
     /** Per-robot move intervals (motion/ramp bands), in scene order. */
     robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
@@ -764,6 +822,9 @@ export interface StudioState {
   setIoOpen: (open: boolean) => void;
   setTopoOpen: (open: boolean) => void;
   setBomOpen: (open: boolean) => void;
+  setRoutingOpen: (open: boolean) => void;
+  setRouteFocus: (name: string | null) => void;
+  setRouteDesignLine: (on: boolean) => void;
   /** A row of the bill: select what it stands for (as the tree would)
    * and raise Layout, so the PART card follows. */
   selectTarget: (target: BomTarget) => void;
@@ -812,6 +873,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   gizmoMode: "translate",
   obstacles: [],
   frames: [],
+  routes: [],
+  routeSupports: [],
+  routeCandidates: {},
+  routeFocus: null,
+  routeDesignLine: initialRouteDesignLine(),
   toolpaths: [],
   collisions: [],
   minDistance: null,
@@ -915,6 +981,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           selectedRobot: selected,
           obstacles: [],
           frames: [],
+          routes: [],
+          routeSupports: [],
+          routeCandidates: {},
+          routeFocus: null,
           toolpaths: [],
           collisions: [],
           minDistance: null,
@@ -989,6 +1059,21 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     } else if (msg.type === "frames") {
       set({ frames: msg.frames });
+    } else if (msg.type === "routes") {
+      set((s) => ({
+        routes: msg.routes,
+        routeSupports: msg.supports ?? [],
+        // A new resolution: the ways on offer were for the old one.
+        routeCandidates: {},
+        routeFocus: s.routeFocus && msg.routes.some((r) => r.name === s.routeFocus) ? s.routeFocus : null,
+        selection:
+          s.selection.type === "route_via" &&
+          !msg.routes.some((r) => r.name === (s.selection as { route: string }).route && r.via.length > (s.selection as { index: number }).index)
+            ? { type: "tcp", robot: "" }
+            : s.selection,
+      }));
+    } else if (msg.type === "route_candidates") {
+      set((s) => ({ routeCandidates: { ...s.routeCandidates, [msg.route]: msg.candidates } }));
     } else if (msg.type === "toolpaths") {
       set({ toolpaths: msg.toolpaths });
     } else if (msg.type === "motions") {
@@ -1138,6 +1223,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           timeline: {
             duration: tl.duration,
             stepSpans: tl.step_spans,
+            routeFindings: tl.route_findings ?? [],
             robots: tl.robots.map((r) => ({
               name: r.name,
               moves: r.moves,
@@ -1223,6 +1309,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           timeline: {
             duration: chunk.duration,
             stepSpans: chunk.step_spans,
+            routeFindings: [],
             robots: chunk.robots.map((r) => ({ name: r.name, moves: r.moves })),
             signals: chunk.signals,
             branches: chunk.branches,
@@ -1278,6 +1365,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           timeline: {
             duration: msg.timeline.duration,
             stepSpans: msg.timeline.step_spans,
+            routeFindings: msg.timeline.route_findings ?? [],
             robots: msg.timeline.robots.map((r) => ({
               name: r.name,
               moves: r.moves,
@@ -1625,6 +1713,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   setIoOpen: (open) => set((s) => persistOverlays(setOverlay(s, "io", open))),
   setTopoOpen: (open) => set((s) => persistOverlays(setOverlay(s, "topo", open))),
   setBomOpen: (open) => set((s) => persistOverlays(setOverlay(s, "bom", open))),
+  setRoutingOpen: (open) => set((s) => persistOverlays(setOverlay(s, "routing", open))),
+  setRouteFocus: (name) => set({ routeFocus: name }),
+  setRouteDesignLine: (on) => set({ routeDesignLine: persistRouteDesignLine(on) }),
   selectTarget: (target) => {
     const s = get();
     const declared = new Set(s.io.io.nodes.map((n) => n.name));
@@ -1709,7 +1800,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (!tracks) return;
     const at = Math.min(Math.max(t, 0), tracks.duration);
     set({ playing: false });
-    get().setPlayback(at, samplePlayback(tracks, at));
+    const sample = samplePlayback(tracks, at);
+    get().setPlayback(at, sample);
+    // The driver moves the objects behind React's back: a seek to a
+    // moment React last rendered — the top, after playing from it — is no
+    // change to React, and would leave them where the driver did.
+    applySample(sample);
   },
   setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
   setPlaybackLoop: (loop) => set({ playbackLoop: loop }),

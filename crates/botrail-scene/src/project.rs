@@ -1061,6 +1061,10 @@ pub struct ProjectFile {
         skip_serializing_if = "crate::connections::ConnectionPlan::is_empty"
     )]
     pub connection_plan: crate::connections::ConnectionPlan,
+    /// Cable and tube routes — specs, supports, routes (absent in older
+    /// files). Their geometry, lengths and BOM rows are derived.
+    #[serde(default, skip_serializing_if = "crate::routing::RoutingPlan::is_empty")]
+    pub routing: crate::routing::RoutingPlan,
 }
 
 /// One named [`crate::coat::Applicator`].
@@ -1189,6 +1193,7 @@ impl ProjectFile {
                     io: crate::iomap::IoMap::default(),
                     parts: Vec::new(),
                     connection_plan: crate::connections::ConnectionPlan::default(),
+                    routing: crate::routing::RoutingPlan::default(),
                 })
             }
             2 => {
@@ -1397,6 +1402,7 @@ impl Scene {
             io: self.io_map().clone(),
             parts: self.parts().to_vec(),
             connection_plan: self.connection_plan().clone(),
+            routing: self.routing_plan().clone(),
             frames: self
                 .frames()
                 .iter()
@@ -1759,6 +1765,8 @@ impl Scene {
             .map_err(|e| ProjectError::Incompatible(format!("parts: {e}")))?;
         self.set_connection_plan(project.connection_plan.clone())
             .map_err(ProjectError::Incompatible)?;
+        self.set_routing_plan(project.routing.clone())
+            .map_err(|e| ProjectError::Incompatible(format!("routing: {e}")))?;
         Ok(())
     }
 }
@@ -2070,6 +2078,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
     if project.applicators.is_empty()
         && project.io.nodes.is_empty()
         && project.connection_plan.is_empty()
+        && project.routing.is_empty()
     {
         out.push_str("import botrail as bt\n\n");
     } else {
@@ -2877,6 +2886,12 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             serde_json::to_string(&project.connection_plan).expect("validated connection plan");
         out.push_str(&format!(
             "\nbt.connections.restore(scene, json.loads({json:?}))\n"
+        ));
+    }
+    if !project.routing.is_empty() {
+        let json = serde_json::to_string(&project.routing).expect("validated routing plan");
+        out.push_str(&format!(
+            "\nbt.routing.restore(scene, json.loads({json:?}))\n"
         ));
     }
 

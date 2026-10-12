@@ -22,8 +22,7 @@ import type {
   SegmentMsg,
   SensorMsg,
   SequenceMsg,
-  ServerMessage,
-} from "./protocol";
+  ServerMessage, Via } from "./protocol";
 import { useStudioStore } from "./store";
 
 const SEND_INTERVAL_MS = 33; // ~30 Hz
@@ -197,6 +196,21 @@ export function sendUpdateObstacleGeometry(
 /** Include/exclude an obstacle from collision checking. */
 export function sendSetObstacleEnabled(name: string, enabled: boolean): void {
   rawSend({ type: "set_obstacle_enabled", name, enabled });
+}
+
+const throttledRouteVia = throttledByKey<Via[]>(SEND_INTERVAL_MS, (route, via) =>
+  rawSend({ type: "update_route_via", route, via }),
+);
+
+/** Replace a route's way points, throttled per route (a gizmo drag). The
+ * host re-resolves the route and sends the routes and the BOM back. */
+export function sendUpdateRouteVia(route: string, via: Via[]): void {
+  throttledRouteVia(route, via);
+}
+
+/** Ask for the ways a route could take; `route_candidates` answers. */
+export function sendSuggestRoute(route: string): void {
+  rawSend({ type: "suggest_route", route });
 }
 
 /**

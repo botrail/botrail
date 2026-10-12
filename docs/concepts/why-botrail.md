@@ -73,8 +73,8 @@ physics, and honesty about that is what makes the numbers trustworthy.
   frozen; there is no cooperative planning. Execution-time interference is
   caught by tick checking, and separation is authored with interlocks — the
   way a PLC cell actually does it.
-* **PLC vocabulary, not PLC connectivity** — but the I/O list and the
-  logic are deliverables. Steps, signals, and scan cycles are the mental
+* **PLC vocabulary, not PLC connectivity** — but the I/O list, the
+  logic and the [cable list](../guides/routing.md) are deliverables. Steps, signals, and scan cycles are the mental
   model; there is no OPC-UA link to real hardware. What the cell needs
   electrically is derived from those programs ([the I/O map](../guides/io-map.md):
   points, assignments, handshake wires, a broken-wire scenario), the

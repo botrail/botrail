@@ -97,3 +97,11 @@ export type { ServerMessage } from "./generated/ServerMessage";
 export type { ClientMessage } from "./generated/ClientMessage";
 
 export type { RopeTrack } from "./generated/RopeTrack";
+export type { RouteMsg } from "./generated/RouteMsg";
+export type { RouteSupportMsg } from "./generated/RouteSupportMsg";
+export type { RouteCandidate } from "./generated/RouteCandidate";
+export type { Via } from "./generated/Via";
+export type { Body } from "./generated/Body";
+export type { RouteSpanMsg } from "./generated/RouteSpanMsg";
+export type { RouteAnchorMsg } from "./generated/RouteAnchorMsg";
+export type { RouteFindingMsg } from "./generated/RouteFindingMsg";

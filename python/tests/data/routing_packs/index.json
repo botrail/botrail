@@ -1,0 +1,582 @@
+{
+ "schema_version": "0.1",
+ "generated_at": "2026-10-11T11:40:36.010080Z",
+ "products": [
+  {
+   "id": "abb/conduit/adaptaflex-pafs21/r1",
+   "kind": "spec",
+   "category": "cable.carrier",
+   "name": "Adaptaflex PAFS21 corrugated conduit (black, nominal 21)",
+   "manufacturer": "ABB",
+   "specs": {
+    "od_mm": 21.2,
+    "bend_r_fixed_mm": 45,
+    "inner_mm": 16.5
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "PAFS21/BL/50M",
+    "unit": "each",
+    "includes": [],
+    "requires": [],
+    "note": "50 m 巻 (reel = 50M)"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "carrier",
+    "params": {
+     "reel": {
+      "values": [
+       "10M",
+       "25M",
+       "50M",
+       "100FT"
+      ],
+      "default": "50M"
+     }
+    },
+    "components": [
+     {
+      "role": "conduit",
+      "category": "cable.carrier",
+      "part_number": "PAFS21/BL/{reel}",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "od": 21.2,
+       "id": 16.5
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "abb/conduit/adaptaflex-pafs21/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "abb/conduit/adaptaflex-prfs16/r1",
+   "kind": "spec",
+   "category": "cable.carrier",
+   "name": "Adaptaflex PRFS16 corrugated conduit (black, nominal 16)",
+   "manufacturer": "ABB",
+   "specs": {
+    "od_mm": 15.8,
+    "bend_r_fixed_mm": 45,
+    "inner_mm": 11.7
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "PRFS16/BL/100FT",
+    "unit": "each",
+    "includes": [],
+    "requires": [],
+    "note": "100 ft (30.48 m) 巻"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "carrier",
+    "params": {
+     "reel": {
+      "values": [
+       "100FT"
+      ],
+      "default": "100FT"
+     }
+    },
+    "components": [
+     {
+      "role": "conduit",
+      "category": "cable.carrier",
+      "part_number": "PRFS16/BL/{reel}",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "od": 15.8,
+       "id": 11.7
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "abb/conduit/adaptaflex-prfs16/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "hellermanntyton/clamp/h6p-pa66hs-bk/r1",
+   "kind": "spec",
+   "category": "cable.clamp",
+   "name": "H6P-PA66HS-BK P-clip (bundle to 10.9 mm, 211-60005)",
+   "manufacturer": "HellermannTyton",
+   "specs": {
+    "bundle_max_mm": 10.9,
+    "width_mm": 10,
+    "hole_mm": 4.3
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "211-60005",
+    "unit": "pack",
+    "includes": [],
+    "requires": [],
+    "note": "100 個入り"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "clamp",
+    "params": {
+     "pack": {
+      "values": [
+       100
+      ],
+      "default": 100
+     }
+    },
+    "components": [
+     {
+      "role": "clip",
+      "category": "cable.clamp",
+      "part_number": "211-60005",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "width": 10.0,
+       "bundle_max": 10.9,
+       "hole": 4.3
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "hellermanntyton/clamp/h6p-pa66hs-bk/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "lapp/cable/etherline-festoon-pn-cat5e/r1",
+   "kind": "spec",
+   "category": "cable.network",
+   "name": "ETHERLINE FESTOON PN Cat.5e (2170936)",
+   "manufacturer": "LAPP",
+   "specs": {
+    "od_mm": 6.5,
+    "bend_r_fixed_mm": 26.8,
+    "bend_r_moving_mm": 67,
+    "mass_kg_m": 0.069
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "2170936",
+    "unit": "each",
+    "includes": [],
+    "requires": [],
+    "note": "メートル売り (cut_m)。ドラム単位は販社による"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "cable_spec",
+    "params": {
+     "cut_m": {
+      "min": 1.0,
+      "max": 1000.0,
+      "step": 1.0,
+      "default": 100.0
+     }
+    },
+    "components": [
+     {
+      "role": "cable",
+      "category": "cable.network",
+      "part_number": "2170936",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "od": 6.5
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "lapp/cable/etherline-festoon-pn-cat5e/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "murrplastik/dress_pack/fhs-sh-set-ur5/r1",
+   "kind": "spec",
+   "category": "cable.carrier",
+   "name": "FHS-SH-Set UR5 robotic dress pack (83693492)",
+   "manufacturer": "Murrplastik",
+   "specs": {
+    "holders": 3,
+    "conduit_length_m": 2.0
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "83693492",
+    "unit": "kit",
+    "includes": [
+     {
+      "catalog": null,
+      "name": "basic body (holder)",
+      "part_number": null,
+      "qty": 3,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "conduit, slotted, 2 m",
+      "part_number": null,
+      "qty": 1,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "ball joint",
+      "part_number": null,
+      "qty": 3,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "system holder",
+      "part_number": null,
+      "qty": 1,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "clamp",
+      "part_number": null,
+      "qty": 1,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "end sleeve",
+      "part_number": null,
+      "qty": 1,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "cable tie",
+      "part_number": null,
+      "qty": 5,
+      "note": null
+     },
+     {
+      "catalog": null,
+      "name": "cable puller",
+      "part_number": null,
+      "qty": 1,
+      "note": null
+     }
+    ],
+    "requires": [],
+    "note": "UR3 用は 83693491 (ボディ 3・導管 2 m)、UR10 用は 83693493 (ボディ 4・導管 3.5 m)"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "carrier",
+    "params": {
+     "robot": {
+      "values": [
+       "UR5"
+      ],
+      "default": "UR5"
+     }
+    },
+    "components": [
+     {
+      "role": "kit",
+      "category": "cable.carrier",
+      "part_number": "83693492",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {},
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "murrplastik/dress_pack/fhs-sh-set-ur5/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "obo_bettermann/duct/lk4-60100/r1",
+   "kind": "spec",
+   "category": "cable.duct",
+   "name": "LK4 60100 floor trunking 100 x 60 (6178037)",
+   "manufacturer": "OBO Bettermann",
+   "specs": {
+    "inner_width_mm": 100,
+    "inner_height_mm": 60,
+    "length_m": 2
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "6178037",
+    "unit": "each",
+    "includes": [],
+    "requires": [],
+    "note": "2 m 定尺、カバー付き"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "duct",
+    "params": {
+     "length_m": {
+      "values": [
+       2
+      ],
+      "default": 2
+     }
+    },
+    "components": [
+     {
+      "role": "trunking",
+      "category": "cable.duct",
+      "part_number": "6178037",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "width": 100.0,
+       "height": 60.0
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "obo_bettermann/duct/lk4-60100/r1/previews/layout.svg"
+   }
+  },
+  {
+   "id": "smc/tube/tu0604bu/r1",
+   "kind": "spec",
+   "category": "pneumatic.tube",
+   "name": "TU0604BU polyurethane tubing (OD 6 / ID 4, blue)",
+   "manufacturer": "SMC",
+   "specs": {
+    "od_mm": 6,
+    "bend_r_fixed_mm": 15,
+    "order_step_m": 20
+   },
+   "mechanical": null,
+   "order": {
+    "part_number": "TU0604BU-20",
+    "unit": "each",
+    "includes": [],
+    "requires": [],
+    "note": "20 m 巻 (reel_m = 20)。100 m 巻は TU0604BU-100"
+   },
+   "kit": null,
+   "compatibility": {
+    "programs": [],
+    "connections": []
+   },
+   "configuration": {
+    "generator": "cable_spec",
+    "params": {
+     "reel_m": {
+      "values": [
+       20,
+       100
+      ],
+      "default": 20
+     }
+    },
+    "components": [
+     {
+      "role": "tube",
+      "category": "pneumatic.tube",
+      "part_number": "TU0604BU-{reel_m}",
+      "variants": null,
+      "widths_mm": null,
+      "length_mm": null,
+      "dimensions_mm": {
+       "od": 6.0,
+       "id": 4.0
+      },
+      "mass": null,
+      "codes": {},
+      "trim": null,
+      "visual": null,
+      "visual_scale": null,
+      "note": null
+     }
+    ],
+    "behavior": {},
+    "rules": {
+     "post_pitch_max_mm": null,
+     "floor_gap_mm": null,
+     "tolerance_mm": 25.0,
+     "corner": null
+    },
+    "examples": []
+   },
+   "electrical": null,
+   "validation_level": "V2",
+   "distribution": "public",
+   "assets": {
+    "urdf": null,
+    "usd": null,
+    "glb": null,
+    "thumbnail": null,
+    "layout": "smc/tube/tu0604bu/r1/previews/layout.svg"
+   }
+  }
+ ]
+}

@@ -9,7 +9,7 @@ import botrail as bt
 import pytest
 from botrail import _cli
 
-from botrail import connections as c  # not re-exported by `botrail`
+from botrail import connections as c  # also `bt.connections`
 
 
 def equipment(scene, name, **attrs):
@@ -297,3 +297,15 @@ def test_restore_validates_structure_and_unknown_capacity():
     assert check(r, "supply:24V:capacity")["status"] == "unknown"
 
 
+
+
+def test_public_module_and_generated_script_restore():
+    assert bt.connections is c
+    s = power_cell()
+    code = s.generate_python()
+    assert "import json" in code and "bt.connections.restore(" in code
+    ns = {}
+    exec(code.replace("bt.studio(scene)", ""), ns)  # noqa: S102 - generated replay contract
+    replay = c.report(ns["scene"])
+    assert [(l["name"], l["cable"]) for l in replay.connections] == [("W1", "CBL-001")]
+    assert replay.ready == c.report(s).ready

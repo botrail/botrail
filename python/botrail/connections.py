@@ -1,10 +1,12 @@
 """Physical interface requirements over existing equipment and I/O assignments.
 
-Not part of the public API: ``import botrail.connections`` explicitly. The
-per-supply current budget most cells need comes from ``scene.requirements()``
+``bt.connections`` is the explicit wiring plan behind ``scene.requirements()``.
+The per-supply current budget most cells need comes from the requirements
 (each power supply against the ``current_a`` of the parts at its voltage);
-this module is the explicit wiring plan behind it, kept for when a cell
-needs to say which supply feeds which load.
+declare ports and connect them when a cell has to say which supply feeds
+which load, which valve feeds which actuator, which controller input reads
+which sensor. The plan rides the ``.botrail`` project and comes back through
+``generate_python``. See ``docs/guides/connections.md``.
 
 Ports describe declared interfaces; they do not execute the cell. Ratings
 are for one endpoint in total. Unknown consumption is never counted as zero.
@@ -20,7 +22,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["ConnectionReport", "connect", "disconnect", "port", "remove_port", "report", "restore"]
+__all__ = ["ConnectionReport", "connect", "disconnect", "port", "ports_of", "remove_port", "report", "restore"]
 
 
 def _plan(scene):
@@ -36,8 +38,52 @@ def restore(scene, plan: dict) -> None:
     scene._set_connection_plan_json(json.dumps(plan, allow_nan=False))
 
 
-def port(scene, name: str, target: str, medium: str, role: str, *, target_kind=None,
-         required: bool | None = None, io=None, terminal=None, reference=None, **specs) -> str:
+def ports_of(scene, target: str) -> list[dict]:
+    """The ports a resident's catalog product declares (``ports:`` in its
+    pack): each with ``name``, ``medium``, ``role``, ``at`` (as :func:`port`
+    takes it — ``(robot, link, xyz)`` on an articulated product, ``(resident,
+    xyz)`` on a body of a generated one), ``exit``, ``straight_m`` and the
+    pack's ``note`` / ``source``. Empty when the product declares none or
+    the resident is not a catalog product. The product is the BOM line the
+    resident is on (``scene.bom()``), so a robot loaded from the catalog
+    and a part pinned with ``catalog=`` both answer."""
+    from ._spec import package
+
+    ref = None
+    for row in scene.bom().rows:
+        if target in (row.get("names") or []) and row.get("catalog"):
+            ref = str(row["catalog"])
+            break
+    if ref is None:
+        return []
+    ident, _, revision = ref.partition("@")
+    try:
+        _, manifest, _ = package((ident, revision or None) if revision else ident)
+    except Exception:
+        return []
+    out = []
+    for p in manifest.get("ports") or []:
+        if not isinstance(p, dict) or not isinstance(p.get("at"), dict):
+            continue
+        place = p["at"]
+        xyz = [float(v) / 1000.0 for v in (place.get("xyz_mm") or (0, 0, 0))]
+        if place.get("link"):
+            at = (target, str(place["link"]), tuple(xyz))
+        else:
+            resident = f"{target}/{place['body']}" if place.get("body") else target
+            at = (resident, tuple(xyz))
+        out.append({
+            "name": p.get("name"), "medium": p.get("medium"), "role": p.get("role"), "at": at,
+            "exit": tuple(float(v) for v in (place.get("exit") or (0, 0, 1))),
+            "straight_m": float(place.get("straight_mm") or 0.0) / 1000.0,
+            "note": p.get("note"), "source": p.get("source"),
+        })
+    return out
+
+
+def port(scene, name: str, target: str, medium: str | None = None, role: str | None = None, *, target_kind=None,
+         required: bool | None = None, io=None, terminal=None, reference=None,
+         at=None, exit=None, straight_m: float = 0.0, from_catalog: str | None = None, **specs) -> str:
     """Define or replace a named interface on an existing resident.
 
     ``medium`` is power/pneumatic/signal/network. Roles are supply/load for
@@ -52,11 +98,43 @@ def port(scene, name: str, target: str, medium: str, role: str, *, target_kind=N
     signal_type (digital/safe_digital/analog/word), voltage range and logic
     (pnp/npn). Networks declare protocol. Values apply to this endpoint's
     total load or capacity; no diversity factor or W/A conversion is inferred.
+
+    ``at`` places the port for routing (``bt.routing``): ``(obstacle_or_frame,
+    (x, y, z))`` or ``(robot, link, (x, y, z))``, the offset in that
+    resident's frame — the port then follows the resident. ``exit`` is the
+    direction the line leaves the connector, in the same frame, and
+    ``straight_m`` how much of it must stay straight (the boot, the gland).
+    A port without ``at`` takes part in the connection checks only.
+    ``from_catalog`` names a port the resident's catalog product declares
+    (:func:`ports_of`): its place, exit, straight length, medium and role
+    are the defaults — what you pass wins.
     """
+    if from_catalog is not None:
+        declared = next((p for p in ports_of(scene, target) if p["name"] == from_catalog), None)
+        if declared is None:
+            have = [p["name"] for p in ports_of(scene, target)]
+            raise ValueError(f"port: {target!r}'s product declares no port {from_catalog!r}"
+                             + (f" (it has {have})" if have else " (it declares none)"))
+        medium = medium or declared["medium"]
+        role = role or declared["role"]
+        if at is None and exit is None:
+            at, exit, straight_m = declared["at"], declared["exit"], declared["straight_m"] if not straight_m else straight_m
+    if medium is None or role is None:
+        raise ValueError("port: medium and role are required (or from_catalog= names a declared port)")
     kind = scene._part_target_kind(target, target_kind)
+    geometry = None
+    if at is not None or exit is not None:
+        from .routing import _finite, _xyz, attach
+
+        if at is None or exit is None:
+            raise ValueError("port: at= and exit= go together")
+        direction = _xyz(exit, "exit")
+        if all(abs(v) < 1e-12 for v in direction):
+            raise ValueError("port: exit must be a nonzero direction")
+        geometry = {"at": attach(scene, at), "exit": direction, "straight_m": _finite(straight_m, "straight_m")}
     value = {"name": name, "target": target, "target_kind": kind, "medium": medium, "role": role,
              "required": role != "supply" if required is None else required, "specs": specs,
-             "io": io, "terminal": terminal, "reference": reference}
+             "io": io, "terminal": terminal, "reference": reference, "geometry": geometry}
     plan = _plan(scene)
     index = next((i for i, p in enumerate(plan["ports"]) if p["name"] == name), None)
     if index is None:

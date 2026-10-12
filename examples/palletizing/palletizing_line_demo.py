@@ -52,7 +52,7 @@ import botrail as bt  # noqa: E402
 import _palletizing_equipment as eq  # noqa: E402
 
 # ---- what is ordered -------------------------------------------------
-PALLETIZER = "fanuc/m410ic/m410ic-185/r1"
+PALLETIZER = "fanuc/m410ic/m410ic-185/r2"
 CATALOG_ROOT: Path | None = None
 
 # ---- the goods -------------------------------------------------------

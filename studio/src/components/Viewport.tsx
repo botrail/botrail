@@ -10,8 +10,11 @@ import { dropUsdScene } from "../ws";
 import { ObstacleView } from "./ObstacleView";
 import { ClothView } from "./ClothView";
 import { RopeView } from "./RopeView";
+import { RouteAidView, RouteView } from "./RouteView";
+import { RoutingOverlay } from "./RoutingOverlay";
 import { PlaybackDriver } from "./PlaybackDriver";
 import { RobotBaseGizmo } from "./RobotBaseGizmo";
+import { RouteViaGizmo } from "./RouteViaGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
 import { ContactMarkerView } from "./ContactMarkerView";
@@ -178,6 +181,7 @@ export function Viewport() {
           <ObstacleView />
           <ClothView />
           <RopeView />
+          <RouteView />
           {/* Aids the camera pass hides: sensor volumes, camera gizmos,
               guide paths, toolpath overlays, contact markers, transform
               gizmos. Process light (flash/spray/trace) stays — a camera
@@ -203,6 +207,9 @@ export function Viewport() {
             <VehiclePathView />
           </Aid>
           <Aid>
+            <RouteAidView />
+          </Aid>
+          <Aid>
             <ToolpathView />
           </Aid>
           <CutTraceView />
@@ -211,6 +218,9 @@ export function Viewport() {
           </Aid>
           <Aid>
             <RobotBaseGizmo />
+          </Aid>
+          <Aid>
+            <RouteViaGizmo />
           </Aid>
           <PlaybackDriver />
           <CameraPass />
@@ -225,6 +235,7 @@ export function Viewport() {
       <LadderOverlay />
       <IoOverlay />
       <BomOverlay />
+      <RoutingOverlay />
       <IoTopologyOverlay />
       <LegendHud />
       <TimelineDock />

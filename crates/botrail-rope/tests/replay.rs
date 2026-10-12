@@ -9,6 +9,11 @@ use rapier_rope::{
 
 fn pass() -> RopePass {
     RopePass {
+        ground_z: None,
+        preroll_s: 0.0,
+        extra_colliders: Vec::new(),
+        straight_rest: false,
+        rod_hz: 0.0,
         spec: RopeSpec::new(
             "cable",
             vec![[0.0, 0.0, 0.4], [0.5, 0.0, 0.4]],
@@ -27,6 +32,7 @@ fn pass() -> RopePass {
         step_s: 1.0 / 240.0,
         pins: vec![],
         anchors: vec![],
+        guides: vec![],
         color: None,
     }
 }
@@ -374,6 +380,8 @@ fn an_anchored_span_rides_its_body_and_holds_the_ropes_direction() {
             body: AnchorBody::Link(binding().link),
             location: RopeLocation::Start,
             length_m,
+            rail: None,
+            roll: false,
         });
         drive(
             &Bake {
@@ -418,6 +426,8 @@ fn an_anchored_span_rides_its_body_and_holds_the_ropes_direction() {
         body: AnchorBody::Obstacle("clamp".into()),
         location: RopeLocation::End,
         length_m: 0.0,
+        rail: None,
+        roll: false,
     });
     let empty = Bake {
         duration_s: 0.0,

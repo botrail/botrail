@@ -46,6 +46,8 @@ pub enum LayoutLayer {
     Sensor,
     /// Named frames (mount points, teach references).
     Frame,
+    /// Cable and tube routes (dashed where a span moves with a robot).
+    Route,
     /// Text labels.
     Label,
     /// Overall dimensions.
@@ -64,6 +66,7 @@ impl LayoutLayer {
             LayoutLayer::Device => "DEVICE",
             LayoutLayer::Sensor => "SENSOR",
             LayoutLayer::Frame => "FRAME",
+            LayoutLayer::Route => "ROUTE",
             LayoutLayer::Label => "LABEL",
             LayoutLayer::Dimension => "DIM",
             LayoutLayer::Grid => "GRID",
@@ -80,6 +83,7 @@ impl LayoutLayer {
             LayoutLayer::Device => 5,
             LayoutLayer::Sensor => 1,
             LayoutLayer::Frame => 3,
+            LayoutLayer::Route => 30,
             LayoutLayer::Label => 7,
             LayoutLayer::Dimension => 7,
             LayoutLayer::Grid => 9,
@@ -95,13 +99,14 @@ impl LayoutLayer {
             LayoutLayer::Device => "device",
             LayoutLayer::Sensor => "sensor",
             LayoutLayer::Frame => "frame",
+            LayoutLayer::Route => "route",
             LayoutLayer::Label => "label",
             LayoutLayer::Dimension => "dim",
             LayoutLayer::Grid => "grid",
         }
     }
 
-    const ALL: [LayoutLayer; 10] = [
+    const ALL: [LayoutLayer; 11] = [
         LayoutLayer::Ground,
         LayoutLayer::Equipment,
         LayoutLayer::Robot,
@@ -109,6 +114,7 @@ impl LayoutLayer {
         LayoutLayer::Device,
         LayoutLayer::Sensor,
         LayoutLayer::Frame,
+        LayoutLayer::Route,
         LayoutLayer::Label,
         LayoutLayer::Dimension,
         LayoutLayer::Grid,
@@ -953,6 +959,40 @@ impl Scene {
         }
 
         // ---- sensors ---------------------------------------------------
+        // Cable and tube routes: the resolved centerline on the floor, a
+        // span that moves with a robot dashed, the name at the middle.
+        let routing = self.routing_report();
+        for geometry in routing.geometries.iter().flatten() {
+            for span in &geometry.spans {
+                let points: Vec<[f64; 2]> = geometry
+                    .span_points(span)
+                    .into_iter()
+                    .map(|p| [p[0], p[1]])
+                    .collect();
+                if points.len() >= 2 {
+                    items.push(LayoutItem {
+                        layer: LayoutLayer::Route,
+                        name: geometry.name.clone(),
+                        shape: LayoutShape::Polyline { points },
+                        dashed: span.kind != crate::routing::SpanKind::Fixed,
+                    });
+                }
+            }
+            if options.labels {
+                if let Some(mid) = geometry.point_at(geometry.length_m / 2.0) {
+                    items.push(LayoutItem {
+                        layer: LayoutLayer::Label,
+                        name: geometry.name.clone(),
+                        shape: LayoutShape::Text {
+                            at: [mid[0], mid[1]],
+                            text: geometry.name.clone(),
+                            size: 0.08,
+                        },
+                        dashed: false,
+                    });
+                }
+            }
+        }
         for sensor in self.sensors() {
             match &sensor.kind {
                 SensorKind::Zone { pose, size } => {
@@ -1553,6 +1593,7 @@ impl LayoutSheet {
         out.push_str(".device{fill:none;stroke:#2b7de9;stroke-width:1.5}\n");
         out.push_str(".sensor{fill:none;stroke:#d1495b;stroke-width:1.5}\n");
         out.push_str(".frame{fill:none;stroke:#2e8b57;stroke-width:1.2}\n");
+        out.push_str(".route{fill:none;stroke:#b4600a;stroke-width:1.5;stroke-linejoin:round}\n");
         out.push_str(".label{fill:#1e2530;text-anchor:middle;dominant-baseline:middle}\n");
         out.push_str(".dim{fill:#1e2530;stroke:#1e2530;stroke-width:1;text-anchor:middle;dominant-baseline:middle}\n");
         out.push_str(".grid{fill:none;stroke:#ececec;stroke-width:1}\n");

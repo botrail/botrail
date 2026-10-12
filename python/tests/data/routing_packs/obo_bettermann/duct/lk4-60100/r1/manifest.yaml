@@ -1,0 +1,62 @@
+schema_version: '0.1'
+id: obo_bettermann/duct/lk4-60100/r1
+kind: spec
+category: cable.duct
+name: LK4 60100 floor trunking 100 x 60 (6178037)
+manufacturer:
+  name: OBO Bettermann
+  product_url: https://www.obo.de/
+lifecycle: active
+articulated: false
+specs:
+  inner_width_mm: 100
+  inner_height_mm: 60
+  length_m: 2
+  material: PVC
+  mount: floor
+configuration:
+  generator: duct
+  params:
+    length_m:
+      values:
+      - 2
+      default: 2
+  components:
+  - role: trunking
+    category: cable.duct
+    part_number: '6178037'
+    dimensions_mm:
+      width: 100.0
+      height: 60.0
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: '6178037'
+  unit: each
+  includes: []
+  requires: []
+  note: 2 m 定尺、カバー付き
+assets: {}
+sources:
+- kind: manufacturer_datasheet
+  url: https://mardag.co.nz/wp-content/uploads/2024/02/LK4-60100-DS.pdf
+  ref: 'LK4 60100 data sheet (item 6178037): length 2 m, width 100 mm, height 60 mm,
+    slotted PVC, nominal dimension = internal dimension'
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは内寸・定尺と品番だけ。品番は製品を指し示す引用で権利は OBO Bettermann にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

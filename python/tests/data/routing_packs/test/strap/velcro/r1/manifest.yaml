@@ -1,0 +1,39 @@
+schema_version: '0.1'
+id: test/strap/velcro/r1
+kind: spec
+category: cable.clamp
+name: Hook-and-loop strap (test fixture)
+manufacturer:
+  name: Test
+lifecycle: active
+articulated: false
+specs:
+  width_mm: 20
+  kind: strap
+configuration:
+  generator: clamp
+  params: {}
+  components: []
+  behavior: {}
+  rules: {}
+  examples: []
+order:
+  part_number: STRAP-20
+  unit: piece
+  includes: []
+  requires: []
+assets: {}
+sources: []
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

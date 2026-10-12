@@ -278,7 +278,7 @@ pub(crate) fn collision_names(
         (None, ColliderId::Link { robot: r, .. }) => *r == robot,
         (Some(links), ColliderId::Link { robot: r, link }) => *r == robot && links.contains(link),
         (_, ColliderId::Obstacle(k)) => carried.contains(k),
-        (_, ColliderId::Attached(_)) => false,
+        (_, ColliderId::Attached(_)) | (_, ColliderId::Route(_)) => false,
     };
     let name = |id: &ColliderId| match id {
         ColliderId::Link { robot: r, link } => {
@@ -291,6 +291,7 @@ pub(crate) fn collision_names(
         }
         ColliderId::Obstacle(k) => scene.obstacles()[*k].name.clone(),
         ColliderId::Attached(k) => format!("attached#{k}"),
+        ColliderId::Route(k) => scene.route_collider_name(*k),
     };
     pairs
         .iter()

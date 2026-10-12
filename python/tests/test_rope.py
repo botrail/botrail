@@ -82,7 +82,58 @@ def test_an_anchor_names_one_body():
     with pytest.raises(ValueError, match="an anchor names"):
         bt.rope.anchor(robot="r")
     assert bt.rope.anchor(robot="r", link="tool", location="End", length_m=0.02) == dict(
-        robot="r", link="tool", location="End", length_m=0.02)
+        robot="r", link="tool", location="End", length_m=0.02, roll=False)
     scene, source = scene_and_bake()
     with pytest.raises(ValueError, match="color"):
         bt.rope.animate(scene, source, name="c", points=[(0, 0, 0), (1, 0, 0)], color=(1, 0))
+
+
+def _sharpest_turn_deg(points):
+    """The largest turn over two particles each side, in degrees."""
+    worst = 0.0
+    for j in range(2, len(points) - 2):
+        a = [points[j][k] - points[j - 2][k] for k in range(3)]
+        b = [points[j + 2][k] - points[j][k] for k in range(3)]
+        la, lb = math.hypot(*a), math.hypot(*b)
+        if la > 1e-12 and lb > 1e-12:
+            c = sum(x * y for x, y in zip(a, b)) / (la * lb)
+            worst = max(worst, math.degrees(math.acos(max(-1.0, min(1.0, c)))))
+    return worst
+
+
+def test_a_straight_rest_lets_a_laid_corner_round_out():
+    scene, source = scene_and_bake()
+    # An L laid in the air, both ends held, under a stiff bending spring.
+    corner = [(0.0, 0.5, 0.6), (0.2, 0.5, 0.6), (0.2, 0.7, 0.6)]
+
+    def sharpest(rest):
+        out = bt.rope.animate(scene, source, name=f"l_{rest}", points=corner, spacing_m=0.01,
+                              pins=[("Start", corner[0]), ("End", corner[-1])], bending_hz=200.0,
+                              preroll_s=1.0, rest=rest)
+        return _sharpest_turn_deg(bt.rope.track(out, f"l_{rest}")["points"][-1])
+
+    # Laid with a corner, the default rest keeps it; a straight rest (a tube
+    # off the reel) springs it round.
+    assert sharpest("straight") < 0.5 * sharpest("start")
+    with pytest.raises(ValueError, match="rest"):
+        bt.rope.animate(scene, source, name="x", points=corner, rest="curved")
+
+
+def test_a_rod_bows_where_a_rope_hangs():
+    scene, source = scene_and_bake()
+    # 0.3 m of tube laid as a V between two points 0.2 m apart, straight at
+    # rest: a rope hangs in it, a rod bows less.
+    v = [(0.0, 0.5, 0.6), (0.1, 0.5, 0.6 - 0.112), (0.2, 0.5, 0.6)]
+
+    def settled(rod_hz):
+        out = bt.rope.animate(scene, source, name=f"v_{rod_hz}", points=v, spacing_m=0.006, radius_m=0.003,
+                              density_kg_m=0.02, step_s=1 / 480, pins=[("Start", v[0]), ("End", v[-1])],
+                              bending_hz=120.0, preroll_s=1.0, rest="straight", rod_hz=rod_hz)
+        return min(p[2] for p in bt.rope.track(out, f"v_{rod_hz}")["points"][-1])
+
+    low_rope = settled(0.0)
+    low_rod = settled(120.0)
+    assert low_rope < 0.6 - 0.07, low_rope
+    assert low_rod > low_rope + 0.02, (low_rope, low_rod)
+    with pytest.raises(ValueError, match="rod_hz"):
+        bt.rope.animate(scene, source, name="x", points=v, rod_hz=-1.0)

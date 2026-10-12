@@ -9,6 +9,7 @@ const TABS: { kind: OverlayKind; label: string; title: string }[] = [
   { kind: "io", label: "I/O", title: "the I/O table — points, channels, findings, live levels" },
   { kind: "topo", label: "TOPOLOGY", title: "the electrical topology — controllers, channels, wires, handshakes" },
   { kind: "bom", label: "BOM", title: "the bill of materials — every line, identified or not, with what it stands for" },
+  { kind: "routing", label: "ROUTING", title: "the cable list — every route with its line, ends and lengths, and the route checks" },
 ];
 
 /**
@@ -23,11 +24,13 @@ export function OverlayTabs({ active }: { active: OverlayKind }) {
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
   const setBomOpen = useStudioStore((s) => s.setBomOpen);
+  const setRoutingOpen = useStudioStore((s) => s.setRoutingOpen);
   const open = (kind: OverlayKind) => {
     if (kind === "sfc") setSfcOpen(true);
     else if (kind === "ld") setLdOpen(true);
     else if (kind === "io") setIoOpen(true);
     else if (kind === "topo") setTopoOpen(true);
+    else if (kind === "routing") setRoutingOpen(true);
     else setBomOpen(true);
   };
   return (

@@ -110,6 +110,10 @@
         "$ref": "#/$defs/ProjectRobotMsg"
       }
     },
+    "routing": {
+      "description": "Cable and tube routes — specs, supports, routes (absent in older\nfiles). Their geometry, lengths and BOM rows are derived.",
+      "$ref": "#/$defs/RoutingPlan"
+    },
     "scenarios": {
       "description": "Scenarios — named initial-state deltas (absent in older files).",
       "type": "array",
@@ -650,6 +654,108 @@
         }
       ]
     },
+    "Attach": {
+      "description": "Where a port (or a clamp) sits: on a resident, at a local offset. The\nworld point follows the resident — an obstacle's pose, a robot link's\nforward kinematics, a frame — so a route re-resolves when things move.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "obstacle"
+            },
+            "name": {
+              "type": "string"
+            },
+            "offset_m": {
+              "type": "array",
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "link"
+            },
+            "link": {
+              "type": "string"
+            },
+            "offset_m": {
+              "type": "array",
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "robot": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "robot",
+            "link"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "frame"
+            },
+            "name": {
+              "type": "string"
+            },
+            "offset_m": {
+              "type": "array",
+              "default": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        }
+      ]
+    },
     "AttachmentMsg": {
       "description": "Attachment state of a grasped obstacle (see `ObstacleMsg::attached_to`).",
       "type": "object",
@@ -682,6 +788,49 @@
         "link",
         "grasp",
         "touch_links"
+      ]
+    },
+    "Body": {
+      "description": "A body a route is dressed along: an obstacle or a robot link (a frame\nhas no surface).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "obstacle"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "link"
+            },
+            "link": {
+              "type": "string"
+            },
+            "robot": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "robot",
+            "link"
+          ]
+        }
       ]
     },
     "Brush": {
@@ -718,6 +867,142 @@
         "name",
         "applicator"
       ]
+    },
+    "CableSpec": {
+      "description": "The line a route is made of — a rule several routes share: change the\nspec and every route's bends, lengths and BOM rows follow. Values are\ndeclared, never guessed: a `None` reads as unknown in the checks.",
+      "type": "object",
+      "properties": {
+        "bend_r_fixed_m": {
+          "description": "Minimum bend radius when fixed (m): the fillet at every corner.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "bend_r_moving_m": {
+          "description": "Minimum bend radius in continuous motion (m): the moving-span check.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "catalog": {
+          "description": "A catalog reference, `id` or `id@revision`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "color": {
+          "description": "Display colour, linear RGB; `None` draws the medium's default.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "end_allowance_m": {
+          "description": "Extra material at each end (stripping, the connector).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "kind": {
+          "$ref": "#/$defs/LineKind",
+          "default": "cable"
+        },
+        "manufacturer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mass_kg_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "max_length_m": {
+          "description": "A product or standard limit on one run (a 100 m Ethernet segment).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "media": {
+          "description": "The media this line may carry; empty = not stated (no check).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Medium"
+          }
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        },
+        "od_m": {
+          "description": "Outer diameter (m).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "order_step_m": {
+          "description": "Sold by the reel / cut to a step (20 m reels, 0.5 m steps).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "sold_lengths_m": {
+          "description": "Lengths the line is sold in (a 6 m or 12 m robot cable); the purchase\nlength is the shortest that fits.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "torsion_deg_m": {
+          "description": "Torsion the line tolerates, degrees per metre of free length (a\nmoving span's twist between its holders is checked against it).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false
     },
     "CameraMountMsg": {
       "description": "What a camera is bolted to.",
@@ -958,6 +1243,54 @@
         "safe_do",
         "word"
       ]
+    },
+    "ClampArticle": {
+      "description": "The article a route's auto clamps (`Via::Along`) are counted as.",
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "description": "A catalog reference, `id` or `id@revision`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "What the clamps leave the line free to do; rigid when unset.",
+          "$ref": "#/$defs/HolderKind",
+          "default": "fixed"
+        },
+        "length_m": {
+          "description": "Material held straight in each clamp (m).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "manufacturer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "standoff_m": {
+          "description": "The saddle's height: how far the clamp holds the line's underside\noff the surface (m); 5 mm when unset.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "Compatibility": {
       "type": "object",
@@ -2504,6 +2837,82 @@
         "joints"
       ]
     },
+    "Holder": {
+      "description": "Where a carrier is fixed, and how.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Attach"
+        },
+        "axis": {
+          "description": "A retracting holder's rail: the carriage runs from the holder's\nplace along `axis` (the body's frame, unit) for `stroke_m`, pulled\nback toward the start with `force_n`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "direction": {
+          "description": "The way the hose runs through the holder, in the body's frame\n(unit); the bisector of the legs when unset.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "force_n": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "kind": {
+          "$ref": "#/$defs/HolderKind",
+          "default": "fixed"
+        },
+        "stroke_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at"
+      ]
+    },
+    "HolderKind": {
+      "description": "What a holder leaves the line free to do. A rigid clamp or bracket\nholds everything (`Fixed`); a rotating holder holds the line's place\nand direction and lets it roll about its own axis (`Rotating`); a guide\nlets it slide through and roll (`Sliding`); a strap holds the point and\nlets the line turn and roll (`Strap`).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "rotating",
+            "sliding",
+            "strap"
+          ]
+        },
+        {
+          "description": "A carriage on a rail that holds the line as a fixed holder does and\nis pulled toward the rail's start — a retraction unit, which takes\nup the line as the arm folds and pays it out as it reaches.",
+          "type": "string",
+          "const": "retracting"
+        }
+      ]
+    },
     "HoleKind": {
       "type": "string",
       "enum": [
@@ -3255,6 +3664,15 @@
       "required": [
         "name",
         "at"
+      ]
+    },
+    "LineKind": {
+      "description": "What a line is: a cable (power, signal, network), a pneumatic tube or a\nhose. Decides the BOM category with the carried medium.",
+      "type": "string",
+      "enum": [
+        "cable",
+        "tube",
+        "hose"
       ]
     },
     "LinkMaterialMsg": {
@@ -4293,6 +4711,11 @@
           "const": "lidar"
         },
         {
+          "description": "A cable / tube route or a clamp of the routing plan, by name — the\nderived line of the cable list; a pin here overlays its identity.",
+          "type": "string",
+          "const": "route"
+        },
+        {
           "description": "An end-effector in a robot's tool stack, by the name its BOM row\ncarries (`<robot>/tool`, `<robot>/tool2`, `<robot>/tool/tool3` for\na tool that is itself a stack). A catalog tool brings its own\nidentity; a made one — a bracket welded on from a URDF string —\ngets it pinned here.",
           "type": "string",
           "const": "tool"
@@ -4479,6 +4902,17 @@
     "Port": {
       "type": "object",
       "properties": {
+        "geometry": {
+          "description": "Where the port sits and which way its line leaves (absent in files\nwritten before routing existed, and on ports nobody routes).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PortGeometry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "io": {
           "anyOf": [
             {
@@ -4551,6 +4985,35 @@
         "medium",
         "role",
         "required"
+      ]
+    },
+    "PortGeometry": {
+      "description": "The geometry of a port: where it sits, which way the line leaves it, and\nhow much of the line must stay straight out of the connector (the boot,\nthe gland). Optional — a port without it still takes part in the\nconnection checks; only a route needs it.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Attach"
+        },
+        "exit": {
+          "description": "Exit direction in the resident's frame (normalized on use).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "straight_m": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "at",
+        "exit"
       ]
     },
     "PoseMsg": {
@@ -5122,6 +5585,123 @@
         "output",
         "peer"
       ]
+    },
+    "Route": {
+      "description": "One physical line between two ports, carrying one or more connections\n(a multi-core cable carries several), made of one spec, passing its way\npoints in order.",
+      "type": "object",
+      "properties": {
+        "carries": {
+          "description": "Connection names; the first decides the two end ports.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "clamp": {
+          "description": "The article the auto clamps are (the BOM line they make).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClampArticle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clamp_pitch_m": {
+          "description": "Clamp pitch of the runs dressed along a body (`Via::Along`), m;\n[`DEFAULT_CLAMP_PITCH_M`] when unset.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "collide": {
+          "description": "Whether fixed spans are colliders for the planner, the tick\nverification and the clearance readout (the static clash check\nalways runs).",
+          "type": "boolean",
+          "default": true
+        },
+        "color": {
+          "description": "Display colour, linear RGB; overrides the spec's.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "name": {
+          "type": "string"
+        },
+        "orthogonal": {
+          "description": "Insert axis-aligned elbows between way points (z, then x, then y).",
+          "type": "boolean",
+          "default": false
+        },
+        "slack_m": {
+          "description": "Extra material beyond the measured run (a service loop), shared by\nthe route's moving spans — or given per moving span in `slacks_m`.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "slacks_m": {
+          "description": "Slack per moving span, in route order; when set it replaces the\nshared `slack_m` (and the cut length counts its sum).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "spec": {
+          "type": "string"
+        },
+        "via": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Via"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "spec"
+      ]
+    },
+    "RoutingPlan": {
+      "description": "Everything authored about routing: the specs, the supports and the\nroutes. Rides the project; references are checked by the report, not\nhere, so a deleted resident leaves a named finding rather than a hole.",
+      "type": "object",
+      "properties": {
+        "routes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        },
+        "specs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CableSpec"
+          }
+        },
+        "supports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Support"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "ScenarioJointsMsg": {
       "description": "A robot start configuration a scenario overrides.",
@@ -5719,6 +6299,261 @@
         "transition"
       ]
     },
+    "Support": {
+      "description": "What holds a route: a clamp (a point on a resident — on a robot link it\nis where a moving span starts or ends) or a duct / tray (a centerline\nthe route follows end to end, with an inner cross-section).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "at": {
+              "$ref": "#/$defs/Attach"
+            },
+            "axis": {
+              "description": "A retracting clamp's rail (see `Holder`).",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "catalog": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "direction": {
+              "description": "The way the line runs through the clamp, in the body's frame\n(unit); the bisector of the legs when unset.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "force_n": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "hold": {
+              "description": "What the clamp leaves the line free to do; rigid when unset\n(`hold`: the variant's tag is `kind`).",
+              "$ref": "#/$defs/HolderKind",
+              "default": "fixed"
+            },
+            "kind": {
+              "type": "string",
+              "const": "clamp"
+            },
+            "length_m": {
+              "description": "Material held straight in the clamp (m).",
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "manufacturer": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "name": {
+              "type": "string"
+            },
+            "stroke_m": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "catalog": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "inner_m": {
+              "description": "Inner width and height (m).",
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "duct"
+            },
+            "manufacturer": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "description": "The centerline, world metres, at least two points.",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 3,
+                "minItems": 3
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "path",
+            "inner_m"
+          ]
+        },
+        {
+          "description": "A protective hose or 3D energy chain dressed along an arm: the\nholders it is fixed in, in order, and the bore the lines inside it\nshare. Routes pass it as one way point and become a bundle.",
+          "type": "object",
+          "properties": {
+            "bend_r_moving_m": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "catalog": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "holders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Holder"
+              }
+            },
+            "inner_m": {
+              "description": "Inner diameter (m) — what the bundle's cross-section is held against.\nThe bore the lines share (m); a kit nobody has measured leaves it\nunstated, and the bundle's fill unchecked.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "kind": {
+              "type": "string",
+              "const": "carrier"
+            },
+            "manufacturer": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "mass_kg_m": {
+              "description": "The hose's own mass per metre (kg/m), for the replay of the\nbundle as one hose; the lines inside add theirs.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "name": {
+              "type": "string"
+            },
+            "od_m": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            },
+            "stroke_m": {
+              "description": "The stroke the kit's retraction takes up (m), when it has one.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "torsion_deg_m": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double",
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "holders"
+          ]
+        }
+      ]
+    },
     "ToolMoveMsg": {
       "oneOf": [
         {
@@ -6012,6 +6847,104 @@
         "axis",
         "pivot",
         "lateral_ratio"
+      ]
+    },
+    "Via": {
+      "description": "One way point of a route: a free point in space, or a support (a clamp\nthe route is held at, a duct it runs through).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "point"
+            },
+            "position": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "position"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "support"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "Run along a body: auto clamps every `pitch_m` (the route's\n`clamp_pitch_m` when unset) on the face of the body's collision\nbounds nearest the way in and the way out, the line held off the\nsurface by its radius and the clamp's standoff.",
+          "type": "object",
+          "properties": {
+            "face": {
+              "description": "The face to lay the run on, in the body's frame (`+x` … `-z`);\nthe side face nearest the way in and the way out when unset.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inset_m": {
+              "description": "How far the run stops short at its way-in end and its way-out\nend (m) — room for the loop that leads into it, past the\nclearance of the neighbouring links.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "along"
+            },
+            "offset_m": {
+              "description": "How far the run is moved sideways on its face (m), along the\nbody's axis across the run, toward that axis's positive end —\ntwo lines along one face, side by side, each with its clips.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "on": {
+              "$ref": "#/$defs/Body"
+            },
+            "pitch_m": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "on"
+          ]
+        }
       ]
     },
     "VisualAssetMsg": {

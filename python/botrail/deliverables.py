@@ -19,7 +19,7 @@ import warnings
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-EXPORTS = ("project", "python", "bom", "io", "topology", "plc", "interlocks", "layout", "usd", "script", "report")
+EXPORTS = ("project", "python", "bom", "cables", "io", "topology", "plc", "interlocks", "layout", "usd", "script", "report")
 SCHEMA_VERSION = 1
 
 
@@ -146,6 +146,13 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
         if "bom" in wanted:
             for ext in ("csv", "md"):
                 write(f"{name}_bom.{ext}", "bom", snapshot.export_bom)
+        if "cables" in wanted and json.loads(snapshot._routing_plan_json())["routes"]:
+            # The cable list and the route checks — only where a cell routes
+            # anything, so a cell without routes keeps its document set.
+            from .routing import cable_list, report as routing_report
+
+            write(f"{name}_cables.csv", "cables", lambda p: cable_list(snapshot).save(p))
+            write(f"{name}_routing.md", "cables", lambda p: routing_report(snapshot).save(p))
         if "io" in wanted:
             write(f"{name}_io.csv", "io", lambda p: snapshot.export_io_list(p, sequences=names))
         if "topology" in wanted:

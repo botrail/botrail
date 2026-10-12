@@ -70,6 +70,11 @@ pub fn scene_and_pass() -> (Scene, SequenceTimeline, RopePass) {
         ropes: vec![],
     };
     let pass = RopePass {
+        ground_z: None,
+        preroll_s: 0.0,
+        extra_colliders: Vec::new(),
+        straight_rest: false,
+        rod_hz: 0.0,
         spec: RopeSpec::new(
             "cable",
             vec![[0.0, 0.0, 0.006], [0.5, 0.0, 0.006]],
@@ -104,6 +109,7 @@ pub fn scene_and_pass() -> (Scene, SequenceTimeline, RopePass) {
         step_s: 1.0 / 240.0,
         pins: vec![],
         anchors: vec![],
+        guides: Vec::new(),
         color: None,
     };
     (scene, timeline, pass)

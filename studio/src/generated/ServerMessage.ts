@@ -13,6 +13,9 @@ import type { MotionMsg } from "./MotionMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
 import type { RobotStateMsg } from "./RobotStateMsg";
+import type { RouteCandidate } from "./RouteCandidate";
+import type { RouteMsg } from "./RouteMsg";
+import type { RouteSupportMsg } from "./RouteSupportMsg";
 import type { ScenarioMsg } from "./ScenarioMsg";
 import type { SceneDescriptionMsg } from "./SceneDescriptionMsg";
 import type { SensorMsg } from "./SensorMsg";
@@ -23,7 +26,11 @@ import type { ToolpathOverlayMsg } from "./ToolpathOverlayMsg";
 import type { TopologyMsg } from "./TopologyMsg";
 import type { TrajectoryMsg } from "./TrajectoryMsg";
 
-export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state", 
+export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, } | { "type": "obstacles", obstacles: Array<ObstacleMsg>, } | { "type": "frames", frames: Array<FrameMsg>, } | { "type": "routes", routes: Array<RouteMsg>, 
+/**
+ * The ducts, clamps and carriers a way may pass.
+ */
+supports: Array<RouteSupportMsg>, } | { "type": "route_candidates", route: string, candidates: Array<RouteCandidate>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state", 
 /**
  * One entry per robot, in `SceneDescriptionMsg::robots` order.
  */

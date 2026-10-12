@@ -1276,7 +1276,9 @@ impl SceneHub {
             sequence: name.to_string(),
             scenario: timeline.scenario.clone(),
             error: None,
-            timeline: Some(botrail_session::timeline_msg(snapshot, timeline)),
+            // The moving spans' verdicts ride the cycle to the studio's
+            // ROUTING tab, each with the time to seek to.
+            timeline: Some(botrail_session::timeline_msg_for_studio(snapshot, timeline)),
             planning_time_ms: None,
             stream: None,
         });
@@ -1820,6 +1822,7 @@ impl SceneHub {
                 let track_names: Vec<String> =
                     rec.object_tracks.iter().map(|(n, ..)| n.clone()).collect();
                 let timeline = wire::TimelineMsg {
+                    route_findings: Vec::new(),
                     duration,
                     // Recordings replay captured link/object poses; the
                     // vehicle frame was not captured, so mounted sensors
@@ -1952,6 +1955,9 @@ impl SceneHub {
                 ),
                 botrail_collide::ColliderId::Obstacle(k) => {
                     ("obstacle".to_string(), scene.obstacles()[k].name.clone())
+                }
+                botrail_collide::ColliderId::Route(k) => {
+                    ("route".to_string(), scene.route_collider_name(k))
                 }
                 // Remapped to obstacle ids by Scene before pairs get here.
                 botrail_collide::ColliderId::Attached(_) => {

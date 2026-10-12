@@ -1,0 +1,10 @@
+{
+  "manifest.yaml": {
+    "spdx": "CC0-1.0",
+    "redistributable": true
+  },
+  "validation/report.json": {
+    "spdx": "CC0-1.0",
+    "redistributable": true
+  }
+}

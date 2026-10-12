@@ -2,20 +2,26 @@
 import type { RopeConnectorTrack } from "./RopeConnectorTrack";
 import type { RopeEvent } from "./RopeEvent";
 
-export type RopeTrack = { name: string, segments: Array<[number, number]>, radius_m: number, times: Array<number>,
+export type RopeTrack = { name: string, segments: Array<[number, number]>, radius_m: number, times: Array<number>, 
 /**
  * Z-up, right handed, SI; f64 storage, f32 GPU display buffers only.
  */
-points: Array<Array<[number, number, number]>>,
+points: Array<Array<[number, number, number]>>, 
 /**
  * Attachments after events at each sample; step function in playback.
  */
-held: Array<Array<number>>, events: Array<RopeEvent>, connectors: Array<RopeConnectorTrack>,
+held: Array<Array<number>>, events: Array<RopeEvent>, connectors: Array<RopeConnectorTrack>, 
 /**
  * Always `baked_one_way_no_source_reaction`; never a live solver checkpoint.
  */
-coupling: string, coordinate_system: string, solver: string,
+coupling: string, coordinate_system: string, solver: string, 
 /**
  * Display colour, linear RGB like an obstacle's; `None` draws the default.
  */
-color?: [number, number, number] | null, };
+color?: [number, number, number] | null, 
+/**
+ * The rope's twist between its two roll-holding ends at each sample
+ * (degrees, signed): the torsion a static rod carries. `None` from a
+ * replay, or when an end leaves the roll free.
+ */
+twist_deg?: Array<number> | null, };

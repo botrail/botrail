@@ -1,0 +1,91 @@
+schema_version: '0.1'
+id: murrplastik/dress_pack/fhs-sh-set-ur5/r1
+kind: spec
+category: cable.carrier
+name: FHS-SH-Set UR5 robotic dress pack (83693492)
+manufacturer:
+  name: Murrplastik
+  product_url: https://universal-robots.com/plus/products/murrplastik/fhs-sh-set
+lifecycle: active
+articulated: false
+specs:
+  carrier_kind: kit
+  holders: 3
+  conduit_length_m: 2.0
+  conduit: special conduit for highly dynamic applications, longitudinal slot
+  robots:
+  - universal_robots/ur/ur5e
+  compatible:
+  - UR3
+  - UR3e
+  - UR5
+  - UR5e
+  - UR10
+  - UR10e
+  - UR12e
+  - UR20
+configuration:
+  generator: carrier
+  params:
+    robot:
+      values:
+      - UR5
+      default: UR5
+  components:
+  - role: kit
+    category: cable.carrier
+    part_number: '83693492'
+    dimensions_mm: {}
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: '83693492'
+  unit: kit
+  includes:
+  - name: basic body (holder)
+    qty: 3
+  - name: conduit, slotted, 2 m
+    qty: 1
+  - name: ball joint
+    qty: 3
+  - name: system holder
+    qty: 1
+  - name: clamp
+    qty: 1
+  - name: end sleeve
+    qty: 1
+  - name: cable tie
+    qty: 5
+  - name: cable puller
+    qty: 1
+  requires: []
+  note: UR3 用は 83693491 (ボディ 3・導管 2 m)、UR10 用は 83693493 (ボディ 4・導管 3.5 m)
+assets: {}
+sources:
+- kind: manufacturer_datasheet
+  url: https://universal-robots.com/plus/products/murrplastik/fhs-sh-set
+  ref: 'UR+ listing: UR5 kit 83693492 — 3 basic bodies, 2 m slotted conduit, 3 ball
+    joints, 1 system holder, 1 clamp, 1 end sleeve, 5 cable ties, cable puller; compatible
+    UR3/UR3e/UR5/UR5e/UR10/UR10e/UR12e/UR20'
+  fetched_at: '2026-10-11'
+- kind: manufacturer_datasheet
+  url: https://www.murrplastik.com/products/robotic-dress-packs/fhs-flexible-holder-systems-for-collaborative-robots/fhs-sets/
+  ref: FHS sets for collaborative robots (product family page)
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのはキットの内訳・数量と品番だけ。品番は製品を指し示す引用で権利は Murrplastik にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

@@ -215,6 +215,100 @@ pub struct FrameMsg {
     pub pose: PoseMsg,
 }
 
+/// One cable or tube route as the studio draws and lists it: the
+/// resolved centerline (bends tessellated) at the line's radius, its
+/// anchors, spans and lengths, and the findings of the static checks.
+/// Re-sent whenever the plan or a resident it hangs on changes. A route
+/// that cannot be resolved comes with an empty centerline and `error`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RouteMsg {
+    pub name: String,
+    pub spec: String,
+    /// `cable` | `tube` | `hose`.
+    pub kind: String,
+    /// `power` | `pneumatic` | `signal` | `network`, when resolved.
+    pub medium: Option<String>,
+    pub carries: Vec<String>,
+    pub centerline: Vec<[f64; 3]>,
+    /// Half the outer diameter; a display default when the spec has none.
+    pub radius_m: f64,
+    /// Linear RGB, like an obstacle's.
+    pub color: [f32; 3],
+    pub spans: Vec<RouteSpanMsg>,
+    pub anchors: Vec<RouteAnchorMsg>,
+    pub length_m: f64,
+    pub cut_length_m: f64,
+    pub purchase_length_m: Option<f64>,
+    pub findings: Vec<RouteFindingMsg>,
+    pub error: Option<String>,
+    /// The way as authored (what an edit replaces).
+    #[serde(default)]
+    pub via: Vec<crate::routing::Via>,
+}
+
+/// A support a route may pass, for the way-point editor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RouteSupportMsg {
+    pub name: String,
+    /// `duct` | `clamp` | `carrier`.
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RouteSpanMsg {
+    /// `fixed` | `moving` | `dressed`.
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+    pub from_s: f64,
+    pub to_s: f64,
+    /// The rope tracks a replay of this span is named by: when the loaded
+    /// cycle carries one, the rope draws the span and its design tube steps
+    /// aside.
+    #[serde(default)]
+    pub ropes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RouteAnchorMsg {
+    pub name: String,
+    /// `port` | `clamp`.
+    pub kind: String,
+    pub position: [f64; 3],
+    /// A port's exit direction (world, unit).
+    pub exit: Option<[f64; 3]>,
+    pub moving: bool,
+    /// What the holder leaves the line free to do: `fixed` | `rotating`
+    /// | `sliding` | `strap`.
+    pub holder: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RouteFindingMsg {
+    pub severity: String,
+    pub code: String,
+    /// The route — or the duct / carrier a bundle finding is about.
+    #[serde(default)]
+    pub route: String,
+    pub message: String,
+    pub position: Option<[f64; 3]>,
+    pub s_m: Option<f64>,
+    /// When, on a baked cycle; the static checks have none.
+    #[serde(default)]
+    pub t_s: Option<f64>,
+    /// The replayed rope the finding was read off, and the sample on it:
+    /// drawn there as the cycle plays.
+    #[serde(default)]
+    pub rope: Option<String>,
+    #[serde(default)]
+    pub sample: Option<usize>,
+}
+
 /// One toolpath's display overlay: world-resolved polylines, split into
 /// cutting (feed) and rapid strokes. The part frame is resolved server
 /// side, so moving the frame re-sends the overlay.
@@ -1457,6 +1551,11 @@ pub struct TimelineMsg {
     pub cloths: Vec<ClothTrackMsg>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ropes: Vec<crate::rope::RopeTrack>,
+    /// What the moving spans of the routes did over this cycle (bends,
+    /// stretch, sag, contact, free length, twist), each with its time —
+    /// filled when the cycle carries a `bt.routing.animate` replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_findings: Vec<RouteFindingMsg>,
     /// Reference-frame track per vehicle that drove, on the same grid.
     #[serde(default)]
     pub vehicles: Vec<VehicleTrackMsg>,
@@ -1515,6 +1614,19 @@ pub enum ServerMessage {
     /// The full named-frame list; resent whenever it changes.
     Frames {
         frames: Vec<FrameMsg>,
+    },
+    /// Every cable / tube route, resolved at the current poses; resent
+    /// whenever the plan, an obstacle, a frame or a robot pose changes.
+    Routes {
+        routes: Vec<RouteMsg>,
+        /// The ducts, clamps and carriers a way may pass.
+        #[serde(default)]
+        supports: Vec<RouteSupportMsg>,
+    },
+    /// The ways one route could take (`suggest_route`), best first.
+    RouteCandidates {
+        route: String,
+        candidates: Vec<crate::routing::RouteCandidate>,
     },
     /// The full toolpath-overlay list; resent whenever a toolpath or a
     /// part frame changes.
@@ -1995,6 +2107,16 @@ pub enum ClientMessage {
     AutoAssignIo {
         #[serde(default)]
         reassign: bool,
+    },
+    /// Replaces one route's way points (`Scene::set_route_via`) and
+    /// rebroadcasts the routes and the BOM.
+    UpdateRouteVia {
+        route: String,
+        via: Vec<crate::routing::Via>,
+    },
+    /// Asks for the ways a route could take; answered with `route_candidates`.
+    SuggestRoute {
+        route: String,
     },
 }
 
@@ -3635,6 +3757,124 @@ pub fn toolpaths_message(scene: &Scene) -> ServerMessage {
     }
 }
 
+/// Every route, resolved at the current poses, as a `routes` message.
+pub fn routes_message(scene: &Scene) -> ServerMessage {
+    use crate::routing::{AnchorKind, SpanKind};
+    let report = scene.routing_report();
+    let routes = scene
+        .routing_plan()
+        .routes
+        .iter()
+        .zip(&report.routes)
+        .zip(&report.geometries)
+        .map(|((route, row), geometry)| {
+            let findings = report
+                .findings
+                .iter()
+                .filter(|f| f.route == route.name)
+                .map(|f| RouteFindingMsg {
+                    severity: f.severity.clone(),
+                    route: f.route.clone(),
+                    code: f.code.clone(),
+                    message: f.message.clone(),
+                    position: f.position,
+                    s_m: f.s_m,
+                    t_s: f.t_s,
+                    rope: f.rope.clone(),
+                    sample: f.sample,
+                })
+                .collect();
+            match geometry {
+                Some(g) => RouteMsg {
+                    name: route.name.clone(),
+                    spec: route.spec.clone(),
+                    kind: g.kind.as_str().to_string(),
+                    medium: g.medium.map(|m| format!("{m:?}").to_lowercase()),
+                    carries: route.carries.clone(),
+                    centerline: g.centerline.clone(),
+                    radius_m: g.od_m.map(|d| d / 2.0).unwrap_or(0.004),
+                    color: g.color,
+                    spans: g
+                        .spans
+                        .iter()
+                        .enumerate()
+                        .map(|(k, s)| RouteSpanMsg {
+                            ropes: crate::routing::span_rope_names(&route.name, &g.spans, k),
+                            kind: match s.kind {
+                                SpanKind::Fixed => "fixed".to_string(),
+                                SpanKind::Moving => "moving".to_string(),
+                                SpanKind::Dressed => "dressed".to_string(),
+                            },
+                            from: s.from.clone(),
+                            to: s.to.clone(),
+                            from_s: s.from_s,
+                            to_s: s.to_s,
+                        })
+                        .collect(),
+                    anchors: g
+                        .anchors
+                        .iter()
+                        .map(|a| RouteAnchorMsg {
+                            name: a.name.clone(),
+                            kind: match a.kind {
+                                AnchorKind::Port => "port".to_string(),
+                                AnchorKind::Clamp => "clamp".to_string(),
+                            },
+                            position: a.position,
+                            exit: a.exit,
+                            moving: a.moving,
+                            holder: a.holder.name().to_string(),
+                        })
+                        .collect(),
+                    length_m: g.length_m,
+                    cut_length_m: g.cut_length_m,
+                    purchase_length_m: g.purchase_length_m,
+                    findings,
+                    error: None,
+                    via: route.via.clone(),
+                },
+                None => RouteMsg {
+                    name: route.name.clone(),
+                    spec: route.spec.clone(),
+                    kind: row.kind.as_str().to_string(),
+                    medium: None,
+                    carries: route.carries.clone(),
+                    centerline: Vec::new(),
+                    radius_m: 0.004,
+                    color: [0.45, 0.45, 0.47],
+                    spans: Vec::new(),
+                    anchors: Vec::new(),
+                    length_m: 0.0,
+                    cut_length_m: 0.0,
+                    purchase_length_m: None,
+                    error: report
+                        .findings
+                        .iter()
+                        .find(|f| f.route == route.name && f.code == "route_endpoint")
+                        .map(|f| f.message.clone()),
+                    via: route.via.clone(),
+                    findings,
+                },
+            }
+        })
+        .collect();
+    let supports = scene
+        .routing_plan()
+        .supports
+        .iter()
+        .map(|s| RouteSupportMsg {
+            name: s.name().to_string(),
+            kind: match s {
+                crate::routing::Support::Duct { .. } => "duct",
+                crate::routing::Support::Clamp { .. } => "clamp",
+                crate::routing::Support::Carrier { .. } => "carrier",
+            }
+            .to_string(),
+        })
+        .collect();
+    ServerMessage::Routes { routes, supports }
+}
+
 /// The full frame list as a `frames` message.
 pub fn frames_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Frames {
@@ -3730,6 +3970,11 @@ fn collider_ref(scene: &Scene, id: ColliderId) -> ColliderRefMsg {
         },
         ColliderId::Obstacle(k) => ColliderRefMsg::Obstacle {
             name: scene.obstacles()[k].name.clone(),
+        },
+        // A cable's fixed span, by its route name (nothing in the tree to
+        // light, but the pair reads right).
+        ColliderId::Route(k) => ColliderRefMsg::Obstacle {
+            name: scene.route_collider_name(k),
         },
         // Scene::remap_obstacle_ids rewrites attached ids to obstacle ids
         // before pairs leave the scene layer.
@@ -3891,6 +4136,7 @@ mod tests {
     #[test]
     fn timeline_span_attribution_and_branches_roundtrip() {
         let msg = TimelineMsg {
+            route_findings: Vec::new(),
             physics: None,
             vehicles: Vec::new(),
             contacts: Vec::new(),

@@ -21,6 +21,11 @@ ladder. What *is* stored is the assignment layer: which controller runs
 which program, and which channel each point lands on (see
 [Nodes and bindings](#nodes-and-bindings) below).
 
+The map is the signal side. What a piece of equipment draws — power from
+which supply, air from which valve — is declared separately as
+[equipment connections](connections.md); a signal port there can point at
+a point of this map.
+
 ## How points are derived
 
 | The cell says | The map lists | Rule |

@@ -96,6 +96,8 @@ fn an_obstacle_anchor_is_a_frame_and_may_be_one_the_cell_does_not_check() {
         body: AnchorBody::Obstacle("clamp".into()),
         location: botrail_rope::RopeLocation::End,
         length_m: 0.03,
+        rail: None,
+        roll: false,
     });
     let baked = bake(&scene, &timeline, &pass).unwrap();
     let clamp = baked

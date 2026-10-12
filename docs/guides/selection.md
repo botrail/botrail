@@ -41,14 +41,20 @@ came from:
 | vehicle, aerial | `max_climb_mps`, `max_descent_mps` | the authored climb and descent rates |
 | vehicle, aerial | `flight_time_min` | the airborne time of the baked cycle — pass `requirements(timeline=tl)`; without it the comparison is left as a note |
 | I/O node | `di`, `do`, `ai`, `ao`, `safe_di`, `safe_do` | the points assigned to it |
-| robot controller, placed (`bt.parts.controller`, or `place=` on the node) | `cable_m` | the robot cable: from the arm's base to the box along the axes (a cable runs in a duct, not as the crow flies) plus `cable_slack_m` (1 m by default); the farthest arm of a shared cabinet |
+| robot controller, placed (`bt.parts.controller`, or `place=` on the node) | `cable_m` | the robot cable: the cut length of the [route](routing.md) that runs from the arm to the box when one is declared; otherwise from the arm's base to the box along the axes (a cable runs in a duct, not as the crow flies) plus `cable_slack_m` (1 m by default); the farthest arm of a shared cabinet |
 | pedestal / table | `load_kg` | the robots standing on it (base inside its top, at its height) and their tools |
+| cable carrier — the dress pack ([`bt.routing.carrier`](routing.md)) | `inner_mm`; with a timeline `free_length_m`, `stroke_m`, `torsion_deg_m`, `bend_r_moving_mm` (≤) | the bundle's Σ od² at 50 % fill; over the baked cycle the holders' farthest distance plus a bend radius per span, their stroke (what a retraction takes up), the twist per metre of hose, and the tightest bend the replay showed — derived for the table and for `search_for`, not linted twice: the route checks (`duct_fill`, `route_tension`, `route_twist`, `route_bend_moving`) already say it of the lines inside |
 | power supply (`power_supply`) | `output_a` | the sum of `current_a` over the parts at its voltage — a part's `voltage_v` against the supply's `output_v`; a part that does not say its voltage counts against every supply, with a note |
 
 A number the cell cannot supply is **not guessed**: a grasped part with no
 `mass_kg` leaves the payload out and adds a note (`requirement_incomplete`)
 saying which part to give a mass. Requirements are geometric and
 deterministic; there is no sizing, no safety evaluation, no choosing.
+
+The per-voltage sum is the whole story until a cell has to say *which*
+supply feeds *which* load — two 24 V units, a drive on its own 48 V supply.
+That is the [connection plan](connections.md): ports declared on the
+equipment, connections between them, and a report checked supply by supply.
 
 A machine that *is* the robot — legs (`vehicle.legged`), or a whole
 airframe on an aerial vehicle (`vehicle.uav`) — has one BOM line, and its

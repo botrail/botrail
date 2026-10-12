@@ -53,6 +53,10 @@ export function SceneTreePanel() {
   const selectIoNode = useStudioStore((s) => s.selectIoNode);
   const partIndex = useStudioStore((s) => s.bomIndex);
   const setBomOpen = useStudioStore((s) => s.setBomOpen);
+  const routes = useStudioStore((s) => s.routes);
+  const routeFocus = useStudioStore((s) => s.routeFocus);
+  const setRouteFocus = useStudioStore((s) => s.setRouteFocus);
+  const setRoutingOpen = useStudioStore((s) => s.setRoutingOpen);
   if (
     robots.length === 0 &&
     obstacles.length === 0 &&
@@ -148,6 +152,45 @@ export function SceneTreePanel() {
         })}
       </div>
       <Tree obstacles={obstacles} frames={frames} partIndex={partIndex} />
+      {routes.length > 0 && (
+        <div className="scene-tree">
+          {routes.map((r) => {
+            const worst = r.error || r.findings.some((f) => f.severity === "error")
+              ? "bad"
+              : r.findings.some((f) => f.severity === "warning")
+                ? "warn"
+                : "ok";
+            return (
+              <div
+                key={r.name}
+                className={`tree-row${routeFocus === r.name ? " selected" : ""}`}
+              >
+                <span className="tree-twist" />
+                <span
+                  className="tree-label"
+                  title={
+                    r.error ??
+                    `${r.kind} · ${r.spec} · ${r.cut_length_m.toFixed(2)} m cut` +
+                      (r.purchase_length_m !== null ? ` · buy ${r.purchase_length_m} m` : "") +
+                      " — click to light it, ROUTING for the list"
+                  }
+                  onClick={() => {
+                    setRouteFocus(routeFocus === r.name ? null : r.name);
+                    setRoutingOpen(true);
+                  }}
+                >
+                  {"\u2301 "}
+                  {r.name}
+                </span>
+                <span className={`badge ${worst}`} title={r.error ?? `${r.findings.length} finding(s)`}>
+                  {r.error ? "unresolved" : r.cut_length_m.toFixed(2) + " m"}
+                </span>
+                <PartBadge hit={lookup(partIndex, "route", r.name)} />
+              </div>
+            );
+          })}
+        </div>
+      )}
       {(sensors.length > 0 ||
         devices.length > 0 ||
         cameras.length > 0 ||

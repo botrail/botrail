@@ -1,0 +1,67 @@
+schema_version: '0.1'
+id: abb/conduit/adaptaflex-pafs21/r1
+kind: spec
+category: cable.carrier
+name: Adaptaflex PAFS21 corrugated conduit (black, nominal 21)
+manufacturer:
+  name: ABB
+  product_url: https://empower.abb.com/ecatalog/ec/EN_CA/p/PAFS21%252FBL%252F50M
+lifecycle: active
+articulated: false
+specs:
+  carrier_kind: conduit
+  nominal_size: 21
+  od_mm: 21.2
+  inner_mm: 16.5
+  bend_r_fixed_mm: 45
+  material: polyamide 6
+  color: black
+configuration:
+  generator: carrier
+  params:
+    reel:
+      values:
+      - 10M
+      - 25M
+      - 50M
+      - 100FT
+      default: 50M
+  components:
+  - role: conduit
+    category: cable.carrier
+    part_number: PAFS21/BL/{reel}
+    dimensions_mm:
+      od: 21.2
+      id: 16.5
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: PAFS21/BL/50M
+  unit: each
+  includes: []
+  requires: []
+  note: 50 m 巻 (reel = 50M)
+assets: {}
+sources:
+- kind: manufacturer_datasheet
+  url: https://empower.abb.com/ecatalog/ec/EN_CA/p/PAFS21%252FBL%252F50M
+  ref: 'PAFS21/BL: outside diameter 21.2 mm, inside diameter 16.5 mm, static bend
+    radius 45 mm, polyamide 6; reels 10 m / 25 m / 50 m / 100 ft'
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは経路の導出に要る寸法・曲げ半径と品番だけ。品番は製品を指し示す引用で 権利は ABB にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

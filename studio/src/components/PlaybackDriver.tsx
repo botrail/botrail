@@ -76,8 +76,12 @@ export function PlaybackDriver() {
       } else if (s.playbackLoop) {
         t = t % tracks.duration;
       } else {
-        // Land exactly on the end and hand the display back to React.
-        s.setPlayback(tracks.duration, samplePlayback(tracks, tracks.duration));
+        // Land exactly on the end and hand the display back to React —
+        // written here too: an end React already rendered (a cycle that
+        // returns to its start) is no change to it.
+        const end = samplePlayback(tracks, tracks.duration);
+        applySample(end);
+        s.setPlayback(tracks.duration, end);
         s.setPlaying(false);
         wasPlaying.current = false;
         return;

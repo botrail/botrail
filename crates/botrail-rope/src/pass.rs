@@ -54,7 +54,100 @@ pub struct Anchor {
     /// any other location. Zero holds one sample, which stays free to
     /// turn; a span holding two or more also holds the rope's direction.
     pub length_m: f64,
+    /// The anchor is a carriage on a rail of the body — a retraction unit
+    /// (the static shape runs it; the replay holds the carriage at the
+    /// rail's start).
+    pub rail: Option<Rail>,
+    /// The holder holds the rope's roll about its own axis too (a rigid
+    /// clamp, a connector): the static rod carries the twist between two
+    /// such holders. The replay has no torsion.
+    pub roll: bool,
 }
+
+/// A retracting anchor's rail: from the held place along `axis` (world,
+/// unit, at time zero) for `stroke_m`, the carriage pulled back toward
+/// the start with `force_n`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rail {
+    pub axis: [f64; 3],
+    pub stroke_m: f64,
+    pub force_n: f64,
+}
+/// A guide the line runs through: a ring on a body — a sliding holder —
+/// the line slides and rolls in. A collider on the body, not an anchor.
+#[derive(Debug, Clone)]
+pub struct Guide {
+    pub body: AnchorBody,
+    /// The ring's centre at time zero (world, m) and its axis (world, unit).
+    pub position: [f64; 3],
+    pub axis: [f64; 3],
+    /// The ring's length along its axis (m) and its inner radius (m).
+    pub length_m: f64,
+    pub inner_radius_m: f64,
+}
+
+/// The ring's wall: plates this thick around the bore — thick enough that a
+/// line pulled taut cannot jump through one between two steps.
+const GUIDE_WALL_M: f64 = 0.01;
+const GUIDE_PLATES: usize = 8;
+
+impl Guide {
+    /// The ring as plates around its bore, in the body's frame at time zero.
+    fn plates(&self, body_at_zero: &Pose) -> Result<Vec<(PoseData, ShapeData)>, Error> {
+        use ::nalgebra::{Matrix3, Point3, Rotation3, UnitQuaternion, Vector3};
+        if !(self.length_m.is_finite() && self.length_m > 0.0)
+            || !(self.inner_radius_m.is_finite() && self.inner_radius_m > 0.0)
+            || self
+                .position
+                .iter()
+                .chain(&self.axis)
+                .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "a guide needs a finite position and axis, a positive length and inner radius",
+            ));
+        }
+        let centre = body_at_zero.inverse_transform_point(Vector::from_array(self.position));
+        let axis = body_at_zero.inverse_transform_vector(Vector::from_array(self.axis));
+        let axis = Vector3::new(axis.x, axis.y, axis.z);
+        if axis.norm() < 1e-9 {
+            return Err(invalid("a guide's axis must not be zero"));
+        }
+        let axis = axis.normalize();
+        let seed = if axis.x.abs() < 0.9 {
+            Vector3::x()
+        } else {
+            Vector3::y()
+        };
+        let a = axis.cross(&seed).normalize();
+        let b = axis.cross(&a);
+        let centre = Point3::new(centre.x, centre.y, centre.z);
+        let half_wall = GUIDE_WALL_M / 2.0;
+        let radius = self.inner_radius_m + half_wall;
+        // Each plate spans its share of the circle, with a little overlap.
+        let half_width = radius * (std::f64::consts::PI / GUIDE_PLATES as f64).tan() * 1.15;
+        let mut plates = Vec::with_capacity(GUIDE_PLATES);
+        for k in 0..GUIDE_PLATES {
+            let phi = 2.0 * std::f64::consts::PI * k as f64 / GUIDE_PLATES as f64;
+            let radial = a * phi.cos() + b * phi.sin();
+            let tangential = axis.cross(&radial);
+            let rotation = Rotation3::from_matrix_unchecked(Matrix3::from_columns(&[
+                radial, tangential, axis,
+            ]));
+            let q = UnitQuaternion::from_rotation_matrix(&rotation);
+            let p = centre + radial * radius;
+            plates.push((
+                PoseData {
+                    position: [p.x, p.y, p.z],
+                    quaternion: [q.i, q.j, q.k, q.w],
+                },
+                ShapeData::Cuboid([half_wall, half_width, self.length_m / 2.0]),
+            ));
+        }
+        Ok(plates)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Connector {
     pub name: String,
@@ -80,9 +173,40 @@ pub struct RopePass {
     /// Spans held by links or obstacles throughout replay. Their bodies
     /// get frame proxies; geometry collides only when also selected.
     pub anchors: Vec<Anchor>,
+    /// Rings on bodies the line runs through (sliding holders): colliders
+    /// on their bodies, which the line slides and rolls in.
+    pub guides: Vec<Guide>,
     /// Display colour carried to the track (linear RGB).
     pub color: Option<[f32; 3]>,
+    /// A floor the rope rests on: a static half-space at this height
+    /// (`None` = no floor — the cell's obstacles are all there is).
+    pub ground_z: Option<f64>,
+    /// Settling time before the clock starts: the rope finds its hanging
+    /// shape under gravity while everything that holds it stays at its
+    /// time-zero pose. Nothing of it is recorded; zero = none.
+    pub preroll_s: f64,
+    /// Static colliders of the pass's own (world pose, shape): the floor and
+    /// walls of a duct the rope lies in, which the cell models as one box.
+    pub extra_colliders: Vec<(PoseData, ShapeData)>,
+    /// The bending springs rest straight — a tube or a cable off the reel,
+    /// bent only by what holds it and by its weight — instead of in the
+    /// shape the rope is laid in (the default: a pre-formed harness keeps
+    /// its bends, and a rope laid with a corner keeps the corner).
+    pub straight_rest: bool,
+    /// The rope as a rod: windows of a few particles along it, each drawn
+    /// toward its own rest shape (straight, or as laid) by a spring of this
+    /// natural frequency — zero for none. The two-away bending springs
+    /// resist a fold and little else; this is what makes a tube hold a
+    /// round loop between its holders instead of hanging in a V. A
+    /// spring, not a calibrated flexural rigidity.
+    pub rod_hz: f64,
 }
+
+/// A rod's window: seven particles, every other particle — a bend is
+/// felt by three or four windows at once, and the windows overlap by
+/// more than half.
+const ROD_WINDOW: u32 = 7;
+const ROD_STRIDE: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Proxy {
@@ -192,6 +316,87 @@ fn invalid(message: impl Into<String>) -> Error {
 /// A track ending at the cycle's duration up to roundoff: the rollout sums
 /// the duration and each robot's knot times separately, so they can differ
 /// in the last bit.
+/// A rope whose springs rest straight, laid in the shape its spec starts
+/// in. The native rest lengths come from the shape a rope is built in, so
+/// it is built along a straight line of the same length, and each particle
+/// is then moved to its arc length on the starting polyline — before
+/// anything holds it, so every hold captures the laid shape.
+fn insert_straight(
+    ropes: &mut RopeSet,
+    id: WorldId,
+    world: &mut PhysicsWorld,
+    spec: &RopeSpec,
+) -> Result<RopeHandle, Error> {
+    if spec.placement != RigidPlacement::default() {
+        return Err(invalid(
+            "a straight rest takes a rope laid in world coordinates (no placement)",
+        ));
+    }
+    let pts = &spec.reference_centerline_m;
+    let dist = |a: [f64; 3], b: [f64; 3]| {
+        ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
+    };
+    let mut arcs = vec![0.0];
+    for w in pts.windows(2) {
+        arcs.push(arcs[arcs.len() - 1] + dist(w[0], w[1]));
+    }
+    let total = arcs[arcs.len() - 1];
+    if pts.len() < 2 || total <= 0.0 || !total.is_finite() {
+        return Err(invalid(
+            "a straight rest needs a starting line of positive length",
+        ));
+    }
+    let (first, last) = (pts[0], pts[pts.len() - 1]);
+    let chord = dist(first, last);
+    let dir = if chord > 1e-9 {
+        [
+            (last[0] - first[0]) / chord,
+            (last[1] - first[1]) / chord,
+            (last[2] - first[2]) / chord,
+        ]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let mut straight = spec.clone();
+    straight.reference_centerline_m = vec![
+        first,
+        [
+            first[0] + dir[0] * total,
+            first[1] + dir[1] * total,
+            first[2] + dir[2] * total,
+        ],
+    ];
+    let rope = ropes.insert(id, world, &straight)?;
+    let (native, at) = {
+        let view = ropes.get(id, world, rope)?;
+        (view.native_handle, view.samples.arc_lengths_m().to_vec())
+    };
+    let body = world
+        .soft_bodies
+        .get_mut(native)
+        .ok_or_else(|| invalid("the rope's soft body is missing"))?;
+    for (i, &s) in at.iter().enumerate() {
+        // The point at arc length `s` on the starting polyline.
+        let k = arcs.partition_point(|a| *a <= s).clamp(1, pts.len() - 1);
+        let (a, b) = (pts[k - 1], pts[k]);
+        let run = arcs[k] - arcs[k - 1];
+        let u = if run > 0.0 {
+            ((s - arcs[k - 1]) / run).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        body.set_particle_position(
+            i,
+            Vector::new(
+                (a[0] + (b[0] - a[0]) * u) as Real,
+                (a[1] + (b[1] - a[1]) * u) as Real,
+                (a[2] + (b[2] - a[2]) * u) as Real,
+            ),
+        );
+    }
+    Ok(rope)
+}
+
 fn ends_at(last: f64, duration: f64) -> bool {
     (last - duration).abs() <= 1e-9 * duration.abs().max(1.0)
 }
@@ -247,6 +452,10 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
         .iter()
         .chain(pass.grippers.iter().map(|g| &g.link))
         .chain(pass.anchors.iter().filter_map(|a| match &a.body {
+            AnchorBody::Link(link) => Some(link),
+            AnchorBody::Obstacle(_) => None,
+        }))
+        .chain(pass.guides.iter().filter_map(|g| match &g.body {
             AnchorBody::Link(link) => Some(link),
             AnchorBody::Obstacle(_) => None,
         }))
@@ -312,8 +521,13 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
     // frame only, and may be one the cell does not collision-check.
     let mut selected_obstacles: Vec<(&String, bool)> =
         pass.obstacles.iter().map(|name| (name, true)).collect();
-    for anchor in &pass.anchors {
-        if let AnchorBody::Obstacle(name) = &anchor.body {
+    for body in pass
+        .anchors
+        .iter()
+        .map(|a| &a.body)
+        .chain(pass.guides.iter().map(|g| &g.body))
+    {
+        if let AnchorBody::Obstacle(name) = body {
             if !selected_obstacles.iter().any(|(n, _)| *n == name) {
                 selected_obstacles.push((name, false));
             }
@@ -382,6 +596,16 @@ pub fn bake(scene: &Scene, timeline: &SequenceTimeline, pass: &RopePass) -> Resu
             shapes,
         });
     }
+    // The guides' rings, on their bodies.
+    for guide in &pass.guides {
+        let key = guide.body.key();
+        let proxy = proxies
+            .iter_mut()
+            .find(|p| p.name == key)
+            .ok_or_else(|| invalid(format!("missing proxy {key} for a guide")))?;
+        let at_zero = proxy.poses[0].native()?;
+        proxy.shapes.extend(guide.plates(&at_zero)?);
+    }
     Ok(Bake {
         duration_s: timeline.duration,
         proxies,
@@ -409,6 +633,9 @@ pub fn animate(
 /// event's source and applied times are equal and stored independently.
 pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
     let duration = bake.duration_s;
+    if !pass.preroll_s.is_finite() || pass.preroll_s < 0.0 {
+        return Err(invalid("preroll_s must be finite and nonnegative"));
+    }
     if !duration.is_finite() || duration < 0.0 || !pass.step_s.is_finite() || pass.step_s <= 0.0 {
         return Err(invalid(
             "duration must be finite/nonnegative and step positive",
@@ -500,7 +727,22 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
     world.gravity = Vector::new(0.0, 0.0, -9.81);
     world.integration_parameters.dt = pass.step_s;
     let mut ropes = RopeSet::new(id)?;
-    let rope = ropes.insert(id, &mut world, &pass.spec)?;
+    if !pass.rod_hz.is_finite() || pass.rod_hz < 0.0 {
+        return Err(invalid("rod_hz must be finite and nonnegative"));
+    }
+    let mut spec = pass.spec.clone();
+    if pass.rod_hz > 0.0 {
+        spec.rod = Some(RodSettings::new(
+            ROD_WINDOW,
+            ROD_STRIDE,
+            SpringSettings::new(pass.rod_hz, 1.0),
+        ));
+    }
+    let rope = if pass.straight_rest {
+        insert_straight(&mut ropes, id, &mut world, &spec)?
+    } else {
+        ropes.insert(id, &mut world, &spec)?
+    };
     let mut native = rapier_rope::RopeTrack::new(
         &pass.spec.name,
         "right-handed Z-up SI; baked_one_way_no_source_reaction",
@@ -535,6 +777,24 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
         }
         bodies.insert(p.name.clone(), body);
     }
+    for (pose, shape) in &pass.extra_colliders {
+        world.insert_collider(
+            ColliderBuilder::new(shape_bridge::reconstruct(shape)?)
+                .position(pose.native()?)
+                .friction(pass.spec.collision.friction),
+            None,
+        );
+    }
+    if let Some(z) = pass.ground_z {
+        // A floor: a wide slab whose top face is at `z` (a half-space
+        // would do, but the slab needs no unit-vector plumbing).
+        world.insert_collider(
+            ColliderBuilder::cuboid(100.0, 100.0, 0.5)
+                .translation(Vector::new(0.0, 0.0, z - 0.5))
+                .friction(pass.spec.collision.friction),
+            None,
+        );
+    }
     let mut track = RopeTrack {
         name: pass.spec.name.clone(),
         segments: ropes.centerline(id, &world, rope)?.segments().to_vec(),
@@ -548,6 +808,7 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
         coordinate_system: "right-handed Z-up SI".into(),
         solver: "rapier3d-f64 0.36.0".into(),
         color: pass.color,
+        twist_deg: None,
     };
     let mut connector_bodies = Vec::new();
     let mut initial = pass
@@ -786,6 +1047,21 @@ pub fn drive(bake: &Bake, pass: &RopePass) -> Result<Replay, Error> {
                 particle: a.particle,
                 local_anchor_m: Some(a.local_anchor_m),
             });
+        }
+        if k == 0 && pass.preroll_s > 0.0 {
+            // Settle before the clock starts: the rope was laid along a
+            // design polyline, not a hanging shape, and the first moments
+            // of a replay would otherwise be its fall. The holders stay at
+            // their time-zero poses; none of this is recorded.
+            let steps = (pass.preroll_s / pass.step_s).ceil().max(1.0) as usize;
+            world.integration_parameters.dt = pass.step_s;
+            for p in &bake.proxies {
+                world.bodies[bodies[&p.name]].set_next_kinematic_position(p.pose_at(0.0).native()?);
+            }
+            for _ in 0..steps {
+                world.step();
+            }
+            world.integration_parameters.dt = dt;
         }
         let mut particles = Vec::new();
         for h in held.iter().flatten() {

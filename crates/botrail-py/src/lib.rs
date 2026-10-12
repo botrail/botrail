@@ -5021,8 +5021,99 @@ impl Scene {
     fn _set_connection_plan_json(&self, json: &str) -> PyResult<()> {
         let plan = serde_json::from_str(json)
             .map_err(|e| PyValueError::new_err(format!("connection plan: {e}")))?;
+        botrail_session::set_connection_plan(&*self.hub, plan).map_err(PyValueError::new_err)
+    }
+
+    fn _routing_plan_json(&self) -> String {
         self.hub
-            .with_scene(|scene| scene.set_connection_plan(plan))
+            .with_scene(|scene| serde_json::to_string(scene.routing_plan()).expect("routing plan"))
+    }
+
+    fn _set_routing_plan_json(&self, json: &str) -> PyResult<()> {
+        let plan = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("routing plan: {e}")))?;
+        botrail_session::set_routing_plan(&*self.hub, plan).map_err(PyValueError::new_err)
+    }
+
+    /// The cable list and the static route checks, as JSON.
+    fn _routing_report_json(&self) -> String {
+        self.hub.with_scene(|scene| {
+            serde_json::to_string(&scene.routing_report()).expect("routing report")
+        })
+    }
+
+    /// The moving spans of the routes over a baked cycle (`bt.routing`):
+    /// the free length, stroke and twist the kinematics give, and — where
+    /// `bt.routing.animate` replayed a span as a rope — its tightest bend,
+    /// stretch, sag and nearest body, every finding with its time. The
+    /// plan is this scene's (as it stands now); the motion is the cycle's.
+    #[pyo3(signature = (timeline, dt = 0.05, sag_limit_m = 0.15))]
+    fn _routing_timeline_report_json(
+        &self,
+        timeline: &SequenceTimeline,
+        dt: f64,
+        sag_limit_m: f64,
+    ) -> PyResult<String> {
+        let report = self
+            .hub
+            .with_scene(|scene| scene.routing_timeline_report(&timeline.inner, dt, sag_limit_m))
+            .map_err(PyValueError::new_err)?;
+        serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The robot links a rope replaying span `k` of `route` collides with,
+    /// and the holding links left out because their shape holds the held
+    /// point, as JSON `{"collide": [[robot, link]…], "exempt": […]}`.
+    fn _span_replay_links_json(&self, route: &str, k: usize, radius: f64) -> PyResult<String> {
+        self.hub
+            .with_scene(|scene| scene.span_replay_links(route, k, radius))
+            .map(|(collide, exempt)| {
+                serde_json::json!({ "collide": collide, "exempt": exempt }).to_string()
+            })
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Which of the links (`[[robot, link]…]`, JSON) any of the points
+    /// (`[[x, y, z]…]`, JSON) comes within `radius` of, as JSON.
+    fn _points_near_links_json(
+        &self,
+        points_json: &str,
+        radius: f64,
+        links_json: &str,
+    ) -> PyResult<String> {
+        let points: Vec<[f64; 3]> =
+            serde_json::from_str(points_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let links: Vec<(String, String)> =
+            serde_json::from_str(links_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let near = self
+            .hub
+            .with_scene(|scene| scene.points_near_links(&points, radius, &links));
+        Ok(serde_json::to_string(&near).expect("link names"))
+    }
+
+    /// The ways one route could take through the cell's ducts, best first
+    /// (`Scene::route_candidates`), as JSON.
+    fn _route_candidates_json(&self, name: &str) -> PyResult<String> {
+        self.hub
+            .with_scene(|scene| scene.route_candidates(name))
+            .map(|c| serde_json::to_string(&c).expect("route candidates"))
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Replaces one route's way points (a JSON list of `Via`) and
+    /// rebroadcasts the routes and the BOM.
+    fn _set_route_via_json(&self, name: &str, via_json: &str) -> PyResult<()> {
+        let via: Vec<botrail_scene::routing::Via> =
+            serde_json::from_str(via_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        botrail_session::set_route_via(&*self.hub, name, via).map_err(PyValueError::new_err)
+    }
+
+    /// One route's derived geometry (centerline, anchors, spans, bends,
+    /// lengths) at the current poses, as JSON.
+    fn _route_geometry_json(&self, name: &str) -> PyResult<String> {
+        self.hub
+            .with_scene(|scene| scene.route_geometry(name))
+            .map(|g| serde_json::to_string(&g).expect("route geometry"))
             .map_err(PyValueError::new_err)
     }
 
@@ -5628,17 +5719,81 @@ impl Scene {
         })
     }
 
+    /// Several one-way rope passes against one bake, computed side by side
+    /// (ropes do not interact) and installed together. Per pass: `None`,
+    /// or why it did not run.
+    fn _animate_ropes_json(
+        &self,
+        timeline: PyRef<'_, SequenceTimeline>,
+        jsons: Vec<String>,
+    ) -> PyResult<(SequenceTimeline, Vec<Option<String>>)> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let passes: Vec<Result<rope::Parsed, String>> =
+            jsons.iter().map(|j| rope::Decl::parse(j)).collect();
+        let scene = &timeline.scene;
+        let inner = &timeline.inner;
+        // Static passes whose laid lines come within reach of one another
+        // are solved together, so the lines keep off each other; the rest,
+        // and every replay, run on their own.
+        let items = rope::work_items(&passes);
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, items.len().max(1));
+        let next = AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Option<Result<botrail_rope::RopeTrack, String>>>> = (0
+            ..passes.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let w = next.fetch_add(1, Ordering::Relaxed);
+                    if w >= items.len() {
+                        break;
+                    }
+                    for (i, result) in rope::run_item(scene, inner, &passes, &items[w]) {
+                        *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                    }
+                });
+            }
+        });
+        let mut augmented = inner.clone();
+        let mut errors = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let result = slot
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|| Err("rope pass did not run".to_string()));
+            match result {
+                Ok(track) => {
+                    botrail_rope::track::install_track(&mut augmented, track);
+                    errors.push(None);
+                }
+                Err(e) => errors.push(Some(e)),
+            }
+        }
+        self.hub.emit_timeline(&timeline.scene, &augmented);
+        Ok((
+            SequenceTimeline {
+                inner: augmented,
+                scene: timeline.scene.clone(),
+            },
+            errors,
+        ))
+    }
+
     /// An explicit one-way rope pass against a completed bake.
     fn _animate_rope_json(
         &self,
         timeline: PyRef<'_, SequenceTimeline>,
         json: &str,
     ) -> PyResult<SequenceTimeline> {
-        let pass = rope::Decl::parse(json).map_err(PyValueError::new_err)?;
-        let replay = botrail_rope::pass::animate(&timeline.scene, &timeline.inner, &pass)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let parsed = rope::Decl::parse(json).map_err(PyValueError::new_err)?;
+        let track =
+            rope::run(&timeline.scene, &timeline.inner, &parsed).map_err(PyValueError::new_err)?;
         let mut augmented = timeline.inner.clone();
-        botrail_rope::track::install(&mut augmented, &replay);
+        botrail_rope::track::install_track(&mut augmented, track);
         self.hub.emit_timeline(&timeline.scene, &augmented);
         Ok(SequenceTimeline {
             inner: augmented,

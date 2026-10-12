@@ -97,7 +97,7 @@ impl Scene {
 /// every tracked object's pose/attachment per its active span. `span_at`
 /// carries each object's last active span index between calls (`t` must be
 /// non-decreasing) so grasp/release transitions apply exactly once.
-fn apply_state(
+pub(crate) fn apply_state(
     world: &mut Scene,
     timeline: &SequenceTimeline,
     t: f64,
@@ -230,9 +230,14 @@ fn touching_pair(world: &Scene, to: Option<&[String]>) -> Option<(String, String
             let name = &world.obstacles()[*k].name;
             world.attachment(name).map(|_| name.clone())
         }
-        ColliderId::Attached(_) => None,
+        ColliderId::Attached(_) | ColliderId::Route(_) => None,
     };
     let env_side = |id: &ColliderId| match id {
+        ColliderId::Route(k) => {
+            let name = world.route_collider_name(*k);
+            to.is_none_or(|to| crate::names_match(to, &name))
+                .then_some(name)
+        }
         ColliderId::Obstacle(k) => {
             let name = &world.obstacles()[*k].name;
             (world.attachment(name).is_none() && to.is_none_or(|to| crate::names_match(to, name)))

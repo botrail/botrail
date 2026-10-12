@@ -3515,6 +3515,7 @@ fn clear_swing(
         botrail_collide::ColliderId::Link { robot, link } => (0u8, robot, link),
         botrail_collide::ColliderId::Obstacle(k) => (1, k, 0),
         botrail_collide::ColliderId::Attached(k) => (2, k, 0),
+        botrail_collide::ColliderId::Route(k) => (3, k, 0),
     };
     let contacts = |world: &mut Scene, at: &[(usize, f64)]| {
         let mut q = q.to_vec();
@@ -5249,6 +5250,9 @@ impl Rollout {
                     }
                     let carrier = self.world.attachment(&name).map(|a| a.robot);
                     Some((carrier, name))
+                }
+                botrail_collide::ColliderId::Route(k) => {
+                    Some((None, self.world.route_collider_name(k)))
                 }
                 botrail_collide::ColliderId::Attached(_) => None,
             }
@@ -7892,6 +7896,7 @@ impl Rollout {
                     let name = &self.world.obstacles()[k].name;
                     self.world.attachment(name).map(|a| (a.robot, name.clone()))
                 }
+                botrail_collide::ColliderId::Route(_) => None,
                 botrail_collide::ColliderId::Attached(_) => {
                     unreachable!("attached ids are remapped by Scene")
                 }
@@ -7939,7 +7944,8 @@ impl Rollout {
                         .world
                         .attachment(&self.world.obstacles()[k].name)
                         .and_then(|a| model.group_for_link(a.link)),
-                    botrail_collide::ColliderId::Attached(_) => None,
+                    botrail_collide::ColliderId::Attached(_)
+                    | botrail_collide::ColliderId::Route(_) => None,
                 }
             };
             let name_of = |id: botrail_collide::ColliderId| -> String {
@@ -7951,6 +7957,7 @@ impl Rollout {
                         self.world.obstacles()[k].name.clone()
                     }
                     botrail_collide::ColliderId::Attached(_) => "attached".to_string(),
+                    botrail_collide::ColliderId::Route(k) => self.world.route_collider_name(k),
                 }
             };
             for pair in self.world.check_self_collisions_for(r) {

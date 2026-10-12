@@ -48,6 +48,11 @@ pub struct RopeTrack {
     /// Display colour, linear RGB like an obstacle's; `None` draws the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
+    /// The rope's twist between its two roll-holding ends at each sample
+    /// (degrees, signed): the torsion a static rod carries. `None` from a
+    /// replay, or when an end leaves the roll free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twist_deg: Option<Vec<f64>>,
 }
 
 impl RopeTrack {

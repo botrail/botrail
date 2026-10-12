@@ -177,6 +177,9 @@ pub enum PartTargetKind {
     /// A LiDAR scanner (the purchasable `sensor.lidar` article).
     Lidar,
     IoNode,
+    /// A cable / tube route or a clamp of the routing plan, by name — the
+    /// derived line of the cable list; a pin here overlays its identity.
+    Route,
     /// An end-effector in a robot's tool stack, by the name its BOM row
     /// carries (`<robot>/tool`, `<robot>/tool2`, `<robot>/tool/tool3` for
     /// a tool that is itself a stack). A catalog tool brings its own
@@ -197,6 +200,7 @@ impl PartTargetKind {
             PartTargetKind::Lidar => "lidar",
             PartTargetKind::IoNode => "io_node",
             PartTargetKind::Tool => "tool",
+            PartTargetKind::Route => "route",
         }
     }
 
@@ -211,6 +215,7 @@ impl PartTargetKind {
             "lidar" => PartTargetKind::Lidar,
             "io_node" => PartTargetKind::IoNode,
             "tool" => PartTargetKind::Tool,
+            "route" => PartTargetKind::Route,
             _ => return None,
         })
     }
@@ -547,6 +552,15 @@ fn resolve_hits(scene: &Scene, target: &str) -> Vec<PartTargetKind> {
     {
         hits.push(PartTargetKind::IoNode);
     }
+    if scene.routing_plan().routes.iter().any(|r| r.name == target)
+        || scene
+            .routing_plan()
+            .supports
+            .iter()
+            .any(|s| s.name() == target)
+    {
+        hits.push(PartTargetKind::Route);
+    }
     if tool_row_names(scene).iter().any(|n| n == target) {
         hits.push(PartTargetKind::Tool);
     }
@@ -767,6 +781,14 @@ fn target_exists(scene: &Scene, target: &str, kind: PartTargetKind) -> bool {
                 || controller_row_names(scene).iter().any(|n| n == target)
         }
         PartTargetKind::Obstacle => scene.obstacles().iter().any(|o| o.name == target),
+        PartTargetKind::Route => {
+            scene.routing_plan().routes.iter().any(|r| r.name == target)
+                || scene
+                    .routing_plan()
+                    .supports
+                    .iter()
+                    .any(|s| s.name() == target)
+        }
         PartTargetKind::Group => {
             let prefix = format!("{target}/");
             scene
@@ -954,13 +976,37 @@ fn merge_rows(lines: Vec<BomRow>) -> Vec<BomRow> {
             .find(|r| r.merge_key().as_ref() == Some(&key))
         {
             Some(row) => {
+                // Derived route lines of one product add their lengths:
+                // the purchase wants metres of this cable, not a count.
+                let both_routes = [&*row, &line].iter().all(|r| {
+                    !r.targets.is_empty()
+                        && r.targets
+                            .iter()
+                            .all(|t| t.derived && t.kind == PartTargetKind::Route)
+                });
                 row.qty += line.qty;
                 row.names.extend(line.names);
                 row.targets.extend(line.targets);
                 if row.description.is_none() {
                     row.description = line.description;
                 }
+                // Lines bought by the metre — a route's cable, a duct —
+                // add up: the row's length is the length to buy.
+                let by_length =
+                    row.category.starts_with("cable.") || row.category == "pneumatic.tube";
                 for (k, v) in line.attributes {
+                    if (both_routes || by_length)
+                        && matches!(k.as_str(), "length_m" | "purchase_length_m" | "mass_kg")
+                    {
+                        if let (Some(a), Some(b)) = (
+                            row.attributes.get(&k).and_then(PartAttr::as_number),
+                            v.as_number(),
+                        ) {
+                            row.attributes
+                                .insert(k, PartAttr::Number(((a + b) * 1000.0).round() / 1000.0));
+                            continue;
+                        }
+                    }
                     row.attributes.entry(k).or_insert(v);
                 }
             }
@@ -1314,7 +1360,22 @@ impl Scene {
             }
         }
         Bom {
-            rows: merge_rows(lines),
+            rows: {
+                // The cables and tubes, derived from the routing plan: the
+                // line by its spec, cut and purchase length on the row; a
+                // part pinned to the route's name overlays the spec's identity.
+                for mut row in crate::routing::bom_rows(self) {
+                    if let Some(part) = row
+                        .names
+                        .first()
+                        .and_then(|n| explicit(PartTargetKind::Route, n))
+                    {
+                        row.apply(part);
+                    }
+                    lines.push(row);
+                }
+                merge_rows(lines)
+            },
         }
     }
 }

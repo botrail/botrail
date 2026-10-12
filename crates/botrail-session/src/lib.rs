@@ -162,7 +162,7 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// Every scene-content message except `scene_init`, in handshake order:
 /// obstacles, motions, sequences, sensors, devices, cameras, lidars, scenarios,
-/// effects, frames, toolpaths, io, parts, state. Re-sent wholesale after
+/// effects, frames, toolpaths, routes, io, parts, state. Re-sent wholesale after
 /// bulk changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
@@ -179,11 +179,70 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::effects_message(scene),
             wire::frames_message(scene),
             wire::toolpaths_message(scene),
+            wire::routes_message(scene),
             wire::io_message(scene),
             wire::bom_message(scene),
             wire::state_message(scene),
         ]
     })
+}
+
+/// Rebroadcasts the routes when there are any: their shape hangs on the
+/// residents' poses, so an obstacle, frame or base-pose change re-resolves
+/// them (`emit_routes_if_moving` for joint changes, which only move the
+/// spans clamped to a robot link).
+pub fn emit_routes(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    if host.with_scene(|scene| scene.routing_plan().is_empty()) {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::routes_message(scene));
+    host.emit(&msg);
+}
+
+fn emit_routes_if_moving(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    if host.with_scene(|scene| scene.routing_has_moving_anchors()) {
+        emit_routes(host);
+    }
+}
+
+/// Replaces the routing plan and rebroadcasts routes and the BOM.
+pub fn set_routing_plan(
+    host: &impl SessionHost,
+    plan: botrail_scene::routing::RoutingPlan,
+) -> Result<(), String> {
+    host.with_scene(|scene| scene.set_routing_plan(plan))?;
+    emit_routes(host);
+    emit_bom(host);
+    Ok(())
+}
+
+/// Replaces one route's way points and rebroadcasts routes and the BOM.
+pub fn set_route_via(
+    host: &impl SessionHost,
+    route: &str,
+    via: Vec<botrail_scene::routing::Via>,
+) -> Result<(), String> {
+    host.with_scene(|scene| scene.set_route_via(route, via))?;
+    emit_routes(host);
+    emit_bom(host);
+    Ok(())
+}
+
+/// Replaces the connection plan; ports carry the geometry routes hang on,
+/// so the routes are rebroadcast too.
+pub fn set_connection_plan(
+    host: &impl SessionHost,
+    plan: botrail_scene::connections::ConnectionPlan,
+) -> Result<(), String> {
+    host.with_scene(|scene| scene.set_connection_plan(plan))?;
+    emit_routes(host);
+    Ok(())
 }
 
 /// The `scene_init` message, with mesh/asset URLs mapped through the host.
@@ -287,6 +346,16 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::SetObstacleEnabled { name, enabled } => {
             set_obstacle_enabled(host, &name, enabled)
                 .map_err(|e| format!("rejected set_obstacle_enabled: {e}"))
+        }
+        ClientMessage::UpdateRouteVia { route, via } => {
+            set_route_via(host, &route, via).map_err(|e| format!("rejected update_route_via: {e}"))
+        }
+        ClientMessage::SuggestRoute { route } => {
+            let candidates = host
+                .with_scene(|scene| scene.route_candidates(&route))
+                .map_err(|e| format!("rejected suggest_route: {e}"))?;
+            host.emit(&ServerMessage::RouteCandidates { route, candidates });
+            Ok(())
         }
         ClientMessage::AttachObstacle {
             name,
@@ -567,6 +636,7 @@ pub fn emit_state(host: &impl SessionHost) {
     }
     let msg = host.with_scene(|scene| wire::state_message(scene));
     host.emit(&msg);
+    emit_routes_if_moving(host);
 }
 
 /// Robot motion drags attached (grasped) obstacles along; clients learn
@@ -598,6 +668,7 @@ pub fn set_robot_base_pose_for(host: &impl SessionHost, robot: usize, pose: Isom
     host.with_scene(|scene| scene.set_robot_base_pose_for(robot, pose));
     emit_obstacles_if_attached(host);
     emit_state(host);
+    emit_routes(host);
 }
 
 pub fn set_tcp_target_for(
@@ -664,6 +735,7 @@ fn emit_obstacles_and_state(host: &impl SessionHost) {
     let msg = host.with_scene(|scene| wire::obstacles_message(scene, |p| host.mesh_url(p)));
     host.emit(&msg);
     emit_state(host);
+    emit_routes(host);
 }
 
 /// Adds an obstacle and returns its (possibly uniquified) name.
@@ -789,12 +861,48 @@ pub fn emit_timeline(
             sequence: timeline.sequences.join(" + "),
             scenario: timeline.scenario.clone(),
             error: None,
-            timeline: Some(timeline_msg(scene, timeline)),
+            timeline: Some(timeline_msg_for_studio(scene, timeline)),
             planning_time_ms: None,
             stream: None,
         };
         host.emit(&msg);
     }
+}
+
+/// The timeline as the studio plays it: [`timeline_msg`] plus, when the
+/// cycle carries a `bt.routing.animate` replay (rope tracks named
+/// `route:…`), the moving spans' verdicts with their times, for the
+/// ROUTING tab to list and seek to. The rope bake itself uses the bare
+/// message.
+pub fn timeline_msg_for_studio(
+    scene: &Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+) -> wire::TimelineMsg {
+    let mut msg = timeline_msg(scene, timeline);
+    if timeline
+        .ropes
+        .iter()
+        .any(|r| r.name.starts_with("route:") || r.name.starts_with("carrier:"))
+    {
+        if let Ok(report) = scene.routing_timeline_report(timeline, 0.05, 0.15) {
+            msg.route_findings = report
+                .findings
+                .iter()
+                .map(|f| wire::RouteFindingMsg {
+                    severity: f.severity.clone(),
+                    code: f.code.clone(),
+                    route: f.route.clone(),
+                    message: f.message.clone(),
+                    position: f.position,
+                    s_m: f.s_m,
+                    t_s: f.t_s,
+                    rope: f.rope.clone(),
+                    sample: f.sample,
+                })
+                .collect();
+        }
+    }
+    msg
 }
 
 pub fn set_obstacle_pose(
@@ -969,8 +1077,9 @@ fn emit_frames(host: &impl SessionHost) {
     let msg = host.with_scene(|scene| wire::frames_message(scene));
     host.emit(&msg);
     // Toolpath overlays are resolved through part frames, so a frame move
-    // re-resolves them.
+    // re-resolves them — and so are the routes anchored on frames.
     emit_toolpaths(host);
+    emit_routes(host);
 }
 
 fn emit_toolpaths(host: &impl SessionHost) {
@@ -1817,7 +1926,7 @@ pub fn baked_result_message(host: &impl SessionHost) -> Option<ServerMessage> {
         sequence: bake_label(&timeline.sequences),
         scenario: timeline.scenario.clone(),
         error: None,
-        timeline: Some(timeline_msg(&scene, &timeline)),
+        timeline: Some(timeline_msg_for_studio(&scene, &timeline)),
         planning_time_ms: None,
         stream: None,
     })
@@ -2245,6 +2354,7 @@ fn timeline_msg_on(
         .collect();
 
     wire::TimelineMsg {
+        route_findings: Vec::new(),
         duration: timeline.duration,
         physics: timeline.physics.clone(),
         robots,
@@ -2683,6 +2793,8 @@ mod tests {
                     ServerMessage::PlanResult { .. } => "plan_result",
                     ServerMessage::Motions { .. } => "motions",
                     ServerMessage::Frames { .. } => "frames",
+                    ServerMessage::Routes { .. } => "routes",
+                    ServerMessage::RouteCandidates { .. } => "route_candidates",
                     ServerMessage::Toolpaths { .. } => "toolpaths",
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
@@ -3424,9 +3536,10 @@ mod tests {
         assert!(matches!(msgs[9], ServerMessage::Effects { .. }));
         assert!(matches!(msgs[10], ServerMessage::Frames { .. }));
         assert!(matches!(msgs[11], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[12], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[13], ServerMessage::Bom { .. }));
-        assert!(matches!(msgs[14], ServerMessage::State { .. }));
+        assert!(matches!(msgs[12], ServerMessage::Routes { .. }));
+        assert!(matches!(msgs[13], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[14], ServerMessage::Bom { .. }));
+        assert!(matches!(msgs[15], ServerMessage::State { .. }));
     }
 
     #[test]

@@ -1,0 +1,64 @@
+schema_version: '0.1'
+id: abb/conduit/adaptaflex-prfs16/r1
+kind: spec
+category: cable.carrier
+name: Adaptaflex PRFS16 corrugated conduit (black, nominal 16)
+manufacturer:
+  name: ABB
+  product_url: https://empower.abb.com/ecatalog/ec/EN_CA/p/PRFS16%252FBL%252F100FT
+lifecycle: active
+articulated: false
+specs:
+  carrier_kind: conduit
+  nominal_size: 16
+  od_mm: 15.8
+  inner_mm: 11.7
+  bend_r_fixed_mm: 45
+  material: modified nylon 6
+  color: black
+configuration:
+  generator: carrier
+  params:
+    reel:
+      values:
+      - 100FT
+      default: 100FT
+  components:
+  - role: conduit
+    category: cable.carrier
+    part_number: PRFS16/BL/{reel}
+    dimensions_mm:
+      od: 15.8
+      id: 11.7
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: PRFS16/BL/100FT
+  unit: each
+  includes: []
+  requires: []
+  note: 100 ft (30.48 m) 巻
+assets: {}
+sources:
+- kind: manufacturer_datasheet
+  url: https://empower.abb.com/ecatalog/ec/EN_CA/p/PRFS16%252FBL%252F100FT
+  ref: 'PRFS16/BL/100FT: outside diameter 15.8 mm, inside diameter 11.7 mm, static
+    bend radius 45 mm, modified nylon 6'
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは経路の導出に要る寸法・曲げ半径と品番だけ。品番は製品を指し示す引用で 権利は ABB にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

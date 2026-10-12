@@ -128,7 +128,11 @@ model="R-30iB Mate Plus")`), or declare the cabinet in the
 robots=["arm"])`): the node's own line then stands for it, and a pin on the
 derived name follows the arm onto it. [`bt.parts.controller`](standard-parts.md)
 does the whole thing at once — the box on the floor plan, the node and the
-line are one name. A vehicle carries its controller on board, and a gripper
+line are one name. The [cables and tubes](routing.md) a cell routes are
+derived lines too — one per route under `cable.<medium>` or
+`pneumatic.tube`, with its cut and purchase length, routes of one spec
+merged with their lengths added (as are ducts of one model, and anything
+else bought by the metre under `cable.*`), and a line per clamp article. A vehicle carries its controller on board, and a gripper
 or a hand loaded on its own is driven by someone else's cabinet — neither
 gets a line.
 

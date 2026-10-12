@@ -66,6 +66,16 @@ format at roughly half the size, byte-for-byte the same composed result.
 `.usdz` is rejected on purpose: it is an asset *package*, not a layer, and
 packaging the referenced robot assets is a different operation.
 
+[Cables and tubes](routing.md) export as `BasisCurves` prims under
+`/World/Toolpaths` beside the toolpath overlays — one per route, the
+centerline at the line's outer diameter in its display colour, resolved at
+the scene's current poses — in both the static stage (`scene.export_usd`)
+and a baked cycle's. In a cycle that carries a rope replay
+(`bt.routing.animate`), a replayed span is the rope's tube under
+`/World/Ropes` and is left out of the curve: the rest of the route keeps
+its curve, as runs named `route_<name>_from<k>` after the span each starts
+at, so no cable is drawn twice.
+
 [Cameras](sensors-and-devices.md#cameras) in the scene export as
 `UsdGeomCamera` prims under `/World/Cameras`, their world pose sampled
 frame by frame through their mount (a wrist camera rides the arm, a

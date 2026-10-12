@@ -98,6 +98,8 @@ export function identityFor(selection: Selection, index: BomIndex): Identity | n
       return identityOf(index, "group", selection.path);
     case "line":
       return identityOf(index, selection.kind, selection.name);
+    case "route_via":
+      return identityOf(index, "route", selection.route);
     default:
       return identityOf(index, selection.type, selection.name);
   }

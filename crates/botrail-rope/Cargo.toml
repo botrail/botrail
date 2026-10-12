@@ -18,7 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # Published upstream runtime; the adapter remains unpublished.
-rapier-rope = { version = "=0.1.0", default-features = false, features = ["f64"] }
+rapier-rope = { version = "=0.1.1", default-features = false, features = ["f64"] }
 
 [dev-dependencies]
 botrail-model.workspace = true

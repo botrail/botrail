@@ -373,7 +373,17 @@ pub fn bake_timeline(
             joint_samples: Some(&joint_samples[r]),
         })
         .collect();
-    let curves = toolpath_curves(scene);
+    // The ropes first: a span a rope replays is drawn by its tube, so the
+    // design curves below leave that stretch out.
+    let ropes: Vec<ClothSpec> = timeline
+        .ropes
+        .iter()
+        .filter_map(|track| rope_tube(track, &sample_at, &times))
+        .collect();
+    let replayed: std::collections::BTreeSet<String> =
+        ropes.iter().map(|r| r.name.clone()).collect();
+    let mut curves = toolpath_curves(scene);
+    curves.extend(route_curves(scene, &replayed));
     // A cloth keeps its own clock: the samples inside the window, and the
     // window's two ends blended from their neighbours.
     let cloths: Vec<ClothSpec> = timeline
@@ -401,11 +411,6 @@ pub fn bake_timeline(
                 color: CLOTH_COLOR,
             }
         })
-        .collect();
-    let ropes: Vec<ClothSpec> = timeline
-        .ropes
-        .iter()
-        .filter_map(|track| rope_tube(track, &sample_at, &times))
         .collect();
     let input = AnimationInput {
         robots: &robots,
@@ -1020,7 +1025,8 @@ fn bake_scene_stage(
             joint_samples: Some(&joint_samples[r]),
         })
         .collect();
-    let curves = toolpath_curves(scene);
+    let mut curves = toolpath_curves(scene);
+    curves.extend(route_curves(scene, &std::collections::BTreeSet::new()));
     let input = AnimationInput {
         robots: &robots,
         times: &times,
@@ -1110,6 +1116,75 @@ fn collapse_static(sampled: Vec<Isometry3<f64>>) -> PoseTrack {
 /// process orange, rapids in grey — resolved through the part frame at
 /// export time. A toolpath whose frame is missing is skipped: the bake
 /// itself would already have failed on it, and export stays best-effort.
+/// One `BasisCurves` per resolved route: the centerline at the line's
+/// outer diameter, in its display colour. Fixed and moving spans alike at
+/// the scene's current poses; the rope replay owns a moving span's motion.
+/// The routes as `BasisCurves`, resolved at the scene's poses: each route's
+/// centerline, less the spans a rope of the cycle replays (`replayed`, the
+/// rope tracks exported) — that stretch is the rope's tube under
+/// `/World/Ropes`, and a design line through it too would show the cable
+/// twice. A route none of whose spans is replayed keeps one curve,
+/// `route_<name>`; one with replayed spans keeps the rest as runs of
+/// consecutive spans, `route_<name>_from<k>` after the span each run starts
+/// at (the ropes are `route_<name>_<k>` / `carrier_<c>_<i>`, their track
+/// names made prim names).
+fn route_curves(scene: &Scene, replayed: &std::collections::BTreeSet<String>) -> Vec<CurveSpec> {
+    let mut out = Vec::new();
+    for g in scene.routing_report().geometries.iter().flatten() {
+        if g.centerline.len() < 2 {
+            continue;
+        }
+        let width = g.od_m.unwrap_or(0.006) as f32;
+        let covered: Vec<bool> = g
+            .spans
+            .iter()
+            .enumerate()
+            .map(|(k, _)| {
+                botrail_scene::routing::span_rope_names(&g.name, &g.spans, k)
+                    .iter()
+                    .any(|n| replayed.contains(n))
+            })
+            .collect();
+        if !covered.iter().any(|c| *c) {
+            out.push(CurveSpec {
+                name: format!("route_{}", g.name),
+                curves: vec![g.centerline.clone()],
+                color: g.color,
+                width,
+            });
+            continue;
+        }
+        let mut k = 0;
+        while k < g.spans.len() {
+            if covered[k] {
+                k += 1;
+                continue;
+            }
+            let start = k;
+            while k < g.spans.len() && !covered[k] {
+                k += 1;
+            }
+            let (from_s, to_s) = (g.spans[start].from_s, g.spans[k - 1].to_s);
+            let points: Vec<[f64; 3]> = g
+                .centerline
+                .iter()
+                .zip(&g.s)
+                .filter(|(_, s)| **s >= from_s - 1e-9 && **s <= to_s + 1e-9)
+                .map(|(p, _)| *p)
+                .collect();
+            if points.len() >= 2 {
+                out.push(CurveSpec {
+                    name: format!("route_{}_from{}", g.name, start),
+                    curves: vec![points],
+                    color: g.color,
+                    width,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn toolpath_curves(scene: &Scene) -> Vec<CurveSpec> {
     const FEED_COLOR: [f32; 3] = [0.85, 0.33, 0.05];
     const RAPID_COLOR: [f32; 3] = [0.38, 0.38, 0.42];
@@ -1158,6 +1233,7 @@ mod tests {
             coupling: "baked_one_way_no_source_reaction".into(),
             coordinate_system: "right-handed Z-up SI".into(),
             solver: "test".into(),
+            twist_deg: None,
             color: Some([0.9, 0.16, 0.015]),
         }
     }

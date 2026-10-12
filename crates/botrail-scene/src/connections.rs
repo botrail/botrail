@@ -51,6 +51,83 @@ pub struct Specs {
     pub logic: Option<String>,
 }
 
+/// Where a port (or a clamp) sits: on a resident, at a local offset. The
+/// world point follows the resident — an obstacle's pose, a robot link's
+/// forward kinematics, a frame — so a route re-resolves when things move.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum Attach {
+    Obstacle {
+        name: String,
+        #[serde(default)]
+        offset_m: [f64; 3],
+    },
+    Link {
+        robot: String,
+        link: String,
+        #[serde(default)]
+        offset_m: [f64; 3],
+    },
+    Frame {
+        name: String,
+        #[serde(default)]
+        offset_m: [f64; 3],
+    },
+}
+
+impl Attach {
+    pub fn offset_m(&self) -> [f64; 3] {
+        match self {
+            Attach::Obstacle { offset_m, .. }
+            | Attach::Link { offset_m, .. }
+            | Attach::Frame { offset_m, .. } => *offset_m,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let named = match self {
+            Attach::Obstacle { name, .. } | Attach::Frame { name, .. } => !name.trim().is_empty(),
+            Attach::Link { robot, link, .. } => !robot.trim().is_empty() && !link.trim().is_empty(),
+        };
+        if !named {
+            return Err("an attachment names its resident".to_string());
+        }
+        if self.offset_m().iter().any(|v| !v.is_finite()) {
+            return Err("attachment offset must be finite".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The geometry of a port: where it sits, which way the line leaves it, and
+/// how much of the line must stay straight out of the connector (the boot,
+/// the gland). Optional — a port without it still takes part in the
+/// connection checks; only a route needs it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PortGeometry {
+    pub at: Attach,
+    /// Exit direction in the resident's frame (normalized on use).
+    pub exit: [f64; 3],
+    #[serde(default)]
+    pub straight_m: f64,
+}
+
+impl PortGeometry {
+    pub fn validate(&self) -> Result<(), String> {
+        self.at.validate()?;
+        if self.exit.iter().any(|v| !v.is_finite()) || self.exit.iter().all(|v| v.abs() < 1e-12) {
+            return Err("exit must be a finite, nonzero direction".to_string());
+        }
+        if !self.straight_m.is_finite() || self.straight_m < 0.0 {
+            return Err("straight_m must be finite and nonnegative".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// A reference into the existing I/O map. The assigned channel is derived.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +159,10 @@ pub struct Port {
     pub terminal: Option<String>,
     #[serde(default)]
     pub reference: Option<String>,
+    /// Where the port sits and which way its line leaves (absent in files
+    /// written before routing existed, and on ports nobody routes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<PortGeometry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,6 +313,11 @@ impl ConnectionPlan {
                     return Err(format!("{}: minimum exceeds maximum", port.name));
                 }
             }
+            if let Some(geometry) = &port.geometry {
+                geometry
+                    .validate()
+                    .map_err(|e| format!("{}: {e}", port.name))?;
+            }
             if let Some(io) = &port.io {
                 if port.medium != Medium::Signal || port.target_kind != PartTargetKind::IoNode {
                     return Err(format!(
@@ -266,6 +352,7 @@ impl crate::Scene {
     pub fn set_connection_plan(&mut self, plan: ConnectionPlan) -> Result<(), String> {
         plan.validate()?;
         self.connection_plan = plan;
+        self.plan_gen = self.plan_gen.wrapping_add(1);
         Ok(())
     }
 }

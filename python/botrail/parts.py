@@ -4241,6 +4241,100 @@ def _size_by_rating(spec, output_a) -> Optional[Point3]:
     return (sides[0], sides[1], sides[2])  # type: ignore[return-value]
 
 
+# ---------------------------------------------------------------------- duct
+
+
+def duct(
+    scene,
+    name: str,
+    path,
+    *,
+    size: Optional[tuple[float, float]] = None,
+    z: float = 0.0,
+    wall: float = 0.0015,
+    catalog: Optional["CatalogRef"] = None,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = STEEL,
+    **attributes,
+) -> Built:
+    """A floor duct or cable tray along `path` — floor points `(x, y)` (or
+    `(x, y, z)`) of its centerline, in order — as a box per straight run
+    under `<name>/run{i}` (runs overlap by half a width at the corners),
+    `size = (width, height)` of the outer section, standing on `z`. The
+    routing support `<name>` (`bt.routing`) has its centerline at mid
+    height inside the duct and the inner section less the `wall`; a route
+    passes it with `via=[name]` (or `bt.routing.through(name)`). The part
+    (`cable.duct`) carries the run length and the section.
+
+    Nothing is sized here: the duct is as wide as you say (100 x 60 mm when
+    you say nothing), and a bundle that will not fit is the routing
+    report's `duct_fill` to tell. With `catalog=` — a `cable.duct` spec pack,
+    or a package directory — the inner section the pack states sets the
+    size (plus the wall), and its maker and part number the part."""
+    from . import routing
+
+    pack = None
+    catalog_ref = None
+    if catalog is not None:
+        pack, specs, catalog_ref = routing._pack(catalog, ("cable.duct",), "bt.parts.duct")
+        inner_w, inner_h = specs.get("inner_width_mm"), specs.get("inner_height_mm")
+        if size is None and inner_w is not None and inner_h is not None:
+            size = (float(inner_w) / 1000.0 + 2 * wall, float(inner_h) / 1000.0 + wall)
+        model = model or routing._pack_model(pack)
+        manufacturer = manufacturer or pack.manufacturer
+    if size is None:
+        size = (0.1, 0.06)
+
+    points = []
+    for p in path:
+        q = [float(v) for v in p]
+        if len(q) == 2:
+            q.append(float(z))
+        elif len(q) == 3:
+            q[2] = float(q[2])
+        else:
+            raise ValueError("duct: path points are (x, y) or (x, y, z)")
+        points.append(q)
+    if len(points) < 2:
+        raise ValueError("duct: path needs two or more points")
+    w, h = (float(v) for v in size)
+    if min(w, h) <= 0 or wall < 0 or 2 * wall >= min(w, h):
+        raise ValueError("duct: size must be positive and larger than twice the wall")
+    built = Built(name)
+    total = 0.0
+    for i, (a, b) in enumerate(zip(points, points[1:])):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        run = math.hypot(dx, dy)
+        if run <= 1e-9:
+            continue
+        total += run
+        yaw = math.atan2(dy, dx)
+        zb = (a[2] + b[2]) / 2
+        built.obstacles.append(
+            scene.add_box(
+                f"{name}/run{i}", size=(run + w, w, h),
+                position=((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, zb + h / 2),
+                quaternion=_yaw_quat(yaw), color=color,
+            )
+        )
+    if total <= 0:
+        raise ValueError("duct: path has no length")
+    routing.duct(
+        scene, name, path=[(p[0], p[1], p[2] + h / 2) for p in points],
+        inner_m=(w - 2 * wall, h - wall), manufacturer=manufacturer, model=model, catalog=catalog_ref,
+    )
+    scene.set_part(
+        name, kind="group", category="cable.duct",
+        **({"catalog": pack.catalog_ref} if pack is not None else {}),
+        **_identity(model, manufacturer, {
+            "length_m": round(total, 3), "width_mm": round(w * 1000, 1), "height_mm": round(h * 1000, 1),
+            **attributes,
+        }),
+    )
+    return built
+
+
 # ---------------------------------------------------------------- remote I/O
 
 

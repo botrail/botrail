@@ -1,0 +1,35 @@
+# A test-only pack (not a product): a box that declares where its lines
+# plug in (`ports:`), so `bt.connections.ports_of` / `port(from_catalog=)`
+# can read them. Figures are made up for the test.
+schema_version: '0.1'
+id: test/box/ported/r1
+kind: spec
+category: power_supply
+name: Test box with declared ports
+manufacturer:
+  name: botrail (test)
+specs:
+  output_v: 24
+  output_a: 10
+ports:
+  - name: dc_out
+    medium: power
+    role: supply
+    at: { body: body, xyz_mm: [0, 100, 30], exit: [0, 1, 0], straight_mm: 40 }
+    note: the gland on the back face
+    source: test
+  - name: bus
+    medium: network
+    role: peer
+    at: { body: body, xyz_mm: [50, 100, 60], exit: [0, 1, 0], straight_mm: 50 }
+configuration:
+  generator: power_supply
+  params:
+    variant: { values: [std], default: std }
+  components:
+    - role: body
+      category: power_supply
+      part_number: TEST-PSU
+order:
+  unit: each
+  part_number: TEST-PSU

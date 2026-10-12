@@ -48,6 +48,9 @@ pub enum ColliderId {
     Obstacle(usize),
     /// Index into the `attached` slice passed to [`check_scene`].
     Attached(usize),
+    /// A fixed span of a cable route, by the scene's route-collider index
+    /// (the scene appends them after the obstacles and remaps the ids).
+    Route(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +237,13 @@ impl ObstacleCollider {
     /// in-memory mesh data, where no file path exists to load from).
     pub fn from_shape(shape: SharedShape) -> Self {
         let parts = vec![(Pose::identity(), shape)];
+        let local_aabb = parts_local_aabb(&parts);
+        ObstacleCollider { parts, local_aabb }
+    }
+
+    /// Several `(local pose, shape)` parts as one collider (the capsules of
+    /// a cable's run).
+    pub fn from_parts(parts: Vec<(Pose, SharedShape)>) -> Self {
         let local_aabb = parts_local_aabb(&parts);
         ObstacleCollider { parts, local_aabb }
     }
@@ -1750,7 +1760,7 @@ mod broadphase_tests {
             match id {
                 ColliderId::Link { robot, .. } => Some(*robot),
                 ColliderId::Attached(k) => Some(attached[*k].robot),
-                ColliderId::Obstacle(_) => None,
+                ColliderId::Obstacle(_) | ColliderId::Route(_) => None,
             }
         };
         let expected: Vec<CollisionPair> = full

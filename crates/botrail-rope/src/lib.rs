@@ -2,6 +2,7 @@
 //! All inputs/outputs use botrail's right-handed Z-up SI frame. No source
 //! physics world is borrowed or mutated and no reaction is returned to it.
 pub mod pass;
+pub mod shape;
 pub mod shape_bridge;
 pub mod track;
 

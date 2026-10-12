@@ -90,6 +90,8 @@ export function selectionForTarget(target: BomTarget, declaredIoNodes: Set<strin
         : { type: "line", kind: "io_node", name: target.name };
     case "tool":
       return { type: "line", kind: "tool", name: target.name };
+    case "route":
+      return { type: "line", kind: "route", name: target.name };
   }
 }
 

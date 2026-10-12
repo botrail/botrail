@@ -137,6 +137,8 @@ nav:
       - Attach and tracking: guides/attach-and-tracking.md
       - Timeline assertions: guides/timeline-assertions.md
       - The I/O map: guides/io-map.md
+      - Equipment connections: guides/connections.md
+      - Cables and tubes: guides/routing.md
       - Parts and the BOM: guides/parts-and-bom.md
       - Selecting parts (requirements, check, catalog search): guides/selection.md
       - Mechanical tool mounting: guides/mounting.md
@@ -168,6 +170,8 @@ nav:
       - Assembly and fastening (bt.assembly): reference/api/assembly.md
       - Multi-purpose hands (bt.tools): reference/api/tools.md
       - Requirements and the check (bt.select): reference/api/select.md
+      - Equipment connections (bt.connections): reference/api/connections.md
+      - Cables and tubes (bt.routing): reference/api/routing.md
       - Catalog search (bt.catalog): reference/api/catalog.md
       - Gaits (bt.Gait): reference/api/gait.md
       - Wheels (bt.Wheels): reference/api/wheels.md

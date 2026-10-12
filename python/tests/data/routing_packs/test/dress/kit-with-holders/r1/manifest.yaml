@@ -1,0 +1,30 @@
+# A test-only pack (not a product): a dress-pack kit that states where its
+# holders go on a UR-shaped arm, so `bt.routing.carrier(catalog=, robot=)`
+# can place them. Figures are made up for the test.
+schema_version: '0.1'
+id: test/dress/kit-with-holders/r1
+kind: spec
+category: cable.carrier
+name: Test dress pack with holder positions
+manufacturer:
+  name: botrail (test)
+specs:
+  carrier_kind: kit
+  inner_mm: 14
+  od_mm: 18
+  bend_r_moving_mm: 60
+  holders: 2
+  holders_at:
+    - { link: upper_arm_link, xyz_mm: [0, 0, 100] }
+    - { link: forearm_link, xyz_mm: [0, 0, 100] }
+configuration:
+  generator: carrier
+  params:
+    robot: { values: [test], default: test }
+  components:
+    - role: kit
+      category: cable.carrier
+      part_number: TEST-KIT-1
+order:
+  unit: kit
+  part_number: TEST-KIT-1

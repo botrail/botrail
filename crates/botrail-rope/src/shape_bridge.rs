@@ -143,7 +143,11 @@ pub fn reconstruct(shape: &ShapeData) -> Result<SharedShape, Error> {
                 .map(vector)
                 .collect::<Result<Vec<_>, _>>()?;
             if matches!(shape, ShapeData::ConvexMesh { .. }) {
-                SharedShape::convex_mesh(v, indices)
+                // A decomposition's hull piece is not always strictly convex
+                // to the solver's taste (coplanar triangles, a sliver): take
+                // the hull of its points before giving up on it.
+                SharedShape::convex_mesh(v.clone(), indices)
+                    .or_else(|| SharedShape::convex_hull(&v))
                     .ok_or_else(|| Error::Input("invalid convex surface".into()))?
             } else {
                 SharedShape::trimesh(v, indices.clone())

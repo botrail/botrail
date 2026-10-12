@@ -43,6 +43,8 @@ What is on it, layer by layer (the DXF layer names in capitals):
 * **DEVICE** — conveyor and sink zones (dashed, with the direction of travel),
   a linear axis's travel, a vehicle's route with its stations.
 * **SENSOR** — zone boxes and beams.
+* **ROUTE** — the [cables and tubes](routing.md), each route's centerline on
+  the floor, dashed where a span moves with a robot, named at its middle.
 * **FRAME** — named frames as crosses, labelled by their last segment.
 * **LABEL** — names on the things worth naming: a [part](parts-and-bom.md)
   pinned to an obstacle or a group labels it (`Pedestal (PD-500)`); the rest

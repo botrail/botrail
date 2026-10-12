@@ -1,0 +1,71 @@
+schema_version: '0.1'
+id: smc/tube/tu0604bu/r1
+kind: spec
+category: pneumatic.tube
+name: TU0604BU polyurethane tubing (OD 6 / ID 4, blue)
+manufacturer:
+  name: SMC
+  product_url: https://www.smcworld.com/
+lifecycle: active
+articulated: false
+specs:
+  line_kind: tube
+  media:
+  - pneumatic
+  od_mm: 6
+  id_mm: 4
+  bend_r_fixed_mm: 15
+  order_step_m: 20
+  max_pressure_mpa_20c: 0.8
+  material: polyurethane
+  color: blue
+configuration:
+  generator: cable_spec
+  params:
+    reel_m:
+      values:
+      - 20
+      - 100
+      default: 20
+  components:
+  - role: tube
+    category: pneumatic.tube
+    part_number: TU0604BU-{reel_m}
+    dimensions_mm:
+      od: 6.0
+      id: 4.0
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: TU0604BU-20
+  unit: each
+  includes: []
+  requires: []
+  note: 20 m 巻 (reel_m = 20)。100 m 巻は TU0604BU-100
+assets: {}
+sources:
+- kind: community
+  url: https://www.motion.com/products/sku/02005413
+  ref: 'TU0604B-20 listing: 4 mm ID, 6 mm OD, minimum bend radius 15 mm'
+  fetched_at: '2026-10-11'
+- kind: community
+  url: https://uk.rubix.com/en/polyurethane-tube/p-G1324010302
+  ref: 'TU0604G1-20: bend radius 15 mm, -20 to 60 °C'
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは経路の導出に要る寸法・曲げ半径・売り長と品番だけ。品番は製品を 指し示す引用で権利は SMC にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

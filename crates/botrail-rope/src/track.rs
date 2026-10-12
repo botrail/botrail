@@ -10,3 +10,13 @@ pub fn install(timeline: &mut botrail_scene::rollout::SequenceTimeline, replay: 
     timeline.ropes.retain(|t| t.name != replay.track.name);
     timeline.ropes.push(replay.track.clone());
 }
+
+/// Installs a track computed without a native replay (the static shape),
+/// replacing a same-name track.
+pub fn install_track(
+    timeline: &mut botrail_scene::rollout::SequenceTimeline,
+    track: crate::RopeTrack,
+) {
+    timeline.ropes.retain(|t| t.name != track.name);
+    timeline.ropes.push(track);
+}

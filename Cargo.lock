@@ -1819,9 +1819,9 @@ dependencies = [
 
 [[package]]
 name = "rapier-rope"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccf63d0a204f75c11af7464f544086dce3420f0bd951025c0cf0964a4f45f82a"
+checksum = "4647ab62703bc67d1795301d1bcbef4b11cb9c9f638895b547ad03beba70fb50"
 dependencies = [
  "rapier3d-f64 0.36.0",
  "serde",

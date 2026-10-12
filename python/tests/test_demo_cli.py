@@ -37,6 +37,7 @@ CELL_DEMOS = [
     "basics/sfc_chart_demo.py",
     "cloth/tshirt_fold_demo.py",
     "drone/drone_survey_demo.py",
+    "engineering/routing_demo.py",
     "legged/building_delivery_demo.py",
     "legged/gtp_station_demo.py",
     "legged/humanoid_carry_demo.py",

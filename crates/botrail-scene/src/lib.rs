@@ -29,6 +29,7 @@ pub mod report;
 pub mod rl;
 pub mod rollout;
 pub mod rope;
+pub mod routing;
 pub mod scan;
 pub mod script;
 pub mod seq;
@@ -525,6 +526,15 @@ pub struct Scene {
     /// (see [`part`]); never read by collision, planning or the rollout.
     parts: Vec<part::PartEntry>,
     connection_plan: connections::ConnectionPlan,
+    /// Cable and tube routes: specs, supports and the routes between
+    /// ports (see [`routing`]). Authoring data; the geometry, lengths, BOM
+    /// rows and checks are derived from it and the residents' poses.
+    routing_plan: routing::RoutingPlan,
+    /// Bumped when the connection or routing plan is set: part of the
+    /// route colliders' cache key.
+    plan_gen: u64,
+    /// The fixed spans of the routes as colliders, derived on demand.
+    route_cache: routing::RouteCache,
     /// Inputs a scenario's faults pin for the run — filled by
     /// `apply_scenario` on a rollout snapshot, read by the rollout. Never
     /// authored, never saved: the live scene's list is empty.
@@ -570,6 +580,9 @@ impl Scene {
             io: iomap::IoMap::default(),
             parts: Vec::new(),
             connection_plan: connections::ConnectionPlan::default(),
+            routing_plan: routing::RoutingPlan::default(),
+            plan_gen: 0,
+            route_cache: routing::RouteCache::default(),
             forced_inputs: Vec::new(),
             collision_warnings: Vec::new(),
         }
@@ -1967,9 +1980,16 @@ impl Scene {
         for pair in &mut pairs {
             for id in [&mut pair.a, &mut pair.b] {
                 match id {
-                    ColliderId::Obstacle(k) => *id = ColliderId::Obstacle(obstacle_map[*k]),
+                    // Route colliders ride behind the obstacles in a query.
+                    ColliderId::Obstacle(k) => {
+                        *id = if *k < obstacle_map.len() {
+                            ColliderId::Obstacle(obstacle_map[*k])
+                        } else {
+                            ColliderId::Route(*k - obstacle_map.len())
+                        }
+                    }
                     ColliderId::Attached(k) => *id = ColliderId::Obstacle(attached_map[*k]),
-                    ColliderId::Link { .. } => {}
+                    ColliderId::Link { .. } | ColliderId::Route(_) => {}
                 }
             }
         }
@@ -2111,7 +2131,7 @@ impl Scene {
                 let part = match pair.a {
                     ColliderId::Link { link, .. } => r.model.links[link].name.clone(),
                     ColliderId::Attached(k) => self.obstacles[attached_map[k]].name.clone(),
-                    ColliderId::Obstacle(_) => return None,
+                    ColliderId::Obstacle(_) | ColliderId::Route(_) => return None,
                 };
                 Some((part, obstacle))
             })
@@ -2172,7 +2192,7 @@ impl Scene {
                     ColliderId::Link { link, .. } => r.model.links[link].name.clone(),
                     // The probe queries links only — nothing is attached.
                     ColliderId::Attached(_) => return None,
-                    ColliderId::Obstacle(_) => return None,
+                    ColliderId::Obstacle(_) | ColliderId::Route(_) => return None,
                 };
                 Some((part, obstacle))
             })
@@ -2389,9 +2409,11 @@ impl Scene {
         &self,
         map: &[usize],
         attached_map: &[usize],
+        routes: &routing::RouteColliders<'_>,
     ) -> botrail_collide::ContactAllowance {
         let mut allowance = botrail_collide::ContactAllowance::default();
         allowance.slack = self.collision_slack;
+        routes.allow_into(&mut allowance, map.len());
         self.object_allowance_into(&mut allowance, attached_map, map);
         for contact in &self.allowed_contacts {
             let Some(orig) = self
@@ -2412,14 +2434,16 @@ impl Scene {
     /// and attached-object pairs at the current configuration.
     pub fn check_collisions(&self) -> Vec<CollisionPair> {
         let poses = self.all_link_poses();
-        let (query, map) = self.obstacle_query();
+        let routes = self.route_colliders();
+        let (mut query, map) = self.obstacle_query();
+        routes.extend_query(&mut query);
         let (attached, attached_map) = self.attached_query();
         let pairs = botrail_collide::check_scene(
             &self.robot_queries(&poses),
             &self.inter_acm,
             &query,
             &attached,
-            &self.contact_allowance(&map, &attached_map),
+            &self.contact_allowance(&map, &attached_map, &routes),
         );
         Self::remap_obstacle_ids(pairs, &map, &attached_map)
     }
@@ -2455,12 +2479,17 @@ impl Scene {
                 self.link_poses_for(r)
             });
         }
-        let (query, map) = self.obstacle_query();
+        let routes = self.route_colliders();
+        let (mut query, map) = self.obstacle_query();
+        routes.extend_query(&mut query);
         let (attached, attached_map) = self.attached_query();
         let allowance = if honor_allowed_contacts {
-            self.contact_allowance(&map, &attached_map)
+            self.contact_allowance(&map, &attached_map, &routes)
         } else {
-            botrail_collide::ContactAllowance::default()
+            // A cable's own end on the arm's base is never a collision.
+            let mut allowance = botrail_collide::ContactAllowance::default();
+            routes.allow_into(&mut allowance, map.len());
+            allowance
         };
         let pairs = botrail_collide::check_scene(
             &self.robot_queries(&poses),
@@ -2504,7 +2533,7 @@ impl Scene {
         let involves = |id: &ColliderId| match id {
             ColliderId::Link { robot: r, .. } => *r == robot,
             ColliderId::Obstacle(k) => carried.contains(k),
-            ColliderId::Attached(_) => false,
+            ColliderId::Attached(_) | ColliderId::Route(_) => false,
         };
         match self.collisions_at_for(robot, q) {
             Ok(pairs) => !pairs.iter().any(|p| involves(&p.a) || involves(&p.b)),
@@ -2557,7 +2586,7 @@ impl Scene {
         let involves = |id: &ColliderId| match id {
             ColliderId::Link { robot: r, link } => *r == robot && moving.contains(link),
             ColliderId::Obstacle(k) => carried.contains(k),
-            ColliderId::Attached(_) => false,
+            ColliderId::Attached(_) | ColliderId::Route(_) => false,
         };
         match self.collisions_at_for(robot, q) {
             Ok(pairs) => !pairs.iter().any(|p| involves(&p.a) || involves(&p.b)),
@@ -2594,13 +2623,15 @@ impl Scene {
     /// included.
     pub fn min_obstacle_distance(&self) -> Option<f64> {
         let poses = self.all_link_poses();
-        let (query, map) = self.obstacle_query();
+        let routes = self.route_colliders();
+        let (mut query, map) = self.obstacle_query();
+        routes.extend_query(&mut query);
         let (attached, attached_map) = self.attached_query();
         botrail_collide::min_robot_obstacle_distance(
             &self.robot_queries(&poses),
             &query,
             &attached,
-            &self.contact_allowance(&map, &attached_map),
+            &self.contact_allowance(&map, &attached_map, &routes),
         )
     }
 
@@ -2622,7 +2653,7 @@ impl Scene {
             &self.robot_queries(&poses),
             &query,
             &attached,
-            &self.contact_allowance(&map, &attached_map),
+            &self.contact_allowance(&map, &attached_map, &self.route_colliders()),
         )
     }
 

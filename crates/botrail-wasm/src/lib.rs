@@ -460,6 +460,7 @@ impl WasmSession {
             vec![
                 wire::obstacles_message(scene, |_| (String::new(), String::new())),
                 wire::frames_message(scene),
+                wire::routes_message(scene),
                 wire::cameras_message(scene),
                 wire::state_message(scene),
             ]

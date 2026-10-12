@@ -434,6 +434,23 @@ function sampleCloths(
   return out;
 }
 
+/** One sample of a rope (or cloth) track at `t`, interpolated the way
+ * `sampleCloths` interpolates the whole: where a finding read off the
+ * rope is as the cycle plays. */
+export function sampleRopePoint(
+  track: { times: number[]; points: number[][][] },
+  t: number,
+  index: number,
+): [number, number, number] | null {
+  const frames = track.points;
+  if (frames.length === 0) return null;
+  const [i, j, u] = frames.length === 1 ? [0, 0, 0] : bracket(track.times, t);
+  const a = frames[Math.min(i, frames.length - 1)]?.[index];
+  const b = frames[Math.min(j, frames.length - 1)]?.[index] ?? a;
+  if (!a || !b) return null;
+  return [lerp(a[0], b[0], u), lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
+}
+
 /** One interpolated pose from a pose track sampled on `times`. */
 function samplePose(times: number[], poses: PoseMsg[], t: number): PoseMsg {
   const [i, j, u] = bracket(times, t);

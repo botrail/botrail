@@ -553,6 +553,23 @@ def check(
         if item.status == "fail":
             code = "required_part_missing" if item.key.startswith("required:") else item.key
             findings.append(Finding("warning", code, item.message, item.target))
+    # The routes: bends, exits, lengths, clashes at the current poses, and
+    # the connections placed but not yet routed (`route_unrouted`, info).
+    for f in json.loads(scene._routing_report_json())["findings"]:
+        findings.append(Finding(f["severity"], f["code"], f"{f['route']}: {f['message']}", f["route"]))
+    if timeline is not None:
+        # The moving spans over the baked cycle: free length, twist, and the
+        # rope replay's bends, stretch, sag and contact — each at its time.
+        for f in json.loads(scene._routing_timeline_report_json(timeline))["findings"]:
+            findings.append(Finding(f["severity"], f["code"], f"{f['route']}: {f['message']}", f["route"]))
+    # The connection plan's failed checks — a supply range outside what the
+    # load accepts, two supplies into one load — as warnings: the plan is a
+    # declaration to review, not the bake.
+    from .connections import report as connection_report
+
+    for c in connection_report(scene).checks:
+        if c["status"] == "fail":
+            findings.append(Finding("warning", "connection", f"{c['target']}: {c['message']}", c["target"]))
     return CheckReport(findings, req)
 
 
@@ -650,6 +667,53 @@ class _Cell:
         self._holds: dict[str, list[list[str]]] = {}
         self._mass_cache: dict[str, tuple[str, Optional[float]]] = {}
         self.cable_slack_m = 1.0
+        self._routing: Optional[dict] = None
+        self._plan: Optional[dict] = None
+        self._motion: Optional[dict] = None
+        self.carriers: set[str] = {
+            s["name"] for s in (self.plan.get("supports") or []) if s.get("kind") == "carrier"
+        }
+
+    @property
+    def routing(self) -> dict:
+        """The routing report (cable list rows and findings), read once."""
+        if self._routing is None:
+            self._routing = json.loads(self.scene._routing_report_json())
+        return self._routing
+
+    @property
+    def plan(self) -> dict:
+        """The routing plan as authored (specs, supports, routes), read once."""
+        if self._plan is None:
+            self._plan = json.loads(self.scene._routing_plan_json())
+        return self._plan
+
+    @property
+    def motion(self) -> Optional[dict]:
+        """The routing report over the baked cycle, when one was given."""
+        if self.timeline is None:
+            return None
+        if self._motion is None:
+            self._motion = json.loads(self.scene._routing_timeline_report_json(self.timeline, 0.05, 0.15))
+        return self._motion
+
+    def routed_cable(self, node: str, robots: list[str]) -> Optional[tuple[str, str, float]]:
+        """The route that runs an arm's cable to its controller — one whose
+        ends are a port on the robot and a port on the node (or on the box
+        the node stands in) — as ``(route, robot, cut length)``, the longest
+        when several arms share the cabinet."""
+        place = (self.nodes.get(node) or {}).get("place")
+        best = None
+        for row in self.routing.get("routes") or []:
+            ends = [row.get("from") or {}, row.get("to") or {}]
+            robot = next((e["target"] for e in ends if e.get("target_kind") == "robot" and e["target"] in robots), None)
+            box = any(e.get("target") == node or (place and e.get("target") == place) for e in ends)
+            length = row.get("cut_length_m")
+            if robot is None or not box or not isinstance(length, (int, float)):
+                continue
+            if best is None or length > best[2]:
+                best = (row["name"], robot, float(length))
+        return best
 
     def _points(self, sequences: Optional[list[str]]) -> list[dict]:
         try:
@@ -681,6 +745,8 @@ class _Cell:
         # own line, sized like a robot.
         if head in self.robots and tail in self.arms_of(head):
             return "robot"
+        if name in self.carriers:
+            return "carrier"
         kinds = [k for (t, k) in self.parts if t == name]
         if len(kinds) == 1:
             return kinds[0]
@@ -774,7 +840,103 @@ class _Cell:
             reqs, notes = self._node(name)
             cable, cable_notes = self._controller(name)
             return reqs + cable, notes + cable_notes
+        if kind == "carrier":
+            return self._carrier(name)
         return self._structure(name, category)
+
+    def _carrier(self, name: str) -> tuple[list[Requirement], list[str]]:
+        """What the dress pack a carrier stands for must offer: a bore the
+        bundle fits at 50 % fill and, over a baked cycle, the hose length
+        between its holders, the stroke a retraction would take up, the
+        twist per metre and the bend radius the replay showed. Derived for
+        the table and for `search_for`, not linted: the route checks
+        (`duct_fill`, `route_tension`, `route_twist`, `route_bend_moving`)
+        already say the same about the lines in it."""
+        from .routing import FILL_LIMIT, _hose_figures
+
+        plan = self.plan
+        carrier = next((s for s in plan.get("supports") or [] if s.get("name") == name), None)
+        if carrier is None:
+            return [], []
+        specs = {s["name"]: s for s in plan.get("specs") or []}
+        through = [
+            r for r in plan.get("routes") or []
+            if any(v.get("kind") == "support" and v.get("name") == name for v in r.get("via") or [])
+        ]
+        holders = carrier.get("holders") or []
+        on = ", ".join(
+            f"{h['robot']}/{h['link']}" if h.get("kind") == "link" else str(h.get("name")) for h in holders
+        )
+        reqs: list[Requirement] = []
+        notes: list[str] = []
+        if not through:
+            return reqs, notes
+        ods: list[float] = []
+        for r in through:
+            od = _number((specs.get(r["spec"]) or {}).get("od_m"))
+            if od is None:
+                notes.append(f"the bore counts no diameter for route {r['name']!r} — its spec states no od_mm")
+            else:
+                ods.append(od)
+        if ods:
+            needed = math.sqrt(sum(od * od for od in ods) / FILL_LIMIT) * 1000.0
+            reqs.append(
+                Requirement(
+                    "inner_mm",
+                    _round(needed, 1),
+                    basis=f"{len(ods)} line(s) of {', '.join(f'{od * 1000:g}' for od in ods)} mm at "
+                    f"{FILL_LIMIT * 100:.0f} % fill, dressed on {on}",
+                    lint=False,
+                )
+            )
+        motion = self.motion
+        if motion is None:
+            notes.append("free length, stroke and twist need the baked cycle — pass requirements(timeline=tl)")
+            return reqs, notes
+        figures = _hose_figures(motion.get("spans") or [], name)
+        if figures is None:
+            return reqs, notes
+        reqs.append(
+            Requirement(
+                "free_length_m",
+                _round(figures["free_length_m"], 2),
+                basis="hose between the holders over the cycle: " + "; ".join(figures["free_basis"])
+                + ", plus a bend radius at each end of every span",
+                lint=False,
+            )
+        )
+        i = figures["stroke_span"]
+        reqs.append(
+            Requirement(
+                "stroke_m",
+                _round(figures["stroke_m"], 3),
+                basis=f"holders h{i} → h{i + 1} move {figures['stroke_m']:.3f} m over the cycle — what a "
+                "retraction takes up (the loop's slack otherwise)",
+                lint=False,
+            )
+        )
+        if figures["twist_at"] is not None:
+            i, deg, material = figures["twist_at"]
+            reqs.append(
+                Requirement(
+                    "torsion_deg_m",
+                    _round(figures["twist_deg_m"], 0),
+                    basis=f"span h{i} → h{i + 1} twists {deg:.0f}° over {material:.2f} m of hose",
+                    lint=False,
+                )
+            )
+        if figures["bend_r_m"] is not None:
+            i = figures["bend_span"]
+            reqs.append(
+                Requirement(
+                    "bend_r_moving_mm",
+                    _round(figures["bend_r_m"] * 1000.0, 0),
+                    op="<=",
+                    basis=f"the replay bends the hose to r = {figures['bend_r_m'] * 1000:.0f} mm in span h{i} → h{i + 1}",
+                    lint=False,
+                )
+            )
+        return reqs, notes
 
     def _screwdriver(self) -> list[Requirement]:
         """What the screws in the cell ask of a screwdriver: the joint
@@ -1715,6 +1877,18 @@ class _Cell:
         kind = (node or {}).get("kind") or {}
         if not node or kind.get("kind") != "robot_controller":
             return [], []
+        robots = [r for r in kind.get("robots") or [] if r in self.robots]
+        if (routed := self.routed_cable(name, robots)) is not None:
+            # A route is the cable: its cut length (run, allowances, slack)
+            # replaces the along-the-axes estimate.
+            route, robot, length = routed
+            return [
+                Requirement(
+                    "cable_m",
+                    _round(length, 2),
+                    basis=f"route {route!r}: {robot} to {name}, cut length {length:.2f} m (run + allowances + slack)",
+                )
+            ], []
         place = node.get("place")
         if not place:
             return [], []

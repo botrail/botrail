@@ -23,8 +23,10 @@ export function selectionLabel(selection: Selection, robots: RobotUiState[]): st
       return `${selection.type} · ${selection.name}`;
     case "io_node":
       return `I/O node · ${selection.name}`;
+    case "route_via":
+      return `route · ${selection.route} · way point ${selection.index + 1}`;
     case "line":
-      return `${selection.kind === "tool" ? "tool" : "controller"} · ${selection.name}`;
+      return `${selection.kind === "tool" ? "tool" : selection.kind === "route" ? "route" : "controller"} · ${selection.name}`;
     case "robot":
       return `${scope(selection.robot)}robot base`;
     case "tcp": {

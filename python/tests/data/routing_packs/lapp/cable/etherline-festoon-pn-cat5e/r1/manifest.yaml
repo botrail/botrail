@@ -1,0 +1,70 @@
+schema_version: '0.1'
+id: lapp/cable/etherline-festoon-pn-cat5e/r1
+kind: spec
+category: cable.network
+name: ETHERLINE FESTOON PN Cat.5e (2170936)
+manufacturer:
+  name: LAPP
+  product_url: https://vn.lapp.com/products/2170936
+lifecycle: active
+articulated: false
+specs:
+  line_kind: cable
+  media:
+  - network
+  protocol: PROFINET
+  od_mm: 6.5
+  od_min_mm: 6.3
+  od_max_mm: 6.7
+  bend_r_fixed_mm: 26.8
+  bend_r_moving_mm: 67
+  mass_kg_m: 0.069
+  cores: 4
+  cross_section_mm2: 0.34
+  awg: 22
+configuration:
+  generator: cable_spec
+  params:
+    cut_m:
+      min: 1.0
+      max: 1000.0
+      step: 1.0
+      default: 100.0
+  components:
+  - role: cable
+    category: cable.network
+    part_number: '2170936'
+    dimensions_mm:
+      od: 6.5
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: '2170936'
+  unit: each
+  includes: []
+  requires: []
+  note: メートル売り (cut_m)。ドラム単位は販社による
+assets: {}
+sources:
+- kind: manufacturer_datasheet
+  url: https://vn.lapp.com/products/2170936
+  ref: 'product page: OD 6.5 (6.3-6.7) mm, bending radius fixed 26.8 mm, flexing 67
+    mm, 69 kg/km, 2x2xAWG22/7'
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは経路の導出に要る寸法・曲げ半径・質量と品番だけ。品番は製品を 指し示す引用で権利は LAPP にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

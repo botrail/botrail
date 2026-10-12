@@ -1,0 +1,68 @@
+schema_version: '0.1'
+id: hellermanntyton/clamp/h6p-pa66hs-bk/r1
+kind: spec
+category: cable.clamp
+name: H6P-PA66HS-BK P-clip (bundle to 10.9 mm, 211-60005)
+manufacturer:
+  name: HellermannTyton
+  product_url: https://www.hellermanntyton.com/
+lifecycle: active
+articulated: false
+specs:
+  bundle_max_mm: 10.9
+  width_mm: 10
+  hole_mm: 4.3
+  material: PA66HS
+  temperature_min_c: -40
+  temperature_max_c: 105
+configuration:
+  generator: clamp
+  params:
+    pack:
+      values:
+      - 100
+      default: 100
+  components:
+  - role: clip
+    category: cable.clamp
+    part_number: 211-60005
+    dimensions_mm:
+      width: 10.0
+      bundle_max: 10.9
+      hole: 4.3
+    codes: {}
+  behavior: {}
+  rules:
+    tolerance_mm: 25.0
+  examples: []
+order:
+  part_number: 211-60005
+  unit: pack
+  includes: []
+  requires: []
+  note: 100 個入り
+assets: {}
+sources:
+- kind: community
+  url: https://octopart.com/part/hellermanntyton/211-60005
+  ref: '211-60005: P-Clamp, 0.39 in wide, 0.43 in max bundle dia, PA66HS, black, HP
+    series'
+  fetched_at: '2026-10-11'
+- kind: community
+  url: https://www.standardelectricsupply.com/Hellermann-Tyton-211-60005-P-Clamp
+  ref: 7/16 in nominal dia, 0.047 in wall, 0.17 in mounting hole
+  fetched_at: '2026-10-11'
+licenses:
+- files: '**'
+  spdx: CC0-1.0
+  redistributable: true
+  note: 収載したのは保持径・幅・穴径と品番だけ。品番は製品を指し示す引用で権利は HellermannTyton にある。この編集物を CC0 で出す
+distribution: public
+validation:
+  level: V1
+  report: validation/report.json
+compatibility:
+  mounts: []
+  requires_adapter: []
+  programs: []
+  connections: []

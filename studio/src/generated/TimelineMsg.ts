@@ -5,6 +5,7 @@ import type { ContactMsg } from "./ContactMsg";
 import type { ObjectTrackMsg } from "./ObjectTrackMsg";
 import type { RobotTimelineMsg } from "./RobotTimelineMsg";
 import type { RopeTrack } from "./RopeTrack";
+import type { RouteFindingMsg } from "./RouteFindingMsg";
 import type { SignalTrackMsg } from "./SignalTrackMsg";
 import type { StepSpanMsg } from "./StepSpanMsg";
 import type { VehicleTrackMsg } from "./VehicleTrackMsg";
@@ -33,7 +34,13 @@ objects: Array<ObjectTrackMsg>,
  * Vertex track per simulated cloth, on the same grid. Empty (and absent
  * from older files) when the cell has no cloth.
  */
-cloths?: Array<ClothTrackMsg>, ropes?: Array<RopeTrack>,
+cloths?: Array<ClothTrackMsg>, ropes?: Array<RopeTrack>, 
+/**
+ * What the moving spans of the routes did over this cycle (bends,
+ * stretch, sag, contact, free length, twist), each with its time —
+ * filled when the cycle carries a `bt.routing.animate` replay.
+ */
+route_findings?: Array<RouteFindingMsg>, 
 /**
  * Reference-frame track per vehicle that drove, on the same grid.
  */

@@ -54,8 +54,31 @@ proxy without adding its collision geometry. Unsupported geometry is rejected
 with a reason. The spring presets (`axial_hz=500`, `bending_hz=20`) are native
 frequency settings and have no calibrated material-modulus claim: a higher
 `bending_hz` is a stiffer cable, up to what the solver's step can hold.
+The bending springs rest in the shape the rope is laid in (`rest="start"`,
+the default: a pre-formed harness keeps its bends — and a corner of the
+laid line keeps its corner) or straight (`rest="straight"`: a tube or a
+cable off the reel, bent only by what holds it and by its weight, its
+laid shape just where it starts). A stiff spring on a rope laid with
+corners is the case to choose for: under `"start"` it holds them, under
+`"straight"` it springs them round. `rod_hz` makes the rope a rod: windows
+of seven particles, every other particle, are each drawn toward their own
+rest shape (straight, or as laid) by a spring of that frequency, so a
+bend anywhere along the rope is resisted — the bending springs alone
+resist a fold and little else, and a slack tube between two holders hangs
+in a V under them where a rod bows. Zero (the default) is a rope; the
+routing replay uses 120 Hz. It is a spring, not a calibrated flexural
+rigidity, and it is bounded by the step: at 480 steps a second the
+replay tears past about 240 Hz.
 `friction` is the rope collider's one coefficient; `color` its display colour
 (linear RGB, like an obstacle's), carried into Studio and the USD export.
+`ground_z` adds a floor at that height for the rope to rest on — a cell has
+no floor obstacle of its own, and a cable laid on the ground would fall
+without one. `preroll_s` settles the rope under gravity for that long before
+the clock starts, everything that holds it parked at its time-zero pose: a
+rope laid along a design polyline is not yet hanging, and the first moments
+of a replay would otherwise be its fall. `extra_colliders` are static shapes
+of the replay's own, `(pose, shape)` pairs in a connector's form — the floor
+and walls of a duct the cell models as one box.
 
 ## Ends held in a part
 
@@ -93,11 +116,45 @@ mass_kg=0.01)]`. A cuboid uses `shape={"Cuboid": [hx,hy,hz]}`. The constraint
 captures the current particle's connector-local anchor; an input connector
 pose does not silently snap the rope end onto the connector center.
 
+`solver="static"` draws the rope instead of simulating it: at every frame
+of the bake the line is the inextensible rod at rest between what holds it
+— of least bending and gravitational energy, held in position by every
+anchor and pin (and in direction where an anchor holds two or more
+samples), clear of the collision links, the obstacles, the extra colliders
+and the floor — with no dynamics, no settling and no spring settings. What
+resists the bend is a flexural rigidity, `rigidity_nm2` (N·m²; a
+polyurethane tube's for the rope's diameter when left out: 1.5e-3 at 6 mm,
+with the fourth power of the diameter), against the rope's weight per
+metre. The shape at a frame does not depend on how fast the cycle ran to
+it, and the laid shape only picks which rest the solve settles to (a loop
+stays on the side it is laid). Grippers, connectors and the rope's spring
+settings do not apply; the track has 30 frames a second. A frame is solved
+to rest from the one before it — a relaxation, run until nothing moves
+more than a hundredth of a millimetre in a round — and a rope whose bodies
+all stand still is solved once. Between two anchors that hold the rope's
+roll (`anchor(..., roll=True)`) the rod carries torsion as well
+(`torsion_nm2`, GJ; `rigidity_nm2 / 1.4` unless given): twist-free as
+first laid at rest, counted from there, pushed toward the shape that
+carries less of it; the track's `twist_deg` has it per frame. An anchor
+on a rail (`anchor(..., rail=...)`) is a carriage the rod runs along it.
+
+`bt.rope.animate_many(scene, cycle, [dict(name=..., points=..., ...), ...])`
+runs several passes against one bake in one call, computed side by side
+(replayed ropes do not interact, so each is what `animate` would give one
+after another; static passes whose laid lines come within 15 cm of each
+other are solved together, each keeping two radii off the others), and
+returns the timeline with every rope that ran plus, per pass, `None` or
+the reason it did not. `bt.routing.animate` replays a
+cell's spans this way.
+
 `timeline.export_usd` writes each rope as a tube mesh under `/World/Ropes`
 (eight sides at the rope's radius, capped) with its points time-sampled on
 the export's frames; a hold costs its two ends.
 
-Uses `rapier-rope` 0.1.0 from crates.io with f64 enabled. The botrail adapter remains unpublished. Rust users can configure the full
+Uses `rapier-rope` 0.1.1 from crates.io with f64 enabled (0.1.1 brings the rod). The botrail adapter remains unpublished. Rust users can configure the full
 `RopeSpec` through `botrail_rope::pass::RopePass`. Run the primitive-only
 `cargo run -p botrail-rope --example rope_replay` for a standalone recording.
-Project persistence of ropes is not supported.
+Project persistence of ropes is not supported: a rope declared here is a
+replay, not a resident. The cables and tubes a cell *has* are declared as
+[routes](routing.md), which ride the project; their moving spans are what
+this replay will verify next.
