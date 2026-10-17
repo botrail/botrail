@@ -1,58 +1,75 @@
-//! Stock carving: voxel subtraction of the cutter's swept volume from a
-//! stock obstacle, walked over a baked timeline.
+//! Stock carving: the cutter's swept volume subtracted from a stock
+//! obstacle along a baked timeline, computed by
+//! [cutrail](https://crates.io/crates/cutrail), a mesh-boolean material
+//! removal core.
 //!
 //! This is *presentation and bookkeeping*, not verification (see
 //! `design/design-machining.md` §3.3 S4 / §5): in a kinematic world the TCP
 //! follows the toolpath exactly, so the carve can never contradict the
 //! plan — what it adds is the picture (the machined part as a mesh) and
 //! the numbers (removed / remaining volume). Deterministic by
-//! construction: a uniform grid in the stock's local frame, initialized
-//! by exact containment against the stock's own solid collision shapes,
-//! then swept with the cutter cylinder at sub-voxel steps.
+//! construction: the stock is a closed mesh in its own frame, kept as
+//! cubic tiles so a cut only touches the tiles under the cutter; the TCP
+//! track is coalesced into segments that stay within `max_deviation` of
+//! every sample, and each segment is subtracted as the convex hull of the
+//! cutter at its ends. The booleans are exact for their polygonal inputs
+//! and independent of scheduling.
 //!
-//! parry ships everything volumetric this could want; only point
-//! containment is needed here, so the grid and the surface extraction
-//! stay first-party and dependency-free.
+//! Units: botrail works in meters, cutrail in millimeters; the conversion
+//! happens in this module and nowhere else.
 
-use nalgebra::{Isometry3, Point3, Vector3};
+use botrail_mesh::MeshData;
+use botrail_model::Geometry;
+use cutrail::{
+    CutOutcome, Engine, EngineOptions, FaceKind, ManifoldKernel, MotionSegment, PartId,
+    Pose as ToolPose, SegmentBuilder, StockShape, Tool, TriMesh,
+};
+use nalgebra::{Isometry3, Vector3};
 use thiserror::Error;
 
 use crate::rollout::SequenceTimeline;
 use crate::Scene;
+
+pub use crate::stages::{staged_timeline, staged_timeline_windows, StageWindow};
+
+/// Meters to millimeters.
+const MM: f64 = 1e3;
+/// Cubic meters to cubic millimeters.
+const MM3: f64 = 1e9;
 
 #[derive(Debug, Error)]
 pub enum CarveError {
     #[error("unknown obstacle `{0}`")]
     UnknownStock(String),
     #[error("unknown robot `{0}`")]
-    UnknownRobot(String),
-    #[error("stock `{0}` has no collision geometry to voxelize")]
-    NoGeometry(String),
-    #[error(
-        "voxel size {voxel} m over the stock needs {cells} cells (cap {cap}); \
-         use a coarser voxel"
-    )]
-    TooFine {
-        voxel: f64,
-        cells: usize,
-        cap: usize,
-    },
-    #[error("voxel size must be positive, got {0}")]
-    BadVoxel(f64),
+    UnknownRobot(usize),
+    #[error("stock `{0}` cannot be carved: {1}")]
+    Stock(String, String),
     #[error("cutter radius/length must be positive")]
     BadCutter,
+    #[error("chord tolerance, deviation, tile size and dt must be positive")]
+    BadOptions,
+    #[error("cutting `{0}` failed: {1}")]
+    Cut(String, String),
 }
 
 #[derive(Debug, Clone)]
 pub struct CarveOptions {
-    /// Grid edge length (m). The cut geometry quantizes to this.
-    pub voxel_size: f64,
+    /// Chord tolerance (m) the cutter's sweeps and a cylindrical stock are
+    /// polygonized with. The cut geometry is exact to this.
+    pub chord_tolerance: f64,
+    /// The sampled TCP track is coalesced into segments; no sample strays
+    /// farther than this (m) from the segment it was folded into. Segments
+    /// are also capped at 5 mm of travel and 2° of axis rotation.
+    pub max_deviation: f64,
+    /// Edge (m) of the cubic tiles the stock is kept in, so that a cut only
+    /// touches the tiles under the cutter. `None` picks 2.5 cutter diameters.
+    pub tile_size: Option<f64>,
     /// Cutter (flute) radius (m).
     pub cutter_radius: f64,
     /// Cutting length from the tip along the tool axis (m).
     pub cutter_length: f64,
-    /// Timeline sampling period (s); sub-stepped further so the TCP never
-    /// moves more than half a voxel between carve stamps.
+    /// Timeline sampling period (s).
     pub dt: f64,
     /// Face color of the surviving original skin (linear RGB).
     pub stock_color: [f32; 3],
@@ -65,7 +82,9 @@ pub struct CarveOptions {
 impl Default for CarveOptions {
     fn default() -> Self {
         CarveOptions {
-            voxel_size: 0.001,
+            chord_tolerance: 1e-5,
+            max_deviation: 1e-5,
+            tile_size: None,
             cutter_radius: 0.004,
             cutter_length: 0.03,
             dt: 0.01,
@@ -75,67 +94,111 @@ impl Default for CarveOptions {
     }
 }
 
-/// The carved stock: a boundary mesh in the stock's local frame plus the
-/// volume bookkeeping.
+/// The carved stock: one closed boundary mesh in the stock's local frame
+/// plus the volume bookkeeping.
 #[derive(Debug, Clone)]
 pub struct StockCarve {
     /// Boundary mesh of the remaining material, stock-local coordinates
-    /// (place it at the stock's pose).
-    pub mesh: botrail_mesh::MeshData,
+    /// (place it at the stock's pose). Face colors mark the surviving skin
+    /// and the surfaces the cutter made.
+    pub mesh: MeshData,
     /// World pose of the stock at carve time.
     pub pose: Isometry3<f64>,
-    pub voxel_size: f64,
+    /// Chord tolerance (m) the carve was run at.
+    pub chord_tolerance: f64,
     pub initial_volume: f64,
     pub removed_volume: f64,
     pub remaining_volume: f64,
 }
 
-struct Grid {
-    origin: Vector3<f64>,
-    voxel: f64,
-    nx: usize,
-    ny: usize,
-    nz: usize,
-    filled: Vec<bool>,
-}
-
-impl Grid {
-    fn index(&self, x: usize, y: usize, z: usize) -> usize {
-        (z * self.ny + y) * self.nx + x
-    }
-
-    fn at(&self, x: isize, y: isize, z: isize) -> bool {
-        if x < 0 || y < 0 || z < 0 {
-            return false;
-        }
-        let (x, y, z) = (x as usize, y as usize, z as usize);
-        if x >= self.nx || y >= self.ny || z >= self.nz {
-            return false;
-        }
-        self.filled[self.index(x, y, z)]
-    }
-
-    fn center(&self, x: usize, y: usize, z: usize) -> Vector3<f64> {
-        self.origin
-            + Vector3::new(
-                (x as f64 + 0.5) * self.voxel,
-                (y as f64 + 0.5) * self.voxel,
-                (z as f64 + 0.5) * self.voxel,
-            )
-    }
-}
-
-/// One frame of a progressive carve: the remaining stock as of `time`.
-/// Snapshots are only taken where the sweep actually removed material
-/// since the previous one, so idle stretches produce no duplicate
-/// meshes.
+/// One snapshot of a progressive carve: the mesh of one tile of the stock
+/// as of `time`. At the first cut every tile is snapshotted (the pristine
+/// ones included, so the tiles can take over from the stock); afterwards
+/// only tiles the sweep changed since the previous snapshot are, so idle
+/// stretches and untouched tiles produce no duplicate meshes. An empty
+/// mesh means the tile has been cut away entirely.
 #[derive(Debug, Clone)]
 pub struct CarveStage {
     /// Timeline time this state is current from.
     pub time: f64,
-    pub mesh: botrail_mesh::MeshData,
+    /// Tile index (stable for the whole carve).
+    pub cell: u32,
+    pub mesh: MeshData,
     /// Cumulative removed volume as of this stage (m³).
     pub removed_volume: f64,
+}
+
+/// The stock's geometry as cutrail stock, in millimeters and the
+/// obstacle's local frame.
+fn stock_shape(name: &str, geometry: &Geometry) -> Result<StockShape, CarveError> {
+    match geometry {
+        Geometry::Box { size } => Ok(StockShape::Box {
+            min: [-size.x / 2.0 * MM, -size.y / 2.0 * MM, -size.z / 2.0 * MM],
+            max: [size.x / 2.0 * MM, size.y / 2.0 * MM, size.z / 2.0 * MM],
+        }),
+        // botrail's cylinder stands along z, like cutrail's.
+        Geometry::Cylinder { radius, length } => Ok(StockShape::Cylinder {
+            center: [0.0, 0.0],
+            radius: radius * MM,
+            z0: -length / 2.0 * MM,
+            z1: length / 2.0 * MM,
+        }),
+        Geometry::Sphere { .. } => Err(CarveError::Stock(
+            name.to_string(),
+            "a sphere is not a stock shape".to_string(),
+        )),
+        Geometry::Mesh { path, scale } => {
+            let data = botrail_mesh::load_path(path)
+                .map_err(|e| CarveError::Stock(name.to_string(), e.to_string()))?;
+            Ok(StockShape::Mesh(TriMesh {
+                positions: data
+                    .vertices
+                    .iter()
+                    .map(|v| {
+                        [
+                            v[0] * scale.x * MM,
+                            v[1] * scale.y * MM,
+                            v[2] * scale.z * MM,
+                        ]
+                    })
+                    .collect(),
+                triangles: data.indices,
+            }))
+        }
+    }
+}
+
+/// A cutrail mesh (mm) as botrail mesh data (m) with the surface classing
+/// as face colors.
+fn mesh_data(mesh: &TriMesh, kinds: &[FaceKind], options: &CarveOptions) -> MeshData {
+    MeshData {
+        vertices: mesh
+            .positions
+            .iter()
+            .map(|p| [p[0] / MM, p[1] / MM, p[2] / MM])
+            .collect(),
+        indices: mesh.triangles.clone(),
+        face_colors: kinds
+            .iter()
+            .map(|k| match k {
+                FaceKind::Stock => options.stock_color,
+                FaceKind::Cut => options.cut_color,
+            })
+            .collect(),
+    }
+}
+
+/// Subtracts one segment; `true` when it removed material.
+fn cut(
+    engine: &mut Engine,
+    tool: &Tool,
+    stock: &str,
+    segment: &MotionSegment,
+) -> Result<bool, CarveError> {
+    let report = engine
+        .cut(tool, segment)
+        .map_err(|e| CarveError::Cut(stock.to_string(), e.to_string()))?;
+    Ok(report.outcome != CutOutcome::NoChange)
 }
 
 /// Carves `stock` with the cutter swept along `timeline`'s track of
@@ -152,9 +215,10 @@ pub fn carve_stock(
     carve_stock_staged(scene, timeline, stock, robot, tcp, options, 1).map(|(carve, _)| carve)
 }
 
-/// [`carve_stock`] plus intermediate snapshots at `stages` equal time
+/// [`carve_stock`] plus per-tile snapshots at `stages` equal time
 /// boundaries — the raw material of progressive-removal display (each
-/// stage shown for its window via [`staged_timeline`]).
+/// tile's chain of snapshots shown for its windows via
+/// [`staged_timeline_windows`]).
 #[allow(clippy::too_many_arguments)]
 pub fn carve_stock_staged(
     scene: &Scene,
@@ -165,372 +229,161 @@ pub fn carve_stock_staged(
     options: &CarveOptions,
     stages: usize,
 ) -> Result<(StockCarve, Vec<CarveStage>), CarveError> {
-    if !(options.voxel_size.is_finite() && options.voxel_size > 0.0) {
-        return Err(CarveError::BadVoxel(options.voxel_size));
+    let positive = |v: f64| v.is_finite() && v > 0.0;
+    if !(positive(options.chord_tolerance)
+        && positive(options.max_deviation)
+        && positive(options.dt)
+        && options.tile_size.is_none_or(positive))
+    {
+        return Err(CarveError::BadOptions);
     }
-    if options.cutter_radius <= 0.0 || options.cutter_length <= 0.0 {
+    if !(positive(options.cutter_radius) && positive(options.cutter_length)) {
         return Err(CarveError::BadCutter);
     }
-    let (obstacle, collider) = scene
+    let (obstacle, _) = scene
         .obstacle_with_collider(stock)
         .ok_or_else(|| CarveError::UnknownStock(stock.to_string()))?;
-    let (mins, maxs) = collider
-        .aabb(&Isometry3::identity())
-        .ok_or_else(|| CarveError::NoGeometry(stock.to_string()))?;
-    let vox = options.voxel_size;
-    let nx = (((maxs[0] - mins[0]) / vox).ceil() as usize).max(1);
-    let ny = (((maxs[1] - mins[1]) / vox).ceil() as usize).max(1);
-    let nz = (((maxs[2] - mins[2]) / vox).ceil() as usize).max(1);
-    const CELL_CAP: usize = 50_000_000;
-    let cells = nx * ny * nz;
-    if cells > CELL_CAP {
-        return Err(CarveError::TooFine {
-            voxel: vox,
-            cells,
-            cap: CELL_CAP,
-        });
+    let track = &timeline
+        .robots
+        .get(robot)
+        .ok_or(CarveError::UnknownRobot(robot))?
+        .trajectory;
+
+    let shape = stock_shape(stock, &obstacle.geometry)?;
+    let tool = Tool::flat_end_mill(2.0 * options.cutter_radius * MM, options.cutter_length * MM);
+    let tile = options.tile_size.unwrap_or(5.0 * options.cutter_radius) * MM;
+    let engine_options = EngineOptions {
+        sweep_tolerance: options.chord_tolerance * MM,
+        stock_tolerance: options.chord_tolerance * MM,
+        ..EngineOptions::default()
     }
+    .with_tile_size(tile);
+    let mut engine = Engine::new(ManifoldKernel, &[shape], engine_options)
+        .map_err(|e| CarveError::Stock(stock.to_string(), e.to_string()))?;
+    let initial_volume = engine.total_volume() / MM3;
 
-    let mut grid = Grid {
-        origin: Vector3::new(mins[0], mins[1], mins[2]),
-        voxel: vox,
-        nx,
-        ny,
-        nz,
-        filled: vec![false; cells],
-    };
-    let mut initial = 0usize;
-    for z in 0..nz {
-        for y in 0..ny {
-            for x in 0..nx {
-                let c = grid.center(x, y, z);
-                if collider.contains_local_point(&Point3::from(c)) {
-                    let i = grid.index(x, y, z);
-                    grid.filled[i] = true;
-                    initial += 1;
-                }
-            }
-        }
-    }
-
-    // The pre-cut occupancy: a boundary face whose empty neighbor *was*
-    // filled is a surface the cutter made — that distinction is the
-    // machined-finish coloring.
-    let was_filled = grid.filled.clone();
-
-    // Sweep the cutter along the baked track: world TCP poses at `dt`,
-    // sub-stepped so consecutive stamps sit within half a voxel.
+    // The TCP in the stock's frame, in cutrail's units.
     let to_local = obstacle.pose.inverse();
-    let track = &timeline.robots[robot].trajectory;
-    let stamp = |grid: &mut Grid, tip: &Vector3<f64>, axis: &Vector3<f64>| -> bool {
-        let r = options.cutter_radius;
-        let len = options.cutter_length;
-        // Cell range from the cutter's local AABB (tip to tip + len*axis,
-        // inflated by the radius).
-        let end = tip + axis * len;
-        let lo = tip.inf(&end) - Vector3::repeat(r);
-        let hi = tip.sup(&end) + Vector3::repeat(r);
-        let cell = |v: f64, o: f64| ((v - o) / vox).floor() as isize;
-        let x0 = cell(lo.x, grid.origin.x).max(0) as usize;
-        let y0 = cell(lo.y, grid.origin.y).max(0) as usize;
-        let z0 = cell(lo.z, grid.origin.z).max(0) as usize;
-        let x1 = (cell(hi.x, grid.origin.x) + 1).clamp(0, grid.nx as isize) as usize;
-        let y1 = (cell(hi.y, grid.origin.y) + 1).clamp(0, grid.ny as isize) as usize;
-        let z1 = (cell(hi.z, grid.origin.z) + 1).clamp(0, grid.nz as isize) as usize;
-        let mut changed = false;
-        for z in z0..z1 {
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = grid.index(x, y, z);
-                    if !grid.filled[i] {
-                        continue;
-                    }
-                    let c = grid.center(x, y, z);
-                    // A flat end mill: strictly the cylinder between the
-                    // tip plane and the flute length — clamping here would
-                    // grow a spherical cap below the tip.
-                    let along = (c - tip).dot(axis);
-                    if !(0.0..=len).contains(&along) {
-                        continue;
-                    }
-                    let radial = (c - (tip + axis * along)).norm();
-                    if radial <= r {
-                        grid.filled[i] = false;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        changed
+    let tool_pose = |q: &[f64]| -> Option<ToolPose> {
+        let poses = scene.fk_for(robot, q).ok()?;
+        let local = to_local * poses[tcp];
+        let tip = local.translation.vector;
+        let axis = local.rotation * Vector3::z();
+        Some(ToolPose::new(
+            [tip.x * MM, tip.y * MM, tip.z * MM],
+            [axis.x, axis.y, axis.z],
+        ))
     };
 
-    let tcp_pose = |q: &[f64]| -> Option<(Vector3<f64>, Vector3<f64>)> {
-        let poses = scene.fk_for(robot, q).ok()?;
-        let world = poses[tcp];
-        let local = to_local * world;
-        Some((local.translation.vector, local.rotation * Vector3::z()))
-    };
+    // Samples at `dt` are coalesced into segments: every sample stays within
+    // `max_deviation` of its segment, corners break exactly at the corner
+    // sample, and a 5 mm / 2° cap keeps each boolean small. The cutter is
+    // also stamped where it starts, so a parked cutter still bores its hole.
+    let mut builder = SegmentBuilder::new(5.0, 2.0).with_max_deviation(options.max_deviation * MM);
+    let mut pending_stamp = tool_pose(&track.sample(0.0));
+    if let Some(start) = pending_stamp {
+        builder.push(start);
+    }
 
     let stages = stages.max(1);
-    let vol = vox * vox * vox;
     let mut snapshots: Vec<CarveStage> = Vec::new();
-    let mut last_count = initial;
+    let mut last_revision = engine.revision();
+    let mut known: Vec<PartId> = engine.parts().iter().map(|p| p.id).collect();
+    let mut handed_over = false;
     let mut t = 0.0;
-    let mut prev = tcp_pose(&track.sample(0.0));
     for k in 1..=stages {
         let boundary = timeline.duration * k as f64 / stages as f64;
         let mut change_t = None;
         while t < boundary - 1e-9 {
             let next_t = (t + options.dt).min(boundary);
-            let next = tcp_pose(&track.sample(next_t));
-            if let (Some((p0, a0)), Some((p1, a1))) = (&prev, &next) {
-                let dist = (p1 - p0).norm();
-                let steps = ((dist / (vox * 0.5)).ceil() as usize).max(1);
-                for s in 0..=steps {
-                    let u = s as f64 / steps as f64;
-                    let tip = p0.lerp(p1, u);
-                    let axis = (a0.lerp(a1, u)).normalize();
-                    if stamp(&mut grid, &tip, &axis) {
+            if let Some(start) = pending_stamp.take() {
+                if cut(
+                    &mut engine,
+                    &tool,
+                    stock,
+                    &MotionSegment::linear(start, start),
+                )? {
+                    change_t = Some(next_t);
+                }
+            }
+            if let Some(pose) = tool_pose(&track.sample(next_t)) {
+                if let Some(segment) = builder.push(pose) {
+                    if cut(&mut engine, &tool, stock, &segment)? {
                         change_t = Some(next_t);
                     }
                 }
             }
-            prev = next;
             t = next_t;
         }
+        // The motion still held below the thresholds is cut at the boundary,
+        // so the snapshot shows everything up to it.
+        if let Some(segment) = builder.flush() {
+            if cut(&mut engine, &tool, stock, &segment)? {
+                change_t = Some(boundary);
+            }
+        }
         // Snapshot only where the sweep changed something: idle windows
-        // extend the previous stage instead of duplicating its mesh. The
+        // extend the previous stage instead of duplicating meshes. The
         // snapshot is stamped with the *last change* time, not the window
         // boundary — the state is identical at both (nothing moved in
         // between), but this keeps the display exact from the moment it
-        // switches, shows the pristine stock until the first real cut,
-        // and gives the final stage a nonzero window even when cutting
-        // runs into the last grid cell.
-        let count = grid.filled.iter().filter(|f| **f).count();
-        if count != last_count {
-            snapshots.push(CarveStage {
-                time: change_t.unwrap_or(boundary),
-                mesh: boundary_mesh(&grid, &was_filled, options.stock_color, options.cut_color),
-                removed_volume: (initial - count) as f64 * vol,
-            });
-            last_count = count;
+        // switches and shows the pristine stock until the first real cut.
+        let revision = engine.revision();
+        if revision != last_revision {
+            let time = change_t.unwrap_or(boundary);
+            let removed_volume = initial_volume - engine.total_volume() / MM3;
+            let current: Vec<PartId> = engine.parts().iter().map(|p| p.id).collect();
+            let changed: Vec<PartId> = if handed_over {
+                engine.changed_since(last_revision)
+            } else {
+                current.clone()
+            };
+            for id in changed {
+                if let Some((mesh, kinds)) = engine.mesh_with_kinds(id) {
+                    snapshots.push(CarveStage {
+                        time,
+                        cell: id.0,
+                        mesh: mesh_data(&mesh, &kinds, options),
+                        removed_volume,
+                    });
+                }
+            }
+            for id in &known {
+                if !current.contains(id) {
+                    snapshots.push(CarveStage {
+                        time,
+                        cell: id.0,
+                        mesh: MeshData::new(Vec::new(), Vec::new()),
+                        removed_volume,
+                    });
+                }
+            }
+            known = current;
+            handed_over = true;
+            last_revision = revision;
         }
     }
 
-    let remaining = last_count;
-    let mesh = match snapshots.last() {
-        Some(stage) => stage.mesh.clone(),
-        None => boundary_mesh(&grid, &was_filled, options.stock_color, options.cut_color),
+    let remaining_volume = engine.total_volume() / MM3;
+    let mesh = if engine.parts().is_empty() {
+        MeshData::new(Vec::new(), Vec::new())
+    } else {
+        let (mesh, kinds) = engine
+            .merged_mesh_with_kinds()
+            .map_err(|e| CarveError::Cut(stock.to_string(), e.to_string()))?;
+        mesh_data(&mesh, &kinds, options)
     };
     Ok((
         StockCarve {
             mesh,
             pose: obstacle.pose,
-            voxel_size: vox,
-            initial_volume: initial as f64 * vol,
-            removed_volume: (initial - remaining) as f64 * vol,
-            remaining_volume: remaining as f64 * vol,
+            chord_tolerance: options.chord_tolerance,
+            initial_volume,
+            removed_volume: initial_volume - remaining_volume,
+            remaining_volume,
         },
         snapshots,
     ))
-}
-
-/// The timeline with progressive-removal visibility injected: the stock
-/// obstacle shows until the first stage's time, then each stage obstacle
-/// shows for its window (stowed outside it). `stage_names[i]` must be an
-/// obstacle placed at `pose` whose geometry is `stages[i]`'s mesh; the
-/// caller registers those. Presentation only — nothing else about the
-/// timeline changes.
-pub fn staged_timeline(
-    timeline: &SequenceTimeline,
-    stock: &str,
-    pose: Isometry3<f64>,
-    stage_names: &[String],
-    stage_times: &[f64],
-) -> SequenceTimeline {
-    use crate::rollout::{ObjectTrack, TrackSpan};
-    let mut out = timeline.clone();
-    let end = out.duration;
-    let first = stage_times.first().copied().unwrap_or(end);
-    // The pristine stock, until the first cut state takes over.
-    out.objects.retain(|track| track.name != stock);
-    let mut stock_spans = vec![TrackSpan::Hold {
-        t0: 0.0,
-        t1: first,
-        pose,
-    }];
-    if first < end {
-        stock_spans.push(TrackSpan::Stowed {
-            t0: first,
-            t1: end,
-            pose,
-        });
-    }
-    out.objects.push(ObjectTrack {
-        name: stock.to_string(),
-        spans: stock_spans,
-    });
-    for (i, name) in stage_names.iter().enumerate() {
-        let from = stage_times[i];
-        let to = stage_times.get(i + 1).copied().unwrap_or(end);
-        let mut spans = Vec::new();
-        if from > 0.0 {
-            spans.push(TrackSpan::Stowed {
-                t0: 0.0,
-                t1: from,
-                pose,
-            });
-        }
-        spans.push(TrackSpan::Hold {
-            t0: from,
-            t1: to,
-            pose,
-        });
-        if to < end {
-            spans.push(TrackSpan::Stowed {
-                t0: to,
-                t1: end,
-                pose,
-            });
-        }
-        out.objects.push(ObjectTrack {
-            name: name.clone(),
-            spans,
-        });
-    }
-    out
-}
-
-/// Boundary surface of the filled cells, greedy-meshed: exposed faces on
-/// each axis/direction merge into maximal rectangles first (the flat top
-/// of a plate becomes a handful of quads instead of tens of thousands),
-/// then emit two triangles each, outward-wound. Faces are classed by what
-/// exposed them — the surviving original skin keeps `stock_color`, a face
-/// whose empty neighbor *was* filled is a surface the cutter made and
-/// gets `cut_color`; rectangles never merge across the two.
-fn boundary_mesh(
-    grid: &Grid,
-    was_filled: &[bool],
-    stock_color: [f32; 3],
-    cut_color: [f32; 3],
-) -> botrail_mesh::MeshData {
-    let mut vertices: Vec<[f64; 3]> = Vec::new();
-    let mut indices: Vec<[u32; 3]> = Vec::new();
-    let mut face_colors: Vec<[f32; 3]> = Vec::new();
-    let mut vertex = |p: Vector3<f64>| -> u32 {
-        vertices.push([p.x, p.y, p.z]);
-        (vertices.len() - 1) as u32
-    };
-
-    const NONE: u8 = 0;
-    const SKIN: u8 = 1;
-    const CUT: u8 = 2;
-
-    // For each axis `d`, sweep the layers perpendicular to it; `u`/`v`
-    // span the layer. A face exists where a filled cell meets an empty
-    // neighbor along `d` (either direction, handled by `sign`).
-    for d in 0..3 {
-        let (u, v) = ((d + 1) % 3, (d + 2) % 3);
-        let dims = [grid.nx, grid.ny, grid.nz];
-        let (nd, nu, nv) = (dims[d], dims[u], dims[v]);
-        for sign in [-1isize, 1isize] {
-            for layer in 0..nd {
-                // Class mask of exposed faces in this layer.
-                let mut mask = vec![NONE; nu * nv];
-                for j in 0..nv {
-                    for i in 0..nu {
-                        let mut cell = [0isize; 3];
-                        cell[d] = layer as isize;
-                        cell[u] = i as isize;
-                        cell[v] = j as isize;
-                        if !grid.at(cell[0], cell[1], cell[2]) {
-                            continue;
-                        }
-                        let mut neighbor = cell;
-                        neighbor[d] += sign;
-                        if grid.at(neighbor[0], neighbor[1], neighbor[2]) {
-                            continue;
-                        }
-                        // The neighbor is empty now; was it stock before
-                        // the sweep? In-bounds check mirrors `Grid::at`.
-                        let removed = neighbor[0] >= 0
-                            && neighbor[1] >= 0
-                            && neighbor[2] >= 0
-                            && (neighbor[0] as usize) < grid.nx
-                            && (neighbor[1] as usize) < grid.ny
-                            && (neighbor[2] as usize) < grid.nz
-                            && was_filled[grid.index(
-                                neighbor[0] as usize,
-                                neighbor[1] as usize,
-                                neighbor[2] as usize,
-                            )];
-                        mask[j * nu + i] = if removed { CUT } else { SKIN };
-                    }
-                }
-                // Greedy rectangles over the mask, one class at a time.
-                let mut used = vec![false; nu * nv];
-                for j in 0..nv {
-                    for i in 0..nu {
-                        let class = mask[j * nu + i];
-                        if class == NONE || used[j * nu + i] {
-                            continue;
-                        }
-                        let mut w = 1;
-                        while i + w < nu && mask[j * nu + i + w] == class && !used[j * nu + i + w] {
-                            w += 1;
-                        }
-                        let mut h = 1;
-                        'grow: while j + h < nv {
-                            for k in 0..w {
-                                let at = (j + h) * nu + i + k;
-                                if mask[at] != class || used[at] {
-                                    break 'grow;
-                                }
-                            }
-                            h += 1;
-                        }
-                        for jj in j..j + h {
-                            for ii in i..i + w {
-                                used[jj * nu + ii] = true;
-                            }
-                        }
-                        // Rectangle corners in grid coordinates: the face
-                        // plane sits at `layer` (+1 when facing +d).
-                        let plane = if sign > 0 { layer + 1 } else { layer } as f64;
-                        let corner = |du: usize, dv: usize| -> Vector3<f64> {
-                            let mut g = [0.0f64; 3];
-                            g[d] = plane;
-                            g[u] = (i + du) as f64;
-                            g[v] = (j + dv) as f64;
-                            grid.origin + Vector3::new(g[0], g[1], g[2]) * grid.voxel
-                        };
-                        let a = vertex(corner(0, 0));
-                        let b = vertex(corner(w, 0));
-                        let c = vertex(corner(w, h));
-                        let e = vertex(corner(0, h));
-                        // Outward winding: for +d faces (u, v, d) is a
-                        // right-handed frame, so a->b->c faces +d; -d
-                        // faces flip.
-                        if sign > 0 {
-                            indices.push([a, b, c]);
-                            indices.push([a, c, e]);
-                        } else {
-                            indices.push([a, c, b]);
-                            indices.push([a, e, c]);
-                        }
-                        let color = if class == CUT { cut_color } else { stock_color };
-                        face_colors.push(color);
-                        face_colors.push(color);
-                    }
-                }
-            }
-        }
-    }
-    botrail_mesh::MeshData {
-        vertices,
-        indices,
-        face_colors,
-    }
 }
 
 #[cfg(test)]
@@ -575,11 +428,10 @@ mod tests {
         )
     }
 
-    #[test]
-    fn a_parked_cutter_bores_one_round_hole() {
+    /// The flange-down configuration and a plate whose top sits 2 mm above
+    /// the parked cutter's tip, offset by `(dx, dy)` from the tip.
+    fn parked_cutter_scene(dx: f64, dy: f64, size: Vector3<f64>) -> (Scene, Vec<f64>, usize) {
         let mut scene = Scene::new(Arc::new(machining_robot()));
-        // Flange-down pose; the plate top sits 2 mm above the tip, so the
-        // parked cutter is buried 2 mm deep in the stock.
         let q = vec![0.0, 0.5, 0.9, std::f64::consts::PI - 1.4, 0.0, 0.0];
         scene.set_joint_positions(q.clone()).unwrap();
         let tcp = scene.robot().default_tcp_link();
@@ -587,47 +439,42 @@ mod tests {
         scene
             .add_obstacle(
                 "plate",
-                Geometry::Box {
-                    size: Vector3::new(0.06, 0.06, 0.01),
-                },
-                Isometry3::translation(tip.x, tip.y, tip.z + 0.002 - 0.005),
+                Geometry::Box { size },
+                Isometry3::translation(tip.x + dx, tip.y + dy, tip.z + 0.002 - size.z / 2.0),
             )
             .unwrap();
+        (scene, q, tcp)
+    }
+
+    #[test]
+    fn a_parked_cutter_bores_one_round_hole() {
+        let (scene, q, tcp) = parked_cutter_scene(0.0, 0.0, Vector3::new(0.06, 0.06, 0.01));
         let timeline = hold_timeline(&scene, q, 1.0);
-        let carve = carve_stock(
-            &scene,
-            &timeline,
-            "plate",
-            0,
-            tcp,
-            &CarveOptions {
-                voxel_size: 0.0005,
-                ..CarveOptions::default()
-            },
-        )
-        .unwrap();
-        // Expected removal: a cylinder r=4mm, depth 2mm.
+        let carve =
+            carve_stock(&scene, &timeline, "plate", 0, tcp, &CarveOptions::default()).unwrap();
+        // Expected removal: a cylinder r=4mm, depth 2mm. The polygonal
+        // cutter is sized so its mean width matches the diameter, which
+        // leaves the area within half a percent.
         let expected = std::f64::consts::PI * 0.004f64.powi(2) * 0.002;
         let err = (carve.removed_volume - expected).abs() / expected;
         assert!(
-            err < 0.15,
-            "removed {:.3e} vs cylinder {:.3e} ({:.0}% off)",
+            err < 0.01,
+            "removed {:.3e} vs cylinder {:.3e} ({:.2}% off)",
             carve.removed_volume,
             expected,
             err * 100.0
         );
-        assert!((carve.initial_volume - 0.06 * 0.06 * 0.01).abs() / (0.06 * 0.06 * 0.01) < 0.02);
+        assert!((carve.initial_volume - 0.06 * 0.06 * 0.01).abs() / (0.06 * 0.06 * 0.01) < 1e-9);
         assert!(
-            (carve.initial_volume - carve.removed_volume - carve.remaining_volume).abs() < 1e-12
+            (carve.initial_volume - carve.removed_volume - carve.remaining_volume).abs() < 1e-15
         );
-        // The mesh is a closed-ish boundary with real triangles, far fewer
-        // than one quad per voxel face (the greedy mesher earns its keep).
-        assert!(!carve.mesh.indices.is_empty());
-        assert!(
-            carve.mesh.indices.len() < 40_000,
-            "{} tris — greedy meshing broken?",
-            carve.mesh.indices.len()
-        );
+        // One closed mesh with real triangles, both surface classes present.
+        assert!(!carve.mesh.indices.is_empty() && carve.mesh.indices.len() < 5_000);
+        assert_eq!(carve.mesh.face_colors.len(), carve.mesh.indices.len());
+        let options = CarveOptions::default();
+        assert!(carve.mesh.face_colors.contains(&options.cut_color));
+        assert!(carve.mesh.face_colors.contains(&options.stock_color));
+        assert_eq!(carve.chord_tolerance, options.chord_tolerance);
     }
 
     #[test]
@@ -654,5 +501,60 @@ mod tests {
         assert_eq!(a.removed_volume, 0.0);
         assert_eq!(a.mesh.vertices, b.mesh.vertices);
         assert_eq!(a.mesh.indices, b.mesh.indices);
+        assert!(a.mesh.face_colors.iter().all(|c| *c == options.stock_color));
+    }
+
+    #[test]
+    fn stages_snapshot_every_tile_at_the_handover_then_only_changed_tiles() {
+        // Four 30 mm tiles; the parked cutter bores into one of them only.
+        let (scene, q, tcp) = parked_cutter_scene(-0.015, -0.015, Vector3::new(0.06, 0.06, 0.01));
+        let timeline = hold_timeline(&scene, q, 1.0);
+        let options = CarveOptions {
+            tile_size: Some(0.03),
+            ..CarveOptions::default()
+        };
+        let (carve, stages) =
+            carve_stock_staged(&scene, &timeline, "plate", 0, tcp, &options, 4).unwrap();
+        assert!(carve.removed_volume > 0.0);
+        // The first cut hands the display over from the stock to all four
+        // tiles at once; nothing changes afterwards, so no more snapshots.
+        assert_eq!(
+            stages.len(),
+            4,
+            "{:?}",
+            stages.iter().map(|s| (s.time, s.cell)).collect::<Vec<_>>()
+        );
+        let cells: std::collections::BTreeSet<u32> = stages.iter().map(|s| s.cell).collect();
+        assert_eq!(cells.len(), 4);
+        assert!(stages
+            .iter()
+            .all(|s| s.time == stages[0].time && s.time > 0.0 && s.time <= 0.25));
+        let cut_tiles = stages
+            .iter()
+            .filter(|s| s.mesh.face_colors.contains(&options.cut_color))
+            .count();
+        assert_eq!(cut_tiles, 1);
+        assert!(stages.iter().all(|s| !s.mesh.indices.is_empty()));
+        assert!(stages
+            .iter()
+            .all(|s| (s.removed_volume - carve.removed_volume).abs() < 1e-18));
+    }
+
+    #[test]
+    fn bad_options_and_unknown_stock_are_rejected() {
+        let (scene, q, tcp) = parked_cutter_scene(0.0, 0.0, Vector3::new(0.06, 0.06, 0.01));
+        let timeline = hold_timeline(&scene, q, 1.0);
+        let bad = CarveOptions {
+            chord_tolerance: 0.0,
+            ..CarveOptions::default()
+        };
+        assert!(matches!(
+            carve_stock(&scene, &timeline, "plate", 0, tcp, &bad),
+            Err(CarveError::BadOptions)
+        ));
+        assert!(matches!(
+            carve_stock(&scene, &timeline, "nope", 0, tcp, &CarveOptions::default()),
+            Err(CarveError::UnknownStock(_))
+        ));
     }
 }

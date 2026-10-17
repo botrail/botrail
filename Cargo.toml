@@ -50,6 +50,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = { version = "1", features = ["derive"] }
 thiserror = "2"
+# Material removal core (mesh booleans) behind botrail-scene::carve.
+cutrail = "0.1.1"
 # The garment, stitch and soft-release APIs are newer than rapier-cloth 0.2.0
 # on crates.io: pinned to the commit until 0.3 is published.
 rapier-cloth = { git = "https://github.com/neka-nat/rapier-cloth", rev = "1c4584e69101217aecbad71ab506ec64207f8356", default-features = false, features = ["f64", "implicit"] }

@@ -573,12 +573,15 @@ class Scene:
         timeline: "SequenceTimeline",
         stock: str,
         stages: Optional[int] = None,
-        voxel_size: float = 0.001,
+        chord_tolerance: float = 1e-5,
+        max_deviation: float = 1e-5,
+        tile_size: Optional[float] = None,
         cutter_radius: float = 0.004,
         cutter_length: float = 0.03,
         dt: float = 0.01,
         robot: Optional[str] = None,
         tcp_link: Optional[str] = None,
+        voxel_size: Optional[float] = None,
     ) -> "SequenceTimeline": ...
     def timeline_from_trajectory(
         self,
@@ -1248,10 +1251,13 @@ class SequenceTimeline:
         stock: str,
         robot: Optional[str] = None,
         tcp_link: Optional[str] = None,
-        voxel_size: float = 0.001,
+        chord_tolerance: float = 1e-5,
+        max_deviation: float = 1e-5,
+        tile_size: Optional[float] = None,
         cutter_radius: float = 0.004,
         cutter_length: float = 0.03,
         dt: float = 0.01,
+        voxel_size: Optional[float] = None,
     ) -> "StockCarve": ...
     def spray_coat(
         self,
@@ -1658,6 +1664,8 @@ class StockCarve:
     def remaining_volume(self) -> float: ...
     @property
     def initial_volume(self) -> float: ...
+    @property
+    def chord_tolerance(self) -> float: ...
     @property
     def voxel_size(self) -> float: ...
     @property

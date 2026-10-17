@@ -370,7 +370,7 @@ def main() -> None:
           f"{tl.feed_report('rim').hold_ratio*100:.1f}%)")
     shift_fixture(scene, -0.03)
 
-    # The machined part: a voxel subtraction of the cutter's sweep from
+    # The machined part: the cutter's sweep subtracted (mesh booleans) from
     # the stock — the picture and the numbers, never verification (in a
     # kinematic world the cut cannot contradict the plan).
     carve = tl.carve_stock("plate")

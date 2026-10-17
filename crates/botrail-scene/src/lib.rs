@@ -33,6 +33,7 @@ pub mod routing;
 pub mod scan;
 pub mod script;
 pub mod seq;
+pub mod stages;
 pub mod toolpath;
 pub mod verify;
 pub mod wheels;

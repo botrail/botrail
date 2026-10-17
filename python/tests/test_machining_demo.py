@@ -423,17 +423,19 @@ def test_the_fixture_shift_moves_the_feed_report_not_the_program(cell, cycle):
 
 
 def test_the_carve_matches_the_cut(cycle):
-    """The machined part, as numbers: the plate is 180x120x12 = 259.2 cm3
-    exactly, and the three cuts take ~11 cm3 out of it. Conservation is
-    exact by construction (counted voxels)."""
+    """The machined part: the cutter's sweep subtracted from the plate
+    with mesh booleans (cutrail). The removed volume is the trim, the
+    pocket and the chamfer; the identity initial = removed + remaining
+    holds exactly, and the result is one closed mesh with both surface
+    classes colored."""
     carve = cycle.carve_stock("plate")
-    assert carve.initial_volume == pytest.approx(259.2e-6, rel=0.02)
-    assert carve.removed_volume == pytest.approx(11.1e-6, abs=1.0e-6)
+    assert carve.initial_volume == pytest.approx(259.2e-6, rel=1e-9)
+    assert carve.removed_volume == pytest.approx(10.83e-6, rel=0.02)
     assert carve.initial_volume == pytest.approx(
-        carve.removed_volume + carve.remaining_volume, abs=1e-12
+        carve.removed_volume + carve.remaining_volume, abs=1e-15
     )
-    # Greedy meshing keeps the machined part light enough to display.
-    assert 0 < carve.triangle_count < 10_000
+    assert carve.chord_tolerance == 1e-5
+    assert 0 < carve.triangle_count < 200_000
 
 
 def test_carving_is_deterministic_and_writes_stl(cycle, tmp_path):
@@ -553,10 +555,11 @@ def test_the_removal_is_progressive_in_usd(animated, animated_usd):
     scene, tl = animated
     text = animated_usd.read_text()
     stages = [n for n in scene.obstacle_names if n.startswith("plate_cut/")]
+    leaves = {n.split("/")[-1] for n in stages}
     tracks = {}
     for m in re.finditer(r'def \w+ "([^"]+)"[^{]*\{', text):
         prim = m.group(1)
-        if prim != "plate" and not prim.startswith("_"):
+        if prim != "plate" and prim not in leaves:
             continue
         vis = re.compile(r"visibility\.timeSamples = \{([^}]*)\}").search(text, m.end())
         tracks[prim] = [
@@ -577,12 +580,22 @@ def test_the_removal_is_progressive_in_usd(animated, animated_usd):
     plate_on, first_cut = window(tracks["plate"])
     assert plate_on == 0.0
     assert 2.0 < first_cut < end / 2
-    # Stages chain contiguously from the handover to the final frame.
-    windows = sorted(window(tracks[p]) for p in tracks if p != "plate")
-    assert windows[0][0] == pytest.approx(first_cut, abs=1.0)
-    assert windows[-1][1] == pytest.approx(end, abs=1e-6)
-    for (_, a_off), (b_on, _) in zip(windows, windows[1:]):
-        assert b_on == pytest.approx(a_off, abs=0.05)
+    # The stock is kept as tiles and each tile is its own chain of
+    # versions: every chain starts at the handover (the pristine tiles
+    # included), its windows follow one another, and the last one carries
+    # the tile through the final frame.
+    chains = {}
+    for prim, samples in tracks.items():
+        if prim == "plate":
+            continue
+        chains.setdefault(prim.rsplit("_v", 1)[0], []).append(window(samples))
+    assert len(chains) >= 4, sorted(chains)
+    for chain, windows in chains.items():
+        windows.sort()
+        assert windows[0][0] == pytest.approx(first_cut, abs=1.0), chain
+        assert windows[-1][1] == pytest.approx(end, abs=1e-6), chain
+        for (_, a_off), (b_on, _) in zip(windows, windows[1:]):
+            assert b_on == pytest.approx(a_off, abs=0.05), chain
 
 
 def test_a_recording_replays_the_removal(animated, animated_usd):

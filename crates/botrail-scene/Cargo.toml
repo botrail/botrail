@@ -17,6 +17,7 @@ botrail-collide.workspace = true
 botrail-plan.workspace = true
 botrail-traj.workspace = true
 botrail-physics.workspace = true
+cutrail.workspace = true
 nalgebra.workspace = true
 parry3d-f64.workspace = true
 serde.workspace = true

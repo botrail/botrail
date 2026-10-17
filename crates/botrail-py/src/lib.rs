@@ -5801,31 +5801,43 @@ impl Scene {
         })
     }
 
-    /// Progressive material removal for a baked cycle: carves `stock` in
-    /// `stages` equal time slices (default: one slice per second of
+    /// Progressive material removal for a baked cycle: re-cuts the sweep
+    /// in `stages` equal time slices (default: one slice per second of
     /// cycle, capped at 240 — the display lags the tool by at most one
-    /// slice, so this keeps the lag around a second), registers one
-    /// display-only obstacle per changed slice (grouped under
-    /// `{stock}_cut/…` in the scene tree, cheap AABB colliders — they
-    /// never collide), and returns the timeline with the visibility
-    /// windows injected: during playback — studio, USD export, and a
-    /// replayed recording alike — the stock disappears as it is cut
-    /// instead of starting pre-cut. The stock keeps colliding unchanged;
-    /// everything here is presentation.
-    #[pyo3(signature = (timeline, stock, stages = None, voxel_size = 0.001, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01, robot = None, tcp_link = None))]
+    /// slice, so this keeps the lag around a second). The stock is kept as
+    /// tiles; at the first cut every tile is registered as a display-only
+    /// obstacle (grouped under `{stock}_cut/…`, cheap AABB colliders — they
+    /// never collide), and afterwards only the tiles a slice changed get a
+    /// new version, so idle stretches and untouched regions cost nothing.
+    /// Returns the timeline with the visibility windows injected: during
+    /// playback — studio, USD export, and a replayed recording alike — the
+    /// stock disappears as it is cut instead of starting pre-cut. The stock
+    /// keeps colliding unchanged; everything here is presentation.
+    ///
+    /// The cut is computed with mesh booleans (cutrail): `chord_tolerance`
+    /// (m) is the polygonization of the cutter and `max_deviation` (m) how
+    /// far a sampled TCP may stray from the segment it is folded into;
+    /// `tile_size` (m) defaults to 2.5 cutter diameters. `voxel_size` is
+    /// deprecated and ignored.
+    #[pyo3(signature = (timeline, stock, stages = None, chord_tolerance = 1e-5, max_deviation = 1e-5, tile_size = None, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01, robot = None, tcp_link = None, voxel_size = None))]
     #[allow(clippy::too_many_arguments)]
     fn animate_carve(
         &self,
+        py: Python<'_>,
         timeline: PyRef<'_, SequenceTimeline>,
         stock: &str,
         stages: Option<usize>,
-        voxel_size: f64,
+        chord_tolerance: f64,
+        max_deviation: f64,
+        tile_size: Option<f64>,
         cutter_radius: f64,
         cutter_length: f64,
         dt: f64,
         robot: Option<&str>,
         tcp_link: Option<&str>,
+        voxel_size: Option<f64>,
     ) -> PyResult<SequenceTimeline> {
+        warn_voxel_size_deprecated(py, voxel_size)?;
         let stages =
             stages.unwrap_or_else(|| (timeline.inner.duration.ceil() as usize).clamp(1, 240));
         let (index, _) = timeline.track_for(robot)?;
@@ -5835,7 +5847,9 @@ impl Scene {
             None => model.default_tcp_link(),
         };
         let options = botrail_scene::carve::CarveOptions {
-            voxel_size,
+            chord_tolerance,
+            max_deviation,
+            tile_size,
             cutter_radius,
             cutter_length,
             dt,
@@ -5857,30 +5871,49 @@ impl Scene {
             )));
         }
 
-        // Stage meshes go to the cache as OBJ + MTL (the format the
-        // studio and the USD export read face colors back from),
-        // content-addressed so re-runs reuse files.
+        // Each tile is its own chain of versions. Stage meshes go to the
+        // cache as OBJ + MTL (the format the studio and the USD export read
+        // face colors back from), content-addressed so re-runs reuse files.
         let dir = cache_base().join("carve");
         let material = botrail_scene::Material::new(0.75, 0.35);
+        let end = timeline.inner.duration;
+        let handover = stage_list
+            .iter()
+            .map(|s| s.time)
+            .fold(f64::INFINITY, f64::min);
+        let mut chains: std::collections::BTreeMap<u32, Vec<&botrail_scene::carve::CarveStage>> =
+            std::collections::BTreeMap::new();
+        for stage in &stage_list {
+            chains.entry(stage.cell).or_default().push(stage);
+        }
         let mut entries: Vec<(
             String,
             botrail_model::Geometry,
             botrail_scene::ObstacleCollider,
-        )> = Vec::with_capacity(stage_list.len());
-        let mut times = Vec::with_capacity(stage_list.len());
-        for (i, stage) in stage_list.iter().enumerate() {
-            let obj_path = write_cached_obj(&dir, &stage.mesh)?;
-            // A cheap stand-in collider: the stage registers disabled, so
-            // VHACD on it would be pure cost.
-            entries.push((
-                format!("{stock}_cut/{i:03}"),
-                botrail_model::Geometry::Mesh {
-                    path: obj_path,
-                    scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
-                },
-                botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(&stage.mesh)),
-            ));
-            times.push(stage.time);
+        )> = Vec::new();
+        // (entry index, from, to) of each version's visible window.
+        let mut windows: Vec<(usize, f64, f64)> = Vec::new();
+        for (cell, versions) in &chains {
+            for (k, stage) in versions.iter().enumerate() {
+                // An empty mesh is a tile cut away entirely: the previous
+                // version's window already ends here.
+                if stage.mesh.indices.is_empty() {
+                    continue;
+                }
+                let to = versions.get(k + 1).map(|next| next.time).unwrap_or(end);
+                let obj_path = write_cached_obj(&dir, &stage.mesh)?;
+                // A cheap stand-in collider: the stage registers disabled, so
+                // VHACD on it would be pure cost.
+                entries.push((
+                    format!("{stock}_cut/t{cell:03}_v{k:03}"),
+                    botrail_model::Geometry::Mesh {
+                        path: obj_path,
+                        scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                    },
+                    botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(&stage.mesh)),
+                ));
+                windows.push((entries.len() - 1, stage.time, to));
+            }
         }
 
         // Register on the live scene (one broadcast) and on the
@@ -5899,13 +5932,21 @@ impl Scene {
             let _ = snapshot.set_obstacle_material(&final_name, Some(material));
         }
         let names = self.hub.add_carve_stages(entries, carve.pose, material);
+        let windows: Vec<botrail_scene::stages::StageWindow> = windows
+            .into_iter()
+            .map(|(i, from, to)| botrail_scene::stages::StageWindow {
+                name: names[i].clone(),
+                from,
+                to,
+            })
+            .collect();
 
-        let augmented = botrail_scene::carve::staged_timeline(
+        let augmented = botrail_scene::stages::staged_timeline_windows(
             &timeline.inner,
             stock,
             carve.pose,
-            &names,
-            &times,
+            handover,
+            &windows,
         );
         self.hub.emit_timeline(&snapshot, &augmented);
         Ok(SequenceTimeline {
@@ -7148,6 +7189,20 @@ fn read_project(bytes: &[u8]) -> Result<botrail_scene::project::ProjectFile, Str
 }
 
 /// `$BOTRAIL_CACHE_DIR`, else `~/.cache/botrail`, else the system temp dir.
+/// `voxel_size` survived the move from the voxel carve to cutrail as an
+/// ignored keyword: passing it warns once, so scripts keep running.
+fn warn_voxel_size_deprecated(py: Python<'_>, voxel_size: Option<f64>) -> PyResult<()> {
+    if voxel_size.is_some() {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+            c"voxel_size is ignored: the stock is carved with mesh booleans (cutrail); use chord_tolerance",
+            2,
+        )?;
+    }
+    Ok(())
+}
+
 fn cache_base() -> PathBuf {
     std::env::var_os("BOTRAIL_CACHE_DIR")
         .map(PathBuf::from)
@@ -8701,22 +8756,34 @@ impl SequenceTimeline {
             })
     }
 
-    /// Carves `stock` with the cutter swept along this cycle: a voxel
-    /// subtraction in the stock's frame, returning the machined part as
-    /// a mesh plus removed/remaining volume. Presentation and numbers —
-    /// the cut can never contradict the plan in a kinematic world.
-    #[pyo3(signature = (stock, robot = None, tcp_link = None, voxel_size = 0.001, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01))]
+    /// Carves `stock` with the cutter swept along this cycle: the cutter's
+    /// sweep subtracted from the stock with mesh booleans (cutrail) in the
+    /// stock's frame, returning the machined part as one closed mesh plus
+    /// removed/remaining volume. Presentation and numbers — the cut can
+    /// never contradict the plan in a kinematic world.
+    ///
+    /// `chord_tolerance` (m) is the polygonization of the cutter (the cut
+    /// geometry is exact to it), `max_deviation` (m) how far a sampled TCP
+    /// may stray from the segment it is folded into, and `tile_size` (m)
+    /// the tiles the stock is kept in (default 2.5 cutter diameters).
+    /// `voxel_size` is deprecated and ignored.
+    #[pyo3(signature = (stock, robot = None, tcp_link = None, chord_tolerance = 1e-5, max_deviation = 1e-5, tile_size = None, cutter_radius = 0.004, cutter_length = 0.03, dt = 0.01, voxel_size = None))]
     #[allow(clippy::too_many_arguments)]
     fn carve_stock(
         &self,
+        py: Python<'_>,
         stock: &str,
         robot: Option<&str>,
         tcp_link: Option<&str>,
-        voxel_size: f64,
+        chord_tolerance: f64,
+        max_deviation: f64,
+        tile_size: Option<f64>,
         cutter_radius: f64,
         cutter_length: f64,
         dt: f64,
+        voxel_size: Option<f64>,
     ) -> PyResult<StockCarve> {
+        warn_voxel_size_deprecated(py, voxel_size)?;
         let (index, _) = self.track_for(robot)?;
         let model = &self.scene.robots()[index].model;
         let tcp = match tcp_link {
@@ -8724,7 +8791,9 @@ impl SequenceTimeline {
             None => model.default_tcp_link(),
         };
         let options = botrail_scene::carve::CarveOptions {
-            voxel_size,
+            chord_tolerance,
+            max_deviation,
+            tile_size,
             cutter_radius,
             cutter_length,
             dt,
@@ -11486,9 +11555,16 @@ impl StockCarve {
         self.inner.initial_volume
     }
 
+    /// Chord tolerance (m) the cutter was polygonized with.
+    #[getter]
+    fn chord_tolerance(&self) -> f64 {
+        self.inner.chord_tolerance
+    }
+
+    /// Deprecated alias of `chord_tolerance`: the carve no longer uses voxels.
     #[getter]
     fn voxel_size(&self) -> f64 {
-        self.inner.voxel_size
+        self.inner.chord_tolerance
     }
 
     #[getter]
@@ -11530,11 +11606,11 @@ impl StockCarve {
 
     fn __repr__(&self) -> String {
         format!(
-            "StockCarve(removed {:.2} cm3 of {:.2} cm3, {} tris at {:.1} mm voxels)",
+            "StockCarve(removed {:.2} cm3 of {:.2} cm3, {} tris, chord {:.3} mm)",
             self.inner.removed_volume * 1e6,
             self.inner.initial_volume * 1e6,
             self.inner.mesh.indices.len(),
-            self.inner.voxel_size * 1e3,
+            self.inner.chord_tolerance * 1e3,
         )
     }
 }
