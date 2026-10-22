@@ -466,6 +466,8 @@ dependencies = [
 [[package]]
 name = "cutrail"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1f4f1a82f430cde1c2ed3013567db42179141f7bae8295896d05c7b66a67627"
 dependencies = [
  "manifold-rust",
  "thiserror 2.0.18",

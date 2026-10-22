@@ -24,6 +24,7 @@ CELL_DEMOS = [
     "assembly/cover_bolting_demo.py",
     "assembly/ev_battery_harness_demo.py",
     "assembly/misumi_frame_cell_demo.py",
+    "assembly/pcb_loop_demo.py",
     "assembly/shuttle_line_demo.py",
     "basics/demo.py",
     "basics/friction_grasp_demo.py",

@@ -48,6 +48,24 @@ Its tool frame matches the previous model. Use
 `--handler fanuc/lrmate200id/lrmate200id/r2` to select the previous model,
 or `--catalog-root DIR` to use a local catalog build.
 
+### PCB loop reference cell
+
+[`assembly/pcb_loop_demo.py`](assembly/pcb_loop_demo.py) reconstructs a compact
+yellow/black guarded PCB cell: one UR5e, two UR3e, a white KUKA KR 6 R900-2 and
+eight carriers on a horizontal SuperTrak HORIZON10 loop. The rear UR feeds from a
+magazine, the central UR scans at the camera, the KUKA loads an electrical test
+clamp, and the right UR sorts into good/reject racks. The default batch drains
+eight boards (six good, two deliberate fault samples); `--boards 1` runs one.
+The close camera follows the
+reference image; `--overview` shows the whole cell.
+
+The default uses the published catalog; `--catalog-root DIR` selects a local build.
+[Setup, product sources and approximations](assembly/pcb_loop_demo.md).
+
+```bash
+python examples/assembly/pcb_loop_demo.py --studio
+```
+
 Demos that build on another one (`sequence_demo` on `demo`, `agv_cell_demo` on
 the factory cell, `stairs_delivery_demo` and `building_delivery_demo` on the
 patrol robot) put the sibling

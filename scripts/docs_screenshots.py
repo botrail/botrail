@@ -12,6 +12,7 @@ Writes docs/assets/studio/*.png — commit the results.
 
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -190,6 +191,33 @@ def main() -> None:
             page.screenshot(path=OUT / "vehicle.png")
             print("wrote vehicle.png")
             server.stop()
+
+        if want("pcb_loop"):
+            import playwright
+            import pcb_loop_demo
+
+            scene, timeline, _info = pcb_loop_demo.bake()
+            server = bt.studio(scene, block=False, open_browser=False)
+            try:
+                # Node avoids Python Playwright's costly concatenation of
+                # the full-lap WebSocket frame into its transport buffer.
+                view = ",".join(str(v) for p in pcb_loop_demo.REFERENCE_VIEW for v in p)
+                import json
+                process_frames = {
+                    "feed": timeline.step_span("magazine_lift0_4").end,
+                    "aoi": timeline.step_span("inspect3").start + 0.2,
+                    "electrical": timeline.step_span("inspect5").start + 0.2,
+                    "sort": timeline.step_span("sort_reject_release9").start + 0.04,
+                }
+                subprocess.run([
+                    "node", str(ROOT / "scripts" / "pcb_loop_screenshot.mjs"),
+                    str(Path(playwright.__file__).parent / "driver" / "package"),
+                    f"{server.url}?view={view}", str(OUT),
+                    str(timeline.step_span("inspect7").start + 0.2),
+                    json.dumps(process_frames),
+                ], check=True, timeout=180)
+            finally:
+                server.stop()
 
         if want("warehouse"):
             # ---- the warehouse from the consultation sketch: a pallet AMR
