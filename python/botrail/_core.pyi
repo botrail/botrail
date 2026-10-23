@@ -241,6 +241,7 @@ class Scene:
         path: Union[str, Path],
         prefix: Optional[str] = None,
         search_paths: Optional[list[Union[str, Path]]] = None,
+        articulated: str = "robot",
     ) -> list[str]: ...
     def load_urdf(
         self,
@@ -287,6 +288,7 @@ class Scene:
         transform: tuple[float, ...],
         color_override: bool = False,
     ) -> None: ...
+    def obstacle_physics(self, name: str) -> Optional[dict]: ...
     def set_obstacle_material(
         self,
         name: str,

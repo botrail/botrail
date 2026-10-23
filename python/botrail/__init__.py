@@ -1,6 +1,6 @@
 """botrail: ROS-free robot motion authoring with a web-based 3D studio."""
 
-from . import assembly, catalog, cloth, connections, rope, routing, gait, io, mounting, paint, parts, select, seq, study, tending, toolpath, tools, trace, wheels
+from . import assembly, catalog, cloth, connections, rope, routing, gait, io, mounting, paint, parts, select, seq, simready, study, tending, toolpath, tools, trace, wheels
 from ._core import (
     Bom,
     CellReport,
@@ -81,6 +81,7 @@ __all__ = [
     "parts",
     "select",
     "seq",
+    "simready",
     "studio",
     "study",
     "sweep",

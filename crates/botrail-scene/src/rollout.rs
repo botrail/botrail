@@ -7010,11 +7010,21 @@ impl Rollout {
                     && !rt.crouching()
                     && !rt.rolling()
                 {
-                    let velocity: Vec<f64> =
+                    let mut velocity: Vec<f64> =
                         rt.q.iter()
                             .zip(&rt.q_prev)
                             .map(|(now, before)| (now - before) / dt)
                             .collect();
+                    // A move that ends by this tick has come to rest: its
+                    // joints stand still here. The last tick's difference
+                    // is not their velocity, and carried into the next,
+                    // longer stretch (a ramp baked ahead) it would bow the
+                    // timeline's curve away from where the joints stand.
+                    for active in rt.active.iter().filter(|a| a.end() <= t + 1e-9) {
+                        for &qi in &active.owned {
+                            velocity[qi] = 0.0;
+                        }
+                    }
                     let q = rt.q.clone();
                     rt.append_waypoint(t, q, velocity);
                 }
@@ -8906,14 +8916,21 @@ impl Rollout {
         }
     }
 
-    /// Is `target`'s origin hidden from `sensor` behind another enabled
-    /// obstacle? One ray, origin to origin — coarse but deterministic
-    /// (design/design-camera.md §3): a body half in view can read either
-    /// way, and robot links never occlude. `skip` never blocks the view
-    /// (a vehicle-mounted field's own chassis).
+    /// Is `target`'s middle hidden from `sensor` behind another enabled
+    /// obstacle? One ray, from the sensor to the centre of the target's
+    /// bounding box — coarse but deterministic (design/design-camera.md
+    /// §3): a body half in view can read either way, and robot links never
+    /// occlude. The centre, not the origin: an imported prop's origin is at
+    /// its foot, on the very surface it stands on, and a ray to it ends
+    /// inside the table. `skip` never blocks the view (a vehicle-mounted
+    /// field's own chassis).
     fn occluded(&self, sensor: &Isometry3<f64>, target: usize, skip: &[usize]) -> bool {
         let origin = sensor.translation.vector;
-        let goal = self.world.obstacles()[target].pose.translation.vector;
+        let obstacle = &self.world.obstacles()[target];
+        let goal = match self.world.obstacle_colliders[target].aabb(&obstacle.pose) {
+            Some((lo, hi)) => nalgebra::Vector3::from_fn(|k, _| (lo[k] + hi[k]) / 2.0),
+            None => obstacle.pose.translation.vector,
+        };
         let dir = goal - origin;
         if dir.norm_squared() < 1e-12 {
             return false;
@@ -23120,6 +23137,48 @@ mod dual_arm_tests {
             crate::handshake::group_busy(&tl, &tl.robots[0].name, "right"),
             Some(vec![(0.0, 0.5)])
         );
+    }
+
+    /// Two arms that move at once and stop, then a long ramp of another
+    /// joint: the arms stand still under it. Baked tick by tick, the tick
+    /// a move ended in used to carry that tick's difference as the arm's
+    /// velocity, and the timeline's cubic across the ramp bowed the arms
+    /// away from where they stood (a wrist through its neighbour, seen in
+    /// the replay of a 2 s bow).
+    #[test]
+    fn arms_that_have_stopped_stand_still_under_a_later_ramp() {
+        let mut scene = dual();
+        let (ls, rs) = (qi(&scene, "left_shoulder"), qi(&scene, "right_shoulder"));
+        let robot = scene.robots()[0].name.clone();
+        let left_done = group_done(&scene, "left");
+        let tl = bake(
+            &mut scene,
+            vec![
+                // Two moves in flight, ending between ticks.
+                step(
+                    "both",
+                    vec![
+                        ramp("left_shoulder", 0.8, 0.2371),
+                        ramp("right_shoulder", -0.8, 0.2373),
+                    ],
+                    Condition::RobotDone { robot },
+                ),
+                step("wrist", vec![ramp("left_wrist", 0.5, 2.0)], left_done),
+            ],
+        )
+        .unwrap();
+        let track = &tl.robots[0].trajectory;
+        let start = tl.step_spans[1].start;
+        for k in 0..=40 {
+            let t = start + 2.0 * k as f64 / 40.0;
+            let q = track.sample(t);
+            assert!(
+                (q[ls] - 0.8).abs() < 1e-9 && (q[rs] + 0.8).abs() < 1e-9,
+                "at {t:.3} s the arms are at {:.4} / {:.4}",
+                q[ls],
+                q[rs]
+            );
+        }
     }
 
     /// The same overlap on one arm is refused where it used to lose a move

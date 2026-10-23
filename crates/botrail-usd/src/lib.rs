@@ -42,6 +42,7 @@ use openusd::ar::{Asset, DefaultResolver, ResolvedPath, Resolver};
 use openusd::schemas::geom::{
     self, Boundable, Gprim, Imageable, PointBased, Purpose, Visibility, Xformable,
 };
+use openusd::schemas::physics;
 use openusd::usd::{Prim, SchemaBase, SchemaKind, Stage, TimeCode};
 use openusd::{gf, sdf};
 use thiserror::Error;
@@ -74,6 +75,12 @@ pub struct ImportOptions {
     /// filesystem. The node's `Geometry::Mesh` path is then a virtual
     /// `usd://<prim>` identifier.
     pub meshes_in_memory: bool,
+    /// Import articulated subtrees as scenery — every body at its authored
+    /// pose, the joints frozen — instead of skipping them for
+    /// [`crate::import_robot`]. For props whose doors and drawers are
+    /// joints (a SimReady kitchen cabinet, a microwave): a stage with a
+    /// robot in it keeps the default.
+    pub articulations_as_scenery: bool,
 }
 
 /// One geometry prim, ready to become a scene obstacle.
@@ -91,7 +98,19 @@ pub struct ImportedNode {
     /// Present when [`ImportOptions::meshes_in_memory`] is set: the baked
     /// (normalized) triangle mesh, for direct collider construction.
     pub mesh_data: Option<MeshData>,
+    /// Authored mass in kg (`PhysicsMassAPI`): this prim's share when a
+    /// body is drawn as several prims. `None` leaves it to the engine's
+    /// density.
+    pub mass: Option<f64>,
+    /// The bound physics material's `physics:dynamicFriction`, when one is
+    /// bound (`material:binding:physics` on the prim or an ancestor).
+    pub friction: Option<f64>,
+    /// The bound physics material's `physics:restitution`.
+    pub restitution: Option<f64>,
 }
+
+/// `(dynamicFriction, restitution)` read off a bound physics material.
+type Surface = (Option<f64>, Option<f64>);
 
 /// A named mount point (leaf Xform/Scope with no geometry).
 #[derive(Debug, Clone)]
@@ -207,6 +226,7 @@ fn import_stage(
         up_axis_fix: y_up_to_z_up(),
         mesh_cache_dir: options.mesh_cache_dir.clone(),
         meshes_in_memory: options.meshes_in_memory,
+        articulations_as_scenery: options.articulations_as_scenery,
         out: ImportedScene::default(),
     };
     importer.read_stage_metadata();
@@ -218,7 +238,7 @@ fn import_stage(
 
     let root = stage.prim(sdf::Path::abs_root());
     importer
-        .walk(root, gf::Matrix4d::default(), None)
+        .walk(root, gf::Matrix4d::default(), None, None, (None, None))
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
     Ok(importer.out)
 }
@@ -379,6 +399,7 @@ struct Importer<'a> {
     /// `meshes_in_memory` avoids the filesystem entirely).
     mesh_cache_dir: Option<PathBuf>,
     meshes_in_memory: bool,
+    articulations_as_scenery: bool,
     out: ImportedScene,
 }
 
@@ -407,7 +428,13 @@ impl Importer<'_> {
         prim: Prim,
         parent_world: gf::Matrix4d,
         parent_color: Option<[f32; 3]>,
+        parent_mass: Option<f64>,
+        parent_surface: Surface,
     ) -> anyhow::Result<()> {
+        // Retired by a variant (`active = false`): not on the stage.
+        if !prim.is_active()? {
+            return Ok(());
+        }
         let view = AnyPrim(prim);
         // USD row-vector convention: localToWorld = local * parentLocalToWorld.
         let world = match view.local_to_parent_transform(TimeCode::EARLIEST) {
@@ -427,10 +454,12 @@ impl Importer<'_> {
         // An articulation subtree is a robot, not scenery: importing its
         // links as static obstacles would make the robot self-collide with
         // its own rest-pose geometry. Skip the subtree wholesale and report
-        // the root so callers can import it via `import_robot`.
-        if prim
-            .has_api_schema("PhysicsArticulationRootAPI")
-            .unwrap_or(false)
+        // the root so callers can import it via `import_robot` — unless the
+        // caller says the articulations here are props (a cabinet's doors).
+        if !self.articulations_as_scenery
+            && prim
+                .has_api_schema("PhysicsArticulationRootAPI")
+                .unwrap_or(false)
         {
             self.out.robot_roots.push(path);
             return Ok(());
@@ -440,9 +469,37 @@ impl Importer<'_> {
         let renderable = view.compute_purpose().unwrap_or_default() == Purpose::Default;
         let type_name = prim.type_name()?.map(|t| t.to_string()).unwrap_or_default();
         let children = view.prim().children()?;
+        // Isaac Sim's convention puts the API on the fixed joint anchoring
+        // the base (`/robot/root_joint`): then this prim is the robot.
+        for child in children.iter().filter(|_| !self.articulations_as_scenery) {
+            if child
+                .has_api_schema("PhysicsArticulationRootAPI")
+                .unwrap_or(false)
+                && child
+                    .type_name()?
+                    .is_some_and(|t| articulation::is_joint_type(t.as_str()))
+            {
+                self.out.robot_roots.push(path.clone());
+                return Ok(());
+            }
+        }
+        // An authored `PhysicsMassAPI` mass belongs to the geometry under
+        // it — split evenly when a body is drawn as several prims, so a
+        // welded unit still weighs what was authored.
+        let mass = match self.authored_mass(view.prim()) {
+            Some(total) => Some(total / self.geometry_count(view.prim())?.max(1) as f64),
+            None => parent_mass,
+        };
+        // A bound physics material (`material:binding:physics`) is inherited
+        // down the namespace like a visual binding.
+        let surface = self
+            .bound_physics_material(view.prim())
+            .unwrap_or(parent_surface);
 
         if visible && renderable {
-            if let Err(e) = self.import_geometry(view.prim(), &path, &type_name, &world, color) {
+            if let Err(e) =
+                self.import_geometry(view.prim(), &path, &type_name, &world, color, mass, surface)
+            {
                 self.warn(view.prim().path(), e.to_string());
             }
         }
@@ -479,11 +536,71 @@ impl Importer<'_> {
         }
 
         for child in children {
-            self.walk(child, world, color)?;
+            self.walk(child, world, color, mass, surface)?;
         }
         Ok(())
     }
 
+    /// `(dynamicFriction, restitution)` of the physics material bound to
+    /// the prim itself, `None` when it binds none.
+    fn bound_physics_material(&self, prim: &Prim) -> Option<Surface> {
+        let targets = prim
+            .relationship("material:binding:physics")
+            .targets()
+            .ok()?;
+        let target = targets.first()?;
+        let material = physics::MaterialAPI::get(self.stage, target.clone())
+            .ok()
+            .flatten()?;
+        let read = |attr: openusd::usd::Attribute| {
+            attr.get::<f32>()
+                .ok()
+                .flatten()
+                .map(f64::from)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+        };
+        let friction = read(material.dynamic_friction_attr());
+        let restitution = read(material.restitution_attr());
+        (friction.is_some() || restitution.is_some()).then_some((friction, restitution))
+    }
+
+    /// `physics:mass` where a `PhysicsMassAPI` authors a positive one.
+    fn authored_mass(&self, prim: &Prim) -> Option<f64> {
+        if !prim.has_api_schema("PhysicsMassAPI").unwrap_or(false) {
+            return None;
+        }
+        prim.attribute("physics:mass")
+            .get::<f32>()
+            .ok()
+            .flatten()
+            .map(f64::from)
+            .filter(|m| m.is_finite() && *m > 0.0)
+    }
+
+    /// How many prims under `prim` (itself included) become obstacles: the
+    /// visible, default-purpose gprims the importer handles.
+    fn geometry_count(&self, prim: &Prim) -> anyhow::Result<usize> {
+        if !prim.is_active()? {
+            return Ok(0);
+        }
+        let view = AnyPrim(prim.clone());
+        let visible =
+            view.compute_visibility().unwrap_or(Visibility::Inherited) != Visibility::Invisible;
+        let renderable = view.compute_purpose().unwrap_or_default() == Purpose::Default;
+        let mut count = 0;
+        if visible && renderable {
+            let type_name = prim.type_name()?.map(|t| t.to_string()).unwrap_or_default();
+            if matches!(type_name.as_str(), "Mesh" | "Cube" | "Sphere" | "Cylinder") {
+                count += 1;
+            }
+        }
+        for child in prim.children()? {
+            count += self.geometry_count(&child)?;
+        }
+        Ok(count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn import_geometry(
         &mut self,
         prim: &Prim,
@@ -491,6 +608,8 @@ impl Importer<'_> {
         type_name: &str,
         world: &gf::Matrix4d,
         color: Option<[f32; 3]>,
+        mass: Option<f64>,
+        surface: Surface,
     ) -> anyhow::Result<()> {
         let (pose, residual) = self.normalized_pose(world);
         let source = self.source_path.clone();
@@ -512,6 +631,9 @@ impl Importer<'_> {
             pose,
             color,
             mesh_data: None,
+            mass,
+            friction: surface.0,
+            restitution: surface.1,
         };
         // Per-local-axis scale for primitive dimensions.
         let scale = [
@@ -556,6 +678,9 @@ impl Importer<'_> {
                         pose,
                         color,
                         mesh_data: Some(baked),
+                        mass,
+                        friction: surface.0,
+                        restitution: surface.1,
                     });
                 } else {
                     let stl_path = self.write_mesh(&baked)?;
@@ -902,6 +1027,9 @@ pub fn stage_dependencies(
         })?;
 
     fn force_load(prim: Prim, assets: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+        if !prim.is_active()? {
+            return Ok(());
+        }
         for attr in prim.attributes()? {
             let values = match attr.get::<sdf::Value>()? {
                 Some(sdf::Value::AssetPath(a)) => vec![a],
@@ -925,6 +1053,14 @@ pub fn stage_dependencies(
     let mut assets = vec![path.to_path_buf()];
     force_load(stage.prim(sdf::Path::abs_root()), &mut assets)
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
+    // Walking from `/` stops at an instance nested inside an instance (a
+    // SimReady prop's instanced Material inside its instanced body): its
+    // contents live only in the shared prototype. Every instance of a
+    // prototype shares it, so one walk per prototype covers them all.
+    for prototype in stage.prototypes() {
+        force_load(stage.prim(prototype), &mut assets)
+            .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
+    }
 
     assets.extend(
         stage
@@ -1316,6 +1452,391 @@ def Xform "W" {
             "pack/a.usd"
         );
         assert_eq!(SearchPathResolver::strip("./local.usda"), "./local.usda");
+    }
+
+    /// An instance inside an instance — the SimReady prop layout: an
+    /// `instanceable` object references its part, and inside that part the
+    /// Material is `instanceable` too, referencing a material layer whose
+    /// texture lives beside the root. The texture must come out of the
+    /// dependency scan, or the studio draws the prop black and an export
+    /// ships without it.
+    const NESTED_ROOT: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def "Crate" (
+        instanceable = true
+        prepend references = @./payloads/part.usda@</Part>
+    )
+    {
+    }
+}
+"#;
+
+    const NESTED_PART: &str = r#"#usda 1.0
+(
+    defaultPrim = "Part"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Part"
+{
+    def Cube "mesh" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double size = 0.4
+        rel material:binding = </Part/Looks/M>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "M" (
+            instanceable = true
+            prepend references = @./materials.usda@</Materials/M>
+        )
+        {
+        }
+    }
+}
+"#;
+
+    const NESTED_MATERIALS: &str = r#"#usda 1.0
+(
+    defaultPrim = "Materials"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Scope "Materials"
+{
+    def Material "M"
+    {
+        token outputs:surface.connect = </Materials/M/S.outputs:surface>
+
+        def Shader "S"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Materials/M/T.outputs:rgb>
+        }
+
+        def Shader "T"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @../tex.png@
+            float3 outputs:rgb
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn dependencies_reach_textures_under_nested_instances() {
+        let dir =
+            std::env::temp_dir().join(format!("botrail-usd-nestedinst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("payloads")).unwrap();
+        let root = dir.join("root.usda");
+        std::fs::write(&root, NESTED_ROOT).unwrap();
+        std::fs::write(dir.join("payloads/part.usda"), NESTED_PART).unwrap();
+        std::fs::write(dir.join("payloads/materials.usda"), NESTED_MATERIALS).unwrap();
+        std::fs::write(dir.join("tex.png"), b"not really a png").unwrap();
+
+        let deps = stage_dependencies(&root, &[]).unwrap();
+        let names: Vec<String> = deps
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        for expected in [
+            "root.usda",
+            "payloads/part.usda",
+            "payloads/materials.usda",
+            "tex.png",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing {expected} in {names:?}"
+            );
+        }
+
+        // The geometry under the outer instance still imports as scenery.
+        let scene = import_usd(&root, &ImportOptions::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(scene.nodes.len(), 1, "{:?}", scene.nodes);
+        assert_eq!(scene.nodes[0].name, "/World/Crate/mesh");
+    }
+
+    fn import_str(tag: &str, usda: &str) -> ImportedScene {
+        import_str_with(tag, usda, &ImportOptions::default())
+    }
+
+    fn import_str_with(tag: &str, usda: &str, options: &ImportOptions) -> ImportedScene {
+        let dir = std::env::temp_dir().join(format!("botrail-usd-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cell.usda");
+        std::fs::write(&path, usda).unwrap();
+        let scene = import_usd(&path, options).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        scene
+    }
+
+    /// Isaac Sim's convention puts `PhysicsArticulationRootAPI` on the
+    /// fixed joint anchoring the base: the joint's parent is the robot, and
+    /// none of its links may become scenery. A retired prim is not scenery
+    /// either.
+    const ROOT_ON_JOINT_CELL: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Cube "Crate"
+    {
+        double size = 0.2
+    }
+
+    def Cube "Retired" (active = false)
+    {
+        double size = 0.2
+    }
+
+    def Xform "Robot"
+    {
+        def PhysicsFixedJoint "root_joint" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+        {
+            rel physics:body1 = </World/Robot/base>
+        }
+
+        def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "geom"
+            {
+                double size = 0.1
+            }
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn robot_rooted_on_a_joint_and_retired_prims_are_not_scenery() {
+        let scene = import_str("rootjointcell", ROOT_ON_JOINT_CELL);
+        assert_eq!(scene.robot_roots, vec!["/World/Robot"]);
+        let names: Vec<&str> = scene.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["/World/Crate"]);
+    }
+
+    /// A cabinet whose door is a joint: by default its articulation is a
+    /// robot and is skipped; as scenery every body comes in at its stage
+    /// pose, and nothing is reported as a robot.
+    const CABINET: &str = r#"#usda 1.0
+(
+    defaultPrim = "Model"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Model"
+{
+    def Xform "Geometry" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "Carcass" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            def Cube "box"
+            {
+                double size = 0.6
+            }
+        }
+
+        def Xform "Door" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0.32, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "panel"
+            {
+                double size = 0.02
+            }
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "door"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </Model/Geometry/Carcass>
+            rel physics:body1 = </Model/Geometry/Door>
+            point3f physics:localPos0 = (0.32, 0, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 110
+        }
+    }
+
+    def PhysicsFixedJoint "root_joint" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        rel physics:body1 = </Model/Geometry/Carcass>
+    }
+}
+"#;
+
+    #[test]
+    fn articulated_props_import_as_scenery_on_request() {
+        let skipped = import_str("cabinet", CABINET);
+        assert!(skipped.nodes.is_empty(), "{:?}", skipped.nodes);
+        assert!(!skipped.robot_roots.is_empty());
+
+        let scenery = import_str_with(
+            "cabinet-scenery",
+            CABINET,
+            &ImportOptions {
+                articulations_as_scenery: true,
+                ..Default::default()
+            },
+        );
+        assert!(scenery.robot_roots.is_empty(), "{:?}", scenery.robot_roots);
+        let names: Vec<&str> = scenery.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["/Model/Geometry/Carcass/box", "/Model/Geometry/Door/panel"]
+        );
+        let door = node(&scenery, "/Model/Geometry/Door/panel");
+        assert!((door.pose.translation.vector.x - 0.32).abs() < 1e-9);
+    }
+
+    /// An authored mass travels with the geometry: a body drawn as two
+    /// visible cubes splits it, a gprim with its own `PhysicsMassAPI` keeps
+    /// it, a plain gprim leaves it to the engine.
+    const MASS_CELL: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "Body" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 3
+
+        def Cube "a"
+        {
+            double size = 0.1
+        }
+
+        def Cube "b"
+        {
+            double size = 0.1
+        }
+
+        def Cube "hidden"
+        {
+            double size = 0.1
+            token visibility = "invisible"
+        }
+    }
+
+    def Cube "Own" (prepend apiSchemas = ["PhysicsMassAPI"])
+    {
+        double size = 0.1
+        float physics:mass = 2
+    }
+
+    def Cube "Plain"
+    {
+        double size = 0.1
+    }
+}
+"#;
+
+    #[test]
+    fn authored_mass_is_shared_out_over_the_body_geometry() {
+        let scene = import_str("mass", MASS_CELL);
+        let mass = |name: &str| node(&scene, name).mass;
+        assert_eq!(mass("/World/Body/a"), Some(1.5));
+        assert_eq!(mass("/World/Body/b"), Some(1.5));
+        assert!(!scene.nodes.iter().any(|n| n.name == "/World/Body/hidden"));
+        assert_eq!(mass("/World/Own"), Some(2.0));
+        assert_eq!(mass("/World/Plain"), None);
+    }
+
+    /// A bound physics material travels with the geometry: bound on the
+    /// gprim, or inherited from an ancestor the way a visual binding is;
+    /// a gprim without one leaves friction to the engine.
+    const SURFACE_CELL: &str = r#"#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Scope "PhysicsMaterials"
+{
+    def Material "Cardboard" (prepend apiSchemas = ["PhysicsMaterialAPI"])
+    {
+        float physics:dynamicFriction = 0.7
+        float physics:staticFriction = 0.8
+        float physics:restitution = 0.4
+    }
+
+    def Material "Rubber" (prepend apiSchemas = ["PhysicsMaterialAPI"])
+    {
+        float physics:dynamicFriction = 1.2
+    }
+}
+
+def Xform "World"
+{
+    def Cube "Box" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double size = 0.1
+        rel material:binding:physics = </PhysicsMaterials/Cardboard>
+    }
+
+    def Xform "Cart" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        rel material:binding:physics = </PhysicsMaterials/Rubber>
+
+        def Cube "wheel"
+        {
+            double size = 0.1
+        }
+    }
+
+    def Cube "Plain"
+    {
+        double size = 0.1
+    }
+}
+"#;
+
+    #[test]
+    fn bound_physics_material_rides_with_the_geometry() {
+        let scene = import_str("surface", SURFACE_CELL);
+        // Authored as `float`: compare to single precision.
+        let surface = |name: &str| {
+            let n = node(&scene, name);
+            (
+                n.friction.map(|v| (v * 1e4).round() / 1e4),
+                n.restitution.map(|v| (v * 1e4).round() / 1e4),
+            )
+        };
+        assert_eq!(surface("/World/Box"), (Some(0.7), Some(0.4)));
+        assert_eq!(surface("/World/Cart/wheel"), (Some(1.2), None));
+        assert_eq!(surface("/World/Plain"), (None, None));
     }
 }
 

@@ -978,6 +978,12 @@ fn attached_robot_and_mutual_pairs(
             if cross_only && other.robot == att.robot {
                 continue;
             }
+            // Two things one link carries move as one: whatever contact
+            // they have is how they were taken (a glass's foot and its
+            // bowl, the parts of one prop) and cannot change.
+            if other.robot == att.robot && other.link == att.link {
+                continue;
+            }
             if !boxes_hit(&bp.att_aabbs[k], &bp.att_aabbs[k2]) {
                 continue;
             }
@@ -1411,6 +1417,43 @@ mod tests {
         assert_eq!(
             check_scene(&robots, &InterRobotAcm::default(), &obs, &held, &turned).len(),
             1
+        );
+    }
+
+    /// Two parts carried by one link are one body: touching each other is
+    /// not a collision. Carried by two links, the same overlap is.
+    #[test]
+    fn parts_carried_by_one_link_do_not_collide_with_each_other() {
+        let (model, collider, acm) = stack();
+        // Separated stack: b at 0.5, c at 1.0.
+        let poses = botrail_kin::forward_kinematics(&model, &[0.5, 0.5]).unwrap();
+        let robots = solo(&collider, &poses, &acm);
+        let part = ObstacleCollider::from_geometry(&Geometry::Sphere { radius: 0.05 }).unwrap();
+        let held = |link: usize, offset: Isometry3<f64>| AttachedCollider {
+            robot: 0,
+            link,
+            offset,
+            collider: &part,
+            skip_links: &[1, 2],
+        };
+        let check = |attached: &[AttachedCollider]| {
+            check_scene(
+                &robots,
+                &InterRobotAcm::default(),
+                &[],
+                attached,
+                &ContactAllowance::default(),
+            )
+        };
+        // Two overlapping spheres 0.3 m beside link c: one prop in two pieces.
+        assert!(check(&[held(2, iso(0.3, 0.0, 0.0)), held(2, iso(0.33, 0.0, 0.0))]).is_empty());
+        // The same overlap with one piece held by link b, 0.5 m lower.
+        assert_eq!(
+            check(&[held(1, iso(0.3, 0.0, 0.5)), held(2, iso(0.33, 0.0, 0.0))]),
+            vec![CollisionPair {
+                a: ColliderId::Attached(0),
+                b: ColliderId::Attached(1),
+            }]
         );
     }
 

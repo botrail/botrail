@@ -19,7 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "examples" / d)
-                for d in ("assembly", "basics", "export", "legged", "machining", "multi_robot", "vehicles", "welding")]
+                for d in ("assembly", "basics", "export", "home", "legged", "machining", "multi_robot", "vehicles",
+                          "welding")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
@@ -34,6 +35,7 @@ import legged_patrol_demo  # noqa: E402
 import machine_tending_demo  # noqa: E402
 import cover_bolting_demo  # noqa: E402
 import semi_humanoid_demo  # noqa: E402
+import simready_demo  # noqa: E402
 
 OUT = ROOT / "docs" / "assets" / "studio"
 CHROMIUM_ARGS = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
@@ -97,6 +99,46 @@ def main() -> None:
                 page.screenshot(path=OUT / "plan.png")
                 print("wrote plan.png")
             server.stop()
+
+        if want("simready"):
+            # ---- SimReady Central props in the cell: textures + MDL look ----
+            scene = simready_demo.build_scene()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.evaluate("() => { window.__CAM = {pos: [3.2, -3.0, 2.3], look: [0.2, 0.4, 0.5]}; }")
+            time.sleep(12.0)  # the packages' 4k textures stream in
+            page.screenshot(path=OUT / "simready.png")
+            print("wrote simready.png")
+            server.stop()
+
+        if want("home"):
+            # ---- a flat furnished from SimReady Central: the G1-D carrying
+            # the two mugs from the coffee table to the kitchen, upright ------
+            # The robot comes from the catalog and the 18 packages from their
+            # publishers' datasets (about 0.5 GB on the first run, cached).
+            import home_tidy_demo
+            try:
+                scene, _house, _poses, tl = home_tidy_demo.bake()
+            except Exception as e:  # noqa: BLE001 — no packages, no picture
+                print(f"skipping home: {e}")
+            else:
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                page.wait_for_selector(".timeline-bands", timeout=120000)
+                time.sleep(12.0)  # the packages' textures stream in
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                span = tl.step_span("to the sink")
+                t = span.start + 0.45 * span.duration
+                bands = page.locator(".timeline-bands").bounding_box()
+                page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+                page.evaluate("window.__CAM = {pos: [2.4, 0.25, 1.9], look: [4.8, 1.3, 0.8]}")
+                page.mouse.move(VIEWPORT["width"] - 20, 300)  # off the canvas: no hover chip
+                time.sleep(3.0)
+                page.screenshot(path=OUT / "home_tidy.png")
+                print("wrote home_tidy.png")
+                server.stop()
 
         if want("sequence"):
             # ---- 3. the sequence cell: baked timeline dock + mid-cycle pose ----

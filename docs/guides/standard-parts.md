@@ -65,13 +65,15 @@ bt.parts.photoelectric(scene, "eye", frm=(0.0, 1.0, 0.75), to=(0.0, 1.4, 0.75),
 | [`person`][botrail.parts.person] | one box `<name>` (collides), drawn in full detail as the library's figure in `pose` (`stand`, `reach`, `pick`), scaled to `height` by its own proportions | — | — | nothing |
 | [`gantry`][botrail.parts.gantry] | `<name>/post_l`, `<name>/post_r`, `<name>/beam` (collide) | `<name>/beam` (the beam's centre underside — a camera's mount) | — | `<name>` (`structure.gantry`) |
 | [`prop`][botrail.parts.prop] | one mesh `<name>`: a catalog object's model (a scanned YCB object) drawn with its textures, colliding as its convex decomposition, dynamic at the pack's mass | — | — | `<name>` (the pack's category, name and maker, the catalog id, `mass_kg`) |
+| [`simready`][botrail.parts.simready] | a [SimReady Central](usd-import.md#simready-central-assets) package's stage under `<name>/` — one obstacle per visible prim, drawn as it ships (textures and MDL), colliding as each prim's convex decomposition, weighing what the package authored; dynamic on request | the package's own frames (a `Grasp` scope, a mount point), moved with it | — | `<name>` (`prop` unless told otherwise, the publisher as the maker, the asset as the model, `source` = the URL at its commit, `license`, `mass_kg`) |
 
-The last ten are *props*: the generic things a cell is full of and nobody
+The rest of the table are *props*: the generic things a cell is full of and nobody
 orders by part number — the tray a part waits in, the stage under a camera,
 the carton, the bin, the roll cage, the rack a goods-to-person drive unit
 brings, the stock on a pallet, the paint on the floor, the person a scenario
-stands in the gate, the portal a camera hangs from. They
-are generated from their dimensions like everything else, drawn from the
+stands in the gate, the portal a camera hangs from, and the goods and scenery
+a library already modelled (`prop`, `simready`). The generated ones
+are built from their dimensions like everything else, drawn from the
 [shape library](#shapes-a-box-cannot-draw-the-shape-library) where a box
 cannot draw the thing, and `detail="plain"` keeps just the massing. The bin
 is the one of them you can also order: with `catalog="botrail/bin/klt-vda4500"`

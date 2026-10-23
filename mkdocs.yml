@@ -173,6 +173,7 @@ nav:
       - Equipment connections (bt.connections): reference/api/connections.md
       - Cables and tubes (bt.routing): reference/api/routing.md
       - Catalog search (bt.catalog): reference/api/catalog.md
+      - SimReady Central (bt.simready): reference/api/simready.md
       - Gaits (bt.Gait): reference/api/gait.md
       - Wheels (bt.Wheels): reference/api/wheels.md
       - Traces (bt.trace): reference/api/trace.md

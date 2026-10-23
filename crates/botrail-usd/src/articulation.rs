@@ -314,7 +314,26 @@ fn import_robot_stage(
     builder.build(prims, options.articulation_root.as_deref())
 }
 
+/// `PhysicsRevoluteJoint`, `PhysicsFixedJoint`, ... — the UsdPhysics joint
+/// prim types.
+pub(crate) fn is_joint_type(type_name: &str) -> bool {
+    type_name.starts_with("Physics") && type_name.ends_with("Joint")
+}
+
+fn parent_prim_path(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
+}
+
 fn collect(prim: Prim, parent_world: gf::Matrix4d, out: &mut Vec<PrimInfo>) -> anyhow::Result<()> {
+    // `active = false` is how a variant retires a joint or a body (a
+    // SimReady gripper's suppressed four-bar revolutes); pxr's traversal
+    // never sees such prims, and neither does this one.
+    if !prim.is_active()? {
+        return Ok(());
+    }
     let view = AnyPrim(prim);
     let world = view
         .local_to_parent_transform(TimeCode::EARLIEST)
@@ -408,6 +427,14 @@ impl RobotBuilder<'_> {
                 }
                 first
             }
+        };
+        // Isaac Sim's convention puts the API on the fixed joint that anchors
+        // the base (`/robot/root_joint`) rather than on an ancestor of the
+        // bodies. A joint has no subtree to import: the articulation is the
+        // joint's parent.
+        let root_path = match prims.iter().find(|p| p.path == root_path) {
+            Some(info) if is_joint_type(&info.type_name) => parent_prim_path(&root_path),
+            _ => root_path,
         };
         let in_subtree =
             |p: &str| p == root_path || p.starts_with(&format!("{root_path}/")) || root_path == "/";
@@ -630,6 +657,24 @@ impl RobotBuilder<'_> {
         info: &PrimInfo,
         joint_type: JointType,
     ) -> anyhow::Result<Option<JointRecord>> {
+        // A joint the engine keeps out of the articulation tree (a loop
+        // closure — the second path round a gripper's four-bar) or switches
+        // off is not a tree edge: the tree is what the model is.
+        let flag = |name: &str| info.prim.attribute(name).get::<bool>().ok().flatten();
+        if flag("physics:excludeFromArticulation") == Some(true) {
+            self.warnings.push(format!(
+                "{}: excluded from the articulation (a loop closure); left out of the tree",
+                info.path
+            ));
+            return Ok(None);
+        }
+        if flag("physics:jointEnabled") == Some(false) {
+            self.warnings.push(format!(
+                "{}: physics:jointEnabled = false; left out of the tree",
+                info.path
+            ));
+            return Ok(None);
+        }
         // All joint types share the JointBase attribute interface; view the
         // prim through a local wrapper so bodies/localPose read uniformly.
         let joint = AnyJoint(info.prim.clone());
@@ -843,23 +888,38 @@ impl RobotBuilder<'_> {
                 .ok()
                 .and_then(|t| t.first().map(|p| p.to_string()))
         };
-        let Some(reference) = rel(own_instance) else {
-            // Report a coupling authored on an axis this joint does not
-            // move rather than dropping it silently.
-            if let Some(other) = MIMIC_INSTANCES
-                .iter()
-                .find(|instance| **instance != own_instance && rel(instance).is_some())
-            {
-                self.warnings.push(format!(
-                    "{}: mimic joint authored on `{other}` but the joint moves about `{own_instance}`; ignored",
-                    info.path
-                ));
+        // A revolute or prismatic joint has one dof, so whichever `rot*` /
+        // `trans*` instance the author chose names it: PhysX maps that dof
+        // onto its D6 twist / X axis whatever `physics:axis` says, and
+        // assets are authored both ways (Robotiq's 2F-85 couples Z-axis
+        // revolutes as `rotX` and `rotZ` alike). Only a coupling of the
+        // other kind — a turn written on a slide — is not this joint's.
+        let kind = |instance: &str| {
+            if instance.starts_with("rot") {
+                "rot"
+            } else {
+                "trans"
             }
-            return None;
         };
+        let instance = std::iter::once(own_instance)
+            .chain(
+                MIMIC_INSTANCES
+                    .iter()
+                    .copied()
+                    .filter(|i| *i != own_instance),
+            )
+            .find(|instance| rel(instance).is_some())?;
+        if kind(instance) != kind(own_instance) {
+            self.warnings.push(format!(
+                "{}: mimic joint authored on `{instance}` but the joint moves about `{own_instance}`; ignored",
+                info.path
+            ));
+            return None;
+        }
+        let reference = rel(instance).expect("found above");
         let attr = |suffix: &str| {
             info.prim
-                .attribute(format!("physxMimicJoint:{own_instance}:{suffix}").as_str())
+                .attribute(format!("physxMimicJoint:{instance}:{suffix}").as_str())
                 .get::<f32>()
                 .ok()
                 .flatten()
@@ -869,7 +929,7 @@ impl RobotBuilder<'_> {
             reference,
             reference_axis: info
                 .prim
-                .attribute(format!("physxMimicJoint:{own_instance}:referenceJointAxis").as_str())
+                .attribute(format!("physxMimicJoint:{instance}:referenceJointAxis").as_str())
                 .get::<openusd::tf::Token>()
                 .ok()
                 .flatten()
@@ -1863,6 +1923,36 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         );
     }
 
+    /// A revolute joint has one dof, so a coupling written as `rotX` on a
+    /// joint about Z (PhysX's twist-axis spelling, Robotiq's 2F-85) is that
+    /// joint's coupling all the same — same relation as [`MIMIC`]'s j2.
+    #[test]
+    fn mimic_named_by_another_rotation_axis_still_couples_the_joint() {
+        let usda = MIMIC
+            .replace("PhysxMimicJointAPI:rotZ", "PhysxMimicJointAPI:rotX")
+            .replace("physxMimicJoint:rotZ", "physxMimicJoint:rotX");
+        let imported = import_arm(&usda);
+        let model = &imported.model;
+        assert_eq!(model.dof(), 2, "{:?}", imported.warnings);
+        let angular = model.joints[model.joint_index("/Robot/joints/j2").unwrap()]
+            .mimic
+            .unwrap();
+        assert_eq!(
+            angular.source_joint,
+            model.joint_index("/Robot/joints/j1").unwrap()
+        );
+        assert!((angular.multiplier - 0.5).abs() < 1e-12);
+        assert!((angular.offset + 30f64.to_radians()).abs() < 1e-12);
+        assert!(
+            !imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/joints/j2")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
     /// [`MIMIC`] with both couplings restated the way Isaac Sim 6 / Newton
     /// and three-usd-robot author them: `q = coef1·q_ref + coef0`, no axis
     /// named. Same two relations (`j2 = 0.5·j1 - 30 deg`, `j4 = -j3 - 2 cm`),
@@ -2686,5 +2776,252 @@ def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
         assert!((up - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-9, "{up}");
         // The camera prim is not geometry: the link keeps its one cube.
         assert_eq!(model.links[link1].visuals.len(), 1);
+    }
+
+    fn import_fixture(tag: &str, usda: &str, articulation_root: Option<&str>) -> ImportedRobot {
+        let dir = std::env::temp_dir().join(format!("botrail-usd-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("robot.usda");
+        std::fs::write(&path, usda).unwrap();
+        let imported = import_robot(
+            &path,
+            &RobotImportOptions {
+                mesh_cache_dir: Some(dir.join("meshes")),
+                articulation_root: articulation_root.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        imported
+    }
+
+    fn link_names(imported: &ImportedRobot) -> Vec<&str> {
+        imported
+            .model
+            .links
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect()
+    }
+
+    /// A variant retires a revolute and welds the pair instead (a SimReady
+    /// gripper's parallel-grip variant), and retires a body outright. The
+    /// retired joint must not give the link a second parent, and the
+    /// retired body must not become a link.
+    const INACTIVE: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Xform "link" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Xform "ghost" (
+        active = false
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "rev" (active = false)
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link>
+            point3f physics:localPos0 = (0, 0, 0.2)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+
+        def PhysicsFixedJoint "weld"
+        {
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link>
+            point3f physics:localPos0 = (0, 0, 0.2)
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn inactive_joints_and_bodies_are_not_on_the_stage() {
+        let imported = import_fixture("inactive", INACTIVE, None);
+        assert_eq!(link_names(&imported), vec!["/Robot/base", "/Robot/link"]);
+        assert_eq!(imported.model.dof(), 0, "{:?}", imported.warnings);
+    }
+
+    /// A four-bar: the second path round the loop is a joint the engine
+    /// keeps out of the articulation. The tree has two dofs, and the loop
+    /// joint is reported, not modeled.
+    const LOOP: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Robot" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Xform "link1" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Xform "link2" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "j1"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link1>
+            point3f physics:localPos0 = (0, 0, 0.2)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+
+        def PhysicsRevoluteJoint "j2"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </Robot/link1>
+            rel physics:body1 = </Robot/link2>
+            point3f physics:localPos0 = (0, 0, 0.2)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+
+        def PhysicsRevoluteJoint "loop"
+        {
+            uniform token physics:axis = "Z"
+            bool physics:excludeFromArticulation = 1
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link2>
+            point3f physics:localPos0 = (0, 0, 0.4)
+        }
+
+        def PhysicsRevoluteJoint "off"
+        {
+            uniform token physics:axis = "Z"
+            bool physics:jointEnabled = 0
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link2>
+            point3f physics:localPos0 = (0, 0, 0.4)
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn loop_closure_and_disabled_joints_stay_out_of_the_tree() {
+        let imported = import_fixture("loop", LOOP, None);
+        assert_eq!(
+            link_names(&imported),
+            vec!["/Robot/base", "/Robot/link1", "/Robot/link2"]
+        );
+        assert_eq!(imported.model.dof(), 2, "{:?}", imported.warnings);
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/Joints/loop") && w.contains("excluded")),
+            "{:?}",
+            imported.warnings
+        );
+        assert!(
+            imported
+                .warnings
+                .iter()
+                .any(|w| w.contains("/Robot/Joints/off") && w.contains("jointEnabled")),
+            "{:?}",
+            imported.warnings
+        );
+    }
+
+    /// Isaac Sim's convention: `PhysicsArticulationRootAPI` on the fixed
+    /// joint that anchors the base, not on an ancestor of the bodies. The
+    /// articulation is the joint's parent.
+    const ROOT_ON_JOINT: &str = r#"#usda 1.0
+(
+    defaultPrim = "Robot"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Robot"
+{
+    def PhysicsFixedJoint "root_joint" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        rel physics:body1 = </Robot/base>
+    }
+
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Xform "link" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "geom" { double size = 0.1 }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "j"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </Robot/base>
+            rel physics:body1 = </Robot/link>
+            point3f physics:localPos0 = (0, 0, 0.2)
+            float physics:lowerLimit = -90
+            float physics:upperLimit = 90
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn articulation_root_on_a_joint_imports_its_parent() {
+        for root in [None, Some("/Robot/root_joint")] {
+            let imported = import_fixture("rootjoint", ROOT_ON_JOINT, root);
+            assert_eq!(
+                link_names(&imported),
+                vec!["/Robot/base", "/Robot/link"],
+                "{root:?}: {:?}",
+                imported.warnings
+            );
+            assert_eq!(imported.model.dof(), 1);
+        }
     }
 }

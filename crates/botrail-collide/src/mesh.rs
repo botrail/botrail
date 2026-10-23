@@ -162,6 +162,12 @@ pub fn compound_from_hulls(hulls: &[Vec<[f64; 3]>]) -> Result<SharedShape, Colli
 }
 
 /// VHACD hulls as plain point sets — the cacheable representation.
+///
+/// parry's decomposition panics, rather than erroring, on some inputs (a
+/// clipping plane through a degenerate voxel set — one part of a SimReady
+/// range hood does it). A mesh it cannot cut is still a solid: it becomes
+/// its own convex hull — coarser than the decomposition, never a failed
+/// scene.
 fn decompose(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {
     let points: Vec<Vector> = mesh
         .vertices
@@ -172,16 +178,86 @@ fn decompose(mesh: &MeshData) -> Vec<Vec<[f64; 3]>> {
         resolution: VHACD_RESOLUTION,
         ..Default::default()
     };
-    let vhacd = VHACD::decompose(&params, &points, &mesh.indices, true);
-    // Use the source triangles within each voxel partition. Hulling voxel
-    // corners expands surfaces by a resolution-dependent amount and can close
-    // real assembly gaps. These remain convex approximations of the input
-    // mesh, not exact CAD or a guarantee that small concavities survive.
-    vhacd
-        .compute_exact_convex_hulls(&points, &mesh.indices)
-        .into_iter()
-        .map(|(pts, _)| pts.iter().map(|p| [p.x, p.y, p.z]).collect())
+    let hulls = without_panicking(|| {
+        let vhacd = VHACD::decompose(&params, &points, &mesh.indices, true);
+        // Use the source triangles within each voxel partition. Hulling voxel
+        // corners expands surfaces by a resolution-dependent amount and can close
+        // real assembly gaps. These remain convex approximations of the input
+        // mesh, not exact CAD or a guarantee that small concavities survive.
+        vhacd
+            .compute_exact_convex_hulls(&points, &mesh.indices)
+            .into_iter()
+            .map(|(pts, _)| pts.iter().map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    });
+    match hulls {
+        Some(hulls) if !hulls.is_empty() => hulls,
+        _ => vec![whole_hull(&points)],
+    }
+}
+
+/// The mesh as one convex piece: the hull of its points, or — for a set
+/// with no volume (a flat panel) — its bounding box, at least 1 mm thick.
+fn whole_hull(points: &[Vector]) -> Vec<[f64; 3]> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[k] = lo[k].min(v);
+            hi[k] = hi[k].max(v);
+        }
+    }
+    let flat = (0..3).any(|k| hi[k] - lo[k] < 0.001);
+    if !flat {
+        if let Ok((vertices, _)) = parry3d_f64::transformation::try_convex_hull(points) {
+            return vertices.iter().map(|p| [p.x, p.y, p.z]).collect();
+        }
+    }
+    for k in 0..3 {
+        let pad = (0.001 - (hi[k] - lo[k])).max(0.0) / 2.0;
+        lo[k] -= pad;
+        hi[k] += pad;
+    }
+    (0..8)
+        .map(|i| {
+            [
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            ]
+        })
         .collect()
+}
+
+/// A convex hull that never panics: parry's `SharedShape::convex_hull`
+/// unwraps its own fallible hull, which errors on degenerate (coplanar,
+/// collinear) point sets.
+fn safe_hull(points: &[Vector]) -> Option<SharedShape> {
+    let (vertices, indices) = parry3d_f64::transformation::try_convex_hull(points).ok()?;
+    without_panicking(|| SharedShape::convex_mesh(vertices, &indices)).flatten()
+}
+
+thread_local! {
+    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f`, turning a panic inside it into `None` — silently: the panic
+/// hook stays quiet on this thread while `f` runs, and speaks as before
+/// everywhere else.
+fn without_panicking<T>(f: impl FnOnce() -> T) -> Option<T> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(|quiet| quiet.get()) {
+                previous(info);
+            }
+        }));
+    });
+    let was = QUIET.with(|quiet| quiet.replace(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    QUIET.with(|quiet| quiet.set(was));
+    result.ok()
 }
 
 fn compound_from_point_sets(hulls: &[Vec<[f64; 3]>]) -> Result<SharedShape, CollideError> {
@@ -189,7 +265,7 @@ fn compound_from_point_sets(hulls: &[Vec<[f64; 3]>]) -> Result<SharedShape, Coll
         .iter()
         .filter_map(|pts| {
             let points: Vec<Vector> = pts.iter().map(|p| Vector::new(p[0], p[1], p[2])).collect();
-            SharedShape::convex_hull(&points)
+            safe_hull(&points)
         })
         .map(|s| (Pose::identity(), s))
         .collect();
@@ -247,6 +323,48 @@ fn write_cache(key: &str, hulls: &[Vec<[f64; 3]>]) {
 mod tests {
     use super::*;
     use parry3d_f64::query;
+
+    /// A panic inside the decomposition is a value, not a crash — and the
+    /// hook says nothing about it.
+    #[test]
+    fn a_panicking_decomposition_is_caught() {
+        assert_eq!(without_panicking(|| 7), Some(7));
+        let caught: Option<()> = without_panicking(|| panic!("degenerate voxel set"));
+        assert!(caught.is_none());
+        // Nested use restores the outer state.
+        assert_eq!(without_panicking(|| without_panicking(|| 1)), Some(Some(1)));
+    }
+
+    /// A flat panel has no hull volume: it becomes its bounding box, at
+    /// least a millimetre thick, and still collides.
+    #[test]
+    fn a_flat_mesh_falls_back_to_its_box() {
+        let points = [
+            Vector::new(0.0, 0.0, 0.2),
+            Vector::new(0.6, 0.0, 0.2),
+            Vector::new(0.6, 0.4, 0.2),
+            Vector::new(0.0, 0.4, 0.2),
+        ];
+        let hull = whole_hull(&points);
+        assert_eq!(hull.len(), 8);
+        let zs: Vec<f64> = hull.iter().map(|p| p[2]).collect();
+        let thick = zs.iter().cloned().fold(f64::MIN, f64::max)
+            - zs.iter().cloned().fold(f64::MAX, f64::min);
+        assert!((thick - 0.001).abs() < 1e-12, "{thick}");
+        let shape = compound_from_point_sets(&[hull]).unwrap();
+        let ball = SharedShape::ball(0.01);
+        let on = Pose {
+            translation: Vector::new(0.3, 0.2, 0.205),
+            ..Pose::identity()
+        };
+        assert!(
+            query::intersection_test(&Pose::identity(), shape.as_ref(), &on, ball.as_ref())
+                .unwrap()
+        );
+        // Hulling the flat set directly does not panic either.
+        let _ = safe_hull(&points);
+        let _ = safe_hull(&points[..2]);
+    }
 
     #[test]
     fn box_mesh_decomposes_to_solid_compound() {

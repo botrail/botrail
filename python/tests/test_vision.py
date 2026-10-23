@@ -68,6 +68,24 @@ def test_vision_in_view_range_and_occlusion(scene) -> None:
     assert tl.signal("xray").value_at(0.05) is True
 
 
+def test_vision_sees_a_prop_whose_origin_is_at_its_foot(scene, tmp_path) -> None:
+    # An imported prop has its origin at its foot, on the table it stands on
+    # (here a millimetre into the top). The occlusion ray goes to the middle
+    # of the prop, so the table under it does not hide it.
+    corners = [(x, y, z) for z in (0.0, 0.1) for y in (-0.05, 0.05) for x in (-0.05, 0.05)]
+    faces = [(1, 3, 4, 2), (5, 6, 8, 7), (1, 2, 6, 5), (3, 7, 8, 4), (1, 5, 7, 3), (2, 4, 8, 6)]
+    obj = tmp_path / "prop.obj"
+    obj.write_text("".join(f"v {x} {y} {z}\n" for x, y, z in corners)
+                   + "".join("f " + " ".join(map(str, f)) + "\n" for f in faces))
+    scene.add_box("table", (0.6, 0.6, 0.04), (0.5, 0.0, 0.38))
+    scene.add_mesh("prop", obj, (0.5, 0.0, 0.399))
+    scene.add_camera(
+        "cam", position=(1.3, 0.0, 1.1), look_at=(0.5, 0.0, 0.4), fov=60, resolution=(640, 480), far=5.0
+    )
+    scene.add_vision_sensor("seen", camera="cam", watch=["prop"])
+    assert bake_hold(scene).signal("seen").value_at(0.05) is True
+
+
 def test_wrist_camera_vision_follows_the_arm(scene) -> None:
     # Place the part 0.4 m down the wrist camera's own view axis, so it is
     # seen wherever the arm happens to stand — then swing the base a

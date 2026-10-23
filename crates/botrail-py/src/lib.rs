@@ -1996,15 +1996,31 @@ impl Scene {
     /// authored optics, whatever their visibility. Obstacle, frame and
     /// camera names are the prim paths, optionally prefixed. Returns the
     /// added obstacle names.
-    #[pyo3(signature = (path, prefix = None, search_paths = None))]
+    ///
+    /// An articulated subtree is a robot (`articulated="robot"`, the
+    /// default): it is skipped, with a notice naming `Robot.from_usd`.
+    /// `articulated="scenery"` imports it like the rest — every body at its
+    /// authored pose — for props whose doors and drawers are joints.
+    #[pyo3(signature = (path, prefix = None, search_paths = None, articulated = "robot"))]
     fn load_usd(
         &self,
         path: PathBuf,
         prefix: Option<String>,
         search_paths: Option<Vec<PathBuf>>,
+        articulated: &str,
     ) -> PyResult<Vec<String>> {
+        let articulations_as_scenery = match articulated {
+            "robot" => false,
+            "scenery" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "articulated must be \"robot\" or \"scenery\", got {other:?}"
+                )))
+            }
+        };
         let options = botrail_usd::ImportOptions {
             search_paths: search_paths.unwrap_or_default(),
+            articulations_as_scenery,
             ..Default::default()
         };
         let imported = botrail_usd::import_usd(&path, &options)
@@ -2019,6 +2035,11 @@ impl Scene {
             );
         }
         let prefix = prefix.unwrap_or_default();
+        let physics: Vec<(Option<f64>, Option<f64>, Option<f64>)> = imported
+            .nodes
+            .iter()
+            .map(|n| (n.mass, n.friction, n.restitution))
+            .collect();
         let batch = imported
             .nodes
             .into_iter()
@@ -2034,6 +2055,27 @@ impl Scene {
             })
             .collect();
         let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
+        // A stage that weighs its bodies (`PhysicsMassAPI`) or binds them a
+        // physics material hands those on; inert until the obstacle is made
+        // dynamic, like `set_physics`.
+        for (name, (mass, friction, restitution)) in names.iter().zip(physics) {
+            if mass.is_none() && friction.is_none() && restitution.is_none() {
+                continue;
+            }
+            let mut props = self.hub.obstacle_physics(name).unwrap_or_default();
+            if let Some(mass) = mass {
+                props.mass = Some(mass);
+            }
+            if let Some(friction) = friction {
+                props.material.friction = friction;
+            }
+            if let Some(restitution) = restitution {
+                props.material.restitution = restitution;
+            }
+            self.hub
+                .set_obstacle_physics(name, Some(props))
+                .map_err(scene_err)?;
+        }
         self.hub.add_frames(
             imported
                 .frames
@@ -2475,6 +2517,29 @@ impl Scene {
     /// authored material.
     fn obstacle_material(&self, name: &str) -> PyResult<Option<(f32, f32)>> {
         self.hub.obstacle_material(name).map_err(scene_err)
+    }
+
+    /// The physics knobs an obstacle carries — what `set_physics` set, or
+    /// the mass and physics material the stage it came from authored — as a
+    /// dict (`dynamic`,
+    /// `mass`, `friction`, `restitution`, `linear_damping`,
+    /// `angular_damping`, `ccd`), or `None` when it carries none.
+    fn obstacle_physics(&self, py: Python<'_>, name: &str) -> PyResult<Option<PyObject>> {
+        let Some(props) = self.hub.obstacle_physics(name) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item(
+            "dynamic",
+            matches!(props.kind, botrail_physics::BodyKind::Dynamic),
+        )?;
+        d.set_item("mass", props.mass)?;
+        d.set_item("friction", props.material.friction)?;
+        d.set_item("restitution", props.material.restitution)?;
+        d.set_item("linear_damping", props.linear_damping)?;
+        d.set_item("angular_damping", props.angular_damping)?;
+        d.set_item("ccd", props.ccd)?;
+        Ok(Some(d.into_any().unbind()))
     }
 
     /// The surface pattern (`"wood"`, `"checker_plate"`, `"plastic"`) the

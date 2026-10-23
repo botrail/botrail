@@ -7246,6 +7246,101 @@ def prop(
     return made
 
 
+def simready(
+    scene,
+    name: str,
+    position,
+    ref,
+    *,
+    yaw: float = 0.0,
+    dynamic: bool = False,
+    mass_kg: float | None = None,
+    friction: float | None = None,
+    category: str = "prop",
+    **attributes,
+) -> str:
+    """A SimReady Central asset — a cardboard box, a crate, a drum, a cart —
+    standing at `position` (x, y[, the z of the face it stands on]) turned
+    by `yaw`: the package's stage as obstacles under `name/` (one per
+    visible prim, drawn as it ships — textures and MDL included — and
+    colliding as each prim's convex decomposition; doors and drawers that
+    are joints in the package stay as authored), placed so the middle of
+    its footprint lands on (x, y) and its underside on the face. The
+    package's own frames (an empty `Grasp` scope, a mount point) move with
+    it. `ref` is what :func:`botrail.simready.fetch` takes: the library's
+    URL at its commit, a `(repo, asset, commit)` triple, or a package
+    folder on disk.
+
+    Physics: `dynamic=True` makes every obstacle a dynamic body; the mass
+    and the friction are what the package authored (`PhysicsMassAPI` and
+    the bound physics material, read by `load_usd`) unless `mass_kg` or
+    `friction` is given — the mass shared evenly when the asset is several
+    prims. One part is
+    pinned on the group (`category`, the publisher as the maker, the asset
+    name as the model, `source` = the URL at its commit, `license`, and the
+    mass as `mass_kg` when it is known), so the BOM names where the thing
+    came from. SimReady assets are not catalog products: there is no part
+    number to order, and nothing the cell verifies should be frozen in one.
+    Returns `name`."""
+    from . import simready as _simready
+
+    package = _simready.fetch(ref)
+    # A prop's doors and drawers are joints (a kitchen cabinet, a
+    # microwave): they come in shut, as the package authored them.
+    names = scene.load_usd(package.root, prefix=name, articulated="scenery")
+    if not names:
+        raise ValueError(f"{name}: {package.root} has no visible geometry to place")
+    lo = [math.inf] * 3
+    hi = [-math.inf] * 3
+    for made in names:
+        a, b = scene.obstacle_bounds(made)
+        lo = [min(lo[i], a[i]) for i in range(3)]
+        hi = [max(hi[i], b[i]) for i in range(3)]
+    centre = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2])
+    x, y, z0 = _floor_point(position)
+    q = _yaw_quat(yaw)
+
+    def placed(pos, quat):
+        moved = _rotate(q, (pos[0] - centre[0], pos[1] - centre[1], pos[2] - centre[2]))
+        return (x + moved[0], y + moved[1], z0 + moved[2]), _mul_quat(q, quat)
+
+    for made in names:
+        pos, quat = scene.obstacle_pose(made)
+        scene.set_obstacle_pose(made, *placed(pos, quat))
+    for frame in [f for f in scene.frames if f.startswith(name + "/")]:
+        pos, quat = scene.frame(frame)
+        scene.remove_frame(frame)
+        scene.add_frame(frame, *placed(pos, quat))
+
+    for made in names:
+        physics: dict = {"dynamic": dynamic}
+        if friction is not None:
+            physics["friction"] = friction
+        if mass_kg is not None:
+            physics["mass"] = float(mass_kg) / len(names)
+        scene.set_physics(made, **physics)
+    masses = [(scene.obstacle_physics(made) or {}).get("mass") for made in names]
+    total = sum(masses) if all(m is not None for m in masses) else None
+
+    identity = dict(attributes)
+    identity.setdefault("model", package.asset)
+    if package.publisher:
+        identity.setdefault("manufacturer", package.publisher)
+    identity.setdefault("source", package.source)
+    if package.license:
+        identity.setdefault("license", package.license)
+    if total is not None:
+        identity.setdefault("mass_kg", float(total))
+    if isinstance(ref, _simready.Hit):
+        # What the library knows about the thing beyond the package: its
+        # Wikidata class and code, the words it was found by.
+        for key, value in (("label", ref.label), ("qcode", ref.qcode), ("caption", ref.caption)):
+            if value:
+                identity.setdefault(key, value)
+    scene.set_part(name, kind="group", category=category, **identity)
+    return name
+
+
 def unit_load(
     scene,
     name: str,
